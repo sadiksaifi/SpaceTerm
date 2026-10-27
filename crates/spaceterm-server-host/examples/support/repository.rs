@@ -29,9 +29,7 @@ pub fn inventory(link: &ServerLink) -> Result<(Inventory, u64), Box<dyn Error>> 
 }
 pub fn mutate(link: &ServerLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
     let (_, sequence) = inventory(link)?;
-    let Some(result) = super::support::mutate(link, sequence, mutation)? else {
-        return Err("mutation response".into());
-    };
+    let result = super::support::mutate(link, sequence, mutation)?;
     let Outcome::Accepted { target } = result.outcome else {
         return Err("mutation rejected".into());
     };

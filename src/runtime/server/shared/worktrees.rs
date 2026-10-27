@@ -155,6 +155,10 @@ impl Writes {
             operation: None,
         }
     }
+    /// Whether a Worktree write is being prepared or run.
+    pub(super) fn busy(&self) -> bool {
+        self.worker.is_some()
+    }
 }
 impl Drop for Writes {
     fn drop(&mut self) {
@@ -206,11 +210,17 @@ pub(in crate::runtime::server) fn pinned_in_worktree<'a>(
 }
 impl SharedWorkspaceHost {
     fn worktree_lock(&self) -> Result<Option<std::fs::File>, Refusal> {
-        self.store
+        self.journal
             .as_ref()
-            .map(OrganizationStore::worktree_lock)
+            .map(|journal| journal.worktree_lock())
             .transpose()
             .map_err(|_| Refusal::StorageUnavailable)
+    }
+    /// Commits a Worktree step and waits until it is retained. Git starts only after its record
+    /// is durable, so recovery after a crash finds every write that may have begun.
+    fn commit_retained(&mut self, next: State) -> Result<(), Refusal> {
+        let revision = self.commit(next)?;
+        self.retained(revision)
     }
     pub(super) fn cancel_worktree_reads(&mut self, connection: Id) {
         self.writes.reads.cancel_connection(connection);
@@ -260,9 +270,9 @@ impl SharedWorkspaceHost {
         device: Id,
         sequence: u64,
         operation: Operation,
-    ) -> Result<Reply, Refusal> {
+    ) -> Result<Answer, Refusal> {
         if !self.state.pending_worktrees().is_empty() {
-            return Ok(Reply::MutationPending);
+            return Ok(Answer::Pending);
         }
         let lock = self.worktree_lock()?;
         let mut next = self.state.clone();
@@ -294,13 +304,16 @@ impl SharedWorkspaceHost {
                     Err(error) => Outcome::WorktreeFailed(error),
                 },
             )?;
-            self.commit(next)?;
-            return Ok(Reply::Outcome(
-                self.state
-                    .outcome(device, sequence)
-                    .ok_or(Refusal::Missing)?
-                    .clone(),
-            ));
+            let revision = self.commit(next)?;
+            return Ok(Answer::Outcome {
+                outcome: Box::new(
+                    self.state
+                        .outcome(device, sequence)
+                        .ok_or(Refusal::Missing)?
+                        .clone(),
+                ),
+                revision,
+            });
         }
         let approval = match &operation {
             Operation::Remove { confirmation, .. } => self
@@ -313,7 +326,7 @@ impl SharedWorkspaceHost {
         };
         let mut inventory = self.inventory();
         inventory.repositories = None;
-        self.commit(next)?;
+        self.commit_retained(next)?;
         self.writes.operation = Some((device, sequence));
         self.writes.worker = Some(
             std::thread::Builder::new()
@@ -323,7 +336,7 @@ impl SharedWorkspaceHost {
                 })
                 .map_err(|_| Refusal::Capacity)?,
         );
-        Ok(Reply::MutationPending)
+        Ok(Answer::Pending)
     }
     fn start_prepared(
         &mut self,
@@ -353,7 +366,7 @@ impl SharedWorkspaceHost {
                     Err(_) => Outcome::WorktreeFailed(Error::Unavailable),
                 };
                 next.finish_worktree(device, sequence, outcome)?;
-                self.commit(next)?;
+                self.commit_retained(next)?;
                 self.writes.operation = None;
             }
             preparing::Prepared::Write(write) => {
@@ -388,7 +401,7 @@ impl SharedWorkspaceHost {
                     return self.settle_worktree(device, sequence, Err(error));
                 }
                 // Durable closure precedes ending reviewed Sessions and starting the Git write.
-                self.commit(next)?;
+                self.commit_retained(next)?;
                 self.synchronize()?;
                 self.writes.worker = Some(
                     std::thread::Builder::new()
@@ -471,7 +484,7 @@ impl SharedWorkspaceHost {
             }
         };
         next.finish_worktree(device, sequence, outcome)?;
-        self.commit(next)?;
+        self.commit_retained(next)?;
         self.writes.operation = None;
         self.repositories.refresh();
         Ok(())
@@ -667,6 +680,7 @@ mod tests {
         assert!(
             matches!(host.request([3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close { target, confirmation } }), Reply::Outcome(record) if record.outcome == Outcome::Accepted { target: workspace })
         );
+        host.tick(Instant::now());
         assert_eq!(
             host.state.inventory.workspaces[0]
                 .tabs

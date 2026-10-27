@@ -30,7 +30,30 @@ pub(crate) trait DirectoryConnector: Send + Sync {
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()>;
 }
 
-impl DirectoryConnection for spaceterm_server::connection::link::ServerLink {
+/// A picker's own connection. Each read is one request whose reply arrives when the read settles,
+/// so looking at a read again sends nothing.
+struct LinkDirectories {
+    link: spaceterm_server::connection::link::ServerLink,
+    reads: std::collections::HashMap<u64, spaceterm_server::connection::link::PendingReply>,
+}
+
+impl LinkDirectories {
+    fn progress(
+        reply: Result<
+            spaceterm_server::protocol::ReplyBody,
+            spaceterm_server::connection::link::RequestError,
+        >,
+    ) -> Result<Result<Progress, Error>, ()> {
+        match reply {
+            Ok(spaceterm_server::protocol::ReplyBody::Directory(result)) => {
+                Ok(result.map(Progress::Ready))
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+impl DirectoryConnection for LinkDirectories {
     // Protocol major 2 servers read, create and match directories.
     fn reads_directories(&self) -> bool {
         true
@@ -42,28 +65,60 @@ impl DirectoryConnection for spaceterm_server::connection::link::ServerLink {
         true
     }
     fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
-        use spaceterm_server::protocol::{Operation, ReplyBody};
-        let (operation, create) = match request {
-            PaneRequest::DirectoryRead(read) => (Operation::DirectoryRead(read.clone()), false),
-            PaneRequest::DirectoryCreate(create) => {
-                (Operation::DirectoryCreate(create.clone()), true)
+        use spaceterm_server::protocol::Operation;
+        let (id, begin, create) = match request {
+            PaneRequest::DirectoryRead(Request::Begin { id, operation }) => (
+                *id,
+                Some(Operation::DirectoryRead(operation.clone())),
+                false,
+            ),
+            PaneRequest::DirectoryCreate(CreationRequest::Begin { id, path }) => (
+                *id,
+                Some(Operation::DirectoryCreate(Creation { path: path.clone() })),
+                true,
+            ),
+            PaneRequest::DirectoryRead(Request::Poll { id }) => (*id, None, false),
+            PaneRequest::DirectoryCreate(CreationRequest::Poll { id }) => (*id, None, true),
+            PaneRequest::DirectoryRead(Request::Cancel { id })
+            | PaneRequest::DirectoryCreate(CreationRequest::Cancel { id }) => {
+                if let Some(pending) = self.reads.remove(id) {
+                    pending.cancel();
+                }
+                let cancelled = Ok(Progress::Cancelled);
+                return Ok(match request {
+                    PaneRequest::DirectoryCreate(_) => Reply::DirectoryCreate(cancelled),
+                    _ => Reply::DirectoryRead(cancelled),
+                });
             }
             _ => return Err(()),
         };
-        match self.request(operation).map_err(|_| ())?.wait() {
-            Ok(ReplyBody::Directory(progress)) if create => Ok(Reply::DirectoryCreate(progress)),
-            Ok(ReplyBody::Directory(progress)) => Ok(Reply::DirectoryRead(progress)),
-            _ => Err(()),
+        if let Some(operation) = begin {
+            let pending = self.link.request(operation).map_err(|_| ())?;
+            self.reads.insert(id, pending);
         }
+        let pending = self.reads.get(&id).ok_or(())?;
+        let progress = match pending.try_take() {
+            Some(reply) => {
+                self.reads.remove(&id);
+                Self::progress(reply)?
+            }
+            None => Ok(Progress::Pending),
+        };
+        Ok(if create {
+            Reply::DirectoryCreate(progress)
+        } else {
+            Reply::DirectoryRead(progress)
+        })
     }
 }
 
 impl DirectoryConnector for ServerConnection {
     /// Each picker opens its own connection, so the server cancels its reads when it closes.
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-        Ok(Box::new(
-            ServerConnection::connect(self, Arc::new(|_| {})).map_err(|_| ())?,
-        ))
+        Ok(Box::new(LinkDirectories {
+            link: ServerConnection::connect(self, Arc::new(|_| {})).map_err(|_| ())?,
+            reads: std::collections::HashMap::new(),
+        }))
     }
 }
 
@@ -442,8 +497,9 @@ enum Exchange {
     Answered(DirectorySourceError),
 }
 
-/// Begins `job` on the server as operation `id` and polls it until it settles, cancelling it
-/// when the picker no longer waits or it outlasts its deadline.
+/// Begins `job` on the server as operation `id` and looks at it until it settles, cancelling it
+/// when the picker no longer waits or it outlasts its deadline. Looking at a running read sends
+/// nothing; its reply arrives when it settles.
 fn exchange(
     connection: &mut dyn DirectoryConnection,
     job: Job,

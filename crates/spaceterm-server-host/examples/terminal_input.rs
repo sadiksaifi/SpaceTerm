@@ -40,17 +40,14 @@ impl WorkspaceCleanup<'_> {
             let confirmation = inventory
                 .close_confirmation(target)
                 .ok_or("cleanup authority missing")?;
-            let Some(result) = support::mutate(
+            let result = support::mutate(
                 &link,
                 next_sequence,
                 Mutation::Close {
                     target,
                     confirmation,
                 },
-            )?
-            else {
-                return Err("cleanup outcome missing".into());
-            };
+            )?;
             if result.outcome != (Outcome::Accepted { target: workspace }) {
                 return Err("test Workspace cleanup refused".into());
             }
@@ -215,17 +212,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let a = connect(&first)?;
     let (inventory, next_sequence) = support::inventory(&a)?;
     let boot = inventory.close.as_ref().ok_or("server boot missing")?.boot;
-    let Some(created) = support::mutate(
+    let created = support::mutate(
         &a,
         next_sequence,
         Mutation::CreateWorkspace {
             name: "Interactive input check".into(),
             directory: None,
         },
-    )?
-    else {
-        return Err("creation outcome missing".into());
-    };
+    )?;
     let Outcome::Accepted { target: workspace } = created.outcome else {
         return Err("creation refused".into());
     };

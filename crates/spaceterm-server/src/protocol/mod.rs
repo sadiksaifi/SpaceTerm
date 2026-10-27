@@ -6,7 +6,6 @@
 //! is JSON.
 mod admission;
 pub mod frame;
-pub mod interim;
 pub mod limits;
 pub mod message;
 pub mod operation;

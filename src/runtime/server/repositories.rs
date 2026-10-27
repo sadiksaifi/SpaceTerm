@@ -93,6 +93,17 @@ impl ServerRepositories {
         }
         self.next_read = Instant::now();
     }
+    /// When the next update has work: a running read's results, or the next refresh for a
+    /// subscriber. `None` without subscribers or a read.
+    pub(super) fn due(&self, now: Instant) -> Option<Instant> {
+        if self.worker.is_some() {
+            Some(now + POLL)
+        } else if self.subscribers.is_empty() {
+            None
+        } else {
+            Some(self.next_read.max(now))
+        }
+    }
     pub(super) fn snapshot(&self) -> Snapshot {
         self.snapshot.clone()
     }

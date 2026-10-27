@@ -93,7 +93,7 @@ pub enum Health {
 }
 
 pub enum LinkEvent {
-    Inventory(Box<InventoryRevision>),
+    Inventory(Arc<InventoryRevision>),
     Health(Health),
 }
 
@@ -146,6 +146,8 @@ pub struct ServerLink {
 
 struct Shared {
     state: Mutex<State>,
+    /// Notified when an inventory revision arrives or the link ends.
+    revisions: Condvar,
     wake: Arc<dyn Wake>,
     events: Arc<dyn LinkSink>,
 }
@@ -181,6 +183,8 @@ struct State {
     assembler: Assembler,
     liveness: Liveness,
     closed: Option<LinkError>,
+    /// The newest inventory revision, and how many this link received.
+    inventory: Option<(u64, Arc<InventoryRevision>)>,
 }
 
 struct Queued {
@@ -212,7 +216,9 @@ impl ServerLink {
                     assembler: Assembler::default(),
                     liveness: Liveness::new(now),
                     closed: None,
+                    inventory: None,
                 }),
+                revisions: Condvar::new(),
                 wake,
                 events,
             }),
@@ -235,6 +241,34 @@ impl ServerLink {
         match self.lock().closed {
             Some(error) => Health::Closed(error),
             None => Health::Live,
+        }
+    }
+
+    /// The newest Workspace Inventory revision this link received, with how many it received.
+    /// The server pushes one when it admits the link, and each one before the reply to the edit
+    /// it holds.
+    pub fn inventory(&self) -> Option<(u64, Arc<InventoryRevision>)> {
+        self.lock().inventory.clone()
+    }
+
+    /// Waits until this link received more than `seen` revisions, and returns the newest. Fails
+    /// once the link ends. Never call it on the I/O thread.
+    pub fn next_inventory(&self, seen: u64) -> Result<(u64, Arc<InventoryRevision>), LinkError> {
+        let mut state = self.lock();
+        loop {
+            if let Some((count, revision)) = &state.inventory
+                && *count > seen
+            {
+                return Ok((*count, Arc::clone(revision)));
+            }
+            if let Some(error) = state.closed {
+                return Err(error);
+            }
+            state = self
+                .shared
+                .revisions
+                .wait(state)
+                .unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -393,6 +427,13 @@ impl ServerLink {
                 }
             }
             ServerMessage::Inventory(revision) => {
+                let revision: Arc<InventoryRevision> = Arc::from(revision);
+                {
+                    let mut state = self.lock();
+                    let count = state.inventory.as_ref().map_or(0, |(count, _)| *count) + 1;
+                    state.inventory = Some((count, Arc::clone(&revision)));
+                }
+                self.shared.revisions.notify_all();
                 self.shared.events.deliver(LinkEvent::Inventory(revision));
             }
             // A full L0 drops the pong. The traffic that filled it renews the server's liveness.
@@ -468,6 +509,7 @@ impl ServerLink {
         for waiter in waiters.into_values() {
             waiter.complete(Err(RequestError::Link(error)));
         }
+        self.shared.revisions.notify_all();
         for sink in channels {
             sink.deliver(ChannelEvent::Closed(error));
         }
@@ -612,6 +654,27 @@ impl PendingReply {
                 .ready
                 .wait(value)
                 .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Waits up to `timeout` for the reply. `None` means it has not arrived.
+    pub fn wait_for(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<Result<ReplyBody, RequestError>> {
+        let deadline = Instant::now() + timeout;
+        let mut value = self.slot.value.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(result) = value.take() {
+                return Some(result);
+            }
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            value = self
+                .slot
+                .ready
+                .wait_timeout(value, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 

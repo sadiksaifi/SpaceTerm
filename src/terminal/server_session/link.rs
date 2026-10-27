@@ -5,7 +5,6 @@ use spaceterm_server::connection::link::{
 };
 use spaceterm_server::protocol::{
     self, Channel, ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
-    interim::{Interim, InterimReply},
 };
 
 /// Tags input with the current epoch and focus generation, or discards it now.
@@ -937,10 +936,6 @@ impl PaneLink {
         }
         let channel =
             |lease: Lease| -> Result<Channel, ServerError> { Ok(self.bound(lease)?.channel()) };
-        let interim = |operation: Interim| {
-            self.request(Operation::Interim(operation))
-                .and_then(interim_reply)
-        };
         match request.clone() {
             Request::View {
                 lease,
@@ -950,7 +945,6 @@ impl PaneLink {
                 self.bound(lease)?.view(visible, max_hz)?;
                 Ok(Reply::Unchanged)
             }
-            Request::Inventory => interim(Interim::Inventory),
             Request::Focus {
                 lease,
                 generation,
@@ -1092,11 +1086,10 @@ impl PaneLink {
                 Ok(Reply::Closed)
             }
             Request::Mutate { sequence, mutation } => {
-                interim_reply(self.request(Operation::Mutate { sequence, mutation })?)
+                mutation_reply(self.request(Operation::Mutate { sequence, mutation })?)
             }
-            Request::Resolve { sequence } => {
-                interim_reply(self.request(Operation::Resolve { sequence })?)
-            }
+            // The shared Workspace client reads pushed inventory and resolves by dispatching.
+            Request::Inventory | Request::Resolve { .. } => Err(ServerError::Unsupported),
             Request::Acknowledge { sequence } => {
                 self.link.acknowledge(sequence)?;
                 Ok(Reply::Unchanged)
@@ -1104,20 +1097,10 @@ impl PaneLink {
             Request::ReleaseAttachment { attachment } => self
                 .request(Operation::ReleaseAttachment { attachment })
                 .map(|_| Reply::Unchanged),
-            Request::DirectoryRead(read) => match self.request(Operation::DirectoryRead(read))? {
-                ReplyBody::Directory(progress) => Ok(Reply::DirectoryRead(progress)),
-                _ => Err(ServerError::Protocol),
-            },
-            Request::DirectoryCreate(create) => {
-                match self.request(Operation::DirectoryCreate(create))? {
-                    ReplyBody::Directory(progress) => Ok(Reply::DirectoryCreate(progress)),
-                    _ => Err(ServerError::Protocol),
-                }
+            // Directory and Worktree reads have their own deferred requests.
+            Request::DirectoryRead(_) | Request::DirectoryCreate(_) | Request::WorktreeRead(_) => {
+                Err(ServerError::Unsupported)
             }
-            Request::WorktreeRead(read) => match self.request(Operation::WorktreeRead(read))? {
-                ReplyBody::Worktree(result) => Ok(Reply::WorktreeRead(result)),
-                _ => Err(ServerError::Protocol),
-            },
             Request::Shutdown => self.request(Operation::Shutdown).map(|_| Reply::Closed),
             // Claims need this Pane's attachment permit. The single-key form predates focus
             // generations.
@@ -1167,23 +1150,12 @@ fn key_batches(keys: Vec<pane::Key>) -> Vec<Vec<InputEvent>> {
     batches
 }
 
-/// The worker's reply for an interim operation's body.
-fn interim_reply(body: ReplyBody) -> Result<Reply, ServerError> {
-    Ok(match body {
-        ReplyBody::Done => Reply::Unchanged,
-        ReplyBody::Outcome(outcome) => Reply::Outcome(outcome),
-        ReplyBody::Interim(reply) => match reply {
-            InterimReply::Inventory {
-                inventory,
-                next_sequence,
-            } => Reply::Inventory {
-                inventory,
-                next_sequence,
-            },
-            InterimReply::MutationPending => Reply::MutationPending,
-        },
-        _ => return Err(ServerError::Protocol),
-    })
+/// The worker's reply to a shared edit: its validated outcome.
+fn mutation_reply(body: ReplyBody) -> Result<Reply, ServerError> {
+    match body {
+        ReplyBody::Outcome(outcome) => Ok(Reply::Outcome(outcome)),
+        _ => Err(ServerError::Protocol),
+    }
 }
 
 impl TerminalSessionFactory for DevelopmentServerSessionFactory {

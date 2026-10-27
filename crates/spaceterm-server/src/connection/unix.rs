@@ -36,6 +36,14 @@ impl UnixCarrier {
     }
 }
 
+impl Drop for UnixCarrier {
+    /// Discards unread input first, so the peer reads everything written and then the end of the
+    /// stream rather than a reset.
+    fn drop(&mut self) {
+        super::io::discard_unread(self.stream.as_raw_fd());
+    }
+}
+
 impl Carrier for UnixCarrier {
     fn offer(&mut self, frame: &[u8], _priority: Priority) -> Result<Offer, CarrierError> {
         if self.closing {
@@ -106,5 +114,35 @@ impl Carrier for UnixCarrier {
 
     fn close(&mut self) {
         self.closing = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peer that sent input this end never read still reads the final frame and then the end
+    /// of the stream. On Linux a socket closed with unread input resets the connection instead.
+    #[test]
+    fn closing_with_unread_input_ends_the_stream_in_order() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&[7; 4096]).unwrap();
+        let mut carrier = UnixCarrier::new(server).unwrap();
+        let goodbye = crate::protocol::frame::encode_server(
+            &crate::protocol::ServerMessage::Goodbye(crate::protocol::Fatal::Stopping),
+        )
+        .unwrap()
+        .frames
+        .remove(0);
+        assert_eq!(
+            carrier.offer(&goodbye, Priority::L0).unwrap(),
+            Offer::Accepted
+        );
+        carrier.close();
+        assert!(!carrier.flush().unwrap().pending);
+        drop(carrier);
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        assert_eq!(received, goodbye);
     }
 }

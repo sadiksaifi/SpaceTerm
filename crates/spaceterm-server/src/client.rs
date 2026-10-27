@@ -65,6 +65,8 @@ pub struct ServerConnection {
 struct SharedLink {
     link: Mutex<Option<ServerLink>>,
     subscribers: Mutex<Vec<Weak<dyn LinkSink>>>,
+    /// How many links were connected. Each new link may reach a restarted server.
+    connected: std::sync::atomic::AtomicU64,
 }
 
 /// Delivers a shared link's events to every live subscriber. It holds the shared state weakly, so
@@ -83,7 +85,7 @@ impl LinkSink for Fanout {
         match event {
             LinkEvent::Inventory(revision) => {
                 for sink in subscribers {
-                    sink.deliver(LinkEvent::Inventory(revision.clone()));
+                    sink.deliver(LinkEvent::Inventory(Arc::clone(&revision)));
                 }
             }
             LinkEvent::Health(health) => {
@@ -399,6 +401,9 @@ impl ServerConnection {
         *saved = None;
         let link = self.connect(Arc::new(Fanout(Arc::downgrade(&self.shared))))?;
         *saved = Some(link.clone());
+        self.shared
+            .connected
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(link)
     }
     /// Makes `link`, already admitted, this handle's shared connection while it stays live. Tests
@@ -406,6 +411,13 @@ impl ServerConnection {
     #[doc(hidden)]
     pub fn adopt(&self, link: ServerLink) {
         *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+    }
+    /// Identifies the shared link: it changes each time [`Self::link`] connects a new one. Facts
+    /// read over an older link may describe a server that has since restarted.
+    pub fn link_generation(&self) -> u64 {
+        self.shared
+            .connected
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     /// Delivers the shared link's pushed inventory and health to `sink` while it lives, across
     /// reconnects.
@@ -722,6 +734,7 @@ mod tests {
             1,
             "clones share one connection"
         );
+        assert_eq!(server.link_generation(), 1);
         // The server's end of that connection closes: every holder sees the same failure.
         served
             .recv()
@@ -740,6 +753,11 @@ mod tests {
             accepted.load(Ordering::SeqCst),
             2,
             "an ended link reconnects once"
+        );
+        assert_eq!(
+            server.clone().link_generation(),
+            2,
+            "a new link has a new identity"
         );
         assert!(answers(&server.clone().link().unwrap()));
         assert_eq!(accepted.load(Ordering::SeqCst), 2);

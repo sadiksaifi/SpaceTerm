@@ -89,7 +89,8 @@ impl Received {
     }
 }
 
-/// Publishes until a row of the received screen equals `line`.
+/// Publishes until a row of the received screen ends with `line`. Output can follow a prompt on
+/// its row when input arrives before the shell prints that prompt, as dash does.
 fn await_line(
     served: &mut Served<SharedWorkspaceHost>,
     outbox: &Outbox,
@@ -100,7 +101,7 @@ fn await_line(
     loop {
         served.tick(Instant::now());
         received.drain(outbox);
-        if received.rows.iter().any(|row| row.trim_end() == line) {
+        if received.rows.iter().any(|row| row.trim_end().ends_with(line)) {
             return;
         }
         assert!(

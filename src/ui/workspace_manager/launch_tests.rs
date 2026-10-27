@@ -212,7 +212,7 @@ fn launch_harness_with(
     )
 }
 
-/// Reads the scripted server's inventory, as the window's poll does.
+/// Reads the scripted server's inventory, as the window does when its connection publishes one.
 fn sync(harness: &LaunchHarness, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {

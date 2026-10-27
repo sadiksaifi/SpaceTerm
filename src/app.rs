@@ -499,25 +499,16 @@ impl QuitSessions for DevelopmentQuitSessions {
     fn observe(
         &self,
     ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError> {
-        use spaceterm_server::{
-            ServerConnection, ServerError,
-            protocol::{
-                Operation, ReplyBody,
-                interim::{Interim, InterimReply},
-            },
-        };
+        use spaceterm_server::{ServerConnection, ServerError};
         let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
         let server = ServerConnection::for_identity(identity)?;
-        let link = server.link()?;
-        match link
-            .request(Operation::Interim(Interim::Inventory))?
-            .wait()?
-        {
-            ReplyBody::Interim(InterimReply::Inventory { inventory, .. }) => inventory
-                .close
-                .ok_or(ServerError::MissingRequiredCapability),
-            _ => Err(ServerError::Protocol),
-        }
+        // The server pushes the inventory when it admits the link.
+        let (_, revision) = server.link()?.next_inventory(0)?;
+        revision
+            .inventory
+            .close
+            .clone()
+            .ok_or(ServerError::MissingRequiredCapability)
     }
 }
 

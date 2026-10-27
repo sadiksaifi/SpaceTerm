@@ -1,9 +1,6 @@
 //! Client requests and their reply bodies.
 //!
 //! Operations reuse the payload types of the request-and-poll exchange where postcard encodes them.
-//! Operations that the push protocol replaces live in [`super::interim::Interim`] until their
-//! replacement merges.
-use super::interim::{Interim, InterimReply};
 use super::message::{Channel, check};
 use super::screen::Page;
 use super::{Fatal, limits};
@@ -37,13 +34,16 @@ pub enum Operation {
         channel: Channel,
         style: PresentationStyle,
     },
-    /// A shared Workspace edit. Its reply carries the validated outcome after the inventory
-    /// revision that contains it.
+    /// A shared Workspace edit, or its Original Operation dispatched again with the same
+    /// identity. The server replays an outcome it already recorded. The reply carries the
+    /// validated outcome after the inventory revision that contains it, once that revision is
+    /// retained, and waits for a Worktree write the outcome depends on.
     Mutate {
         sequence: u64,
         mutation: crate::hierarchy::Mutation,
     },
-    /// Settles an Unconfirmed Outcome of the same Original Operation.
+    /// The recorded outcome of an Original Operation, without dispatching it. The reply waits
+    /// like `Mutate`'s, and refuses `Missing` when the server recorded no such operation.
     Resolve {
         sequence: u64,
     },
@@ -76,15 +76,17 @@ pub enum Operation {
     EndAccessibility {
         channel: Channel,
     },
-    DirectoryRead(directories::Request),
-    DirectoryCreate(directories::CreationRequest),
+    /// Replied when the read settles. `Cancel` abandons it.
+    DirectoryRead(directories::Operation),
+    /// Replied when the write settles. `Cancel` prevents the write if it has not started;
+    /// directories it already created stay.
+    DirectoryCreate(directories::Creation),
+    /// Replied when the read settles. `Cancel` abandons it. `Read::Poll` is refused.
     WorktreeRead(crate::worktree::Read),
     /// Direct-network administration. Paired connections may send only what the host allows.
     Direct(crate::direct::Management),
     /// Stops the server. Account-local connections only.
     Shutdown,
-    /// A request-and-poll operation awaiting its push replacement.
-    Interim(Interim),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,10 +109,9 @@ pub enum ReplyBody {
     Page(Page),
     Graphics(Result<graphics::Chunk, graphics::Error>),
     Accessibility(Result<accessibility::Chunk, accessibility::Error>),
-    Directory(Result<directories::Progress, directories::Error>),
+    Directory(Result<directories::Value, directories::Error>),
     Worktree(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
-    Interim(InterimReply),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -163,6 +164,7 @@ impl Operation {
                 | Self::Graphics { .. }
                 | Self::Accessibility { .. }
                 | Self::DirectoryRead(_)
+                | Self::DirectoryCreate(_)
                 | Self::WorktreeRead(_)
         )
     }

@@ -151,7 +151,7 @@ fn devices_facts(observed_at: u64, devices: &[Device]) -> PairedDevicesFacts {
 }
 
 /// How long an unchanged live reading goes before it is retained again with its new time, so a
-/// server's shown time stays close to when SpaceTerm last reached it without a write every poll.
+/// server's shown time stays close to when SpaceTerm last reached it without a write every look.
 const UNCHANGED_RETENTION: u64 = 60;
 
 /// The access the rows show: the live reading, or what the server last reported while SpaceTerm

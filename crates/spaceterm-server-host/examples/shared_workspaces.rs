@@ -43,9 +43,7 @@ fn inventory(link: &ServerLink) -> Result<(Inventory, u64), Box<dyn Error>> {
 }
 fn mutate(link: &ServerLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
     let (_, sequence) = inventory(link)?;
-    let Some(result) = support::mutate(link, sequence, mutation)? else {
-        return Err("mutation response".into());
-    };
+    let result = support::mutate(link, sequence, mutation)?;
     let Outcome::Accepted { target } = result.outcome else {
         return Err("mutation rejected".into());
     };
@@ -234,7 +232,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         name: "Rejected draft".into(),
     };
     assert!(
-        matches!(support::mutate(&second, conflict_sequence, rejected.clone())?, Some(o) if o.outcome == Outcome::Conflict && o.mutation == rejected)
+        matches!(support::mutate(&second, conflict_sequence, rejected.clone())?, o if o.outcome == Outcome::Conflict && o.mutation == rejected)
     );
     second.acknowledge(conflict_sequence)?;
     mutate(
@@ -280,12 +278,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(w.tabs[0].root_pane, pane);
     assert_eq!(w.tabs[0].panes[1].source, Some(pane));
     assert!(matches!(select(&first, pane, false)?, Claimed::Restored(_)));
-    let Some(saved) = support::resolve(&first, sequence)? else {
-        return Err("retained outcome".into());
-    };
-    let Some(replayed) = support::mutate(&first, sequence, creation)? else {
-        return Err("replay outcome".into());
-    };
+    let saved = support::resolve(&first, sequence)?;
+    let replayed = support::mutate(&first, sequence, creation)?;
     assert_eq!(saved, replayed);
     assert_eq!(inventory(&first)?.0, before);
     first.acknowledge(sequence)?;
@@ -298,7 +292,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (_, sequence) = inventory(&second)?;
     assert!(matches!(support::mutate(
         &second, sequence, Mutation::Close { target: tab_target, confirmation: stale }
-    )?, Some(o) if o.outcome == Outcome::StaleConfirmation));
+    )?, o if o.outcome == Outcome::StaleConfirmation));
     second.acknowledge(sequence)?;
     let Claimed::Attached(_split) = select(&second, split, true)? else {
         return Err("second restored first use".into());
@@ -383,12 +377,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     host.kill()?;
     let mut host = Server::start()?;
     let first = connect(&a)?;
-    let Some(saved) = support::resolve(&first, sequence)? else {
-        return Err("Kill outcome".into());
-    };
-    let Some(replayed) = support::mutate(&first, sequence, kill)? else {
-        return Err("Kill replay".into());
-    };
+    let saved = support::resolve(&first, sequence)?;
+    let replayed = support::mutate(&first, sequence, kill)?;
     assert_eq!(saved, replayed);
     assert_eq!(saved.outcome, Outcome::Accepted { target: workspace });
     first.acknowledge(sequence)?;
@@ -413,7 +403,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let (_, sequence) = inventory(&first)?;
     assert!(
-        matches!(support::mutate(&first, sequence, Mutation::CreateTab { workspace, source: None })?, Some(o) if o.outcome == Outcome::Missing)
+        matches!(support::mutate(&first, sequence, Mutation::CreateTab { workspace, source: None })?, o if o.outcome == Outcome::Missing)
     );
     first.acknowledge(sequence)?;
     assert!(matches!(
