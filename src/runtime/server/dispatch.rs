@@ -390,6 +390,9 @@ pub trait HostCommands: Send {
     }
     /// The host's wake, which makes it tick again; see `PaneService::ticker`.
     fn ticker(&mut self, _wake: Arc<dyn spaceterm_server::connection::Wake>) {}
+    /// A Terminal Session rang the bell, so the next tick carries what it changed. A host may
+    /// pace what such ticks push.
+    fn rung(&mut self) {}
     /// The host is stopping; refuse every deferred reply still owed. See `PaneService::stopping`.
     fn stopping(&mut self) {}
     /// Records the Client Name an admitted client supplied, before any of its requests.
@@ -1135,6 +1138,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         // ended shell's final screen over before the host's timed work retires its Pane.
         if self.bell.take() {
             self.publish_all();
+            self.host.rung();
         }
         let host = self.host.tick(now);
         self.sweep();

@@ -1238,6 +1238,8 @@ enum Command {
     AccessibilityDemand,
     AccessibilityContinue,
     PublishAccessibility,
+    /// A hidden Terminal Session reports metadata that changed while it was paced.
+    PublishMetadata,
     SelectionAutoscrollTick,
     PublishPendingScreen,
     MetadataStatusTick,
@@ -1312,6 +1314,7 @@ impl fmt::Debug for Command {
             Self::AccessibilityDemand => "AccessibilityDemand",
             Self::AccessibilityContinue => "AccessibilityContinue",
             Self::PublishAccessibility => "PublishAccessibility",
+            Self::PublishMetadata => "PublishMetadata",
             Self::SelectionAutoscrollTick => "SelectionAutoscrollTick",
             Self::PublishPendingScreen => "PublishPendingScreen",
             Self::MetadataStatusTick => "MetadataStatusTick",
@@ -2025,6 +2028,7 @@ impl TerminalWorker {
             }
             Command::AccessibilityContinue => self.publish_accessibility(false),
             Command::PublishAccessibility => self.publish_accessibility(true),
+            Command::PublishMetadata => self.publish_metadata_changed(),
             Command::SelectionAutoscrollTick => {
                 if self.emulator.synchronized_output_deadline().is_some() {
                     return self.refresh_selection_autoscroll();
@@ -2757,7 +2761,8 @@ impl TerminalWorker {
     }
 
     fn publish_metadata_changed(&mut self) -> bool {
-        let Some(wakeup) = self.schedules.take_metadata_presentation() else {
+        let now = self.schedules.now();
+        let Some(wakeup) = self.schedules.take_metadata_presentation(now) else {
             return true;
         };
         match self
