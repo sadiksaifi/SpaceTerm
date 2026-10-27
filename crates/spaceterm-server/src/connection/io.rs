@@ -61,6 +61,29 @@ impl Waker {
     }
 }
 
+/// Reads and discards what the peer sent that this end never read, without waiting, before the
+/// socket closes. A Unix or TCP socket closed with unread input resets the connection on Linux,
+/// and a reset can make the peer drop a goodbye it has not read yet. Bounded, so a peer that keeps
+/// sending cannot hold the close.
+pub(crate) fn discard_unread(fd: RawFd) {
+    let mut buffer = [0u8; 16 * 1024];
+    for _ in 0..64 {
+        // SAFETY: recv writes at most `buffer.len()` bytes into the live local buffer, from the
+        // caller's live descriptor, without blocking.
+        let count = unsafe {
+            libc::recv(
+                fd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if count <= 0 {
+            return;
+        }
+    }
+}
+
 /// Waits until `fd` is readable, or writable when `write` is set, or `deadline` passes. Returns
 /// `false` at the deadline. Used by blocking preambles such as TLS and WebSocket handshakes.
 pub(crate) fn wait_fd(fd: RawFd, write: bool, deadline: Instant) -> bool {
