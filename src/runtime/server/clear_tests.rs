@@ -117,10 +117,7 @@ fn clear_under_lease(preserve_prompt: bool) {
         ));
     }
     let untouched = await_screen(&mut host, [1; 32], first, |_| true);
-    assert_eq!(
-        retained(&untouched),
-        retained(&first_before)
-    );
+    assert_eq!(retained(&untouched), retained(&first_before));
     assert_eq!(text(&untouched), text(&first_before));
 
     let Reply::Attached { lease: resumed } = exchange(&mut host, 1, 3, select(tab.root_pane))
@@ -153,15 +150,11 @@ fn clear_under_lease(preserve_prompt: bool) {
         std::thread::sleep(Duration::from_millis(100));
         let hidden = await_screen(&mut host, [1; 32], resumed, |_| true);
         assert_eq!(text(&hidden), text(&first_before));
-        assert_eq!(
-            retained(&hidden),
-            retained(&first_before)
-        );
+        assert_eq!(retained(&hidden), retained(&first_before));
         host.view(&resumed, true, 60);
     }
     let cleared = await_screen(&mut host, [1; 32], resumed, |s| {
-        s.generation > first_before.generation
-            && retained(s) == 0
+        s.generation > first_before.generation && retained(s) == 0
     });
     assert!(
         text(&cleared).contains("FIRST-prompt"),
@@ -178,9 +171,6 @@ fn clear_under_lease(preserve_prompt: bool) {
     }
     let second_after = await_screen(&mut host, [1; 32], second, |_| true);
     assert_eq!(text(&second_after), text(&second_before));
-    assert_eq!(
-        retained(&second_after),
-        retained(&second_before)
-    );
+    assert_eq!(retained(&second_after), retained(&second_before));
     host.shutdown().unwrap();
 }

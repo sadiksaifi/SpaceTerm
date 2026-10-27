@@ -17,8 +17,9 @@ pub(super) struct Viewport {
 impl Viewport {
     /// The line at the top of the view.
     pub(super) fn top(&self, history: History) -> u64 {
-        self.top
-            .map_or(history.total, |top| top.clamp(history.oldest, history.total))
+        self.top.map_or(history.total, |top| {
+            top.clamp(history.oldest, history.total)
+        })
     }
 
     pub(super) fn following(&self) -> bool {

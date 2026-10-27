@@ -309,7 +309,10 @@ fn point_at(lines: Lines<'_>, top: u64, grid: Grid, x: f32, y: f32) -> Option<Po
         Some(found) if found.spacer_tail(column) => column.saturating_sub(1),
         _ => column,
     };
-    lines.range().contains(&line).then_some(Point { line, column })
+    lines
+        .range()
+        .contains(&line)
+        .then_some(Point { line, column })
 }
 
 /// Ghostty's cell drag: the pressed and current cells count once the pointer passes 60% of
@@ -468,7 +471,9 @@ fn word_between(lines: Lines<'_>, from: Point, to: Point) -> Option<(Point, Poin
                 let line = point.line.checked_sub(1)?;
                 (line >= to.line).then(|| Point {
                     line,
-                    column: lines.get(line).map_or(0, |row| row.columns().saturating_sub(1)),
+                    column: lines
+                        .get(line)
+                        .map_or(0, |row| row.columns().saturating_sub(1)),
                 })
             })?
         };
@@ -513,9 +518,9 @@ fn line(lines: Lines<'_>, point: Point, trim: bool) -> Option<(Point, Point)> {
         return Some((start, end));
     }
     let content = |candidate: &Point| {
-        lines.get(candidate.line).is_some_and(|row| {
-            row.has_text(candidate.column) && row.text(candidate.column) != "\t"
-        })
+        lines
+            .get(candidate.line)
+            .is_some_and(|row| row.has_text(candidate.column) && row.text(candidate.column) != "\t")
     };
     let cells = (first..=last).flat_map(|line| {
         let columns = lines.get(line).map_or(0, RowRef::columns);
@@ -586,7 +591,10 @@ impl<'a> Html<'a> {
     }
 
     fn text(&mut self, row: RowRef<'_>, column: u16) {
-        let css = row.style(column).map(|cell| self.css(cell)).unwrap_or_default();
+        let css = row
+            .style(column)
+            .map(|cell| self.css(cell))
+            .unwrap_or_default();
         let style = (!css.is_empty()).then_some(css);
         // Pending spaces and line breaks belong to the style already open.
         let mut pending = String::new();

@@ -88,12 +88,7 @@ impl ScrollbackCache {
     /// Adds rows the server reported for consecutive positions from `start`, keeping only
     /// retained positions. `focus` is the position the reader is closest to; rows farthest from
     /// it leave first when the cache is full.
-    fn insert(
-        &mut self,
-        start: u64,
-        rows: impl IntoIterator<Item = CachedRow>,
-        focus: u64,
-    ) {
+    fn insert(&mut self, start: u64, rows: impl IntoIterator<Item = CachedRow>, focus: u64) {
         let retained = self.history.oldest..self.history.total;
         let mut changed = false;
         for (position, row) in (start..).zip(rows) {
@@ -145,7 +140,11 @@ impl ScrollbackCache {
         let wanted = self.retained(wanted);
         let mut missing = Vec::new();
         let mut cursor = wanted.start;
-        for position in self.rows.range(wanted.clone()).map(|(position, _)| *position) {
+        for position in self
+            .rows
+            .range(wanted.clone())
+            .map(|(position, _)| *position)
+        {
             if position > cursor {
                 missing.push(cursor..position);
             }

@@ -213,5 +213,8 @@ fn every_tick_runs_the_hosts_timed_work_and_only_the_bell_publishes() {
     served.tick(now + Duration::from_millis(2));
     let sessions = sessions.lock().unwrap();
     assert_eq!(sessions.ticks, 3, "every wake runs the host's timed work");
-    assert_eq!(sessions.observed, 0, "a wake without a ring publishes nothing");
+    assert_eq!(
+        sessions.observed, 0,
+        "a wake without a ring publishes nothing"
+    );
 }

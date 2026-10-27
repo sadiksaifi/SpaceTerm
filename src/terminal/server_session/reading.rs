@@ -56,7 +56,6 @@ impl Reading {
         self.pages.push((request, page));
     }
 
-
     /// Decodes arrived pages and runs a due autoscroll step. `columns` is the screen's width,
     /// which every row of the current history epoch shares.
     pub(super) fn turn(
@@ -155,7 +154,8 @@ impl PresentationHandle {
             || (input.phase == PointerPhase::Motion && input.button.is_some());
         let (mapping, x, y) =
             self.pointer_position(input.generation, input.position, continuation)?;
-        let shift_selection = input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
+        let shift_selection =
+            input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
         let modes = modes(mapping, shift_selection && input.modifiers.shift);
         let phase = match input.phase {
             PointerPhase::Press => route::PointerPhase::Press,
@@ -230,11 +230,14 @@ impl PresentationHandle {
         else {
             return;
         };
-        let shift_selection = input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
+        let shift_selection =
+            input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
         match route::wheel_route(modes(mapping, shift_selection && input.modifiers.shift)) {
             WheelRoute::Ignore => {}
             WheelRoute::Scrollback => {
-                let steps = input.vertical_steps.clamp(-MAX_WHEEL_LINES, MAX_WHEEL_LINES);
+                let steps = input
+                    .vertical_steps
+                    .clamp(-MAX_WHEEL_LINES, MAX_WHEEL_LINES);
                 self.local(|reading| ((), reading.scrollback.wheel(steps)));
             }
             WheelRoute::Program => {

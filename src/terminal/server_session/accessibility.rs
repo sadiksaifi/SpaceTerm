@@ -94,10 +94,7 @@ impl RetainedSemantics {
     /// The visible lines and Selection of `applied` as this client presents them: moved up by
     /// how far the view is scrolled back, with this client's Selection in place of the server's
     /// while it has one.
-    fn project(
-        &self,
-        applied: &Applied,
-    ) -> (Range<usize>, Option<AccessibilitySelectionRefs>) {
+    fn project(&self, applied: &Applied) -> (Range<usize>, Option<AccessibilitySelectionRefs>) {
         let visible = applied.visible_lines.clone();
         let shift = usize::try_from(self.view.scrolled)
             .unwrap_or(usize::MAX)
@@ -822,7 +819,11 @@ mod tests {
             });
         let next = PresentationGeneration::default().next();
         let scrolled = fetcher.rebind(&state, next).unwrap();
-        assert_eq!(scrolled.visible_lines(), 1..3, "VoiceOver reads the rows shown");
+        assert_eq!(
+            scrolled.visible_lines(),
+            1..3,
+            "VoiceOver reads the rows shown"
+        );
         let selection = scrolled.selection_refs().unwrap();
         assert_eq!(
             (
