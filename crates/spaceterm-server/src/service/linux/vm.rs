@@ -99,9 +99,10 @@ fn await_marker(link: &ServerLink, channel: &ChannelHandle, marker: &str) {
                 channel: channel.channel(),
             }),
         ) {
-            let found = screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
+            let found = screen.update.rows.iter().any(|row| {
+                row.runs
+                    .iter()
+                    .map(|run| run.text.as_str())
                     .collect::<String>()
                     .trim_end()
                     == marker

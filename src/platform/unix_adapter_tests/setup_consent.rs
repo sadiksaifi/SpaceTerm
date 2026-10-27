@@ -397,7 +397,7 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
     let target = "x86_64-unknown-linux-gnu";
     let directory = catalog.join(target);
     std::fs::create_dir_all(&directory).unwrap();
-    let manifest = serde_json::json!({"schema":1,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":1,"capabilities":["workspace_policy"]}).to_string().into_bytes();
+    let manifest = serde_json::json!({"schema":1,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_server::protocol::MAJOR,"capabilities":["workspace_policy"]}).to_string().into_bytes();
     let mut entries = vec![
         ("server/build.json".to_owned(), manifest, 0o644),
         (

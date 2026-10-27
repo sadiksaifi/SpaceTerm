@@ -61,8 +61,9 @@ fn reported(outbox: &Outbox) -> Vec<(u32, InputOutcome)> {
     outcomes
 }
 
-/// Polls until a row of the screen equals `line`. `rows` keeps the last screen, because a poll
-/// answers `Unchanged` until the screen changes again.
+/// Polls until a row of the screen ends with `line`. Output can follow a prompt on its row when
+/// input arrives before the shell prints that prompt, as dash does. `rows` keeps the last screen,
+/// because a poll answers `Unchanged` until the screen changes again.
 fn await_line(served: &mut Served<SharedWorkspaceHost>, rows: &mut Vec<String>, line: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -72,7 +73,7 @@ fn await_line(served: &mut Served<SharedWorkspaceHost>, rows: &mut Vec<String>, 
         ) {
             *rows = super::tests::lines(&screen);
         }
-        if rows.iter().any(|row| row.trim_end() == line) {
+        if rows.iter().any(|row| row.trim_end().ends_with(line)) {
             return;
         }
         assert!(
