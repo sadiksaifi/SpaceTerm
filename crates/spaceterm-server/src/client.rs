@@ -784,8 +784,10 @@ mod tests {
             let other =
                 direct::tests::admitted(connection, &paired.client, "Other view", &paired).unwrap();
             let policy = change_address.then(|| {
-                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                direct::NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
+                direct::NetworkPolicy::new(direct::tests::free_udp(
+                    std::net::Ipv4Addr::LOCALHOST.into(),
+                ))
+                .unwrap()
             });
             let local = ServerConnection::with_paths(fixture.paths.clone())
                 .unwrap()

@@ -9,7 +9,7 @@ use crate::connection::unix::UnixCarrier;
 use crate::protocol::{EffectDone, Input, Operation, Refusal, ReplyBody, RequestId, View};
 use client::Messages;
 use std::{
-    net::{TcpListener, UdpSocket},
+    net::UdpSocket,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -33,6 +33,11 @@ impl PaneService for Refusing {
 
 pub(crate) fn service(service: impl PaneService + 'static) -> SharedPaneService {
     Arc::new(Mutex::new(Box::new(service)))
+}
+
+/// A UDP port of `ip` that was free a moment ago.
+pub(crate) fn free_udp(ip: std::net::IpAddr) -> std::net::SocketAddr {
+    UdpSocket::bind((ip, 0)).unwrap().local_addr().unwrap()
 }
 
 /// Severs nothing, for registrations a test only inspects.
@@ -163,14 +168,27 @@ impl Fixture {
             .map(|v| v.0)
     }
     pub(crate) fn enable(&self) {
-        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        self.management(Management::SetPolicy {
-            enabled: true,
-            policy: Some(NetworkPolicy::new(address).unwrap()),
-        })
-        .unwrap();
+        self.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+    }
+    /// Enables exposure on a free UDP port of `ip`. Another test can take the port between
+    /// finding it and binding it, so a failed bind tries another.
+    pub(crate) fn listen_at(&self, ip: std::net::IpAddr) -> std::net::SocketAddr {
+        for _ in 0..8 {
+            let address = free_udp(ip);
+            self.management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(address).unwrap()),
+            })
+            .unwrap();
+            let ManagementReply::Status(status) = self.management(Management::Status).unwrap()
+            else {
+                panic!()
+            };
+            if status.listener == (ListenerState::Listening { addr: address }) {
+                return address;
+            }
+        }
+        panic!("no free UDP port to listen on");
     }
     pub(super) fn invite(&self) -> Invitation {
         let ManagementReply::Invitation(text) = self.management(Management::Invite).unwrap() else {
@@ -1414,10 +1432,8 @@ fn a_paired_policy_request_is_refused_without_mutation_or_retiring_its_connectio
         let paired = fixture.enroll(&credential);
         let server = fixture.serve_next();
         let connection = connect(&fixture.endpoint(), &paired, &credential);
-        let policy = change_address.then(|| {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
-        });
+        let policy = change_address
+            .then(|| NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap());
         // The admission reply precedes the retained connection timestamp. A server request
         // completes after that metadata write and fences this baseline.
         assert!(matches!(
@@ -1481,11 +1497,9 @@ fn setup(
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let policy = status
-        .policy
-        .clone()
-        .unwrap_or_else(|| NetworkPolicy::new(listener.local_addr().unwrap()).unwrap());
+    let policy = status.policy.clone().unwrap_or_else(|| {
+        NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap()
+    });
     operation[..8].copy_from_slice(&status.setup_generation.to_be_bytes());
     Management::Setup {
         generation: status.setup_generation,
@@ -1996,9 +2010,7 @@ fn configured_listener_survives_off_on_and_can_be_selected_before_exposure() {
         }),
         Err(DirectError::InvalidRequest)
     ));
-    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
-    let policy = NetworkPolicy::new(socket.local_addr().unwrap()).unwrap();
-    drop(socket);
+    let policy = NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap();
     fixture
         .management(Management::SetPolicy {
             policy: Some(policy.clone()),
@@ -3201,8 +3213,8 @@ mod quic_connections {
         let _ = server.join().unwrap();
     }
 
-    /// Measures a QUIC request's round trip on loopback, as `quic_request_round_trip_on_loopback`
-    /// does for QUIC. Run it with `mise run bench:latency:quic`.
+    /// Measures a paired request's round trip over QUIC on loopback. Run it with
+    /// `mise run bench:latency:quic`.
     #[test]
     #[ignore = "a measurement; run with `mise run bench:latency:quic`"]
     fn quic_request_round_trip_on_loopback() {

@@ -8,7 +8,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 - **Workspaces** for local and remote terminal work
 - **Tabs and Panes** with recursive splits, focus, resize, and zoom
-- **Remote terminals** over paired secure WebSocket connections
+- **Remote terminals** over paired, encrypted QUIC connections on UDP port 9231
 - **Keyboard-first navigation** through the Command Palette and Workspace Switcher
 
 ## Install macOS/Linux
@@ -53,7 +53,7 @@ flowchart TB
 
 ## Add a remote server
 
-Open Settings > Servers > Add Server and use your existing OpenSSH configuration or an Invitation Link. SSH prepares and pairs the server, then closes. SpaceTerm uses the saved secure WebSocket connection for remote work. Create Workspaces and browse directories on your added servers from either sidebar creation menu.
+Open Settings > Servers > Add Server and use your existing OpenSSH configuration or an Invitation Link. SSH prepares and pairs the server, then closes. SpaceTerm uses the saved QUIC connection, on UDP port 9231 by default, for remote work. The server needs that UDP port reachable from your computer. Create Workspaces and browse directories on your added servers from either sidebar creation menu.
 
 ## Copy and paste over SSH and tmux
 

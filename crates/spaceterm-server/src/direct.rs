@@ -209,7 +209,7 @@ pub enum DirectError {
     Disabled,
     #[error("This connection request is invalid.")]
     InvalidRequest,
-    #[error("Enter a DNS name or IP address and a nonzero TCP port.")]
+    #[error("Enter a DNS name or IP address and a nonzero UDP port.")]
     InvalidAddress,
     #[error("This claim has already been decided.")]
     AlreadyDecided,

@@ -209,7 +209,7 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
         SetupFailure::Unreachable { address } => SetupProblem {
             state: "Not Reachable",
             explanation: format!(
-                "SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {}. Check the address and any firewall, or enter the address this computer uses to reach it.",
+                "SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {}. Check the address and that any firewall allows UDP, or enter the address this computer uses to reach it.",
                 address.authority()
             )
             .into(),

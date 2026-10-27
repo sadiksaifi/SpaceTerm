@@ -48,7 +48,7 @@ Setup rejects SSH executable or runtime configuration paths containing whitespac
 
 Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies the QUIC address with UDP port 9231. The optional Network Address disclosure accepts a DNS name or IP address and an optional UDP port. SSH aliases and ProxyJump can reach a machine without making its QUIC endpoint reachable; use the override when the client needs a different address. Network exposure requires approval of the reachable address and the server's listener. Installation and startup do not complete setup until credentials and the connection are saved, SSH resources close and QUIC admission succeeds. If setup fails, review its reported service and pairing effects before retrying.
 
-Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Retry and pairing cleanup use QUIC. A network that blocks UDP needs a VPN or tailnet route; there is no TCP fallback. Manage network exposure, invitations, other devices, End All Sessions, the native service and server updates on the server's own machine. Saved addresses are read-only; add the server again to use a different address.
+Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Retry and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). Manage network exposure, invitations, other devices, End All Sessions, the native service and server updates on the server's own machine. Saved addresses are read-only; add the server again to use a different address.
 
 ## Cross-target artifact catalogs
 
@@ -76,7 +76,7 @@ Each client holds one SpaceTerm Protocol connection per server: the account-loca
 
 ## Paired connections
 
-Saved QUIC routes and restricted unpair recovery live in `direct-device-connections.json` in private client data, outside the Settings Document. Each pairing has a separate native credential. The account server keeps listener policy, trust and pairing grants in `direct.json`. Invitations are never retained. [ADR 0028](adr/0028-use-spaceterm-protocol-over-every-client-connection.md) owns enrollment and [ADR 0052](adr/0052-carry-paired-connections-over-quic.md) the transport; [ADR 0038](adr/0038-unpair-devices-without-blocking-local-connection-removal.md) owns removal and recovery.
+Saved QUIC routes and restricted unpair recovery live in `direct-device-connections.json` in private client data, outside the Settings Document. Routes saved over WSS, before QUIC, are dropped when the client loads that file; add those servers again. Each pairing has a separate native credential. The account server keeps listener policy, trust and pairing grants in `direct.json`. Invitations are never retained. [ADR 0028](adr/0028-use-spaceterm-protocol-over-every-client-connection.md) owns enrollment and [ADR 0052](adr/0052-carry-paired-connections-over-quic.md) the transport; [ADR 0038](adr/0038-unpair-devices-without-blocking-local-connection-removal.md) owns removal and recovery.
 
 `mise run server:direct:build` prepares the two-host verification helper. Its help defines the exact idle Development scope for `server:direct:smoke`; executing the built helper preserves its signature. `server:direct:credentials:native:test` separately verifies and removes two randomly scoped native-store items.
 
@@ -116,7 +116,7 @@ mise run bench:latency:netem --owner-host penguin --jail /var/tmp/spaceterm-nete
 
 `--client-address` must be an address of this machine. `--expose` uses a port of its own, so an installed server keeps its listener. The owner host builds the server and probe from the same checkout path; `--owner-target` selects its Cargo target directory. `--jail` gives the server private, disposable state through bwrap, so a Development server already running there is left alone. Defaults are 2% loss, 25 ms delay and 300 samples of each measurement per cell. `--output` receives raw results and a percentile table.
 
-The idle task reads per-connection TCP byte counters with `nettop`. It counts neither account-local IPC nor paired QUIC connections, which run over UDP, until it gains a UDP mode.
+The idle task reads per-flow UDP byte counters with `nettop`, so it sees paired QUIC connections but not account-local IPC.
 
 On macOS, remote tasks accept `--interface` with a remote host, and the pixel, idle and protocol tasks take that host as `--route-host`. A task given them refuses to run unless the route to the host uses that interface and every established TCP connection to the host uses an address on it. Paired connections are UDP, so the guard checks only the route for them. Use them to keep a wired batch on Ethernet.
 

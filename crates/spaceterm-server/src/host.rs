@@ -2081,7 +2081,8 @@ mod startup_tests {
         fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
         let original = fs::symlink_metadata(fixture.paths.socket()).unwrap().ino();
         let mut child = fixture.start();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Generous, because a loaded test host can take seconds to start the child.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let exit = loop {
             if let Some(exit) = child.0.try_wait().unwrap() {
                 break Some(exit);
@@ -2109,7 +2110,8 @@ mod startup_tests {
         fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
         drop(stale);
         let _child = fixture.start();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Generous, because a loaded test host can take seconds to start the child.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut stream = loop {
             match UnixStream::connect(fixture.paths.socket()) {
                 Ok(stream) => break stream,

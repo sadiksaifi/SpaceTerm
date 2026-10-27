@@ -4,7 +4,7 @@
 # USAGE flag "--owner-directory <directory>" help="Repository checkout on the owner host; defaults to this checkout's path from ~"
 # USAGE flag "--owner-target <directory>" help="CARGO_TARGET_DIR on the owner host; defaults to the checkout's target"
 # USAGE flag "--jail <directory>" help="Private Development server state on the owner host, mounted with bwrap and replaced at each run, so another Development server there keeps running"
-# USAGE flag "--expose <address>" help="Owner host address and port the server listens on, for TCP and UDP"
+# USAGE flag "--expose <address>" help="Owner host address and UDP port the server listens on"
 # USAGE flag "--client-address <address>" help="This machine's IPv4 address as the owner host sees it; only traffic to it is impaired"
 # USAGE flag "--device <device>" help="Owner host network device to impair" default="eno1"
 # USAGE flag "--loss <percent>" help="netem packet loss" default="2"
