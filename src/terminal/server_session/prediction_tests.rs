@@ -378,21 +378,63 @@ fn a_silent_read_in_the_line_editors_mode_never_shows_its_keys() {
 }
 
 #[test]
-fn an_unechoed_key_never_shows_and_expires() {
+fn an_unechoed_key_never_shows_and_expires_without_a_frame() {
     let mut worker = Worker::confirmed();
     worker.send(typed("\r"));
     worker.new_line("");
     worker.send(typed("s"));
 
-    // A program that turned echo off reads the key; its frame shows nothing at the cell.
-    worker.now += ROUND_TRIP;
-    worker.server_frame(worker.serial);
+    // A program that turned echo off reads the key. Nothing changes on screen, so the server
+    // sends no frame.
     assert_eq!(worker.shown(), "");
-    assert!(worker.predictor.deadline().is_some());
-    worker.predictor.expire(worker.now + Duration::from_secs(1));
+    let deadline = worker
+        .predictor
+        .deadline()
+        .expect("the key waits for its echo");
+    assert!(deadline > worker.now + ROUND_TRIP);
+    worker.predictor.expire(deadline);
     assert_eq!(worker.predictor.deadline(), None);
     worker.send(typed("t"));
     assert_eq!(worker.shown(), "");
+}
+
+#[test]
+fn a_shown_key_without_echo_is_withdrawn_when_overdue_and_later_keys_stay_hidden() {
+    // A function echoes one key, then reads a PIN silently in the line editor's mode, with no
+    // line mode change the server could see in between.
+    let mut worker = Worker::confirmed();
+    worker.send(typed("1"));
+    assert_eq!(worker.shown(), "1", "the confirmed epoch shows the key");
+
+    // No echo and no frame arrive. The key is withdrawn one round trip and the grace later.
+    let deadline = worker.predictor.deadline().unwrap();
+    worker.predictor.expire(deadline - Duration::from_millis(1));
+    assert_eq!(worker.shown(), "1");
+    worker.predictor.expire(deadline);
+    assert_eq!(worker.shown(), "");
+
+    // Later keys stay hidden: prediction waits for a frame, then for an echo to confirm again.
+    worker.now = deadline;
+    worker.send(typed("2"));
+    assert_eq!(worker.shown(), "");
+    worker.now += ROUND_TRIP;
+    worker.lines = vec!["$ ec".into()];
+    worker.server_frame(worker.serial);
+    for text in ["3", "4"] {
+        worker.send(typed(text));
+        assert_eq!(worker.shown(), "", "{text} showed");
+    }
+}
+
+#[test]
+fn a_discarded_key_rolls_back() {
+    let mut worker = Worker::confirmed();
+    let serial = worker.send(typed("a"));
+    worker.send(typed("b"));
+    assert_eq!(worker.shown(), "ab");
+    worker.predictor.discarded(serial);
+    assert_eq!(worker.shown(), "");
+    assert_eq!(worker.predictor.deadline(), None);
 }
 
 #[test]

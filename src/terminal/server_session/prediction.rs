@@ -10,9 +10,12 @@
 //! A prediction shows only once the server has confirmed its epoch: a frame showed one prediction
 //! of the epoch echoed in a cell that held something else before, with the cursor right after it
 //! and the row to its left as it was predicted. A program that reads silently in the line
-//! editor's mode, such as bash's `read -rsn4` or zsh's `read -sk4`, never echoes, so its epoch
-//! stays hidden. Enter, a control key and any input that is not a printable key start a new
-//! epoch, as does every line state change. A wrong prediction drops every prediction.
+//! editor's mode, such as bash's `read -rsn4` or zsh's `read -sk4`, never echoes. Each
+//! prediction's echo is due one round trip estimate and [`ECHO_GRACE`] after its key was sent,
+//! with or without a frame; an overdue echo drops every prediction, so keys read silently after
+//! a confirmed echo show only until then. Enter, a control key and any input that is not a
+//! printable key start a new epoch, as does every line state change. A wrong prediction or a
+//! discarded key drops every prediction.
 use super::ScreenSnapshot;
 use crate::terminal::emulator::{
     ActiveScreenSnapshot, CursorPositionSnapshot, RowSnapshot, TerminalUnderlineSnapshot,
@@ -30,7 +33,8 @@ const ACTIVE_ROUND_TRIP: Duration = Duration::from_millis(30);
 const INACTIVE_ROUND_TRIP: Duration = Duration::from_millis(20);
 /// How many recent samples the round trip is the smallest of.
 const ROUND_TRIP_SAMPLES: usize = 8;
-/// How long a frame may cover a key without showing its echo before its prediction is wrong.
+/// How much longer than the round trip estimate a key may go without its echo before its
+/// prediction is wrong.
 const ECHO_GRACE: Duration = Duration::from_millis(100);
 /// Keys whose round trip is not measured yet. Older ones are forgotten.
 const MAX_TIMED: usize = 64;
@@ -93,7 +97,7 @@ impl RoundTrip {
             self.samples.pop_front();
         }
         self.samples.push_back(sample);
-        let Some(estimate) = self.samples.iter().min().copied() else {
+        let Some(estimate) = self.estimate() else {
             return;
         };
         if estimate >= ACTIVE_ROUND_TRIP {
@@ -101,6 +105,10 @@ impl RoundTrip {
         } else if estimate < INACTIVE_ROUND_TRIP {
             self.active = false;
         }
+    }
+
+    fn estimate(&self) -> Option<Duration> {
+        self.samples.iter().min().copied()
     }
 }
 
@@ -116,8 +124,10 @@ struct Prediction {
     /// earlier predictions on the row in place.
     prefix: u64,
     shown: bool,
-    /// When a frame first covered the key without showing its echo.
-    covered_at: Option<Instant>,
+    /// When the echo is overdue: one round trip estimate and [`ECHO_GRACE`] after the key was
+    /// sent. A server sends no frame for a key that changes nothing on screen, so this holds
+    /// whether or not frames arrive.
+    due: Instant,
 }
 
 #[derive(Default)]
@@ -161,7 +171,7 @@ impl Predictor {
                 self.timed.push_back((serial, sent_at));
             }
             match typed {
-                Typed::Printable(text) if self.predict(serial, text) => {}
+                Typed::Printable(text) if self.predict(serial, text, sent_at) => {}
                 Typed::Printable(_) | Typed::Other => self.suspend(serial),
             }
         });
@@ -218,12 +228,8 @@ impl Predictor {
                 self.predictions.pop_front();
                 continue;
             }
-            let unchanged = cell == Some(&*prediction.original);
-            let Some(prediction) = self.predictions.front_mut() else {
-                break;
-            };
-            let covered_at = *prediction.covered_at.get_or_insert(now);
-            if unchanged && now < covered_at + ECHO_GRACE {
+            // The echo may follow in a later frame until it is due.
+            if cell == Some(&*prediction.original) && now < prediction.due {
                 break;
             }
             self.reset();
@@ -238,21 +244,33 @@ impl Predictor {
         }
     }
 
-    /// Drops every prediction once a frame has covered one for longer than the echo grace
-    /// without showing its echo.
+    /// Drops every prediction once one is overdue. A key that shows and never echoes may belong
+    /// to a program that reads silently in the line editor's mode, so the new epoch shows
+    /// nothing until the server's echo confirms it again.
     pub(super) fn expire(&mut self, now: Instant) {
         if self.deadline().is_some_and(|deadline| now >= deadline) {
             self.reset();
         }
     }
 
-    /// When [`Self::expire`] next has work.
+    /// When [`Self::expire`] next has work: only while predictions wait for their echo.
     pub(super) fn deadline(&self) -> Option<Instant> {
         self.predictions
             .iter()
-            .filter_map(|prediction| prediction.covered_at)
+            .map(|prediction| prediction.due)
             .min()
-            .map(|covered_at| covered_at + ECHO_GRACE)
+    }
+
+    /// The server discarded Input `serial`. A prediction of it never echoes, so every
+    /// prediction goes.
+    pub(super) fn discarded(&mut self, serial: u32) {
+        if self
+            .predictions
+            .iter()
+            .any(|prediction| prediction.serial >= serial)
+        {
+            self.reset();
+        }
     }
 
     /// The predictions the view draws, or `None` when none shows.
@@ -275,7 +293,10 @@ impl Predictor {
 
     /// Places a printable key after the newest prediction, or at the server's cursor. Returns
     /// whether it was placed.
-    fn predict(&mut self, serial: u32, text: char) -> bool {
+    fn predict(&mut self, serial: u32, text: char, sent_at: Instant) -> bool {
+        let Some(estimate) = self.round_trip.estimate() else {
+            return false;
+        };
         if !self.round_trip.active
             || self.resume.is_some()
             || !self.line.is_some_and(|line| line.mode.line_editor())
@@ -310,7 +331,7 @@ impl Predictor {
             original,
             prefix,
             shown: self.confirmed,
-            covered_at: None,
+            due: sent_at + estimate + ECHO_GRACE,
         });
         true
     }

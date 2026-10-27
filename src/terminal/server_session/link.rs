@@ -668,8 +668,13 @@ struct Received {
     /// Serials whose outcome a caller waits for.
     awaited: std::collections::BTreeSet<u32>,
     discarded: Option<pane::Refusal>,
+    /// Serials of Input messages the server discarded, oldest first, for prediction.
+    dropped: std::collections::VecDeque<u32>,
     closed: Option<ServerError>,
 }
+
+/// Discarded serials kept for the worker. Older ones are forgotten.
+const MAX_DROPPED: usize = 64;
 
 impl PaneLink {
     pub(super) fn new(
@@ -693,6 +698,12 @@ impl PaneLink {
         self.last_input.get()
     }
 
+    /// Takes the serials of Input messages the server discarded since the last call.
+    pub(super) fn take_dropped(&self) -> Vec<u32> {
+        let mut received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
+        received.dropped.drain(..).collect()
+    }
+
     /// When the oldest pushed event held by a Development push delay becomes due.
     pub(super) fn pushed_due(&self) -> Option<std::time::Instant> {
         self.pushed.as_ref().and_then(|pushed| pushed.due())
@@ -713,6 +724,12 @@ impl PaneLink {
                 let mut received = inbox.state.lock().unwrap_or_else(|e| e.into_inner());
                 match event {
                     ChannelEvent::Pane(PaneEvent::Input { serial, outcome }) => {
+                        if matches!(outcome, InputOutcome::Discarded(_)) {
+                            if received.dropped.len() == MAX_DROPPED {
+                                received.dropped.pop_front();
+                            }
+                            received.dropped.push_back(serial);
+                        }
                         if received.awaited.contains(&serial) {
                             received.settled.insert(serial, outcome);
                         } else if let InputOutcome::Discarded(refusal) = outcome
@@ -844,6 +861,12 @@ impl PaneLink {
         self.pushed = None;
         // A new channel numbers its Input from 1.
         self.last_input.set(0);
+        self.inbox
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dropped
+            .clear();
         let pushed = super::inbox::Inbox::new(Arc::clone(&self.notify));
         let channel = self.link.open_channel(self.sink(Arc::clone(&pushed)))?;
         let reply = Self::wait(channel.claim(
@@ -1423,6 +1446,9 @@ pub(super) fn present(
                     },
                     &mut paste_unconfirmed,
                 )?;
+                for serial in connection.take_dropped() {
+                    predictor.discarded(serial);
+                }
                 demand.set_visible(state.presentable.load(Ordering::Acquire));
                 demand.set_preparation(state.preparation.load(Ordering::Acquire));
                 if let Some((visible, max_hz)) = demand.take_view() {

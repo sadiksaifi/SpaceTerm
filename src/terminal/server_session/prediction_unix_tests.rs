@@ -88,11 +88,26 @@ impl Server {
             };
             self.predictor.line(self.line);
         }
-        if let Some(screen) = self.emulator.snapshot().unwrap() {
-            self.screen = screen;
-        }
         self.now += ROUND_TRIP;
-        self.predictor.frame(&self.screen, self.written, self.now);
+        // The server sends a frame only when something on screen changed, not when only the
+        // Input serial moved.
+        if let Some(screen) = self.emulator.snapshot().unwrap()
+            && (screen.rows != self.screen.rows || screen.cursor != self.screen.cursor)
+        {
+            self.screen = screen;
+            self.predictor.frame(&self.screen, self.written, self.now);
+        }
+        // The worker expires overdue predictions on each turn.
+        self.predictor.expire(self.now);
+    }
+
+    /// The person pauses for `pause`. The worker wakes at the predictor's deadline, so the view
+    /// is recorded after any overdue prediction expired.
+    fn pause(&mut self, pause: Duration) {
+        self.now += pause;
+        self.predictor.expire(self.now);
+        self.views
+            .push((String::new(), shown(&self.predictor, &self.screen)));
     }
 
     /// Publishes everything the program writes until it goes quiet.
@@ -261,6 +276,59 @@ fn a_silent_read_in_the_line_editors_mode_never_shows_its_keys() {
             .collect();
         assert!(drawn.is_empty(), "the view drew {drawn:?}");
         shell.program.wait_for_output("GOT-P123");
+    }
+}
+
+/// A function echoes one key it read silently, then reads a PIN silently, both in the line
+/// editor's mode. The echo confirms the epoch, and the mode never changes where the server can
+/// see it. A PIN key that shows is withdrawn when its echo is overdue, and later keys stay hidden.
+#[test]
+fn a_pin_read_silently_after_an_echoed_key_is_withdrawn_and_stays_hidden() {
+    let Some(_lock) = isolated(&format!(
+        "{PREFIX}a_pin_read_silently_after_an_echoed_key_is_withdrawn_and_stays_hidden"
+    )) else {
+        return;
+    };
+    for (mut shell, function) in [
+        (
+            Server::zsh(),
+            "f() { read -sk1 'a?Continue? '; print -n -- $a; read -sk4 pin; echo; echo GOT-$pin }",
+        ),
+        (
+            Server::bash(),
+            "f() { read -rsn1 -p 'Continue? ' a; printf %s \"$a\"; read -rsn4 pin; echo; echo GOT-$pin; }",
+        ),
+    ] {
+        shell.command(function);
+        shell.settle();
+        shell.command_without_enter("f");
+        shell.send("\r");
+        shell.wait_for_new_output("Continue? ");
+        shell
+            .program
+            .wait_for_mode("the first read", LineMode::line_editor);
+        shell.settle();
+        shell.send("y");
+        shell.settle();
+
+        let first = shell.views.len();
+        for key in ["1", "2", "3", "4"] {
+            shell.send(key);
+            shell.settle();
+            shell.pause(Duration::from_millis(250));
+        }
+        // Only the first PIN key may show, until its echo is overdue.
+        let drawn: Vec<_> = shell.views[first + 1..]
+            .iter()
+            .filter(|(_, view)| !view.is_empty())
+            .collect();
+        assert!(drawn.is_empty(), "the view drew {drawn:?}");
+        assert!(
+            shell.views[first].1.is_empty() || shell.views[first].1 == "1",
+            "{:?}",
+            shell.views[first]
+        );
+        shell.program.wait_for_output("GOT-1234");
     }
 }
 
