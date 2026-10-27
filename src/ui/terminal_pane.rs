@@ -1727,10 +1727,26 @@ impl TerminalPane {
         }
 
         self.reset_blink_phase();
-        if !demanded {
-            return;
+        if demanded {
+            self.start_blink_timer(cx);
         }
+    }
 
+    /// Restarts the blink cycle from its visible phase after accepted input. Only a hidden
+    /// cursor needs a frame; a visible one keeps its pixels, so the echo is the next frame.
+    fn restart_blink_after_input(&mut self, cx: &mut Context<Self>) {
+        let hidden = !self.blink_phase_visible;
+        let blinking = self._blink_task.is_some();
+        self.reset_blink_phase();
+        if blinking {
+            self.start_blink_timer(cx);
+        }
+        if hidden {
+            cx.notify();
+        }
+    }
+
+    fn start_blink_timer(&mut self, cx: &mut Context<Self>) {
         let generation = self.blink_generation;
         self._blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -2856,8 +2872,7 @@ impl TerminalPane {
                 self.clear_attention(cx);
             }
             if resets_cursor_blink && self.screen.cursor.visible && self.screen.cursor.blinking {
-                self.reset_blink_phase();
-                cx.notify();
+                self.restart_blink_after_input(cx);
             }
         }
         true

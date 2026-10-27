@@ -3918,27 +3918,29 @@ fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     cx.run_until_parked();
     let assert_composition = |cx: &mut VisualTestContext, cursor_visible: bool| {
         cx.update(|window, _| {
+            // The scene draws quads in this order.
             let quads = window.painted_quads();
             let selected: Vec<_> = quads
                 .iter()
-                .filter(|quad| quad.background == gpui::rgba(0x11_dd_77_ff).into())
+                .enumerate()
+                .filter(|(_, quad)| quad.background == gpui::rgba(0x11_dd_77_ff).into())
                 .collect();
             let cursor: Vec<_> = quads
                 .iter()
-                .filter(|quad| quad.background == gpui::rgba(0xff_00_00_ff).into())
+                .enumerate()
+                .filter(|(_, quad)| quad.background == gpui::rgba(0xff_00_00_ff).into())
                 .collect();
             let cell_bounds = Bounds::new(point(px(2.0), px(0.0)), gpui::size(px(8.0), px(16.0)))
                 .scale(window.scale_factor());
             assert_eq!(selected.len(), if cursor_visible { 2 } else { 1 });
-            for quad in &selected {
+            for (_, quad) in &selected {
                 assert_eq!(quad.bounds, cell_bounds);
             }
             assert_eq!(cursor.len(), usize::from(cursor_visible));
             if cursor_visible {
-                assert_eq!(cursor[0].bounds, cell_bounds);
-                assert!(selected[0].order < selected[1].order);
+                assert_eq!(cursor[0].1.bounds, cell_bounds);
                 assert!(
-                    selected[1].order < cursor[0].order,
+                    selected[1].0 < cursor[0].0,
                     "cursor must compose over Selection"
                 );
             }
@@ -4130,6 +4132,69 @@ fn cursor_blink_resets_on_accepted_input_and_focus_gain(cx: &mut TestAppContext)
     cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
     cx.run_until_parked();
     assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+}
+
+#[gpui::test]
+fn accepted_input_redraws_only_a_hidden_blinking_cursor(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    cx.update(|_window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
+            pane.handle_event(
+                TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+                cx,
+            );
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    let notifications = Rc::new(Cell::new(0));
+    cx.update(|_, cx| {
+        let notifications = notifications.clone();
+        cx.observe(&pane, move |_, _| {
+            notifications.set(notifications.get() + 1)
+        })
+        .detach();
+    });
+    let type_key = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.send_key_translation(
+                    KeyTranslation::Encoded(KeyInput::input_method_commit("x")),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+    };
+
+    // A visible cursor keeps its pixels, so input waits for the echo to draw.
+    cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL / 2);
+    type_key(cx);
+    assert_eq!(notifications.get(), 0);
+    cx.executor()
+        .advance_clock(PRESENTATION_BLINK_INTERVAL - Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    assert_eq!(notifications.get(), 0);
+
+    // A hidden cursor reappears with the input.
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    let hidden = notifications.get();
+    type_key(cx);
+    assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+    assert_eq!(notifications.get(), hidden + 1);
 }
 
 #[gpui::test]
