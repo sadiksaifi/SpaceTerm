@@ -53,8 +53,8 @@ os = ["linux"]
 hint = "Run mise run setup:packages, then install the Vulkan driver for your GPU"
 
 [doctor.checks.linux-tools]
-description = "Desktop entry, D-Bus, SSH, and zsh tools that Linux tests run"
-run = "python -m spaceterm_tasks.doctor tools desktop-file-validate dbus-daemon dbus-run-session ssh zsh"
+description = "Desktop entry, D-Bus, SSH, zsh, and vim tools that Linux tests run"
+run = "python -m spaceterm_tasks.doctor tools desktop-file-validate dbus-daemon dbus-run-session ssh zsh vim"
 os = ["linux"]
 hint = "Run mise run setup:packages"
 
@@ -82,6 +82,7 @@ hint = "Run mise run setup:packages"
 "apt:dbus" = { os = "linux" }
 "apt:desktop-file-utils" = { os = "linux" }
 "apt:zsh" = { os = "linux" }
+"apt:vim" = { os = "linux" }
 "apt:python3-gi" = { os = "linux" }
 "apt:gir1.2-glib-2.0" = { os = "linux" }
 "apt:python3-pyatspi" = { os = "linux" }
