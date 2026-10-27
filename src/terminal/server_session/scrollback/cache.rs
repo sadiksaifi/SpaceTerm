@@ -27,7 +27,12 @@ pub(super) struct ScrollbackCache {
     session: Option<[u8; 32]>,
     history: History,
     rows: BTreeMap<u64, CachedRow>,
+    /// Pages asked for and not answered yet, of any epoch or connection. Every one counts toward
+    /// the in-flight limit until its reply settles it; the link answers each exactly once.
     in_flight: Vec<PageRequest>,
+    /// Ranges answered for the current history, cached or not. A refused or shortened page is not
+    /// asked for again until a frame reports different history.
+    settled: Vec<Range<u64>>,
     /// Whether this epoch already asked for a page. The first page is smaller, so the rows above
     /// the screen arrive sooner.
     requested: bool,
@@ -37,7 +42,6 @@ pub(super) struct ScrollbackCache {
 
 impl ScrollbackCache {
     /// Binds the cache to a channel's Terminal Session. Another session's rows are discarded.
-    /// Pages asked for on an earlier connection are never answered, so they are forgotten.
     /// Returns whether the session is unchanged.
     pub(super) fn attach(&mut self, session: [u8; 32]) -> bool {
         let same = self.session == Some(session);
@@ -45,7 +49,6 @@ impl ScrollbackCache {
             self.clear();
             self.session = Some(session);
         }
-        self.in_flight.clear();
         same
     }
 
@@ -56,6 +59,9 @@ impl ScrollbackCache {
         let same = history.epoch == self.history.epoch;
         if !same {
             self.clear();
+        }
+        if history != self.history {
+            self.settled.clear();
         }
         self.history = history;
         let retained = history.oldest..history.total;
@@ -102,7 +108,8 @@ impl ScrollbackCache {
         }
     }
 
-    /// Settles a page this cache asked for. Rows of an older epoch are discarded.
+    /// Settles a page this cache asked for. Rows of an older epoch are discarded. A page that
+    /// starts later than asked shows the server discarded the rows before it.
     pub(super) fn page(
         &mut self,
         request: PageRequest,
@@ -112,10 +119,22 @@ impl ScrollbackCache {
         if let Some(index) = self.in_flight.iter().position(|sent| *sent == request) {
             self.in_flight.swap_remove(index);
         }
+        if request.epoch != self.history.epoch {
+            return;
+        }
+        self.settled.push(request.range());
         if let Some((epoch, start, rows)) = page
             && epoch == self.history.epoch
-            && request.epoch == epoch
         {
+            if start > request.start && start > self.history.oldest {
+                self.history.oldest = start.min(self.history.total);
+                let oldest = self.history.oldest;
+                let before = self.rows.len();
+                self.rows.retain(|position, _| *position >= oldest);
+                if self.rows.len() != before {
+                    self.revision += 1;
+                }
+            }
             self.insert(start, rows, focus);
         }
     }
@@ -135,9 +154,17 @@ impl ScrollbackCache {
         if cursor < wanted.end {
             missing.push(cursor..wanted.end);
         }
+        let epoch = self.history.epoch;
+        let asked = self
+            .in_flight
+            .iter()
+            .filter(|sent| sent.epoch == epoch)
+            .map(|sent| sent.range())
+            .chain(self.settled.iter().cloned())
+            .collect::<Vec<_>>();
         let missing = missing
             .into_iter()
-            .flat_map(|run| subtract(run, &self.in_flight))
+            .flat_map(|run| subtract(run, &asked))
             .collect::<Vec<_>>();
         let distance = |run: &Range<u64>| {
             if focus < run.start {
@@ -206,16 +233,16 @@ impl ScrollbackCache {
             self.revision += 1;
         }
         self.rows.clear();
-        self.in_flight.clear();
+        self.settled.clear();
         self.requested = false;
     }
 }
 
-/// The parts of `run` that no in-flight page covers.
-fn subtract(run: Range<u64>, in_flight: &[PageRequest]) -> Vec<Range<u64>> {
+/// The parts of `run` that no asked range covers.
+fn subtract(run: Range<u64>, asked: &[Range<u64>]) -> Vec<Range<u64>> {
     let mut parts = vec![run];
-    for sent in in_flight {
-        let sent = sent.range();
+    for sent in asked {
+        let sent = sent.clone();
         parts = parts
             .into_iter()
             .flat_map(|part| {

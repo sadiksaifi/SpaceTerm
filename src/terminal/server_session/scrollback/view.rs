@@ -4,6 +4,7 @@ use crate::terminal::emulator::{
     ContentDamageSnapshot, ScrollbarSnapshot, SnapshotDamage, ViewportSnapshot,
 };
 use crate::terminal::{PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalFindSnapshot};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Where the view starts. Following, it shows the screen and moves with output. Scrolled back,
@@ -58,6 +59,7 @@ impl Viewport {
 pub(super) fn compose(
     screen: &Arc<ScreenSnapshot>,
     lines: Lines<'_>,
+    placeholders: &BTreeMap<u64, (RowSnapshot, bool)>,
     top: u64,
     selection: Option<(Point, Point)>,
     selection_revision: u64,
@@ -90,9 +92,13 @@ pub(super) fn compose(
     let mut presented_rows = Vec::with_capacity(rows);
     let mut wrapped = Vec::with_capacity(rows);
     for line in top..top + rows as u64 {
-        let (row, soft) = lines
-            .get(line)
-            .map_or_else(|| (Arc::clone(&blank), false), |row| (row.snapshot(), row.wrapped()));
+        let (row, soft) = match lines.get(line) {
+            Some(row) => (row.snapshot(), row.wrapped()),
+            None => placeholders
+                .get(&line)
+                .cloned()
+                .unwrap_or_else(|| (Arc::clone(&blank), false)),
+        };
         presented_rows.push(match selection {
             Some(range) => select(row, line, range),
             None => row,

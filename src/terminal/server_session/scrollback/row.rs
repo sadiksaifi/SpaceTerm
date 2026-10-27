@@ -194,6 +194,18 @@ impl<'a> RowRef<'a> {
         }
     }
 
+    /// Whether both present the same cells and soft wrap.
+    pub(super) fn same(self, other: RowRef<'_>) -> bool {
+        if self.wrapped() != other.wrapped() {
+            return false;
+        }
+        match (self, other) {
+            (Self::Visible(a, _), RowRef::Visible(b, _)) => Arc::ptr_eq(a, b) || a == b,
+            (Self::Cached(a), RowRef::Cached(b)) => a == b,
+            _ => self.snapshot() == other.snapshot(),
+        }
+    }
+
     pub(super) fn snapshot(self) -> RowSnapshot {
         match self {
             Self::Cached(row) => row.snapshot(),

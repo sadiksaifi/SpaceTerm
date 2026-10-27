@@ -267,10 +267,16 @@ fn a_scrolled_view_stays_on_its_rows_while_output_continues() {
     server.serve(&mut scrollback);
     scrollback.wheel(3);
     assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
-    // Two rows scroll into history; the scrolled view asks for them only if it needs them.
+    // Two rows scroll into history. Until their page arrives, the view shows them as the last
+    // frame did, never blank.
     server.rows.push(("a".into(), false));
     server.rows.push(("b".into(), false));
     scrollback.screen(screen(&["c", "$ ls", "x", "y"], server.history()));
+    assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
+    scrollback.set_find_query(FindQueryGeneration::test(1), "b".into());
+    let find = scrollback.present(PresentationGeneration::test(1)).unwrap().find.clone().unwrap();
+    assert_eq!(find.total_matches, 0, "a placeholder is not searched");
+    scrollback.end_find(FindQueryGeneration::test(1));
     server.serve(&mut scrollback);
     assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
     assert!(scrollback.wheel(-5));
@@ -644,4 +650,93 @@ fn a_press_decides_where_its_whole_pointer_gesture_goes() {
         router.route(Press, Some(PointerButton::Other), tracking),
         PointerRoute::Program
     );
+}
+
+#[test]
+fn a_refused_or_shortened_page_is_not_asked_for_again_until_history_changes() {
+    let mut server = Server::new(1000);
+    let mut scrollback = attached(&server, &["$", "", "", ""]);
+    scrollback.scroll(ScrollbackMovement::Top);
+    let requests = scrollback.requests();
+    assert!(!requests.is_empty());
+    // The server refuses every page, as for an ended epoch.
+    for request in requests {
+        scrollback.page(request, None);
+    }
+    // A hidden Pane receives no frames, so nothing may ask again however often it wakes.
+    for _ in 0..10 {
+        let again = scrollback.requests();
+        assert!(
+            again.iter().all(|request| request.start >= 1000 - 200),
+            "refused rows were asked for again: {again:?}"
+        );
+        for request in again {
+            scrollback.page(request, None);
+        }
+    }
+    assert!(scrollback.requests().is_empty());
+    // Output continues, and the server discarded the oldest rows before the frame reports it:
+    // a page starts later than asked.
+    server.rows.push(("line1000".into(), false));
+    server.oldest = 300;
+    scrollback.screen(screen(&["$", "", "", ""], History {
+        oldest: 0,
+        ..server.history()
+    }));
+    let requests = scrollback.requests();
+    assert_eq!(requests[0].start, 0, "a new frame allows asking again");
+    for request in requests {
+        scrollback.page(request, server.answer(request));
+    }
+    assert_eq!(
+        scrollback.cache.history().oldest,
+        300,
+        "a later page start shows where history begins"
+    );
+    assert_eq!(presented(&mut scrollback)[0], "line300");
+    assert!(
+        scrollback.requests().iter().all(|request| request.start >= 300),
+        "discarded rows are never asked for"
+    );
+}
+
+#[test]
+fn pages_of_an_earlier_connection_count_until_their_replies_settle_them() {
+    let server = Server::new(5000);
+    let mut scrollback = attached(&server, &["$", "", "", ""]);
+    scrollback.set_find_query(FindQueryGeneration::test(1), "line".into());
+    let first = scrollback.requests();
+    assert_eq!(first.len(), 4);
+    // The connection ends and the same Session is presented again.
+    scrollback.attach(SESSION);
+    scrollback.screen(screen(&["$", "", "", ""], server.history()));
+    assert!(
+        scrollback.requests().is_empty(),
+        "unanswered pages still count toward the limit"
+    );
+    // The ended link fails each pending request.
+    for request in first {
+        scrollback.page(request, None);
+    }
+    assert_eq!(scrollback.requests().len(), 4);
+}
+
+#[test]
+fn a_copy_survives_unrelated_output_and_follows_rewritten_selected_text() {
+    let server = Server::new(0);
+    let mut scrollback = attached(&server, &["selected", "other", "", "$"]);
+    let start = Instant::now();
+    press(&mut scrollback, 0.0, 5.0, start);
+    scrollback.pointer(PointerEvent::Drag { x: 79.0, y: 5.0 }, GRID, start);
+    scrollback.pointer(PointerEvent::Release, GRID, start);
+    let first = ready(scrollback.copy(SelectionCopyOptions::default()));
+    assert_eq!(first.plain_text.as_ref(), "selected");
+    // Output elsewhere keeps the prepared text.
+    scrollback.screen(screen(&["selected", "changed", "", "$"], server.history()));
+    let unchanged = ready(scrollback.copy(SelectionCopyOptions::default()));
+    assert!(Arc::ptr_eq(&first.plain_text, &unchanged.plain_text));
+    // A program rewrites the selected row.
+    scrollback.screen(screen(&["replaced", "changed", "", "$"], server.history()));
+    let replaced = ready(scrollback.copy(SelectionCopyOptions::default()));
+    assert_eq!(replaced.plain_text.as_ref(), "replaced");
 }

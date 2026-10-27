@@ -174,6 +174,53 @@ fn a_wheel_measured_against_an_earlier_paint_of_the_same_grid_still_scrolls() {
     assert!(adapter.input.try_recv().is_err());
 }
 
+#[test]
+fn a_copy_waiting_for_rows_wakes_the_worker_to_request_them() {
+    use super::super::pointer_input::*;
+    let adapter = Adapter::new();
+    let mapping = adapter.frame(40);
+    adapter.handle.scroll_scrollback(ScrollbackMovement::Top);
+    let pointer = |phase, y| PointerInput {
+        generation: mapping.local,
+        phase,
+        button: Some(PointerButton::Left),
+        position: SurfacePosition { x: 1.0, y },
+        modifiers: Default::default(),
+        shift_selection: ShiftSelectionPolicy::ReportToApplication,
+    };
+    adapter.handle.pointer(pointer(PointerPhase::Press, 1.0));
+    adapter.handle.pointer(pointer(PointerPhase::Motion, 61.0));
+    adapter.handle.pointer(pointer(PointerPhase::Release, 61.0));
+    // Consume the wakes the gesture caused.
+    adapter
+        .handle
+        .state
+        .wake
+        .wait(Some(std::time::Instant::now()));
+    assert!(adapter.handle.copy_selection().unwrap().is_none(), "no row is cached yet");
+    let started = std::time::Instant::now();
+    adapter
+        .handle
+        .state
+        .wake
+        .wait(Some(started + Duration::from_secs(5)));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the worker was not woken to request the selected rows"
+    );
+    assert!(
+        !adapter
+            .handle
+            .state
+            .reading
+            .lock()
+            .unwrap()
+            .scrollback
+            .requests()
+            .is_empty()
+    );
+}
+
 pub(super) struct Adapter {
     pub(super) handle: PresentationHandle,
     pub(super) input: mpsc::Receiver<SubmittedInput>,

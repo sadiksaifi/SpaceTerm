@@ -14,7 +14,7 @@
 //! screen and none placed on history rows. Frames carry no shell-integration prompt marks, so a
 //! triple-click selects whole lines without stopping at a prompt. Rows that scroll off the screen
 //! reach the cache through pages, never from frames, whose rows may have changed before they
-//! scrolled.
+//! scrolled; until their page arrives, a scrolled-back view shows them as the last frame did.
 mod cache;
 mod find;
 pub(super) mod route;
@@ -31,12 +31,13 @@ pub(crate) use selection::{Grid, PointerEvent};
 use crate::terminal::emulator::HistorySnapshot as History;
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{
-    ActiveScreenSnapshot, FindDirection, FindQueryGeneration, PresentationGeneration,
+    ActiveScreenSnapshot, RowSnapshot, FindDirection, FindQueryGeneration, PresentationGeneration,
     ScreenSnapshot, ScrollbackMovement,
 };
 use cache::ScrollbackCache;
 use row::RowRef;
 use spaceterm_server::protocol::limits::{FIRST_PAGE_ROWS, MAX_CACHED_ROWS, MAX_PAGE_ROWS};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
@@ -119,9 +120,23 @@ pub(crate) struct Scrollback {
     screen: Option<Arc<ScreenSnapshot>>,
     /// Asks for the rows just above the screen once after attaching.
     warm: bool,
-    /// The copy asked for while its rows were missing, and the copy prepared for it.
+    /// The copy asked for while its rows were missing, and the copy prepared for it, with the
+    /// revisions it was prepared at.
     copying: Option<SelectionCopyOptions>,
-    prepared: Option<(u64, u64, SelectionCopyOptions, CopyOutcome)>,
+    prepared: Option<((u64, u64, u64), SelectionCopyOptions, CopyOutcome)>,
+    /// Increases when a frame rewrites a visible row inside the Selection.
+    selected_content: u64,
+    /// Rows earlier frames showed that scrolled into history before their page arrived. They
+    /// stand in for those rows on screen only; Find and copy read cached rows alone.
+    placeholders: BTreeMap<u64, (RowSnapshot, bool)>,
+}
+
+/// What assistive technology sees of this client's view: how far it is scrolled back, and the
+/// Selection, in lines relative to the first row of the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AccessibilityView {
+    pub(crate) scrolled: u64,
+    pub(crate) selection: Option<((i64, u16), (i64, u16))>,
 }
 
 impl Scrollback {
@@ -137,9 +152,17 @@ impl Scrollback {
     /// Applies the newest decoded frame and the history it reports.
     pub(crate) fn screen(&mut self, screen: Arc<ScreenSnapshot>) {
         let history = screen.history;
+        let same_epoch = history.epoch == self.cache.history().epoch;
+        if let Some(previous) = self.screen.clone().filter(|_| same_epoch) {
+            if self.selected_rows_changed(&previous, &screen) {
+                self.selected_content += 1;
+            }
+            self.keep_placeholders(&previous, history);
+        }
         if !self.cache.observe(history) {
             self.reset_reading();
         }
+        self.prune_placeholders();
         let alternate = screen.active_screen == ActiveScreenSnapshot::Alternate;
         self.screen = Some(screen);
         if alternate {
@@ -271,17 +294,90 @@ impl Scrollback {
         let Some(screen) = self.screen.clone() else {
             return CopyOutcome::Nothing;
         };
-        let key = (self.selection.revision(), self.cache.revision());
-        if let Some((selection, cache, saved, copy)) = &self.prepared
-            && (*selection, *cache) == key
+        let key = (
+            self.selection.revision(),
+            self.cache.revision(),
+            self.selected_content,
+        );
+        if let Some((saved_key, saved, copy)) = &self.prepared
+            && *saved_key == key
             && *saved == options
         {
             return copy.clone();
         }
         let copy = self.selection.copy(lines(&self.cache, &screen), &screen, options);
         self.copying = (copy == CopyOutcome::Pending).then_some(options);
-        self.prepared = Some((key.0, key.1, options, copy.clone()));
+        self.prepared = Some((key, options, copy.clone()));
         copy
+    }
+
+    /// The view and Selection for assistive technology.
+    pub(crate) fn accessibility_view(&self) -> AccessibilityView {
+        let history = self.cache.history();
+        let total = i64::try_from(history.total).unwrap_or(i64::MAX);
+        let relative = |point: Point| {
+            (
+                i64::try_from(point.line).unwrap_or(i64::MAX) - total,
+                point.column,
+            )
+        };
+        AccessibilityView {
+            scrolled: history.total - self.view.top(history),
+            selection: self
+                .selection
+                .range()
+                .map(|(start, end)| (relative(start), relative(end))),
+        }
+    }
+
+    /// Whether `next` rewrites a row of `previous` that the Selection covers and `next` shows.
+    fn selected_rows_changed(&self, previous: &ScreenSnapshot, next: &ScreenSnapshot) -> bool {
+        let Some((start, end)) = self.selection.range() else {
+            return false;
+        };
+        let before = lines(&self.cache, previous);
+        let after = Lines {
+            history: next.history,
+            alternate: next.active_screen == ActiveScreenSnapshot::Alternate,
+            ..lines(&self.cache, next)
+        };
+        let shown = next.history.total..next.history.total + next.rows.len() as u64;
+        (start.line.max(shown.start)..=end.line.min(shown.end.saturating_sub(1))).any(|line| {
+            match (before.get(line), after.get(line)) {
+                (Some(old), Some(new)) => !old.same(new),
+                (None, None) => false,
+                _ => true,
+            }
+        })
+    }
+
+    /// Keeps the rows of `previous` that scrolled into history and are not cached, so a
+    /// scrolled-back view does not blank them until their page arrives.
+    fn keep_placeholders(&mut self, previous: &ScreenSnapshot, history: History) {
+        let old_total = self.cache.history().total;
+        for (offset, row) in previous.rows.iter().enumerate() {
+            let line = old_total + offset as u64;
+            if line >= history.total {
+                break;
+            }
+            if self.cache.get(line).is_none() {
+                let wrapped = previous.row_soft_wrapped.get(offset).copied().unwrap_or(false);
+                self.placeholders.insert(line, (Arc::clone(row), wrapped));
+            }
+        }
+    }
+
+    /// Drops placeholders the cache replaced, that left retained history, or that exceed one
+    /// page of the newest rows.
+    fn prune_placeholders(&mut self) {
+        let history = self.cache.history();
+        let cache = &self.cache;
+        self.placeholders.retain(|line, _| {
+            (history.oldest..history.total).contains(line) && cache.get(*line).is_none()
+        });
+        while self.placeholders.len() > usize::from(MAX_PAGE_ROWS) {
+            self.placeholders.pop_first();
+        }
     }
 
     /// Whether a pending copy can now complete.
@@ -336,6 +432,7 @@ impl Scrollback {
     pub(crate) fn page(&mut self, request: PageRequest, page: Option<(u64, u64, Vec<CachedRow>)>) {
         let focus = self.focus();
         self.cache.page(request, page, focus);
+        self.prune_placeholders();
     }
 
     /// The screen this client presents: the newest frame, moved to the view's position, with
@@ -349,6 +446,7 @@ impl Scrollback {
         Some(view::compose(
             &screen,
             lines,
+            &self.placeholders,
             top,
             self.selection.range(),
             self.selection.revision(),
@@ -358,6 +456,7 @@ impl Scrollback {
     }
 
     fn reset_reading(&mut self) {
+        self.placeholders.clear();
         self.view.follow();
         self.selection.clear();
         self.find.invalidate();

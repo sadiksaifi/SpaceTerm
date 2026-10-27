@@ -1201,6 +1201,11 @@ pub(crate) struct TerminalAccessibilityState {
 }
 
 impl TerminalAccessibilityState {
+    /// The model this state published last.
+    pub(crate) fn latest(&self) -> Option<&TerminalAccessibilityModel> {
+        self.latest.as_ref()
+    }
+
     pub(crate) fn reset_presentation(&mut self) {
         self.latest = None;
     }

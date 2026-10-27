@@ -47,7 +47,8 @@ impl Reading {
         self.router.cancel();
         self.scrollback.pointer_cancel();
         self.deferred_copy = false;
-        self.pages.clear();
+        // Replies to pages of the ended connection still settle them, so they stop counting
+        // toward the in-flight limit.
         self.autoscroll_due = None;
     }
 
@@ -105,14 +106,16 @@ impl Reading {
         }
     }
 
-    fn copy(&mut self) -> Option<super::super::SelectionCopy> {
+    /// The Selection's text now, or `None`. A copy whose rows are missing waits, and the
+    /// returned flag asks the worker to request their pages.
+    fn copy(&mut self) -> (Option<super::super::SelectionCopy>, bool) {
         match self.scrollback.copy(SelectionCopyOptions::default()) {
-            CopyOutcome::Ready(copy) => Some(copy),
+            CopyOutcome::Ready(copy) => (Some(copy), false),
             CopyOutcome::Pending => {
                 self.deferred_copy = true;
-                None
+                (None, true)
             }
-            CopyOutcome::Nothing => None,
+            CopyOutcome::Nothing => (None, false),
         }
     }
 }
@@ -180,12 +183,18 @@ impl PresentationHandle {
             let changed = reading
                 .scrollback
                 .pointer(event, grid, std::time::Instant::now());
-            let copy = (phase == route::PointerPhase::Release
-                && reading.scrollback.selection_present())
-            .then(|| reading.copy())
-            .flatten();
+            let (copy, pending) = if phase == route::PointerPhase::Release
+                && reading.scrollback.selection_present()
+            {
+                reading.copy()
+            } else {
+                (None, false)
+            };
             // A drag past an edge starts autoscroll on the worker.
-            ((route, copy), changed || reading.scrollback.autoscrolling())
+            (
+                (route, copy),
+                changed || pending || reading.scrollback.autoscrolling(),
+            )
         });
         if route == PointerRoute::Program {
             self.send(Input::Pointer(
@@ -273,7 +282,7 @@ impl PresentationHandle {
     /// that waits for rows reports `SelectionCopyReady` once it completes.
     pub(super) fn copy(&self) -> Option<super::super::SelectionCopy> {
         self.reading_mapping()?;
-        self.local(|reading| (reading.copy(), false))
+        self.local(|reading| reading.copy())
     }
 
     /// The copy a pointer release or an earlier request left waiting for rows.
@@ -322,8 +331,18 @@ pub(super) fn show(
             reading.scrollback.screen(frame);
         }
         reading.grid = Some(grid(mapping));
-        reading.scrollback.present(generation)
+        (
+            reading.scrollback.present(generation),
+            reading.scrollback.accessibility_view(),
+        )
     };
+    let (presented, view) = presented;
+    // Assistive technology follows this client's scrolled view and Selection.
+    state
+        .accessibility
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_view(view);
     mapping.local = generation;
     state.connected(epoch, mapping, paste_unconfirmed)?;
     if let Some(presented) = presented {
