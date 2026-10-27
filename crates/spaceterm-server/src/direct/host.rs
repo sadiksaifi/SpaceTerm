@@ -138,11 +138,22 @@ impl State {
         Ok(())
     }
     pub(crate) fn accept(&mut self) -> Option<(TcpStream, [u8; 32])> {
-        self.listener
-            .as_ref()?
-            .accept()
-            .ok()
-            .map(|v| (v.0, self.generation))
+        self.accept_next().ok().flatten()
+    }
+    /// The next waiting connection and the listener generation it belongs to. `Ok(None)` means
+    /// none waits; an error is the listener's, such as running out of descriptors.
+    pub(crate) fn accept_next(&mut self) -> std::io::Result<Option<(TcpStream, [u8; 32])>> {
+        let Some(listener) = self.listener.as_ref() else {
+            return Ok(None);
+        };
+        loop {
+            match listener.accept() {
+                Ok((tcp, _)) => return Ok(Some((tcp, self.generation))),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) if crate::host::accept_retries(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
     }
     pub(crate) fn certificate(&self) -> (&[u8], &[u8]) {
         (&self.record.certificate, &self.record.key)
