@@ -99,10 +99,13 @@ impl AdmittedConnection {
                     if claim.channel.0 <= self.highest_channel {
                         return Err(Fatal::ProtocolViolation);
                     }
-                    if self.serials.len() >= limits::MAX_CHANNELS {
-                        return Err(Fatal::Capacity);
-                    }
                     self.highest_channel = claim.channel.0;
+                    // Too many open channels refuse this claim only; every other channel of the
+                    // connection keeps working.
+                    if self.serials.len() >= limits::MAX_CHANNELS {
+                        self.outbox.reply(request.id, Err(Refusal::Capacity))?;
+                        return Ok(None);
+                    }
                     self.serials.insert(claim.channel, 0);
                 }
                 if self.peer.paired() && administration(&request.operation) {
@@ -168,7 +171,13 @@ impl AdmittedConnection {
             );
         };
         let peer = self.peer;
+        let outbox = self.outbox.clone();
         self.sync.reply(&self.outbox, id, move || {
+            // A connection that ended or was revoked while this job waited has no authority
+            // left. Its reply is never written.
+            if outbox.is_closing() {
+                return Err(Refusal::Stale);
+            }
             Ok(ReplyBody::Direct(handler.manage(&peer, management)))
         })
     }
@@ -181,12 +190,17 @@ impl AdmittedConnection {
         Ok(())
     }
 
-    /// Calls the service while the caller holds its lock.
+    /// Calls the service while the caller holds its lock. A message received before a revocation
+    /// and dispatched after it is dropped: revocation queues the goodbye before it calls
+    /// [`PaneService::revoked`], and this check runs under the same lock.
     pub fn dispatch(
         &mut self,
         inbound: Inbound,
         service: &mut dyn PaneService,
     ) -> Result<(), Fatal> {
+        if self.outbox.is_closing() {
+            return Ok(());
+        }
         let peer = &self.peer;
         match inbound {
             Inbound::Request(request) => {

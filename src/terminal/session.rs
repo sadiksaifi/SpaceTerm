@@ -2565,6 +2565,14 @@ impl TerminalWorker {
         }
         match self.emulator.key(input) {
             Ok(action) => self.apply_terminal_input_action(action),
+            // A key that cannot be encoded is discarded. It says nothing about the Terminal
+            // Session, which keeps running.
+            Err(failure)
+                if failure.reason()
+                    == Some(crate::terminal::failure::FailureReason::InvalidInput) =>
+            {
+                true
+            }
             Err(message) => {
                 self.send_runtime_failure(message);
                 false

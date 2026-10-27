@@ -139,7 +139,7 @@ impl Service {
 
     /// Verify and retain the archive pinned by the running client, independently of its release.
     ///
-    /// Required capabilities apply to the connection; optional features do not gate staging.
+    /// Required package capabilities gate staging; optional ones do not.
     /// This changes no service policy, approved installation, Stop intent or running work.
     ///
     /// # Errors

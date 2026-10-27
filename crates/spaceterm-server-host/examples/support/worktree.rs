@@ -1,10 +1,10 @@
 //! Existing Worktree mutation, original-outcome and removal-review helpers for native checks.
 use super::repository::inventory;
 use spaceterm_server::{
-    ServerConnection,
+    ServerConnection, ServerError,
+    connection::link::ServerLink,
     hierarchy::{Mutation, RetainedOutcome},
-    pane::{PaneConnection, Reply, Request},
-    worktree::{Operation, Read, ReadReply},
+    worktree::{Operation, Read, ReadReply, read_worktree},
 };
 use std::{
     error::Error,
@@ -12,13 +12,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn finish(c: &mut PaneConnection, sequence: u64) -> Result<RetainedOutcome, Box<dyn Error>> {
+pub fn finish(link: &ServerLink, sequence: u64) -> Result<RetainedOutcome, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(25);
     loop {
-        match c.exchange(&Request::Resolve { sequence })? {
-            Reply::Outcome(outcome) => return Ok(outcome),
-            Reply::MutationPending => {}
-            _ => return Err("original write outcome unavailable".into()),
+        if let Some(outcome) = super::support::resolve(link, sequence)? {
+            return Ok(outcome);
         }
         if Instant::now() > until {
             return Err("write did not settle".into());
@@ -26,32 +24,23 @@ pub fn finish(c: &mut PaneConnection, sequence: u64) -> Result<RetainedOutcome, 
         std::thread::sleep(Duration::from_millis(20));
     }
 }
-pub fn write(
-    c: &mut PaneConnection,
-    operation: Operation,
-) -> Result<RetainedOutcome, Box<dyn Error>> {
-    let sequence = inventory(c)?.1;
-    let reply = c.exchange(&Request::Mutate {
-        sequence,
-        mutation: Mutation::Worktree(operation),
-    })?;
-    let outcome = match reply {
-        Reply::Outcome(o) => o,
-        Reply::MutationPending => finish(c, sequence)?,
-        _ => return Err("write response".into()),
+pub fn write(link: &ServerLink, operation: Operation) -> Result<RetainedOutcome, Box<dyn Error>> {
+    let sequence = inventory(link)?.1;
+    let outcome = match super::support::mutate(link, sequence, Mutation::Worktree(operation))? {
+        Some(outcome) => outcome,
+        None => finish(link, sequence)?,
     };
-    c.exchange(&Request::Acknowledge { sequence })?;
+    link.acknowledge(sequence).map_err(ServerError::from)?;
     Ok(outcome)
 }
-pub fn review(
-    c: &mut PaneConnection,
-    root: &Path,
-    path: &Path,
-) -> Result<Operation, Box<dyn Error>> {
-    let review = match c.read_worktree(Read::CheckRemoval {
-        root: root.into(),
-        path: path.into(),
-    })? {
+pub fn review(link: &ServerLink, root: &Path, path: &Path) -> Result<Operation, Box<dyn Error>> {
+    let review = match read_worktree(
+        link,
+        Read::CheckRemoval {
+            root: root.into(),
+            path: path.into(),
+        },
+    )? {
         Ok(ReadReply::Removal(review)) => review,
         Err(error) => {
             return Err(format!("removal review failed: {error:?}").into());
@@ -69,28 +58,24 @@ pub fn review(
 /// Keeps an uncertain original in this client's existing journal until its exact outcome settles.
 pub fn journaled_mutation(
     server: &ServerConnection,
-    connection: &mut PaneConnection,
+    link: &ServerLink,
     mutation: Mutation,
 ) -> Result<RetainedOutcome, Box<dyn Error>> {
     let mut journal = server.shared_journal()?;
     if journal.pending().is_some() {
         return Err("fixture client has an unresolved original; refusing new work".into());
     }
-    let sequence = inventory(connection)?.1;
+    let sequence = inventory(link)?.1;
     journal.submit(sequence, mutation.clone())?;
-    let result = match connection.exchange(&Request::Mutate {
-        sequence,
-        mutation: mutation.clone(),
-    })? {
-        Reply::Outcome(outcome) => outcome,
-        Reply::MutationPending => finish(connection, sequence)?,
-        _ => return Err("fixture mutation outcome unavailable".into()),
+    let result = match super::support::mutate(link, sequence, mutation.clone())? {
+        Some(outcome) => outcome,
+        None => finish(link, sequence)?,
     };
     if result.sequence != sequence || result.mutation != mutation {
         return Err("fixture original identity changed".into());
     }
     journal.complete(result.clone())?;
-    connection.exchange(&Request::Acknowledge { sequence })?;
+    link.acknowledge(sequence).map_err(ServerError::from)?;
     journal.retire()?;
     Ok(result)
 }

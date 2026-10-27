@@ -30,24 +30,40 @@ pub(crate) trait DirectoryConnector: Send + Sync {
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()>;
 }
 
-impl DirectoryConnection for spaceterm_server::pane::PaneConnection {
+impl DirectoryConnection for spaceterm_server::connection::link::ServerLink {
+    // Protocol major 2 servers read, create and match directories.
     fn reads_directories(&self) -> bool {
-        self.supports_directory_recovery()
+        true
     }
     fn creates_directories(&self) -> bool {
-        self.supports_directory_creation()
+        true
     }
     fn matches_directories(&self) -> bool {
-        self.supports_directory_matching()
+        true
     }
     fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
-        Self::exchange(self, request).map_err(|_| ())
+        use spaceterm_server::protocol::{Operation, ReplyBody};
+        let (operation, create) = match request {
+            PaneRequest::DirectoryRead(read) => (Operation::DirectoryRead(read.clone()), false),
+            PaneRequest::DirectoryCreate(create) => {
+                (Operation::DirectoryCreate(create.clone()), true)
+            }
+            _ => return Err(()),
+        };
+        match self.request(operation).map_err(|_| ())?.wait() {
+            Ok(ReplyBody::Directory(progress)) if create => Ok(Reply::DirectoryCreate(progress)),
+            Ok(ReplyBody::Directory(progress)) => Ok(Reply::DirectoryRead(progress)),
+            _ => Err(()),
+        }
     }
 }
 
 impl DirectoryConnector for ServerConnection {
+    /// Each picker opens its own connection, so the server cancels its reads when it closes.
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-        Ok(Box::new(self.connect_pane().map_err(|_| ())?))
+        Ok(Box::new(
+            ServerConnection::connect(self, Arc::new(|_| {})).map_err(|_| ())?,
+        ))
     }
 }
 
@@ -624,21 +640,12 @@ pub(crate) mod testing {
 
     impl DirectoryConnector for InProcessServer {
         fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-            let reply = (self.0.lock().unwrap())(&PaneRequest::Capabilities);
-            let Reply::Capabilities {
-                directory_recovery,
-                directory_creation,
-                directory_matching,
-                ..
-            } = reply
-            else {
-                return Err(());
-            };
+            // Protocol major 2 servers read, create and match directories.
             Ok(Box::new(InProcessConnection {
                 server: Arc::clone(&self.0),
-                reads: directory_recovery,
-                creates: directory_creation,
-                matches: directory_matching,
+                reads: true,
+                creates: true,
+                matches: true,
             }))
         }
     }

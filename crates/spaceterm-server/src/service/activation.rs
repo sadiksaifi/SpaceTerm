@@ -247,7 +247,7 @@ impl Service {
         runtime::verify_candidate_installation(
             &candidate.directory,
             &self.identity,
-            1,
+            crate::protocol::MAJOR,
             &["workspace_policy"],
         )?;
         let previous = self.describe_approved(&state)?;
@@ -292,7 +292,7 @@ impl Service {
             runtime::verify_candidate_installation(
                 &approval.candidate.directory,
                 &self.identity,
-                1,
+                crate::protocol::MAJOR,
                 &["workspace_policy"],
             )?;
             state.activation = Some(Operation {

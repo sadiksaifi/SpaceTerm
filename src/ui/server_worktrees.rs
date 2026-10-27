@@ -185,15 +185,8 @@ fn write(
 }
 
 pub(crate) fn read_server(server: &ServerConnection, read: Read) -> Result<ReadReply, Error> {
-    let mut connection = server
-        .connect_shared_pane()
-        .map_err(|_| Error::Unavailable)?;
-    if !connection.worktree_writes() {
-        return Err(Error::Unavailable);
-    }
-    connection
-        .read_worktree(read)
-        .map_err(|_| Error::Unavailable)?
+    let link = server.link().map_err(|_| Error::Unavailable)?;
+    spaceterm_server::worktree::read_worktree(&link, read).map_err(|_| Error::Unavailable)?
 }
 
 pub(crate) fn result(outcome: RetainedOutcome) -> Result<(), WriteError> {
