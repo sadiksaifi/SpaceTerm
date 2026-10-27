@@ -1,20 +1,25 @@
 //! Protocol latency probe for `mise run bench:latency:protocol`.
 //!
-//! latency_probe measure IDENTITY local [--samples N] [--requests N]
-//! latency_probe measure IDENTITY paired [--owner-command COMMAND] [--expose ADDRESS] [...]
+//! latency_probe measure IDENTITY local [--samples N] [--requests N] [--pages N] [--fetches N]
+//! latency_probe measure IDENTITY paired [--transport wss|quic] [--owner-command COMMAND]
+//!     [--expose ADDRESS] [...]
 //! latency_probe owner IDENTITY
 //!
 //! `measure` creates a probe Workspace whose Pane runs a raw `cat`, times request round trips
-//! and key-to-echo, closes the Workspace and prints one JSON result per line. A paired run
+//! and key-to-echo, closes the Workspace and prints one JSON result per line. `--pages` also
+//! times a typed screenful until its last row is pushed, a scroll by one page of output.
+//! `--fetches` then times reads of 200-row Scrollback pages from that history. `--transport quic`
+//! connects through the iroh prototype of #671, in builds with the `iroh` feature; pairing still
+//! runs over WSS. A paired run
 //! enrolls a fresh pairing through an owner on the server's machine and revokes it afterwards.
-//! Without `--owner-command` the owner is this process, so the server must be on this machine;
-//! `--expose` enables its network exposure for the run. `owner` serves the owner side as JSON
-//! lines on standard input and output; when its input ends, it withdraws unused invitations and
-//! revokes the devices it approved. SIGINT, SIGTERM and SIGHUP stop a measurement through the
+//! Without `--owner-command` the owner is this process, so the server must be on this machine.
+//! `--expose` enables the owner's server exposure for the run and restores it afterwards.
+//! `owner` serves the owner side as JSON lines on standard input and output; when its input ends,
+//! it withdraws unused invitations, revokes the devices it approved and restores exposure. SIGINT, SIGTERM and SIGHUP stop a measurement through the
 //! same cleanup. Protocol calls live in `protocol.rs`.
 mod protocol;
 
-use protocol::{Claim, EchoPane, Failure, Owner, Route, fail};
+use protocol::{Claim, EchoPane, Failure, Owner, Route, Transport, fail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
@@ -31,6 +36,9 @@ struct Options {
     expose: Option<std::net::SocketAddr>,
     samples: usize,
     requests: usize,
+    pages: usize,
+    fetches: usize,
+    transport: Transport,
 }
 
 fn options(arguments: &[String]) -> Result<Options> {
@@ -44,6 +52,9 @@ fn options(arguments: &[String]) -> Result<Options> {
         expose: None,
         samples: 200,
         requests: 50,
+        pages: 0,
+        fetches: 0,
+        transport: Transport::Wss,
     };
     let mut flags = flags.iter();
     while let Some(flag) = flags.next() {
@@ -64,14 +75,31 @@ fn options(arguments: &[String]) -> Result<Options> {
                 Ok(count) if count > 0 => options.requests = count,
                 _ => return fail("--requests needs a positive count"),
             },
+            "--pages" => match value.parse() {
+                Ok(count) => options.pages = count,
+                _ => return fail("--pages needs a count"),
+            },
+            "--fetches" => match value.parse() {
+                Ok(count) => options.fetches = count,
+                _ => return fail("--fetches needs a count"),
+            },
+            "--transport" => match value.as_str() {
+                "wss" => options.transport = Transport::Wss,
+                "quic" if cfg!(feature = "iroh") => options.transport = Transport::Quic,
+                "quic" => return fail("--transport quic needs a build with the iroh feature"),
+                _ => return fail("--transport must be wss or quic"),
+            },
             _ => return fail("unknown option"),
         }
     }
     if options.route != "local" && options.route != "paired" {
         return fail("the route must be local or paired");
     }
-    if options.expose.is_some() && options.owner_command.is_some() {
-        return fail("--expose needs the owner on this machine");
+    if options.fetches > 0 && options.pages * 30 < 400 {
+        return fail("--fetches needs at least 14 --pages of history");
+    }
+    if options.route == "local" && options.transport != Transport::Wss {
+        return fail("--transport applies only to the paired route");
     }
     Ok(options)
 }
@@ -93,12 +121,15 @@ fn ms(duration: Duration) -> f64 {
 /// A small xorshift generator for human-like gaps between keys.
 struct Gaps(u64);
 impl Gaps {
-    fn next(&mut self) -> Duration {
+    fn unit(&mut self) -> f64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
-        let unit = (self.0 >> 11) as f64 / (1u64 << 53) as f64;
-        Duration::from_millis(80 + (unit * 80.0) as u64)
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn next(&mut self) -> Duration {
+        Duration::from_millis(80 + (self.unit() * 80.0) as u64)
     }
 }
 
@@ -129,8 +160,40 @@ fn sample(pane: &mut EchoPane, options: &Options, route: &str) -> Result<()> {
         std::thread::sleep(gaps.next());
     }
     emit("key to echo", route, &echoes);
+
+    if options.pages > 0 {
+        let mut pages = Vec::with_capacity(options.pages);
+        pane.rewind()?;
+        for index in 0..options.pages {
+            continue_unless_interrupted()?;
+            let start = Instant::now();
+            pane.page(index, start + Duration::from_secs(10))?;
+            pages.push(ms(start.elapsed()));
+            std::thread::sleep(gaps.next());
+        }
+        emit("page of output", route, &pages);
+    }
+
+    if options.fetches > 0 {
+        let available = pane.history_rows();
+        let mut fetches = Vec::with_capacity(options.fetches);
+        for _ in 0..options.fetches {
+            continue_unless_interrupted()?;
+            // Anywhere in the history the pages wrote, so no page repeats a cached read.
+            let span = available.saturating_sub(u64::from(FETCH_ROWS));
+            let back = u64::from(FETCH_ROWS) + (gaps.unit() * span as f64) as u64;
+            let start = Instant::now();
+            pane.fetch(back, FETCH_ROWS)?;
+            fetches.push(ms(start.elapsed()));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        emit("scrollback page", route, &fetches);
+    }
     Ok(())
 }
+
+/// Rows in one timed Scrollback page, as a client's first page after opening a channel.
+const FETCH_ROWS: u16 = 200;
 
 /// The owner of the server under test, in this process or behind an owner command.
 enum OwnerLink {
@@ -217,6 +280,16 @@ impl OwnerLink {
         self.ask(json!({ "abandon": true })).map(drop)
     }
 
+    /// Enables the owner's server exposure at `bind` for the owner's lifetime.
+    fn expose(&mut self, bind: std::net::SocketAddr) -> Result<()> {
+        let reply = self.ask(json!({ "expose": bind.to_string() }))?;
+        if reply["exposed"] == true {
+            Ok(())
+        } else {
+            fail("owner exposure")
+        }
+    }
+
     fn revoke(&mut self, device: &str) -> Result<usize> {
         if let Self::Here(owner) = self {
             return owner.revoke(device);
@@ -264,6 +337,10 @@ fn measure_paired(options: &Options) -> Result<()> {
     let mut owner = OwnerLink::open(options)?;
     let exposure = match (&owner, options.expose) {
         (OwnerLink::Here(here), Some(bind)) => Some(here.expose(bind)?),
+        (OwnerLink::Command { .. }, Some(bind)) => {
+            owner.expose(bind)?;
+            None
+        }
         _ => None,
     };
     let device = format!("latency-probe-{}", std::process::id());
@@ -275,9 +352,13 @@ fn measure_paired(options: &Options) -> Result<()> {
         if !owner.approve(&device)? {
             return fail("the owner found no pairing claim");
         }
-        let route = claim.finish()?;
+        let route = claim.finish(options.transport)?;
         continue_unless_interrupted()?;
-        measure_route(options, &route, "paired")
+        let label = match options.transport {
+            Transport::Wss => "paired",
+            Transport::Quic => "paired-quic",
+        };
+        measure_route(options, &route, label)
     })();
     // Clean up even after a failure: an invitation or claim may be pending, and approval may
     // have succeeded.
@@ -298,12 +379,26 @@ fn measure_paired(options: &Options) -> Result<()> {
 fn serve_owner(identity: &str) -> Result<()> {
     let owner = Owner::open(identity)?;
     let mut approved = Vec::new();
-    let served = serve_requests(&owner, &mut approved);
-    let revoked = approved.iter().map(|device| owner.revoke(device).map(drop));
-    combine([served, owner.abandon()].into_iter().chain(revoked))
+    let mut exposure = None;
+    let served = serve_requests(&owner, &mut approved, &mut exposure);
+    let revoked: Vec<_> = approved
+        .iter()
+        .map(|device| owner.revoke(device).map(drop))
+        .collect();
+    let restored = exposure.map_or(Ok(()), |exposure| owner.restore(exposure));
+    combine(
+        [served, owner.abandon()]
+            .into_iter()
+            .chain(revoked)
+            .chain([restored]),
+    )
 }
 
-fn serve_requests(owner: &Owner, approved: &mut Vec<String>) -> Result<()> {
+fn serve_requests(
+    owner: &Owner,
+    approved: &mut Vec<String>,
+    exposure: &mut Option<protocol::Exposure>,
+) -> Result<()> {
     let mut output = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else {
@@ -325,6 +420,14 @@ fn serve_requests(owner: &Owner, approved: &mut Vec<String>) -> Result<()> {
             owner
                 .revoke(device)
                 .map(|count| json!({ "revoked": count }))
+        } else if let Some(bind) = request["expose"].as_str() {
+            match (bind.parse(), exposure.is_some()) {
+                (Ok(bind), false) => owner.expose(bind).map(|previous| {
+                    *exposure = Some(previous);
+                    json!({ "exposed": true })
+                }),
+                _ => fail("owner exposure"),
+            }
         } else if request["abandon"] == true {
             owner.abandon().map(|()| json!({ "abandoned": true }))
         } else {
