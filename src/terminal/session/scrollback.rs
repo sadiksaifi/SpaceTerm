@@ -37,7 +37,13 @@ pub(super) struct ScrollbackRead {
 impl TerminalRuntime {
     /// Reads up to `rows` history rows from position `start` of history `epoch` on the worker,
     /// after the output it already received. Reading writes nothing to the PTY and moves no view.
-    pub(crate) fn read_scrollback(&self, epoch: u64, start: u64, rows: u16, reply: ScrollbackReply) {
+    pub(crate) fn read_scrollback(
+        &self,
+        epoch: u64,
+        start: u64,
+        rows: u16,
+        reply: ScrollbackReply,
+    ) {
         if let Some(commands) = &self.commands {
             // A stopped worker drops the command, and the reply answers `None`.
             let _ = commands.send(Command::ReadScrollback(ScrollbackRead {
@@ -52,7 +58,10 @@ impl TerminalRuntime {
 
 impl TerminalWorker {
     pub(super) fn read_scrollback(&mut self, read: ScrollbackRead) -> bool {
-        match self.emulator.scrollback_page(read.epoch, read.start, read.rows) {
+        match self
+            .emulator
+            .scrollback_page(read.epoch, read.start, read.rows)
+        {
             Ok(page) => {
                 read.reply.send(page);
                 true

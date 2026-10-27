@@ -162,6 +162,7 @@ impl ActiveInput {
     /// Sends up to [`INPUT_DRAIN`] queued commands in order before the worker next checks the
     /// screen. Where the server takes key batches, adjacent queued keys travel in one exchange,
     /// and any other command first sends the keys queued before it. It never waits for more.
+    /// Returns whether it stopped at the bound, so more input may wait for the next turn.
     pub(super) fn drain(
         &mut self,
         state: &DevelopmentPaneState,
@@ -169,10 +170,12 @@ impl ActiveInput {
         batches: bool,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
         paste_unconfirmed: &mut bool,
-    ) -> Result<(), ServerError> {
+    ) -> Result<bool, ServerError> {
         let mut keys = Vec::new();
+        let mut bounded = true;
         for _ in 0..INPUT_DRAIN {
             let Ok(submitted) = input.try_recv() else {
+                bounded = false;
                 break;
             };
             if state.epoch.load(Ordering::Acquire) != self.epoch {
@@ -185,7 +188,8 @@ impl ActiveInput {
             self.send_keys(state, std::mem::take(&mut keys), exchange)?;
             self.process(state, submitted, exchange, paste_unconfirmed)?;
         }
-        self.send_keys(state, keys, exchange)
+        self.send_keys(state, keys, exchange)?;
+        Ok(bounded)
     }
     /// Sends queued keys as one batch, keeping only those a single key exchange would send now:
     /// this lease's epoch, the current focus generation, and a target that takes them. The
@@ -1369,8 +1373,9 @@ pub(super) fn present(
                 if state.epoch.load(Ordering::Acquire) != epoch {
                     return Err(ServerError::Protocol);
                 }
-                // Queued input is sent before pushed output is applied.
-                active_input.drain(
+                // Queued input is sent before pushed output is applied. Input beyond the bound
+                // goes on in the next turn without waiting.
+                let more_input = active_input.drain(
                     &state,
                     &input,
                     true,
@@ -1528,7 +1533,7 @@ pub(super) fn present(
                     })?;
                 }
                 // Graphics and semantic transfers continue one chunk per turn without waiting.
-                let mut busy = false;
+                let mut busy = more_input;
                 let mut deadline = None;
                 if ready && let Some((_, mapping)) = &mut latest_screen {
                     let turn = state
@@ -1771,6 +1776,53 @@ mod tests {
             _ => {}
         }
         Ok(Reply::Unchanged)
+    }
+
+    /// Input queued while the worker was blocked can exceed one turn's bound. Each drain that
+    /// stops at the bound says so, and the worker turns again without waiting, so the rest is
+    /// sent even if the program shows nothing, as at a password prompt.
+    #[test]
+    fn a_drain_stopped_at_its_bound_reports_the_input_left_for_the_next_turn() {
+        let adapter = Adapter::new();
+        let Adapter {
+            handle,
+            input,
+            mut active,
+            ..
+        } = adapter;
+        for index in 0..40 {
+            for key in typed(&format!("{}", index % 10)) {
+                handle.key(key);
+            }
+        }
+        let mut sent = Vec::new();
+        let mut unconfirmed = false;
+        let mut turns = Vec::new();
+        loop {
+            let more = active
+                .drain(
+                    &handle.state,
+                    &input,
+                    true,
+                    &mut |request| record(&mut sent, request),
+                    &mut unconfirmed,
+                )
+                .unwrap();
+            turns.push(more);
+            if !more {
+                break;
+            }
+        }
+
+        assert_eq!(turns, [true, true, false], "80 events in bounds of 32");
+        let keys: usize = sent
+            .iter()
+            .map(|sent| match sent {
+                Sent::Batch(keys) => keys.len(),
+                _ => 1,
+            })
+            .sum();
+        assert_eq!(keys, 80);
     }
 
     /// Typing 53 characters queues 106 key events. A server that takes key batches gets them

@@ -105,7 +105,10 @@ fn copy_with_a_selection_is_local_and_without_one_forwards_through_the_fenced_in
             Ok(Reply::Unchanged)
         })
         .unwrap();
-    assert_eq!(forwarded, 1, "the program decides what Copy without a Selection does");
+    assert_eq!(
+        forwarded, 1,
+        "the program decides what Copy without a Selection does"
+    );
     let pointer = |phase, x| PointerInput {
         generation: mapping.local,
         phase,
@@ -125,7 +128,10 @@ fn copy_with_a_selection_is_local_and_without_one_forwards_through_the_fenced_in
     assert!(adapter.input.try_recv().is_err(), "selecting sends nothing");
     let copied = adapter.handle.copy_or_forward(modifiers).unwrap().unwrap();
     assert_eq!(copied.plain_text, copy.plain_text);
-    assert!(adapter.input.try_recv().is_err(), "Copy of a Selection forwards nothing");
+    assert!(
+        adapter.input.try_recv().is_err(),
+        "Copy of a Selection forwards nothing"
+    );
     // Typing clears the Selection, as in a local terminal.
     adapter.handle.key(KeyInput {
         action: KeyAction::Press,
@@ -197,7 +203,10 @@ fn a_copy_waiting_for_rows_wakes_the_worker_to_request_them() {
         .state
         .wake
         .wait(Some(std::time::Instant::now()));
-    assert!(adapter.handle.copy_selection().unwrap().is_none(), "no row is cached yet");
+    assert!(
+        adapter.handle.copy_selection().unwrap().is_none(),
+        "no row is cached yet"
+    );
     let started = std::time::Instant::now();
     adapter
         .handle
@@ -328,14 +337,13 @@ impl Adapter {
     /// worker applies frames, and returns its mapping.
     fn frame(&self, history: u64) -> ScreenMapping {
         use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
-        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(
-            TerminalGeometry::from_grid(
+        let mut emulator =
+            crate::terminal::emulator::TerminalEmulator::new(TerminalGeometry::from_grid(
                 CellGridSize::new(20, 6),
                 LogicalCellSize::new(10.0, 20.0),
                 BackingScale::ONE,
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         emulator.snapshot().unwrap();
         for _ in 0..history + 5 {
             emulator.feed(b"line\r\n");

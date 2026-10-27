@@ -226,9 +226,9 @@ impl Demand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use spaceterm_server::protocol::{Channel, ScreenUpdate};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// Applies a frame's generation as the screen; generation 0 changes nothing visible.
     struct Generations;

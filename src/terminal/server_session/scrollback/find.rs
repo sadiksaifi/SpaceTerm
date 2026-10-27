@@ -174,11 +174,7 @@ impl LocalFind {
         // Complete history lines end before the screen; the line the screen starts in may begin
         // in history, so it is matched with the screen.
         let mut boundary = total.max(range.start);
-        while boundary > range.start
-            && lines
-                .get(boundary - 1)
-                .is_some_and(|row| row.wrapped())
-        {
+        while boundary > range.start && lines.get(boundary - 1).is_some_and(|row| row.wrapped()) {
             boundary -= 1;
         }
         // A kept line is still whole: every row cached, and no row above it continues into it.

@@ -31,7 +31,7 @@ pub(crate) use selection::{Grid, PointerEvent};
 use crate::terminal::emulator::HistorySnapshot as History;
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{
-    ActiveScreenSnapshot, RowSnapshot, FindDirection, FindQueryGeneration, PresentationGeneration,
+    ActiveScreenSnapshot, FindDirection, FindQueryGeneration, PresentationGeneration, RowSnapshot,
     ScreenSnapshot, ScrollbackMovement,
 };
 use cache::ScrollbackCache;
@@ -171,8 +171,13 @@ impl Scrollback {
             self.view.observe(history);
         }
         let readable = self.lines_range();
-        let floor = if alternate { readable.start } else { self.floor() };
-        self.selection.observe(floor.max(readable.start)..readable.end);
+        let floor = if alternate {
+            readable.start
+        } else {
+            self.floor()
+        };
+        self.selection
+            .observe(floor.max(readable.start)..readable.end);
     }
 
     /// Moves the view by native wheel steps; positive steps move toward older rows.
@@ -273,10 +278,7 @@ impl Scrollback {
         let rows = self.rows();
         let top = self.view.top(history);
         let lines = lines(&self.cache, &screen);
-        let Some(target) = self
-            .find
-            .navigate(generation, direction, lines, top, rows)
-        else {
+        let Some(target) = self.find.navigate(generation, direction, lines, top, rows) else {
             return false;
         };
         if !alternate {
@@ -305,7 +307,9 @@ impl Scrollback {
         {
             return copy.clone();
         }
-        let copy = self.selection.copy(lines(&self.cache, &screen), &screen, options);
+        let copy = self
+            .selection
+            .copy(lines(&self.cache, &screen), &screen, options);
         self.copying = (copy == CopyOutcome::Pending).then_some(options);
         self.prepared = Some((key, options, copy.clone()));
         copy
@@ -342,13 +346,13 @@ impl Scrollback {
             ..lines(&self.cache, next)
         };
         let shown = next.history.total..next.history.total + next.rows.len() as u64;
-        (start.line.max(shown.start)..=end.line.min(shown.end.saturating_sub(1))).any(|line| {
-            match (before.get(line), after.get(line)) {
+        (start.line.max(shown.start)..=end.line.min(shown.end.saturating_sub(1))).any(
+            |line| match (before.get(line), after.get(line)) {
                 (Some(old), Some(new)) => !old.same(new),
                 (None, None) => false,
                 _ => true,
-            }
-        })
+            },
+        )
     }
 
     /// Keeps the rows of `previous` that scrolled into history and are not cached, so a
@@ -361,7 +365,11 @@ impl Scrollback {
                 break;
             }
             if self.cache.get(line).is_none() {
-                let wrapped = previous.row_soft_wrapped.get(offset).copied().unwrap_or(false);
+                let wrapped = previous
+                    .row_soft_wrapped
+                    .get(offset)
+                    .copied()
+                    .unwrap_or(false);
                 self.placeholders.insert(line, (Arc::clone(row), wrapped));
             }
         }
@@ -437,7 +445,10 @@ impl Scrollback {
 
     /// The screen this client presents: the newest frame, moved to the view's position, with
     /// the Selection and Find matches applied.
-    pub(crate) fn present(&mut self, generation: PresentationGeneration) -> Option<Arc<ScreenSnapshot>> {
+    pub(crate) fn present(
+        &mut self,
+        generation: PresentationGeneration,
+    ) -> Option<Arc<ScreenSnapshot>> {
         let screen = self.screen.clone()?;
         let history = self.cache.history();
         let top = self.view.top(history);
@@ -476,9 +487,9 @@ impl Scrollback {
     }
 
     fn rows(&self) -> u16 {
-        self.screen
-            .as_ref()
-            .map_or(0, |screen| u16::try_from(screen.rows.len()).unwrap_or(u16::MAX))
+        self.screen.as_ref().map_or(0, |screen| {
+            u16::try_from(screen.rows.len()).unwrap_or(u16::MAX)
+        })
     }
 
     /// The oldest line Find and copying read: the cache holds at most the newest

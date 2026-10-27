@@ -865,7 +865,6 @@ fn current_wheel(emulator: &TerminalEmulator, mut input: WheelInput) -> WheelInp
     input
 }
 
-
 fn key(physical_key: PhysicalKey, modifiers: InputModifiers) -> KeyInput {
     KeyInput {
         action: KeyAction::Press,
@@ -5658,8 +5657,6 @@ fn accessibility_selection_rejects_a_model_from_before_the_latest_screen() {
     );
 }
 
-
-
 #[test]
 fn selection_copy_reuses_prepared_text_while_only_the_viewport_changes() {
     let mut emulator = emulator(8, 3);
@@ -5690,8 +5687,6 @@ fn selection_copy_reuses_prepared_text_while_only_the_viewport_changes() {
     let changed = emulator.selection_copy(options).unwrap().unwrap();
     assert_ne!(first.plain_text, changed.plain_text);
 }
-
-
 
 #[test]
 fn cached_selection_copy_preserves_wide_cells_and_soft_wrap_options() {
@@ -5724,6 +5719,3 @@ fn cached_selection_copy_preserves_wide_cells_and_soft_wrap_options() {
     assert_eq!(wrapped.plain_text.as_ref(), "界ab\nce");
     assert!(wrapped.html.as_ref().unwrap().contains("&#30028;"));
 }
-
-
-

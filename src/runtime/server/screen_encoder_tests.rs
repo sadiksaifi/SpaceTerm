@@ -323,7 +323,11 @@ fn frames_carry_the_emulators_history_positions() {
     let (update, _) = channel.present().unwrap();
     let history = capture.screen.history;
     assert_eq!(
-        (update.history.epoch, update.history.oldest, update.history.total),
+        (
+            update.history.epoch,
+            update.history.oldest,
+            update.history.total
+        ),
         (history.epoch, history.oldest, history.total)
     );
     assert_eq!(update.history.total, 7);
