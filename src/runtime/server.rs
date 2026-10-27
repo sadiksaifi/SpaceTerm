@@ -55,6 +55,11 @@ mod repositories;
 #[path = "server/repository_tests.rs"]
 mod repository_tests;
 mod screen;
+// Wired into the interim poll path next; push and scrollback use it after that.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod screen_encoder;
+#[cfg(test)]
+mod screen_encoder_tests;
 #[cfg(test)]
 mod screen_tests;
 mod shared;

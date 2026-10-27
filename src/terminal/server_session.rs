@@ -9,6 +9,11 @@ mod reading;
 mod recovery;
 mod schedule;
 mod screen;
+// Replaces `ScreenReceiver`'s decoding when the interim poll path carries `ScreenUpdate`.
+#[cfg_attr(not(test), allow(dead_code))]
+mod screen_decoder;
+#[cfg(test)]
+mod screen_decoder_tests;
 #[cfg(test)]
 mod tests;
 use super::pointer_input::{PointerInput, WheelInput};

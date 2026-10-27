@@ -246,16 +246,19 @@ fn publication_order_holds_within_l1_and_l0_preempts_l2_chunks() {
     let page = crate::protocol::Page {
         epoch: 1,
         start: 0,
-        rows: vec![crate::protocol::screen::Row {
-            index: 0,
-            wrapped: false,
-            runs: vec![crate::protocol::screen::Run {
-                style: 0,
-                link: None,
-                text: "x".repeat(150 * 1024),
-                cells: crate::protocol::screen::Cells::Narrow,
-            }],
-        }],
+        // 300 rows of 512 cells: about 150 KiB.
+        rows: (0..300)
+            .map(|index| crate::protocol::screen::Row {
+                index,
+                wrapped: false,
+                runs: vec![crate::protocol::screen::Run {
+                    style: 0,
+                    link: None,
+                    text: "x".repeat(512),
+                    cells: crate::protocol::screen::Cells::Narrow,
+                }],
+            })
+            .collect(),
         styles: vec![],
         links: vec![],
     };

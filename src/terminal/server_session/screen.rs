@@ -134,7 +134,7 @@ fn decode_color(c: pane::Color) -> TerminalColor {
         pane::Color::Rgb(c) => TerminalColor::Rgb(color(c)),
     }
 }
-fn decode_hyperlink(
+pub(super) fn decode_hyperlink(
     link: &pane::effects::Hyperlink,
     local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
 ) -> Option<Arc<super::super::hyperlink::HyperlinkTarget>> {
