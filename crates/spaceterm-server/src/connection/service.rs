@@ -2,11 +2,13 @@
 //!
 //! One `PaneService` serves every connection behind one mutex ([`SharedPaneService`]). Its methods
 //! change state and capture snapshots only. Encoding runs on each connection's I/O thread through
-//! [`super::outbox::Presentation`], and disk syncs run in [`Dispatch::After`] work after the
-//! mutex is released. The service pushes replies, Pane events, inventory and presentation into the
-//! [`Outbox`] it receives in [`PaneService::admitted`].
+//! [`super::outbox::Presentation`]. Disk syncs run on the server's [`super::sync::SyncWorker`],
+//! either as [`Dispatch::After`] work or as jobs the service submits itself. The service pushes
+//! replies, Pane events, inventory and presentation into the [`Outbox`] it receives in
+//! [`PaneService::admitted`].
 use super::outbox::Outbox;
 use crate::ServerError;
+use crate::direct::{DirectError, Management, ManagementReply, PairingId};
 use crate::pane::control::ClientName;
 use crate::protocol::{EffectDone, Input, Operation, Refusal, ReplyBody, RequestId, View};
 use std::sync::{Arc, Mutex};
@@ -20,20 +22,36 @@ pub struct Peer {
     pub client: [u8; 32],
     /// Unique per connection. Leases bind to it.
     pub connection: [u8; 32],
-    /// A paired WSS device, which cannot administer the owning account.
-    pub paired: bool,
+    /// Present for a paired WSS device, which cannot administer the owning account.
+    pub pairing: Option<Pairing>,
 }
 
-/// Work that runs after the `PaneService` lock is released, such as a disk sync. Its result is
-/// the reply.
+/// The pairing a paired connection was admitted under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pairing {
+    pub pairing: PairingId,
+    /// The direct-network listener generation at admission. Disabling access or an uncertain
+    /// commit starts a new generation and ends every connection of the old one.
+    pub generation: [u8; 32],
+}
+
+impl Peer {
+    pub fn paired(&self) -> bool {
+        self.pairing.is_some()
+    }
+}
+
+/// Work that runs on the sync worker after the `PaneService` lock is released, such as a disk
+/// sync. Its result is the reply.
 pub type AfterLock = Box<dyn FnOnce() -> Result<ReplyBody, Refusal> + Send>;
 
 pub enum Dispatch {
-    /// Built with [`Dispatch::reply`].
+    /// Built with [`Dispatch::reply`]. Encoded and queued under the lock.
     Reply(Box<Result<ReplyBody, Refusal>>),
-    /// The service replies later with `Outbox::reply`, for example after the inventory revision
-    /// that contains an edit's outcome.
+    /// The service replies later with `Outbox::reply_or_refuse`, for example after the inventory
+    /// revision that contains an edit's outcome.
     Deferred,
+    /// Submitted to the sync worker while the lock is still held, so syncs keep lock order.
     After(AfterLock),
 }
 
@@ -55,7 +73,7 @@ pub trait PaneService: Send {
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox);
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
-    /// Every operation except `Direct`, which the host's direct-network state answers, and
+    /// Every operation except `Operation::Direct`, which goes to [`DirectManagement`], and
     /// account administration from paired peers, which the connection refuses.
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch;
     /// Applies or discards the message as a whole. A discard on a channel the service knows is
@@ -75,4 +93,11 @@ pub trait PaneService: Send {
     }
     fn disconnected(&mut self, peer: &Peer);
     fn shutdown(&mut self) -> Result<(), ServerError>;
+}
+
+/// The host's direct-network administration, answering `Operation::Direct`. It runs on the sync
+/// worker, without the `PaneService` lock. It must not hold the direct-network lock while it takes
+/// the `PaneService` lock, for example to call [`PaneService::revoked`].
+pub trait DirectManagement: Send + Sync {
+    fn manage(&self, peer: &Peer, request: Management) -> Result<ManagementReply, DirectError>;
 }

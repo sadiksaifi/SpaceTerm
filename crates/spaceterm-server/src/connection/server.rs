@@ -2,24 +2,29 @@
 //!
 //! The I/O thread passes each received frame to [`AdmittedConnection::receive`]. It handles
 //! continuation frames, bounds, request ids, channel and serial order, frame acknowledgements,
-//! pings, and the account-administration refusal for paired peers. What remains is an
-//! [`Inbound`] message for the service. The I/O thread locks the service, calls
-//! [`AdmittedConnection::dispatch`], unlocks it, and then runs any returned [`Deferred`] work.
+//! pings, the account-administration refusal for paired peers, and `Operation::Direct`, which it
+//! hands to the host's [`DirectManagement`] on the sync worker. What remains is an [`Inbound`]
+//! message for the service. The I/O thread locks the service, calls
+//! [`AdmittedConnection::dispatch`], and unlocks it. `Dispatch::After` work is submitted to the
+//! sync worker inside `dispatch`, under the lock, so syncs keep lock order. The I/O thread never
+//! runs sync or deferred work.
 use super::health::{Check, Death, Liveness};
 use super::outbox::{Outbox, OutboxError};
-use super::service::{AfterLock, Dispatch, PaneService, Peer};
+use super::service::{DirectManagement, Dispatch, PaneService, Peer};
+use super::sync::SyncWorker;
 use crate::protocol::frame::Assembler;
 use crate::protocol::{
-    Channel, ClientMessage, EffectDone, Fatal, Input, Operation, RawFrame, Refusal, Request,
-    RequestId, View, limits,
+    Channel, ClaimReply, ClientMessage, EffectDone, Fatal, Input, Operation, RawFrame, Refusal,
+    ReplyBody, Request, RequestId, View, limits,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// A client message the service handles.
 #[derive(Debug)]
 pub enum Inbound {
-    /// `Operation::Direct` reaches the host's direct-network state instead of the service.
+    /// Never `Operation::Direct`.
     Request(Box<Request>),
     Input(Input),
     View(View),
@@ -32,34 +37,33 @@ pub enum Inbound {
     },
 }
 
-/// Reply work to run after the `PaneService` lock is released.
-pub struct Deferred {
-    id: RequestId,
-    work: AfterLock,
-}
-
-impl Deferred {
-    pub fn run(self, connection: &AdmittedConnection) -> Result<(), Fatal> {
-        Ok(connection.outbox.reply(self.id, (self.work)())?)
-    }
-}
-
 pub struct AdmittedConnection {
     peer: Peer,
     outbox: Outbox,
+    sync: SyncWorker,
+    direct: Option<Arc<dyn DirectManagement>>,
     assembler: Assembler,
     highest_channel: u32,
-    /// The last Input serial per recent channel. The oldest entry is evicted past the bound, and
-    /// the service discards input on channels it no longer binds.
+    /// The last Input serial of each claimed channel that is not yet closed.
     serials: BTreeMap<Channel, u32>,
     liveness: Liveness,
 }
 
 impl AdmittedConnection {
-    pub fn new(peer: Peer, outbox: Outbox, now: Instant) -> Self {
+    /// `direct` is `None` on a host without direct-network state, which refuses `Direct` as
+    /// `StorageUnavailable`.
+    pub fn new(
+        peer: Peer,
+        outbox: Outbox,
+        sync: SyncWorker,
+        direct: Option<Arc<dyn DirectManagement>>,
+        now: Instant,
+    ) -> Self {
         Self {
             peer,
             outbox,
+            sync,
+            direct,
             assembler: Assembler::default(),
             highest_channel: 0,
             serials: BTreeMap::new(),
@@ -75,12 +79,19 @@ impl AdmittedConnection {
         &self.outbox
     }
 
-    /// Applies one received frame. An error ends the connection with `Goodbye(error)`.
+    /// Applies one received frame. An error ends the connection with `Goodbye(error)`. After a
+    /// goodbye was queued, for example by revocation, received messages are ignored.
     pub fn receive(&mut self, frame: RawFrame, now: Instant) -> Result<Option<Inbound>, Fatal> {
         self.liveness.received(now);
         let Some(message) = self.assembler.client(frame)? else {
             return Ok(None);
         };
+        if self.outbox.is_closing() {
+            return Ok(None);
+        }
+        for channel in self.outbox.take_closed() {
+            self.serials.remove(&channel);
+        }
         Ok(match message {
             ClientMessage::Request(request) => {
                 self.outbox.begin(request.id)?;
@@ -88,17 +99,24 @@ impl AdmittedConnection {
                     if claim.channel.0 <= self.highest_channel {
                         return Err(Fatal::ProtocolViolation);
                     }
+                    if self.serials.len() >= limits::MAX_CHANNELS {
+                        return Err(Fatal::Capacity);
+                    }
                     self.highest_channel = claim.channel.0;
                     self.serials.insert(claim.channel, 0);
-                    if self.serials.len() > limits::MAX_CHANNELS {
-                        self.serials.pop_first();
-                    }
                 }
-                if self.peer.paired && administration(&request.operation) {
+                if self.peer.paired() && administration(&request.operation) {
                     self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
                     return Ok(None);
                 }
-                Some(Inbound::Request(request))
+                let Request { id, operation } = *request;
+                match operation {
+                    Operation::Direct(management) => {
+                        self.direct(id, management)?;
+                        None
+                    }
+                    operation => Some(Inbound::Request(Box::new(Request { id, operation }))),
+                }
             }
             ClientMessage::Input(input) => {
                 self.claimed(input.channel)?;
@@ -136,6 +154,25 @@ impl AdmittedConnection {
         })
     }
 
+    fn direct(
+        &self,
+        id: RequestId,
+        management: crate::direct::Management,
+    ) -> Result<(), OutboxError> {
+        let Some(handler) = self.direct.clone() else {
+            return self.outbox.reply(
+                id,
+                Ok(ReplyBody::Direct(Err(
+                    crate::direct::DirectError::StorageUnavailable,
+                ))),
+            );
+        };
+        let peer = self.peer;
+        self.sync.reply(&self.outbox, id, move || {
+            Ok(ReplyBody::Direct(handler.manage(&peer, management)))
+        })
+    }
+
     /// Channel messages may name only channels a `Claim` already introduced.
     fn claimed(&self, channel: Channel) -> Result<(), Fatal> {
         if channel.0 == 0 || channel.0 > self.highest_channel {
@@ -146,18 +183,29 @@ impl AdmittedConnection {
 
     /// Calls the service while the caller holds its lock.
     pub fn dispatch(
-        &self,
+        &mut self,
         inbound: Inbound,
         service: &mut dyn PaneService,
-    ) -> Result<Option<Deferred>, Fatal> {
+    ) -> Result<(), Fatal> {
         let peer = &self.peer;
         match inbound {
             Inbound::Request(request) => {
                 let Request { id, operation } = *request;
+                let claim = match &operation {
+                    Operation::Claim(claim) => Some(claim.channel),
+                    _ => None,
+                };
                 match service.request(peer, id, operation) {
-                    Dispatch::Reply(result) => self.outbox.reply(id, *result)?,
+                    Dispatch::Reply(result) => {
+                        if let Some(channel) = claim
+                            && !matches!(*result, Ok(ReplyBody::Claim(ClaimReply::Attached { .. })))
+                        {
+                            self.serials.remove(&channel);
+                        }
+                        self.outbox.reply_or_refuse(id, *result)?;
+                    }
                     Dispatch::Deferred => {}
-                    Dispatch::After(work) => return Ok(Some(Deferred { id, work })),
+                    Dispatch::After(work) => self.sync.reply(&self.outbox, id, work)?,
                 }
             }
             Inbound::Input(input) => service.input(peer, input),
@@ -166,12 +214,16 @@ impl AdmittedConnection {
             Inbound::Acknowledge { sequence } => service.acknowledge(peer, sequence),
             Inbound::Cancel { id } => service.cancel(peer, id),
         }
-        Ok(None)
+        Ok(())
     }
 
-    /// Records whether outbox frames wait on the carrier after a write attempt.
-    pub fn wrote(&mut self, now: Instant, blocked: bool) {
-        self.liveness.wrote(now, blocked);
+    /// Records a write attempt; see [`Liveness::wrote`]. Also starts the acknowledgement timer of
+    /// frames the outbox handed out.
+    pub fn wrote(&mut self, now: Instant, progressed: bool, pending: bool) {
+        if progressed {
+            self.outbox.written(now);
+        }
+        self.liveness.wrote(now, progressed, pending);
     }
 
     /// Pings or ends the connection from traffic, and returns when to check again.

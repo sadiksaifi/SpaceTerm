@@ -5,7 +5,9 @@
 //! - [`outbox`] orders a server's outgoing messages by priority and holds the latest presentation
 //!   per channel under one frame of credit.
 //! - [`server`] applies the protocol's ordering rules to one admitted connection and routes the
-//!   rest to the [`service::PaneService`].
+//!   rest to the [`service::PaneService`] or the host's [`service::DirectManagement`].
+//! - [`sync`] runs disk syncs and direct-network administration in order on one worker per server.
+//! - [`registry`] ends live paired connections on revocation.
 //! - `link` is the client's [`link::ServerLink`]: concurrent requests, fire-and-forget input,
 //!   per-channel delivery, pushed inventory and health.
 //! - [`health`] judges liveness from traffic on the live connection.
@@ -18,8 +20,10 @@ pub mod health;
 pub mod link;
 pub mod loopback;
 pub mod outbox;
+pub mod registry;
 pub mod server;
 pub mod service;
+pub mod sync;
 #[cfg(all(test, feature = "client"))]
 mod tests;
 

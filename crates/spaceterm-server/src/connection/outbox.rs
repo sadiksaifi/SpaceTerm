@@ -9,10 +9,14 @@
 //! The I/O thread writes one frame per [`Outbox::next_frame`] call, so L0 interleaves between the
 //! frames of a large L1 or L2 message. Inventory and each channel's presentation are latest-state
 //! slots: publishing again replaces a state that is not yet written but keeps its place in L1.
-//! Each channel has one frame of credit, returned by its acknowledgement. Presentation is
-//! encoded by [`Presentation::encode`] on the calling I/O thread, outside the `PaneService` lock
-//! and outside this outbox's lock.
+//! Each channel has one frame of credit, returned by its acknowledgement.
+//!
+//! Replies, Pane events and inventory are encoded when they are queued, on the producer's thread,
+//! so the producer receives any encoding error. Presentation is encoded by
+//! [`Presentation::encode`] on the I/O thread, outside the `PaneService` lock and this outbox's
+//! lock.
 use super::Wake;
+use super::carrier::Priority;
 use crate::protocol::frame::{EncodeError, encode_server};
 use crate::protocol::screen::ScreenUpdate;
 use crate::protocol::{
@@ -24,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// A Pane's screen state captured under the `PaneService` lock and encoded later outside it.
+/// It owns its snapshot, for example through an `Arc`, and never borrows service state.
 pub trait Presentation: Send {
     /// Encodes this state against `ticket.base`, or as a keyframe when `base` is `None`.
     /// `None` means the state equals the base: no frame is written, credit stays available, and
@@ -51,7 +56,7 @@ pub enum OutboxError {
     /// A queue passed its bound. The connection ends with `Goodbye(Stalled)`.
     #[error("the connection stalled")]
     Stalled,
-    /// The connection has too many channels or requests open.
+    /// The connection has too many channels open.
     #[error("the connection reached capacity")]
     Capacity,
     /// The peer broke an ordering rule, such as acknowledging a frame it was not sent.
@@ -60,8 +65,13 @@ pub enum OutboxError {
     /// The connection is closing. Nothing more is queued except what already was.
     #[error("the connection is closing")]
     Closed,
+    /// This server could not encode its own message. Nothing was queued, and a reply id stays
+    /// owed, so the producer can answer with a refusal instead.
     #[error("the message could not be encoded")]
     Encode(EncodeError),
+    /// The server misused the outbox, such as replying to an id it does not owe.
+    #[error("the server misused the connection")]
+    Misuse,
 }
 
 impl From<OutboxError> for Fatal {
@@ -69,13 +79,14 @@ impl From<OutboxError> for Fatal {
         match error {
             OutboxError::Stalled => Self::Stalled,
             OutboxError::Capacity => Self::Capacity,
-            OutboxError::Violation | OutboxError::Encode(_) => Self::ProtocolViolation,
+            OutboxError::Violation => Self::ProtocolViolation,
             OutboxError::Closed => Self::Stopping,
+            OutboxError::Encode(_) | OutboxError::Misuse => Self::Internal,
         }
     }
 }
 
-/// Clones share one connection's queues.
+/// Clones share one connection's queues. Every method is safe to call from any thread.
 #[derive(Clone)]
 pub struct Outbox {
     shared: Arc<Shared>,
@@ -86,23 +97,27 @@ struct Shared {
     wake: Arc<dyn Wake>,
 }
 
+type Frames = Vec<Vec<u8>>;
+
 #[derive(Default)]
 struct State {
     l0: VecDeque<Vec<u8>>,
     l0_bytes: usize,
     l1: VecDeque<Entry>,
     l1_rest: VecDeque<Vec<u8>>,
-    l2: VecDeque<ServerMessage>,
+    l2: VecDeque<Frames>,
     l2_rest: VecDeque<Vec<u8>>,
-    inventory: Option<InventoryRevision>,
+    inventory: Option<Frames>,
     inventory_queued: bool,
     channels: BTreeMap<Channel, Slot>,
+    /// Channels closed since the connection last asked, for its serial bookkeeping.
+    closed: Vec<Channel>,
     requests: BTreeSet<RequestId>,
     closing: bool,
 }
 
 enum Entry {
-    Message(ServerMessage),
+    Message(Frames),
     Inventory,
     Frame(Channel),
 }
@@ -112,15 +127,17 @@ struct Slot {
     queued: bool,
     visible: bool,
     next: u64,
-    in_flight: Option<(u64, Instant)>,
+    /// The frame awaiting acknowledgement, and when its first wire frame was written.
+    in_flight: Option<(u64, Option<Instant>)>,
     acknowledged: Option<u64>,
     keyframe: bool,
+    /// Set by [`Outbox::end`]: written after the final frame, then the slot is removed.
+    end: Option<Frames>,
 }
 
 enum Taken {
-    Frame(Vec<u8>),
-    Message(ServerMessage, bool),
-    Present(FrameTicket, Box<dyn Presentation>),
+    Frame(Vec<u8>, Priority),
+    Present(FrameTicket, Box<dyn Presentation>, Option<Frames>),
     Skip,
 }
 
@@ -134,73 +151,95 @@ impl Outbox {
         }
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.shared.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn with<T>(
         &self,
         change: impl FnOnce(&mut State) -> Result<T, OutboxError>,
     ) -> Result<T, OutboxError> {
-        let result = change(&mut self.shared.state.lock().unwrap_or_else(|e| e.into_inner()));
+        let result = change(&mut self.lock());
         if result.is_ok() {
             self.shared.wake.wake();
         }
         result
     }
 
-    /// Registers a request id. A duplicate in-flight id is a violation.
+    /// Registers a request id from the peer. A duplicate in-flight id, or more than
+    /// [`limits::MAX_REQUESTS_IN_FLIGHT`], is a violation.
     pub fn begin(&self, id: RequestId) -> Result<(), OutboxError> {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.requests.len() >= limits::MAX_REQUESTS_IN_FLIGHT {
-            return Err(OutboxError::Violation);
-        }
-        if !state.requests.insert(id) {
+        let mut state = self.lock();
+        if state.requests.len() >= limits::MAX_REQUESTS_IN_FLIGHT || !state.requests.insert(id) {
             return Err(OutboxError::Violation);
         }
         Ok(())
     }
 
-    /// Queues the one reply to `id`. Bulk bodies go to L2.
+    /// Queues the one reply to `id`, bulk bodies at L2. On `Encode`, nothing is queued and the
+    /// reply stays owed; prefer [`Outbox::reply_or_refuse`].
     pub fn reply(
         &self,
         id: RequestId,
         result: Result<ReplyBody, Refusal>,
     ) -> Result<(), OutboxError> {
+        let bulk = matches!(&result, Ok(body) if body.bulk());
+        let frames = encode(&ServerMessage::Reply(Box::new(Reply { id, result })))?;
         self.with(|state| {
-            if !state.requests.remove(&id) {
-                return Err(OutboxError::Violation);
+            state.open()?;
+            if !state.requests.contains(&id) {
+                return Err(OutboxError::Misuse);
             }
-            let bulk = matches!(&result, Ok(body) if body.bulk());
-            let message = ServerMessage::Reply(Box::new(Reply { id, result }));
             if bulk {
-                state.open()?;
                 if state.l2.len() >= limits::MAX_L2_MESSAGES {
                     return Err(OutboxError::Stalled);
                 }
-                state.l2.push_back(message);
-                Ok(())
+                state.l2.push_back(frames);
             } else {
-                state.push_l1(Entry::Message(message))
+                state.push_l1(Entry::Message(frames))?;
             }
+            state.requests.remove(&id);
+            Ok(())
         })
     }
 
+    /// Queues `result`, or a refusal if `result` cannot be encoded: `Capacity` for a body over its
+    /// bound, otherwise `Failed`. The reply id is never lost.
+    pub fn reply_or_refuse(
+        &self,
+        id: RequestId,
+        result: Result<ReplyBody, Refusal>,
+    ) -> Result<(), OutboxError> {
+        match self.reply(id, result) {
+            Err(OutboxError::Encode(error)) => self.reply(
+                id,
+                Err(match error {
+                    EncodeError::TooLarge => Refusal::Capacity,
+                    EncodeError::Unencodable => Refusal::Failed,
+                }),
+            ),
+            result => result,
+        }
+    }
+
+    /// Queues a Pane event that leaves the channel open. Use [`Outbox::end`] for `Ended`,
+    /// `SessionEnded`, `Failed` and `Takeover`.
     pub fn pane(&self, channel: Channel, event: PaneEvent) -> Result<(), OutboxError> {
-        self.with(|state| {
-            state.push_l1(Entry::Message(ServerMessage::Pane(PaneMessage {
-                channel,
-                event,
-            })))
-        })
+        let frames = encode(&ServerMessage::Pane(PaneMessage { channel, event }))?;
+        self.with(|state| state.push_l1(Entry::Message(frames)))
     }
 
     /// Replaces any inventory revision not yet written. A reply queued after this call is
     /// written after the revision, so a deferred outcome never precedes the revision holding it.
     pub fn inventory(&self, revision: InventoryRevision) -> Result<(), OutboxError> {
+        let frames = encode(&ServerMessage::Inventory(Box::new(revision)))?;
         self.with(|state| {
             state.open()?;
-            state.inventory = Some(revision);
             if !state.inventory_queued {
                 state.push_l1(Entry::Inventory)?;
                 state.inventory_queued = true;
             }
+            state.inventory = Some(frames);
             Ok(())
         })
     }
@@ -214,16 +253,20 @@ impl Outbox {
     }
 
     /// Queues the final message. Afterwards only L0 frames already queued and this one are
-    /// written.
+    /// written, and producers receive `Closed`.
     pub fn goodbye(&self, fatal: Fatal) -> Result<(), OutboxError> {
+        let frames = encode(&ServerMessage::Goodbye(fatal))?;
         self.with(|state| {
             state.open()?;
-            let message =
-                encode_server(&ServerMessage::Goodbye(fatal)).map_err(OutboxError::Encode)?;
-            state.l0.extend(message.frames);
+            state.l0.extend(frames);
             state.closing = true;
             Ok(())
         })
+    }
+
+    /// Whether `goodbye` was queued. The connection stops dispatching once it is.
+    pub fn is_closing(&self) -> bool {
+        self.lock().closing
     }
 
     /// Starts presenting `channel`, visible and owing a keyframe.
@@ -233,7 +276,7 @@ impl Outbox {
                 return Err(OutboxError::Capacity);
             }
             if state.channels.contains_key(&channel) {
-                return Err(OutboxError::Violation);
+                return Err(OutboxError::Misuse);
             }
             state.channels.insert(
                 channel,
@@ -245,31 +288,74 @@ impl Outbox {
                     in_flight: None,
                     acknowledged: None,
                     keyframe: true,
+                    end: None,
                 },
             );
             Ok(())
         })
     }
 
-    /// Stops presenting `channel` and drops its pending state.
+    /// Forgets `channel` at once, dropping its pending state, for a client `Release` or `Close`.
+    /// Also call it when a claim ends without binding the channel, so the connection forgets it.
     pub fn close(&self, channel: Channel) {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.lock();
         state.channels.remove(&channel);
+        state.closed.push(channel);
+    }
+
+    /// Ends `channel` from the server side with `Ended`, `SessionEnded`, `Failed` or `Takeover`.
+    /// A pending final state is written first, after the in-flight frame's acknowledgement if one
+    /// is in flight; then `event`; then the channel is forgotten. Later presentations are ignored.
+    pub fn end(&self, channel: Channel, event: PaneEvent) -> Result<(), OutboxError> {
+        let frames = encode(&ServerMessage::Pane(PaneMessage { channel, event }))?;
+        self.with(|state| {
+            state.open()?;
+            let Some(slot) = state.channels.get_mut(&channel) else {
+                state.closed.push(channel);
+                return state.push_l1(Entry::Message(frames));
+            };
+            if slot.end.is_some() {
+                return Ok(());
+            }
+            if slot.pending.is_none() && slot.in_flight.is_none() {
+                state.channels.remove(&channel);
+                state.closed.push(channel);
+                return state.push_l1(Entry::Message(frames));
+            }
+            slot.end = Some(frames);
+            Ok(())
+        })
+    }
+
+    /// Drains the channels closed since the last call.
+    pub fn take_closed(&self) -> Vec<Channel> {
+        std::mem::take(&mut self.lock().closed)
     }
 
     /// A hidden channel drops its pending state and receives no frames. Revealing keeps the
     /// acknowledged baseline; the publisher presents the current state again.
     pub fn view(&self, channel: Channel, visible: bool) {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.lock();
+        let mut ended = None;
         if let Some(slot) = state.channels.get_mut(&channel) {
             slot.visible = visible;
             if !visible {
                 slot.pending = None;
+                if slot.in_flight.is_none() {
+                    ended = slot.end.take();
+                }
             }
+        }
+        if let Some(frames) = ended {
+            state.channels.remove(&channel);
+            state.closed.push(channel);
+            let _ = state.push_l1(Entry::Message(frames));
+            drop(state);
+            self.shared.wake.wake();
         }
     }
 
-    /// Replaces the channel's pending state. Ignored for a hidden or closed channel.
+    /// Replaces the channel's pending state. Ignored for a hidden, ending or closed channel.
     pub fn present(
         &self,
         channel: Channel,
@@ -280,7 +366,7 @@ impl Outbox {
             let Some(slot) = state.channels.get_mut(&channel) else {
                 return Ok(());
             };
-            if !slot.visible {
+            if !slot.visible || slot.end.is_some() {
                 return Ok(());
             }
             slot.pending = Some(presentation);
@@ -294,14 +380,13 @@ impl Outbox {
 
     /// The next frame on `channel` is a keyframe, for example after a geometry change.
     pub fn require_keyframe(&self, channel: Channel) {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = state.channels.get_mut(&channel) {
+        if let Some(slot) = self.lock().channels.get_mut(&channel) {
             slot.keyframe = true;
         }
     }
 
     /// Returns the channel's credit. Acknowledging a frame that is not in flight is a violation;
-    /// an acknowledgement for a closed channel is ignored.
+    /// an acknowledgement for a channel the server already forgot is ignored.
     pub fn acknowledge(&self, channel: Channel, frame: u64) -> Result<(), OutboxError> {
         self.with(|state| {
             let Some(slot) = state.channels.get_mut(&channel) else {
@@ -312,85 +397,94 @@ impl Outbox {
             }
             slot.in_flight = None;
             slot.acknowledged = Some(frame);
-            if slot.pending.is_some() && !slot.queued {
-                slot.queued = true;
-                state.push_l1(Entry::Frame(channel))?;
+            if slot.pending.is_some() {
+                if !slot.queued {
+                    slot.queued = true;
+                    state.push_l1(Entry::Frame(channel))?;
+                }
+            } else if let Some(frames) = slot.end.take() {
+                state.channels.remove(&channel);
+                state.closed.push(channel);
+                state.push_l1(Entry::Message(frames))?;
             }
             Ok(())
         })
     }
 
+    /// Records that the I/O thread wrote a frame. Starts the acknowledgement timer of every frame
+    /// taken but not yet written.
+    pub fn written(&self, now: Instant) {
+        for slot in self.lock().channels.values_mut() {
+            if let Some((_, since @ None)) = &mut slot.in_flight {
+                *since = Some(now);
+            }
+        }
+    }
+
     /// When the oldest unacknowledged frame was written, for [`super::health::Liveness::check`].
     pub fn unacknowledged_since(&self) -> Option<Instant> {
-        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        state
+        self.lock()
             .channels
             .values()
-            .filter_map(|slot| slot.in_flight.map(|(_, since)| since))
+            .filter_map(|slot| slot.in_flight.and_then(|(_, since)| since))
             .min()
     }
 
-    /// The next whole frame to write, in priority order. Only the connection's I/O thread calls
-    /// this. It encodes outside the outbox lock.
-    pub fn next_frame(&self, now: Instant) -> Result<Option<Vec<u8>>, OutboxError> {
+    /// The next whole frame to write and its level. Only the connection's I/O thread calls this.
+    /// It encodes presentation outside the outbox lock. A frame this server cannot encode ends
+    /// its channel with `PaneEvent::Failed`; the connection continues.
+    pub fn next_frame(&self) -> Option<(Vec<u8>, Priority)> {
         loop {
-            let taken = {
-                let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-                state.take(now)
+            let taken = self.lock().take();
+            let (ticket, presentation, end) = match taken? {
+                Taken::Frame(frame, priority) => return Some((frame, priority)),
+                Taken::Skip => continue,
+                Taken::Present(ticket, presentation, end) => (ticket, presentation, end),
             };
-            let (message, bulk) = match taken {
-                None => return Ok(None),
-                Some(Taken::Frame(frame)) => return Ok(Some(frame)),
-                Some(Taken::Skip) => continue,
-                Some(Taken::Message(message, bulk)) => (message, bulk),
-                Some(Taken::Present(ticket, presentation)) => match presentation.encode(ticket) {
-                    Some(presented) => (
-                        ServerMessage::Frame(Box::new(Frame {
-                            channel: ticket.channel,
-                            frame: ticket.frame,
-                            base: ticket.base,
-                            input: presented.input,
-                            update: presented.update,
-                        })),
-                        false,
-                    ),
-                    None => {
-                        self.unsent(ticket);
-                        continue;
-                    }
-                },
+            let encoded = match presentation.encode(ticket) {
+                Some(presented) => Some(encode(&ServerMessage::Frame(Box::new(Frame {
+                    channel: ticket.channel,
+                    frame: ticket.frame,
+                    base: ticket.base,
+                    input: presented.input,
+                    update: presented.update,
+                })))),
+                None => None,
             };
-            let mut frames = encode_server(&message)
-                .map_err(OutboxError::Encode)?
-                .frames
-                .into_iter();
-            let first = frames.next();
-            let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            let rest = if bulk {
-                &mut state.l2_rest
-            } else {
-                &mut state.l1_rest
+            let mut state = self.lock();
+            let frames = match encoded {
+                Some(Ok(frames)) => frames,
+                None if end.is_none() => {
+                    state.unsent(ticket);
+                    continue;
+                }
+                None => Vec::new(),
+                Some(Err(_)) => {
+                    state.channels.remove(&ticket.channel);
+                    state.closed.push(ticket.channel);
+                    let failed = encode(&ServerMessage::Pane(PaneMessage {
+                        channel: ticket.channel,
+                        event: PaneEvent::Failed,
+                    }));
+                    failed.unwrap_or_default()
+                }
+            };
+            let mut frames = frames.into_iter().chain(end.into_iter().flatten());
+            let Some(first) = frames.next() else {
+                continue;
             };
             for (index, frame) in frames.enumerate() {
-                rest.insert(index, frame);
+                state.l1_rest.insert(index, frame);
             }
-            return Ok(first);
+            return Some((first, Priority::L1));
         }
     }
+}
 
-    fn unsent(&self, ticket: FrameTicket) {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = state.channels.get_mut(&ticket.channel)
-            && slot.in_flight.map(|(sent, _)| sent) == Some(ticket.frame)
-        {
-            slot.in_flight = None;
-            slot.keyframe = ticket.base.is_none();
-            if slot.pending.is_some() && !slot.queued {
-                slot.queued = true;
-                let _ = state.push_l1(Entry::Frame(ticket.channel));
-            }
-        }
-    }
+fn encode(message: &ServerMessage) -> Result<Frames, OutboxError> {
+    encode_server(message)
+        .map(|wire| wire.frames)
+        .map_err(OutboxError::Encode)
 }
 
 impl State {
@@ -404,14 +498,15 @@ impl State {
 
     fn push_l0(&mut self, message: &ServerMessage) -> Result<(), OutboxError> {
         self.open()?;
-        let message = encode_server(message).map_err(OutboxError::Encode)?;
-        if self.l0.len() + message.frames.len() > limits::MAX_L0_FRAMES
-            || self.l0_bytes + message.bytes() > limits::MAX_L0_BYTES
+        let frames = encode(message)?;
+        let bytes: usize = frames.iter().map(Vec::len).sum();
+        if self.l0.len() + frames.len() > limits::MAX_L0_FRAMES
+            || self.l0_bytes + bytes > limits::MAX_L0_BYTES
         {
             return Err(OutboxError::Stalled);
         }
-        self.l0_bytes += message.bytes();
-        self.l0.extend(message.frames);
+        self.l0_bytes += bytes;
+        self.l0.extend(frames);
         Ok(())
     }
 
@@ -424,41 +519,49 @@ impl State {
         Ok(())
     }
 
-    fn take(&mut self, now: Instant) -> Option<Taken> {
+    fn take(&mut self) -> Option<Taken> {
         if let Some(frame) = self.l0.pop_front() {
             self.l0_bytes = self.l0_bytes.saturating_sub(frame.len());
-            return Some(Taken::Frame(frame));
+            return Some(Taken::Frame(frame, Priority::L0));
         }
         if self.closing {
             return None;
         }
         if let Some(frame) = self.l1_rest.pop_front() {
-            return Some(Taken::Frame(frame));
+            return Some(Taken::Frame(frame, Priority::L1));
         }
         if let Some(entry) = self.l1.pop_front() {
-            return Some(match entry {
-                Entry::Message(message) => Taken::Message(message, false),
+            let frames = match entry {
+                Entry::Message(frames) => frames,
                 Entry::Inventory => {
                     self.inventory_queued = false;
-                    match self.inventory.take() {
-                        Some(revision) => {
-                            Taken::Message(ServerMessage::Inventory(Box::new(revision)), false)
-                        }
-                        None => Taken::Skip,
-                    }
+                    self.inventory.take().unwrap_or_default()
                 }
-                Entry::Frame(channel) => self.present(channel, now),
-            });
+                Entry::Frame(channel) => return Some(self.present(channel)),
+            };
+            return Some(self.first(frames, Priority::L1));
         }
         if let Some(frame) = self.l2_rest.pop_front() {
-            return Some(Taken::Frame(frame));
+            return Some(Taken::Frame(frame, Priority::L2));
         }
-        self.l2
-            .pop_front()
-            .map(|message| Taken::Message(message, true))
+        let frames = self.l2.pop_front()?;
+        Some(self.first(frames, Priority::L2))
     }
 
-    fn present(&mut self, channel: Channel, now: Instant) -> Taken {
+    /// Returns the first frame of a message and keeps the rest ahead of its level's queue.
+    fn first(&mut self, frames: Frames, priority: Priority) -> Taken {
+        let mut frames = frames.into_iter();
+        let Some(first) = frames.next() else {
+            return Taken::Skip;
+        };
+        match priority {
+            Priority::L2 => self.l2_rest.extend(frames),
+            _ => self.l1_rest.extend(frames),
+        }
+        Taken::Frame(first, priority)
+    }
+
+    fn present(&mut self, channel: Channel) -> Taken {
         let Some(slot) = self.channels.get_mut(&channel) else {
             return Taken::Skip;
         };
@@ -480,218 +583,29 @@ impl State {
         };
         slot.next += 1;
         slot.keyframe = false;
-        slot.in_flight = Some((ticket.frame, now));
-        Taken::Present(ticket, presentation)
+        slot.in_flight = Some((ticket.frame, None));
+        let end = slot.end.take();
+        if end.is_some() {
+            self.channels.remove(&channel);
+            self.closed.push(channel);
+        }
+        Taken::Present(ticket, presentation, end)
+    }
+
+    /// Undoes `present` for a state that equalled its base.
+    fn unsent(&mut self, ticket: FrameTicket) {
+        if let Some(slot) = self.channels.get_mut(&ticket.channel)
+            && slot.in_flight.map(|(sent, _)| sent) == Some(ticket.frame)
+        {
+            slot.in_flight = None;
+            slot.keyframe |= ticket.base.is_none();
+            if slot.pending.is_some() && !slot.queued {
+                slot.queued = true;
+                let _ = self.push_l1(Entry::Frame(ticket.channel));
+            }
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::frame::Assembler;
-    use crate::protocol::{RawFrame, ScreenUpdate};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct State(u64);
-    impl Presentation for State {
-        fn encode(self: Box<Self>, _ticket: FrameTicket) -> Option<Presented> {
-            Some(Presented {
-                input: self.0 as u32,
-                update: ScreenUpdate {
-                    generation: self.0,
-                    ..ScreenUpdate::default()
-                },
-            })
-        }
-    }
-    struct Unchanged;
-    impl Presentation for Unchanged {
-        fn encode(self: Box<Self>, _ticket: FrameTicket) -> Option<Presented> {
-            None
-        }
-    }
-
-    fn fresh() -> (Outbox, Arc<AtomicUsize>) {
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&wakes);
-        (
-            Outbox::new(Arc::new(move || {
-                counter.fetch_add(1, Ordering::Relaxed);
-            })),
-            wakes,
-        )
-    }
-
-    fn drain(outbox: &Outbox, now: Instant) -> Vec<ServerMessage> {
-        let mut assembler = Assembler::default();
-        let mut messages = Vec::new();
-        while let Some(frame) = outbox.next_frame(now).unwrap() {
-            if let Some(message) = assembler.server(RawFrame::parse(&frame).unwrap()).unwrap() {
-                messages.push(message);
-            }
-        }
-        messages
-    }
-
-    #[test]
-    fn one_frame_of_credit_and_newer_state_replaces_pending_state() {
-        let (outbox, wakes) = fresh();
-        let now = Instant::now();
-        let channel = Channel(1);
-        outbox.open(channel).unwrap();
-        outbox.present(channel, Box::new(State(1))).unwrap();
-        outbox.present(channel, Box::new(State(2))).unwrap();
-        assert!(wakes.load(Ordering::Relaxed) >= 2);
-        let sent = drain(&outbox, now);
-        let [ServerMessage::Frame(first)] = sent.as_slice() else {
-            panic!("expected one frame");
-        };
-        assert_eq!((first.frame, first.base, first.input), (1, None, 2));
-
-        outbox.present(channel, Box::new(State(3))).unwrap();
-        outbox.present(channel, Box::new(State(4))).unwrap();
-        assert!(
-            drain(&outbox, now).is_empty(),
-            "no credit before the acknowledgement"
-        );
-        assert_eq!(outbox.unacknowledged_since(), Some(now));
-        assert_eq!(outbox.acknowledge(channel, 2), Err(OutboxError::Violation));
-        outbox.acknowledge(channel, 1).unwrap();
-        let sent = drain(&outbox, now);
-        let [ServerMessage::Frame(second)] = sent.as_slice() else {
-            panic!("expected one frame");
-        };
-        assert_eq!((second.frame, second.base, second.input), (2, Some(1), 4));
-
-        outbox.acknowledge(channel, 2).unwrap();
-        outbox.require_keyframe(channel);
-        outbox.present(channel, Box::new(Unchanged)).unwrap();
-        assert!(drain(&outbox, now).is_empty());
-        assert_eq!(
-            outbox.unacknowledged_since(),
-            None,
-            "an unchanged state keeps the credit"
-        );
-        outbox.present(channel, Box::new(State(5))).unwrap();
-        let sent = drain(&outbox, now);
-        let [ServerMessage::Frame(third)] = sent.as_slice() else {
-            panic!("expected one frame");
-        };
-        assert_eq!(
-            third.base, None,
-            "the required keyframe survives an unchanged state"
-        );
-    }
-
-    #[test]
-    fn hidden_channels_receive_no_frames() {
-        let (outbox, _) = fresh();
-        let channel = Channel(4);
-        outbox.open(channel).unwrap();
-        outbox.present(channel, Box::new(State(1))).unwrap();
-        outbox.view(channel, false);
-        outbox.present(channel, Box::new(State(2))).unwrap();
-        assert!(drain(&outbox, Instant::now()).is_empty());
-        outbox.view(channel, true);
-        outbox.present(channel, Box::new(State(3))).unwrap();
-        assert_eq!(drain(&outbox, Instant::now()).len(), 1);
-    }
-
-    #[test]
-    fn publication_order_holds_within_l1_and_l0_preempts_l2_chunks() {
-        let (outbox, _) = fresh();
-        let now = Instant::now();
-        let channel = Channel(1);
-        outbox.open(channel).unwrap();
-        for id in 1..=3 {
-            outbox.begin(RequestId(id)).unwrap();
-        }
-        let page = crate::protocol::Page {
-            epoch: 1,
-            start: 0,
-            rows: vec![crate::protocol::screen::Row {
-                index: 0,
-                wrapped: false,
-                runs: vec![crate::protocol::screen::Run {
-                    style: 0,
-                    link: None,
-                    text: "x".repeat(150 * 1024),
-                    cells: crate::protocol::screen::Cells::Narrow,
-                }],
-            }],
-            styles: vec![],
-            links: vec![],
-        };
-        outbox
-            .reply(RequestId(1), Ok(ReplyBody::Page(page)))
-            .unwrap();
-        outbox
-            .inventory(InventoryRevision {
-                inventory: crate::hierarchy::State::empty().inventory,
-                next_sequence: 1,
-            })
-            .unwrap();
-        outbox.reply(RequestId(2), Ok(ReplyBody::Done)).unwrap();
-        outbox.present(channel, Box::new(State(1))).unwrap();
-        outbox.pane(channel, PaneEvent::Ended).unwrap();
-        assert_eq!(
-            outbox.reply(RequestId(2), Ok(ReplyBody::Done)),
-            Err(OutboxError::Violation),
-            "exactly one reply per request"
-        );
-
-        let mut assembler = Assembler::default();
-        let mut order = Vec::new();
-        let mut frames = 0;
-        while let Some(frame) = outbox.next_frame(now).unwrap() {
-            frames += 1;
-            if frames == 6 {
-                outbox.ping(9).unwrap();
-            }
-            let frame = RawFrame::parse(&frame).unwrap();
-            assert!(frame.body.len() <= limits::MAX_FRAME_BODY);
-            if let Some(message) = assembler.server(frame).unwrap() {
-                order.push(match message {
-                    ServerMessage::Inventory(_) => "inventory",
-                    ServerMessage::Reply(reply) if reply.id == RequestId(2) => "reply",
-                    ServerMessage::Frame(_) => "frame",
-                    ServerMessage::Pane(_) => "pane",
-                    ServerMessage::Ping(_) => "ping",
-                    ServerMessage::Reply(reply) if reply.id == RequestId(1) => "page",
-                    _ => "other",
-                });
-            }
-        }
-        assert_eq!(
-            order,
-            ["inventory", "reply", "frame", "pane", "ping", "page"]
-        );
-    }
-
-    #[test]
-    fn goodbye_is_last_and_bounds_stall_the_connection() {
-        let (outbox, _) = fresh();
-        outbox.ping(1).unwrap();
-        outbox.goodbye(Fatal::Stopping).unwrap();
-        assert_eq!(
-            outbox.pane(Channel(1), PaneEvent::Ended),
-            Err(OutboxError::Closed)
-        );
-        let sent = drain(&outbox, Instant::now());
-        assert!(matches!(
-            sent.as_slice(),
-            [
-                ServerMessage::Ping(_),
-                ServerMessage::Goodbye(Fatal::Stopping)
-            ]
-        ));
-
-        let (outbox, _) = fresh();
-        let result = (0..=limits::MAX_L0_FRAMES as u64).try_for_each(|nonce| outbox.pong(nonce));
-        assert_eq!(result, Err(OutboxError::Stalled));
-        for channel in 0..limits::MAX_CHANNELS as u32 {
-            outbox.open(Channel(channel)).unwrap();
-        }
-        assert_eq!(outbox.open(Channel(999)), Err(OutboxError::Capacity));
-    }
-}
+mod tests;

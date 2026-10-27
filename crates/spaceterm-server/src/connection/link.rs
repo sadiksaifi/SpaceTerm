@@ -5,7 +5,12 @@
 //! [`ServerLink::receive`], and judges health with [`ServerLink::check`]. The link delivers pushed
 //! messages to sinks on the I/O thread, outside its lock. Sinks must not block; they forward each
 //! event to their owner's queue.
+//!
+//! Every request, input, frame acknowledgement, view and ping travels at L0 in one FIFO, so a
+//! claim never overtakes an earlier request, and a channel's input never overtakes its claim.
+//! `EffectDone`, `Acknowledge` and `Cancel` travel at L1.
 use super::Wake;
+use super::carrier::Priority;
 use super::health::{Check, Death, Liveness};
 use crate::pane::{AttachmentClaim, PaneSize, PresentationStyle, effects};
 use crate::protocol::frame::{Assembler, encode_client};
@@ -31,12 +36,16 @@ pub enum LinkError {
     Goodbye(Fatal),
     #[error("the server broke the protocol")]
     Violation,
-    /// The link stays usable. The caller exceeded the requests in flight.
-    #[error("too many requests are in flight")]
+    /// The link stays usable. The caller exceeded the requests in flight, the open channels, or
+    /// the queued input.
+    #[error("the connection is busy")]
     Busy,
     /// The link stays usable. The message exceeded a protocol bound and was not sent.
     #[error("the message exceeds a protocol bound")]
     OutOfBounds,
+    /// The link stays usable. The channel was not claimed, was claimed twice, or has ended.
+    #[error("the channel is not claimed")]
+    Unclaimed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -62,6 +71,8 @@ pub enum LinkEvent {
 pub enum ChannelEvent {
     /// Apply it, then call [`ChannelHandle::acknowledge`] before rendering.
     Frame(Box<Frame>),
+    /// `Ended`, `SessionEnded`, `Failed` and `Takeover` are the channel's last event. Every frame
+    /// before them is still applied and acknowledged.
     Pane(PaneEvent),
 }
 
@@ -113,7 +124,10 @@ struct State {
     requests: HashMap<RequestId, Waiter>,
     next_channel: u32,
     channels: HashMap<Channel, ChannelState>,
-    l0: VecDeque<Vec<u8>>,
+    /// Channels whose handle dropped while their `Release` waits for request capacity.
+    releases: VecDeque<Channel>,
+    l0: VecDeque<Queued>,
+    /// Bytes of queued L0 frames other than requests, which the in-flight limit bounds.
     l0_bytes: usize,
     l1: VecDeque<Vec<u8>>,
     assembler: Assembler,
@@ -121,9 +135,17 @@ struct State {
     closed: Option<LinkError>,
 }
 
+struct Queued {
+    frame: Vec<u8>,
+    counted: bool,
+}
+
 struct ChannelState {
     sink: Arc<dyn ChannelSink>,
     serial: u32,
+    claimed: bool,
+    /// The server sent the channel's last event, so dropping the handle sends no `Release`.
+    ended: bool,
 }
 
 impl ServerLink {
@@ -135,6 +157,7 @@ impl ServerLink {
                     requests: HashMap::new(),
                     next_channel: 0,
                     channels: HashMap::new(),
+                    releases: VecDeque::new(),
                     l0: VecDeque::new(),
                     l0_bytes: 0,
                     l1: VecDeque::new(),
@@ -150,6 +173,10 @@ impl ServerLink {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.shared.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn wake(&self) {
+        self.shared.wake.wake();
     }
 
     pub fn health(&self) -> Health {
@@ -182,40 +209,33 @@ impl ServerLink {
     fn send_request(&self, operation: Operation, waiter: Waiter) -> Result<RequestId, LinkError> {
         let mut state = self.lock();
         state.usable()?;
-        if state.requests.len() >= limits::MAX_REQUESTS_IN_FLIGHT {
-            return Err(LinkError::Busy);
-        }
-        let id = loop {
-            state.next_id = state.next_id.wrapping_add(1);
-            let id = RequestId(state.next_id);
-            if !state.requests.contains_key(&id) {
-                break id;
-            }
-        };
-        // A claim travels at L0, so its channel's input, views and acknowledgements never
-        // overtake it.
-        let urgent = matches!(operation, Operation::Claim(_));
-        let message = ClientMessage::Request(Box::new(Request { id, operation }));
-        state.queue(&message, urgent)?;
-        state.requests.insert(id, waiter);
+        // Releases of dropped channels go first, so they never wait behind new requests.
+        state.send_releases();
+        let id = state.send_request(operation, waiter)?;
         drop(state);
-        self.shared.wake.wake();
+        self.wake();
         Ok(id)
     }
 
     /// Opens a channel whose frames and Pane events go to `sink`. Claim it next with
-    /// [`ChannelHandle::claim`]. Dropping the handle stops delivery.
+    /// [`ChannelHandle::claim`]. Dropping the handle sends `Release` unless the channel ended.
     pub fn open_channel(&self, sink: Arc<dyn ChannelSink>) -> Result<ChannelHandle, LinkError> {
         let mut state = self.lock();
         state.usable()?;
-        if state.channels.len() >= limits::MAX_CHANNELS {
+        if state.channels.len() + state.releases.len() >= limits::MAX_CHANNELS {
             return Err(LinkError::Busy);
         }
         state.next_channel = state.next_channel.checked_add(1).ok_or(LinkError::Busy)?;
         let channel = Channel(state.next_channel);
-        state
-            .channels
-            .insert(channel, ChannelState { sink, serial: 0 });
+        state.channels.insert(
+            channel,
+            ChannelState {
+                sink,
+                serial: 0,
+                claimed: false,
+                ended: false,
+            },
+        );
         Ok(ChannelHandle {
             link: self.clone(),
             channel,
@@ -232,7 +252,7 @@ impl ServerLink {
         state.usable()?;
         state.queue(message, urgent)?;
         drop(state);
-        self.shared.wake.wake();
+        self.wake();
         Ok(())
     }
 
@@ -241,23 +261,24 @@ impl ServerLink {
         self.fail(LinkError::Closed);
     }
 
-    /// I/O thread: the next whole frame to write. L0 (claims, input, frame acknowledgements,
-    /// views, pings) precedes L1 (other requests and messages).
-    pub fn next_frame(&self) -> Option<Vec<u8>> {
+    /// I/O thread: the next whole frame to write and its level.
+    pub fn next_frame(&self) -> Option<(Vec<u8>, Priority)> {
         let mut state = self.lock();
         if state.closed.is_some() {
             return None;
         }
-        if let Some(frame) = state.l0.pop_front() {
-            state.l0_bytes -= frame.len();
-            return Some(frame);
+        if let Some(queued) = state.l0.pop_front() {
+            if queued.counted {
+                state.l0_bytes -= queued.frame.len();
+            }
+            return Some((queued.frame, Priority::L0));
         }
-        state.l1.pop_front()
+        state.l1.pop_front().map(|frame| (frame, Priority::L1))
     }
 
-    /// I/O thread: records whether queued bytes wait on the carrier after a write attempt.
-    pub fn wrote(&self, now: Instant, blocked: bool) {
-        self.lock().liveness.wrote(now, blocked);
+    /// I/O thread: records a write attempt; see [`Liveness::wrote`].
+    pub fn wrote(&self, now: Instant, progressed: bool, pending: bool) {
+        self.lock().liveness.wrote(now, progressed, pending);
     }
 
     /// I/O thread: applies one received frame. An error is final and already reported as health.
@@ -282,21 +303,42 @@ impl ServerLink {
         match message {
             ServerMessage::Reply(reply) => {
                 let Reply { id, result } = *reply;
-                let waiter = self.lock().requests.remove(&id);
+                let waiter = {
+                    let mut state = self.lock();
+                    let waiter = state.requests.remove(&id);
+                    if state.send_releases() {
+                        drop(state);
+                        self.wake();
+                    }
+                    waiter
+                };
                 let Some(waiter) = waiter else {
                     self.fail(LinkError::Violation);
                     return Err(LinkError::Violation);
                 };
                 waiter.complete(result.map_err(RequestError::Refused));
             }
-            ServerMessage::Frame(frame) => {
-                let sink = self.sink(frame.channel);
-                if let Some(sink) = sink {
-                    sink.deliver(ChannelEvent::Frame(frame));
-                }
-            }
+            ServerMessage::Frame(frame) => match self.sink(frame.channel, false) {
+                Some(sink) => sink.deliver(ChannelEvent::Frame(frame)),
+                // Nobody holds the channel any more. Acknowledging keeps its credit from stalling
+                // the connection until the server processes the `Release`.
+                None => self.send(
+                    &ClientMessage::FrameAck(FrameAck {
+                        channel: frame.channel,
+                        frame: frame.frame,
+                    }),
+                    true,
+                )?,
+            },
             ServerMessage::Pane(pane) => {
-                if let Some(sink) = self.sink(pane.channel) {
+                let last = matches!(
+                    pane.event,
+                    PaneEvent::Ended
+                        | PaneEvent::SessionEnded
+                        | PaneEvent::Failed
+                        | PaneEvent::Takeover(_)
+                );
+                if let Some(sink) = self.sink(pane.channel, last) {
                     sink.deliver(ChannelEvent::Pane(pane.event));
                 }
             }
@@ -315,11 +357,11 @@ impl ServerLink {
         Ok(())
     }
 
-    fn sink(&self, channel: Channel) -> Option<Arc<dyn ChannelSink>> {
-        self.lock()
-            .channels
-            .get(&channel)
-            .map(|channel| Arc::clone(&channel.sink))
+    fn sink(&self, channel: Channel, last: bool) -> Option<Arc<dyn ChannelSink>> {
+        let mut state = self.lock();
+        let channel = state.channels.get_mut(&channel)?;
+        channel.ended |= last;
+        Some(Arc::clone(&channel.sink))
     }
 
     /// I/O thread: pings or ends the link from traffic, and returns when to check again.
@@ -358,6 +400,7 @@ impl ServerLink {
             state.closed = Some(error);
             state.l0.clear();
             state.l1.clear();
+            state.releases.clear();
             std::mem::take(&mut state.requests)
         };
         for waiter in waiters.into_values() {
@@ -366,7 +409,22 @@ impl ServerLink {
         self.shared
             .events
             .deliver(LinkEvent::Health(Health::Closed(error)));
-        self.shared.wake.wake();
+        self.wake();
+    }
+
+    fn release(&self, channel: Channel) {
+        let mut state = self.lock();
+        let Some(dropped) = state.channels.remove(&channel) else {
+            return;
+        };
+        if !dropped.claimed || dropped.ended || state.closed.is_some() {
+            return;
+        }
+        state.releases.push_back(channel);
+        if state.send_releases() {
+            drop(state);
+            self.wake();
+        }
     }
 }
 
@@ -378,20 +436,77 @@ impl State {
         }
     }
 
-    fn queue(&mut self, message: &ClientMessage, urgent: bool) -> Result<(), LinkError> {
-        message.validate().map_err(|_| LinkError::OutOfBounds)?;
-        let message = encode_client(message).map_err(|_| LinkError::OutOfBounds)?;
-        if urgent {
-            if self.l0.len() + message.frames.len() > limits::MAX_L0_FRAMES
-                || self.l0_bytes + message.bytes() > limits::MAX_L0_BYTES
-            {
-                return Err(LinkError::Stalled);
-            }
-            self.l0_bytes += message.bytes();
-            self.l0.extend(message.frames);
-        } else {
-            self.l1.extend(message.frames);
+    fn send_request(
+        &mut self,
+        operation: Operation,
+        waiter: Waiter,
+    ) -> Result<RequestId, LinkError> {
+        if self.requests.len() >= limits::MAX_REQUESTS_IN_FLIGHT {
+            return Err(LinkError::Busy);
         }
+        let id = loop {
+            self.next_id = self.next_id.wrapping_add(1);
+            let id = RequestId(self.next_id);
+            if !self.requests.contains_key(&id) {
+                break id;
+            }
+        };
+        let message = ClientMessage::Request(Box::new(Request { id, operation }));
+        message.validate().map_err(|_| LinkError::OutOfBounds)?;
+        let wire = encode_client(&message).map_err(|_| LinkError::OutOfBounds)?;
+        self.l0.extend(wire.frames.into_iter().map(|frame| Queued {
+            frame,
+            counted: false,
+        }));
+        self.requests.insert(id, waiter);
+        Ok(id)
+    }
+
+    /// Sends queued releases while request capacity allows. Returns whether any was sent.
+    fn send_releases(&mut self) -> bool {
+        let mut sent = false;
+        while self.requests.len() < limits::MAX_REQUESTS_IN_FLIGHT
+            && let Some(channel) = self.releases.pop_front()
+        {
+            let ignore = Waiter::Callback(Box::new(|_| {}));
+            sent |= self
+                .send_request(Operation::Release { channel }, ignore)
+                .is_ok();
+        }
+        sent
+    }
+
+    /// Queues one message, or none on error.
+    fn queue(&mut self, message: &ClientMessage, urgent: bool) -> Result<(), LinkError> {
+        self.queue_all(std::slice::from_ref(message), urgent)
+    }
+
+    /// Queues every message or none, so a paste is never partly sent.
+    fn queue_all(&mut self, messages: &[ClientMessage], urgent: bool) -> Result<(), LinkError> {
+        let mut frames = Vec::new();
+        for message in messages {
+            message.validate().map_err(|_| LinkError::OutOfBounds)?;
+            frames.extend(
+                encode_client(message)
+                    .map_err(|_| LinkError::OutOfBounds)?
+                    .frames,
+            );
+        }
+        if !urgent {
+            self.l1.extend(frames);
+            return Ok(());
+        }
+        let bytes: usize = frames.iter().map(Vec::len).sum();
+        if self.l0.len() + frames.len() > limits::MAX_L0_FRAMES + limits::MAX_REQUESTS_IN_FLIGHT
+            || self.l0_bytes + bytes > limits::MAX_CLIENT_L0_BYTES
+        {
+            return Err(LinkError::Busy);
+        }
+        self.l0_bytes += bytes;
+        self.l0.extend(frames.into_iter().map(|frame| Queued {
+            frame,
+            counted: true,
+        }));
         Ok(())
     }
 }
@@ -420,7 +535,7 @@ impl PendingReply {
         self.id
     }
 
-    /// Blocks until the reply arrives or the link ends.
+    /// Blocks until the reply arrives or the link ends. Never call it on the I/O thread.
     pub fn wait(self) -> Result<ReplyBody, RequestError> {
         let mut value = self.slot.value.lock().unwrap_or_else(|e| e.into_inner());
         loop {
@@ -452,7 +567,7 @@ impl PendingReply {
     }
 }
 
-/// One claimed or claimable Pane on one link.
+/// One claimable Pane on one link.
 pub struct ChannelHandle {
     link: ServerLink,
     channel: Channel,
@@ -463,7 +578,8 @@ impl ChannelHandle {
         self.channel
     }
 
-    /// Claims a Pane for this channel. Frames may arrive before the reply.
+    /// Claims a Pane for this channel, once. Frames may arrive before the reply. A reply other
+    /// than `ClaimReply::Attached` leaves the channel unbound; drop the handle.
     pub fn claim(
         &self,
         attachment: crate::attachments::Attachment,
@@ -472,47 +588,115 @@ impl ChannelHandle {
         size: PaneSize,
         style: Option<PresentationStyle>,
     ) -> Result<PendingReply, LinkError> {
-        self.link.request(Operation::Claim(Claim {
+        let slot = Arc::new(ReplySlot::default());
+        let mut state = self.link.lock();
+        state.usable()?;
+        let channel = state
+            .channels
+            .get_mut(&self.channel)
+            .ok_or(LinkError::Unclaimed)?;
+        if channel.claimed {
+            return Err(LinkError::Unclaimed);
+        }
+        state.send_releases();
+        let operation = Operation::Claim(Claim {
             channel: self.channel,
             attachment,
             pane,
             claim,
             size,
             style,
-        }))
+        });
+        let id = state.send_request(operation, Waiter::Slot(Arc::clone(&slot)))?;
+        if let Some(channel) = state.channels.get_mut(&self.channel) {
+            channel.claimed = true;
+        }
+        drop(state);
+        self.link.wake();
+        Ok(PendingReply {
+            link: self.link.clone(),
+            id,
+            slot,
+        })
     }
 
-    /// Sends one Input message at L0 and returns its serial. Input is fire-and-forget: frames
-    /// report the serials they reflect, and `PaneEvent::Input` reports a discard.
-    pub fn input(&self, generation: u64, events: Vec<InputEvent>) -> Result<u32, LinkError> {
+    /// Queues messages on this claimed, live channel. `build` receives the next serial.
+    fn send_channel(
+        &self,
+        urgent: bool,
+        build: impl FnOnce(u32) -> Result<(Vec<ClientMessage>, u32), LinkError>,
+    ) -> Result<u32, LinkError> {
         let mut state = self.link.lock();
         state.usable()?;
         let channel = state
             .channels
-            .get_mut(&self.channel)
-            .ok_or(LinkError::Closed)?;
-        let serial = channel
-            .serial
-            .checked_add(1)
-            .ok_or(LinkError::OutOfBounds)?;
-        let message = ClientMessage::Input(Input {
-            channel: self.channel,
-            serial,
-            generation,
-            events,
-        });
-        state.queue(&message, true)?;
+            .get(&self.channel)
+            .ok_or(LinkError::Unclaimed)?;
+        if !channel.claimed || channel.ended {
+            return Err(LinkError::Unclaimed);
+        }
+        let (messages, serial) = build(channel.serial)?;
+        state.queue_all(&messages, urgent)?;
         if let Some(channel) = state.channels.get_mut(&self.channel) {
             channel.serial = serial;
         }
         drop(state);
-        self.link.shared.wake.wake();
+        self.link.wake();
         Ok(serial)
     }
 
+    /// Sends one Input message at L0 and returns its serial. Input is fire-and-forget: frames
+    /// report the serials they reflect, and `PaneEvent::Input` reports a discard. Use
+    /// [`ChannelHandle::paste`] for paste text.
+    pub fn input(&self, generation: u64, events: Vec<InputEvent>) -> Result<u32, LinkError> {
+        let channel = self.channel;
+        self.send_channel(true, move |last| {
+            let serial = last.checked_add(1).ok_or(LinkError::OutOfBounds)?;
+            let message = ClientMessage::Input(Input {
+                channel,
+                serial,
+                generation,
+                events,
+            });
+            Ok((vec![message], serial))
+        })
+    }
+
+    /// Sends a whole paste of at most [`limits::MAX_PASTE_BYTES`] as consecutive Input messages,
+    /// all or none, and returns the serial of the last one, which its outcome names.
+    pub fn paste(&self, generation: u64, text: &str) -> Result<u32, LinkError> {
+        if text.len() > limits::MAX_PASTE_BYTES {
+            return Err(LinkError::OutOfBounds);
+        }
+        let chunks = chunks(text, limits::MAX_PASTE_CHUNK_BYTES);
+        let channel = self.channel;
+        self.send_channel(true, move |mut serial| {
+            let count = chunks.len();
+            let mut messages = Vec::with_capacity(count);
+            for (index, chunk) in chunks.into_iter().enumerate() {
+                serial = serial.checked_add(1).ok_or(LinkError::OutOfBounds)?;
+                messages.push(ClientMessage::Input(Input {
+                    channel,
+                    serial,
+                    generation,
+                    events: vec![InputEvent::Paste {
+                        text: chunk.to_owned(),
+                        last: index + 1 == count,
+                    }],
+                }));
+            }
+            Ok((messages, serial))
+        })
+    }
+
+    fn send_simple(&self, message: ClientMessage, urgent: bool) -> Result<(), LinkError> {
+        self.send_channel(urgent, |serial| Ok((vec![message], serial)))
+            .map(|_| ())
+    }
+
     pub fn acknowledge(&self, frame: u64) -> Result<(), LinkError> {
-        self.link.send(
-            &ClientMessage::FrameAck(FrameAck {
+        self.send_simple(
+            ClientMessage::FrameAck(FrameAck {
                 channel: self.channel,
                 frame,
             }),
@@ -521,8 +705,8 @@ impl ChannelHandle {
     }
 
     pub fn view(&self, visible: bool, max_hz: u8) -> Result<(), LinkError> {
-        self.link.send(
-            &ClientMessage::View(View {
+        self.send_simple(
+            ClientMessage::View(View {
                 channel: self.channel,
                 visible,
                 max_hz,
@@ -537,8 +721,8 @@ impl ChannelHandle {
         effect: u64,
         completion: effects::Completion,
     ) -> Result<(), LinkError> {
-        self.link.send(
-            &ClientMessage::EffectDone(EffectDone {
+        self.send_simple(
+            ClientMessage::EffectDone(EffectDone {
                 channel: self.channel,
                 generation,
                 effect,
@@ -554,7 +738,28 @@ impl ChannelHandle {
 }
 
 impl Drop for ChannelHandle {
+    /// Sends `Release` for a claimed channel that has not ended, so the server frees its slot.
     fn drop(&mut self) {
-        self.link.lock().channels.remove(&self.channel);
+        self.link.release(self.channel);
+    }
+}
+
+/// Splits `text` at character boundaries into pieces of at most `limit` bytes. An empty paste is
+/// one empty piece, which the server rejects as `Empty`.
+fn chunks(text: &str, limit: usize) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    loop {
+        if rest.len() <= limit {
+            pieces.push(rest);
+            return pieces;
+        }
+        let mut end = limit;
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (piece, tail) = rest.split_at(end);
+        pieces.push(piece);
+        rest = tail;
     }
 }

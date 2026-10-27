@@ -52,12 +52,14 @@ impl Liveness {
         self.pinged = None;
     }
 
-    /// Records whether queued bytes are waiting on the carrier after a write attempt.
-    pub fn wrote(&mut self, now: Instant, blocked: bool) {
-        self.blocked = match (blocked, self.blocked) {
-            (false, _) => None,
-            (true, Some(since)) => Some(since),
-            (true, None) => Some(now),
+    /// Records a write attempt. `progressed` is whether any byte reached the carrier or the
+    /// socket; `pending` is whether bytes still wait, in the carrier or the outbox. Progress
+    /// restarts the stall timer, so a large backlog that keeps draining is not a stall.
+    pub fn wrote(&mut self, now: Instant, progressed: bool, pending: bool) {
+        self.blocked = match (pending, progressed, self.blocked) {
+            (false, _, _) => None,
+            (true, true, _) | (true, false, None) => Some(now),
+            (true, false, Some(since)) => Some(since),
         };
     }
 
@@ -129,17 +131,27 @@ mod tests {
             liveness.check(start + Duration::from_secs(15), None),
             Check::Live { .. }
         ));
-        liveness.wrote(start + Duration::from_secs(15), true);
-        liveness.wrote(start + Duration::from_secs(16), true);
-        liveness.received(start + Duration::from_secs(24));
+        // A backlog that keeps draining is not a stall.
+        for second in 15..30 {
+            liveness.received(start + Duration::from_secs(second));
+            liveness.wrote(start + Duration::from_secs(second), true, true);
+        }
+        assert!(matches!(
+            liveness.check(start + Duration::from_secs(30), None),
+            Check::Live { .. }
+        ));
+        liveness.wrote(start + Duration::from_secs(30), false, true);
+        liveness.wrote(start + Duration::from_secs(31), false, true);
+        liveness.received(start + Duration::from_secs(39));
         assert_eq!(
-            liveness.check(start + Duration::from_secs(25), None),
+            liveness.check(start + Duration::from_secs(40), None),
             Check::Dead(Death::Stalled)
         );
-        liveness.wrote(start + Duration::from_secs(25), false);
+        liveness.wrote(start + Duration::from_secs(41), true, false);
+        liveness.received(start + Duration::from_secs(41));
         assert!(matches!(
-            liveness.check(start + Duration::from_secs(25), Some(start + Duration::from_secs(20))),
-            Check::Live { next } if next == start + Duration::from_secs(29)
+            liveness.check(start + Duration::from_secs(42), Some(start + Duration::from_secs(35))),
+            Check::Live { next } if next == start + Duration::from_secs(45)
         ));
     }
 }

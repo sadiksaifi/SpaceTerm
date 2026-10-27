@@ -1,18 +1,21 @@
-//! The connection contract end to end: a `ServerLink` and a `AdmittedConnection` over a loopback
-//! carrier, pumped on one thread in place of the I/O threads.
+//! The connection contract end to end: a `ServerLink` and an `AdmittedConnection` over a loopback
+//! carrier, pumped on one thread in place of the two I/O threads.
 use super::carrier::{Carrier, Offer};
 use super::link::{ChannelEvent, Health, LinkError, LinkEvent, RequestError, ServerLink};
 use super::loopback::Loopback;
 use super::outbox::{FrameTicket, Outbox, Presentation, Presented};
+use super::registry::{PairedConnections, Sever};
 use super::server::AdmittedConnection;
-use super::service::{Dispatch, PaneService, Peer};
+use super::service::{DirectManagement, Dispatch, Pairing, PaneService, Peer};
+use super::sync::SyncWorker;
 use crate::ServerError;
+use crate::direct::{DirectError, Management, ManagementReply};
 use crate::pane::control::ClientName;
 use crate::pane::{AttachmentClaim, Lease, PaneSize};
 use crate::protocol::interim::Interim;
 use crate::protocol::{
-    ClaimReply, EffectDone, Fatal, Input, InputEvent, InventoryRevision, Operation, PaneEvent,
-    Refusal, ReplyBody, RequestId, ScreenUpdate, View,
+    Channel, ClaimReply, EffectDone, Fatal, Input, InputEvent, InventoryRevision, Operation,
+    PaneEvent, Refusal, ReplyBody, RequestId, ScreenUpdate, View,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,8 +24,10 @@ use std::time::{Duration, Instant};
 struct Recorded {
     outbox: Option<Outbox>,
     deferred: Vec<RequestId>,
-    inputs: Vec<u32>,
+    inputs: Vec<(u32, usize)>,
     views: Vec<View>,
+    released: Vec<Channel>,
+    sync_threads: Vec<std::thread::ThreadId>,
 }
 
 struct Toy(Arc<Mutex<Recorded>>);
@@ -43,9 +48,9 @@ impl PaneService for Toy {
     }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         let mut recorded = self.0.lock().unwrap();
+        let outbox = recorded.outbox.clone().unwrap();
         match operation {
             Operation::Claim(claim) => {
-                let outbox = recorded.outbox.as_ref().unwrap();
                 outbox.open(claim.channel).unwrap();
                 outbox.present(claim.channel, Box::new(Screen(0))).unwrap();
                 Dispatch::reply(Ok(ReplyBody::Claim(ClaimReply::Attached {
@@ -57,20 +62,30 @@ impl PaneService for Toy {
                     },
                 })))
             }
+            Operation::Release { channel } => {
+                outbox.close(channel);
+                recorded.released.push(channel);
+                Dispatch::reply(Ok(ReplyBody::Done))
+            }
             Operation::Resolve { .. } => {
                 recorded.deferred.push(id);
                 Dispatch::Deferred
             }
             Operation::Interim(Interim::Inventory) => {
-                Dispatch::After(Box::new(|| Err(Refusal::StorageUnavailable)))
+                let recorded = Arc::clone(&self.0);
+                Dispatch::After(Box::new(move || {
+                    let thread = std::thread::current().id();
+                    recorded.lock().unwrap().sync_threads.push(thread);
+                    Err(Refusal::StorageUnavailable)
+                }))
             }
             _ => Dispatch::reply(Ok(ReplyBody::Done)),
         }
     }
     fn input(&mut self, _peer: &Peer, input: Input) {
         let mut recorded = self.0.lock().unwrap();
-        recorded.inputs.push(input.serial);
-        let outbox = recorded.outbox.as_ref().unwrap();
+        recorded.inputs.push((input.serial, input.events.len()));
+        let outbox = recorded.outbox.clone().unwrap();
         outbox
             .present(input.channel, Box::new(Screen(input.serial)))
             .unwrap();
@@ -86,91 +101,109 @@ impl PaneService for Toy {
     }
 }
 
+struct Direct(Mutex<Vec<bool>>);
+impl DirectManagement for Direct {
+    fn manage(&self, peer: &Peer, _request: Management) -> Result<ManagementReply, DirectError> {
+        self.0.lock().unwrap().push(peer.paired());
+        Err(DirectError::Disabled)
+    }
+}
+
 struct Harness {
     link: ServerLink,
     client: Loopback,
     server: Loopback,
     connection: AdmittedConnection,
     service: Mutex<Box<dyn PaneService>>,
+    sync: SyncWorker,
     recorded: Arc<Mutex<Recorded>>,
-    inventory: Arc<Mutex<Vec<LinkEvent>>>,
+    events: Arc<Mutex<Vec<LinkEvent>>>,
+    direct: Arc<Direct>,
 }
 
 impl Harness {
-    fn new(paired: bool) -> Self {
+    fn new(pairing: Option<Pairing>) -> Self {
         let now = Instant::now();
         let (client, server) = Loopback::pair(4).unwrap();
-        let inventory = Arc::new(Mutex::new(Vec::new()));
-        let events = Arc::clone(&inventory);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
         let link = ServerLink::new(
-            Arc::new(move |event| events.lock().unwrap().push(event)),
+            Arc::new(move |event| sink.lock().unwrap().push(event)),
             Arc::new(|| {}),
             now,
         );
         let peer = Peer {
             client: [9; 32],
             connection: [8; 32],
-            paired,
+            pairing,
         };
         let outbox = Outbox::new(Arc::new(|| {}));
         let recorded = Arc::new(Mutex::new(Recorded::default()));
         let mut service: Box<dyn PaneService> = Box::new(Toy(Arc::clone(&recorded)));
         service.admitted(&peer, "Build Mac".into(), outbox.clone());
+        let (sync, _) = SyncWorker::spawn().unwrap();
+        let direct = Arc::new(Direct(Mutex::new(Vec::new())));
+        let handler: Arc<dyn DirectManagement> = direct.clone();
         Self {
             link,
             client,
             server,
-            connection: AdmittedConnection::new(peer, outbox, now),
+            connection: AdmittedConnection::new(peer, outbox, sync.clone(), Some(handler), now),
             service: Mutex::new(service),
+            sync,
             recorded,
-            inventory,
+            events,
+            direct,
         }
     }
 
-    /// Moves frames both ways until neither side makes progress, as the two I/O threads would.
+    /// Moves frames both ways until neither side makes progress and the sync worker is idle, as
+    /// the two I/O threads would.
     fn pump(&mut self) -> Result<(), Fatal> {
+        loop {
+            self.pump_once()?;
+            self.sync.flush().unwrap();
+            if !self.pump_once()? {
+                return Ok(());
+            }
+        }
+    }
+
+    fn pump_once(&mut self) -> Result<bool, Fatal> {
         let now = Instant::now();
-        let mut held_client = None;
-        let mut held_server = None;
+        let mut any = false;
         loop {
             let mut progress = false;
-            if held_client.is_none() {
-                held_client = self.link.next_frame();
-            }
-            if let Some(frame) = held_client.take() {
-                match self.client.offer(&frame).unwrap() {
-                    Offer::Accepted => progress = true,
-                    Offer::Full => held_client = Some(frame),
-                }
+            if let Some((frame, priority)) = self.link.next_frame() {
+                assert_eq!(
+                    self.client.offer(&frame, priority).unwrap(),
+                    Offer::Accepted
+                );
+                progress = true;
             }
             while let Some(frame) = self.server.receive().unwrap() {
                 progress = true;
                 if let Some(inbound) = self.connection.receive(frame, now)? {
-                    let deferred = {
-                        let mut service = self.service.lock().unwrap();
-                        self.connection.dispatch(inbound, service.as_mut())?
-                    };
-                    if let Some(deferred) = deferred {
-                        deferred.run(&self.connection)?;
-                    }
+                    let mut service = self.service.lock().unwrap();
+                    self.connection.dispatch(inbound, service.as_mut())?;
                 }
             }
-            if held_server.is_none() {
-                held_server = self.connection.outbox().next_frame(now).unwrap();
-            }
-            if let Some(frame) = held_server.take() {
-                match self.server.offer(&frame).unwrap() {
-                    Offer::Accepted => progress = true,
-                    Offer::Full => held_server = Some(frame),
-                }
+            if let Some((frame, priority)) = self.connection.outbox().next_frame() {
+                assert_eq!(
+                    self.server.offer(&frame, priority).unwrap(),
+                    Offer::Accepted
+                );
+                self.connection.wrote(now, true, false);
+                progress = true;
             }
             while let Some(frame) = self.client.receive().unwrap() {
                 progress = true;
                 let _ = self.link.receive(frame, now);
             }
             if !progress {
-                return Ok(());
+                return Ok(any);
             }
+            any = true;
         }
     }
 }
@@ -184,9 +217,52 @@ fn size() -> PaneSize {
     }
 }
 
+fn attachment() -> crate::attachments::Attachment {
+    crate::attachments::Attachment {
+        workspace: [1; 32],
+        generation: 1,
+    }
+}
+
+type Events = Arc<Mutex<Vec<ChannelEvent>>>;
+
+fn claimed(harness: &mut Harness) -> (super::link::ChannelHandle, Events) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let channel = harness
+        .link
+        .open_channel(Arc::new(move |event| sink.lock().unwrap().push(event)))
+        .unwrap();
+    let claim = channel
+        .claim(
+            attachment(),
+            [2; 32],
+            AttachmentClaim::Select { explicit: true },
+            size(),
+            None,
+        )
+        .unwrap();
+    harness.pump().unwrap();
+    assert!(matches!(
+        claim.wait(),
+        Ok(ReplyBody::Claim(ClaimReply::Attached { .. }))
+    ));
+    (channel, events)
+}
+
+fn frames(events: &Events) -> Vec<(u64, Option<u64>, u32)> {
+    std::mem::take(&mut *events.lock().unwrap())
+        .into_iter()
+        .map(|event| match event {
+            ChannelEvent::Frame(frame) => (frame.frame, frame.base, frame.input),
+            ChannelEvent::Pane(_) => panic!("unexpected Pane event"),
+        })
+        .collect()
+}
+
 #[test]
-fn requests_are_concurrent_and_deferred_replies_arrive_later() {
-    let mut harness = Harness::new(false);
+fn requests_are_concurrent_and_sync_work_runs_off_the_io_thread() {
+    let mut harness = Harness::new(None);
     let resolve = harness
         .link
         .request(Operation::Resolve { sequence: 1 })
@@ -194,15 +270,16 @@ fn requests_are_concurrent_and_deferred_replies_arrive_later() {
     let release = harness
         .link
         .request(Operation::ReleaseAttachment {
-            attachment: crate::attachments::Attachment {
-                workspace: [1; 32],
-                generation: 1,
-            },
+            attachment: attachment(),
         })
         .unwrap();
     let after = harness
         .link
         .request(Operation::Interim(Interim::Inventory))
+        .unwrap();
+    let direct = harness
+        .link
+        .request(Operation::Direct(Management::Status))
         .unwrap();
     harness.pump().unwrap();
     assert!(
@@ -214,6 +291,14 @@ fn requests_are_concurrent_and_deferred_replies_arrive_later() {
         after.wait().unwrap_err(),
         RequestError::Refused(Refusal::StorageUnavailable)
     );
+    assert!(matches!(
+        direct.wait(),
+        Ok(ReplyBody::Direct(Err(DirectError::Disabled)))
+    ));
+    assert_eq!(*harness.direct.0.lock().unwrap(), [false]);
+    let threads = harness.recorded.lock().unwrap().sync_threads.clone();
+    assert_eq!(threads.len(), 1);
+    assert_ne!(threads[0], std::thread::current().id());
 
     let id = harness.recorded.lock().unwrap().deferred[0];
     let outbox = harness.connection.outbox().clone();
@@ -226,7 +311,7 @@ fn requests_are_concurrent_and_deferred_replies_arrive_later() {
     outbox.reply(id, Ok(ReplyBody::Done)).unwrap();
     harness.pump().unwrap();
     assert!(matches!(
-        harness.inventory.lock().unwrap().as_slice(),
+        harness.events.lock().unwrap().as_slice(),
         [LinkEvent::Inventory(_)]
     ));
     assert!(matches!(resolve.wait(), Ok(ReplyBody::Done)));
@@ -234,49 +319,18 @@ fn requests_are_concurrent_and_deferred_replies_arrive_later() {
 
 #[test]
 fn claimed_channels_receive_frames_under_one_frame_of_credit() {
-    let mut harness = Harness::new(false);
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&events);
-    let channel = harness
-        .link
-        .open_channel(Arc::new(move |event| sink.lock().unwrap().push(event)))
-        .unwrap();
-    let claim = channel
-        .claim(
-            crate::attachments::Attachment {
-                workspace: [1; 32],
-                generation: 1,
-            },
-            [2; 32],
-            AttachmentClaim::Select { explicit: true },
-            size(),
-            None,
-        )
-        .unwrap();
+    let mut harness = Harness::new(None);
+    let (channel, events) = claimed(&mut harness);
     channel.view(true, 120).unwrap();
     harness.pump().unwrap();
-    assert!(matches!(
-        claim.wait(),
-        Ok(ReplyBody::Claim(ClaimReply::Attached { .. }))
-    ));
     assert_eq!(harness.recorded.lock().unwrap().views.len(), 1);
-
-    let frames = |events: &Arc<Mutex<Vec<ChannelEvent>>>| {
-        std::mem::take(&mut *events.lock().unwrap())
-            .into_iter()
-            .map(|event| match event {
-                ChannelEvent::Frame(frame) => (frame.frame, frame.base, frame.input),
-                ChannelEvent::Pane(_) => panic!("unexpected Pane event"),
-            })
-            .collect::<Vec<_>>()
-    };
     assert_eq!(frames(&events), [(1, None, 0)]);
 
     let key = |modifiers| vec![InputEvent::CopyOrForward { modifiers }];
     assert_eq!(channel.input(1, key(1)).unwrap(), 1);
     assert_eq!(channel.input(1, key(2)).unwrap(), 2);
     harness.pump().unwrap();
-    assert_eq!(harness.recorded.lock().unwrap().inputs, [1, 2]);
+    assert_eq!(harness.recorded.lock().unwrap().inputs, [(1, 1), (2, 1)]);
     assert!(
         frames(&events).is_empty(),
         "no credit until frame 1 is acknowledged"
@@ -290,49 +344,180 @@ fn claimed_channels_receive_frames_under_one_frame_of_credit() {
         "only the latest state is sent"
     );
 
+    // The final state follows the acknowledgement, then the end event closes the channel.
     harness
         .connection
         .outbox()
-        .pane(channel.channel(), PaneEvent::Ended)
+        .present(channel.channel(), Box::new(Screen(9)))
         .unwrap();
+    harness
+        .connection
+        .outbox()
+        .end(channel.channel(), PaneEvent::Ended)
+        .unwrap();
+    harness.pump().unwrap();
+    assert!(events.lock().unwrap().is_empty());
+    channel.acknowledge(2).unwrap();
     harness.pump().unwrap();
     assert!(matches!(
         events.lock().unwrap().as_slice(),
-        [ChannelEvent::Pane(PaneEvent::Ended)]
+        [ChannelEvent::Frame(last), ChannelEvent::Pane(PaneEvent::Ended)] if last.input == 9
     ));
+    assert_eq!(channel.input(1, key(3)), Err(LinkError::Unclaimed));
+    drop(channel);
+    harness.pump().unwrap();
+    assert!(
+        harness.recorded.lock().unwrap().released.is_empty(),
+        "an ended channel needs no release"
+    );
+}
+
+#[test]
+fn dropping_a_channel_releases_it_and_acknowledges_late_frames() {
+    let mut harness = Harness::new(None);
+    let (channel, _) = claimed(&mut harness);
+    let id = channel.channel();
+    channel.acknowledge(1).unwrap();
+    harness.pump().unwrap();
+    let outbox = harness.connection.outbox().clone();
+    outbox.present(id, Box::new(Screen(1))).unwrap();
+    let (frame, priority) = outbox.next_frame().unwrap();
+    harness.server.offer(&frame, priority).unwrap();
+    drop(channel);
+    let frame = harness.client.receive().unwrap().unwrap();
+    harness.link.receive(frame, Instant::now()).unwrap();
+
+    let mut assembler = crate::protocol::frame::Assembler::default();
+    let mut sent = Vec::new();
+    while let Some((frame, priority)) = harness.link.next_frame() {
+        let raw = crate::protocol::RawFrame::parse(&frame).unwrap();
+        sent.push(assembler.client(raw).unwrap().unwrap());
+        harness.client.offer(&frame, priority).unwrap();
+    }
+    assert!(matches!(
+        sent.as_slice(),
+        [
+            crate::protocol::ClientMessage::Request(release),
+            crate::protocol::ClientMessage::FrameAck(ack),
+        ] if matches!(release.operation, Operation::Release { channel } if channel == id)
+            && ack.frame == 2
+    ));
+    harness.pump().unwrap();
+    assert_eq!(harness.recorded.lock().unwrap().released, [id]);
+    assert_eq!(outbox.unacknowledged_since(), None);
+
+    let unclaimed = harness.link.open_channel(Arc::new(|_| {})).unwrap();
+    assert_eq!(
+        unclaimed.input(1, vec![InputEvent::Resize(size())]),
+        Err(LinkError::Unclaimed)
+    );
+    assert_eq!(unclaimed.view(true, 60), Err(LinkError::Unclaimed));
+}
+
+#[test]
+fn a_paste_is_sent_whole_in_bounded_messages() {
+    let mut harness = Harness::new(None);
+    let (channel, _) = claimed(&mut harness);
+    let text = "界".repeat(crate::protocol::limits::MAX_PASTE_BYTES / 3);
+    let last = channel.paste(1, &text).unwrap();
+    harness.pump().unwrap();
+    let inputs = harness.recorded.lock().unwrap().inputs.clone();
+    assert_eq!(inputs.len(), last as usize);
+    assert!(inputs.len() > 1);
+    assert_eq!(
+        channel.paste(1, &"x".repeat(crate::protocol::limits::MAX_PASTE_BYTES + 1)),
+        Err(LinkError::OutOfBounds)
+    );
+    assert_eq!(
+        channel.input(1, vec![]).unwrap_err(),
+        LinkError::OutOfBounds
+    );
+    assert_eq!(
+        channel.input(1, vec![InputEvent::Resize(size())]).unwrap(),
+        last + 1,
+        "refused messages consume no serial"
+    );
 }
 
 #[test]
 fn protocol_order_violations_end_the_connection() {
-    let mut harness = Harness::new(false);
-    let channel = harness.link.open_channel(Arc::new(|_| {})).unwrap();
-    channel.input(1, vec![InputEvent::Resize(size())]).unwrap();
+    let mut harness = Harness::new(None);
+    let (channel, _) = claimed(&mut harness);
+    drop(channel);
+    // A misbehaving client: input on a channel number no claim introduced.
+    harness
+        .client
+        .offer(
+            &crate::protocol::frame::encode_client(&crate::protocol::ClientMessage::Input(Input {
+                channel: Channel(7),
+                serial: 1,
+                generation: 1,
+                events: vec![InputEvent::Resize(size())],
+            }))
+            .unwrap()
+            .frames[0],
+            super::carrier::Priority::L0,
+        )
+        .unwrap();
+    let frame = harness.server.receive().unwrap().unwrap();
     assert_eq!(
-        harness.pump(),
-        Err(Fatal::ProtocolViolation),
-        "input on a channel that was never claimed"
+        harness
+            .connection
+            .receive(frame, Instant::now())
+            .unwrap_err(),
+        Fatal::ProtocolViolation
     );
-
-    let mut harness = Harness::new(false);
-    let unacknowledged = harness.link.open_channel(Arc::new(|_| {})).unwrap();
-    unacknowledged.acknowledge(1).unwrap();
-    assert_eq!(harness.pump(), Err(Fatal::ProtocolViolation));
 }
 
 #[test]
-fn paired_peers_cannot_administer_the_account() {
-    let mut harness = Harness::new(true);
+fn revocation_ends_a_live_paired_connection() {
+    struct Severed(Arc<Mutex<bool>>);
+    impl Sever for Severed {
+        fn sever(&self) {
+            *self.0.lock().unwrap() = true;
+        }
+    }
+    let pairing = Pairing {
+        pairing: [4; 32],
+        generation: [5; 32],
+    };
+    let mut harness = Harness::new(Some(pairing));
     let shutdown = harness.link.request(Operation::Shutdown).unwrap();
     harness.pump().unwrap();
     assert_eq!(
         shutdown.wait().unwrap_err(),
-        RequestError::Refused(Refusal::Unsupported)
+        RequestError::Refused(Refusal::Unsupported),
+        "paired peers cannot administer the account"
+    );
+
+    let severed = Arc::new(Mutex::new(false));
+    let mut registry = PairedConnections::default();
+    registry
+        .register(
+            harness.connection.peer().connection,
+            pairing,
+            harness.connection.outbox().clone(),
+            Box::new(Severed(Arc::clone(&severed))),
+        )
+        .unwrap();
+    let pending = harness.link.request(Operation::Resolve { sequence: 1 });
+    registry.revoke([4; 32]);
+    harness.pump().unwrap();
+    assert!(*severed.lock().unwrap());
+    assert!(harness.recorded.lock().unwrap().deferred.is_empty());
+    assert_eq!(
+        harness.link.health(),
+        Health::Closed(LinkError::Goodbye(Fatal::Revoked))
+    );
+    assert_eq!(
+        pending.unwrap().wait().unwrap_err(),
+        RequestError::Link(LinkError::Goodbye(Fatal::Revoked))
     );
 }
 
 #[test]
 fn health_comes_from_traffic_and_failure_settles_every_pending_request() {
-    let mut harness = Harness::new(false);
+    let mut harness = Harness::new(None);
     let start = Instant::now();
     let next = harness.link.check(start + Duration::from_secs(5)).unwrap();
     assert!(next > start + Duration::from_secs(5));
@@ -354,7 +539,7 @@ fn health_comes_from_traffic_and_failure_settles_every_pending_request() {
     assert_eq!(harness.link.health(), Health::Closed(closed));
     assert_eq!(pending.wait().unwrap_err(), RequestError::Link(closed));
     assert!(matches!(
-        harness.inventory.lock().unwrap().as_slice(),
+        harness.events.lock().unwrap().as_slice(),
         [LinkEvent::Health(Health::Closed(_))]
     ));
     assert_eq!(

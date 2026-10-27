@@ -1,5 +1,5 @@
 //! An in-memory carrier pair for tests, with real descriptors for readiness.
-use super::carrier::{Carrier, CarrierError, Flush, Offer, Readiness};
+use super::carrier::{Carrier, CarrierError, Flush, Offer, Priority, Readiness};
 use crate::protocol::RawFrame;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -23,6 +23,8 @@ pub struct Loopback {
     bell: UnixStream,
     /// Rings the peer's bell.
     peer: UnixStream,
+    /// This end called `close`. The peer still receives what was sent before.
+    closing: bool,
 }
 
 impl Loopback {
@@ -46,6 +48,7 @@ impl Loopback {
                 capacity,
                 bell: a_bell,
                 peer: b_ring,
+                closing: false,
             },
             Self {
                 incoming: a_to_b,
@@ -53,6 +56,7 @@ impl Loopback {
                 capacity,
                 bell: b_bell,
                 peer: a_ring,
+                closing: false,
             },
         ))
     }
@@ -68,7 +72,7 @@ impl Loopback {
 }
 
 impl Carrier for Loopback {
-    fn offer(&mut self, frame: &[u8]) -> Result<Offer, CarrierError> {
+    fn offer(&mut self, frame: &[u8], _priority: Priority) -> Result<Offer, CarrierError> {
         if self.closed() {
             return Err(CarrierError::Closed);
         }
@@ -87,14 +91,18 @@ impl Carrier for Loopback {
         Ok(Offer::Accepted)
     }
 
+    /// Accepted frames are already in the peer's queue, so nothing is ever pending.
     fn flush(&mut self) -> Result<Flush, CarrierError> {
-        if self.closed() {
-            return Err(CarrierError::Closed);
-        }
-        Ok(Flush::Done)
+        Ok(Flush {
+            progressed: false,
+            pending: false,
+        })
     }
 
     fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
+        if self.closing {
+            return Err(CarrierError::Closed);
+        }
         let mut drained = [0; 64];
         while matches!((&self.bell).read(&mut drained), Ok(count) if count > 0) {}
         let frame = self
@@ -121,6 +129,7 @@ impl Carrier for Loopback {
     }
 
     fn close(&mut self) {
+        self.closing = true;
         self.outgoing.closed.store(true, Ordering::Release);
         self.incoming.closed.store(true, Ordering::Release);
         self.ring();
