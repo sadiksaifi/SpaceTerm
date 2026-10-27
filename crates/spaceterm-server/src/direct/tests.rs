@@ -463,7 +463,7 @@ fn invalid_device_proof_cannot_consume_an_invitation_or_substitute_an_approval()
 }
 
 #[test]
-fn an_explicit_owner_rejection_crosses_wss_as_rejected_without_enrolling_the_device() {
+fn an_explicit_owner_rejection_crosses_quic_as_rejected_without_enrolling_the_device() {
     let fixture = Fixture::new();
     fixture.enable();
     let invitation = fixture.invite();
@@ -1040,7 +1040,7 @@ fn only_a_fully_admitted_device_updates_its_retained_last_connection_time() {
 }
 
 #[test]
-fn wss_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity() {
+fn quic_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -1531,7 +1531,7 @@ fn reserve(fixture: &Fixture, request: &Management) {
 }
 
 #[test]
-fn prepared_setup_can_be_cancelled_over_wss_before_admission_and_after_restart() {
+fn prepared_setup_can_be_cancelled_over_quic_before_admission_and_after_restart() {
     let fixture = Fixture::new();
     fixture.enable();
     let endpoint = fixture.endpoint();
@@ -1753,7 +1753,7 @@ fn admitted_setup_retry_returns_its_original_pairing_without_replacing_a_changed
 }
 
 #[test]
-fn lost_setup_reply_uses_the_original_claim_for_key_bound_wss_cleanup() {
+fn lost_setup_reply_uses_the_original_claim_for_key_bound_quic_cleanup() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -1804,7 +1804,7 @@ fn lost_setup_reply_uses_the_original_claim_for_key_bound_wss_cleanup() {
 }
 
 #[test]
-fn paired_wss_authority_cannot_prepare_enroll_or_cancel_account_setup() {
+fn paired_quic_authority_cannot_prepare_enroll_or_cancel_account_setup() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -2302,7 +2302,7 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
     impl DirectConnector for Connector {
         fn connect(&self) -> Result<DirectConnection, DirectError> {
             let result = DirectConnection::connect(&self.endpoint, &self.paired, &self.credential);
-            // Both handles finish WSS authentication before either starts admission.
+            // Both handles finish QUIC authentication before either starts admission.
             self.admitted.wait();
             result
         }
@@ -2489,8 +2489,225 @@ mod quic_connections {
         let _ = server.join().unwrap();
     }
 
-    /// Measures a QUIC request's round trip on loopback, as `wss_request_round_trip_on_loopback`
-    /// does for WSS. Run it with `mise run bench:latency:quic`.
+    /// A raw frame of `kind` with `size` bytes in all, its body filled with `fill`.
+    fn raw(kind: crate::protocol::Kind, size: usize, fill: u8) -> Vec<u8> {
+        let mut frame = vec![fill; size];
+        let len = (size - 4) as u32;
+        frame[..4].copy_from_slice(&len.to_be_bytes());
+        frame[4] = kind as u8;
+        frame
+    }
+
+    /// Drives `carrier` until it has received `count` frames or `deadline` passes.
+    fn receive_frames(
+        carrier: &mut dyn crate::connection::carrier::Carrier,
+        count: usize,
+        deadline: Instant,
+    ) -> Vec<crate::protocol::RawFrame> {
+        let mut frames = Vec::new();
+        while frames.len() < count {
+            match carrier.receive() {
+                Ok(Some(frame)) => frames.push(frame),
+                Ok(None) => {
+                    carrier.flush().unwrap();
+                    let readiness = carrier.readiness();
+                    let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+                    crate::connection::io::wait_fd(readiness.read, false, until);
+                    assert!(Instant::now() < deadline, "frames did not arrive");
+                }
+                Err(_) => break,
+            }
+        }
+        frames
+    }
+
+    /// Offers `frames` in order and drives `carrier` until the peer has them, then closes.
+    fn send_frames(
+        carrier: &mut dyn crate::connection::carrier::Carrier,
+        frames: Vec<(Vec<u8>, crate::connection::carrier::Priority)>,
+        deadline: Instant,
+    ) {
+        use crate::connection::carrier::Offer;
+        let mut queue = frames.into_iter();
+        let mut held = queue.next();
+        loop {
+            while let Some((frame, priority)) = &held {
+                if carrier.offer(frame, *priority).unwrap() != Offer::Accepted {
+                    break;
+                }
+                held = queue.next();
+            }
+            let pending = carrier.flush().unwrap().pending;
+            if held.is_none() && !pending {
+                break;
+            }
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+            crate::connection::io::wait_fd(readiness.read, false, until);
+            let _ = carrier.receive();
+            assert!(Instant::now() < deadline, "frames did not leave");
+        }
+        carrier.close();
+        while carrier.flush().is_ok_and(|flush| flush.pending) && Instant::now() < deadline {
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+            crate::connection::io::wait_fd(readiness.read, false, until);
+        }
+    }
+
+    /// The server writes L0 before L1, so without the client's rule a goodbye written after a
+    /// large frame would arrive first.
+    #[test]
+    fn a_goodbye_never_overtakes_a_frame_in_flight() {
+        use crate::connection::carrier::Priority;
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let large = raw(Kind::Frame, crate::protocol::limits::MAX_FRAME_BYTES, 7);
+        let goodbye = crate::protocol::frame::encode_server(
+            &crate::protocol::ServerMessage::Goodbye(crate::protocol::Fatal::Stopping),
+        )
+        .unwrap()
+        .frames
+        .remove(0);
+        let sent = (large.clone(), goodbye.clone());
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            send_frames(
+                &mut carrier,
+                vec![(sent.0, Priority::L1), (sent.1, Priority::L0)],
+                Instant::now() + Duration::from_secs(10),
+            );
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        let mut carrier = stream.into_carrier();
+        let frames = receive_frames(&mut carrier, 2, Instant::now() + Duration::from_secs(10));
+        let kinds: Vec<u8> = frames.iter().map(|frame| frame.kind).collect();
+        assert_eq!(kinds, [Kind::Frame as u8, Kind::Goodbye as u8]);
+        server.join().unwrap();
+    }
+
+    /// The client writes every level on one stream in the order it offers frames, so a
+    /// cancellation never overtakes its request and later input never overtakes an earlier
+    /// native effect completion.
+    #[test]
+    fn client_frames_arrive_in_the_order_offered() {
+        use crate::connection::carrier::Priority;
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            receive_frames(&mut carrier, 4, Instant::now() + Duration::from_secs(10))
+                .iter()
+                .map(|frame| frame.kind)
+                .collect::<Vec<_>>()
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        let mut carrier = stream.into_carrier();
+        send_frames(
+            &mut carrier,
+            vec![
+                (raw(Kind::Request, 60 * 1024, 1), Priority::L0),
+                (raw(Kind::Cancel, 64, 2), Priority::L1),
+                (raw(Kind::EffectDone, 16 * 1024, 3), Priority::L1),
+                (raw(Kind::Input, 64, 4), Priority::L0),
+            ],
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            [
+                Kind::Request as u8,
+                Kind::Cancel as u8,
+                Kind::EffectDone as u8,
+                Kind::Input as u8
+            ]
+        );
+    }
+
+    /// A switch between networks moves the client to a new socket and source port. The server
+    /// validates the new path; the session continues without a second admission.
+    #[test]
+    fn a_client_on_a_new_socket_keeps_its_session_without_admission() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Admissions(Arc<AtomicUsize>);
+        impl PaneService for Admissions {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                Dispatch::reply(Err(Refusal::Unsupported))
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let server = fixture.serve_next_with(service(Admissions(Arc::clone(&admissions))));
+        let mut stream = quic::dial(&fixture.endpoint(), &paired.pin, &credential).unwrap();
+        let answer = client::exchange_on(
+            &mut stream,
+            &paired.pin,
+            &credential,
+            wire::Action::Connect {
+                paired: paired.clone(),
+            },
+            None,
+            None,
+        );
+        assert!(matches!(answer, Ok(wire::Answer::Connected)));
+        crate::protocol::admit_transport(
+            &mut stream,
+            (&paired.client, &"Test".into()),
+            &paired.pin.server,
+            &paired.pin.build,
+            &[crate::protocol::MAJOR],
+        )
+        .unwrap();
+        let carrier = stream.into_carrier();
+        let rebind = carrier.rebinder();
+        let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        for _ in 0..3 {
+            rebind.store(true, Ordering::Release);
+            for _ in 0..5 {
+                assert!(matches!(
+                    request(&link, nothing()),
+                    Err(RequestError::Refused(Refusal::Unsupported))
+                ));
+            }
+        }
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(link.health(), crate::connection::link::Health::Live);
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// Measures a QUIC request's round trip on loopback, as `quic_request_round_trip_on_loopback`
+    /// does for QUIC. Run it with `mise run bench:latency:quic`.
     #[test]
     #[ignore = "a measurement; run with `mise run bench:latency:quic`"]
     fn quic_request_round_trip_on_loopback() {

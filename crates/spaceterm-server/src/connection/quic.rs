@@ -8,10 +8,15 @@
 //! - **Pinned keys.** TLS 1.3 runs inside QUIC with the same pinned server certificate as before.
 //!   The client presents a self-signed certificate of its device key, which the server compares
 //!   with the enrolled key. The callers build both rustls configurations.
-//! - **Streams.** L0 is the bidirectional stream the server opens for pairing and admission. Each
-//!   side opens one unidirectional stream for L1 and one for L2 when it first sends at that level;
-//!   such a stream starts with its level byte. Frames follow back to back with their length
+//! - **Streams.** L0 is the bidirectional stream the server opens for pairing and admission. The
+//!   server opens one unidirectional stream for L1 and one for L2 when it first sends at that
+//!   level; such a stream starts with its level byte. Frames follow back to back with their length
 //!   prefix, as on the Unix socket. A lost packet stalls only its own level.
+//! - **Ordering.** Frames of one level arrive in the order they were offered. The client sends
+//!   every level on L0, so a cancellation or an edit acknowledgement never overtakes its request.
+//!   On close the server finishes all three streams, opening any it never used, and the client
+//!   holds the server's goodbye until L1 and L2 have ended, so a goodbye never overtakes frames
+//!   in flight.
 //! - **Readiness.** The carrier reports its socket or bell as readable when datagrams arrive, and
 //!   QUIC's next timer as a deadline. Write progress needs incoming acknowledgements, so the same
 //!   descriptor is the progress descriptor.
@@ -653,10 +658,48 @@ impl Driver {
                     self.state.stashed = Some((transmit.destination, bytes.to_vec()));
                     return;
                 }
+                // The connected socket's local address left with its network: move to a socket
+                // the system binds afresh. QUIC retransmits what this send lost.
+                Err(error)
+                    if self.peer.is_some()
+                        && matches!(
+                            error.kind(),
+                            ErrorKind::AddrNotAvailable
+                                | ErrorKind::NetworkUnreachable
+                                | ErrorKind::HostUnreachable
+                                | ErrorKind::NetworkDown
+                        ) =>
+                {
+                    self.rebind(now);
+                    return;
+                }
                 // A lost datagram is QUIC's to recover.
                 _ => {}
             }
         }
+    }
+
+    /// Moves a client to a new UDP socket, as after a switch between networks. The server
+    /// validates the new path and the connection continues without a new handshake.
+    fn rebind(&mut self, now: Instant) {
+        let Some(peer) = self.peer else {
+            return;
+        };
+        let local: SocketAddr = if peer.is_ipv4() {
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+        } else {
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+        };
+        let Ok(socket) = nonblocking_socket(local) else {
+            return;
+        };
+        if socket.connect(peer).is_err() {
+            return;
+        }
+        self.socket = Arc::new(socket);
+        self.state.stashed = None;
+        self.connection.handle_network_change(None, now);
+        self.transmit(now);
     }
 
     /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
@@ -974,6 +1017,8 @@ struct Outgoing {
 /// One incoming stream: L0, or a peer's L1 or L2 once its level byte arrived.
 struct Incoming {
     id: StreamId,
+    /// The level, once known.
+    level: Option<usize>,
     /// Whether the level byte is still to be read.
     unlabelled: bool,
     reader: FrameReader,
@@ -1006,6 +1051,12 @@ pub struct QuicCarrier {
     /// Peer streams of other levels this end accepted, so a third is a violation.
     labelled: [bool; 3],
     severed: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether this end is the client, which sends every level on L0.
+    client: bool,
+    /// Set to move a client to a new socket at its next call.
+    rebind: Arc<std::sync::atomic::AtomicBool>,
+    /// The server's goodbye, held until its L1 and L2 streams ended.
+    goodbye: Option<RawFrame>,
     /// Packets sent, so a flush reports progress.
     sent: u64,
     closing: bool,
@@ -1022,13 +1073,18 @@ impl QuicCarrier {
         let incoming = l0
             .map(|id| Incoming {
                 id,
+                level: Some(0),
                 unlabelled: false,
                 reader,
                 ended: false,
             })
             .into_iter()
             .collect();
+        let client = matches!(driver.side, Side::Client { .. });
         Self {
+            client,
+            rebind: Arc::default(),
+            goodbye: None,
             driver,
             outgoing,
             incoming,
@@ -1052,6 +1108,18 @@ impl QuicCarrier {
         QuicSever {
             severed: Arc::clone(&self.severed),
             ring,
+        }
+    }
+
+    /// A handle that moves this client to a new UDP socket at its next turn, as a network change
+    /// does. Ring the link after setting it.
+    pub fn rebinder(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.rebind)
+    }
+
+    fn rebind_if_asked(&mut self) {
+        if self.rebind.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            self.driver.rebind(Instant::now());
         }
     }
 
@@ -1097,6 +1165,23 @@ impl QuicCarrier {
                 }
             }
             if self.closing && outgoing.frames.is_empty() && !outgoing.finished {
+                // The server finishes every level, opening any it never used, so the client knows
+                // when nothing is left in flight before the goodbye.
+                if outgoing.id.is_none() && !self.client {
+                    let Some(id) = self.driver.connection.streams().open(Dir::Uni) else {
+                        continue;
+                    };
+                    if self
+                        .driver
+                        .connection
+                        .send_stream(id)
+                        .write(&[index(level) as u8])
+                        != Ok(1)
+                    {
+                        return Err(CarrierError::Failed);
+                    }
+                    outgoing.id = Some(id);
+                }
                 outgoing.finished = true;
                 if let Some(id) = outgoing.id {
                     let _ = self.driver.connection.send_stream(id).finish();
@@ -1104,6 +1189,16 @@ impl QuicCarrier {
             }
         }
         Ok(())
+    }
+
+    /// Whether the server's L1 and L2 streams both ended, so nothing sent before its goodbye is
+    /// still in flight.
+    fn levels_ended(&self) -> bool {
+        [1, 2].iter().all(|level| {
+            self.incoming
+                .iter()
+                .any(|stream| stream.level == Some(*level) && stream.ended)
+        })
     }
 
     fn unflushed(&self) -> usize {
@@ -1115,6 +1210,7 @@ impl QuicCarrier {
         while let Some(id) = self.driver.connection.streams().accept(Dir::Uni) {
             self.incoming.push(Incoming {
                 id,
+                level: None,
                 unlabelled: true,
                 reader: FrameReader::default(),
                 ended: false,
@@ -1143,11 +1239,16 @@ impl QuicCarrier {
                         ));
                     }
                     self.labelled[level] = true;
+                    stream.level = Some(level);
                     stream.unlabelled = false;
                     data = rest;
                 }
                 stream.reader.feed(data);
                 while let Some(frame) = stream.reader.next_frame()? {
+                    if self.client && frame.kind == crate::protocol::Kind::Goodbye as u8 {
+                        self.goodbye.get_or_insert(frame);
+                        continue;
+                    }
                     self.inbound_bytes += limits::HEADER_BYTES + frame.body.len();
                     self.inbound.push_back(frame);
                 }
@@ -1179,13 +1280,13 @@ impl Carrier for QuicCarrier {
         if self.unflushed() > 1 {
             return Ok(Offer::Full);
         }
-        self.outgoing[index(priority)]
-            .frames
-            .push_back(frame.to_vec());
+        let level = if self.client { Priority::L0 } else { priority };
+        self.outgoing[index(level)].frames.push_back(frame.to_vec());
         Ok(Offer::Accepted)
     }
 
     fn flush(&mut self) -> Result<Flush, CarrierError> {
+        self.rebind_if_asked();
         // Frames first, so acknowledgements of what `receive` took ride on them.
         self.write_streams()?;
         if self.closing {
@@ -1234,6 +1335,9 @@ impl Carrier for QuicCarrier {
         if let Some(frame) = self.inbound.pop_front() {
             self.inbound_bytes -= limits::HEADER_BYTES + frame.body.len();
             return Ok(Some(frame));
+        }
+        if self.goodbye.is_some() && self.levels_ended() {
+            return Ok(self.goodbye.take());
         }
         if let Some(error) = self.violation.or(self.driver.state.lost) {
             return Err(error);
