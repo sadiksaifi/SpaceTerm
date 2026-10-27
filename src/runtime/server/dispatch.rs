@@ -332,6 +332,9 @@ impl HostCommands for DevelopmentPaneHost {
     fn input_written(&mut self, lease: &Lease, serial: u32) {
         DevelopmentPaneHost::input_written(self, lease, serial);
     }
+    fn restart_input(&mut self, lease: &Lease) {
+        DevelopmentPaneHost::restart_input(self, lease);
+    }
     fn disconnected(&mut self, connection: [u8; 32]) {
         self.directories.cancel_connection(connection);
         if let Some(pane) = &mut self.pane
@@ -390,6 +393,9 @@ pub trait HostCommands: Send {
     }
     /// The host's wake, which makes it tick again; see `PaneService::ticker`.
     fn ticker(&mut self, _wake: Arc<dyn spaceterm_server::connection::Wake>) {}
+    /// A Terminal Session rang the bell, so the next tick carries what it changed. A host may
+    /// pace what such ticks push.
+    fn rung(&mut self) {}
     /// The host is stopping; refuse every deferred reply still owed. See `PaneService::stopping`.
     fn stopping(&mut self) {}
     /// Records the Client Name an admitted client supplied, before any of its requests.
@@ -431,6 +437,9 @@ pub trait HostCommands: Send {
     fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8);
     /// Marks the end of Input `serial`, so screens captured once its bytes reach the PTY carry it.
     fn input_written(&mut self, lease: &Lease, serial: u32);
+    /// A channel was bound to `lease`, and its Input serials start at 1. Screens report no serial
+    /// of an earlier binding.
+    fn restart_input(&mut self, lease: &Lease);
     /// Reads Scrollback rows of the Pane `lease` controls. `reply` runs exactly once, on the
     /// Pane's terminal worker, unless this refuses the read.
     fn scrollback_page(
@@ -803,6 +812,8 @@ impl<H: HostCommands> Served<H> {
                 publication,
             },
         );
+        // The new channel numbers its Input from 1, before any Input of it reaches the session.
+        self.host.restart_input(&lease);
         // The Terminal Session publishes nothing until the client's first `View` shows it.
         self.host
             .view(&lease, false, crate::terminal::session::DEFAULT_FRAME_RATE);
@@ -1135,6 +1146,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         // ended shell's final screen over before the host's timed work retires its Pane.
         if self.bell.take() {
             self.publish_all();
+            self.host.rung();
         }
         let host = self.host.tick(now);
         self.sweep();

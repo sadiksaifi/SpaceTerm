@@ -25,6 +25,10 @@ use spaceterm_server::connection::sync::SyncWorker;
 use spaceterm_server::protocol::RequestId;
 pub(super) use worktrees::pinned_in_worktree;
 
+/// How often what Terminal Sessions present, such as titles and progress, is synchronized and
+/// pushed at most. Edits and claims push at once.
+const PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
+
 pub struct SharedWorkspaceHost {
     writes: worktrees::Writes,
     prototype: DevelopmentPaneHost,
@@ -45,6 +49,11 @@ pub struct SharedWorkspaceHost {
     /// The host's wake, and the deadline the host last received from a tick.
     ticker: Option<Arc<dyn spaceterm_server::connection::Wake>>,
     armed: Option<Instant>,
+    /// A Terminal Session changed what the inventory presents, such as a title, since the last
+    /// tick. Such ticks synchronize and push at most once per [`PRESENTATION_INTERVAL`].
+    rung: bool,
+    /// When a tick that only presents may next synchronize, and whether one waits for it.
+    paced: (Option<Instant>, bool),
     /// Why the last synchronization failed. Requests are refused until one succeeds.
     blocked: Option<Refusal>,
     organization_prepared: bool,
@@ -96,6 +105,8 @@ impl SharedWorkspaceHost {
             waiting: Vec::new(),
             ticker: None,
             armed: None,
+            rung: false,
+            paced: (None, false),
             blocked: None,
             organization_prepared: false,
             attachment_generations: BTreeMap::new(),
@@ -288,12 +299,14 @@ impl SharedWorkspaceHost {
             );
         }
         // Keep an exited runtime until its controller has observed its final screen, and a
-        // deleted Pane's process until its deletion is retained and the process stopped.
+        // deleted Pane's process until its deletion is retained and the process stopped. An
+        // exited shell's Pane leaves the state at once, but its host stays while a channel is
+        // bound to it, so that channel still receives the final screen.
         self.panes.retain(|id, h| {
             if self.state.pane(*id).is_some() {
                 h.pane.is_some() || h.directory_unavailable || h.dormant.is_some()
             } else {
-                h.pane.as_ref().is_some_and(|p| !p.ended)
+                h.pane.as_ref().is_some_and(|p| !p.ended || p.connected)
             }
         });
         self.attachment_generations.retain(|(_, workspace), _| {
@@ -938,6 +951,14 @@ impl SharedWorkspaceHost {
     /// `None` means nothing waits: no write, Git or directory work or Git facts. A live terminal
     /// rings the host's wake when its screen, metadata or lifetime changes, so it needs no tick.
     pub(super) fn tick_until(&mut self, now: Instant) -> Option<Instant> {
+        let presenting = std::mem::take(&mut self.rung)
+            && self.armed.is_none_or(|armed| now < armed);
+        if presenting && self.paced.0.is_some_and(|next| now < next) {
+            self.paced.1 = true;
+            self.armed = self.due(now);
+            return self.armed;
+        }
+        self.paced = (Some(now + PRESENTATION_INTERVAL), false);
         let _ = self.finish_worktrees(false);
         self.prototype.directories.tick();
         let _ = self.synchronized();
@@ -954,12 +975,13 @@ impl SharedWorkspaceHost {
             || !self.waiting.is_empty()
             || self.prototype.directories.busy();
         let soon = waiting.then_some(now + super::dispatch::TICK);
+        let paced = self.paced.0.filter(|_| self.paced.1);
         // A failed synchronization never reaches the Git read it would start, so its due time
         // stays past. Retrying waits for the tick instead.
         let repositories = (self.blocked.is_none() && self.settled())
             .then(|| self.repositories.due(now))
             .flatten();
-        [soon, repositories].into_iter().flatten().min()
+        [soon, paced, repositories].into_iter().flatten().min()
     }
     /// Wakes the host when a message started timed work due before the deadline it waits for.
     fn rearm(&mut self) {
@@ -983,6 +1005,9 @@ impl HostCommands for SharedWorkspaceHost {
     }
     fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
         self.ticker = Some(wake);
+    }
+    fn rung(&mut self) {
+        self.rung = true;
     }
     fn stopping(&mut self) {
         self.refuse_waiting();
@@ -1104,6 +1129,11 @@ impl HostCommands for SharedWorkspaceHost {
     fn input_written(&mut self, lease: &Lease, serial: u32) {
         for host in self.panes.values_mut() {
             host.input_written(lease, serial);
+        }
+    }
+    fn restart_input(&mut self, lease: &Lease) {
+        for host in self.panes.values_mut() {
+            host.restart_input(lease);
         }
     }
     fn unbound(&mut self, connection: Id, lease: &Lease) {
@@ -1317,6 +1347,116 @@ mod tests {
             )),
             "recovery publishes only retained organization"
         );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn presentation_changes_are_pushed_at_most_once_per_interval() {
+        use spaceterm_server::protocol::ServerMessage;
+        let mut host = SharedWorkspaceHost::new(host());
+        host.prepare_initial_organization().unwrap();
+        let outbox = Outbox::new(Arc::new(|| {}));
+        // A subscriber without Git facts, so nothing else is due.
+        host.publication.subscribe([1; 32], [1; 32], outbox.clone());
+        let start = Instant::now();
+        HostCommands::rung(&mut host);
+        HostCommands::tick(&mut host, start);
+        drain(&outbox);
+        // A Terminal Session retitles its Pane again and again.
+        let mut pushed = 0;
+        for step in 1..=9 {
+            host.state.inventory.workspaces[0].name = format!("Title {step}");
+            HostCommands::rung(&mut host);
+            let now = start + Duration::from_millis(10 * step);
+            let next = HostCommands::tick(&mut host, now);
+            assert_eq!(next, Some(start + PRESENTATION_INTERVAL), "{step}");
+            pushed += drain(&outbox).len();
+        }
+        assert_eq!(pushed, 0, "changes within the interval wait");
+        HostCommands::tick(&mut host, start + PRESENTATION_INTERVAL);
+        assert!(matches!(
+            drain(&outbox).as_slice(),
+            [ServerMessage::Inventory(revision)]
+                if revision.inventory.workspaces[0].name == "Title 9"
+        ));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_shell_that_exits_with_another_keeps_its_final_screen_for_its_channel() {
+        use super::super::publish::Observed;
+        use super::super::tests::command;
+        let mut host = SharedWorkspaceHost::new(host());
+        host.prepare_initial_organization().unwrap();
+        let workspace = shared_inventory(&mut host).workspaces[0].id;
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 1,
+                    mutation: Mutation::CreateTab {
+                        workspace,
+                        source: None
+                    },
+                }
+            ),
+            Reply::Outcome(_)
+        ));
+        let panes: Vec<_> = shared_inventory(&mut host).workspaces[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.root_pane)
+            .collect();
+        let leases: Vec<_> = panes
+            .iter()
+            .map(|pane| {
+                let Reply::Attached { lease } = host.request(
+                    [1; 32],
+                    [1; 32],
+                    Request::SelectPane {
+                        pane: *pane,
+                        explicit: true,
+                        size: size(),
+                        style: None,
+                    },
+                ) else {
+                    panic!("explicit first use");
+                };
+                lease
+            })
+            .collect();
+        for lease in &leases {
+            command(&mut host, 1, *lease, "printf 'FINAL\\n'; exit");
+        }
+        // Both shells exit before either channel looks.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !panes.iter().all(|pane| {
+            host.panes
+                .get_mut(pane)
+                .and_then(|host| host.pane.as_mut())
+                .is_some_and(|owned| {
+                    owned.drain();
+                    owned.ended
+                })
+        }) {
+            assert!(Instant::now() < deadline, "the shells did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The first channel's end synchronizes, which retires every exited shell.
+        assert!(matches!(
+            HostCommands::observe(&mut host, [1; 32], &leases[0]),
+            Observed::Gone { last: Some(_), .. }
+        ));
+        assert!(
+            matches!(
+                HostCommands::observe(&mut host, [1; 32], &leases[1]),
+                Observed::Gone { last: Some(_), .. }
+            ),
+            "the second channel still receives its final screen"
+        );
+        host.tick(Instant::now());
+        assert!(host.panes.is_empty(), "observed hosts retire");
         host.shutdown().unwrap();
     }
 

@@ -20,7 +20,7 @@ struct Sessions {
     started: u32,
     live: BTreeSet<[u8; 32]>,
     unbound: Vec<Lease>,
-    /// Input serials the host was told reached the PTY.
+    /// Input serials the host was told reached the PTY. Zero marks a restart of the numbering.
     written: Vec<u32>,
     /// How often the host ran its timed work and how often a Pane was observed for publishing.
     ticks: u32,
@@ -97,6 +97,9 @@ impl HostCommands for Host {
     fn view(&mut self, _: &Lease, _: bool, _: u8) {}
     fn input_written(&mut self, _: &Lease, serial: u32) {
         self.0.lock().unwrap().written.push(serial);
+    }
+    fn restart_input(&mut self, _: &Lease) {
+        self.0.lock().unwrap().written.push(0);
     }
     fn disconnected(&mut self, _: [u8; 32]) {}
     fn shutdown(&mut self) -> Result<(), ServerError> {
@@ -191,7 +194,7 @@ fn an_input_serial_is_written_only_once_its_bytes_reach_the_session() {
     send(3, vec![paste("needs confirm", true)]);
     send(4, vec![protocol::InputEvent::Resize(super::tests::size())]);
 
-    assert_eq!(sessions.lock().unwrap().written, [2, 4]);
+    assert_eq!(sessions.lock().unwrap().written, [0, 2, 4]);
 }
 
 /// A host's own wake, such as an edit waiting on a Worktree, runs its timed work at once, even
