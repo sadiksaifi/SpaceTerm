@@ -9,3 +9,5 @@ Eligible connected interactions present optimistically throughout the client. Af
 A definite refusal restores the affected view or draft while preserving unrelated later work. Conflicts require explicit review. A lost reply remains an unresolved Original Operation; the client resolves that operation before retiring it or dispatching dependent work. Pending connected actions do not become offline mutation queuing under [ADR 0047](0047-keep-shared-workspace-edits-unavailable-offline.md). Reconciliation preserves newer client intent under [ADR 0041](0041-keep-each-clients-view-independent.md), and never renews destructive consent.
 
 Retries carry the original operation identity so the server recognizes the operation and its outcome rather than creating a duplicate Tab or repeating a destructive action. Reconnecting clients reconcile with authoritative server state before retrying an unresolved edit.
+
+[ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) resolves a shared edit in one round trip and keeps the server's disk syncs off the request path.
