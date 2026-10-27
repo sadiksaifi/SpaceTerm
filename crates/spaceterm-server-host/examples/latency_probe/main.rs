@@ -17,7 +17,7 @@
 //! calls live in `protocol.rs`.
 mod protocol;
 
-use protocol::{Claim, EchoPane, Failure, Owner, Route, fail};
+use protocol::{Claim, EchoPane, Failure, Owner, Route, Transport, fail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
@@ -36,6 +36,7 @@ struct Options {
     requests: usize,
     pages: usize,
     fetches: usize,
+    transport: Transport,
 }
 
 fn options(arguments: &[String]) -> Result<Options> {
@@ -51,6 +52,7 @@ fn options(arguments: &[String]) -> Result<Options> {
         requests: 50,
         pages: 0,
         fetches: 0,
+        transport: Transport::Wss,
     };
     let mut flags = flags.iter();
     while let Some(flag) = flags.next() {
@@ -74,6 +76,12 @@ fn options(arguments: &[String]) -> Result<Options> {
             "--pages" => match value.parse() {
                 Ok(count) => options.pages = count,
                 _ => return fail("--pages needs a count"),
+            },
+            "--transport" => match value.as_str() {
+                "wss" => options.transport = Transport::Wss,
+                "quic" if cfg!(feature = "iroh") => options.transport = Transport::Quic,
+                "quic" => return fail("--transport quic needs a build with the iroh feature"),
+                _ => return fail("--transport must be wss or quic"),
             },
             "--fetches" => match value.parse() {
                 Ok(count) => options.fetches = count,
@@ -335,9 +343,13 @@ fn measure_paired(options: &Options) -> Result<()> {
         if !owner.approve(&device)? {
             return fail("the owner found no pairing claim");
         }
-        let route = claim.finish()?;
+        let route = claim.finish(options.transport)?;
         continue_unless_interrupted()?;
-        measure_route(options, &route, "paired")
+        let label = match options.transport {
+            Transport::Wss => "paired",
+            Transport::Quic => "paired-quic",
+        };
+        measure_route(options, &route, label)
     })();
     // Clean up even after a failure: an invitation or claim may be pending, and approval may
     // have succeeded.

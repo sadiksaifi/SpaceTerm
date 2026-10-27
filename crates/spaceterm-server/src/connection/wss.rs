@@ -296,6 +296,7 @@ impl Carrier for WssCarrier {
         Readiness {
             read: fd,
             write: Some(fd),
+            progress: None,
         }
     }
 

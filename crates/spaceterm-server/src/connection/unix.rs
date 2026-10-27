@@ -109,6 +109,7 @@ impl Carrier for UnixCarrier {
         Readiness {
             read: fd,
             write: Some(fd),
+            progress: None,
         }
     }
 

@@ -100,7 +100,9 @@ The workload task reports keystroke-to-pixels p99 with the other Pane idle, then
 
 `bench:latency:protocol` creates a probe Workspace with its own client identity and closes it afterwards. A paired run enrolls a fresh pairing and revokes it afterwards, including after an interrupt; it also withdraws an invitation that no approved claim used. `--owner-host` runs the owner side through SSH on the server's machine, which needs this repository at the same commit. Without it, the server must run on this machine. `--expose ADDRESS` enables that server's network exposure for the run and then restores the previous address and enabled state. When no address was configured before, the probe's address stays configured, disabled. Each exposure change disconnects every paired client, so the task changes nothing when exposure is already enabled at that address. The probe's protocol calls live in [one module](../crates/spaceterm-server-host/examples/latency_probe/protocol.rs).
 
-`bench:latency:wss` measures a paired request's round trip through TLS and the WebSocket on loopback, in a release build, without a desktop or installed server.
+`bench:latency:wss` measures a paired request's round trip through TLS and the WebSocket on loopback, in a release build, without a desktop or installed server. `bench:latency:quic` measures the same over the iroh QUIC prototype of #671, which the `iroh` Cargo feature builds beside WSS.
+
+`bench:latency:netem` compares paired WSS with that QUIC prototype against a foreground Development server on a Linux owner host, clean and with netem loss and delay. The impairment applies only to the owner host's traffic to this machine, and the task removes its qdisc after every impaired cell, also after a failure. The owner host needs passwordless sudo for `tc`. `--jail` gives the server private, disposable state through bwrap, so a Development server already running there is left alone.
 
 ### Loss test
 

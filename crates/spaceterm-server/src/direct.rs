@@ -12,6 +12,8 @@ mod endpoint;
 pub use endpoint::Endpoint;
 pub(crate) mod host;
 mod network;
+#[cfg(feature = "iroh")]
+mod quic;
 mod storage;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -305,14 +307,14 @@ pub trait DirectConnector: Send + Sync {
     fn connect(&self) -> Result<DirectConnection, DirectError>;
 }
 
-/// An authenticated WSS socket before admission. Admission turns it into the connection's
-/// carrier; dropping it closes the socket.
+/// An authenticated WSS socket, or with the `iroh` feature a QUIC connection, before admission.
+/// Admission turns it into the connection's carrier; dropping it closes the connection.
 pub struct DirectConnection {
     #[cfg_attr(
         not(any(feature = "client", test)),
         allow(dead_code, reason = "the desktop admits and carries the socket")
     )]
-    ws: wss::Ws,
+    transport: Transport,
     #[cfg_attr(
         not(feature = "client"),
         allow(
@@ -330,6 +332,63 @@ impl DirectConnection {
         credential: &DeviceCredential,
     ) -> Result<Self, DirectError> {
         client::connect(endpoint, paired, credential)
+    }
+    /// Like [`Self::connect`], over QUIC to the same address and port in UDP. The server's iroh
+    /// key is its pinned public key, and this device's is its credential.
+    #[cfg(feature = "iroh")]
+    pub fn connect_quic(
+        endpoint: &str,
+        paired: &PairedDevice,
+        credential: &DeviceCredential,
+    ) -> Result<Self, DirectError> {
+        quic::connect(endpoint, paired, credential)
+    }
+}
+
+/// The authenticated connection under a [`DirectConnection`].
+pub(crate) enum Transport {
+    Wss(Box<wss::Ws>),
+    #[cfg(feature = "iroh")]
+    Quic(crate::connection::quic::QuicStream),
+}
+#[cfg_attr(
+    not(any(feature = "client", test)),
+    allow(dead_code, reason = "the desktop admits and carries the socket")
+)]
+impl Transport {
+    /// Admits this client and returns the connection's carrier.
+    pub(crate) fn admit(
+        self,
+        client: (&[u8; 32], &ClientName),
+        pin: &ServerPin,
+    ) -> Result<Box<dyn crate::connection::carrier::Carrier>, ServerError> {
+        let versions = [crate::protocol::MAJOR];
+        match self {
+            Self::Wss(ws) => {
+                let mut ws = *ws;
+                crate::protocol::admit_transport(
+                    &mut ws,
+                    client,
+                    &pin.server,
+                    &pin.build,
+                    &versions,
+                )?;
+                Ok(Box::new(crate::connection::wss::WssCarrier::new(ws)))
+            }
+            #[cfg(feature = "iroh")]
+            Self::Quic(mut stream) => {
+                crate::protocol::admit_transport(
+                    &mut stream,
+                    client,
+                    &pin.server,
+                    &pin.build,
+                    &versions,
+                )?;
+                Ok(Box::new(
+                    stream.into_carrier().map_err(|_| ServerError::Protocol)?,
+                ))
+            }
+        }
     }
 }
 

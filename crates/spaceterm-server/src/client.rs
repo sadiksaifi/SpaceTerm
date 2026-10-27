@@ -352,16 +352,13 @@ impl ServerConnection {
             if connection.paired() != &direct.paired {
                 return Err(ServerError::AuthenticationRefused);
             }
-            let mut ws = connection.into_ws();
-            protocol::admit_transport(
-                &mut ws,
+            // `with_direct` fixed the pin's build to this handle's identity.
+            let carrier = connection.into_transport().admit(
                 (&direct.paired.client, &self.client_name()),
-                &direct.paired.pin.server,
-                &self.identity,
-                &[protocol::MAJOR],
+                &direct.paired.pin,
             )?;
             return Ok((
-                Box::new(crate::connection::wss::WssCarrier::new(ws)),
+                carrier,
                 self.scope_for(direct.paired.client, direct.paired.pin.server),
             ));
         }

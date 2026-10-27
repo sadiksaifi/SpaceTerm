@@ -580,6 +580,22 @@ fn serve_runtime_ready(
                 Err(_) => break,
             }
         }
+        #[cfg(feature = "iroh")]
+        while network.len() < MAX_NETWORK_CONNECTIONS
+            && let Some(state) = &direct
+        {
+            let accepted = state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .accept_quic();
+            let Some((stream, generation)) = accepted else {
+                break;
+            };
+            match spawn_quic(stream, generation, state, &environment) {
+                Ok(running) => network.push(running),
+                Err(_) => break,
+            }
+        }
         while local_paused.is_none() {
             let stream = match listener.accept() {
                 Ok((stream, _)) => stream,
@@ -874,6 +890,46 @@ fn spawn_network(
         sever: Box::new(move || {
             let _ = cancel.shutdown(std::net::Shutdown::Read);
         }),
+        wake,
+    })
+}
+
+/// Serves one QUIC connection of the prototype. Its handshake waits under deadlines, and an
+/// admitted connection stops on the wake, so stopping needs no sever.
+#[cfg(feature = "iroh")]
+fn spawn_quic(
+    stream: crate::connection::quic::QuicStream,
+    generation: [u8; 32],
+    state: &crate::direct::host::Shared,
+    environment: &Environment,
+) -> Result<Running, ServerError> {
+    let (waker, wake) = Waker::new().map_err(|_| ServerError::Protocol)?;
+    let state = Arc::clone(state);
+    let environment = environment.clone();
+    let outbox_wake = Arc::clone(&wake);
+    let done = Arc::new(AtomicBool::new(false));
+    let finished = Arc::clone(&done);
+    let thread = std::thread::Builder::new()
+        .name("spaceterm-quic-connection".into())
+        .spawn(move || {
+            let _ended = Ended {
+                done: finished,
+                wake: Arc::clone(&environment.stop.wake),
+            };
+            let _ = crate::direct::host::serve_quic(
+                stream,
+                generation,
+                state,
+                &environment,
+                waker,
+                outbox_wake,
+            );
+        })
+        .map_err(|_| ServerError::Protocol)?;
+    Ok(Running {
+        thread,
+        done,
+        sever: Box::new(|| {}),
         wake,
     })
 }

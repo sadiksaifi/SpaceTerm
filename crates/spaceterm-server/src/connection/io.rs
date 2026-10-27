@@ -160,6 +160,13 @@ fn wait(
             revents: 0,
         });
     }
+    if writing && let Some(fd) = readiness.progress {
+        descriptors.push(libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
     let _ = poll(&mut descriptors, deadline);
     waker.drain();
 }
@@ -543,6 +550,7 @@ mod tests {
             Readiness {
                 read: self.bell.as_raw_fd(),
                 write: None,
+                progress: None,
             }
         }
         fn close(&mut self) {
@@ -609,6 +617,7 @@ mod tests {
             Readiness {
                 read: self.bell.as_raw_fd(),
                 write: None,
+                progress: None,
             }
         }
         fn close(&mut self) {}

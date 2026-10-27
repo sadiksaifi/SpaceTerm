@@ -15,8 +15,8 @@
 //!
 //! Implementations: `UnixCarrier` for account-local IPC and `WssCarrier` for paired WSS (rustls and
 //! tungstenite on the nonblocking TCP descriptor, `TCP_NODELAY`, `TCP_NOTSENT_LOWAT` of 16 KiB, one
-//! WebSocket binary message per frame). A later QUIC carrier maps each [`Priority`] to its own
-//! stream and exposes a wake descriptor that its runtime signals.
+//! WebSocket binary message per frame). The QUIC prototype `IrohCarrier` maps each [`Priority`] to
+//! its own stream and exposes a wake descriptor that its runtime signals.
 use crate::protocol::{DecodeError, RawFrame};
 use std::os::fd::RawFd;
 
@@ -63,11 +63,14 @@ pub struct Flush {
 }
 
 /// `read` becomes readable when `receive` may return a frame, or when a `Full` carrier has room.
-/// `write`, when present, becomes writable when buffered bytes can make progress.
+/// `write`, when present, becomes writable when buffered bytes can make progress. `progress`, when
+/// present, becomes readable when accepted frames made progress; a carrier whose runtime writes on
+/// another thread reports it instead of `write`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Readiness {
     pub read: RawFd,
     pub write: Option<RawFd>,
+    pub progress: Option<RawFd>,
 }
 
 /// Classifications only. Native errors and peer bytes never cross this boundary.

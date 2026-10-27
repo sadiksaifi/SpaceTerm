@@ -46,6 +46,9 @@ pub(crate) struct State {
     record: storage::Record,
     pub(super) pin: ServerPin,
     listener: Option<TcpListener>,
+    /// The QUIC prototype's endpoint on the same address and port in UDP.
+    #[cfg(feature = "iroh")]
+    quic: Option<crate::connection::quic::QuicListener>,
     listener_state: ListenerState,
     invitations: Vec<PendingInvitation>,
     claims: Vec<PendingClaim>,
@@ -73,6 +76,8 @@ impl State {
             record,
             pin,
             listener: None,
+            #[cfg(feature = "iroh")]
+            quic: None,
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
             claims: Vec::new(),
@@ -87,6 +92,10 @@ impl State {
         Ok(Arc::new(Mutex::new(state)))
     }
     pub(crate) fn set_wake(&mut self, wake: Arc<dyn Wake>) {
+        #[cfg(feature = "iroh")]
+        if let Some(quic) = &self.quic {
+            quic.set_wake(Arc::clone(&wake));
+        }
         self.wake = Some(wake);
     }
     /// The listener the host's accept loop waits on.
@@ -101,6 +110,10 @@ impl State {
     fn listen(&mut self) {
         self.listener_changed();
         self.listener = None;
+        #[cfg(feature = "iroh")]
+        {
+            self.quic = None;
+        }
         self.listener_state = match self.record.policy.as_ref().filter(|_| self.record.enabled) {
             None => ListenerState::Off,
             Some(policy) => match bind_listener(policy.bind) {
@@ -111,6 +124,33 @@ impl State {
                 Err(_) => ListenerState::Failed(DirectError::Transport),
             },
         };
+        #[cfg(feature = "iroh")]
+        if let ListenerState::Listening { addr } = self.listener_state {
+            self.quic = self.bind_quic(addr);
+        }
+    }
+    /// Binds the QUIC prototype under the server's pinned key. WSS keeps working without it.
+    #[cfg(feature = "iroh")]
+    fn bind_quic(
+        &self,
+        address: std::net::SocketAddr,
+    ) -> Option<crate::connection::quic::QuicListener> {
+        use crate::connection::quic;
+        let secret = quic::secret_key(&self.record.key, &self.pin.public_key).ok()?;
+        let listener = quic::QuicListener::bind(secret, address).ok()?;
+        if let Some(wake) = &self.wake {
+            listener.set_wake(Arc::clone(wake));
+        }
+        Some(listener)
+    }
+    /// The next QUIC connection whose handshake completed, and the listener generation it
+    /// belongs to.
+    #[cfg(feature = "iroh")]
+    pub(crate) fn accept_quic(
+        &mut self,
+    ) -> Option<(crate::connection::quic::QuicStream, [u8; 32])> {
+        let stream = self.quic.as_ref()?.accept()?;
+        Some((stream, self.generation))
     }
     fn recover(&mut self) -> Result<(), DirectError> {
         if self.uncertain {
@@ -130,6 +170,10 @@ impl State {
             // A renamed but unsynced revocation must never leave ordinary authority usable.
             self.connections.end_all();
             self.listener = None;
+            #[cfg(feature = "iroh")]
+            {
+                self.quic = None;
+            }
             self.listener_changed();
             self.listener_state = ListenerState::Failed(error);
             return Err(error);
@@ -191,11 +235,28 @@ impl State {
         outbox: crate::connection::outbox::Outbox,
         tcp: &TcpStream,
     ) -> Result<(), DirectError> {
+        let read_side = tcp.try_clone().map_err(|_| DirectError::Transport)?;
+        self.register_with(
+            paired,
+            generation,
+            connection,
+            outbox,
+            Box::new(ReadSide(read_side)),
+        )
+    }
+    /// Like `register`, with the transport's own way to sever the connection.
+    pub(crate) fn register_with(
+        &mut self,
+        paired: &PairedDevice,
+        generation: [u8; 32],
+        connection: [u8; 32],
+        outbox: crate::connection::outbox::Outbox,
+        sever: Box<dyn Sever>,
+    ) -> Result<(), DirectError> {
         self.authorized(paired)?;
         if generation != self.generation {
             return Err(DirectError::Disabled);
         }
-        let read_side = tcp.try_clone().map_err(|_| DirectError::Transport)?;
         self.connections
             .register(
                 connection,
@@ -204,9 +265,18 @@ impl State {
                     generation,
                 },
                 outbox,
-                Box::new(ReadSide(read_side)),
+                sever,
             )
             .map_err(|_| DirectError::Capacity)
+    }
+    /// The enrolled public key of `paired`'s device.
+    #[cfg(feature = "iroh")]
+    fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
+        self.record
+            .devices
+            .iter()
+            .find(|device| device.info.pairing == paired.pairing)
+            .map(|device| device.info.public_key)
     }
     pub(crate) fn unregister(&mut self, connection: [u8; 32]) {
         self.connections.unregister(connection);
@@ -1073,6 +1143,10 @@ impl State {
     }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
+        #[cfg(feature = "iroh")]
+        {
+            self.quic = None;
+        }
         self.listener_state = ListenerState::Off;
         self.listener_changed();
         self.connections.end_all();
@@ -1183,6 +1257,81 @@ pub(crate) fn serve(
         );
         Ok::<_, ServerError>(())
     })()
+}
+
+/// Serves one QUIC connection like [`serve`]: one pairing exchange on its L0 stream, and for a
+/// paired device whose proven iroh key is its enrolled key, admission and then the protocol
+/// connection over a [`crate::connection::quic::IrohCarrier`]. The prototype carries connections
+/// only, so any other action is refused.
+#[cfg(feature = "iroh")]
+pub(crate) fn serve_quic(
+    mut stream: crate::connection::quic::QuicStream,
+    generation: [u8; 32],
+    state: Shared,
+    environment: &crate::host::Environment,
+    waker: crate::connection::io::Waker,
+    wake: Arc<dyn Wake>,
+) -> Result<(), ServerError> {
+    use super::client::Messages;
+    let challenge = {
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
+        if generation != state.generation {
+            return Err(DirectError::Disabled.into());
+        }
+        state.challenge()?
+    };
+    stream.send(&challenge)?;
+    let authentication: wire::Authentication = stream.receive()?;
+    let wire::Action::Connect { paired } = &authentication.action else {
+        return Err(DirectError::InvalidRequest.into());
+    };
+    let paired = paired.clone();
+    let answer = {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.device_key(&paired) != Some(stream.remote_key()) {
+            return Err(ServerError::AuthenticationRefused);
+        }
+        state
+            .authenticate_and_resolve(&challenge, &authentication)
+            .0
+    };
+    let connected = matches!(answer, Ok(wire::Answer::Connected));
+    stream.send(&answer)?;
+    if !connected {
+        return Ok(());
+    }
+    let (_, client, name) = crate::protocol::admit_direct_server(&mut stream, &paired)?;
+    let connection = crate::protocol::random()?;
+    let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
+    let carrier = stream.into_carrier().map_err(|_| ServerError::Protocol)?;
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .register_with(
+            &paired,
+            generation,
+            connection,
+            outbox.clone(),
+            Box::new(carrier.sever()),
+        )?;
+    let _registered = Registered {
+        state: Arc::clone(&state),
+        connection,
+    };
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .note_connection(&paired)?;
+    let peer = crate::connection::service::Peer {
+        client,
+        connection,
+        pairing: Some(crate::connection::service::Pairing {
+            pairing: paired.pairing,
+            generation,
+        }),
+    };
+    crate::host::serve_admitted(Box::new(carrier), peer, name, outbox, waker, environment);
+    Ok(())
 }
 
 /// A paired connection's place in the registry, removed when it drops.
