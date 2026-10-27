@@ -916,6 +916,87 @@ mod tests {
     }
 
     #[test]
+    fn stopping_waits_for_a_reply_the_sync_worker_still_owes() {
+        use crate::connection::link::{Health, LinkError};
+        use crate::protocol::{Fatal, ReplyBody};
+        /// Stops the host and answers on the sync worker once the test releases the job.
+        struct Syncing(Arc<Stop>, Mutex<Option<std::sync::mpsc::Receiver<()>>>);
+        impl PaneService for Syncing {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {}
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                self.0.stopping.store(true, Ordering::Release);
+                let released = self.1.lock().unwrap().take().unwrap();
+                Dispatch::After(Box::new(move || {
+                    let _ = released.recv();
+                    Ok(ReplyBody::Done)
+                }))
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let (release, released) = std::sync::mpsc::channel();
+        let (sync, _) = SyncWorker::spawn().unwrap();
+        let mut environment =
+            Environment::for_tests(Arc::new(Mutex::new(Box::new(NoPanes))), sync, None);
+        environment.panes = Arc::new(Mutex::new(Box::new(Syncing(
+            Arc::clone(&environment.stop),
+            Mutex::new(Some(released)),
+        ))));
+        let (client, server) = UnixStream::pair().unwrap();
+        let (waker, wake) = Waker::new().unwrap();
+        let host_wake = Arc::clone(&wake);
+        let serving = {
+            let environment = environment.clone();
+            std::thread::spawn(move || {
+                serve_admitted(
+                    Box::new(UnixCarrier::new(server).unwrap()),
+                    Peer {
+                        client: [1; 32],
+                        connection: [1; 32],
+                        pairing: None,
+                    },
+                    "Test".into(),
+                    Outbox::new(wake),
+                    waker,
+                    &environment,
+                )
+            })
+        };
+        let link = crate::connection::io::spawn_link(
+            Box::new(UnixCarrier::new(client).unwrap()),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let pending = link.request(Operation::Shutdown).unwrap();
+        while !environment.stop.stopping() {
+            std::thread::yield_now();
+        }
+        // The host wakes every connection once it stops. This one stops reading, and its
+        // goodbye waits for the owed reply.
+        host_wake.wake();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(link.health(), Health::Live);
+        release.send(()).unwrap();
+        assert!(matches!(pending.wait(), Ok(ReplyBody::Done)));
+        serving.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while link.health() == Health::Live {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            link.health(),
+            Health::Closed(LinkError::Goodbye(Fatal::Stopping))
+        );
+    }
+
+    #[test]
     fn full_network_slots_leave_the_listener_unwatched_and_an_ended_thread_rings_the_bell() {
         let fixture = crate::direct::tests::Fixture::new();
         fixture.enable();

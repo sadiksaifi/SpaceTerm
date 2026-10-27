@@ -298,11 +298,13 @@ pub fn serve(
 ) {
     let mut held = None;
     let mut receiving = true;
+    let mut stopped: Option<Instant> = None;
     loop {
         let now = Instant::now();
         let outbox = connection.outbox().clone();
         if stopping.load(Ordering::Acquire) {
             receiving = false;
+            stopped.get_or_insert(now);
         }
         if receiving {
             match receive(carrier.as_mut(), &mut connection, service, now) {
@@ -326,7 +328,20 @@ pub fn serve(
         connection.wrote(now, written.progressed, written.pending);
         if !written.pending && !receiving {
             if !outbox.is_closing() {
-                // Stopping: every queued reply is written, so the goodbye goes last.
+                // Stopping: replies the sync worker still owes go out first, for at most
+                // `STALL_AFTER`, so the goodbye goes last.
+                if let Some(since) = stopped
+                    && outbox.owes_replies()
+                    && now < since + limits::STALL_AFTER
+                {
+                    wait(
+                        carrier.as_ref(),
+                        (false, false),
+                        waker,
+                        Some(since + limits::STALL_AFTER),
+                    );
+                    continue;
+                }
                 let _ = outbox.goodbye(Fatal::Stopping);
                 continue;
             }

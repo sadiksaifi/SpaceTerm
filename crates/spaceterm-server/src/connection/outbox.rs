@@ -264,6 +264,12 @@ impl Outbox {
         })
     }
 
+    /// Whether a request this connection began still waits for its reply, for example from the
+    /// sync worker.
+    pub fn owes_replies(&self) -> bool {
+        !self.lock().requests.is_empty()
+    }
+
     /// Whether `goodbye` was queued, a queue passed its bound, or the connection ended. The
     /// connection stops dispatching once it is.
     pub fn is_closing(&self) -> bool {
