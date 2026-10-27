@@ -483,27 +483,36 @@ mod tests {
     use crate::connection::carrier::{Flush, Readiness};
     use crate::protocol::RawFrame;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// A carrier full until its next flush, which writes nothing because the backlog already left
     /// while it received, as a WebSocket answering the peer does.
     struct Backpressured {
         room: bool,
         accepted: usize,
-        flushes: Arc<AtomicUsize>,
         pending: bool,
+        closed: bool,
+        /// Receives one message for each flush after `close`.
+        drained: mpsc::Sender<()>,
+        /// Never readable, because this carrier never has a frame to receive. Its peer stays open:
+        /// a closed peer would keep the descriptor readable and wake the live loop at once.
         bell: UnixStream,
+        _peer: UnixStream,
     }
 
     impl Backpressured {
-        fn new(pending: bool) -> (Self, Arc<AtomicUsize>) {
-            let flushes = Arc::new(AtomicUsize::new(0));
-            let (bell, _) = UnixStream::pair().unwrap();
+        fn new(pending: bool) -> (Self, mpsc::Receiver<()>) {
+            let (drained, flushes) = mpsc::channel();
+            let (bell, peer) = UnixStream::pair().unwrap();
             let carrier = Self {
                 room: false,
                 accepted: 0,
-                flushes: Arc::clone(&flushes),
                 pending,
+                closed: false,
+                drained,
                 bell,
+                _peer: peer,
             };
             (carrier, flushes)
         }
@@ -518,7 +527,9 @@ mod tests {
             Ok(Offer::Accepted)
         }
         fn flush(&mut self) -> Result<Flush, CarrierError> {
-            self.flushes.fetch_add(1, Ordering::Relaxed);
+            if self.closed {
+                let _ = self.drained.send(());
+            }
             self.room = true;
             Ok(Flush {
                 progressed: false,
@@ -534,7 +545,9 @@ mod tests {
                 write: None,
             }
         }
-        fn close(&mut self) {}
+        fn close(&mut self) {
+            self.closed = true;
+        }
     }
 
     #[test]
@@ -553,12 +566,16 @@ mod tests {
         let (carrier, flushes) = Backpressured::new(true);
         let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
         drop(link);
-        let deadline = Instant::now() + std::time::Duration::from_millis(200);
-        while Instant::now() < deadline {
-            std::thread::park_timeout(deadline - Instant::now());
-        }
-        // The drain flushes once, then waits on its wake pipe and the stall deadline.
-        assert!(flushes.load(Ordering::Relaxed) < 10);
+        flushes
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the drain flushes when it starts");
+        // Then it flushes only when woken, until the stall deadline `STALL_AFTER` away. The one
+        // wake left is the last handle's, which may arrive after the drain started. A spinning
+        // drain flushes again at once.
+        let again = std::iter::from_fn(|| flushes.recv_timeout(Duration::from_millis(200)).ok())
+            .take(2)
+            .count();
+        assert!(again <= 1, "the drain flushed without a wake");
     }
 
     /// A peer that sends without pause: acknowledgements forever, which need no reply.
