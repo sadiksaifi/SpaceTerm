@@ -566,6 +566,11 @@ fn serve_runtime_ready(
     }
     stop.request();
     SIGNAL_WAKE.store(-1, Ordering::Release);
+    // Connections still waiting to be accepted close in order. A listener closed with them
+    // pending resets them on Linux.
+    while let Ok((stream, _)) = listener.accept() {
+        crate::connection::io::discard_unread(stream.as_raw_fd());
+    }
     drop(listener);
     let threads: Vec<_> = connections
         .into_iter()

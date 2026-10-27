@@ -207,6 +207,14 @@ impl WssCarrier {
     }
 }
 
+impl Drop for WssCarrier {
+    /// Discards unread input first, so TCP closes in order instead of resetting the connection
+    /// before the peer read the goodbye and the WebSocket Close.
+    fn drop(&mut self) {
+        super::io::discard_unread(self.ws.get_ref().tcp.as_raw_fd());
+    }
+}
+
 impl Carrier for WssCarrier {
     fn offer(&mut self, frame: &[u8], _priority: Priority) -> Result<Offer, CarrierError> {
         if self.closing {
