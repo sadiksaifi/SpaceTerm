@@ -1,3 +1,4 @@
+use crate::connection::link::{LinkEvent, LinkSink, ServerLink};
 use crate::{
     AuthenticatedStatus, ServerError,
     host::{self, Paths},
@@ -5,6 +6,7 @@ use crate::{
     storage::Directory,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex, Weak};
 
 /// A stable presentation identity. Possession grants no connection authority.
 #[derive(Serialize, Deserialize)]
@@ -53,8 +55,44 @@ pub struct ServerConnection {
     development: Option<String>,
     computer: std::sync::Arc<dyn crate::computer_name::ComputerName>,
     direct: Option<std::sync::Arc<DirectRoute>>,
-    shared_pane: std::sync::Arc<crate::pane::SharedPaneConnection>,
+    shared: std::sync::Arc<SharedLink>,
     client_cache: std::sync::Arc<ClientCache>,
+}
+
+/// The one live link that a handle and its clones share with their server, and the sinks that
+/// receive its pushed inventory and health.
+#[derive(Default)]
+struct SharedLink {
+    link: Mutex<Option<ServerLink>>,
+    subscribers: Mutex<Vec<Weak<dyn LinkSink>>>,
+}
+
+/// Delivers a shared link's events to every live subscriber. It holds the shared state weakly, so
+/// the link it belongs to never keeps that state alive.
+struct Fanout(Weak<SharedLink>);
+impl LinkSink for Fanout {
+    fn deliver(&self, event: LinkEvent) {
+        let Some(shared) = self.0.upgrade() else {
+            return;
+        };
+        let subscribers: Vec<_> = {
+            let mut subscribers = shared.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+            subscribers.retain(|sink| sink.strong_count() > 0);
+            subscribers.iter().filter_map(Weak::upgrade).collect()
+        };
+        match event {
+            LinkEvent::Inventory(revision) => {
+                for sink in subscribers {
+                    sink.deliver(LinkEvent::Inventory(revision.clone()));
+                }
+            }
+            LinkEvent::Health(health) => {
+                for sink in subscribers {
+                    sink.deliver(LinkEvent::Health(health));
+                }
+            }
+        }
+    }
 }
 struct DirectRoute {
     id: [u8; 32],
@@ -169,7 +207,7 @@ impl ServerConnection {
     /// Whether `other` is a clone of this handle rather than a separately created one, such as
     /// the handle a later connection to the same account creates.
     pub fn same_handle(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.shared_pane, &other.shared_pane)
+        std::sync::Arc::ptr_eq(&self.shared, &other.shared)
     }
 
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
@@ -284,7 +322,7 @@ impl ServerConnection {
             development,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
-            shared_pane: std::sync::Arc::default(),
+            shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         })
     }
@@ -302,42 +340,26 @@ impl ServerConnection {
         server.development = Some(name.to_owned());
         Ok(server)
     }
-    fn authenticate(&self) -> Result<AuthenticatedStatus, ServerError> {
-        let mut stream = host::connect(&self.paths)?;
-        let client = self.client_id()?;
-        let server = self.server_id()?;
-        let mut status = protocol::admit_client(
-            &mut stream,
-            (&client, &self.client_name()),
-            &server,
-            &self.identity,
-            &[protocol::MAJOR],
-        )?;
-        // Status is used by desktop startup too. Apply the same required-capability
-        // admission as remote routes before reporting this server ready.
-        crate::pane::PaneConnection::negotiate(stream)?;
-        self.bind_scope(self.scope_for(client, server))?;
-        status.development_pane = true;
-        Ok(status)
-    }
-    /// Admits a transport through its route's verified authority, without implicit Start.
+    /// Admits a new connection through its route's verified authority, without implicit Start,
+    /// and returns its carrier.
     fn connect_admitted(
         &self,
-    ) -> Result<(Box<dyn crate::transport::Transport>, ClientScope), ServerError> {
+    ) -> Result<(Box<dyn crate::connection::carrier::Carrier>, ClientScope), ServerError> {
         if let Some(direct) = &self.direct {
-            let mut connection = direct.connector.connect().map_err(ServerError::from)?;
+            let connection = direct.connector.connect().map_err(ServerError::from)?;
             if connection.paired() != &direct.paired {
                 return Err(ServerError::AuthenticationRefused);
             }
+            let mut ws = connection.into_ws();
             protocol::admit_transport(
-                &mut connection,
+                &mut ws,
                 (&direct.paired.client, &self.client_name()),
                 &direct.paired.pin.server,
                 &self.identity,
                 &[protocol::MAJOR],
             )?;
             return Ok((
-                Box::new(connection),
+                Box::new(crate::connection::wss::WssCarrier::new(ws)),
                 self.scope_for(direct.paired.client, direct.paired.pin.server),
             ));
         }
@@ -352,30 +374,54 @@ impl ServerConnection {
             &self.identity,
             &[protocol::MAJOR],
         )?;
-        Ok((Box::new(stream), self.scope_for(client, server)))
+        let carrier =
+            crate::connection::unix::UnixCarrier::new(stream).map_err(|_| ServerError::Protocol)?;
+        Ok((Box::new(carrier), self.scope_for(client, server)))
     }
-    pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
-        let (stream, scope) = self.connect_admitted()?;
-        let connection = crate::pane::PaneConnection::negotiate(stream)?;
+    /// Opens a new connection of its own, separate from the shared one. `events` receives its
+    /// pushed inventory and health. Dropping every handle of the link closes it.
+    pub fn connect(&self, events: Arc<dyn LinkSink>) -> Result<ServerLink, ServerError> {
+        let (carrier, scope) = self.connect_admitted()?;
         self.bind_scope(scope)?;
-        Ok(connection)
+        crate::connection::io::spawn_link(carrier, events).map_err(|_| ServerError::Protocol)
     }
-    /// Clones share a transport. Independent desktops retain distinct identities and views.
-    pub fn connect_shared_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
-        self.shared_pane.connect(|| self.connect_pane())
-    }
-    /// Checks an existing server. Never sets up storage or starts it.
-    pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
-        if self.direct.is_some() {
-            self.connect_pane()?;
-            return Ok(AuthenticatedStatus {
-                protocol_major: protocol::MAJOR,
-                development_pane: true,
-            });
+    /// The one live connection this handle and its clones share with the server. Connects when
+    /// none is live. A link that ended is never reused; its pending requests already failed.
+    pub fn link(&self) -> Result<ServerLink, ServerError> {
+        // Callers wait for one connection attempt, so simultaneous Pane workers never open a
+        // connection each.
+        let mut saved = self.shared.link.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(link) = saved.as_ref()
+            && link.health() == crate::connection::link::Health::Live
+        {
+            return Ok(link.clone());
         }
-        crate::service::check_admission(&self.paths)?;
-        self.server_id()?;
-        self.authenticate()
+        *saved = None;
+        let link = self.connect(Arc::new(Fanout(Arc::downgrade(&self.shared))))?;
+        *saved = Some(link.clone());
+        Ok(link)
+    }
+    /// Delivers the shared link's pushed inventory and health to `sink` while it lives, across
+    /// reconnects.
+    pub fn subscribe(&self, sink: Weak<dyn LinkSink>) {
+        self.shared
+            .subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(sink);
+    }
+    /// Checks an existing server through the shared connection, connecting only when none is
+    /// live. Never sets up storage or starts it.
+    pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
+        if self.direct.is_none() {
+            crate::service::check_admission(&self.paths)?;
+            self.server_id()?;
+        }
+        self.link()?;
+        Ok(AuthenticatedStatus {
+            protocol_major: protocol::MAJOR,
+            development_pane: true,
+        })
     }
     /// Explicit first setup retains a nonsecret server identity. It never changes Stop intent.
     pub fn setup(&self) -> Result<(), ServerError> {
@@ -438,13 +484,17 @@ impl ServerConnection {
         &self,
         request: crate::direct::Management,
     ) -> Result<crate::direct::ManagementReply, crate::direct::DirectError> {
-        let (mut connection, _) = self
-            .connect_admitted()
-            .map_err(crate::direct::DirectError::from)?;
-        let mut wire = protocol::Wire::terminal(connection.as_mut())?;
-        wire.write(&crate::pane::Request::Direct(request))?;
-        match wire.read()? {
-            crate::pane::Reply::Direct(reply) => reply,
+        let reply = self
+            .link()
+            .and_then(|link| {
+                link.request(crate::protocol::Operation::Direct(request))
+                    .map_err(ServerError::from)
+            })
+            .map_err(crate::direct::DirectError::from)?
+            .wait()
+            .map_err(|error| crate::direct::DirectError::from(ServerError::from(error)))?;
+        match reply {
+            crate::protocol::ReplyBody::Direct(reply) => reply,
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
@@ -544,73 +594,50 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn local_status_requires_workspace_capability_before_reporting_ready() {
-        use crate::pane::Request;
+    fn local_status_admits_major_two_and_binds_the_scope_without_an_operation() {
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
-        for workspace_policy in [None, Some(false), Some(true)] {
-            let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-                "st-cap-{:x}",
-                u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
-            ));
-            let paths = Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            };
-            let server = ServerConnection::with_paths(paths.clone()).unwrap();
-            server.setup().unwrap();
-            Directory::open(&paths.runtime, true).unwrap();
-            let listener = UnixListener::bind(paths.socket()).unwrap();
-            std::fs::set_permissions(paths.socket(), std::fs::Permissions::from_mode(0o600))
-                .unwrap();
-            let pin = server.server_id().unwrap();
-            let peer = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                protocol::admit_server(&mut stream, &pin, &paths.identity).unwrap();
-                let mut wire = protocol::Wire::terminal(&mut stream).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
-                let mut reply = serde_json::json!({"Capabilities":{"development_pane":true}});
-                if let Some(supported) = workspace_policy {
-                    reply["Capabilities"]["workspace_policy"] = supported.into();
-                }
-                wire.write(&reply).unwrap();
-                assert!(
-                    wire.read::<Request>().is_err(),
-                    "status must send no operation"
-                );
-            });
-            assert_eq!(
-                server.workspace_owner().err(),
-                Some(ServerError::AuthenticationRefused)
-            );
-            let result = server.refresh();
-            peer.join().unwrap();
-            if workspace_policy == Some(true) {
-                assert_eq!(
-                    server.workspace_owner().unwrap(),
-                    server.clone().workspace_owner().unwrap()
-                );
-                assert_eq!(
-                    result,
-                    Ok(AuthenticatedStatus {
-                        protocol_major: 1,
-                        development_pane: true,
-                    }),
-                    "missing optional capabilities must not prevent admission"
-                );
-            } else {
-                assert_eq!(result, Err(ServerError::MissingRequiredCapability));
-                assert_eq!(
-                    server.workspace_owner().err(),
-                    Some(ServerError::AuthenticationRefused)
-                );
-            }
-            std::fs::remove_dir_all(root).unwrap();
-        }
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-cap-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        };
+        let server = ServerConnection::with_paths(paths.clone()).unwrap();
+        server.setup().unwrap();
+        Directory::open(&paths.runtime, true).unwrap();
+        let listener = UnixListener::bind(paths.socket()).unwrap();
+        std::fs::set_permissions(paths.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let pin = server.server_id().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            protocol::admit_server(&mut stream, &pin, &paths.identity).unwrap();
+            stream.set_nonblocking(false).unwrap();
+            let mut received = Vec::new();
+            std::io::Read::read_to_end(&mut stream, &mut received).unwrap();
+            received
+        });
+        assert_eq!(
+            server.workspace_owner().err(),
+            Some(ServerError::AuthenticationRefused)
+        );
+        assert_eq!(
+            server.refresh(),
+            Ok(AuthenticatedStatus {
+                protocol_major: 2,
+                development_pane: true,
+            })
+        );
+        assert_eq!(
+            server.workspace_owner().unwrap(),
+            server.clone().workspace_owner().unwrap()
+        );
+        drop(server);
+        assert!(peer.join().unwrap().is_empty(), "status sends no operation");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -634,15 +661,9 @@ mod tests {
             let endpoint = fixture.endpoint();
             // Refusing administration must preserve the same pairing's other transport.
             let other_worker = fixture.serve_next();
-            let mut other = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
-            protocol::admit_transport(
-                &mut other,
-                (&paired.client, &"Other view".into()),
-                &paired.pin.server,
-                &paired.pin.build,
-                &[protocol::MAJOR],
-            )
-            .unwrap();
+            let connection = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
+            let other =
+                direct::tests::admitted(connection, &paired.client, "Other view", &paired).unwrap();
             let policy = change_address.then(|| {
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 direct::NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
@@ -665,6 +686,8 @@ mod tests {
             };
             let issuer_worker = fixture.serve_next();
             let result = local.set_direct_policy(policy.clone(), policy.is_some());
+            // The request used the handle's shared connection, which ends with the handle.
+            drop(local);
             let _ = issuer_worker.join().unwrap();
             let ManagementReply::Status(observed) = fixture.management(Management::Status).unwrap()
             else {
@@ -673,11 +696,8 @@ mod tests {
             assert_eq!(result, Err(direct::DirectError::AuthenticationRefused));
             assert_eq!(observed.enabled, initial.enabled);
             assert_eq!(observed.policy, initial.policy);
-            let mut wire = protocol::Wire::terminal(&mut other).unwrap();
-            wire.write(&crate::pane::Request::Direct(Management::Status))
-                .unwrap();
-            assert!(matches!(wire.read::<crate::pane::Reply>().unwrap(),
-                crate::pane::Reply::Direct(Ok(ManagementReply::Status(status)))
+            assert!(matches!(direct::tests::manage(&other, Management::Status),
+                Ok(ManagementReply::Status(status))
                 if status.enabled == initial.enabled && status.policy == initial.policy));
             drop(other);
             let _ = other_worker.join().unwrap();
@@ -725,7 +745,7 @@ mod tests {
         root: &std::path::Path,
         paired: crate::direct::PairedDevice,
     ) -> ServerConnection {
-        let mut local = ServerConnection::for_development_client("first", 1).unwrap();
+        let mut local = ServerConnection::for_development_client("first", 2).unwrap();
         local.paths = Paths {
             identity: "spaceterm-development".into(),
             data: root.join("data"),
@@ -794,7 +814,7 @@ mod tests {
     #[test]
     fn local_and_direct_workspace_owners_stay_distinct_when_server_and_client_ids_collide() {
         let paired = paired_identity();
-        let local = ServerConnection::for_development_client("first", 1).unwrap();
+        let local = ServerConnection::for_development_client("first", 2).unwrap();
         // Supply the admitted identity at the transport boundary without starting a server.
         local
             .bind_scope(local.scope_for(paired.client, paired.pin.server))
@@ -810,7 +830,7 @@ mod tests {
     fn workspace_owners_ignore_storage_paths_and_development_client_environment_names() {
         let paired = paired_identity();
         let original = direct_fixture(std::path::Path::new("/first"), paired.clone());
-        let mut relaunched = ServerConnection::for_development_client("second", 1).unwrap();
+        let mut relaunched = ServerConnection::for_development_client("second", 2).unwrap();
         relaunched.paths.data = std::path::PathBuf::from("/second");
         let relaunched = relaunched
             .with_direct([3; 32], paired, Arc::new(NoConnect))
@@ -846,7 +866,7 @@ mod tests {
             u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
         ));
         let local = |name| {
-            let mut connection = ServerConnection::for_development_client(name, 1).unwrap();
+            let mut connection = ServerConnection::for_development_client(name, 2).unwrap();
             connection.paths = Paths {
                 identity: "spaceterm-development".into(),
                 data: root.join("data"),
@@ -1010,7 +1030,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
-            shared_pane: std::sync::Arc::default(),
+            shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
         let subscription = server.clone();
@@ -1047,7 +1067,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
-            shared_pane: std::sync::Arc::default(),
+            shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
         let data = Directory::open(&server.paths.data, true).unwrap();
@@ -1082,7 +1102,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
-            shared_pane: std::sync::Arc::default(),
+            shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
         let first = make("first");

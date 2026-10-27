@@ -1,7 +1,8 @@
 //! The network boundary drops a real successful start reply. Each client runs in a fresh
 //! test process, with fresh PaneControls, while the production host and its PTY stay alive.
 use super::*;
-use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+use crate::runtime::HostCommands as _;
+use spaceterm_server::hierarchy::Mutation;
 use std::{
     io::{Read, Write},
     os::unix::net::{UnixListener, UnixStream},
@@ -14,7 +15,6 @@ const SOCKET: &str = "SPACETERM_START_TEST_SOCKET";
 
 fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(value).unwrap();
-    assert!(bytes.len() <= pane::MAX_TERMINAL_FRAME);
     stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
     stream.write_all(&bytes)
 }
@@ -29,7 +29,6 @@ fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> std::io::Res
     }
     stream.read_exact(&mut length[1..])?;
     let length = u32::from_be_bytes(length) as usize;
-    assert!(length <= pane::MAX_TERMINAL_FRAME);
     let mut bytes = vec![0; length];
     stream.read_exact(&mut bytes)?;
     serde_json::from_slice(&bytes)
@@ -128,13 +127,9 @@ fn prove_shell_started(host: &mut crate::runtime::SharedWorkspaceHost, lease: Le
     loop {
         if let Reply::Screen(screen) =
             host.request([1; 32], lease.connection, Request::Poll { lease })
-            && screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    == "ST-START-SUCCEEDED"
-            })
+            && crate::terminal::server_session::screen_decoder::keyframe_lines(&screen)
+                .iter()
+                .any(|row| row.trim_end() == "ST-START-SUCCEEDED")
         {
             return;
         }

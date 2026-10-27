@@ -31,7 +31,7 @@ fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_bui
                         archive,
                         signature,
                         &pin,
-                        1,
+                        2,
                         &["workspace_policy"],
                     );
                     if case == "clean" || (identity != "spaceterm" && case == "dirty") {
@@ -71,7 +71,7 @@ fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claim
         let service = Service::for_identity(identity).unwrap();
         let pin = digest(&std::fs::read(&archive).unwrap());
         let inspect =
-            || service.inspect_candidate(&archive, &signature, &pin, 1, &["workspace_policy"]);
+            || service.inspect_candidate(&archive, &signature, &pin, 2, &["workspace_policy"]);
         if identity == "spaceterm" {
             assert_eq!(inspect(), Err(ServerError::RuntimeUnavailable));
             let parent = root.join("release-installations");
@@ -82,7 +82,7 @@ fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claim
                     &archive,
                     &signature,
                     &pin,
-                    1,
+                    2,
                     &["workspace_policy"]
                 ),
                 Err(ServerError::RuntimeUnavailable)
@@ -123,7 +123,7 @@ fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claim
             })
             .unwrap();
             assert_eq!(
-                other.inspect_candidate(&archive, &signature, &pin, 1, &["workspace_policy"]),
+                other.inspect_candidate(&archive, &signature, &pin, 2, &["workspace_policy"]),
                 Err(ServerError::RuntimeUnavailable)
             );
             std::fs::write(&signature, [0; 64]).unwrap();
@@ -164,7 +164,7 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                     signature,
                     &pin,
                     remote_target,
-                    1,
+                    2,
                     &["workspace_policy"],
                 )
                 .unwrap();
@@ -175,7 +175,7 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                     signature,
                     &pin,
                     target(),
-                    1,
+                    2,
                     &["workspace_policy"]
                 ),
                 Err(ServerError::RuntimeUnavailable)
@@ -191,7 +191,7 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                     &signature_bytes,
                     &pin,
                     remote_target,
-                    1,
+                    2,
                     &["workspace_policy"],
                 ),
                 Ok(metadata),
@@ -224,7 +224,7 @@ fn retained_candidate_revalidates_declared_compatibility_and_signature() {
                 verify_candidate_installation(
                     &installation.directory,
                     "spaceterm-development",
-                    1,
+                    2,
                     &["workspace_policy"]
                 ),
                 Ok(())
@@ -233,7 +233,7 @@ fn retained_candidate_revalidates_declared_compatibility_and_signature() {
                 verify_candidate_installation(
                     &installation.directory,
                     "spaceterm-development",
-                    2,
+                    3,
                     &["workspace_policy"]
                 ),
                 Err(ServerError::IncompatibleProtocol)
@@ -242,7 +242,7 @@ fn retained_candidate_revalidates_declared_compatibility_and_signature() {
                 verify_candidate_installation(
                     &installation.directory,
                     "spaceterm-development",
-                    1,
+                    2,
                     &["future_required"]
                 ),
                 Err(ServerError::MissingRequiredCapability)
@@ -252,7 +252,7 @@ fn retained_candidate_revalidates_declared_compatibility_and_signature() {
                 verify_candidate_installation(
                     &installation.directory,
                     "spaceterm-development",
-                    1,
+                    2,
                     &["workspace_policy"]
                 ),
                 Err(ServerError::RuntimeUnavailable)
@@ -271,12 +271,12 @@ fn signed_candidate_discovery_distinguishes_required_major_and_capability() {
         |archive, signature| {
             for (major, required, expected) in [
                 (
-                    2,
+                    3,
                     vec!["workspace_policy"],
                     ServerError::IncompatibleProtocol,
                 ),
                 (
-                    1,
+                    2,
                     vec!["future_required"],
                     ServerError::MissingRequiredCapability,
                 ),
@@ -295,7 +295,7 @@ fn signed_candidate_discovery_distinguishes_required_major_and_capability() {
             let service = Service::for_identity("spaceterm-development").unwrap();
             let pin = digest(&std::fs::read(archive).unwrap());
             let metadata = service
-                .inspect_candidate(archive, signature, &pin, 1, &["workspace_policy"])
+                .inspect_candidate(archive, signature, &pin, 2, &["workspace_policy"])
                 .unwrap();
             assert_eq!(metadata.version, VERSION);
             assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
@@ -319,7 +319,7 @@ fn signed_candidate_can_reuse_an_independent_release_and_deduplicates_whole_arch
                 archive,
                 signature,
                 &pin,
-                1,
+                2,
                 &["workspace_policy"],
             )
             .unwrap();
@@ -329,7 +329,7 @@ fn signed_candidate_can_reuse_an_independent_release_and_deduplicates_whole_arch
                 archive,
                 signature,
                 &pin,
-                1,
+                2,
                 &["workspace_policy"],
             )
             .unwrap();
@@ -348,7 +348,7 @@ fn signed_candidate_can_reuse_an_independent_release_and_deduplicates_whole_arch
                 archive,
                 signature,
                 &changed_pin,
-                1,
+                2,
                 &["workspace_policy"],
             )
             .unwrap();
@@ -373,9 +373,9 @@ fn matching_digest_never_bypasses_signature_or_signed_compatibility_validation()
                     let mut info: serde_json::Value =
                         serde_json::from_slice(&entries[0].1).unwrap();
                     match change {
-                        0 => info["protocol_major"] = 2.into(),
+                        0 => info["protocol_major"] = 3.into(),
                         1 => {
-                            info["protocol_major"] = 1.into();
+                            info["protocol_major"] = 2.into();
                             info["capabilities"] = serde_json::json!([]);
                         }
                         2 => {
@@ -400,7 +400,7 @@ fn matching_digest_never_bypasses_signature_or_signed_compatibility_validation()
                         archive,
                         signature,
                         &pin,
-                        1,
+                        2,
                         &["workspace_policy"]
                     )
                     .is_err()
@@ -415,7 +415,7 @@ fn matching_digest_never_bypasses_signature_or_signed_compatibility_validation()
                     archive,
                     signature,
                     &pin,
-                    1,
+                    2,
                     &["workspace_policy"]
                 )
                 .is_err()
@@ -448,7 +448,7 @@ fn candidate_pin_covers_resources_and_build_metadata_before_retention() {
                     archive,
                     signature,
                     &pin,
-                    1,
+                    2,
                     &["workspace_policy"]
                 ),
                 Err(ServerError::CandidateChanged)

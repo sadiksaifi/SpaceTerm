@@ -43,19 +43,10 @@ fn large_grid_dimensions_reach_the_emulator_screen_and_pty_together() {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease }) {
-                assert_eq!(screen.columns, columns);
-                assert_eq!(screen.rows.len(), usize::from(rows));
-                assert!(
-                    screen
-                        .rows
-                        .iter()
-                        .all(|row| row.len() == usize::from(columns))
-                );
-                let mut decoder = pane::presentation::ScreenDecoder::default();
-                assert!(matches!(
-                    decoder.apply(Reply::Screen(screen)),
-                    Ok(Reply::Screen(_))
-                ));
+                let geometry = screen.update.geometry.unwrap();
+                assert_eq!((geometry.columns, geometry.rows), (columns, rows));
+                screen.update.validate().unwrap();
+                assert!(super::dispatch::wire_bytes(Reply::Screen(screen)).is_some());
                 break;
             }
             assert!(
@@ -78,13 +69,23 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
     let mut emulator = crate::terminal::emulator::TerminalEmulator::new(geometry).unwrap();
     emulator.feed(b"grid");
     let mut screen = (*emulator.snapshot().unwrap().unwrap()).clone();
-    // Six JSON bytes per codepoint is the largest escaped representation. This bounds even
-    // strings the emulator would normally sanitize before exposing a rendered cell.
+    // Every cell starts its own run: neighbors differ in link, and every style and link table
+    // entry is used. Each cell carries the longest text a cell sends.
+    let links = (0..spaceterm_server::protocol::limits::MAX_LINKS)
+        .map(|index| {
+            let value = format!("https://example.test/{index}/");
+            let value = value.clone()
+                + &"a".repeat(crate::terminal::hyperlink::MAX_LINK_BYTES - value.len());
+            Arc::new(HyperlinkTarget::url(&value).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let mut index = 0_usize;
     for row in Arc::make_mut(&mut screen.rows) {
         for cell in Arc::make_mut(row) {
-            cell.text = "\0".repeat(64);
-            cell.foreground_source =
-                TerminalColor::Rgb(crate::appearance::color::Color::rgb(0xffffff));
+            cell.text = "\u{10ffff}".repeat(32);
+            cell.foreground_source = TerminalColor::Rgb(crate::appearance::color::Color::rgb(
+                0xff0000 | (index % 4095) as u32,
+            ));
             cell.background_source = cell.foreground_source;
             cell.underline_source = cell.foreground_source;
             cell.inverse = true;
@@ -95,67 +96,84 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
             cell.invisible = true;
             cell.strikethrough = true;
             cell.overline = true;
-            cell.spacer_tail = true;
             cell.selected = true;
             cell.underline = TerminalUnderlineSnapshot::Dashed;
+            cell.hyperlink = Some(Arc::clone(&links[index % links.len()]));
+            index += 1;
         }
     }
-    let mut encoded = encode_screen(&screen);
-    let link = "https://example.test/".to_owned() + &"a".repeat(235);
-    encoded.hyperlinks = (0..pane::effects::MAX_SCREEN_HYPERLINKS)
-        .map(|_| pane::effects::Hyperlink::Url(link.clone()))
-        .collect();
     let image = pane::graphics::ImageKey {
         image_id: u32::MAX,
         generation: u64::MAX,
     };
-    encoded.graphics = Some(Ok(pane::graphics::Snapshot {
-        generation: u64::MAX,
-        placement_generation: u64::MAX,
-        images: vec![pane::graphics::Image {
-            key: image,
-            width: 1,
-            height: 1,
-        }],
-        placements: (0..pane::graphics::MAX_PLACEMENTS)
-            .map(|_| pane::graphics::Placement {
-                image,
-                placement_id: u32::MAX,
-                z: i32::MIN,
-                viewport_col: i32::MIN,
-                viewport_row: i32::MIN,
-                cell_offset_x: u32::MAX,
-                cell_offset_y: u32::MAX,
-                source_x: 0,
-                source_y: 0,
-                source_width: 1,
-                source_height: 1,
-                destination_width: u32::MAX,
-                destination_height: u32::MAX,
-                unicode_placeholder: true,
+    screen.graphics.generation = u64::MAX;
+    screen.graphics.placement_generation = u64::MAX;
+    screen.graphics.images = Arc::from([Arc::new(crate::terminal::ImageSnapshot {
+        key: image,
+        width: 1,
+        height: 1,
+        rgba: Arc::from([0_u8; 4]),
+        reservation: None,
+    })]);
+    screen.graphics.placements = (0..pane::graphics::MAX_PLACEMENTS)
+        .map(|_| pane::graphics::Placement {
+            image,
+            placement_id: u32::MAX,
+            z: i32::MIN,
+            viewport_col: i32::MIN,
+            viewport_row: i32::MIN,
+            cell_offset_x: u32::MAX,
+            cell_offset_y: u32::MAX,
+            source_x: 0,
+            source_y: 0,
+            source_width: 1,
+            source_height: 1,
+            destination_width: u32::MAX,
+            destination_height: u32::MAX,
+            unicode_placeholder: true,
+        })
+        .collect();
+    screen.find = Some(Arc::new(crate::terminal::TerminalFindSnapshot {
+        generation: crate::terminal::FindQueryGeneration::from_value(u64::MAX),
+        total_matches: 131072,
+        current_match: Some(131072),
+        visible_spans: (0..256)
+            .flat_map(|row| {
+                (0..512).map(move |column| crate::terminal::FindHighlightSpan {
+                    row,
+                    start_column: column,
+                    end_column: column + 1,
+                    current: true,
+                })
             })
             .collect(),
     }));
-    encoded
-        .graphics
-        .as_ref()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .validate()
-        .unwrap();
-    encoded.reading.as_mut().unwrap().find = Some(pane::reading::Find {
+    let capture = screen_encoder::ScreenCapture {
+        screen: Arc::new(screen),
+        history: spaceterm_server::protocol::screen::History {
+            epoch: u64::MAX,
+            total: u64::MAX,
+        },
         generation: u64::MAX,
-        total: 131072,
-        current: Some(131072),
-        spans: (0..256)
-            .flat_map(|row| (0..512).map(move |col| (row, col, col + 1, true)))
-            .collect(),
-    });
-    let bytes = serde_json::to_vec(&Reply::Screen(Box::new(encoded))).unwrap();
+        accessibility_revision: u64::MAX,
+    };
+    let update = screen_encoder::ScreenEncoder::default()
+        .encode(&capture, u64::MAX, Some(u64::MAX - 1))
+        .unwrap();
+    assert_eq!(update.rows.len(), 256);
+    assert!(update.rows.iter().all(|row| row.runs.len() == 512));
+    assert_eq!(
+        update.links.len(),
+        spaceterm_server::protocol::limits::MAX_LINKS
+    );
+    assert!(matches!(&update.graphics, Some(Ok(_))));
+    let screen = spaceterm_server::protocol::interim::ScreenFrame {
+        frame: u64::MAX,
+        base: Some(u64::MAX - 1),
+        update,
+    };
     assert!(
-        bytes.len() < pane::MAX_TERMINAL_FRAME,
-        "full frame has {} bytes",
-        bytes.len()
+        super::dispatch::wire_bytes(Reply::Screen(Box::new(screen))).is_some(),
+        "a full screen fits one protocol reply"
     );
 }

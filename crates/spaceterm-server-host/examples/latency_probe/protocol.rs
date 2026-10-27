@@ -1,19 +1,23 @@
 //! Every protocol call the latency probe makes. When the client protocol changes, port this
 //! module and keep its public items: [`Owner`], [`Claim`], [`Route`] and [`EchoPane`].
 use spaceterm::runtime::PhysicalKey;
-use spaceterm_server::ServerConnection;
+use spaceterm_server::attachments::Attachment;
+use spaceterm_server::connection::link::{ChannelEvent, ChannelHandle, LinkEvent, ServerLink};
 use spaceterm_server::direct::{
     ClaimId, DeviceCredential, DirectConnection, DirectConnector, DirectError, Enrollment,
     Invitation, NetworkPolicy, PairedDevice,
 };
-use spaceterm_server::hierarchy::{CloseTarget, Id, Mutation, Outcome};
-use spaceterm_server::pane::{
-    FocusTarget, InteractiveInput, Key, Lease, PaneConnection, PaneSize, Reply, Request,
-    presentation::ScreenDecoder,
+use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
+use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize, Refusal};
+use spaceterm_server::protocol::interim::{Interim, InterimReply};
+use spaceterm_server::protocol::screen::CursorPosition;
+use spaceterm_server::protocol::{
+    ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
 };
+use spaceterm_server::{ServerConnection, ServerError};
 use std::cell::RefCell;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A failed probe stage and the typed classification of its cause.
@@ -208,17 +212,52 @@ pub enum Route {
 }
 
 /// A probe Workspace whose Pane runs `cat` on a raw terminal, so each typed key echoes once.
+///
+/// Screens are polled until the server pushes frames. The probe keeps only the last frame it saw,
+/// which `PollChanges` names as its base, and the cursor that the echo moves.
 pub struct EchoPane {
     server: ServerConnection,
-    connection: PaneConnection,
+    link: ServerLink,
     boot: Id,
     workspace: Id,
-    lease: Option<Lease>,
-    decoder: ScreenDecoder,
-    cursor: Option<(u16, u16, u8)>,
+    channel: Option<ChannelHandle>,
+    /// The first input the server discarded. The connection's I/O thread records it.
+    discarded: Arc<Mutex<Option<Refusal>>>,
+    frame: Option<u64>,
+    cursor: Option<CursorPosition>,
 }
 
 const READY: &str = "PROBE-READY";
+
+/// Every claim names attachment generation 1. The probe releases no attachment, so the server
+/// never holds a newer generation for its Workspace.
+const GENERATION: u64 = 1;
+
+fn connect(server: &ServerConnection) -> std::result::Result<ServerLink, ServerError> {
+    server.connect(Arc::new(|_: LinkEvent| {}))
+}
+
+fn request(link: &ServerLink, stage: &'static str, operation: Operation) -> Result<ReplyBody> {
+    let pending = at(stage, link.request(operation))?;
+    at(stage, pending.wait())
+}
+
+fn interim(link: &ServerLink, stage: &'static str, operation: Interim) -> Result<InterimReply> {
+    match request(link, stage, Operation::Interim(operation))? {
+        ReplyBody::Interim(reply) => Ok(reply),
+        _ => fail(stage),
+    }
+}
+
+fn inventory(link: &ServerLink, stage: &'static str) -> Result<(Inventory, u64)> {
+    match interim(link, stage, Interim::Inventory)? {
+        InterimReply::Inventory {
+            inventory,
+            next_sequence,
+        } => Ok((inventory, next_sequence)),
+        _ => fail(stage),
+    }
+}
 
 impl EchoPane {
     pub fn open(identity: &str, route: &Route) -> Result<Self> {
@@ -234,14 +273,8 @@ impl EchoPane {
                 ),
             )?,
         };
-        let mut connection = at("connect", server.connect_pane())?;
-        let Reply::Inventory {
-            inventory,
-            next_sequence,
-        } = at("inventory", connection.exchange(&Request::Inventory))?
-        else {
-            return fail("inventory");
-        };
+        let link = at("connect", connect(&server))?;
+        let (inventory, next_sequence) = inventory(&link, "inventory")?;
         let Some(boot) = inventory.close.as_ref().map(|close| close.boot) else {
             return fail("server boot");
         };
@@ -249,17 +282,18 @@ impl EchoPane {
             name: format!("Latency probe {}", std::process::id()),
             directory: None,
         };
-        let outcome = mutate(&mut connection, next_sequence, mutation)?;
+        let outcome = mutate(&link, next_sequence, mutation)?;
         let Outcome::Accepted { target: workspace } = outcome else {
             return fail("Workspace creation refused");
         };
         let mut pane = Self {
             server,
-            connection,
+            link,
             boot,
             workspace,
-            lease: None,
-            decoder: ScreenDecoder::default(),
+            channel: None,
+            discarded: Arc::default(),
+            frame: None,
             cursor: None,
         };
         // Close the Workspace if the Pane never becomes ready.
@@ -273,11 +307,7 @@ impl EchoPane {
     }
 
     fn start(&mut self) -> Result<()> {
-        let Reply::Inventory { inventory, .. } =
-            at("inventory", self.connection.exchange(&Request::Inventory))?
-        else {
-            return fail("inventory");
-        };
+        let (inventory, _) = inventory(&self.link, "inventory")?;
         let workspace = self.workspace;
         let Some(pane) = inventory
             .workspaces
@@ -294,40 +324,60 @@ impl EchoPane {
             cell_width: 8,
             cell_height: 18,
         };
-        let request = Request::SelectPane {
-            pane,
-            explicit: true,
-            size,
-            style: None,
+        let discarded = Arc::clone(&self.discarded);
+        let channel = at(
+            "attach",
+            self.link.open_channel(Arc::new(move |event: ChannelEvent| {
+                if let ChannelEvent::Pane(PaneEvent::Input {
+                    outcome: InputOutcome::Discarded(refusal),
+                    ..
+                }) = event
+                {
+                    discarded
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_or_insert(refusal);
+                }
+            })),
+        )?;
+        let attachment = Attachment {
+            workspace,
+            generation: GENERATION,
         };
-        let Reply::Attached { lease } = at("attach", self.connection.exchange(&request))? else {
+        let claim = AttachmentClaim::Select { explicit: true };
+        let pending = at("attach", channel.claim(attachment, pane, claim, size, None))?;
+        let ReplyBody::Claim(ClaimReply::Attached { .. }) = at("attach", pending.wait())? else {
+            channel.detach();
             return fail("attach");
         };
-        self.lease = Some(lease);
-        let focus = Request::Focus {
-            lease,
-            generation: 1,
-            target: FocusTarget::Terminal,
-        };
-        at("focus", self.connection.exchange(&focus))?;
-        let demand = Request::PresentationDemand {
-            lease,
+        let channel = self.channel.insert(channel);
+        at(
+            "focus",
+            channel.input(GENERATION, vec![InputEvent::Focus(FocusTarget::Terminal)]),
+        )?;
+        let demand = Interim::PresentationDemand {
+            channel: channel.channel(),
             visible: true,
         };
-        at("visible", self.connection.exchange(&demand))?;
+        interim(&self.link, "visible", demand)?;
         // The printf output differs from the typed command, so only the program prints READY.
         std::thread::sleep(Duration::from_millis(1500));
-        self.input(InteractiveInput::Key(text_key(
-            "stty raw -echo; printf 'PROBE%sREADY' -; exec cat",
-        )))?;
-        self.input(InteractiveInput::Key(enter_key()))?;
+        self.input(vec![
+            InputEvent::Key(text_key(
+                "stty raw -echo; printf 'PROBE%sREADY' -; exec cat",
+            )),
+            InputEvent::Key(enter_key()),
+        ])?;
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            let reply = at("ready", self.connection.exchange(&Request::Poll { lease }))?;
-            if let Reply::Screen(screen) = reply
-                && screen.rows.iter().any(|row| {
-                    row.iter()
-                        .map(|cell| cell.text.as_str())
+            let poll = Interim::Poll {
+                channel: self.channel()?.channel(),
+            };
+            if let InterimReply::Screen(screen) = interim(&self.link, "ready", poll)?
+                && screen.update.rows.iter().any(|row| {
+                    row.runs
+                        .iter()
+                        .map(|run| run.text.as_str())
                         .collect::<String>()
                         .contains(READY)
                 })
@@ -340,53 +390,82 @@ impl EchoPane {
             std::thread::sleep(Duration::from_millis(20));
         }
         std::thread::sleep(Duration::from_millis(300));
-        let request = Request::PollChanges { lease, base: None };
-        let reply = at("screen", self.connection.exchange(&request))?;
-        if let Reply::Screen(screen) = at("screen", self.decoder.apply(reply))? {
-            self.cursor = screen.cursor;
-        }
+        self.frame = None;
+        self.poll("screen")?;
         Ok(())
     }
 
-    fn lease(&self) -> Result<Lease> {
-        self.lease
+    fn channel(&self) -> Result<&ChannelHandle> {
+        self.channel
+            .as_ref()
             .map_or_else(|| fail("probe Pane not attached"), Ok)
     }
 
-    fn input(&mut self, input: InteractiveInput) -> Result<()> {
-        let request = Request::Input {
-            lease: self.lease()?,
-            generation: 1,
-            input,
+    /// Fails when the server discarded earlier input.
+    fn reported(&self) -> Result<()> {
+        match *self.discarded.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(refusal) => Err(Failure {
+                stage: "input",
+                cause: Some(format!("{refusal:?}")),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Sends one Input message under focus generation 1 and returns its serial. Input has no
+    /// reply; the server reports only a discard.
+    fn input(&mut self, events: Vec<InputEvent>) -> Result<u32> {
+        self.reported()?;
+        at("input", self.channel()?.input(GENERATION, events))
+    }
+
+    /// Polls the screen's changes since the last screen the probe saw, and returns whether the
+    /// cursor moved.
+    fn poll(&mut self, stage: &'static str) -> Result<bool> {
+        self.reported()?;
+        let poll = Interim::PollChanges {
+            channel: self.channel()?.channel(),
+            base: self.frame,
         };
-        at("input", self.connection.exchange(&request)).map(drop)
+        let screen = match interim(&self.link, stage, poll)? {
+            InterimReply::Screen(screen) => *screen,
+            InterimReply::Unchanged | InterimReply::AccessibilityRevision { .. } => {
+                return Ok(false);
+            }
+            _ => return fail(stage),
+        };
+        // The probe reads only the cursor, so every update applies whatever its base.
+        self.frame = Some(screen.frame);
+        let cursor = screen.update.cursor.position;
+        let moved = cursor != self.cursor;
+        self.cursor = cursor;
+        Ok(moved)
     }
 
-    /// One request that changes nothing.
+    /// One request that changes nothing. It releases an attachment of a Workspace that never
+    /// existed, which the server answers before it reads any attachment state.
     pub fn round_trip(&mut self) -> Result<()> {
-        at(
-            "round trip",
-            self.connection.exchange(&Request::Capabilities),
-        )
-        .map(drop)
+        let nothing = Operation::ReleaseAttachment {
+            attachment: Attachment {
+                workspace: [0; 32],
+                generation: 0,
+            },
+        };
+        match request(&self.link, "round trip", nothing)? {
+            ReplyBody::Done => Ok(()),
+            _ => fail("round trip"),
+        }
     }
 
-    pub fn send_key(&mut self, character: char) -> Result<()> {
-        self.input(InteractiveInput::Key(text_key(&character.to_string())))
+    /// Types `character` and returns the serial of its Input message.
+    pub fn send_key(&mut self, character: char) -> Result<u32> {
+        self.input(vec![InputEvent::Key(text_key(&character.to_string()))])
     }
 
     /// Returns once the client has seen the cursor move.
     pub fn await_echo(&mut self, deadline: Instant) -> Result<()> {
         while Instant::now() < deadline {
-            let request = Request::PollChanges {
-                lease: self.lease()?,
-                base: self.decoder.baseline(),
-            };
-            let reply = at("poll", self.connection.exchange(&request))?;
-            if let Reply::Screen(screen) = at("decode", self.decoder.apply(reply))?
-                && screen.cursor != self.cursor
-            {
-                self.cursor = screen.cursor;
+            if self.poll("poll")? {
                 return Ok(());
             }
         }
@@ -395,27 +474,22 @@ impl EchoPane {
 
     /// Sends Return, which moves the raw cursor back to the first column of the same line.
     pub fn rewind(&mut self) -> Result<()> {
-        self.input(InteractiveInput::Key(enter_key()))?;
+        self.input(vec![InputEvent::Key(enter_key())])?;
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.cursor.map(|cursor| cursor.0) != Some(0) {
+        while self.cursor.map(|cursor| cursor.column) != Some(0) {
             self.await_echo(deadline)?;
         }
         Ok(())
     }
 
     /// Closes the probe Workspace on a fresh connection, unless the server restarted.
-    pub fn close(self) -> Result<()> {
-        let mut connection = at("cleanup connect", self.server.connect_pane())?;
-        let Reply::Inventory {
-            inventory,
-            next_sequence,
-        } = at(
-            "cleanup inventory",
-            connection.exchange(&Request::Inventory),
-        )?
-        else {
-            return fail("cleanup inventory");
-        };
+    pub fn close(mut self) -> Result<()> {
+        // Closing the Workspace ends the Pane, so its channel needs no release.
+        if let Some(channel) = self.channel.take() {
+            channel.detach();
+        }
+        let link = at("cleanup connect", connect(&self.server))?;
+        let (inventory, next_sequence) = inventory(&link, "cleanup inventory")?;
         if inventory.close.as_ref().map(|close| close.boot) != Some(self.boot) {
             return fail("the server restarted; nothing to close");
         }
@@ -426,7 +500,7 @@ impl EchoPane {
             return Ok(());
         };
         let outcome = mutate(
-            &mut connection,
+            &link,
             next_sequence,
             Mutation::Close {
                 target,
@@ -440,18 +514,16 @@ impl EchoPane {
     }
 }
 
-fn mutate(connection: &mut PaneConnection, sequence: u64, mutation: Mutation) -> Result<Outcome> {
-    let request = Request::Mutate { sequence, mutation };
-    let mut reply = at("mutate", connection.exchange(&request))?;
+fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
+    let mut reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
     let deadline = Instant::now() + Duration::from_secs(15);
-    while matches!(reply, Reply::MutationPending) && Instant::now() < deadline {
+    while matches!(reply, ReplyBody::Interim(InterimReply::MutationPending))
+        && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(40));
-        reply = at(
-            "resolve",
-            connection.exchange(&Request::Resolve { sequence }),
-        )?;
+        reply = request(link, "resolve", Operation::Resolve { sequence })?;
     }
-    let Reply::Outcome(result) = reply else {
+    let ReplyBody::Outcome(result) = reply else {
         return fail("mutation outcome");
     };
     Ok(result.outcome)

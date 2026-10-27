@@ -367,6 +367,8 @@ fn work(owner: &Arc<Inner>) {
 
 fn check_route(owner: &Arc<Inner>, job: RouteJob) {
     let result = match job.server {
+        // The route's shared connection judges its own health with pings. Refreshing a live
+        // connection reads that health without network traffic; only an ended one reconnects.
         Some(server) => server.refresh().map(|_| server).map_err(DirectError::from),
         None => connect(owner, &job.saved, job.interaction, Arc::clone(&job.gate)),
     };

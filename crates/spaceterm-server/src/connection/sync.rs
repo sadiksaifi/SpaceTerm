@@ -50,7 +50,8 @@ impl SyncWorker {
     ) -> Result<(), OutboxError> {
         let replier = outbox.clone();
         let job = move || {
-            // A closing connection no longer needs the reply.
+            // `Closed` means the connection no longer needs the reply. A full queue already
+            // closed the outbox with `Goodbye(Stalled)`. Either way nothing is owed any more.
             let _ = replier.reply_or_refuse(id, work());
         };
         match self.submit(job) {
@@ -60,6 +61,9 @@ impl SyncWorker {
     }
 
     /// Blocks until every job submitted before this call has run, for example before shutdown.
+    ///
+    /// Never call it while holding the `PaneService` lock, because a queued job may take that
+    /// lock, and never from inside a job. Either deadlocks.
     pub fn flush(&self) -> Result<(), Stopped> {
         let (done, finished) = mpsc::channel();
         self.submit(move || {

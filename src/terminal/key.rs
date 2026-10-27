@@ -100,6 +100,74 @@ impl KeyInput {
         )
     }
 
+    /// Text input as the keys a person types for it. Printable runs stay text; each control
+    /// character becomes the key that produces it: CR, LF or CR LF is Enter, HT is Tab, ESC is
+    /// Escape, BS and DEL are Backspace, and the other C0 controls 0x01 to 0x1a are Control with
+    /// a letter. Other control characters have no key and are refused.
+    pub fn typed_keys(&self) -> Result<Vec<KeyInput>, UnsupportedControlText> {
+        let Some(text) = self.text.as_deref() else {
+            return Ok(vec![self.clone()]);
+        };
+        if !text.chars().any(char::is_control) {
+            return Ok(vec![self.clone()]);
+        }
+        let mut keys = Vec::new();
+        let mut run = String::new();
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            if !character.is_control() {
+                run.push(character);
+                continue;
+            }
+            if !run.is_empty() {
+                let mut printable = self.clone();
+                printable.text = Some(std::mem::take(&mut run));
+                keys.push(printable);
+            }
+            if character == '\r' && characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+            keys.push(self.control_key(character)?);
+        }
+        if !run.is_empty() {
+            let mut printable = self.clone();
+            printable.text = Some(run);
+            keys.push(printable);
+        }
+        Ok(keys)
+    }
+
+    fn control_key(&self, character: char) -> Result<KeyInput, UnsupportedControlText> {
+        let (physical_key, logical_key, control) = match character {
+            '\r' | '\n' => (PhysicalKey::Enter, "enter", false),
+            '\t' => (PhysicalKey::Tab, "tab", false),
+            '\u{1b}' => (PhysicalKey::Escape, "escape", false),
+            '\u{8}' | '\u{7f}' => (PhysicalKey::Backspace, "backspace", false),
+            '\u{1}'..='\u{1a}' => {
+                let offset = character as i32 - 1;
+                let key = PhysicalKey::try_from(PhysicalKey::A as i32 + offset)
+                    .map_err(|_| UnsupportedControlText)?;
+                (key, "", true)
+            }
+            _ => return Err(UnsupportedControlText),
+        };
+        let letter = control.then(|| char::from(b'a' + (character as u8 - 1)));
+        Ok(KeyInput {
+            action: KeyAction::Press,
+            physical_key,
+            native_key_code: None,
+            logical_key: letter.map_or_else(|| logical_key.to_owned(), String::from),
+            text: None,
+            unshifted_codepoint: letter,
+            modifiers: InputModifiers {
+                control,
+                ..InputModifiers::default()
+            },
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: self.option_as_alt,
+        })
+    }
+
     pub fn validate(&self) -> Result<(), KeyInputError> {
         if self.physical_key == PhysicalKey::Unidentified
             && !self.is_text_input()
@@ -115,6 +183,11 @@ impl KeyInput {
     }
 }
 
+/// Text input contains a control character that no key produces.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("text input contains a control character that no key produces")]
+pub struct UnsupportedControlText;
+
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum KeyInputError {
     #[error("unsupported terminal key {logical_key:?} with native key code {native_key_code:?}")]
@@ -127,6 +200,36 @@ pub enum KeyInputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_characters_in_text_input_become_the_keys_that_type_them() {
+        let keys = KeyInput::text_input("ls\r\nx\t\u{3}\u{1b}\u{7f}")
+            .typed_keys()
+            .unwrap();
+        let typed: Vec<_> = keys
+            .iter()
+            .map(|key| (key.physical_key, key.text.as_deref(), key.modifiers.control))
+            .collect();
+        assert_eq!(
+            typed,
+            [
+                (PhysicalKey::Unidentified, Some("ls"), false),
+                (PhysicalKey::Enter, None, false),
+                (PhysicalKey::Unidentified, Some("x"), false),
+                (PhysicalKey::Tab, None, false),
+                (PhysicalKey::C, None, true),
+                (PhysicalKey::Escape, None, false),
+                (PhysicalKey::Backspace, None, false),
+            ]
+        );
+        assert!(keys.iter().all(|key| key.validate().is_ok()));
+        for refused in ["\u{0}", "\u{1c}", "\u{9b}"] {
+            assert_eq!(
+                KeyInput::text_input(refused).typed_keys(),
+                Err(UnsupportedControlText)
+            );
+        }
+    }
 
     #[test]
     fn unidentified_physical_key_should_fail_with_native_and_logical_identity() {

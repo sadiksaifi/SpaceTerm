@@ -1,7 +1,7 @@
 //! Golden vectors pin the wire bytes. Round trips cover every operation and every reused payload
 //! type, including optional fields in both states, because postcard has no field names.
 use super::frame::{Assembler, DecodeError, FrameReader, Kind, encode_client, encode_server};
-use super::interim::{Interim, InterimReply};
+use super::interim::{self, Interim, InterimReply};
 use super::screen::{
     Cells, Cursor, CursorPosition, Geometry, History, Row, Run, ScrollShift, Style, StyleDefinition,
 };
@@ -591,7 +591,11 @@ fn every_server_message_round_trips() {
             }),
             hidden_input: true,
         }),
-        ReplyBody::Interim(InterimReply::Screen(Box::new(screen()))),
+        ReplyBody::Interim(InterimReply::Screen(Box::new(interim::ScreenFrame {
+            frame: 2,
+            base: Some(1),
+            update: update(),
+        }))),
         ReplyBody::Interim(InterimReply::ReadingReady {
             generation: 1,
             selection_revision: 2,
@@ -676,45 +680,6 @@ fn every_server_message_round_trips() {
     server_round_trip(ServerMessage::Pong(Pong { nonce: 1 }));
 }
 
-fn screen() -> pane::Screen {
-    pane::Screen {
-        accessibility_revision: 1,
-        graphics: None,
-        cell_pixels: Some((8, 16)),
-        reading: None,
-        hyperlinks: vec![],
-        generation: 2,
-        mouse_tracking: false,
-        alternate_scroll: true,
-        columns: 2,
-        rows: vec![vec![pane::Cell {
-            hyperlink: None,
-            text: "a".into(),
-            foreground: pane::Color::Default,
-            background: pane::Color::Rgb([1, 2, 3]),
-            underline_color: pane::Color::Default,
-            flags: 0,
-            underline: 0,
-        }]],
-        wrapped: vec![false],
-        foreground: [0; 3],
-        background: [0; 3],
-        palette: vec![[0; 3]; 256],
-        reversed: false,
-        foreground_overridden: false,
-        background_overridden: false,
-        cursor_overridden: false,
-        palette_overrides: vec![false; 256],
-        cursor: None,
-        cursor_visible: true,
-        cursor_blinking: false,
-        cursor_shape: 0,
-        cursor_color: [0; 3],
-        cursor_text: [0; 3],
-        alternate: false,
-    }
-}
-
 #[test]
 fn large_messages_continue_across_frames_and_bulk_replies_use_small_chunks() {
     let wire = encode_server(&reply(ReplyBody::Graphics(Ok(pane::graphics::Chunk {
@@ -739,11 +704,12 @@ fn large_messages_continue_across_frames_and_bulk_replies_use_small_chunks() {
         .map(|index| Row {
             index,
             wrapped: false,
+            // 512 cells of 16 bytes each, such as long grapheme clusters.
             runs: vec![Run {
                 style: 0,
                 link: None,
                 text: "x".repeat(8 * 1024),
-                cells: Cells::Narrow,
+                cells: Cells::Explicit(vec![16; 512]),
             }],
         })
         .collect();
@@ -873,4 +839,97 @@ fn decoding_refuses_malformed_oversized_misdirected_and_out_of_bounds_frames() {
         DecodeError::Oversized,
         "continued frames are bounded by the message limit of their kind"
     );
+}
+
+#[test]
+fn screen_updates_refuse_inconsistent_tables_cells_and_cursors() {
+    let refused = |change: &dyn Fn(&mut ScreenUpdate)| {
+        let mut update = update();
+        change(&mut update);
+        let frame = RawFrame::parse(&server_bytes(&ServerMessage::Frame(Box::new(Frame {
+            channel: Channel(1),
+            frame: 2,
+            base: Some(1),
+            input: 0,
+            update,
+        }))))
+        .unwrap();
+        match Assembler::default().server(frame) {
+            Ok(_) => false,
+            Err(error) => error == DecodeError::OutOfBounds,
+        }
+    };
+    assert!(!refused(&|_| {}));
+    assert!(refused(&|update| {
+        let duplicate = update.styles[0];
+        update.styles.push(duplicate);
+    }));
+    assert!(refused(&|update| update.styles[0].style.flags = 1 << 9));
+    assert!(refused(&|update| update.styles[0].style.underline = 6));
+    assert!(refused(&|update| update.cursor.shape = 4));
+    assert!(refused(&|update| {
+        update.cursor.position = Some(CursorPosition {
+            column: 0,
+            row: 0,
+            width: 3,
+        })
+    }));
+    assert!(refused(&|update| {
+        update.links = vec![super::screen::LinkDefinition {
+            id: 0,
+            link: pane::effects::Hyperlink::Url("x".repeat(limits::MAX_LINK_BYTES + 1)),
+        }]
+    }));
+    assert!(refused(&|update| {
+        update.rows[0].runs[0] = Run {
+            style: 0,
+            link: None,
+            text: "界".into(),
+            cells: Cells::Explicit(vec![2, 1]),
+        }
+    }));
+    assert!(refused(&|update| {
+        update.rows[0].runs[0] = Run {
+            style: 0,
+            link: None,
+            text: "x".repeat(limits::MAX_CELL_BYTES + 1),
+            cells: Cells::Explicit(vec![limits::MAX_CELL_BYTES as u16 + 1]),
+        }
+    }));
+    assert!(refused(&|update| {
+        update.rows[0].runs[0] = Run {
+            style: 0,
+            link: None,
+            text: "x".repeat(usize::from(pane::MAX_COLUMNS) + 1),
+            cells: Cells::Narrow,
+        }
+    }));
+}
+
+#[test]
+fn a_scroll_shift_moves_its_region_and_blanks_the_rows_it_vacates() {
+    let mut rows = vec![0, 1, 2, 3, 4, 5];
+    let up = ScrollShift {
+        top: 1,
+        bottom: 5,
+        lines: 2,
+    };
+    up.apply(&mut rows, || -1).unwrap();
+    assert_eq!(rows, [0, 3, 4, -1, -1, 5]);
+    let down = ScrollShift { lines: -1, ..up };
+    down.apply(&mut rows, || -2).unwrap();
+    assert_eq!(rows, [0, -2, 3, 4, -1, 5]);
+    let outside = ScrollShift {
+        top: 4,
+        bottom: 7,
+        lines: 1,
+    };
+    assert!(outside.apply(&mut rows, || 0).is_none());
+    let spacer = Run {
+        style: 0,
+        link: None,
+        text: "界a".into(),
+        cells: Cells::Explicit(vec![3, 0, 1]),
+    };
+    assert_eq!(spacer.cells(), Some(vec![0..3, 3..3, 3..4]));
 }

@@ -3660,24 +3660,22 @@ fn resize_failure_identifies_the_pty_operation_and_stops_the_worker() {
 }
 
 #[test]
-fn invalid_key_input_identifies_the_emulator_operation_without_retaining_text() {
+fn control_text_input_is_typed_as_keys_and_text_without_a_key_is_discarded() {
     let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, events, _accessibility) = result.unwrap();
-    session.key(KeyInput::text_input(
-        "token=secret\nprivate output".to_owned(),
-    ));
-    let event = receive_event(&events, "the key validation failure", |event| {
-        matches!(event, TerminalSessionEvent::Failed(_))
+    // FS has no key. The input is discarded and the Terminal Session keeps running.
+    session.key(KeyInput::text_input("token=secret\u{1c}".to_owned()));
+    // A line feed is typed as Enter, which the legacy encoding writes as a carriage return.
+    session.key(KeyInput::text_input("ls\nok".to_owned()));
+    records.wait_for("the typed text and Enter", |state| {
+        state.written == b"ls\rok"
     });
-    let TerminalSessionEvent::Failed(failure) = event else {
-        unreachable!("the predicate accepts only failures")
-    };
-    let diagnostic = TerminalFailure::from_session(&failure);
-    assert_eq!(
-        diagnostic,
-        TerminalFailure::emulator("validate-key-text").with_reason(FailureReason::InvalidInput)
-    );
-    assert!(records.snapshot().written.is_empty());
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event, TerminalSessionEvent::Failed(_)),
+            "unencodable input must not fail the Terminal Session"
+        );
+    }
     session.shutdown();
 }
 

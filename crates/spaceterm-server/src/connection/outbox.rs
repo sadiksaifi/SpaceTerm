@@ -53,7 +53,7 @@ pub struct Presented {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OutboxError {
-    /// A queue passed its bound. The connection ends with `Goodbye(Stalled)`.
+    /// A queue passed its bound. The outbox already queued `Goodbye(Stalled)` and closed itself.
     #[error("the connection stalled")]
     Stalled,
     /// The connection has too many channels open.
@@ -160,7 +160,7 @@ impl Outbox {
         change: impl FnOnce(&mut State) -> Result<T, OutboxError>,
     ) -> Result<T, OutboxError> {
         let result = change(&mut self.lock());
-        if result.is_ok() {
+        if matches!(result, Ok(_) | Err(OutboxError::Stalled)) {
             self.shared.wake.wake();
         }
         result
@@ -192,7 +192,7 @@ impl Outbox {
             }
             if bulk {
                 if state.l2.len() >= limits::MAX_L2_MESSAGES {
-                    return Err(OutboxError::Stalled);
+                    return Err(state.overflow());
                 }
                 state.l2.push_back(frames);
             } else {
@@ -264,9 +264,16 @@ impl Outbox {
         })
     }
 
-    /// Whether `goodbye` was queued. The connection stops dispatching once it is.
+    /// Whether `goodbye` was queued, a queue passed its bound, or the connection ended. The
+    /// connection stops dispatching once it is.
     pub fn is_closing(&self) -> bool {
         self.lock().closing
+    }
+
+    /// Records that the connection's I/O thread exited. Producers receive `Closed` from now on,
+    /// and sync jobs of this connection skip their work.
+    pub fn disconnected(&self) {
+        self.lock().closing = true;
     }
 
     /// Starts presenting `channel`, visible and owing a keyframe.
@@ -349,6 +356,8 @@ impl Outbox {
         if let Some(frames) = ended {
             state.channels.remove(&channel);
             state.closed.push(channel);
+            // A full L1 closes the outbox with `Goodbye(Stalled)`, so the event is not lost
+            // silently: the whole connection ends.
             let _ = state.push_l1(Entry::Message(frames));
             drop(state);
             self.shared.wake.wake();
@@ -458,6 +467,8 @@ impl Outbox {
                     state.unsent(ticket);
                     continue;
                 }
+                // The channel is ending: its own last event follows instead of `Failed`.
+                None | Some(Err(_)) if end.is_some() => Vec::new(),
                 None => Vec::new(),
                 Some(Err(_)) => {
                     state.channels.remove(&ticket.channel);
@@ -496,6 +507,18 @@ impl State {
         }
     }
 
+    /// A queue passed its bound: the outbox queues `Goodbye(Stalled)` past every bound and
+    /// closes itself, so no producer's error is lost silently.
+    fn overflow(&mut self) -> OutboxError {
+        if !self.closing {
+            if let Ok(frames) = encode(&ServerMessage::Goodbye(Fatal::Stalled)) {
+                self.l0.extend(frames);
+            }
+            self.closing = true;
+        }
+        OutboxError::Stalled
+    }
+
     fn push_l0(&mut self, message: &ServerMessage) -> Result<(), OutboxError> {
         self.open()?;
         let frames = encode(message)?;
@@ -503,7 +526,7 @@ impl State {
         if self.l0.len() + frames.len() > limits::MAX_L0_FRAMES
             || self.l0_bytes + bytes > limits::MAX_L0_BYTES
         {
-            return Err(OutboxError::Stalled);
+            return Err(self.overflow());
         }
         self.l0_bytes += bytes;
         self.l0.extend(frames);
@@ -513,7 +536,7 @@ impl State {
     fn push_l1(&mut self, entry: Entry) -> Result<(), OutboxError> {
         self.open()?;
         if self.l1.len() >= limits::MAX_L1_MESSAGES {
-            return Err(OutboxError::Stalled);
+            return Err(self.overflow());
         }
         self.l1.push_back(entry);
         Ok(())
@@ -601,6 +624,8 @@ impl State {
             slot.keyframe |= ticket.base.is_none();
             if slot.pending.is_some() && !slot.queued {
                 slot.queued = true;
+                // A full L1 closes the outbox with `Goodbye(Stalled)`, so the slot is never
+                // left queued without an entry on a live connection.
                 let _ = self.push_l1(Entry::Frame(ticket.channel));
             }
         }

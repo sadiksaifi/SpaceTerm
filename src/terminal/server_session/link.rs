@@ -1,5 +1,12 @@
 //! The Pane worker's server connection, request sending, polling loop and input.
 use super::*;
+use spaceterm_server::connection::link::{
+    ChannelEvent, ChannelHandle, ChannelSink, LinkError, PendingReply, ServerLink,
+};
+use spaceterm_server::protocol::{
+    self, Channel, ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
+    interim::{Interim, InterimReply},
+};
 
 /// Tags input with the current epoch and focus generation, or discards it now.
 pub(super) fn submit_input(
@@ -149,6 +156,9 @@ impl ActiveInput {
         Ok(())
     }
     fn disable(&self, state: &DevelopmentPaneState) {
+        Self::disable_interaction(state);
+    }
+    pub(super) fn disable_interaction(state: &DevelopmentPaneState) {
         let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
         interaction.interactive = false;
         interaction.pending = None;
@@ -640,6 +650,532 @@ fn decode_paste_rejection(rejection: pane::PasteRejection) -> super::super::past
     }
 }
 
+/// How long a paste waits for the server to settle it.
+const PASTE_SETTLES: Duration = Duration::from_secs(10);
+
+/// The Pane worker's connection: its channel on the server's shared link. It maps the worker's
+/// commands onto the channel: claims bind it, input is sent without waiting, and polled
+/// presentation, effects and reading travel as `Operation::Interim` until push and scrollback
+/// replace them. Discarded input is reported by the server and fails the next command, as a
+/// refused exchange did.
+pub(super) struct PaneLink {
+    link: ServerLink,
+    attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
+    channel: Option<(ChannelHandle, Lease)>,
+    inbox: Arc<Inbox>,
+    notify: Arc<dyn Fn() + Send + Sync>,
+    /// Called when the server discards input as `Unsupported`, which disables interactive input.
+    unsupported: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[derive(Default)]
+struct Inbox {
+    state: Mutex<Received>,
+    ready: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct Received {
+    /// Settled pastes and paste resolutions, by the serial of their last Input message.
+    settled: std::collections::BTreeMap<u32, InputOutcome>,
+    /// Serials whose outcome a caller waits for.
+    awaited: std::collections::BTreeSet<u32>,
+    discarded: Option<pane::Refusal>,
+    closed: Option<ServerError>,
+}
+
+impl PaneLink {
+    pub(super) fn new(
+        link: ServerLink,
+        attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
+        notify: Arc<dyn Fn() + Send + Sync>,
+        unsupported: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            link,
+            attachment,
+            channel: None,
+            inbox: Arc::default(),
+            notify,
+            unsupported,
+        }
+    }
+
+    fn sink(&self) -> Arc<dyn ChannelSink> {
+        let inbox = Arc::clone(&self.inbox);
+        let notify = Arc::clone(&self.notify);
+        let unsupported = Arc::clone(&self.unsupported);
+        Arc::new(move |event: ChannelEvent| {
+            {
+                let mut received = inbox.state.lock().unwrap_or_else(|e| e.into_inner());
+                match event {
+                    ChannelEvent::Pane(PaneEvent::Input { serial, outcome }) => {
+                        if received.awaited.contains(&serial) {
+                            received.settled.insert(serial, outcome);
+                        } else if let InputOutcome::Discarded(refusal) = outcome {
+                            if refusal == pane::Refusal::Unsupported {
+                                unsupported();
+                            } else {
+                                received.discarded.get_or_insert(refusal);
+                            }
+                        }
+                    }
+                    ChannelEvent::Closed(error) => {
+                        received.closed.get_or_insert(error.into());
+                    }
+                    // Presentation is polled until push sends frames and Pane events.
+                    ChannelEvent::Frame(_) | ChannelEvent::Pane(_) => return,
+                }
+            }
+            inbox.ready.notify_all();
+            notify();
+        })
+    }
+
+    fn bound(&self, lease: Lease) -> Result<&ChannelHandle, ServerError> {
+        match &self.channel {
+            Some((channel, bound)) if *bound == lease => Ok(channel),
+            _ => Err(ServerError::StaleControl),
+        }
+    }
+
+    /// A failure the server reported since the last command.
+    fn reported(&self) -> Result<(), ServerError> {
+        let mut received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(error) = received.closed {
+            return Err(error);
+        }
+        match received.discarded.take() {
+            Some(refusal) => Err(refusal.into()),
+            None => Ok(()),
+        }
+    }
+
+    fn wait(pending: PendingReply) -> Result<ReplyBody, ServerError> {
+        pending.wait().map_err(ServerError::from)
+    }
+
+    fn request(&self, operation: Operation) -> Result<ReplyBody, ServerError> {
+        Self::wait(self.link.request(operation)?)
+    }
+
+    fn input(
+        &self,
+        lease: Lease,
+        generation: u64,
+        events: Vec<InputEvent>,
+    ) -> Result<u32, ServerError> {
+        Ok(self.bound(lease)?.input(generation, events)?)
+    }
+
+    /// Waits until the server settles the paste or resolution that ended with `serial`.
+    fn settled(&self, serial: u32) -> Result<pane::PasteOutcome, ServerError> {
+        let deadline = std::time::Instant::now() + PASTE_SETTLES;
+        let mut received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(outcome) = received.settled.remove(&serial) {
+                received.awaited.remove(&serial);
+                return match outcome {
+                    InputOutcome::Paste(outcome) => Ok(outcome),
+                    InputOutcome::Discarded(refusal) => Err(refusal.into()),
+                };
+            }
+            if let Some(error) = received.closed {
+                return Err(error);
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                received.awaited.remove(&serial);
+                return Err(ServerError::Protocol);
+            }
+            received = self
+                .inbox
+                .ready
+                .wait_timeout(received, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// Sends input whose outcome the caller needs: a paste or a paste resolution.
+    fn settle(
+        &self,
+        lease: Lease,
+        send: impl FnOnce(&ChannelHandle) -> Result<u32, LinkError>,
+    ) -> Result<Reply, ServerError> {
+        let channel = self.bound(lease)?;
+        let mut received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
+        let serial = send(channel)?;
+        // The sink waits for this lock, so the outcome cannot arrive before its registration.
+        received.awaited.insert(serial);
+        drop(received);
+        self.settled(serial).map(Reply::Paste)
+    }
+
+    fn claim(
+        &mut self,
+        claim: spaceterm_server::attachments::PaneClaim,
+    ) -> Result<Reply, ServerError> {
+        if let Some((old, _)) = self.channel.take() {
+            old.detach();
+        }
+        let channel = self.link.open_channel(self.sink())?;
+        let reply = Self::wait(channel.claim(
+            claim.attachment,
+            claim.pane,
+            claim.claim,
+            claim.size,
+            claim.style,
+        )?);
+        if let Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) = reply {
+            self.channel = Some((channel, lease));
+            return Ok(Reply::Attached { lease });
+        }
+        // The server already closed a channel its claim did not bind, so it needs no Release.
+        channel.detach();
+        Ok(match reply? {
+            ReplyBody::Claim(ClaimReply::Takeover(takeover)) => Reply::Takeover {
+                session_ended: takeover.session_ended,
+                target: takeover.target,
+                controller: takeover.controller,
+            },
+            ReplyBody::Claim(ClaimReply::Restored(restored)) => {
+                let protocol::Restored {
+                    fresh,
+                    session_ended,
+                    recovery,
+                    directory_unavailable,
+                    server,
+                    workspace,
+                    tab,
+                    pane,
+                } = *restored;
+                Reply::Restored {
+                    fresh,
+                    session_ended,
+                    recovery,
+                    directory_unavailable,
+                    server,
+                    workspace,
+                    tab,
+                    pane,
+                }
+            }
+            _ => return Err(ServerError::Protocol),
+        })
+    }
+
+    /// Runs one worker command.
+    pub(super) fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
+        self.reported()?;
+        if let Some(permit) = &self.attachment
+            && let Some(claim) = permit.claim(&self.link, request)?
+        {
+            return self.claim(claim);
+        }
+        let channel =
+            |lease: Lease| -> Result<Channel, ServerError> { Ok(self.bound(lease)?.channel()) };
+        let interim = |operation: Interim| {
+            self.request(Operation::Interim(operation))
+                .and_then(interim_reply)
+        };
+        match request.clone() {
+            Request::Poll { lease } => interim(Interim::Poll {
+                channel: channel(lease)?,
+            }),
+            Request::PollChanges { lease, base } => interim(Interim::PollChanges {
+                channel: channel(lease)?,
+                base,
+            }),
+            Request::PresentationDemand { lease, visible } => {
+                interim(Interim::PresentationDemand {
+                    channel: channel(lease)?,
+                    visible,
+                })
+            }
+            Request::NativeEffects { lease, generation } => interim(Interim::NativeEffects {
+                channel: channel(lease)?,
+                generation,
+            }),
+            Request::Read { lease, operation } => interim(Interim::Read {
+                channel: channel(lease)?,
+                operation,
+            }),
+            Request::ReadingStatus { lease } => interim(Interim::ReadingStatus {
+                channel: channel(lease)?,
+            }),
+            Request::SelectionChunk {
+                lease,
+                generation,
+                offset,
+            } => interim(Interim::SelectionChunk {
+                channel: channel(lease)?,
+                generation,
+                offset: offset as u64,
+            }),
+            Request::Inventory => interim(Interim::Inventory),
+            Request::Focus {
+                lease,
+                generation,
+                target,
+            } => {
+                self.input(lease, generation, vec![InputEvent::Focus(target)])?;
+                Ok(Reply::Unchanged)
+            }
+            Request::Keys {
+                lease,
+                generation,
+                keys,
+            } => {
+                for batch in key_batches(keys) {
+                    self.input(lease, generation, batch)?;
+                }
+                Ok(Reply::Unchanged)
+            }
+            Request::Input {
+                lease,
+                generation,
+                input,
+            } => match input {
+                pane::InteractiveInput::Paste { text } => {
+                    self.settle(lease, |channel| channel.paste(generation, &text))
+                }
+                pane::InteractiveInput::ResolvePaste { id, confirm } => {
+                    self.settle(lease, |channel| {
+                        channel.input(generation, vec![InputEvent::ResolvePaste { id, confirm }])
+                    })
+                }
+                input => {
+                    let event = match input {
+                        pane::InteractiveInput::Key(key) => InputEvent::Key(key),
+                        pane::InteractiveInput::Pointer(pointer) => InputEvent::Pointer(pointer),
+                        pane::InteractiveInput::Wheel(wheel) => InputEvent::Wheel(wheel),
+                        pane::InteractiveInput::CopyOrForward { modifiers } => {
+                            InputEvent::CopyOrForward { modifiers }
+                        }
+                        pane::InteractiveInput::Paste { .. }
+                        | pane::InteractiveInput::ResolvePaste { .. } => unreachable!(),
+                    };
+                    self.input(lease, generation, vec![event])?;
+                    Ok(Reply::Unchanged)
+                }
+            },
+            // Resize is never fenced by focus, so its generation is unused.
+            Request::Resize { lease, size } => {
+                self.input(lease, 0, vec![InputEvent::Resize(size)])?;
+                Ok(Reply::Unchanged)
+            }
+            Request::CompleteClipboard {
+                lease,
+                generation,
+                id,
+                completion,
+            } => {
+                self.bound(lease)?.effect_done(generation, id, completion)?;
+                Ok(Reply::Unchanged)
+            }
+            Request::Style { lease, style } => self
+                .request(Operation::Style {
+                    channel: channel(lease)?,
+                    style,
+                })
+                .map(|_| Reply::Unchanged),
+            Request::ClearScreenAndScrollback { lease } => self
+                .request(Operation::ClearScrollback {
+                    channel: channel(lease)?,
+                })
+                .map(|_| Reply::Unchanged),
+            Request::GraphicsChunk {
+                lease,
+                image,
+                offset,
+            } => match self.request(Operation::Graphics {
+                channel: channel(lease)?,
+                image,
+                offset: offset as u64,
+            })? {
+                ReplyBody::Graphics(chunk) => Ok(Reply::GraphicsChunk(chunk)),
+                _ => Err(ServerError::Protocol),
+            },
+            Request::Accessibility {
+                lease,
+                revision,
+                offset,
+                base,
+            } => match self.request(Operation::Accessibility {
+                channel: channel(lease)?,
+                revision,
+                offset: offset as u64,
+                base,
+            })? {
+                ReplyBody::Accessibility(chunk) => Ok(Reply::Accessibility(chunk)),
+                _ => Err(ServerError::Protocol),
+            },
+            Request::AccessibilitySelection {
+                lease,
+                focus_generation,
+                selection,
+            } => {
+                let body = self.request(Operation::AccessibilitySelection {
+                    channel: channel(lease)?,
+                    focus_generation,
+                    selection,
+                })?;
+                match body {
+                    ReplyBody::Done => Ok(Reply::Reading { accepted: true }),
+                    body => interim_reply(body),
+                }
+            }
+            Request::EndAccessibilityDemand { lease } => self
+                .request(Operation::EndAccessibility {
+                    channel: channel(lease)?,
+                })
+                .map(|_| Reply::Unchanged),
+            Request::Release { lease } => {
+                self.bound(lease)?;
+                // Dropping the handle sends `Release` in order behind earlier input.
+                self.channel = None;
+                Ok(Reply::Unchanged)
+            }
+            Request::Close { lease } => {
+                self.request(Operation::Close {
+                    channel: channel(lease)?,
+                })?;
+                if let Some((channel, _)) = self.channel.take() {
+                    channel.detach();
+                }
+                Ok(Reply::Closed)
+            }
+            Request::Mutate { sequence, mutation } => {
+                interim_reply(self.request(Operation::Mutate { sequence, mutation })?)
+            }
+            Request::Resolve { sequence } => {
+                interim_reply(self.request(Operation::Resolve { sequence })?)
+            }
+            Request::Acknowledge { sequence } => {
+                self.link.acknowledge(sequence)?;
+                Ok(Reply::Unchanged)
+            }
+            Request::ReleaseAttachment { attachment } => self
+                .request(Operation::ReleaseAttachment { attachment })
+                .map(|_| Reply::Unchanged),
+            Request::DirectoryRead(read) => match self.request(Operation::DirectoryRead(read))? {
+                ReplyBody::Directory(progress) => Ok(Reply::DirectoryRead(progress)),
+                _ => Err(ServerError::Protocol),
+            },
+            Request::DirectoryCreate(create) => {
+                match self.request(Operation::DirectoryCreate(create))? {
+                    ReplyBody::Directory(progress) => Ok(Reply::DirectoryCreate(progress)),
+                    _ => Err(ServerError::Protocol),
+                }
+            }
+            Request::WorktreeRead(read) => match self.request(Operation::WorktreeRead(read))? {
+                ReplyBody::Worktree(result) => Ok(Reply::WorktreeRead(result)),
+                _ => Err(ServerError::Protocol),
+            },
+            Request::Shutdown => self.request(Operation::Shutdown).map(|_| Reply::Closed),
+            // Claims need this Pane's attachment permit. The single-key form predates focus
+            // generations.
+            Request::SelectPane { .. }
+            | Request::StartRestored { .. }
+            | Request::TakeOver { .. }
+            | Request::RepairDirectory { .. }
+            | Request::ClaimPane { .. }
+            | Request::Attach { .. }
+            | Request::Select { .. }
+            | Request::Key { .. } => Err(ServerError::Unsupported),
+        }
+    }
+}
+
+impl Drop for PaneLink {
+    /// A dismissed presentation keeps its Pane's control, so the channel is detached, not
+    /// released.
+    fn drop(&mut self) {
+        if let Some((channel, _)) = self.channel.take() {
+            channel.detach();
+        }
+    }
+}
+
+/// Splits keys into Input messages within the protocol's event and byte bounds, in order.
+fn key_batches(keys: Vec<pane::Key>) -> Vec<Vec<InputEvent>> {
+    // Room for each key's fixed fields and the message envelope.
+    const KEY_OVERHEAD: usize = 64;
+    let budget = protocol::limits::MAX_INPUT_BYTES - 1024;
+    let mut batches: Vec<Vec<InputEvent>> = Vec::new();
+    let mut bytes = 0;
+    for key in keys {
+        let size = KEY_OVERHEAD + key.logical.len() + key.text.as_ref().map_or(0, String::len);
+        let full = batches.last().is_none_or(|batch| {
+            batch.len() >= protocol::limits::MAX_INPUT_EVENTS || bytes + size > budget
+        });
+        if full {
+            batches.push(Vec::new());
+            bytes = 0;
+        }
+        bytes += size;
+        if let Some(batch) = batches.last_mut() {
+            batch.push(InputEvent::Key(key));
+        }
+    }
+    batches
+}
+
+/// The worker's reply for a polled operation's body.
+fn interim_reply(body: ReplyBody) -> Result<Reply, ServerError> {
+    Ok(match body {
+        ReplyBody::Done => Reply::Unchanged,
+        ReplyBody::Outcome(outcome) => Reply::Outcome(outcome),
+        ReplyBody::Interim(reply) => match reply {
+            InterimReply::Screen(screen) => Reply::Screen(screen),
+            InterimReply::Unchanged => Reply::Unchanged,
+            InterimReply::Ended => Reply::Ended,
+            InterimReply::AccessibilityRevision { revision } => {
+                Reply::AccessibilityRevision { revision }
+            }
+            InterimReply::NativeEffects {
+                request,
+                hidden_input,
+            } => Reply::NativeEffects {
+                request,
+                hidden_input,
+            },
+            InterimReply::Inventory {
+                inventory,
+                next_sequence,
+            } => Reply::Inventory {
+                inventory,
+                next_sequence,
+            },
+            InterimReply::MutationPending => Reply::MutationPending,
+            InterimReply::Reading { accepted } => Reply::Reading { accepted },
+            InterimReply::ReadingReady {
+                generation,
+                selection_revision,
+                selection_present,
+            } => Reply::ReadingReady {
+                generation,
+                selection_revision,
+                selection_present,
+            },
+            InterimReply::SelectionChunk {
+                generation,
+                offset,
+                total,
+                bytes,
+            } => Reply::SelectionChunk {
+                generation,
+                offset: usize::try_from(offset).map_err(|_| ServerError::Protocol)?,
+                total: usize::try_from(total).map_err(|_| ServerError::Protocol)?,
+                bytes,
+            },
+            InterimReply::SelectionPending => Reply::SelectionPending,
+        },
+        _ => return Err(ServerError::Protocol),
+    })
+}
+
 impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn is_server_backed(&self) -> bool {
         true
@@ -707,28 +1243,16 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     }
 }
 
-fn exchange(
-    attachment: &Option<spaceterm_server::attachments::AttachmentPermit>,
-    connection: &mut pane::PaneConnection,
-    request: &Request,
-) -> Result<Reply, ServerError> {
-    match attachment {
-        Some(permit) => permit.exchange(connection, request),
-        None => connection.exchange(request),
-    }
-}
-
 /// Sends in this worker's turn. A retired or dismissed presentation sends nothing.
 fn send(
     presenter: &control::Presenter,
     alive: &AtomicBool,
-    attachment: &Option<spaceterm_server::attachments::AttachmentPermit>,
-    connection: &mut pane::PaneConnection,
+    connection: &mut PaneLink,
     request: &Request,
 ) -> Result<Reply, ServerError> {
     presenter.send(request, |request| {
         if alive.load(Ordering::Acquire) {
-            exchange(attachment, connection, request)
+            connection.exchange(request)
         } else {
             Err(ServerError::NotRunning)
         }
@@ -775,7 +1299,18 @@ pub(super) fn present(
         }
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
-            let mut connection = server.connect_shared_pane()?;
+            let mut connection = PaneLink::new(
+                server.link()?,
+                attachment.clone(),
+                {
+                    let state = Arc::clone(&state);
+                    Arc::new(move || state.wake.notify())
+                },
+                {
+                    let state = Arc::clone(&state);
+                    Arc::new(move || ActiveInput::disable_interaction(&state))
+                },
+            );
             let Some(claim::Granted {
                 lease,
                 size: grant_size,
@@ -787,7 +1322,7 @@ pub(super) fn present(
                 attachment: &attachment,
                 size: &size,
                 appearance: &appearance,
-                directory_recovery: connection.supports_directory_recovery(),
+                directory_recovery: true,
                 attached_session: &mut attached_session,
                 takeover: &mut takeover,
                 paste_unconfirmed: &mut paste_unconfirmed,
@@ -801,7 +1336,7 @@ pub(super) fn present(
                         // Complete recovery bookkeeping before another presentation can send.
                         // No Recovery lock is held while exchanging with the server.
                         claim::exchange(&state, pane_id, request, |request| {
-                            exchange(&attachment, &mut connection, request)
+                            connection.exchange(request)
                         })
                     })
                 },
@@ -829,8 +1364,9 @@ pub(super) fn present(
             let mut graphics = graphics::Graphics::default();
             let mut semantic = accessibility::Fetcher::new(lease);
             let mut latest_screen = None;
-            let changes = connection.supports_presentation_changes();
-            let batches = connection.supports_key_input_batches();
+            // Protocol major 2 servers take presentation changes and key batches.
+            let changes = true;
+            let batches = true;
             let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
             let mut cadence = schedule::Cadence::new(
                 std::time::Instant::now(),
@@ -852,8 +1388,7 @@ pub(super) fn present(
                     &input,
                     batches,
                     &mut |request| {
-                        let reply =
-                            send(&presenter, &alive, &attachment, &mut connection, request)?;
+                        let reply = send(&presenter, &alive, &mut connection, request)?;
                         if let Request::Resize { size, .. } = request {
                             active_size = *size;
                         }
@@ -868,7 +1403,6 @@ pub(super) fn present(
                     expect_unchanged(send(
                         &presenter,
                         &alive,
-                        &attachment,
                         &mut connection,
                         &Request::PresentationDemand { lease, visible },
                     )?)?;
@@ -876,25 +1410,13 @@ pub(super) fn present(
                 }
                 let polled = cadence.poll_due(now);
                 if polled {
-                    let reply = if changes {
-                        let base = screens.baseline();
-                        let reply = send(
-                            &presenter,
-                            &alive,
-                            &attachment,
-                            &mut connection,
-                            &Request::PollChanges { lease, base },
-                        )?;
-                        screens.apply(reply)?
-                    } else {
-                        send(
-                            &presenter,
-                            &alive,
-                            &attachment,
-                            &mut connection,
-                            &Request::Poll { lease },
-                        )?
-                    };
+                    let base = screens.baseline();
+                    let reply = send(
+                        &presenter,
+                        &alive,
+                        &mut connection,
+                        &Request::PollChanges { lease, base },
+                    )?;
                     // A reply that completed after a successor claimed the Pane is not published.
                     if !presenter.current() {
                         return Err(ServerError::NotRunning);
@@ -903,16 +1425,21 @@ pub(super) fn present(
                         return Err(ServerError::Protocol);
                     }
                     match reply {
-                        Reply::Screen(screen) => {
-                            semantic.note_revision(screen.accessibility_revision);
-                            let (screen, mapping) = screens.decode(
-                                screen,
+                        Reply::Screen(frame) => 'screen: {
+                            // A frame for a lost baseline is skipped; the next poll asks for a
+                            // keyframe.
+                            let Some((screen, mapping, revision)) = screens.receive(
+                                *frame,
                                 epoch,
                                 &mut generation,
                                 active_size,
                                 &mut graphics,
                                 &appearance,
-                            )?;
+                            )?
+                            else {
+                                break 'screen;
+                            };
+                            semantic.note_revision(revision);
                             if !ready {
                                 // Claims apply their measured controller facts once.
                                 // Reconcile changes made while attachment was in flight.
@@ -923,7 +1450,6 @@ pub(super) fn present(
                                     expect_unchanged(send(
                                         &presenter,
                                         &alive,
-                                        &attachment,
                                         &mut connection,
                                         &Request::Resize {
                                             lease,
@@ -936,7 +1462,6 @@ pub(super) fn present(
                                     expect_unchanged(send(
                                         &presenter,
                                         &alive,
-                                        &attachment,
                                         &mut connection,
                                         &Request::Style {
                                             lease,
@@ -948,12 +1473,12 @@ pub(super) fn present(
                                     .interaction
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .interactive = connection.supports_interactive_input();
+                                    .interactive = true;
                                 state
                                     .interaction
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .reading = connection.supports_reading();
+                                    .reading = true;
                                 // Publish the authorized screen first. Input stays queued
                                 // until this worker's focus barrier is acknowledged.
                                 ready = true;
@@ -987,30 +1512,29 @@ pub(super) fn present(
                 }
                 if ready {
                     active_input.sync_focus(&state, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
+                        send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
                 let mut next = reading::Next::Idle;
-                if ready && connection.supports_reading() {
+                if ready {
                     next = reader.poll(&state, lease, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
+                        send(&presenter, &alive, &mut connection, request)
                     })?;
                     let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
                     reading.publish_ready(&events);
                 }
                 if polled
                     && ready
-                    && connection.supports_native_effects()
                     && let Some((generation, _)) = active_input.focus_sent
                 {
                     effects.poll(&state, lease, generation, &events, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
+                        send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
                 // A hidden Pane transfers no images.
-                if polled && cadence.visible() && ready && connection.supports_graphics() {
+                if polled && cadence.visible() && ready {
                     let result = graphics.poll(lease, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
+                        send(&presenter, &alive, &mut connection, request)
                     })?;
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
@@ -1038,12 +1562,9 @@ pub(super) fn present(
                 }
                 // Semantic transfer follows its own explicit demand, even while hidden, and a
                 // partial document continues one chunk per turn.
-                if (polled || semantic.can_continue())
-                    && ready
-                    && connection.supports_accessibility()
-                {
+                if (polled || semantic.can_continue()) && ready {
                     let model = semantic.poll(&state, generation, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
+                        send(&presenter, &alive, &mut connection, request)
                     })?;
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
@@ -1075,9 +1596,7 @@ pub(super) fn present(
                 return attached;
             }
             // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains.
-            presenter.retire(lease, changes, |request| {
-                exchange(&attachment, &mut connection, request)
-            });
+            presenter.retire(lease, changes, |request| connection.exchange(request));
             Ok(())
         })();
         match connected {
@@ -1297,8 +1816,8 @@ mod tests {
 
     #[test]
     fn a_large_input_method_commit_reaches_the_real_server_pty_once_in_order() {
+        use crate::runtime::HostCommands as _;
         use sha2::{Digest, Sha256};
-        use spaceterm_server::pane::PaneService as _;
         let mut host = crate::runtime::directory_testing::terminal_host();
         let size = PaneSize {
             columns: 80,
@@ -1339,13 +1858,12 @@ mod tests {
             loop {
                 if let Reply::Screen(screen) =
                     host.request([1; 32], [1; 32], Request::Poll { lease })
-                    && screen.rows.iter().any(|row| {
-                        let line = row
-                            .iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>();
-                        marker.map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
-                    })
+                    && crate::terminal::server_session::screen_decoder::keyframe_lines(&screen)
+                        .iter()
+                        .any(|line| {
+                            marker
+                                .map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
+                        })
                 {
                     break;
                 }

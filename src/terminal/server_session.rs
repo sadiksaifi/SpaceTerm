@@ -17,6 +17,9 @@ mod reading;
 mod recovery;
 mod schedule;
 mod screen;
+mod screen_decoder;
+#[cfg(test)]
+mod screen_decoder_tests;
 #[cfg(test)]
 mod tests;
 use super::pointer_input::{PointerInput, WheelInput};

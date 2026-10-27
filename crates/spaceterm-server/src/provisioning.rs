@@ -5,6 +5,7 @@ use crate::direct::{
 use crate::pane::control::ClientName;
 use crate::{ServerError, host, protocol, storage::Directory};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// One exact enrollment authorized by the owning account during Add Server.
 #[derive(Serialize, Deserialize)]
@@ -153,16 +154,19 @@ fn manage(identity: &str, request: Management) -> Result<ManagementReply, Server
         identity,
         &[protocol::MAJOR],
     )?;
-    let mut wire = protocol::Wire::terminal(&mut stream)?;
-    wire.write(&crate::pane::Request::Direct(request))?;
-    match wire.read()? {
-        crate::pane::Reply::Direct(reply) => reply.map_err(Into::into),
+    let link = host::link(stream, Arc::new(|_| {}))?;
+    let reply = link
+        .request(crate::protocol::Operation::Direct(request))?
+        .wait();
+    link.close();
+    match reply? {
+        crate::protocol::ReplyBody::Direct(reply) => reply.map_err(Into::into),
         _ => Err(ServerError::Protocol),
     }
 }
 
-/// Bounded account discovery. The helper declares its protocol; final admission negotiates
-/// capabilities with the running server before any operation.
+/// Bounded account discovery. The helper declares its protocol; final admission selects the
+/// protocol major with the running server before any operation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountDiscovery {

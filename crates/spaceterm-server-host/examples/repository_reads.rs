@@ -1,4 +1,4 @@
-//! Real owning-host Git reads through two authenticated clients on either supported major.
+//! Real owning-host Git reads through two authenticated clients on protocol major 2.
 #[path = "support/lifecycle.rs"]
 #[expect(
     dead_code,
@@ -8,15 +8,20 @@ mod lifecycle;
 use spaceterm_server::{
     ServerConnection,
     hierarchy::{CloseTarget, Mutation},
-    pane::Request,
+    protocol::Operation,
     repository::{ChangeTotal, DirectoryFacts, RepositoryHead},
 };
 use std::error::Error;
 #[path = "support/repository.rs"]
 mod repository;
+#[expect(
+    dead_code,
+    reason = "Git reads use only requests on the shared connection."
+)]
+mod support;
 use repository::*;
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let a = ServerConnection::for_development_client("repository-smoke-a", major)?;
     let b = ServerConnection::for_development_client("repository-smoke-b", major)?;
     lifecycle::require_idle(&a)?;
@@ -24,17 +29,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     b.setup()?;
     let mut server = lifecycle::Server::start()?;
     let repository = Repository::new()?;
-    let mut first = connect(&a)?;
-    let mut second = connect(&b)?;
+    let first = connect(&a)?;
+    let second = connect(&b)?;
     let workspace = mutate(
-        &mut first,
+        &first,
         Mutation::CreateWorkspace {
             name: "Repository reads smoke".into(),
             directory: None,
         },
     )?;
     mutate(
-        &mut first,
+        &first,
         Mutation::PinWorkspace {
             workspace,
             version: 0,
@@ -42,16 +47,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let tab = mutate(
-        &mut first,
+        &first,
         Mutation::CreateTab {
             workspace,
             source: None,
         },
     )?;
-    let initial = await_facts(&mut second, &repository.0, |f| {
+    // Tab membership follows the Worktree listing, which the server may publish after the head.
+    let initial = await_facts(&second, &repository.0, |f| {
         f.repository
             .as_ref()
             .is_some_and(|r| r.head == RepositoryHead::Branch("main".into()))
+            && f.worktrees.is_some()
     })?;
     assert_eq!(
         initial
@@ -83,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("github.com", "example", "repository")
     );
     let inactive = mutate(
-        &mut second,
+        &second,
         Mutation::CreateWorkspace {
             name: "Other active work".into(),
             directory: None,
@@ -103,8 +110,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .as_ref()
             .is_some_and(|l| l.worktrees.iter().any(|r| r.root == linked && !r.missing))
     };
-    await_facts(&mut first, &repository.0, listed)?;
-    await_facts(&mut second, &repository.0, listed)?;
+    await_facts(&first, &repository.0, listed)?;
+    await_facts(&second, &repository.0, listed)?;
     let changes = |f: &DirectoryFacts| {
         f.repository.as_ref().is_some_and(|r| {
             r.changes
@@ -112,12 +119,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .is_ok_and(|changes| changes.total == ChangeTotal::Exact(1))
         })
     };
-    await_facts(&mut first, &linked, changes)?;
-    await_facts(&mut second, &linked, changes)?;
+    await_facts(&first, &linked, changes)?;
+    await_facts(&second, &linked, changes)?;
     // Leave only one Tab rooted in the linked Worktree. After it disappears, a fresh host
     // must use its retained locator rather than another Workspace or a live snapshot.
     mutate(
-        &mut first,
+        &first,
         Mutation::PinWorkspace {
             workspace,
             version: 1,
@@ -125,13 +132,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let tab = mutate(
-        &mut first,
+        &first,
         Mutation::CreateTab {
             workspace,
             source: None,
         },
     )?;
-    let current = inventory(&mut first)?.0;
+    let current = inventory(&first)?.0;
     for other in &current
         .workspaces
         .iter()
@@ -141,7 +148,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         if other.id != tab {
             close(
-                &mut first,
+                &first,
                 CloseTarget::Tab {
                     workspace,
                     tab: other.id,
@@ -150,7 +157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     close(
-        &mut first,
+        &first,
         CloseTarget::Workspace {
             workspace: inactive,
         },
@@ -161,20 +168,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             .as_ref()
             .is_some_and(|l| l.worktrees.iter().any(|r| r.root == linked && r.missing))
     };
-    await_facts(&mut first, &repository.0, missing)?;
-    await_facts(&mut second, &repository.0, missing)?;
+    await_facts(&first, &repository.0, missing)?;
+    await_facts(&second, &repository.0, missing)?;
     repository.git(&["worktree", "prune"])?;
-    await_facts(&mut second, &repository.0, |f| {
+    await_facts(&second, &repository.0, |f| {
         f.worktrees.as_ref().is_some_and(|l| l.worktrees.len() == 1)
     })?;
     assert!(!linked.exists());
     // Forced restart proves saved membership survives without restoring a program.
     server.kill()?;
-    drop(first);
-    drop(second);
+    first.close();
+    second.close();
     let mut restarted = lifecycle::Server::start()?;
-    let mut first = connect(&a)?;
-    let restored = await_facts(&mut first, &repository.0, |f| f.repository.is_some())?;
+    let first = connect(&a)?;
+    let restored = await_facts(&first, &repository.0, |f| f.repository.is_some())?;
     assert_eq!(
         restored
             .workspaces
@@ -190,8 +197,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(&linked)
     );
     assert!(!linked.exists());
-    close(&mut first, CloseTarget::Workspace { workspace })?;
-    first.exchange(&Request::Shutdown)?;
+    close(&first, CloseTarget::Workspace { workspace })?;
+    support::done(&first, Operation::Shutdown)?;
     restarted.0.wait()?;
     println!(
         "Owning-host Git facts, inactive Workspace updates, external Worktrees, missing/pruned directories, credential-free query targets and restored membership passed through two clients on protocol {major}."

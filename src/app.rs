@@ -501,13 +501,19 @@ impl QuitSessions for DevelopmentQuitSessions {
     ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError> {
         use spaceterm_server::{
             ServerConnection, ServerError,
-            pane::{Reply, Request},
+            protocol::{
+                Operation, ReplyBody,
+                interim::{Interim, InterimReply},
+            },
         };
         let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
         let server = ServerConnection::for_identity(identity)?;
-        let mut connection = server.connect_pane()?;
-        match connection.exchange(&Request::Inventory)? {
-            Reply::Inventory { inventory, .. } => inventory
+        let link = server.link()?;
+        match link
+            .request(Operation::Interim(Interim::Inventory))?
+            .wait()?
+        {
+            ReplyBody::Interim(InterimReply::Inventory { inventory, .. }) => inventory
                 .close
                 .ok_or(ServerError::MissingRequiredCapability),
             _ => Err(ServerError::Protocol),

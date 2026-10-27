@@ -246,16 +246,19 @@ fn publication_order_holds_within_l1_and_l0_preempts_l2_chunks() {
     let page = crate::protocol::Page {
         epoch: 1,
         start: 0,
-        rows: vec![crate::protocol::screen::Row {
-            index: 0,
-            wrapped: false,
-            runs: vec![crate::protocol::screen::Run {
-                style: 0,
-                link: None,
-                text: "x".repeat(150 * 1024),
-                cells: crate::protocol::screen::Cells::Narrow,
-            }],
-        }],
+        // 300 rows of 512 cells: about 150 KiB.
+        rows: (0..300)
+            .map(|index| crate::protocol::screen::Row {
+                index,
+                wrapped: false,
+                runs: vec![crate::protocol::screen::Run {
+                    style: 0,
+                    link: None,
+                    text: "x".repeat(512),
+                    cells: crate::protocol::screen::Cells::Narrow,
+                }],
+            })
+            .collect(),
         styles: vec![],
         links: vec![],
     };
@@ -327,6 +330,17 @@ fn goodbye_is_last_and_bounds_stall_the_connection() {
     let (outbox, _) = fresh();
     let result = (0..=limits::MAX_L0_FRAMES as u64).try_for_each(|nonce| outbox.pong(nonce));
     assert_eq!(result, Err(OutboxError::Stalled));
+    // The outbox closes itself: the queued pongs leave, then `Goodbye(Stalled)`.
+    assert!(outbox.is_closing());
+    assert_eq!(outbox.pong(0), Err(OutboxError::Closed));
+    let written = drain(&outbox);
+    assert_eq!(written.len(), limits::MAX_L0_FRAMES + 1);
+    assert!(matches!(
+        written.last(),
+        Some(ServerMessage::Goodbye(Fatal::Stalled))
+    ));
+
+    let (outbox, _) = fresh();
     for channel in 0..limits::MAX_CHANNELS as u32 {
         outbox.open(Channel(channel)).unwrap();
     }

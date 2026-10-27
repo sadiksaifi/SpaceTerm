@@ -33,6 +33,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod directory_tests;
 mod dispatch;
+pub use dispatch::{HostCommands, Served};
 #[cfg(test)]
 #[path = "server/effect_tests.rs"]
 mod effect_tests;
@@ -41,6 +42,8 @@ use self::effects::NativeEffects;
 mod graphics;
 #[cfg(test)]
 mod graphics_tests;
+#[cfg(test)]
+mod input_tests;
 mod metadata;
 #[cfg(test)]
 mod metadata_tests;
@@ -56,6 +59,9 @@ mod repositories;
 #[path = "server/repository_tests.rs"]
 mod repository_tests;
 mod screen;
+pub(crate) mod screen_encoder;
+#[cfg(test)]
+mod screen_encoder_tests;
 #[cfg(test)]
 mod screen_tests;
 mod shared;
@@ -66,8 +72,6 @@ mod tests;
 use self::pane_host::decode_modifiers;
 pub(crate) use self::pane_host::{decode_key, geometry};
 use self::screen::appearance;
-#[cfg(test)]
-use self::screen::encode_screen;
 
 pub struct DevelopmentPaneHost {
     boot: [u8; 32],
@@ -101,8 +105,12 @@ struct OwnedPane {
     subscription: TerminalSubscription,
     screen: Option<Arc<ScreenSnapshot>>,
     graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
+    /// The snapshot a keyframe poll last returned.
     sent: Option<PresentationGeneration>,
-    screen_encoder: pane::presentation::ScreenEncoder,
+    screen_encoder: screen_encoder::ScreenEncoder,
+    /// The last frame number a poll returned.
+    frame: u64,
+    history: screen_encoder::HistoryTracker,
     presentable: bool,
     ended: bool,
     failed: bool,

@@ -224,26 +224,27 @@ pub enum ReadReply {
     Removal(Removal),
 }
 
+/// Poll one bounded read on `link`. Uncertain requests are never retried.
 #[cfg(feature = "client")]
-impl crate::pane::PaneConnection {
-    /// Poll one bounded read on this connection. Uncertain exchanges are never retried.
-    pub fn read_worktree(
-        &mut self,
-        mut read: Read,
-    ) -> Result<Result<ReadReply, Error>, crate::ServerError> {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            match self.exchange(&crate::pane::Request::WorktreeRead(read))? {
-                crate::pane::Reply::WorktreeRead(Ok(ReadReply::Pending { id })) => {
-                    if std::time::Instant::now() >= until {
-                        return Ok(Err(Error::Unavailable));
-                    }
-                    read = Read::Poll { id };
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+pub fn read_worktree(
+    link: &crate::connection::link::ServerLink,
+    mut read: Read,
+) -> Result<Result<ReadReply, Error>, crate::ServerError> {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let reply = link
+            .request(crate::protocol::Operation::WorktreeRead(read))?
+            .wait()?;
+        match reply {
+            crate::protocol::ReplyBody::Worktree(Ok(ReadReply::Pending { id })) => {
+                if std::time::Instant::now() >= until {
+                    return Ok(Err(Error::Unavailable));
                 }
-                crate::pane::Reply::WorktreeRead(result) => return Ok(result),
-                _ => return Err(crate::ServerError::Protocol),
+                read = Read::Poll { id };
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
+            crate::protocol::ReplyBody::Worktree(result) => return Ok(result),
+            _ => return Err(crate::ServerError::Protocol),
         }
     }
 }

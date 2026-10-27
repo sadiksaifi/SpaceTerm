@@ -1,9 +1,11 @@
 //! One fixture-only terminal exercise shared by the native IPC and WSS checks.
+use super::support::{Pane, has_row, no_op, rows, text_key};
 use spaceterm_server::{
     ServerError,
-    pane::{
-        FocusTarget, Lease, PaneConnection, Reply, Request, Screen, accessibility, graphics,
-        reading,
+    pane::{FocusTarget, accessibility, graphics, reading},
+    protocol::{
+        Operation, ReplyBody,
+        interim::{Interim, InterimReply, ScreenFrame},
     },
 };
 use std::time::{Duration, Instant};
@@ -142,19 +144,17 @@ pub fn input_timing_requested() -> bool {
     std::env::var(TIMING_FLAG).as_deref() == Ok("1")
 }
 
+/// `queue` is the time a call took to queue its message on the connection. `exchange` is the time
+/// until the reply to a request arrived.
 #[derive(Default)]
 struct Timings {
     queue: Vec<u128>,
     exchange: Vec<u128>,
 }
 impl Timings {
-    fn note(&mut self, connection: &PaneConnection) -> Result<()> {
-        let timing = connection
-            .last_exchange_timing()
-            .ok_or("input timing unavailable")?;
-        self.queue.push(timing.queue_wait.as_micros());
-        self.exchange.push(timing.exchange.as_micros());
-        Ok(())
+    fn note(&mut self, queue: Duration, exchange: Duration) {
+        self.queue.push(queue.as_micros());
+        self.exchange.push(exchange.as_micros());
     }
     fn emit(mut self, operation: &'static str, elapsed: Duration) {
         self.queue.sort_unstable();
@@ -175,85 +175,52 @@ impl Timings {
     }
 }
 
-fn input_timing(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    command: impl Fn(&mut PaneConnection, Lease, &str) -> std::result::Result<(), ServerError>,
-) -> Result<()> {
-    require(
-        connection.supports_interactive_input(),
-        "input timing capability missing",
-    )?;
+/// Times a request that changes nothing, then each key followed by such a request. A key has no
+/// reply, and the server handles one connection's input and requests in order, so the request's
+/// reply marks when the server took the key.
+fn input_timing(pane: &Pane) -> Result<()> {
     let script = format!(
         "python3 -c 'exec({})'",
         api(serde_json::to_string(TIMING_PRODUCER))?
     );
-    stage("input-timing-producer", command(connection, lease, &script))?;
-    screen_at("input-timing-ready", connection, lease, |screen| {
-        screen.rows.iter().any(|row| {
-            row.iter()
-                .map(|cell| cell.text.as_str())
-                .collect::<String>()
-                .trim_end()
-                == "ST-INPUT-TIMING-READY"
-        })
+    stage("input-timing-producer", pane.command(&script))?;
+    screen_at("input-timing-ready", pane, |screen| {
+        has_row(screen, "ST-INPUT-TIMING-READY")
     })?;
+    let round_trip = |label: &'static str, timings: &mut Timings, queue: Duration| {
+        let started = Instant::now();
+        let pending = stage(label, pane.link().request(no_op()))?;
+        let queued = started.elapsed();
+        let started = Instant::now();
+        require(
+            matches!(stage(label, pending.wait())?, ReplyBody::Done),
+            "input timing round-trip response changed",
+        )?;
+        timings.note(queue + queued, started.elapsed());
+        Ok::<_, Failure>(())
+    };
     let deadline = Instant::now() + DEADLINE;
     let started = Instant::now();
-    let mut capabilities = Timings::default();
+    let mut requests = Timings::default();
     for _ in 0..8 {
         require(Instant::now() < deadline, "input timing deadline elapsed")?;
-        require(
-            matches!(
-                stage(
-                    "input-timing-capabilities",
-                    connection.exchange(&Request::Capabilities)
-                )?,
-                Reply::Capabilities { .. }
-            ),
-            "input timing capability response changed",
-        )?;
-        capabilities.note(connection)?;
+        round_trip("input-timing-round-trip", &mut requests, Duration::ZERO)?;
     }
-    capabilities.emit("capabilities", started.elapsed());
+    requests.emit("round-trip", started.elapsed());
     let started = Instant::now();
     let mut keys = Timings::default();
     for index in 0..53 {
         require(Instant::now() < deadline, "input timing deadline elapsed")?;
-        let reply = stage(
+        let queued = Instant::now();
+        stage(
             "input-timing-key",
-            connection.exchange(&Request::Input {
-                lease,
-                generation: 1,
-                input: spaceterm_server::pane::InteractiveInput::Key(spaceterm_server::pane::Key {
-                    // The protocol's physical-key code for Unidentified (libghostty-vt Key).
-                    // This support file also compiles inside the spaceterm crate itself.
-                    physical: 0,
-                    action: 0,
-                    logical: "text-input".into(),
-                    text: Some(char::from(b'a' + index % 26).to_string()),
-                    unshifted: None,
-                    modifiers: 0,
-                    consumed: 0,
-                    option_as_alt: false,
-                }),
-            }),
+            pane.key(1, text_key(&char::from(b'a' + index % 26).to_string())),
         )?;
-        require(
-            matches!(reply, Reply::Unchanged),
-            "input timing key refused",
-        )?;
-        keys.note(connection)?;
+        round_trip("input-timing-key", &mut keys, queued.elapsed())?;
     }
     keys.emit("key", started.elapsed());
-    screen_at("input-timing-done", connection, lease, |screen| {
-        screen.rows.iter().any(|row| {
-            row.iter()
-                .map(|cell| cell.text.as_str())
-                .collect::<String>()
-                .trim_end()
-                == "ST-INPUT-TIMING-DONE"
-        })
+    screen_at("input-timing-done", pane, |screen| {
+        has_row(screen, "ST-INPUT-TIMING-DONE")
     })?;
     Ok(())
 }
@@ -276,22 +243,17 @@ fn pause(until: Instant) -> Result<()> {
     std::thread::sleep(Duration::from_millis(20));
     Ok(())
 }
-pub fn screen(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    matches: impl Fn(&Screen) -> bool,
-) -> Result<Box<Screen>> {
-    screen_at("fixture-output", connection, lease, matches)
+pub fn screen(pane: &Pane, matches: impl Fn(&ScreenFrame) -> bool) -> Result<Box<ScreenFrame>> {
+    screen_at("fixture-output", pane, matches)
 }
 fn screen_at(
     label: &'static str,
-    connection: &mut PaneConnection,
-    lease: Lease,
-    matches: impl Fn(&Screen) -> bool,
-) -> Result<Box<Screen>> {
+    pane: &Pane,
+    matches: impl Fn(&ScreenFrame) -> bool,
+) -> Result<Box<ScreenFrame>> {
     let until = Instant::now() + DEADLINE;
     loop {
-        if let Reply::Screen(screen) = stage(label, connection.exchange(&Request::Poll { lease }))?
+        if let Some(screen) = stage(label, pane.screen())?
             && matches(&screen)
         {
             return Ok(screen);
@@ -299,45 +261,37 @@ fn screen_at(
         pause(until).map_err(|failure| failure.at(label))?;
     }
 }
-fn read(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    operation: reading::Operation,
-) -> Result<()> {
+fn read(pane: &Pane, operation: reading::Operation) -> Result<()> {
     let until = Instant::now() + DEADLINE;
     loop {
         match stage(
             "reading-operation",
-            connection.exchange(&Request::Read {
-                lease,
+            pane.interim(Interim::Read {
+                channel: pane.channel(),
                 operation: operation.clone(),
             }),
         )? {
-            Reply::Reading { accepted: true } => return Ok(()),
-            Reply::Reading { accepted: false } => pause(until)?,
+            InterimReply::Reading { accepted: true } => return Ok(()),
+            InterimReply::Reading { accepted: false } => pause(until)?,
             _ => return Err("terminal reading response changed".into()),
         }
     }
 }
-fn semantics(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    until: Instant,
-) -> Result<accessibility::Snapshot> {
+fn semantics(pane: &Pane, until: Instant) -> Result<accessibility::Snapshot> {
     let mut revision = None;
     let mut bytes = Vec::new();
     let mut total = None;
     loop {
         match stage(
             "accessibility-transfer",
-            connection.exchange(&Request::Accessibility {
-                lease,
+            pane.request(Operation::Accessibility {
+                channel: pane.channel(),
                 revision,
-                offset: bytes.len(),
+                offset: bytes.len() as u64,
                 base: None,
             }),
         )? {
-            Reply::Accessibility(Ok(chunk)) => {
+            ReplyBody::Accessibility(Ok(chunk)) => {
                 require(
                     chunk.offset == bytes.len()
                         && revision.is_none_or(|saved| saved == chunk.revision)
@@ -360,8 +314,8 @@ fn semantics(
                     return Ok(snapshot);
                 }
             }
-            Reply::Accessibility(Err(accessibility::Error::Pending)) => pause(until)?,
-            Reply::Accessibility(Err(accessibility::Error::Stale)) => {
+            ReplyBody::Accessibility(Err(accessibility::Error::Pending)) => pause(until)?,
+            ReplyBody::Accessibility(Err(accessibility::Error::Stale)) => {
                 revision = None;
                 total = None;
                 bytes.clear();
@@ -371,21 +325,22 @@ fn semantics(
         }
     }
 }
-fn copy(connection: &mut PaneConnection, lease: Lease) -> Result<String> {
+fn copy(pane: &Pane) -> Result<String> {
     let until = Instant::now() + DEADLINE;
+    let channel = pane.channel();
     let generation = loop {
         match stage(
             "selection-status",
-            connection.exchange(&Request::ReadingStatus { lease }),
+            pane.interim(Interim::ReadingStatus { channel }),
         )? {
-            Reply::ReadingReady {
+            InterimReply::ReadingReady {
                 selection_revision,
                 selection_present: true,
                 ..
             } => {
                 break selection_revision;
             }
-            Reply::ReadingReady { .. } | Reply::SelectionPending => pause(until)?,
+            InterimReply::ReadingReady { .. } | InterimReply::SelectionPending => pause(until)?,
             _ => return Err("selection preparation unavailable".into()),
         }
     };
@@ -394,16 +349,16 @@ fn copy(connection: &mut PaneConnection, lease: Lease) -> Result<String> {
     let mut chunks = 0;
     loop {
         // Poll drains the worker's completed copy preparation before requesting a chunk.
-        stage("screen-poll", connection.exchange(&Request::Poll { lease }))?;
+        stage("screen-poll", pane.poll())?;
         match stage(
             "selection-chunk",
-            connection.exchange(&Request::SelectionChunk {
-                lease,
+            pane.interim(Interim::SelectionChunk {
+                channel,
                 generation,
-                offset: bytes.len(),
+                offset: bytes.len() as u64,
             }),
         )? {
-            Reply::SelectionChunk {
+            InterimReply::SelectionChunk {
                 generation: actual,
                 offset,
                 total: length,
@@ -411,18 +366,18 @@ fn copy(connection: &mut PaneConnection, lease: Lease) -> Result<String> {
             } => {
                 require(
                     actual == generation
-                        && offset == bytes.len()
+                        && offset == bytes.len() as u64
                         && total.is_none_or(|saved| saved == length)
-                        && length <= reading::MAX_SELECTION_BYTES
+                        && length <= reading::MAX_SELECTION_BYTES as u64
                         && !part.is_empty()
                         && part.len() <= reading::SELECTION_CHUNK_BYTES
-                        && offset + part.len() <= length,
+                        && offset + part.len() as u64 <= length,
                     "selection chunk binding or bounds changed",
                 )?;
                 total = Some(length);
                 bytes.extend(part);
                 chunks += 1;
-                if bytes.len() == length {
+                if bytes.len() as u64 == length {
                     require(
                         chunks > 2,
                         "full history copy did not cross chunk boundaries",
@@ -431,119 +386,94 @@ fn copy(connection: &mut PaneConnection, lease: Lease) -> Result<String> {
                     return Ok(selection.plain_text);
                 }
             }
-            Reply::SelectionPending => pause(until)?,
+            InterimReply::SelectionPending => pause(until)?,
             _ => return Err("selection transfer unavailable".into()),
         }
     }
 }
 
-/// The caller owns the Pane and supplies its existing protocol command helper.
-/// No terminal content, remote path or native error is returned as evidence.
-pub fn exercise(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    command: impl Fn(&mut PaneConnection, Lease, &str) -> std::result::Result<(), ServerError>,
-) -> Result<Report> {
-    require(
-        connection.supports_reading(),
-        "required reading capability missing",
-    )?;
-    require(
-        connection.supports_accessibility(),
-        "required accessibility capability missing",
-    )?;
-    let graphics = connection.supports_graphics();
-    let script = if graphics {
-        "stty -echo; python3 -c 'import base64,sys; w=sys.stdout.write; w(\"\\033[3J\\033[2J\\033[H\"); [w(\"ST-NATIVE-%05d\\n\"%i) for i in range(5000)]; d=base64.b64encode(bytes([255,0,0,255])*320*240).decode(); [w(\"\\033_G\"+(\"a=T,f=32,s=320,v=240,i=541,q=2,\" if i==0 else \"\")+\"m=%d;\"%int(i+4096<len(d))+d[i:i+4096]+\"\\033\\\\\") for i in range(0,len(d),4096)]; w(\"\\nST-SEMANTICS-DONE\\n\"); sys.stdout.flush()'"
-    } else {
-        "stty -echo; printf '\\033[3J\\033[2J\\033[H'; i=0; while [ \"$i\" -lt 5000 ]; do printf 'ST-NATIVE-%05d\\n' \"$i\"; i=$((i+1)); done; printf 'ST-SEMANTICS-DONE\\n'"
-    };
-    stage("fixture-output-command", command(connection, lease, script))?;
+/// The caller owns the Pane. Every route of protocol major 2 carries reading, accessibility and
+/// graphics. No terminal content, remote path or native error is returned as evidence.
+pub fn exercise(pane: &Pane) -> Result<Report> {
+    let script = "stty -echo; python3 -c 'import base64,sys; w=sys.stdout.write; w(\"\\033[3J\\033[2J\\033[H\"); [w(\"ST-NATIVE-%05d\\n\"%i) for i in range(5000)]; d=base64.b64encode(bytes([255,0,0,255])*320*240).decode(); [w(\"\\033_G\"+(\"a=T,f=32,s=320,v=240,i=541,q=2,\" if i==0 else \"\")+\"m=%d;\"%int(i+4096<len(d))+d[i:i+4096]+\"\\033\\\\\") for i in range(0,len(d),4096)]; w(\"\\nST-SEMANTICS-DONE\\n\"); sys.stdout.flush()'";
+    stage("fixture-output-command", pane.command(script))?;
     // Exercise backpressure using the same real delayed consumer on each route.
     std::thread::sleep(Duration::from_millis(300));
-    let complete = screen(connection, lease, |screen| {
-        screen.rows.iter().any(|row| {
-            row.iter()
-                .map(|cell| cell.text.as_str())
-                .collect::<String>()
-                .trim_end()
-                == DONE
-        })
-    })
-    .map_err(|failure| failure.at("bulk-output"))?;
+    let complete = screen(pane, |screen| has_row(screen, DONE))
+        .map_err(|failure| failure.at("bulk-output"))?;
     require(
         complete
+            .update
             .reading
             .as_ref()
             .is_some_and(|s| s.total_rows >= ROWS as u64),
         "bulk Scrollback did not retain its rows",
     )?;
+    let manifest = complete
+        .update
+        .graphics
+        .as_ref()
+        .and_then(|s| s.as_ref().ok())
+        .ok_or("negotiated graphics manifest missing")?;
+    api(manifest.validate())?;
+    let image = manifest
+        .images
+        .iter()
+        .find(|i| i.width == 320 && i.height == 240)
+        .ok_or("bulk graphics image missing")?;
     let mut graphics_bytes = 0;
-    if graphics {
-        let manifest = complete
-            .graphics
-            .as_ref()
-            .and_then(|s| s.as_ref().ok())
-            .ok_or("negotiated graphics manifest missing")?;
-        api(manifest.validate())?;
-        let image = manifest
-            .images
-            .iter()
-            .find(|i| i.width == 320 && i.height == 240)
-            .ok_or("bulk graphics image missing")?;
-        while graphics_bytes < 320 * 240 * 4 {
-            let Reply::GraphicsChunk(Ok(chunk)) = stage(
-                "graphics-chunk",
-                connection.exchange(&Request::GraphicsChunk {
-                    lease,
-                    image: image.key,
-                    offset: graphics_bytes,
-                }),
-            )?
-            else {
-                return Err("bulk graphics transfer unavailable".into());
-            };
-            let (pixels, remainder) = chunk.bytes.as_chunks::<4>();
-            require(
-                chunk.image == image.key
-                    && chunk.offset == graphics_bytes
-                    && !chunk.bytes.is_empty()
-                    && chunk.bytes.len() <= graphics::CHUNK_BYTES
-                    && remainder.is_empty()
-                    && pixels.iter().all(|p| *p == [255, 0, 0, 255]),
-                "graphics chunk binding or fixture pixels changed",
-            )?;
-            graphics_bytes += chunk.bytes.len();
-        }
+    while graphics_bytes < 320 * 240 * 4 {
+        let ReplyBody::Graphics(Ok(chunk)) = stage(
+            "graphics-chunk",
+            pane.request(Operation::Graphics {
+                channel: pane.channel(),
+                image: image.key,
+                offset: graphics_bytes as u64,
+            }),
+        )?
+        else {
+            return Err("bulk graphics transfer unavailable".into());
+        };
+        let (pixels, remainder) = chunk.bytes.as_chunks::<4>();
         require(
-            graphics_bytes == 320 * 240 * 4,
-            "graphics transfer length changed",
+            chunk.image == image.key
+                && chunk.offset == graphics_bytes
+                && !chunk.bytes.is_empty()
+                && chunk.bytes.len() <= graphics::CHUNK_BYTES
+                && remainder.is_empty()
+                && pixels.iter().all(|p| *p == [255, 0, 0, 255]),
+            "graphics chunk binding or fixture pixels changed",
         )?;
+        graphics_bytes += chunk.bytes.len();
     }
+    require(
+        graphics_bytes == 320 * 240 * 4,
+        "graphics transfer length changed",
+    )?;
     read(
-        connection,
-        lease,
+        pane,
         reading::Operation::Query {
             generation: 1,
             text: PREFIX.into(),
         },
     )?;
-    screen_at("find-results", connection, lease, |s| {
-        s.reading
+    screen_at("find-results", pane, |s| {
+        s.update
+            .reading
             .as_ref()
             .and_then(|s| s.find.as_ref())
             .is_some_and(|f| f.generation == 1 && f.total == ROWS)
     })?;
     read(
-        connection,
-        lease,
+        pane,
         reading::Operation::Navigate {
             generation: 1,
             backwards: false,
         },
     )?;
-    let found = screen_at("find-first-navigation", connection, lease, |s| {
-        s.reading
+    let found = screen_at("find-first-navigation", pane, |s| {
+        s.update
+            .reading
             .as_ref()
             .and_then(|s| s.find.as_ref())
             .is_some_and(|f| {
@@ -555,51 +485,37 @@ pub fn exercise(
             })
     })?;
     let first = found
+        .update
         .reading
         .as_ref()
         .and_then(|s| s.find.as_ref())
         .and_then(|f| f.current)
         .ok_or("Find current match missing")?;
     read(
-        connection,
-        lease,
+        pane,
         reading::Operation::Navigate {
             generation: 1,
             backwards: false,
         },
     )?;
-    screen_at("find-next-navigation", connection, lease, |s| {
-        s.reading
+    screen_at("find-next-navigation", pane, |s| {
+        s.update
+            .reading
             .as_ref()
             .and_then(|s| s.find.as_ref())
             .is_some_and(|f| f.total == ROWS && f.current == Some(first % ROWS + 1))
     })?;
-    read(
-        connection,
-        lease,
-        reading::Operation::EndFind { generation: 1 },
-    )?;
-    read(
-        connection,
-        lease,
-        reading::Operation::Scroll(reading::Scroll::Top),
-    )?;
-    screen_at("scroll-top", connection, lease, |s| {
-        s.rows.iter().any(|row| {
-            row.iter()
-                .map(|c| c.text.as_str())
-                .collect::<String>()
-                .trim_end()
-                == "ST-NATIVE-00000"
-        })
+    read(pane, reading::Operation::EndFind { generation: 1 })?;
+    read(pane, reading::Operation::Scroll(reading::Scroll::Top))?;
+    screen_at("scroll-top", pane, |s| {
+        rows(s)
+            .iter()
+            .any(|row| row.trim_end() == "ST-NATIVE-00000")
     })?;
-    read(
-        connection,
-        lease,
-        reading::Operation::Scroll(reading::Scroll::Bottom),
-    )?;
-    screen_at("scroll-bottom", connection, lease, |s| {
-        s.reading
+    read(pane, reading::Operation::Scroll(reading::Scroll::Bottom))?;
+    screen_at("scroll-bottom", pane, |s| {
+        s.update
+            .reading
             .as_ref()
             .is_some_and(|r| r.offset_rows + r.visible_rows == r.total_rows)
     })?;
@@ -610,7 +526,7 @@ pub fn exercise(
     // server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_lease
     // regression, wait for the fixture's own semantic witness instead of its first snapshot.
     let (model, first, last) = loop {
-        let model = semantics(connection, lease, until)?;
+        let model = semantics(pane, until)?;
         let mut fixture_rows = vec![None; ROWS];
         for row in &model.rows {
             let text = row
@@ -682,56 +598,54 @@ pub fn exercise(
     };
     stage(
         "accessibility-selection-focus",
-        connection.exchange(&Request::Focus {
-            lease,
-            generation: 1,
-            target: FocusTarget::Terminal,
-        }),
+        pane.focus(1, FocusTarget::Terminal),
     )?;
     require(
         matches!(
             stage(
                 "accessibility-selection",
-                connection.exchange(&Request::AccessibilitySelection {
-                    lease,
+                pane.request(Operation::AccessibilitySelection {
+                    channel: pane.channel(),
                     focus_generation: 1,
                     selection: Some(selection),
                 })
             )?,
-            Reply::Reading { accepted: true }
+            ReplyBody::Done | ReplyBody::Interim(InterimReply::Reading { accepted: true })
         ),
         "accessible history selection refused",
     )?;
     let until = Instant::now() + DEADLINE;
     loop {
-        if semantics(connection, lease, until)?.selection == Some(selection) {
+        if semantics(pane, until)?.selection == Some(selection) {
             break;
         }
         pause(until)?;
     }
     require(
-        copy(connection, lease)? == expected.join("\n"),
+        copy(pane)? == expected.join("\n"),
         "full history Copy contents changed",
     )?;
     stage(
         "accessibility-selection",
-        connection.exchange(&Request::AccessibilitySelection {
-            lease,
+        pane.request(Operation::AccessibilitySelection {
+            channel: pane.channel(),
             focus_generation: 1,
             selection: None,
         }),
     )?;
     stage(
         "accessibility-demand-end",
-        connection.exchange(&Request::EndAccessibilityDemand { lease }),
+        pane.request(Operation::EndAccessibility {
+            channel: pane.channel(),
+        }),
     )?;
     if input_timing_requested() {
-        input_timing(connection, lease, command)?;
+        input_timing(pane)?;
     }
     Ok(Report {
         copied_rows: ROWS,
         accessible_rows: ROWS,
-        graphics_supported: graphics,
+        graphics_supported: true,
         graphics_bytes,
     })
 }

@@ -43,7 +43,7 @@ fn unavailable_account_environment_allows_pane_close_and_server_shutdown() {
 }
 
 pub(super) fn native_command(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     lease: Lease,
     generation: u64,
     text: &str,
@@ -66,7 +66,7 @@ pub(super) fn native_command(
 }
 
 pub(super) fn focus(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     lease: Lease,
     generation: u64,
     target: FocusTarget,
@@ -86,7 +86,7 @@ pub(super) fn focus(
 }
 
 pub(super) fn input(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     lease: Lease,
     generation: u64,
     input: InteractiveInput,
@@ -696,7 +696,7 @@ pub(super) fn attach(host: &mut DevelopmentPaneHost, connection: u8, create: boo
 }
 
 pub(super) fn command(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     connection: u8,
     lease: Lease,
     text: &str,
@@ -740,34 +740,53 @@ pub(super) fn command(
     )
 }
 
-pub(super) fn await_text(host: &mut impl PaneService, connection: u8, lease: Lease, text: &str) {
+pub(super) fn await_text(host: &mut impl HostCommands, connection: u8, lease: Lease, text: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut diagnostic = String::new();
+    let mut diagnostic = Vec::new();
     loop {
         let reply = host.request([1; 32], [connection; 32], Request::Poll { lease });
         if let Reply::Screen(screen) = &reply {
-            diagnostic = screen
-                .rows
-                .iter()
-                .map(|r| r.iter().map(|c| c.text.as_str()).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\n");
-        }
-        if let Reply::Screen(screen) = reply
-            && screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|c| c.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    == text
-            })
-        {
-            return;
+            diagnostic = lines(screen);
+            if diagnostic.iter().any(|line| line.trim_end() == text) {
+                return;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "expected terminal output {text}; fixture screen: {diagnostic:?}"
+            "expected terminal output {text}; fixture screen: {:?}",
+            diagnostic.join("\n")
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// The text of each row of a polled keyframe. Rows the keyframe omits are blank, and a wide
+/// character's spacer adds nothing.
+pub(super) fn lines(screen: &spaceterm_server::protocol::interim::ScreenFrame) -> Vec<String> {
+    let rows = screen
+        .update
+        .geometry
+        .map_or(0, |geometry| usize::from(geometry.rows));
+    let mut lines = vec![String::new(); rows];
+    for row in &screen.update.rows {
+        if let Some(line) = lines.get_mut(usize::from(row.index)) {
+            *line = row.runs.iter().map(|run| run.text.as_str()).collect();
+        }
+    }
+    lines
+}
+
+/// `screen` encoded as a keyframe, as a poll returns it.
+pub(super) fn keyframe(
+    screen: &ScreenSnapshot,
+) -> spaceterm_server::protocol::screen::ScreenUpdate {
+    let capture = screen_encoder::ScreenCapture {
+        screen: Arc::new(screen.clone()),
+        history: screen_encoder::HistoryTracker::default().observe(screen),
+        generation: 1,
+        accessibility_revision: 0,
+    };
+    screen_encoder::ScreenEncoder::default()
+        .encode(&capture, 1, None)
+        .unwrap()
 }

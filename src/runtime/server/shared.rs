@@ -560,23 +560,6 @@ impl SharedWorkspaceHost {
                 }
                 Ok(Reply::Unchanged)
             }
-            Request::Capabilities => Ok(Reply::Capabilities {
-                development_pane: true,
-                pane_takeover: true,
-                interactive_input: true,
-                key_input_batches: true,
-                native_effects: true,
-                reading: true,
-                graphics: true,
-                accessibility: true,
-                directory_recovery: true,
-                directory_creation: true,
-                directory_matching: true,
-                worktree_writes: true,
-                end_all_sessions: true,
-                workspace_policy: true,
-                presentation_changes: true,
-            }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
                 next_sequence: self.state.next_sequence(device),
@@ -809,7 +792,7 @@ impl SharedWorkspaceHost {
             .ok_or(Refusal::Missing)
     }
 }
-impl PaneService for SharedWorkspaceHost {
+impl HostCommands for SharedWorkspaceHost {
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
         let record = store.read()?;
         self.restore_organization(record.as_ref());
@@ -821,10 +804,11 @@ impl PaneService for SharedWorkspaceHost {
         self.prepare_initial_organization()
             .map_err(|_| ServerError::StorageUnavailable)
     }
-    fn tick(&mut self) {
+    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
         let _ = self.finish_worktrees(false);
         self.prototype.directories.tick();
         let _ = self.synchronize();
+        Some(now + super::dispatch::TICK)
     }
     fn admitted(&mut self, client: Id, name: control::ClientName) {
         self.prototype.admitted(client, name);
