@@ -306,8 +306,10 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     std::fs::write(git.0.join("tracked.txt"), "after!\n").unwrap();
     let current = git_facts(&mut host, &git.0, |facts| {
         facts.repository.as_ref().is_some_and(|repository| {
+            // A count that follows a finished one stays quiet until it ends or runs long.
             repository.head == RepositoryHead::Branch("feature".into())
                 && repository.counting.is_none()
+                && repository.changes.is_err()
         }) && facts.worktrees.as_ref().is_some_and(|list| {
             list.worktrees[0].head
                 == spaceterm_server::repository::WorktreeHead::Branch("feature".into())
@@ -1594,5 +1596,99 @@ fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
         .find(|t| t.id == target)
         .unwrap();
     assert_eq!(tab.worktree.as_ref(), Some(&actual.join("created")));
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_sends_nothing() {
+    use spaceterm_server::connection::outbox::Outbox;
+    use spaceterm_server::protocol::{RawFrame, frame::Assembler};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let counter = |count: &Arc<AtomicUsize>| -> Arc<dyn Fn() + Send + Sync> {
+        let count = Arc::clone(count);
+        Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let sent = |outbox: &Outbox| {
+        let mut assembler = Assembler::default();
+        let mut messages = 0;
+        while let Some((frame, _)) = outbox.next_frame() {
+            if assembler
+                .server(RawFrame::parse(&frame).unwrap())
+                .unwrap()
+                .is_some()
+            {
+                messages += 1;
+            }
+        }
+        messages
+    };
+    let git = GitFixture::new();
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    // The host's wake, and the bell its Terminal Sessions ring when they have news.
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let rings = Arc::new(AtomicUsize::new(0));
+    let wake = {
+        let wakes = Arc::clone(&wakes);
+        move || {
+            wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    };
+    HostCommands::ticker(&mut host, Arc::new(wake));
+    HostCommands::set_notifier(&mut host, counter(&rings));
+    host.prepare_initial_organization().unwrap();
+    let outbox = Outbox::new(Arc::new(|| {}));
+    HostCommands::connected(&mut host, [1; 32], [1; 32], &outbox);
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("Root Pane did not start")
+    };
+    HostCommands::view(&mut host, &lease, true, 60);
+    git_facts(&mut host, &git.0, |facts| {
+        facts.worktrees.is_some()
+            && facts
+                .repository
+                .as_ref()
+                .is_some_and(|repository| repository.counting.is_none() && repository.changes.is_ok())
+    });
+    // Let the shell print its prompt and the reads that follow a new watch finish, ticking
+    // whenever the host is woken, as the host's loop does.
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let before = wakes.load(Ordering::SeqCst) + rings.load(Ordering::SeqCst);
+        HostCommands::tick(&mut host, Instant::now());
+        std::thread::sleep(Duration::from_millis(1500));
+        if wakes.load(Ordering::SeqCst) + rings.load(Ordering::SeqCst) == before {
+            break;
+        }
+        assert!(Instant::now() < until, "the server never became idle");
+    }
+    sent(&outbox);
+    assert_eq!(
+        HostCommands::tick(&mut host, Instant::now()),
+        None,
+        "an idle server has no timed work"
+    );
+    sent(&outbox);
+    let (wakes_before, rings_before) = (wakes.load(Ordering::SeqCst), rings.load(Ordering::SeqCst));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(wakes.load(Ordering::SeqCst), wakes_before, "nothing woke the host");
+    assert_eq!(rings.load(Ordering::SeqCst), rings_before, "no Terminal Session rang");
+    assert_eq!(sent(&outbox), 0, "nothing was pushed");
+    // Even a tick nobody asked for finds nothing to read, publish or schedule.
+    assert_eq!(HostCommands::tick(&mut host, Instant::now()), None);
+    assert_eq!(sent(&outbox), 0, "an unchanged repository publishes nothing");
     host.shutdown().unwrap();
 }

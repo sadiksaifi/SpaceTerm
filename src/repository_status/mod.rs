@@ -382,7 +382,7 @@ pub(crate) struct RepositoryWatchError;
 /// Dropping the value stops watching.
 pub(crate) trait RepositoryWatch: Send {}
 
-/// Watches local git directories, never a work tree.
+/// Watches local directories. A desktop watches git directories, never a work tree.
 pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
     /// Calls `changed` after any change, and after any watch error, below `directories`.
     fn watch(
@@ -390,6 +390,16 @@ pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
         directories: Vec<WatchDirectory>,
         changed: Box<dyn Fn() + Send + Sync>,
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError>;
+
+    /// Like [`Self::watch`], and tells `changed` which paths changed. An empty list means the
+    /// paths are unknown, as after a watch error.
+    fn watch_paths(
+        &self,
+        directories: Vec<WatchDirectory>,
+        changed: Box<dyn Fn(&[PathBuf]) + Send + Sync>,
+    ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
+        self.watch(directories, Box::new(move || changed(&[])))
+    }
 }
 
 pub(crate) use spaceterm_server::repository::{

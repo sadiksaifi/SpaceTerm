@@ -1,6 +1,9 @@
 use super::super::repository_tests::GitFixture;
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+
+/// How long a test waits between looks at a reader it drives.
+const PAUSE: Duration = Duration::from_millis(10);
 
 /// Delay only a full scan at the process boundary; discovery, porcelain parsing, Worktree
 /// listing, physical directory validation, and publication all use the production readers.
@@ -42,7 +45,7 @@ impl RepositoryProgramRunner for DelayedCount {
                     if Instant::now() >= until {
                         return Err(ProgramError::TimedOut);
                     }
-                    std::thread::sleep(POLL);
+                    std::thread::sleep(PAUSE);
                 }
             }
         }
@@ -53,8 +56,30 @@ struct Reading {
     repositories: ServerRepositories,
     state: State,
 }
+/// Reports no change, so only explicit rereads read a directory again.
+struct Unwatched;
+struct NoWatch;
+impl RepositoryWatch for NoWatch {}
+impl RepositoryWatcher for Unwatched {
+    fn watch(
+        &self,
+        _: Vec<WatchDirectory>,
+        _: Box<dyn Fn() + Send + Sync>,
+    ) -> Result<Box<dyn RepositoryWatch>, policy::RepositoryWatchError> {
+        Ok(Box::new(NoWatch))
+    }
+}
 impl Reading {
     fn start(sources: Sources, runner: Arc<dyn RepositoryProgramRunner>, home: PathBuf) -> Self {
+        let watcher = Arc::new(crate::platform::repository_watch::NotifyRepositoryWatcher::new());
+        Self::watched(sources, runner, home, watcher)
+    }
+    fn watched(
+        sources: Sources,
+        runner: Arc<dyn RepositoryProgramRunner>,
+        home: PathBuf,
+        watcher: Arc<dyn RepositoryWatcher>,
+    ) -> Self {
         let git = std::process::Command::new("/usr/bin/which")
             .arg("git")
             .output()
@@ -90,25 +115,24 @@ impl Reading {
         let mut repositories = ServerRepositories::new([1; 32]);
         repositories.sources = sources.clone();
         let cancellation = CancellationToken::default();
-        let token = cancellation.clone();
         let sent_sources = sources.clone();
-        let (interests, updates) = mpsc::sync_channel(1);
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (inputs, receiver) = mpsc::channel();
+        let (sender, results) = mpsc::sync_channel(RESULTS);
+        let reader = Reader {
+            inputs: (inputs.clone(), receiver),
+            cancellation: cancellation.clone(),
+            sender,
+            ring: repositories.ring.clone(),
+            watcher,
+        };
         let worker = std::thread::spawn(move || {
-            read_sources(
-                sources,
-                updates,
-                Some(readers),
-                GitToolStatus::Ready(version),
-                token,
-                sender,
-            );
+            read_sources(sources, Some(readers), GitToolStatus::Ready(version), reader);
         });
         repositories.worker = Some(Worker {
             cancellation,
             handle: worker,
-            results: receiver,
-            interests,
+            results,
+            inputs,
             sent_sources,
         });
         Self {
@@ -139,7 +163,7 @@ impl Reading {
                 Instant::now() < until,
                 "current reads must finish without stopping recurring discovery"
             );
-            std::thread::sleep(POLL);
+            std::thread::sleep(PAUSE);
         }
     }
 }
@@ -209,7 +233,7 @@ fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
             Instant::now() < until,
             "deleted-directory read did not finish"
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     };
     assert!(
         !tree.exists(),
@@ -266,7 +290,13 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
     ]
     .into();
     let requested_at = Instant::now();
-    let mut reading = Reading::start(sources, runner.clone(), other.0.join("unused-home"));
+    // A new watch reads its repository once more, which would count this root twice.
+    let mut reading = Reading::watched(
+        sources,
+        runner.clone(),
+        other.0.join("unused-home"),
+        Arc::new(Unwatched),
+    );
     let until = Instant::now() + Duration::from_secs(6);
     let mut published = BTreeMap::new();
     let mut progress_at = None;
@@ -320,7 +350,7 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
         if responsive {
             break;
         }
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
     assert!(
         responsive,
@@ -432,7 +462,7 @@ fn refreshing_branch_retains_known_changes_until_the_new_count_finishes() {
             refreshed = true;
             break;
         }
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
     assert!(
         refreshed,
@@ -492,7 +522,7 @@ fn discovery_refreshes_external_branch_and_worktree_changes_while_counts_remain_
             Instant::now() < until,
             "publish the first listing and start the slow scans"
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
     // Both count workers are blocked, with a third physical root waiting. Only now change
     // independent Git facts, so initial publication cannot satisfy this regression.
@@ -532,7 +562,7 @@ fn discovery_refreshes_external_branch_and_worktree_changes_while_counts_remain_
             Instant::now() < until,
             "recurring discovery must not wait for the count queue"
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
     assert!(!runner.released.load(Ordering::Acquire));
     assert!(
@@ -583,7 +613,7 @@ fn withdrawing_the_last_source_cancels_its_in_flight_count_and_discards_its_fact
             Instant::now() < until,
             "start the count before withdrawing its source"
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
     reading.state.inventory.workspaces.clear();
     let until = Instant::now() + Duration::from_secs(1);
@@ -596,7 +626,7 @@ fn withdrawing_the_last_source_cancels_its_in_flight_count_and_discards_its_fact
             Instant::now() < until,
             "a count without any interest must be cancelled"
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
     runner.released.store(true, Ordering::Release);
     assert!(reading.poll().directories.is_empty());
@@ -620,7 +650,7 @@ fn cancellation_releases_count_workers_with_a_full_publication_queue() {
     );
     let until = Instant::now() + Duration::from_secs(4);
     while runner.started.lock().unwrap().is_none() && Instant::now() < until {
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
     assert!(runner.started.lock().unwrap().is_some());
     // Stop draining: the final listing or progress now encounters publication backpressure.
@@ -711,7 +741,7 @@ impl RepositoryProgramRunner for SaturatedReads {
                 if permitted {
                     break;
                 }
-                std::thread::sleep(POLL);
+                std::thread::sleep(PAUSE);
             }
         }
         DeadlineRunner.run(request, stdout, cancellation)
@@ -729,7 +759,7 @@ fn saturation_snapshot(reading: &mut Reading, predicate: impl Fn(&Snapshot) -> b
             Instant::now() < until,
             "waiting sources must progress through a saturated reader"
         );
-        std::thread::sleep(POLL);
+        std::thread::sleep(PAUSE);
     }
 }
 
@@ -751,7 +781,13 @@ fn assert_late_source_progresses_while_earlier_sources_refresh(stage: SaturatedR
         calls: Mutex::default(),
         permits: Mutex::default(),
     });
-    let mut reading = Reading::start(slow.clone(), runner.clone(), fast.0.join("unused-home"));
+    // A watch may report the fixtures' creation late. Only the explicit reread below asks again.
+    let mut reading = Reading::watched(
+        slow.clone(),
+        runner.clone(),
+        fast.0.join("unused-home"),
+        Arc::new(Unwatched),
+    );
     saturation_snapshot(&mut reading, |snapshot| {
         runner.started().len() == workers
             && (matches!(stage, SaturatedRead::Discovery)
@@ -774,6 +810,11 @@ fn assert_late_source_progresses_while_earlier_sources_refresh(stage: SaturatedR
     runner.release(&first);
     saturation_snapshot(&mut reading, |snapshot| {
         runner.started().len() == 2 * workers
+            // The late root waits for a free worker of the saturated stage.
+            && (matches!(stage, SaturatedRead::Discovery)
+                || snapshot.directories.iter().any(|facts| {
+                    facts.directory == fast.0 && facts.repository.is_some()
+                }))
             && first.iter().all(|root| {
                 snapshot.directories.iter().any(|facts| {
                     facts.directory == *root
@@ -786,13 +827,10 @@ fn assert_late_source_progresses_while_earlier_sources_refresh(stage: SaturatedR
             })
     });
     let second: Sources = runner.started().difference(&first).cloned().collect();
-    // Let the completed first cohort become due again while the second cohort occupies
-    // the workers and the third occupies the queue. Its refresh must not overtake the late root.
-    let due = Instant::now() + REFRESH + Duration::from_millis(100);
-    while Instant::now() < due {
-        reading.poll();
-        std::thread::sleep(POLL);
-    }
+    // Ask for the completed first cohort again while the second cohort occupies the workers
+    // and the third occupies the queue. Its new read must not overtake the late root.
+    reading.repositories.reread(first.clone());
+    reading.poll();
     runner.release(&second);
     saturation_snapshot(&mut reading, |_| runner.started().len() == 3 * workers);
     let third: Sources = slow

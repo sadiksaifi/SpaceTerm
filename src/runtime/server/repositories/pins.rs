@@ -1,4 +1,7 @@
 //! Resolve physical pins off the terminal request lock, with at most one filesystem worker.
+//!
+//! A check runs when the pins or the listed Worktree roots change, and rings the host when it
+//! ends. Nothing checks again on a timer.
 use super::*;
 use spaceterm_server::hierarchy::Inventory;
 
@@ -36,7 +39,8 @@ struct Resolution {
 pub(super) struct PinMembership {
     interests: Interests,
     worker: Option<Resolution>,
-    next_check: Option<Instant>,
+    /// Whether the current interests were checked, or could not be.
+    checked: bool,
     resolver: Arc<dyn PinResolver>,
     seen_revision: Option<u64>,
 }
@@ -62,13 +66,19 @@ impl PinMembership {
         Self {
             interests: Interests::default(),
             worker: None,
-            next_check: None,
+            checked: false,
             resolver,
             seen_revision: None,
         }
     }
 
-    pub(super) fn update(&mut self, inventory: &Inventory, snapshot: &mut Snapshot, active: bool) {
+    pub(super) fn update(
+        &mut self,
+        inventory: &Inventory,
+        snapshot: &mut Snapshot,
+        active: bool,
+        ring: &Ring,
+    ) {
         let pins = inventory
             .workspaces
             .iter()
@@ -89,7 +99,7 @@ impl PinMembership {
             self.seen_revision = Some(snapshot.revision);
         }
         if changed {
-            self.next_check = None;
+            self.checked = false;
             if let Some(worker) = &self.worker {
                 worker.cancellation.cancel();
             }
@@ -114,7 +124,7 @@ impl PinMembership {
                     Some(Err(())) => publish(snapshot, Vec::new(), PinCheckState::Unavailable),
                     None => (),
                 }
-                self.next_check = Some(Instant::now() + REFRESH);
+                self.checked = true;
             }
         }
         if self.interests.pins.is_empty() || self.interests.roots.is_empty() {
@@ -127,7 +137,7 @@ impl PinMembership {
             }
             return;
         }
-        if self.worker.is_some() || self.next_check.is_some_and(|next| Instant::now() < next) {
+        if self.worker.is_some() || self.checked {
             return;
         }
         let cancellation = CancellationToken::default();
@@ -138,21 +148,28 @@ impl PinMembership {
         // the host itself never enter this worker.
         let pins = interests.pins.clone();
         let resolver = Arc::clone(&self.resolver);
+        let ring = ring.clone();
         match std::thread::Builder::new()
             .name("spaceterm-worktree-pins".into())
             .spawn(move || {
-                let mut pinned = Vec::new();
-                for root in roots {
-                    if token.is_cancelled() {
-                        return None;
+                let resolve = || {
+                    let mut pinned = Vec::new();
+                    for root in roots {
+                        if token.is_cancelled() {
+                            return None;
+                        }
+                        match resolver.holds(&pins, &root) {
+                            Ok(true) => pinned.push(root),
+                            Ok(false) => (),
+                            Err(_) => return Some(Err(())),
+                        }
                     }
-                    match resolver.holds(&pins, &root) {
-                        Ok(true) => pinned.push(root),
-                        Ok(false) => (),
-                        Err(_) => return Some(Err(())),
-                    }
-                }
-                Some(Ok(pinned))
+                    Some(Ok(pinned))
+                };
+                let result = resolve();
+                // The host joins the finished check once it hears this.
+                ring.ring();
+                result
             }) {
             Ok(handle) => {
                 self.worker = Some(Resolution {
@@ -163,7 +180,7 @@ impl PinMembership {
             }
             Err(_) => {
                 publish(snapshot, Vec::new(), PinCheckState::Unavailable);
-                self.next_check = Some(Instant::now() + REFRESH);
+                self.checked = true;
             }
         }
     }
@@ -248,7 +265,7 @@ mod tests {
             }],
         };
         let start = Instant::now();
-        membership.update(&state.inventory, &mut snapshot, true);
+        membership.update(&state.inventory, &mut snapshot, true, &Ring::default());
         assert!(
             start.elapsed() < Duration::from_millis(250),
             "filesystem work must not run in synchronization"
@@ -258,12 +275,12 @@ mod tests {
         assert!(snapshot.pinned_worktrees.is_empty());
         // An inventory change remains publishable while the old physical check is blocked.
         state.inventory.workspaces[0].pinned_directory = None;
-        membership.update(&state.inventory, &mut snapshot, true);
+        membership.update(&state.inventory, &mut snapshot, true, &Ring::default());
         assert_eq!(snapshot.pin_check, PinCheckState::Ready);
         release.send(()).unwrap();
         let until = Instant::now() + Duration::from_secs(1);
         while membership.worker.is_some() && Instant::now() < until {
-            membership.update(&state.inventory, &mut snapshot, true);
+            membership.update(&state.inventory, &mut snapshot, true, &Ring::default());
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(membership.worker.is_none());
@@ -272,7 +289,7 @@ mod tests {
             "a stale physical result grants no restriction to the new inventory"
         );
         state.inventory.workspaces[0].pinned_directory = Some("/server/another-pin".into());
-        membership.update(&state.inventory, &mut snapshot, false);
+        membership.update(&state.inventory, &mut snapshot, false, &Ring::default());
         assert!(
             membership.worker.is_none(),
             "disconnected subscribers start no filesystem work"

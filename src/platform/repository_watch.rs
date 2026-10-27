@@ -1,4 +1,6 @@
-//! Watches git directories through the Operating System's file events.
+//! Watches repository directories through the Operating System's file events.
+
+use std::path::PathBuf;
 
 use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -23,15 +25,23 @@ impl RepositoryWatcher for NotifyRepositoryWatcher {
         directories: Vec<WatchDirectory>,
         changed: Box<dyn Fn() + Send + Sync>,
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
+        self.watch_paths(directories, Box::new(move |_: &[PathBuf]| changed()))
+    }
+
+    fn watch_paths(
+        &self,
+        directories: Vec<WatchDirectory>,
+        changed: Box<dyn Fn(&[PathBuf]) + Send + Sync>,
+    ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
                 Ok(event) => {
                     if is_change(event.kind) {
-                        changed();
+                        changed(&event.paths);
                     }
                 }
                 // A lost or overflowed event may hide a change, so it counts as one.
-                Err(_) => changed(),
+                Err(_) => changed(&[]),
             })
             .map_err(|_| RepositoryWatchError)?;
         for directory in directories {
