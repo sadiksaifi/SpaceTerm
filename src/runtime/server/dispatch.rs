@@ -1216,8 +1216,9 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         }
         self.host.stopping();
     }
-    /// The client abandoned a read. It replies `Stale` at once; a directory read stops, while a
-    /// creation and a Worktree read finish unobserved.
+    /// The client abandoned a read. It replies `Stale` at once. A directory read stops. A
+    /// creation that has not started never runs, and one that has keeps what it created. A
+    /// Worktree read finishes unobserved.
     fn cancel(&mut self, peer: &Peer, id: RequestId) {
         let Some(index) = self
             .reads

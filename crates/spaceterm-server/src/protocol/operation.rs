@@ -79,7 +79,8 @@ pub enum Operation {
     },
     /// Replied when the read settles. `Cancel` abandons it.
     DirectoryRead(directories::Operation),
-    /// Replied when the write settles. Cancelling it stops observation only.
+    /// Replied when the write settles. `Cancel` prevents the write if it has not started;
+    /// directories it already created stay.
     DirectoryCreate(directories::Creation),
     /// Replied when the read settles. `Cancel` abandons it. `Read::Poll` is refused.
     WorktreeRead(crate::worktree::Read),

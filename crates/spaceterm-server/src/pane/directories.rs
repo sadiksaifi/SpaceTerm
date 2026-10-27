@@ -20,7 +20,8 @@ pub enum Request {
     Cancel { id: u64 },
 }
 /// An explicit, idempotent filesystem write, independent of Workspace or pin edits.
-/// Cancellation stops observation; directories already created are never rolled back.
+/// Cancellation prevents a creation that has not started. Directories already created are never
+/// rolled back.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CreationRequest {
     Begin { id: u64, path: PathBuf },
