@@ -2336,33 +2336,9 @@ impl TabView {
         );
         let changes = shared.changes();
         self.shared = Some(shared);
-        // Each Pane connection hints when its presentation may have changed. Only a connection
-        // that cannot hint is read on a timer, so an idle Tab does no work.
+        // Each Pane's connection hints after it changes, so the Tab reads its Panes only then.
         self._shared_status = Some(cx.spawn_in(window, async move |view, cx| {
-            loop {
-                let Ok(polled) = view.read_with(cx, |view, _| {
-                    view.shared
-                        .as_ref()
-                        .is_some_and(super::shared_workspaces::SharedPanes::polled)
-                }) else {
-                    break;
-                };
-                if polled {
-                    let timer = cx
-                        .background_executor()
-                        .timer(super::shared_workspaces::POLL_INTERVAL);
-                    let open =
-                        futures_lite::future::or(async { changes.recv().await.is_ok() }, async {
-                            timer.await;
-                            true
-                        })
-                        .await;
-                    if !open {
-                        break;
-                    }
-                } else if changes.recv().await.is_err() {
-                    break;
-                }
+            while changes.recv().await.is_ok() {
                 if view
                     .update_in(cx, |view, window, cx| view.sync_shared_panes(window, cx))
                     .is_err()

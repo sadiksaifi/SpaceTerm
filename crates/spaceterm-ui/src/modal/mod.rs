@@ -634,6 +634,16 @@ pub fn window_modal_is_open(window: &gpui::Window, cx: &gpui::App) -> bool {
     core::window_modal_is_open(window, cx)
 }
 
+/// Calls `closed` each time the window's modal presentation ends, for as long as the returned
+/// subscription lives. `None` when the window has never presented a modal.
+pub fn when_window_modal_closes<V: 'static>(
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<V>,
+    closed: impl FnMut(&mut V, &mut gpui::Window, &mut gpui::Context<V>) + 'static,
+) -> Option<gpui::Subscription> {
+    core::when_window_modal_closes(window, cx, closed)
+}
+
 /// Application-owned text and intent colors for the shared modal renderer.
 ///
 /// The scrim, the surface material, its edge, and its internal rules belong to the shared

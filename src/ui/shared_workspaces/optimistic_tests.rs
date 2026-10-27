@@ -15,7 +15,8 @@ struct Delivery {
     original: Option<(u64, Mutation)>,
     dispatched: Vec<Mutation>,
 }
-struct DelayedServer(RefCell<Delivery>);
+/// Hints its readers after each change, as the real client does.
+struct DelayedServer(RefCell<Delivery>, crate::terminal::changes::Changes);
 
 impl DelayedServer {
     fn new() -> Rc<Self> {
@@ -26,22 +27,25 @@ impl DelayedServer {
             .unwrap();
         let inventory = live_inventory(&server);
         server.inventory.close.clone_from(&inventory.close);
-        Rc::new(Self(RefCell::new(Delivery {
-            server,
-            snapshot: SharedWorkspaceSnapshot {
-                end_all_sessions: true,
-                worktree_writes: false,
-                inventory: Some(inventory),
-                connected: true,
-                pending: false,
-                pending_operation: None,
-                rejected: None,
-                outcome: None,
-                error: None,
-            },
-            original: None,
-            dispatched: Vec::new(),
-        })))
+        Rc::new(Self(
+            RefCell::new(Delivery {
+                server,
+                snapshot: SharedWorkspaceSnapshot {
+                    end_all_sessions: true,
+                    worktree_writes: false,
+                    inventory: Some(inventory),
+                    connected: true,
+                    pending: false,
+                    pending_operation: None,
+                    rejected: None,
+                    outcome: None,
+                    error: None,
+                },
+                original: None,
+                dispatched: Vec::new(),
+            }),
+            crate::terminal::changes::Changes::default(),
+        ))
     }
     fn inventory(&self) -> Inventory {
         self.0.borrow().snapshot.inventory.clone().unwrap()
@@ -51,6 +55,7 @@ impl DelayedServer {
     }
     fn connected(&self, connected: bool) {
         self.0.borrow_mut().snapshot.connected = connected;
+        self.1.publish();
     }
 
     fn finish(&self, acknowledge: bool, valid_directory: bool) -> RetainedOutcome {
@@ -81,6 +86,7 @@ impl DelayedServer {
             delivery.snapshot.pending_operation = None;
             delivery.original = None;
         }
+        self.1.publish();
         result
     }
 
@@ -94,6 +100,7 @@ impl DelayedServer {
         let inventory = live_inventory(&delivery.server);
         delivery.server.inventory.close.clone_from(&inventory.close);
         delivery.snapshot.inventory = Some(inventory);
+        self.1.publish();
     }
 
     fn rename_elsewhere(&self, workspace: Id, name: &str) {
@@ -125,6 +132,7 @@ impl DelayedServer {
         let inventory = live_inventory(&delivery.server);
         delivery.server.inventory.close.clone_from(&inventory.close);
         delivery.snapshot.inventory = Some(inventory);
+        self.1.publish();
     }
 }
 
@@ -174,7 +182,11 @@ impl SharedWorkspaceEdits for DelayedServer {
         delivery.snapshot.pending_operation = Some(mutation);
         delivery.snapshot.outcome = None;
         delivery.snapshot.rejected = None;
+        self.1.publish();
         true
+    }
+    fn subscribe(&self) -> async_channel::Receiver<()> {
+        self.1.subscribe()
     }
 }
 
@@ -1356,8 +1368,6 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
         .panes
         .pane(closing)
         .set(DevelopmentPaneStatus::TakeoverReconnecting);
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     assert!(cx.debug_bounds("shared-pane-takeover-2").is_none());
     assert!(cx.debug_bounds("shared-pane-notice-2").is_none());
@@ -1450,8 +1460,6 @@ fn a_committed_original_keeps_resolving_without_a_workspace_window(cx: &mut Test
     assert_eq!(original.dispatched().len(), 1);
     original.finish(true, true);
     drop(original);
-    cx.background_executor
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     assert!(
         retained.upgrade().is_none(),
@@ -1559,8 +1567,6 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
         .panes
         .pane(doomed_pane)
         .set(DevelopmentPaneStatus::TakeoverReconnecting);
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     assert!(cx.debug_bounds("shared-pane-takeover-1").is_none());
     assert!(cx.debug_bounds("shared-pane-notice-1").is_none());
@@ -1593,8 +1599,6 @@ fn closing_the_active_tab_onto_a_running_pane_keeps_its_session_and_keyboard(
     click("create-tab-button", cx);
     harness.server.finish(true, true);
     project_window(&harness, cx);
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     let opened = harness.panes.opened().len();
     close_own_tab(&harness, local_view(&harness, cx).0, cx);

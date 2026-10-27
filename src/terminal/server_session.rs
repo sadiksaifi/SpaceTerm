@@ -89,8 +89,8 @@ pub(crate) struct DevelopmentPaneState {
     presentable: AtomicBool,
     preparation: AtomicBool,
     wake: inbox::Wake,
-    /// Views told when what they present may have changed.
-    observers: Mutex<Vec<async_channel::Sender<()>>>,
+    /// Hints the views that read what this Pane presents.
+    changes: crate::terminal::changes::Changes,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -122,7 +122,7 @@ impl DevelopmentPaneState {
             presentable: AtomicBool::new(true),
             preparation: AtomicBool::new(false),
             wake: inbox::Wake::default(),
-            observers: Mutex::default(),
+            changes: crate::terminal::changes::Changes::default(),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
                 authority.route();
@@ -138,17 +138,10 @@ impl DevelopmentPaneState {
     /// progress, controller, dormancy or start confirmation may have changed, so a view reads
     /// them on change instead of on a timer.
     pub(crate) fn observe(&self, hint: async_channel::Sender<()>) {
-        self.observers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(hint);
+        self.changes.observe(hint);
     }
-    /// Hints every observer. A full channel already holds a hint.
     fn changed(&self) {
-        self.observers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|hint| !matches!(hint.try_send(()), Err(async_channel::TrySendError::Closed(()))));
+        self.changes.publish();
     }
     pub(crate) fn startup_pending(&self) -> bool {
         *self.admission.lock().unwrap_or_else(|e| e.into_inner()) == Admission::Pending

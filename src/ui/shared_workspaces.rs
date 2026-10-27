@@ -20,7 +20,7 @@
 //!
 pub(crate) use development::ArrangementUnavailable;
 pub(crate) use development::{
-    DirectServer, POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
+    DirectServer, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseIntent, SharedCloseReview, SharedCloseState, SharedCloseUnavailable,
     SharedEditSource, SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason,
     SharedRemoval, SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
@@ -67,10 +67,6 @@ mod development {
     use crate::ui::pane_lifecycle::PaneConstruction;
     use crate::ui::server_pane::{ServerPaneConnection, ServerPaneView};
 
-    /// How often the Workspace Window reads the server's inventory and its own edit state.
-    /// Reading takes one uncontended lock and clones the inventory.
-    pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
-
     /// The one Workspace Window presenting this device's shared Workspaces.
     ///
     /// One device holds one durable edit journal and one claim on each Pane, so a second window
@@ -115,11 +111,9 @@ mod development {
         /// SharedEditSource owns the connected interactions waiting to dispatch.
         fn submit(&self, mutation: Mutation) -> bool;
 
-        /// A data-free hint after each change the snapshot publishes, or `None` when only
-        /// periodic reading observes changes. The snapshot stays the authority.
-        fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
-            None
-        }
+        /// A data-free hint now and after each change the snapshot publishes. The snapshot
+        /// stays the authority.
+        fn subscribe(&self) -> async_channel::Receiver<()>;
 
         /// Whether the server accepts Worktree writes, without copying the hierarchy.
         fn worktree_writes(&self) -> bool {
@@ -144,8 +138,8 @@ mod development {
             Self::submit(self, mutation)
         }
 
-        fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
-            Some(Self::subscribe(self))
+        fn subscribe(&self) -> async_channel::Receiver<()> {
+            Self::subscribe(self)
         }
     }
 
@@ -160,20 +154,12 @@ mod development {
 
     pub(crate) struct SharedEditNotifications {
         local: async_channel::Receiver<()>,
-        remote: Option<async_channel::Receiver<()>>,
+        remote: async_channel::Receiver<()>,
     }
 
     impl SharedEditNotifications {
-        /// Whether the server connection says when it publishes, so nothing needs a timer.
-        pub(crate) fn pushed(&self) -> bool {
-            self.remote.is_some()
-        }
-
         pub(crate) async fn recv(&self) -> Result<(), async_channel::RecvError> {
-            match &self.remote {
-                Some(remote) => futures_lite::future::race(self.local.recv(), remote.recv()).await,
-                None => self.local.recv().await,
-            }
+            futures_lite::future::race(self.local.recv(), self.remote.recv()).await
         }
     }
 
@@ -288,13 +274,15 @@ mod development {
         /// Keep the original transport alive independently until its durable operation retires.
         pub(crate) fn retain_until_settled(&self, cx: &mut App) {
             let source = self.clone();
-            cx.spawn(async move |cx| {
-                loop {
+            let changes = self.edits.subscribe();
+            // Each answer the server publishes hints here, and reading the snapshot dispatches
+            // the next queued edit.
+            cx.spawn(async move |_| {
+                while changes.recv().await.is_ok() {
                     let snapshot = source.snapshot();
                     if !snapshot.pending && !source.has_pending() {
                         break;
                     }
-                    cx.background_executor().timer(POLL_INTERVAL).await;
                 }
             })
             .detach();
@@ -879,8 +867,8 @@ mod development {
             0
         }
         // A placeholder never changes; the published Pane replaces it.
-        fn observe(&self, _hint: async_channel::Sender<()>) -> bool {
-            true
+        fn observe(&self, hint: async_channel::Sender<()>) {
+            let _ = hint.try_send(());
         }
         fn select(&self) {}
         fn retry(&self) {}
@@ -899,10 +887,8 @@ mod development {
         views: BTreeMap<PaneId, ServerPaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
         pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
-        /// Hints from every Pane connection that can give them.
+        /// One hint for a change to any registered Pane's connection.
         changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
-        /// Panes whose connections give no hints, so the Tab reads them on a timer.
-        unobserved: std::collections::BTreeSet<PaneId>,
     }
 
     impl Drop for SharedPanes {
@@ -930,7 +916,6 @@ mod development {
                 screen_focus: BTreeMap::new(),
                 pending_starts: Default::default(),
                 changes: async_channel::bounded(1),
-                unobserved: Default::default(),
             }
         }
 
@@ -955,25 +940,14 @@ mod development {
             } else if self.pending_starts.borrow_mut().remove(&pane_id) {
                 state.start_created();
             }
-            if state.observe(self.changes.0.clone()) {
-                self.unobserved.remove(&pane_id);
-            } else {
-                self.unobserved.insert(pane_id);
-            }
+            state.observe(self.changes.0.clone());
             self.views.insert(pane_id, ServerPaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
-            // A hint the new view has not read yet.
-            let _ = self.changes.0.try_send(());
         }
 
-        /// Hints that a Pane connection may present something new. Read every view after each.
+        /// Hints after any registered Pane's connection changes. Read every view after each.
         pub(crate) fn changes(&self) -> async_channel::Receiver<()> {
             self.changes.1.clone()
-        }
-
-        /// Whether some Pane connection gives no hints, so the Tab must also read on a timer.
-        pub(crate) fn polled(&self) -> bool {
-            !self.unobserved.is_empty()
         }
 
         pub(crate) fn forget(&mut self, pane_id: PaneId) {
@@ -983,7 +957,6 @@ mod development {
             self.pending_starts.borrow_mut().remove(&pane_id);
             self.views.remove(&pane_id);
             self.screen_focus.remove(&pane_id);
-            self.unobserved.remove(&pane_id);
         }
 
         /// A provisional creation already owns its startup intent. Only a confirmed Pane
@@ -1876,14 +1849,15 @@ mod development {
             self.connection_error
         }
 
-        /// Wakes for each change the server connection publishes, when it can say so.
-        pub(crate) fn subscribe(&self) -> Option<SharedEditNotifications> {
+        /// Wakes now, after each change the server connection publishes, and after each edit
+        /// this window queues.
+        pub(crate) fn subscribe(&self) -> SharedEditNotifications {
             let (sender, local) = async_channel::bounded(1);
             self.edits.subscribers.borrow_mut().push(sender);
-            Some(SharedEditNotifications {
+            SharedEditNotifications {
                 local,
                 remote: self.edits.edits.subscribe(),
-            })
+            }
         }
 
         /// Reads the server's answer and its inventory together, and reports both.
@@ -2510,6 +2484,8 @@ mod development {
             take_overs: std::sync::atomic::AtomicUsize,
             restored_starts: std::sync::atomic::AtomicUsize,
             retries: std::sync::atomic::AtomicUsize,
+            /// Hints the Tab after each change, as a real connection does.
+            changes: crate::terminal::changes::Changes,
         }
 
         impl ScriptedPane {
@@ -2527,6 +2503,7 @@ mod development {
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
                     restored_starts: std::sync::atomic::AtomicUsize::new(0),
                     retries: std::sync::atomic::AtomicUsize::new(0),
+                    changes: crate::terminal::changes::Changes::default(),
                 })
             }
 
@@ -2544,12 +2521,14 @@ mod development {
                     std::sync::atomic::Ordering::SeqCst,
                 );
                 *self.status.lock().expect("status") = status;
+                self.changes.publish();
             }
 
             /// An authenticated admission can precede every screen of a hidden Pane.
             pub(crate) fn admitted(&self) {
                 self.startup_pending
                     .store(false, std::sync::atomic::Ordering::SeqCst);
+                self.changes.publish();
             }
 
             /// The server offers Take Over and says who controls the Pane.
@@ -2572,6 +2551,7 @@ mod development {
             pub(crate) fn set_session_dormant(&self, dormant: bool) {
                 self.session_dormant
                     .store(dormant, std::sync::atomic::Ordering::SeqCst);
+                self.changes.publish();
             }
 
             /// A new connection reaches the server, which answers with `status`.
@@ -2632,6 +2612,10 @@ mod development {
                 self.generation.load(std::sync::atomic::Ordering::SeqCst)
             }
 
+            fn observe(&self, hint: async_channel::Sender<()>) {
+                self.changes.observe(hint);
+            }
+
             fn start_created(&self) {
                 self.created_starts
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2654,6 +2638,8 @@ mod development {
                 if *status == crate::terminal::server_session::DevelopmentPaneStatus::Takeover {
                     *status = crate::terminal::server_session::DevelopmentPaneStatus::TakingOver;
                 }
+                drop(status);
+                self.changes.publish();
             }
 
             fn start_restored(&self) {
@@ -2734,6 +2720,8 @@ mod development {
             submitted: Mutex<Vec<Mutation>>,
             /// The next sequence a settled answer carries.
             sequence: Mutex<u64>,
+            /// Hints readers after each change, as the real client does.
+            changes: crate::terminal::changes::Changes,
         }
 
         impl ScriptedEdits {
@@ -2752,28 +2740,35 @@ mod development {
                     }),
                     submitted: Mutex::new(Vec::new()),
                     sequence: Mutex::new(1),
+                    changes: crate::terminal::changes::Changes::default(),
                 }
             }
 
+            /// Changes the snapshot, then hints its readers.
+            fn publish(&self, update: impl FnOnce(&mut SharedWorkspaceSnapshot)) {
+                update(&mut self.snapshot.lock().expect("snapshot"));
+                self.changes.publish();
+            }
+
             pub(crate) fn set_inventory(&self, inventory: Inventory) {
-                self.snapshot.lock().expect("snapshot").inventory = Some(inventory);
+                self.publish(|snapshot| snapshot.inventory = Some(inventory));
             }
 
             /// Whether the scripted server negotiated End All Sessions.
             pub(crate) fn set_end_all_sessions(&self, offered: bool) {
-                self.snapshot.lock().expect("snapshot").end_all_sessions = offered;
+                self.publish(|snapshot| snapshot.end_all_sessions = offered);
             }
 
             pub(crate) fn set_connected(&self, connected: bool) {
-                self.snapshot.lock().expect("snapshot").connected = connected;
+                self.publish(|snapshot| snapshot.connected = connected);
             }
 
             pub(crate) fn set_worktree_writes(&self, worktree_writes: bool) {
-                self.snapshot.lock().expect("snapshot").worktree_writes = worktree_writes;
+                self.publish(|snapshot| snapshot.worktree_writes = worktree_writes);
             }
 
             pub(crate) fn set_error(&self, error: spaceterm_server::ServerError) {
-                self.snapshot.lock().expect("snapshot").error = Some(error);
+                self.publish(|snapshot| snapshot.error = Some(error));
             }
 
             /// Answers the last submitted edit with `outcome`.
@@ -2786,13 +2781,14 @@ mod development {
                     .cloned()
                     .expect("an answered edit must have been submitted");
                 let mut sequence = self.sequence.lock().expect("sequence");
-                let mut snapshot = self.snapshot.lock().expect("snapshot");
-                snapshot.pending = false;
-                snapshot.pending_operation = None;
-                snapshot.outcome = Some(RetainedOutcome {
-                    sequence: *sequence,
-                    mutation,
-                    outcome,
+                self.publish(|snapshot| {
+                    snapshot.pending = false;
+                    snapshot.pending_operation = None;
+                    snapshot.outcome = Some(RetainedOutcome {
+                        sequence: *sequence,
+                        mutation,
+                        outcome,
+                    });
                 });
                 *sequence += 1;
             }
@@ -2804,10 +2800,14 @@ mod development {
             /// Records a durable operation an earlier run submitted, which recovery answers after
             /// a relaunch without this process ever asking for it.
             pub(crate) fn submit_for_recovery(&self, mutation: Mutation) {
-                let mut snapshot = self.snapshot.lock().expect("snapshot");
-                snapshot.pending = true;
-                snapshot.pending_operation = Some(mutation.clone());
-                self.submitted.lock().expect("submitted").push(mutation);
+                self.submitted
+                    .lock()
+                    .expect("submitted")
+                    .push(mutation.clone());
+                self.publish(|snapshot| {
+                    snapshot.pending = true;
+                    snapshot.pending_operation = Some(mutation);
+                });
             }
         }
 
@@ -2829,8 +2829,14 @@ mod development {
                 snapshot.pending = true;
                 snapshot.pending_operation = Some(mutation.clone());
                 snapshot.outcome = None;
+                drop(snapshot);
                 self.submitted.lock().expect("submitted").push(mutation);
+                self.changes.publish();
                 true
+            }
+
+            fn subscribe(&self) -> async_channel::Receiver<()> {
+                self.changes.subscribe()
             }
         }
     }

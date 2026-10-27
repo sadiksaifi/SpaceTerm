@@ -383,7 +383,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     ) else {
         panic!("Root Pane did not start")
     };
-    let mut focus = |host: &mut SharedWorkspaceHost| {
+    let focus = |host: &mut SharedWorkspaceHost| {
         host.request(
             [1; 32],
             [1; 32],

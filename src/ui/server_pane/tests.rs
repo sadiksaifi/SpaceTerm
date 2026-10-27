@@ -56,6 +56,11 @@ impl ServerPaneConnection for Connection {
         self.generation.load(Ordering::SeqCst)
     }
 
+    // These tests read the view directly.
+    fn observe(&self, hint: async_channel::Sender<()>) {
+        let _ = hint.try_send(());
+    }
+
     fn select(&self) {}
 
     fn retry(&self) {
