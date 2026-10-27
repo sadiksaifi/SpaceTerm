@@ -10,13 +10,13 @@ use spaceterm_server::{
     hierarchy::{Id, Inventory, Mutation, RetainedOutcome},
     pane::{
         AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, effects,
-        graphics, reading,
+        graphics,
     },
     protocol::{
         Channel, ClaimReply, Frame, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
         Restored, Takeover,
-        interim::{Interim, InterimReply},
-        screen::{Colors, Cursor, Geometry, Modes},
+        limits::MAX_PAGE_ROWS,
+        screen::{Colors, Cursor, Geometry, History, Modes},
     },
 };
 use std::{
@@ -52,14 +52,6 @@ pub fn request(link: &ServerLink, operation: Operation) -> Result<ReplyBody> {
 pub fn done(link: &ServerLink, operation: Operation) -> Result<()> {
     match request(link, operation)? {
         ReplyBody::Done => Ok(()),
-        _ => Err(ServerError::Protocol),
-    }
-}
-
-/// Sends a polled operation that awaits its push replacement.
-pub fn interim(link: &ServerLink, operation: Interim) -> Result<InterimReply> {
-    match request(link, Operation::Interim(operation))? {
-        ReplyBody::Interim(reply) => Ok(reply),
         _ => Err(ServerError::Protocol),
     }
 }
@@ -297,7 +289,8 @@ pub struct Screen {
     pub cursor: Cursor,
     /// Fences pointer and wheel coordinates.
     pub generation: u64,
-    pub reading: Option<reading::Snapshot>,
+    /// The Scrollback above the visible rows.
+    pub history: History,
     pub graphics: Option<std::result::Result<graphics::Snapshot, graphics::Error>>,
     /// The text of each visible row. A wide character's spacer adds nothing.
     pub rows: Vec<String>,
@@ -341,9 +334,7 @@ impl Screen {
         if let Some(colors) = &update.colors {
             self.colors = Some(colors.clone());
         }
-        if let Some(reading) = &update.reading {
-            self.reading = Some(reading.clone());
-        }
+        self.history = update.history;
         if let Some(graphics) = &update.graphics {
             self.graphics = Some(graphics.clone());
         }
@@ -549,14 +540,40 @@ impl Pane {
         Ok(self.handle()?.effect_done(generation, effect, completion)?)
     }
 
+    /// The text of every retained Scrollback row of `history`, read through `ScrollbackPage` as a
+    /// client caches it, oldest first.
+    pub fn scrollback(&self, history: History) -> Result<Vec<String>> {
+        let mut rows = Vec::new();
+        let mut start = history.oldest;
+        while start < history.total {
+            let ReplyBody::Page(page) = self.request(Operation::ScrollbackPage {
+                channel: self.channel(),
+                epoch: history.epoch,
+                start,
+                rows: MAX_PAGE_ROWS,
+            })?
+            else {
+                return Err(ServerError::Protocol);
+            };
+            if page.epoch != history.epoch || page.start < start {
+                return Err(ServerError::Protocol);
+            }
+            if page.rows.is_empty() {
+                break;
+            }
+            start = page.start + page.rows.len() as u64;
+            rows.extend(
+                page.rows
+                    .iter()
+                    .map(|row| row.runs.iter().map(|run| run.text.as_str()).collect()),
+            );
+        }
+        Ok(rows)
+    }
+
     pub fn request(&self, operation: Operation) -> Result<ReplyBody> {
         self.reported()?;
         request(&self.link, operation)
-    }
-
-    pub fn interim(&self, operation: Interim) -> Result<InterimReply> {
-        self.reported()?;
-        interim(&self.link, operation)
     }
 
     /// Applies the frames the server pushed, acknowledging each, until `found` returns a value

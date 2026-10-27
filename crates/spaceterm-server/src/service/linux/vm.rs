@@ -5,10 +5,7 @@ use crate::{
     connection::link::{ChannelEvent, ChannelHandle, LinkEvent, ServerLink},
     hierarchy::{Id, Inventory, Mutation, Outcome},
     pane::{AttachmentClaim, FocusTarget, Key, PaneSize},
-    protocol::{
-        ClaimReply, Frame, InputEvent, Operation, ReplyBody,
-        interim::{Interim, InterimReply},
-    },
+    protocol::{ClaimReply, Frame, InputEvent, Operation, ReplyBody},
 };
 use std::sync::{
     Arc,

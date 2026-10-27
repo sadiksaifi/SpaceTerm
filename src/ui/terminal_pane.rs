@@ -4460,7 +4460,7 @@ impl TerminalPane {
             .as_ref()
             .filter(|snapshot| snapshot.generation == self.find_generation);
         let query_too_large = self.server_backed()
-            && input.read(cx).value().len() > spaceterm_server::pane::reading::MAX_QUERY_BYTES;
+            && input.read(cx).value().len() > crate::terminal::find::MAX_QUERY_BYTES;
         let result_label = if query_too_large {
             "Query exceeds 4,096 bytes".to_owned()
         } else if input.read(cx).value().is_empty() {

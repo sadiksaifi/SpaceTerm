@@ -5,7 +5,6 @@ pub mod directories;
 pub mod effects;
 pub mod graphics;
 pub mod metadata;
-pub mod reading;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
 
@@ -226,18 +225,6 @@ pub enum Request {
         image: graphics::ImageKey,
         offset: usize,
     },
-    Read {
-        lease: Lease,
-        operation: reading::Operation,
-    },
-    ReadingStatus {
-        lease: Lease,
-    },
-    SelectionChunk {
-        lease: Lease,
-        generation: u64,
-        offset: usize,
-    },
     CompleteClipboard {
         lease: Lease,
         generation: u64,
@@ -355,21 +342,6 @@ pub enum Reply {
     DirectoryRead(Result<directories::Progress, directories::Error>),
     DirectoryCreate(Result<directories::Progress, directories::Error>),
     GraphicsChunk(Result<graphics::Chunk, graphics::Error>),
-    Reading {
-        accepted: bool,
-    },
-    ReadingReady {
-        generation: u64,
-        selection_revision: u64,
-        selection_present: bool,
-    },
-    SelectionChunk {
-        generation: u64,
-        offset: usize,
-        total: usize,
-        bytes: Vec<u8>,
-    },
-    SelectionPending,
     Paste(PasteOutcome),
     Inventory {
         inventory: crate::hierarchy::Inventory,

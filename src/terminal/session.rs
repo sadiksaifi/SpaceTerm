@@ -3,9 +3,10 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
+mod scrollback;
+pub(crate) use scrollback::ScrollbackReply;
 mod publication;
 pub(crate) use publication::DEFAULT_FRAME_RATE;
-mod server_reading;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
@@ -711,42 +712,6 @@ impl TerminalRuntime {
             let _ = commands.send(Command::CopyOrForward(modifiers, reply));
         }
     }
-    pub(crate) fn reading_pointer(&self, input: PointerInput) -> mpsc::Receiver<bool> {
-        let (reply, completion) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingPointer(input, reply));
-        }
-        completion
-    }
-    pub(crate) fn reading_wheel(&self, input: WheelInput) -> mpsc::Receiver<bool> {
-        let (reply, completion) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingWheel(input, reply));
-        }
-        completion
-    }
-    pub(crate) fn reading_barrier(&self) -> mpsc::Receiver<()> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingBarrier(tx));
-        }
-        rx
-    }
-    pub(crate) fn reset_reading(&self) {
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ResetReading);
-        }
-    }
-    pub(crate) fn prepare_server_selection(
-        &self,
-        generation: u64,
-    ) -> mpsc::Receiver<server_reading::PreparedSelection> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::PrepareServerSelection(generation, tx));
-        }
-        rx
-    }
     /// Applies a server client's accessible Selection endpoints on the worker.
     ///
     /// The receiver yields `true` only when the Selection changed; stale endpoints, mismatched
@@ -1215,11 +1180,7 @@ struct ReaderEventBatch {
 }
 
 enum Command {
-    ReadingPointer(PointerInput, mpsc::SyncSender<bool>),
-    ReadingWheel(WheelInput, mpsc::SyncSender<bool>),
-    ResetReading,
-    ReadingBarrier(mpsc::SyncSender<()>),
-    PrepareServerSelection(u64, mpsc::SyncSender<server_reading::PreparedSelection>),
+    ReadScrollback(scrollback::ScrollbackRead),
     ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
     RouteClientEffects,
@@ -1307,16 +1268,12 @@ impl Command {
         matches!(
             self,
             Self::Pointer(..)
-                | Self::ReadingPointer(..)
-                | Self::ReadingWheel(..)
                 | Self::ApplicationPointer(..)
                 | Self::PointerAndCopySelection(..)
                 | Self::Wheel(..)
                 | Self::ScrollTo(..)
                 | Self::SelectionCopy(Some(_), _)
-                | Self::PrepareServerSelection(..)
                 | Self::ServerAccessibilitySelection(..)
-                | Self::ReadingBarrier(_)
                 | Self::AccessibilitySelection(..)
                 | Self::AccessibilityContinue
                 | Self::PublishAccessibility
@@ -1327,11 +1284,7 @@ impl Command {
 impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::ReadingPointer(..) => "ReadingPointer",
-            Self::ReadingWheel(..) => "ReadingWheel",
-            Self::ResetReading => "ResetReading",
-            Self::ReadingBarrier(_) => "ReadingBarrier",
-            Self::PrepareServerSelection(..) => "PrepareServerSelection",
+            Self::ReadScrollback(..) => "ReadScrollback",
             Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
             Self::RouteClientEffects => "RouteClientEffects",
@@ -1388,7 +1341,8 @@ struct TerminalWorker {
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
-    server_reading: Option<server_reading::ServerReading>,
+    /// The worker presents a SpaceTerm Server Pane: clients present and read its screens.
+    served: bool,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
     events: TerminalEventPublisher,
@@ -1585,7 +1539,7 @@ impl TerminalWorker {
             native_pty,
             input: PtyInput::default(),
             emulator,
-            server_reading: None,
+            served: false,
             commands,
             reader_events: reader_event_rx,
             events,
@@ -1772,7 +1726,7 @@ impl TerminalWorker {
     }
 
     fn order_presentation_barrier(&mut self, command: Command) -> Command {
-        if self.server_reading.is_some()
+        if self.served
             && !self.schedules.is_presentable()
             && matches!(
                 &command,
@@ -1801,58 +1755,7 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
-            Command::ReadingPointer(input, reply) => match self.emulator.reading_pointer(input) {
-                Ok(action) => {
-                    let applied = action.is_some();
-                    let success = action.is_none_or(|action| self.apply_emulator_action(action))
-                        && self.refresh_selection_autoscroll();
-                    let _ = reply.send(applied && success);
-                    // The server waits on this reply before it drains the session again.
-                    self.events.notify();
-                    success
-                }
-                Err(error) => {
-                    self.send_runtime_failure(error);
-                    false
-                }
-            },
-            Command::ReadingWheel(input, reply) => match self.emulator.reading_wheel(input) {
-                Ok(action) => {
-                    let applied = action.is_some();
-                    let success = action.is_none_or(|action| self.apply_emulator_action(action));
-                    let _ = reply.send(applied && success);
-                    self.events.notify();
-                    success
-                }
-                Err(error) => {
-                    self.send_runtime_failure(error);
-                    false
-                }
-            },
-            Command::ReadingBarrier(reply) => {
-                let _ = reply.send(());
-                // The server holds back draining the session until this barrier passes.
-                self.events.notify();
-                true
-            }
-            Command::ResetReading => match self.emulator.reset_reading() {
-                Ok(action) => self.apply_emulator_action(action),
-                Err(error) => {
-                    self.send_runtime_failure(error);
-                    false
-                }
-            },
-            Command::PrepareServerSelection(generation, reply) => {
-                let selection = if self.emulator.synchronized_output_deadline().is_some() {
-                    Ok(None)
-                } else {
-                    self.server_reading
-                        .as_ref()
-                        .map_or(Ok(None), |reading| reading.prepared(generation))
-                };
-                let _ = reply.send(selection);
-                true
-            }
+            Command::ReadScrollback(read) => self.read_scrollback(read),
             Command::ServerAccessibilitySelection(selection, reply) => {
                 match self.emulator.set_accessibility_selection_refs(selection) {
                     Ok(changed) => {
@@ -1874,8 +1777,7 @@ impl TerminalWorker {
             }
             Command::RouteClientEffects => {
                 self.emulator.enable_client_clipboard();
-                self.emulator.enable_server_reading();
-                self.server_reading = Some(server_reading::ServerReading::default());
+                self.served = true;
                 self.schedules
                     .set_server_presentable(self.schedules.is_presentable(), Instant::now());
                 true
@@ -2150,7 +2052,7 @@ impl TerminalWorker {
             }
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
-                if self.server_reading.is_some() {
+                if self.served {
                     self.schedules.set_server_presentable(presentable, now);
                 } else {
                     self.schedules.set_presentable(presentable, now);
@@ -2487,7 +2389,7 @@ impl TerminalWorker {
         }
 
         if received_output {
-            if self.server_reading.is_some() {
+            if self.served {
                 self.schedules.note_hidden_server_content_changed();
             }
             let metadata = self.emulator.metadata();
@@ -2731,7 +2633,7 @@ impl TerminalWorker {
     }
 
     fn publish_visible_screen_change(&mut self) -> bool {
-        if self.server_reading.is_some() {
+        if self.served {
             self.schedules.note_hidden_server_content_changed();
         }
         self.schedules.request_presentation();
@@ -2772,7 +2674,7 @@ impl TerminalWorker {
     fn publish_screen(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
-            if self.server_reading.is_some() {
+            if self.served {
                 self.schedules.set_server_presentable(false, Instant::now());
             } else {
                 self.schedules.set_presentable(false, Instant::now());
@@ -2785,9 +2687,6 @@ impl TerminalWorker {
 
     fn publish_screen_snapshot(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
-        if let Some(reading) = &mut self.server_reading {
-            reading.update(&mut self.emulator);
-        }
         let semantic_content_changed = self.emulator.accessibility_content_changed();
         self.emulator.set_input_serial(self.input.written_serial());
         let snapshot = self.emulator.snapshot();

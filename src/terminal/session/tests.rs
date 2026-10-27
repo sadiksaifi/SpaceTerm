@@ -1541,7 +1541,7 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
             native_pty: direct_native_pty(records.clone()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-            server_reading: None,
+            served: false,
             commands,
             reader_events,
             events: events.into(),
@@ -1583,7 +1583,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -1650,7 +1650,7 @@ fn permission_request_worker() -> PermissionRequestWorker {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -1753,7 +1753,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events: reader_event_rx,
         events: events.into(),
@@ -1797,7 +1797,7 @@ fn a_published_screen_reports_the_input_serial_written_before_its_capture() {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -1837,7 +1837,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -1902,7 +1902,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -1954,7 +1954,7 @@ fn queued_input_runs_before_due_scrollback_compression() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2000,7 +2000,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2070,7 +2070,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2138,7 +2138,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2195,7 +2195,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             input: PtyInput::default(),
             emulator,
-            server_reading: None,
+            served: false,
             commands,
             reader_events,
             events: events.into(),
@@ -2270,7 +2270,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2335,7 +2335,7 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2397,7 +2397,7 @@ fn closed_screen_lane_skips_snapshot_and_accessibility_without_stopping_runtime(
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2434,7 +2434,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events: reader_event_rx,
         events: events.into(),
@@ -2497,7 +2497,7 @@ fn queued_reader_commands_should_not_extend_the_prompt_redraw_cap() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2592,7 +2592,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             reader_events,
             events: events.into(),
             accessibility,
-            server_reading: None,
+            served: false,
             pending_command: None,
             terminal_input_focused: false,
             focus_reporting_enabled: false,
@@ -2667,7 +2667,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2707,7 +2707,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2758,7 +2758,7 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2811,7 +2811,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -2855,7 +2855,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events: reader_event_rx,
         events: events.into(),
@@ -4011,7 +4011,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        server_reading: None,
+        served: false,
         commands,
         reader_events,
         events: events.into(),
@@ -4135,7 +4135,7 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
                 native_pty: direct_native_pty(records.clone()),
                 input: PtyInput::default(),
                 emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-                server_reading: None,
+                served: false,
                 commands,
                 reader_events,
                 events: events.into(),
@@ -4225,7 +4225,7 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-            server_reading: None,
+            served: false,
             commands,
             reader_events,
             events: events.into(),
@@ -4414,7 +4414,7 @@ fn clipboard_worker() -> (
             native_pty: direct_native_pty(records.clone()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-            server_reading: None,
+            served: false,
             commands,
             reader_events,
             events: events.into(),
@@ -4590,76 +4590,6 @@ fn fragmented_clipboard_operations_keep_their_initial_focus_grant() {
         assert_eq!(records.snapshot().written, b"\x1b]52;c;\x07");
         worker.finish();
     }
-}
-
-#[test]
-fn prepared_server_copy_survives_unrelated_output_and_rejects_changed_selected_text() {
-    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
-    let (sender, events) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
-    worker.events = sender.into();
-    let latest = || {
-        let mut latest = None;
-        while let Ok(event) = events.try_recv() {
-            if let TerminalSessionEvent::Screen(screen) = event {
-                latest = Some(screen);
-            }
-        }
-        latest.unwrap()
-    };
-    assert!(worker.process_command(Command::RouteClientEffects));
-    worker.emulator.feed("line\r\n".repeat(60).as_bytes());
-    worker.emulator.feed(b"\x1b[1;1Hselected");
-    assert!(worker.publish_screen_snapshot());
-    for (phase, x) in [
-        (PointerPhase::Press, 1.0),
-        (PointerPhase::Motion, 63.0),
-        (PointerPhase::Release, 63.0),
-    ] {
-        let input = PointerInput {
-            generation: worker.emulator.presentation_generation(),
-            phase,
-            button: Some(PointerButton::Left),
-            position: SurfacePosition { x, y: 1.0 },
-            modifiers: Default::default(),
-            shift_selection: Default::default(),
-        };
-        assert!(worker.process_command(Command::ReadingPointer(input, mpsc::sync_channel(1).0)));
-    }
-    assert!(worker.publish_screen_snapshot());
-    let selected = latest();
-    worker.emulator.feed(b"\r\nunrelated");
-    assert!(worker.publish_screen_snapshot());
-    let next = latest();
-    assert_ne!(selected.generation, next.generation);
-    assert_eq!(selected.selection_revision, next.selection_revision);
-    worker.emulator.scroll_scrollback(ScrollbackMovement::Top);
-    assert!(worker.publish_screen_snapshot());
-    let hidden = latest();
-    assert!(!screen_text(&hidden).contains("selected"));
-    worker.emulator.feed(b"\x1b[1;1Hreplaced");
-    assert!(worker.publish_screen_snapshot());
-    let changed = latest();
-    assert!(changed.selection_present);
-    assert_eq!(
-        hidden.rows, changed.rows,
-        "selection changes must publish even when the viewport cells are unchanged"
-    );
-    assert_ne!(selected.selection_revision, changed.selection_revision);
-    let (reply, response) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::PrepareServerSelection(
-        selected.selection_revision,
-        reply
-    )));
-    assert!(response.recv().unwrap().unwrap().is_none());
-    let (reply, response) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::PrepareServerSelection(
-        changed.selection_revision,
-        reply
-    )));
-    let bytes = response.recv().unwrap().unwrap().unwrap();
-    let copy: spaceterm_server::pane::reading::Selection = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(copy.plain_text, "replaced");
-    worker.finish();
 }
 
 #[test]
@@ -4973,67 +4903,6 @@ fn metadata_only_screen_changes_do_not_schedule_another_semantic_document() {
             .schedules
             .accessibility_presentation_due(now + Duration::from_secs(1))
     );
-    worker.finish();
-}
-
-#[test]
-fn queued_server_reading_reports_application_after_output_and_refuses_changed_rows() {
-    for (output, applied) in [
-        (b"\x1b[4;1Hunrelated".as_slice(), true),
-        (b"\x1b[1;1Hreplacement".as_slice(), false),
-    ] {
-        let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
-        assert!(worker.process_command(Command::RouteClientEffects));
-        worker.emulator.feed(b"select this text");
-        assert!(worker.publish_screen_snapshot());
-        let mut input = PointerInput {
-            generation: worker.emulator.presentation_generation(),
-            phase: PointerPhase::Press,
-            button: Some(PointerButton::Left),
-            position: SurfacePosition { x: 1.0, y: 1.0 },
-            modifiers: Default::default(),
-            shift_selection: Default::default(),
-        };
-        let (reply, completion) = mpsc::sync_channel(1);
-        let queued = Command::ReadingPointer(input, reply);
-        worker.emulator.feed(output);
-        assert!(worker.publish_screen_snapshot());
-        assert!(worker.process_command(queued));
-        assert_eq!(completion.recv().unwrap(), applied);
-        if !applied {
-            input.phase = PointerPhase::Motion;
-            input.position.x = 60.0;
-            let (reply, completion) = mpsc::sync_channel(1);
-            assert!(worker.process_command(Command::ReadingPointer(input, reply)));
-            assert!(!completion.recv().unwrap());
-            assert!(worker.emulator.selection_text().unwrap().is_none());
-        }
-        worker.finish();
-    }
-}
-
-#[test]
-fn server_wheel_completion_accepts_unchanged_viewports_and_zero_delta_edges() {
-    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
-    assert!(worker.process_command(Command::RouteClientEffects));
-    worker.emulator.feed(b"no scrollback");
-    assert!(worker.publish_screen_snapshot());
-    for (horizontal_steps, vertical_steps) in [(0, 0), (1, 0), (0, 1)] {
-        let (reply, completion) = mpsc::sync_channel(1);
-        assert!(worker.process_command(Command::ReadingWheel(
-            WheelInput {
-                generation: worker.emulator.presentation_generation(),
-                horizontal_steps,
-                vertical_steps,
-                phase: WheelPhase::GestureEnded,
-                position: SurfacePosition { x: 1.0, y: 1.0 },
-                modifiers: Default::default(),
-                shift_selection: Default::default(),
-            },
-            reply
-        )));
-        assert!(completion.recv().unwrap());
-    }
     worker.finish();
 }
 

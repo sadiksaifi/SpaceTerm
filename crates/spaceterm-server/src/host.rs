@@ -1634,10 +1634,7 @@ mod startup_tests {
     #[test]
     #[ignore = "runs only as a child of the shared transport admission test"]
     fn shared_transport_child() {
-        use crate::protocol::{
-            ClaimReply, ReplyBody, Restored,
-            interim::{Interim, InterimReply},
-        };
+        use crate::protocol::{ClaimReply, ReplyBody, Restored};
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         serve_with_panes(
             &Paths {
@@ -1667,13 +1664,25 @@ mod startup_tests {
                                 bytes: vec![255; crate::pane::graphics::CHUNK_BYTES],
                             }))
                         }
-                        Operation::Interim(Interim::SelectionChunk {
-                            generation, offset, ..
-                        }) => ReplyBody::Interim(InterimReply::SelectionChunk {
-                            generation,
-                            offset,
-                            total: 32 * crate::pane::reading::SELECTION_CHUNK_BYTES as u64,
-                            bytes: vec![65; crate::pane::reading::SELECTION_CHUNK_BYTES],
+                        Operation::ScrollbackPage {
+                            epoch, start, rows, ..
+                        } => ReplyBody::Page(crate::protocol::Page {
+                            epoch,
+                            start,
+                            rows: (0..rows)
+                                .map(|index| crate::protocol::screen::Row {
+                                    index,
+                                    wrapped: false,
+                                    runs: vec![crate::protocol::screen::Run {
+                                        style: crate::protocol::screen::StyleRef::Default,
+                                        link: None,
+                                        text: "A".repeat(200),
+                                        cells: crate::protocol::screen::Cells::Narrow,
+                                    }],
+                                })
+                                .collect(),
+                            styles: Vec::new(),
+                            links: Vec::new(),
                         }),
                         _ => ReplyBody::Done,
                     }))
@@ -1687,7 +1696,6 @@ mod startup_tests {
     fn a_client_that_stops_reading_bulk_replies_does_not_stall_another_client() {
         use crate::protocol::{
             Channel, ClientMessage, ReplyBody, Request, RequestId, frame::encode_client,
-            interim::Interim,
         };
         use std::io::Write;
         for graphics in [false, true] {
@@ -1714,12 +1722,12 @@ mod startup_tests {
                         offset: u64::from(index) * crate::pane::graphics::CHUNK_BYTES as u64,
                     }
                 } else {
-                    Operation::Interim(Interim::SelectionChunk {
+                    Operation::ScrollbackPage {
                         channel: Channel(1),
-                        generation: 1,
-                        offset: u64::from(index)
-                            * crate::pane::reading::SELECTION_CHUNK_BYTES as u64,
-                    })
+                        epoch: 1,
+                        start: u64::from(index) * u64::from(crate::protocol::limits::MAX_PAGE_ROWS),
+                        rows: crate::protocol::limits::MAX_PAGE_ROWS,
+                    }
                 };
                 let message = ClientMessage::Request(Box::new(Request {
                     id: RequestId(index + 1),
