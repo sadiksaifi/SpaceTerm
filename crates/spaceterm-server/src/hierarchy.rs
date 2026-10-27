@@ -13,12 +13,12 @@ const MAX_OUTCOMES: usize = 32;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
     /// Live owning-server Git facts. Excluded from retained Organization.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub repositories: Option<crate::repository::Snapshot>,
     pub revision: u64,
     pub workspaces: Vec<Workspace>,
     /// Live facts accompany publication only; retained organization never supplies authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub close: Option<CloseInventory>,
 }
 
@@ -64,7 +64,7 @@ pub struct CloseInventory {
     pub boot: Id,
     pub sessions: Vec<ConfirmedPane>,
     /// Missing on older peers, which cannot fence confirmation-free closes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub controls: Option<Vec<ConfirmedControl>>,
 }
 
@@ -75,7 +75,7 @@ pub struct CloseConfirmation {
     pub removes_tab: bool,
     pub removes_workspace: bool,
     /// Only a confirmation-free own close binds control in addition to exact membership.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub own_controls: Option<Vec<ConfirmedControl>>,
 }
 
@@ -186,10 +186,10 @@ pub struct Tab {
     #[serde(default)]
     pub worktree_membership_fixed: bool,
     /// Saved membership, retained even when Git no longer lists the directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub worktree: Option<PathBuf>,
     /// Main Worktree discovery locator for this membership, revalidated after each boot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub worktree_repository: Option<PathBuf>,
     pub id: Id,
     pub root_pane: Id,
@@ -202,13 +202,11 @@ pub struct Pane {
     pub axis: Axis,
     pub starting_directory: PathBuf,
     /// Live terminal directory presentation. Never retained as restoration authority.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub current_directory: Option<PathBuf>,
     /// Protected Repository Source Directory from the owning Terminal Session, never retained.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub repository_directory: Option<PathBuf>,
     /// Current presentation for every authorized client, independent of Pane control or visibility.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
     pub confirmed_directory: Option<PathBuf>,
     /// The creator reserves control even before measured first use starts a shell.
@@ -1462,15 +1460,13 @@ mod tests {
     }
 
     #[test]
-    fn close_control_fields_read_old_wire_forms_and_omit_absent_fences() {
+    fn retained_close_records_without_control_fences_read_as_absent_fences() {
         let old = serde_json::json!({ "boot": vec![9u8; 32], "sessions": [] });
-        let inventory: CloseInventory = serde_json::from_value(old.clone()).unwrap();
+        let inventory: CloseInventory = serde_json::from_value(old).unwrap();
         assert!(inventory.controls.is_none());
-        assert_eq!(serde_json::to_value(inventory).unwrap(), old);
         let old = serde_json::json!({ "boot": vec![9u8; 32], "panes": [], "removes_tab": true, "removes_workspace": false });
-        let confirmation: CloseConfirmation = serde_json::from_value(old.clone()).unwrap();
+        let confirmation: CloseConfirmation = serde_json::from_value(old).unwrap();
         assert!(confirmation.own_controls.is_none());
-        assert_eq!(serde_json::to_value(confirmation).unwrap(), old);
     }
 
     #[test]

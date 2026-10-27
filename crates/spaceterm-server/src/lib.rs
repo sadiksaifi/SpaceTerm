@@ -5,12 +5,13 @@ mod client;
 pub mod client_view;
 #[cfg(feature = "client")]
 mod computer_name;
+pub mod connection;
 pub mod direct;
 pub mod hierarchy;
 mod host;
 pub mod organization;
 pub mod pane;
-mod protocol;
+pub mod protocol;
 pub mod provisioning;
 pub mod repository;
 pub mod service;
