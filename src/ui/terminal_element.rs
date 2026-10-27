@@ -1025,83 +1025,104 @@ impl TerminalPaintBatch {
                 bounds: grid_bounds,
             }),
             |window| {
+                // Each pass paints in one GPUI layer, so the scene orders its primitives by pass
+                // instead of searching the bounds of every cell for overlaps. Within a layer GPUI
+                // draws by primitive kind, so a pass never mixes kinds whose order matters.
                 self.graphics
                     .paint_layer(GraphicsLayer::BelowBackground, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
-                for row in &self.rows {
-                    for (_, background) in row.backgrounds_in_paint_order() {
-                        record_quad_paint(
-                            #[cfg(test)]
-                            counter,
-                        );
-                        self.corners.paint(background, window);
+                window.paint_layer(grid_bounds, |window| {
+                    for row in &self.rows {
+                        for (_, background) in row.backgrounds_in_paint_order() {
+                            record_quad_paint(
+                                #[cfg(test)]
+                                counter,
+                            );
+                            self.corners.paint(background, window);
+                        }
                     }
-                }
+                });
                 self.graphics
                     .paint_layer(GraphicsLayer::BelowText, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
-                for (row_index, row) in self.rows.iter().enumerate() {
-                    paint_prepared_decorations(
-                        &row.stable.under_text_decorations,
-                        self.blink_phase_visible,
-                        window,
-                        #[cfg(test)]
-                        counter,
-                    );
-                    paint_prepared_decorations(
-                        &row.hyperlink_hover_decorations,
-                        self.blink_phase_visible,
-                        window,
-                        #[cfg(test)]
-                        counter,
-                    );
-                    let cursor_paint = cursor_text_paint(self.cursor_text_overlay, row_index);
-                    match cursor_paint {
-                        CursorTextPaint::Unchanged => paint_prepared_decorations(
-                            &row.stable.symbols,
+                window.paint_layer(grid_bounds, |window| {
+                    for row in &self.rows {
+                        paint_prepared_decorations(
+                            &row.stable.under_text_decorations,
                             self.blink_phase_visible,
                             window,
                             #[cfg(test)]
                             counter,
-                        ),
-                        CursorTextPaint::Exclude(bounds)
-                        | CursorTextPaint::Recolor { bounds, .. } => {
-                            paint_prepared_symbols_excluding_region(
+                        );
+                        paint_prepared_decorations(
+                            &row.hyperlink_hover_decorations,
+                            self.blink_phase_visible,
+                            window,
+                            #[cfg(test)]
+                            counter,
+                        );
+                    }
+                });
+                // Symbols are quads and text is sprites, so the symbols of every row paint
+                // before any glyph, as they do within a row.
+                window.paint_layer(grid_bounds, |window| {
+                    for (row_index, row) in self.rows.iter().enumerate() {
+                        let cursor_paint = cursor_text_paint(self.cursor_text_overlay, row_index);
+                        match cursor_paint {
+                            CursorTextPaint::Unchanged => paint_prepared_decorations(
                                 &row.stable.symbols,
                                 self.blink_phase_visible,
-                                bounds,
                                 window,
                                 #[cfg(test)]
                                 counter,
-                            );
-                            if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
-                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                    paint_prepared_decorations(
-                                        &row.cursor_symbols,
-                                        self.blink_phase_visible,
-                                        window,
-                                        #[cfg(test)]
-                                        counter,
+                            ),
+                            CursorTextPaint::Exclude(bounds)
+                            | CursorTextPaint::Recolor { bounds, .. } => {
+                                paint_prepared_symbols_excluding_region(
+                                    &row.stable.symbols,
+                                    self.blink_phase_visible,
+                                    bounds,
+                                    window,
+                                    #[cfg(test)]
+                                    counter,
+                                );
+                                if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
+                                    window.with_content_mask(
+                                        Some(ContentMask { bounds }),
+                                        |window| {
+                                            paint_prepared_decorations(
+                                                &row.cursor_symbols,
+                                                self.blink_phase_visible,
+                                                window,
+                                                #[cfg(test)]
+                                                counter,
+                                            );
+                                        },
                                     );
-                                });
+                                }
                             }
                         }
+                        paint_prepared_row_text(
+                            row,
+                            self.line_height,
+                            self.blink_phase_visible,
+                            cursor_paint,
+                            window,
+                        )?;
                     }
-                    paint_prepared_row_text(
-                        row,
-                        self.line_height,
-                        self.blink_phase_visible,
-                        cursor_paint,
-                        window,
-                    )?;
-                    paint_prepared_decorations(
-                        &row.stable.over_text_decorations,
-                        self.blink_phase_visible,
-                        window,
-                        #[cfg(test)]
-                        counter,
-                    );
-                }
+                    Ok(())
+                })?;
+                window.paint_layer(grid_bounds, |window| {
+                    for row in &self.rows {
+                        paint_prepared_decorations(
+                            &row.stable.over_text_decorations,
+                            self.blink_phase_visible,
+                            window,
+                            #[cfg(test)]
+                            counter,
+                        );
+                    }
+                });
                 self.graphics
                     .paint_layer(GraphicsLayer::AboveText, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
@@ -5167,6 +5188,40 @@ mod tests {
                 .all(|glyph| !glyph.visible_bounds.intersects(&cursor)),
             "neighboring emoji pixels must be excluded from the cursor"
         );
+    }
+
+    #[test]
+    fn every_row_paints_text_in_one_layer_above_the_backgrounds() {
+        let mut cx = test_app_with_raster_bounds(Bounds::new(
+            point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+            size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+        ));
+        let cx = cx.add_empty_window();
+        let capture = PaintCapture::default();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| PaintBatches {
+                batches: cursor_render_batches(window, false),
+            },
+        );
+        capture_frame(cx, &capture);
+        let glyphs = capture.glyphs.borrow();
+        let quads = capture.quads.borrow();
+        let text_orders = glyphs
+            .iter()
+            .map(|glyph| glyph.order)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            text_orders.len(),
+            1,
+            "the glyphs of every row must share one draw order: {glyphs:#?}"
+        );
+        let background = quads
+            .iter()
+            .find(|quad| quad.background == rgba(0x22_44_88_ff).into())
+            .expect("the cursor background must paint");
+        assert!(text_orders.iter().all(|order| background.order < *order));
     }
 
     #[test]
