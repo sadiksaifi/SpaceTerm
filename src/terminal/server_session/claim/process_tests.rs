@@ -127,13 +127,9 @@ fn prove_shell_started(host: &mut crate::runtime::SharedWorkspaceHost, lease: Le
     loop {
         if let Reply::Screen(screen) =
             host.request([1; 32], lease.connection, Request::Poll { lease })
-            && screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    == "ST-START-SUCCEEDED"
-            })
+            && crate::terminal::server_session::screen_decoder::keyframe_lines(&screen)
+                .iter()
+                .any(|row| row.trim_end() == "ST-START-SUCCEEDED")
         {
             return;
         }
