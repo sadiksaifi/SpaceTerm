@@ -402,7 +402,9 @@ impl DirectConnections {
             // Old connectors stay disabled even if the person reconnects before an
             // in-flight attempt returns. Its result belongs to the previous gate.
             route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // The next connection is a new link, which the worker follows afresh.
             route.server = None;
+            route.health = None;
             route.status = DirectRouteStatus::Disconnected;
         }
         self.0.save(&mut state);

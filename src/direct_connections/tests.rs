@@ -779,6 +779,29 @@ fn confirmed_self_unpair_retires_its_key_after_another_original_finishes_using_i
 }
 
 #[test]
+fn a_disconnected_route_stops_following_its_old_link() {
+    let (connections, ids) = connected_routes(&["Studio"]);
+    let id = ids[0];
+    let health = worker::follow_link(&connections.0, id);
+    connections.0.state.lock().unwrap().routes.get_mut(&id).unwrap().health = Some(health);
+    connections.disconnect(&id);
+    assert!(
+        connections.0.state.lock().unwrap().routes[&id]
+            .health
+            .is_none(),
+        "the next connection's link must be followed instead"
+    );
+    connections.connect(&id);
+    // Once the route connects again, the worker follows the new link and checks the route only
+    // when that link ends.
+    await_condition(|| {
+        let state = connections.0.state.lock().unwrap();
+        let route = &state.routes[&id];
+        route.status == DirectRouteStatus::Connected && route.health.is_some()
+    });
+}
+
+#[test]
 fn disconnect_then_connect_ignores_the_previous_attempt_and_never_reopens_its_gate() {
     struct BlockingNetwork {
         started: std::sync::mpsc::Sender<Arc<AtomicBool>>,

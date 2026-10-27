@@ -261,7 +261,7 @@ impl Drop for JobPermit {
 
 /// Makes a connected route due again when its shared link ends. The link judges its own health
 /// with pings, so a live link needs no check.
-fn follow_link(
+pub(super) fn follow_link(
     owner: &Arc<Inner>,
     id: DirectRouteId,
 ) -> Arc<dyn spaceterm_server::connection::link::LinkSink> {
@@ -479,6 +479,8 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
         Ok(server) => {
             if runtime.server.is_none() {
                 runtime.server = Some(server);
+                // A new connection has a new link to follow.
+                runtime.health = None;
             }
             runtime.status = DirectRouteStatus::Connected;
             runtime.retry.attempt = 0;
