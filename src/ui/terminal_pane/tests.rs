@@ -733,6 +733,41 @@ fn visual_bell_presentation_state_clears_on_focus_or_input(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn input_takes_down_the_visual_bell_border_at_once(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: true,
+                active_tab: true,
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
+        pane.handle_event(
+            TerminalSessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+            cx,
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("terminal-visual-bell").is_some());
+
+    // A key with no echo draws nothing else.
+    cx.update(|_window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.send_key_translation(
+                KeyTranslation::Encoded(KeyInput::input_method_commit("x")),
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("terminal-visual-bell").is_none());
+}
+
+#[gpui::test]
 fn accepted_input_method_commit_clears_pending_attention(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
