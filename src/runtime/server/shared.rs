@@ -1129,6 +1129,11 @@ impl HostCommands for SharedWorkspaceHost {
             host.input_written(lease, serial);
         }
     }
+    fn restart_input(&mut self, lease: &Lease) {
+        for host in self.panes.values_mut() {
+            host.restart_input(lease);
+        }
+    }
     fn unbound(&mut self, connection: Id, lease: &Lease) {
         for host in self.panes.values_mut() {
             host.unbound(connection, lease);

@@ -290,6 +290,15 @@ impl DevelopmentPaneHost {
         }
     }
 
+    /// The channel bound to `lease` numbers its Input from 1 again.
+    pub(super) fn restart_input(&mut self, lease: &Lease) {
+        if let Some(pane) = &self.pane
+            && pane.lease == *lease
+        {
+            pane.runtime.restart_input_serials();
+        }
+    }
+
     /// Marks the end of Input `serial` on the Pane `lease` controls.
     pub(super) fn input_written(&mut self, lease: &Lease, serial: u32) {
         if let Some(pane) = &self.pane
