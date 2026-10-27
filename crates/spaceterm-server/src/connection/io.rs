@@ -22,6 +22,9 @@ use std::time::Instant;
 /// rings it.
 pub struct Waker {
     bell: UnixStream,
+    /// Keeps the pipe's write end open after every other handle dropped, so the bell never reads
+    /// as closed and a draining thread does not wake in a loop.
+    _ring: Arc<Ring>,
 }
 
 struct Ring(UnixStream);
@@ -38,7 +41,14 @@ impl Waker {
         let (bell, ring) = UnixStream::pair()?;
         bell.set_nonblocking(true)?;
         ring.set_nonblocking(true)?;
-        Ok((Self { bell }, Arc::new(Ring(ring))))
+        let ring = Arc::new(Ring(ring));
+        Ok((
+            Self {
+                bell,
+                _ring: Arc::clone(&ring),
+            },
+            ring,
+        ))
     }
 
     fn descriptor(&self) -> RawFd {
@@ -149,6 +159,8 @@ fn write(
     mut next: impl FnMut() -> Held,
 ) -> Result<Written, CarrierError> {
     let mut progressed = false;
+    // Whether the held frame was already offered again after a flush that freed no room.
+    let mut retried = false;
     loop {
         if held.is_none() {
             *held = next();
@@ -157,13 +169,21 @@ fn write(
             break;
         };
         match carrier.offer(frame, *priority)? {
-            Offer::Accepted => *held = None,
+            Offer::Accepted => {
+                *held = None;
+                retried = false;
+            }
             Offer::Full => {
                 let flush = carrier.flush()?;
                 progressed |= flush.progressed;
-                if !flush.progressed {
-                    break;
+                // Bytes written outside `flush`, for example while `receive` answered the peer,
+                // can leave the carrier empty without this flush writing anything. Offer once
+                // more before waiting: an empty carrier has no write readiness to wake on.
+                if flush.progressed || (!flush.pending && !retried) {
+                    retried = !flush.progressed;
+                    continue;
                 }
+                break;
             }
         }
     }
@@ -377,4 +397,89 @@ fn receive(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::carrier::{Flush, Readiness};
+    use crate::protocol::RawFrame;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A carrier full until its next flush, which writes nothing because the backlog already left
+    /// while it received, as a WebSocket answering the peer does.
+    struct Backpressured {
+        room: bool,
+        accepted: usize,
+        flushes: Arc<AtomicUsize>,
+        pending: bool,
+        bell: UnixStream,
+    }
+
+    impl Backpressured {
+        fn new(pending: bool) -> (Self, Arc<AtomicUsize>) {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let (bell, _) = UnixStream::pair().unwrap();
+            let carrier = Self {
+                room: false,
+                accepted: 0,
+                flushes: Arc::clone(&flushes),
+                pending,
+                bell,
+            };
+            (carrier, flushes)
+        }
+    }
+
+    impl Carrier for Backpressured {
+        fn offer(&mut self, _: &[u8], _: Priority) -> Result<Offer, CarrierError> {
+            if !self.room {
+                return Ok(Offer::Full);
+            }
+            self.accepted += 1;
+            Ok(Offer::Accepted)
+        }
+        fn flush(&mut self) -> Result<Flush, CarrierError> {
+            self.flushes.fetch_add(1, Ordering::Relaxed);
+            self.room = true;
+            Ok(Flush {
+                progressed: false,
+                pending: self.pending,
+            })
+        }
+        fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
+            Ok(None)
+        }
+        fn readiness(&self) -> Readiness {
+            Readiness {
+                read: self.bell.as_raw_fd(),
+                write: None,
+            }
+        }
+        fn close(&mut self) {}
+    }
+
+    #[test]
+    fn a_frame_refused_while_the_carrier_emptied_itself_is_offered_again_at_once() {
+        let (mut carrier, _) = Backpressured::new(false);
+        let mut held = None;
+        let mut frames = vec![(vec![0; 8], Priority::L1)].into_iter();
+        let written = write(&mut carrier, &mut held, || frames.next()).unwrap();
+        assert!(held.is_none(), "the frame must not wait for a later wake");
+        assert_eq!(carrier.accepted, 1);
+        assert!(!written.pending);
+    }
+
+    #[test]
+    fn a_draining_link_without_handles_waits_instead_of_spinning() {
+        let (carrier, flushes) = Backpressured::new(true);
+        let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
+        drop(link);
+        let deadline = Instant::now() + std::time::Duration::from_millis(200);
+        while Instant::now() < deadline {
+            std::thread::park_timeout(deadline - Instant::now());
+        }
+        // The drain flushes once, then waits on its wake pipe and the stall deadline.
+        assert!(flushes.load(Ordering::Relaxed) < 10);
+    }
 }
