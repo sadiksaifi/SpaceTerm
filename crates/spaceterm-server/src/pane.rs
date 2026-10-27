@@ -43,6 +43,49 @@ pub struct Lease {
     pub connection: [u8; 32],
 }
 
+/// How the PTY's line discipline treats typed input, and whether the shell reads it. The server
+/// reads these flags from the PTY master; they carry no terminal contents.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LineMode {
+    /// ICANON: the kernel collects a whole line before the program reads it.
+    pub canonical: bool,
+    /// ECHO: the kernel echoes typed input.
+    pub echo: bool,
+    /// ISIG: the kernel turns the interrupt, quit and suspend keys into signals.
+    pub signals: bool,
+    /// The shell's process group owns the terminal's foreground.
+    pub shell_foreground: bool,
+}
+
+impl LineMode {
+    /// The mode reported when the PTY cannot be read: no hidden input and no line editor.
+    pub const UNKNOWN: Self = Self {
+        canonical: false,
+        echo: false,
+        signals: false,
+        shell_foreground: false,
+    };
+
+    /// Whether the terminal hides typed input, as at a password prompt.
+    pub fn hidden_input(self) -> bool {
+        self.canonical && !self.echo
+    }
+
+    /// Whether the shell's own line editor reads typed input: zsh's ZLE, bash's readline or
+    /// dash at its prompt. Only then does a printable key normally echo at the cursor.
+    pub fn line_editor(self) -> bool {
+        !self.canonical && !self.echo && self.signals && self.shell_foreground
+    }
+}
+
+/// A Terminal Session's line mode with the epoch it was read in. The epoch increases by 1 each
+/// time the server reads a mode that differs from the previous one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LineState {
+    pub epoch: u64,
+    pub mode: LineMode,
+}
+
 /// Identifies a running Pane without granting access to its terminal content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneTarget {

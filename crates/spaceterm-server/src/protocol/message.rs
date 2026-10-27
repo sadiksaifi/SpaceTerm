@@ -3,7 +3,7 @@
 use super::limits;
 use super::operation::{Operation, ReplyBody, Takeover};
 use super::screen::ScreenUpdate;
-use crate::pane::{FocusTarget, Key, PaneSize, PasteOutcome, Pointer, Wheel, effects};
+use crate::pane::{FocusTarget, Key, LineState, PaneSize, PasteOutcome, Pointer, Wheel, effects};
 use serde::{Deserialize, Serialize};
 
 pub use crate::pane::Refusal;
@@ -187,8 +187,9 @@ pub enum PaneEvent {
     Input { serial: u32, outcome: InputOutcome },
     /// The accessibility revision changed while no frame carried it.
     Accessibility { revision: u64 },
-    /// Whether the terminal hides typed input, such as at a password prompt.
-    HiddenInput(bool),
+    /// The PTY's line mode changed. The server sends the current state first on each channel,
+    /// then each change it reads after input, after output and after focus changes.
+    Line(LineState),
 }
 
 impl PaneEvent {

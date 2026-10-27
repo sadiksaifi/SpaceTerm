@@ -1,5 +1,16 @@
 //! Bounded presentation delivery, independent of worker and PTY ownership.
 use super::*;
+use spaceterm_server::pane::{LineMode, LineState};
+
+/// A stopped Terminal Session reads no mode: it hides no input and has no line editor.
+fn stop(line: &mut LineState) {
+    if line.mode != LineMode::UNKNOWN {
+        *line = LineState {
+            epoch: line.epoch + 1,
+            mode: LineMode::UNKNOWN,
+        };
+    }
+}
 
 pub struct TerminalSubscription {
     pub events: async_channel::Receiver<TerminalSessionEvent>,
@@ -19,10 +30,10 @@ impl TerminalSubscription {
             .collect()
     }
 
-    /// The retained PTY hidden-input state. Read it after receiving events to reconcile
-    /// coalesced change notifications. A stopped runtime always returns false.
-    pub fn hidden_input(&self) -> bool {
-        self.state.hidden_input()
+    /// The retained PTY line state. Read it after receiving events to reconcile coalesced change
+    /// notifications. A stopped runtime reports [`LineMode::UNKNOWN`], which hides no input.
+    pub fn line(&self) -> LineState {
+        self.state.line()
     }
 }
 
@@ -39,7 +50,7 @@ struct EventState {
     screen: Option<Arc<ScreenSnapshot>>,
     finished: Option<Result<TerminalSessionExit, TerminalSessionFailure>>,
     stopped: bool,
-    hidden_input: bool,
+    line: LineState,
     client_effects: std::collections::VecDeque<ClientEffectRequest>,
 }
 
@@ -51,7 +62,7 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
             screen: None,
             finished: None,
             stopped: false,
-            hidden_input: false,
+            line: LineState::default(),
             client_effects: std::collections::VecDeque::new(),
         })))
     }
@@ -115,17 +126,17 @@ impl TerminalEventPublisher {
     pub(super) fn close(&self) {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.stopped = true;
-        state.hidden_input = false;
+        stop(&mut state.line);
         state.events.close();
         // The subscriber learns that the session stopped without waiting for another event.
         notify(state);
     }
 
-    pub(super) fn hidden_input(&self) -> bool {
+    pub(super) fn line(&self) -> LineState {
         self.0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .hidden_input
+            .line
     }
 
     pub(super) fn try_send(
@@ -179,14 +190,14 @@ impl EventState {
         match event {
             TerminalSessionEvent::Screen(screen) => self.screen = Some(Arc::clone(screen)),
             TerminalSessionEvent::Exited(exit) => {
-                self.hidden_input = false;
+                stop(&mut self.line);
                 self.finished = Some(Ok(exit.clone()));
             }
             TerminalSessionEvent::Failed(failure) => {
-                self.hidden_input = false;
+                stop(&mut self.line);
                 self.finished = Some(Err(failure.clone()));
             }
-            TerminalSessionEvent::HiddenInputChanged(active) => self.hidden_input = *active,
+            TerminalSessionEvent::Line(line) => self.line = *line,
             _ => {}
         }
     }

@@ -180,6 +180,11 @@ arg "[scenario]" help="Simulated updater state" default="available" {
 '''
 run = [{ task = "development:{{ os() }}", env = { SPACETERM_UPDATE_PREVIEW = "{{usage.scenario}}" } }]
 
+[tasks."development:latency"]
+description = "Run SpaceTerm Development with each Pane's pushed events held back, to show Predictive Echo on a local Pane"
+usage = 'arg "[milliseconds]" help="How long each pushed event waits" default="80"'
+run = [{ task = "development:{{ os() }}", env = { SPACETERM_DEVELOPER_PUSH_DELAY_MS = "{{usage.milliseconds}}" } }]
+
 [tasks."fmt:check"]
 description = "Check Rust and Python formatting"
 run = [{ task = "fmt", args = ["--check"] }]

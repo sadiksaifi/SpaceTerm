@@ -3,9 +3,10 @@ use super::publication::PublicationSchedule;
 use super::*;
 use crate::terminal::paste::PasteConfirmationSchedule;
 use libghostty_vt::terminal::{CompressionActivity, CompressionResult};
+use spaceterm_server::pane::{LineMode, LineState};
 use std::sync::{Mutex, MutexGuard};
 
-const HIDDEN_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
+const LINE_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 const ACCESSIBILITY_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
 /// How often a hidden Terminal Session reports changed metadata. A program that retitles its
@@ -134,7 +135,7 @@ pub(super) struct WorkerSchedules {
     selection_autoscroll: SelectionAutoscrollSchedule,
     paste_confirmations: PasteConfirmationSchedule,
     paste_confirmation_owner: Option<(PasteConfirmationId, PasteConfirmationOwner)>,
-    hidden_input: HiddenInputSchedule,
+    line: LineSchedule,
     presentation: PublicationSchedule,
     metadata_presentation_pending: bool,
     metadata_presentation_queued: Arc<AtomicBool>,
@@ -274,16 +275,16 @@ impl WorkerSchedules {
             .update(now, interval.filter(|_| self.presentation.is_presentable()));
     }
 
-    pub(super) fn update_hidden_input(
+    pub(super) fn update_line(
         &mut self,
         now: Instant,
-        result: Result<bool, NativePtyOperationFailure>,
-    ) -> Option<bool> {
-        self.hidden_input.update(now, result)
+        result: Result<LineMode, NativePtyOperationFailure>,
+    ) -> Option<LineState> {
+        self.line.update(now, result)
     }
 
-    pub(super) fn hidden_input_transition(&mut self, now: Instant) {
-        self.hidden_input.transition(now);
+    pub(super) fn line_transition(&mut self, now: Instant) {
+        self.line.transition(now);
     }
 
     pub(super) fn request_presentation(&mut self) {
@@ -456,7 +457,7 @@ impl WorkerSchedules {
             selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
             paste_confirmation_owner: None,
-            hidden_input: HiddenInputSchedule::new(now),
+            line: LineSchedule::new(now),
             presentation: PublicationSchedule::new(now),
             metadata_presentation_pending: false,
             metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
@@ -481,7 +482,7 @@ impl WorkerSchedules {
             self.metadata_deadline(),
             self.graphics_animation,
             self.compression.deadline(),
-            self.hidden_input.deadline,
+            self.line.deadline,
         ]
         .into_iter()
         .flatten()
@@ -512,10 +513,10 @@ impl WorkerSchedules {
         if self.metadata_deadline().is_some_and(|due| now >= due) {
             return Some(Command::PublishMetadata);
         }
-        self.hidden_input
+        self.line
             .deadline
             .is_some_and(|deadline| now >= deadline)
-            .then_some(Command::PollHiddenInput)
+            .then_some(Command::ReadLineMode)
     }
 }
 
@@ -638,19 +639,19 @@ impl AccessibilityContinuationSchedule {
     }
 }
 
-/// Checks whether the program hides input after output, focus changes and written input. An
-/// idle session checks nothing: a program that hides input silently is seen at the next of
-/// those, which is no later than the person's first keystroke reaching it.
-struct HiddenInputSchedule {
-    active: bool,
+/// Reads the PTY's line mode after output, focus changes and written input. An idle session reads
+/// nothing: a program that changes the mode silently is seen at the next of those, which is no
+/// later than the person's first keystroke reaching it.
+struct LineSchedule {
+    state: LineState,
     deadline: Option<Instant>,
     settle: bool,
 }
 
-impl HiddenInputSchedule {
+impl LineSchedule {
     fn new(now: Instant) -> Self {
         Self {
-            active: false,
+            state: LineState::default(),
             deadline: Some(now),
             settle: false,
         }
@@ -658,31 +659,30 @@ impl HiddenInputSchedule {
 
     fn transition(&mut self, now: Instant) {
         self.deadline = Some(now);
-        // Programs may write their prompt before changing termios. Check again once the
+        // Programs may write their prompt before changing termios. Read again once the
         // transition has settled.
         self.settle = true;
     }
 
+    /// Returns the new state when the mode differs from the last one read.
     fn update(
         &mut self,
         now: Instant,
-        result: Result<bool, NativePtyOperationFailure>,
-    ) -> Option<bool> {
-        self.deadline =
-            std::mem::take(&mut self.settle).then(|| now + HIDDEN_INPUT_SETTLE_INTERVAL);
-        let active = match result {
-            Ok(active) => active,
-            Err(_) => {
-                eprintln!("PTY hidden-input inspection failed; releasing secure input");
-                false
-            }
-        };
-        if self.active == active {
-            None
-        } else {
-            self.active = active;
-            Some(active)
+        result: Result<LineMode, NativePtyOperationFailure>,
+    ) -> Option<LineState> {
+        self.deadline = std::mem::take(&mut self.settle).then(|| now + LINE_SETTLE_INTERVAL);
+        let mode = result.unwrap_or_else(|_| {
+            eprintln!("PTY line mode inspection failed; releasing secure input");
+            LineMode::UNKNOWN
+        });
+        if self.state.mode == mode {
+            return None;
         }
+        self.state = LineState {
+            epoch: self.state.epoch + 1,
+            mode,
+        };
+        Some(self.state)
     }
 }
 
@@ -888,6 +888,13 @@ impl AccessibilityDemandMailbox {
 mod tests {
     use super::*;
 
+    const PASSWORD: LineMode = LineMode {
+        canonical: true,
+        echo: false,
+        signals: true,
+        shell_foreground: false,
+    };
+
     #[test]
     fn compression_waits_for_a_quiet_interval_after_activity() {
         let start = Instant::now();
@@ -1021,30 +1028,32 @@ mod tests {
     }
 
     #[test]
-    fn hidden_input_polling_emits_only_transitions_and_fails_closed() {
+    fn line_reads_emit_only_changes_with_a_new_epoch_and_fail_closed() {
         let start = Instant::now();
-        let mut schedule = HiddenInputSchedule::new(start);
+        let mut schedule = LineSchedule::new(start);
 
-        assert_eq!(schedule.update(start, Ok(false)), None);
-        assert_eq!(schedule.update(start, Ok(true)), Some(true));
-        assert_eq!(schedule.update(start, Ok(true)), None);
-        assert_eq!(
-            schedule.update(
+        assert_eq!(schedule.update(start, Ok(LineMode::UNKNOWN)), None);
+        let changed = schedule.update(start, Ok(PASSWORD)).unwrap();
+        assert_eq!((changed.epoch, changed.mode), (1, PASSWORD));
+        assert_eq!(schedule.update(start, Ok(PASSWORD)), None);
+        let failed = schedule
+            .update(
                 start,
                 Err(NativePtyOperationFailure::new(
-                    std::io::ErrorKind::BrokenPipe
-                ))
-            ),
-            Some(false)
-        );
+                    std::io::ErrorKind::BrokenPipe,
+                )),
+            )
+            .unwrap();
+        assert_eq!((failed.epoch, failed.mode), (2, LineMode::UNKNOWN));
+        assert!(!failed.mode.hidden_input());
         assert_eq!(schedule.deadline, None);
     }
 
     #[test]
-    fn hidden_input_idles_without_a_deadline_after_one_transition_followup() {
+    fn line_reads_idle_without_a_deadline_after_one_transition_followup() {
         let now = Instant::now();
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
-        schedules.update_hidden_input(now, Ok(false));
+        schedules.update_line(now, Ok(LineMode::UNKNOWN));
         assert_eq!(schedules.deadline(None), None);
         assert!(
             schedules
@@ -1053,27 +1062,34 @@ mod tests {
         );
 
         let prompt = now + Duration::from_secs(1);
-        schedules.hidden_input_transition(prompt);
+        schedules.line_transition(prompt);
         assert!(matches!(
             schedules.take_due(prompt),
-            Some(Command::PollHiddenInput)
+            Some(Command::ReadLineMode)
         ));
-        assert_eq!(schedules.update_hidden_input(prompt, Ok(false)), None);
+        assert_eq!(schedules.update_line(prompt, Ok(LineMode::UNKNOWN)), None);
         let settled = prompt + Duration::from_millis(200);
         assert_eq!(schedules.deadline(None), Some(settled));
         assert!(matches!(
             schedules.take_due(settled),
-            Some(Command::PollHiddenInput)
+            Some(Command::ReadLineMode)
         ));
-        assert_eq!(schedules.update_hidden_input(settled, Ok(true)), Some(true));
+        assert_eq!(
+            schedules
+                .update_line(settled, Ok(PASSWORD))
+                .map(|state| state.mode),
+            Some(PASSWORD)
+        );
         assert_eq!(schedules.deadline(None), None);
 
         let focused = settled + Duration::from_secs(1);
-        schedules.hidden_input_transition(focused);
+        schedules.line_transition(focused);
         assert_eq!(schedules.deadline(None), Some(focused));
         assert_eq!(
-            schedules.update_hidden_input(focused, Ok(false)),
-            Some(false)
+            schedules
+                .update_line(focused, Ok(LineMode::UNKNOWN))
+                .map(|state| state.mode),
+            Some(LineMode::UNKNOWN)
         );
     }
 
@@ -1113,10 +1129,10 @@ mod tests {
     fn worker_schedules_preserve_deadline_priority_and_expire_each_payload_once() {
         let now = Instant::now();
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
-        schedules.update_hidden_input(now, Ok(false));
+        schedules.update_line(now, Ok(LineMode::UNKNOWN));
         let due = now + Duration::from_secs(30);
-        // Output just before `due` asks for a hidden-input check.
-        schedules.hidden_input_transition(due);
+        // Output just before `due` asks for a line mode read.
+        schedules.line_transition(due);
         schedules.update_selection_autoscroll(now, Some(Duration::from_secs(30)));
         schedules
             .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)
@@ -1132,9 +1148,9 @@ mod tests {
         ));
         assert!(matches!(
             schedules.take_due(due),
-            Some(Command::PollHiddenInput)
+            Some(Command::ReadLineMode)
         ));
-        schedules.update_hidden_input(due, Ok(false));
+        schedules.update_line(due, Ok(LineMode::UNKNOWN));
         assert!(schedules.take_due(due).is_none());
     }
 
@@ -1142,7 +1158,7 @@ mod tests {
     fn synchronized_output_holds_publication_until_the_engine_deadline() {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_line(start, Ok(LineMode::UNKNOWN));
         schedules.mark_presented(start);
         let output = start + Duration::from_secs(1);
         schedules.request_pty_presentation(output);
@@ -1156,7 +1172,7 @@ mod tests {
     fn graphics_animation_wakes_once_at_the_engine_deadline() {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_line(start, Ok(LineMode::UNKNOWN));
         let due = start + Duration::from_millis(40);
         schedules.update_graphics_animation(Some(due));
 
@@ -1173,7 +1189,7 @@ mod tests {
     fn hidden_graphics_stop_waking_and_resume_with_a_fresh_presentation() {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_line(start, Ok(LineMode::UNKNOWN));
         schedules.update_graphics_animation(Some(start + Duration::from_millis(40)));
         schedules.set_presentable(false, start);
 
@@ -1209,7 +1225,7 @@ mod tests {
     fn hidden_presentation_cancels_background_accessibility_and_autoscroll_work() {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_line(start, Ok(LineMode::UNKNOWN));
         schedules.update_accessibility(true);
         schedules.update_selection_autoscroll(start, Some(Duration::from_millis(20)));
 
@@ -1256,7 +1272,7 @@ mod tests {
         let start = Instant::now();
         let input = ScheduleInput::default();
         let mut schedules = WorkerSchedules::new(start, input.clone());
-        schedules.update_hidden_input(start, Ok(false));
+        schedules.update_line(start, Ok(LineMode::UNKNOWN));
         schedules.note_screen_published();
         assert!(schedules.accessibility_presentation_due(start));
         schedules.mark_accessibility_presented(start, true);
