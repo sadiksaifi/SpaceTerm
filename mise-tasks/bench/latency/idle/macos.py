@@ -9,9 +9,10 @@
 """Measure the TCP traffic a SpaceTerm app sends while its visible Panes stay idle.
 
 Show a remote Pane, leave it idle and run this task. nettop reports the app's byte counters for
-each TCP connection, so this covers paired WSS connections. Account-local IPC uses a Unix socket
-that nettop does not count; a connection-level test covers that path. A client that sends no
-periodic requests sends only its keepalive: one ping after 5 seconds of silence.
+each TCP connection. Paired connections now use QUIC over UDP, which this task does not count
+yet. Account-local IPC uses a Unix socket that nettop does not count; a connection-level test
+covers that path. A client that sends no periodic requests sends only its keepalive: one ping
+after 5 seconds of silence.
 """
 
 import argparse
@@ -23,7 +24,7 @@ from spaceterm_tasks.latency import APPS, add_route_arguments, check_route, reso
 
 # The keepalive sends one ping after this much silence.
 KEEPALIVE_SECONDS = 5
-# A generous ceiling for one ping on the wire, with WebSocket and TLS framing.
+# A generous ceiling for one ping on the wire, with QUIC packet framing and encryption.
 PING_BYTES = 128
 BUDGET = PING_BYTES / KEEPALIVE_SECONDS
 

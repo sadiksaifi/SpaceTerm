@@ -200,7 +200,7 @@ impl Resolver {
 mod tests {
     use super::*;
     #[test]
-    fn authorities_retain_dns_names_and_apply_the_wss_port_independently_of_ssh() {
+    fn authorities_retain_dns_names_and_apply_the_quic_port_independently_of_ssh() {
         for (input, expected) in [
             ("Penguin.EXAMPLE", "penguin.example:9231"),
             ("penguin.example:9443", "penguin.example:9443"),

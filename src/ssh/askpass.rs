@@ -892,7 +892,7 @@ impl AskPassTeardown {
         }
     }
 
-    /// Setup workers wait here before admitting WSS or reporting cancellation.
+    /// Setup workers wait here before admitting QUIC or reporting cancellation.
     fn close_and_wait(&self) {
         self.close();
         let (completed, changed) = &*self.completed;

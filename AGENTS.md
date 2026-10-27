@@ -11,7 +11,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 ## Architecture
 
-- Each SpaceTerm Server owns its Workspaces, Tabs, Panes, and Terminal Sessions. The desktop owns their presentation and client view over account-local IPC or paired WSS connections. SSH is temporary provisioning authority inside Add Server.
+- Each SpaceTerm Server owns its Workspaces, Tabs, Panes, and Terminal Sessions. The desktop owns their presentation and client view over account-local IPC or paired QUIC connections. SSH is temporary provisioning authority inside Add Server.
 - Put behavior, invariants, and cleanup in deep modules with narrow interfaces. Expose intentional operations and typed recoverable failures.
 - Keep product policy portable. Reach frameworks, external systems, and operating system capabilities through narrow adapters chosen by constructor injection. Add a boundary only for durable replaceability or locality.
 - Use Apple's Human Interface Guidelines for macOS 27 as the UI design baseline.

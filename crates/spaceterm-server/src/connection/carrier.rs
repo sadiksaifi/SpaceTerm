@@ -6,17 +6,15 @@
 //!
 //! The I/O loop follows these rules:
 //!
-//! - After any readiness event it calls [`Carrier::receive`] until `Ok(None)`. TLS and WebSocket
-//!   carriers hold decrypted frames that no descriptor reports as readable.
+//! - After any readiness event it calls [`Carrier::receive`] until `Ok(None)`. The QUIC carrier
+//!   holds decrypted frames that no descriptor reports as readable.
 //! - It offers the next frame only after the previous offer was `Accepted`, and it calls
 //!   [`Carrier::flush`] after every accepted offer and whenever the write descriptor is ready.
 //! - After [`Carrier::close`] it keeps calling `flush` until `Flush::Done` or a stall, so the final
-//!   `Goodbye` and a WebSocket Close frame leave the socket.
+//!   `Goodbye` and the end of every stream leave the socket.
 //!
-//! Implementations: `UnixCarrier` for account-local IPC and `WssCarrier` for paired WSS (rustls and
-//! tungstenite on the nonblocking TCP descriptor, `TCP_NODELAY`, `TCP_NOTSENT_LOWAT` of 16 KiB, one
-//! WebSocket binary message per frame). The QUIC prototype `IrohCarrier` maps each [`Priority`] to
-//! its own stream and exposes a wake descriptor that its runtime signals.
+//! Implementations: `UnixCarrier` for account-local IPC and `QuicCarrier` for paired connections
+//! (noq-proto on a UDP socket the I/O thread drives, one stream per [`Priority`] on the server).
 use crate::protocol::{DecodeError, RawFrame};
 use std::os::fd::RawFd;
 

@@ -3,7 +3,7 @@
 # USAGE flag "--identity <identity>" help="Server build to measure" default="spaceterm-preflight" {
 # USAGE   choices "spaceterm-preflight" "spaceterm-development"
 # USAGE }
-# USAGE flag "--route <route>" help="Account-local IPC or a paired WSS connection" default="local" {
+# USAGE flag "--route <route>" help="Account-local IPC or a paired QUIC connection" default="local" {
 # USAGE   choices "local" "paired"
 # USAGE }
 # USAGE flag "--owner-host <host>" help="SSH host whose server a paired run measures; omit for this machine"

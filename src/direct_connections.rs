@@ -24,7 +24,7 @@ use records::{
 };
 
 /// An exact enrollment retained before setup can change the server.
-/// Dropping an unfinished setup requests restricted WSS cancellation.
+/// Dropping an unfinished setup requests restricted QUIC cancellation.
 pub(crate) struct SetupEnrollment {
     owner: DirectConnections,
     operation: JoinId,

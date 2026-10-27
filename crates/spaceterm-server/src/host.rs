@@ -616,7 +616,7 @@ fn serve_runtime_ready(
 
 /// Serving threads for account-local connections, including those still in admission.
 const MAX_LOCAL_CONNECTIONS: usize = 64;
-/// Serving threads for network connections, including those still in the WSS handshake.
+/// Serving threads for network connections, including those still in the QUIC handshake.
 const MAX_NETWORK_CONNECTIONS: usize = 32;
 
 /// Runs the service's timed work and revocations found by direct-network recovery, and returns

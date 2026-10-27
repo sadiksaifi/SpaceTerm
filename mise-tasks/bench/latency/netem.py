@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# MISE description="Measure paired WSS latency with and without netem loss and delay on the server's host"
+# MISE description="Measure paired QUIC latency with and without netem loss and delay on the server's host"
 # USAGE flag "--owner-host <host>" help="SSH host whose Linux Development server is measured and impaired"
 # USAGE flag "--owner-directory <directory>" help="Repository checkout on the owner host; defaults to this checkout's path from ~"
 # USAGE flag "--owner-target <directory>" help="CARGO_TARGET_DIR on the owner host; defaults to the checkout's target"
@@ -16,7 +16,7 @@
 # USAGE flag "--fetches <count>" help="Scrollback pages per cell and round" default="300"
 # USAGE flag "--output <directory>" help="Directory for raw results and the summary table"
 # USAGE flag "--interface <interface>" help="Refuse to run unless the owner host routes through this interface"
-"""Measure paired WSS latency with and without netem loss and delay on the server's host.
+"""Measure paired QUIC latency with and without netem loss and delay on the server's host.
 
 The task builds the protocol probe here and the server and its owner on the owner host. It starts
 a foreground Development server there, which ends when the task closes its input. Each cell runs

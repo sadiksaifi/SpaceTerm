@@ -515,7 +515,7 @@ impl State {
                 next.enabled = enabled;
                 self.commit(next)?;
                 self.generation = generation;
-                // Network administration arrives only over IPC. Retire all WSS authority.
+                // Network administration arrives only over IPC. Retire all QUIC authority.
                 self.connections.retire_generation(generation);
                 self.invitations.clear();
                 for pending in &mut self.claims {

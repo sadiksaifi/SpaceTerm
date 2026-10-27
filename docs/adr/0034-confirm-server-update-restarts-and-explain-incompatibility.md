@@ -7,3 +7,5 @@ Client updates restart the client and preserve server-owned work. Server updates
 Confirmation names the server and exact candidate and states that every client's Terminal Sessions on that server end. Changed installation, run or Stop observations require fresh confirmation. Identity, pairings and [Workspace organization](0031-retain-workspace-organization-across-server-restarts.md) survive; retained Panes follow [ADR 0043](0043-start-restored-shells-on-first-use.md). Updating a stopped server leaves it stopped.
 
 Admitted local operations belong to the application independently of the Settings Window. Recovery resolves the original exact-target operation without repeating destructive dispatch or choosing another candidate. Uncertain outcomes refuse terminal admission. Return to the previous verified runtime requires separate confirmation and proof that the candidate never became ready and saved state is unchanged. Ended Terminal Sessions never return. [ADR 0040](0040-keep-one-server-runtime-version-active.md) owns runtime activation.
+
+[ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

@@ -85,7 +85,7 @@ pub(crate) fn discard_unread(fd: RawFd) {
 }
 
 /// Waits until `fd` is readable, or writable when `write` is set, or `deadline` passes. Returns
-/// `false` at the deadline. Used by blocking preambles such as TLS and WebSocket handshakes.
+/// `false` at the deadline. Used by blocking preambles such as the QUIC handshake.
 pub(crate) fn wait_fd(fd: RawFd, write: bool, deadline: Instant) -> bool {
     loop {
         let now = Instant::now();
@@ -227,8 +227,8 @@ fn write(
     })
 }
 
-/// After `close`, flushes until the carrier is done or stalls, so a goodbye and a WebSocket
-/// Close leave the socket.
+/// After `close`, flushes until the carrier is done or stalls, so a goodbye and the end of every
+/// stream leave the socket.
 fn drain(carrier: &mut dyn Carrier, waker: &Waker) {
     carrier.close();
     let mut stalled = Instant::now() + limits::STALL_AFTER;
@@ -343,7 +343,7 @@ pub fn serve(
             stopped.get_or_insert(now);
         }
         // A turn that stopped at its receive bound continues without waiting: the socket, or the
-        // plaintext TLS and the WebSocket hold, may already have more.
+        // QUIC streams hold, may already have more.
         let mut more = false;
         if receiving {
             match receive(carrier.as_mut(), &mut connection, service, now) {
@@ -495,7 +495,7 @@ mod tests {
     use std::time::Duration;
 
     /// A carrier full until its next flush, which writes nothing because the backlog already left
-    /// while it received, as a WebSocket answering the peer does.
+    /// while it received, as a carrier answering the peer does.
     struct Backpressured {
         room: bool,
         accepted: usize,

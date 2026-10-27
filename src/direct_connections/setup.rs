@@ -87,7 +87,7 @@ impl DirectConnections {
         Ok(prepared)
     }
 
-    /// The caller closes every SSH resource before entering this WSS admission step.
+    /// The caller closes every SSH resource before entering this QUIC admission step.
     pub(crate) fn complete_setup(
         &self,
         prepared: &SetupEnrollment,

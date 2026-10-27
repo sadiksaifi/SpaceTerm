@@ -845,7 +845,7 @@ mod tests {
     struct NoConnect;
     impl crate::direct::DirectConnector for NoConnect {
         fn connect(&self) -> Result<crate::direct::DirectConnection, crate::direct::DirectError> {
-            panic!("retained state must not contact WSS")
+            panic!("retained state must not contact QUIC")
         }
     }
     fn paired_identity() -> crate::direct::PairedDevice {
