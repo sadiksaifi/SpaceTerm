@@ -469,6 +469,7 @@ fn connected_fixture(
                 server: Some(server),
                 gate,
                 retry: Retry::new(Interaction::Quiet),
+                health: None,
             },
         );
         state.document.routes.push(saved);
