@@ -126,6 +126,18 @@ pub(super) fn exchange(
     request: &Request,
     exchange: impl FnOnce(&Request) -> Result<Reply, ServerError>,
 ) -> Result<Reply, ServerError> {
+    let result = bookkept(state, pane_id, request, exchange);
+    // A start's confirmation and directory progress may have moved.
+    state.changed();
+    result
+}
+
+fn bookkept(
+    state: &DevelopmentPaneState,
+    pane_id: spaceterm_server::hierarchy::Id,
+    request: &Request,
+    exchange: impl FnOnce(&Request) -> Result<Reply, ServerError>,
+) -> Result<Reply, ServerError> {
     let start = match request {
         Request::StartRestored { server, .. } => Some(Some(*server)),
         Request::RepairDirectory { target, .. } => Some(Some(target.boot)),

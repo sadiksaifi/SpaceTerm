@@ -164,6 +164,11 @@ mod development {
     }
 
     impl SharedEditNotifications {
+        /// Whether the server connection says when it publishes, so nothing needs a timer.
+        pub(crate) fn pushed(&self) -> bool {
+            self.remote.is_some()
+        }
+
         pub(crate) async fn recv(&self) -> Result<(), async_channel::RecvError> {
             match &self.remote {
                 Some(remote) => futures_lite::future::race(self.local.recv(), remote.recv()).await,
@@ -873,6 +878,10 @@ mod development {
         fn connection_generation(&self) -> u64 {
             0
         }
+        // A placeholder never changes; the published Pane replaces it.
+        fn observe(&self, _hint: async_channel::Sender<()>) -> bool {
+            true
+        }
         fn select(&self) {}
         fn retry(&self) {}
         fn take_over(&self) {}
@@ -890,6 +899,10 @@ mod development {
         views: BTreeMap<PaneId, ServerPaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
         pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
+        /// Hints from every Pane connection that can give them.
+        changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
+        /// Panes whose connections give no hints, so the Tab reads them on a timer.
+        unobserved: std::collections::BTreeSet<PaneId>,
     }
 
     impl Drop for SharedPanes {
@@ -916,6 +929,8 @@ mod development {
                 views: BTreeMap::new(),
                 screen_focus: BTreeMap::new(),
                 pending_starts: Default::default(),
+                changes: async_channel::bounded(1),
+                unobserved: Default::default(),
             }
         }
 
@@ -940,8 +955,25 @@ mod development {
             } else if self.pending_starts.borrow_mut().remove(&pane_id) {
                 state.start_created();
             }
+            if state.observe(self.changes.0.clone()) {
+                self.unobserved.remove(&pane_id);
+            } else {
+                self.unobserved.insert(pane_id);
+            }
             self.views.insert(pane_id, ServerPaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
+            // A hint the new view has not read yet.
+            let _ = self.changes.0.try_send(());
+        }
+
+        /// Hints that a Pane connection may present something new. Read every view after each.
+        pub(crate) fn changes(&self) -> async_channel::Receiver<()> {
+            self.changes.1.clone()
+        }
+
+        /// Whether some Pane connection gives no hints, so the Tab must also read on a timer.
+        pub(crate) fn polled(&self) -> bool {
+            !self.unobserved.is_empty()
         }
 
         pub(crate) fn forget(&mut self, pane_id: PaneId) {
@@ -951,6 +983,7 @@ mod development {
             self.pending_starts.borrow_mut().remove(&pane_id);
             self.views.remove(&pane_id);
             self.screen_focus.remove(&pane_id);
+            self.unobserved.remove(&pane_id);
         }
 
         /// A provisional creation already owns its startup intent. Only a confirmed Pane

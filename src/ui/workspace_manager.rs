@@ -2921,7 +2921,12 @@ impl WorkspaceManager {
             }
         }
         // The first reading happens at once, so the window presents Workspaces as soon as the
-        // server publishes them rather than one interval later.
+        // server publishes them. After that the window reads when the connection publishes a
+        // change or a local edit is queued. Only a source that cannot say so is read on a timer.
+        let changes = self
+            .shared
+            .get(key)
+            .and_then(super::shared_workspaces::SharedWorkspaces::subscribe);
         let poll = cx.spawn_in(window, async move |manager, cx| {
             loop {
                 if manager
@@ -2932,32 +2937,33 @@ impl WorkspaceManager {
                 {
                     break;
                 }
-                cx.background_executor()
-                    .timer(super::shared_workspaces::POLL_INTERVAL)
-                    .await;
-            }
-        });
-        // Reads the server's inventory as soon as its connection publishes a change. The periodic
-        // poll stays, so a missed or absent hint only delays a reading.
-        let wake = self
-            .shared
-            .get(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::subscribe)
-            .map(|wake| {
-                cx.spawn_in(window, async move |manager, cx| {
-                    while wake.recv().await.is_ok() {
-                        if manager
-                            .update_in(cx, |manager, window, cx| {
-                                manager.sync_shared_workspaces(key, window, cx);
-                            })
-                            .is_err()
-                        {
+                let timer = cx
+                    .background_executor()
+                    .timer(super::shared_workspaces::POLL_INTERVAL);
+                match &changes {
+                    Some(changes) if changes.pushed() => {
+                        if changes.recv().await.is_err() {
                             break;
                         }
                     }
-                })
-            });
-        self.shared.follow(key, poll, wake);
+                    Some(changes) => {
+                        futures_lite::future::or(
+                            async {
+                                let _ = changes.recv().await;
+                            },
+                            async {
+                                timer.await;
+                            },
+                        )
+                        .await;
+                    }
+                    None => {
+                        timer.await;
+                    }
+                }
+            }
+        });
+        self.shared.follow(key, poll);
         cx.notify();
         key
     }

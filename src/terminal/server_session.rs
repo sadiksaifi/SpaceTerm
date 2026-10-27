@@ -89,6 +89,8 @@ pub(crate) struct DevelopmentPaneState {
     presentable: AtomicBool,
     preparation: AtomicBool,
     wake: inbox::Wake,
+    /// Views told when what they present may have changed.
+    observers: Mutex<Vec<async_channel::Sender<()>>>,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -120,6 +122,7 @@ impl DevelopmentPaneState {
             presentable: AtomicBool::new(true),
             preparation: AtomicBool::new(false),
             wake: inbox::Wake::default(),
+            observers: Mutex::default(),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
                 authority.route();
@@ -131,12 +134,29 @@ impl DevelopmentPaneState {
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
+    /// Sends `hint` a data-free signal whenever the status, connection generation, directory
+    /// progress, controller, dormancy or start confirmation may have changed, so a view reads
+    /// them on change instead of on a timer.
+    pub(crate) fn observe(&self, hint: async_channel::Sender<()>) {
+        self.observers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(hint);
+    }
+    /// Hints every observer. A full channel already holds a hint.
+    fn changed(&self) {
+        self.observers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|hint| !matches!(hint.try_send(()), Err(async_channel::TrySendError::Closed(()))));
+    }
     pub(crate) fn startup_pending(&self) -> bool {
         *self.admission.lock().unwrap_or_else(|e| e.into_inner()) == Admission::Pending
             || self.start_unconfirmed()
     }
     fn admission(&self, admission: Admission) {
         *self.admission.lock().unwrap_or_else(|e| e.into_inner()) = admission;
+        self.changed();
     }
     /// Who controlled the Pane when the server last offered Take Over, if it ever did.
     pub(crate) fn controller(&self) -> Option<pane::control::Controller> {
@@ -180,6 +200,7 @@ impl DevelopmentPaneState {
         if !self.start_unconfirmed() {
             self.created_start.store(true, Ordering::Release);
             self.wake.notify();
+            self.changed();
         }
     }
 
@@ -199,6 +220,7 @@ impl DevelopmentPaneState {
             self.selected.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
             self.wake.notify();
+            self.changed();
         }
     }
     pub(crate) fn retry(&self) {
@@ -208,6 +230,7 @@ impl DevelopmentPaneState {
             .retry();
         self.retry.store(true, Ordering::Release);
         self.wake.notify();
+        self.changed();
     }
     /// The original shell start may still be in flight. Retry observes it without starting again.
     pub(crate) fn start_unconfirmed(&self) -> bool {
@@ -233,6 +256,7 @@ impl DevelopmentPaneState {
                 .unwrap_or_else(|e| e.into_inner()) = None;
             self.start_restored.store(true, Ordering::Release);
             self.wake.notify();
+            self.changed();
         }
     }
     pub(crate) fn directory_progress(&self) -> (bool, Option<&'static str>) {
@@ -272,6 +296,7 @@ impl DevelopmentPaneState {
                 .unwrap_or_else(|e| e.into_inner()) = None;
             *self.repair.lock().unwrap_or_else(|e| e.into_inner()) = Some((target, replacement));
             self.wake.notify();
+            self.changed();
         }
     }
     pub(crate) fn take_over(&self) {
@@ -283,6 +308,7 @@ impl DevelopmentPaneState {
             self.take_over.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
             self.wake.notify();
+            self.changed();
         }
     }
     /// The server offered Take Over and named who controls the Pane. Every offer replaces the
@@ -295,6 +321,8 @@ impl DevelopmentPaneState {
         if *status != DevelopmentPaneStatus::TakingOver {
             *status = DevelopmentPaneStatus::Takeover;
         }
+        drop(status);
+        self.changed();
     }
     fn invalidate(&self) -> u64 {
         self.reading
@@ -323,6 +351,8 @@ impl DevelopmentPaneState {
         self.connected_epoch.store(epoch, Ordering::Release);
         // A worker waiting for pushed events learns of the new epoch at once.
         self.wake.notify();
+        drop(status);
+        self.changed();
         epoch
     }
     /// Starts a connection epoch whose focus continues above every generation this client
@@ -393,6 +423,7 @@ impl DevelopmentPaneState {
         {
             self.admission(Admission::Waiting);
         }
+        self.changed();
         retryable
     }
     fn set(&self, status: DevelopmentPaneStatus) {
@@ -407,6 +438,8 @@ impl DevelopmentPaneState {
             self.paste_unconfirmed.store(false, Ordering::Release);
         }
         *current = status;
+        drop(current);
+        self.changed();
     }
     fn connected(
         &self,
@@ -434,16 +467,22 @@ impl DevelopmentPaneState {
             }
             interaction.screen = mapping;
         }
-        self.connected_epoch.store(epoch, Ordering::Release);
+        let previous = self.connected_epoch.swap(epoch, Ordering::AcqRel);
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
         }
+        let changed = previous != epoch || *status != DevelopmentPaneStatus::Connected;
         if *status != DevelopmentPaneStatus::Connected {
             let interaction = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
             self.effect_authority
                 .client_focus(Some(interaction.target == pane::FocusTarget::Terminal));
         }
         *status = DevelopmentPaneStatus::Connected;
+        drop(status);
+        // Each frame reaches here. Only a new status or generation concerns a view.
+        if changed {
+            self.changed();
+        }
         Ok(())
     }
 }

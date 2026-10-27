@@ -43,7 +43,6 @@ struct Binding {
     origin: ServerOrigin,
     workspaces: SharedWorkspaces,
     _poll: Option<Task<()>>,
-    _wake: Option<Task<()>>,
 }
 
 /// Every server binding, the local one first.
@@ -86,7 +85,6 @@ impl ServerBindings {
             origin,
             workspaces,
             _poll: None,
-            _wake: None,
         };
         if key == ServerKey::LOCAL {
             self.bindings.insert(0, binding);
@@ -97,10 +95,9 @@ impl ServerBindings {
     }
 
     /// Keeps the tasks that read one binding's server for as long as the binding lives.
-    pub(crate) fn follow(&mut self, key: ServerKey, poll: Task<()>, wake: Option<Task<()>>) {
+    pub(crate) fn follow(&mut self, key: ServerKey, poll: Task<()>) {
         if let Some(binding) = self.binding_mut(key) {
             binding._poll = Some(poll);
-            binding._wake = wake;
         }
     }
 

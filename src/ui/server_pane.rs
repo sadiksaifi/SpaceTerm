@@ -845,6 +845,12 @@ mod connection {
         /// Who controlled the Pane when the server last offered Take Over, if it ever did.
         fn controller(&self) -> Option<Controller>;
 
+        /// Sends `hint` a signal whenever what [`ServerPaneView::sync`] reads may have changed.
+        /// Returns `false` when this connection cannot, so its view must be read on a timer.
+        fn observe(&self, _hint: async_channel::Sender<()>) -> bool {
+            false
+        }
+
         /// Whether End All Sessions ended the Pane's shell and nobody has started a new one, as
         /// the server last said, including while another client controls the Pane.
         fn session_dormant(&self) -> bool {
@@ -905,6 +911,11 @@ mod connection {
 
         fn controller(&self) -> Option<Controller> {
             Self::controller(self)
+        }
+
+        fn observe(&self, hint: async_channel::Sender<()>) -> bool {
+            Self::observe(self, hint);
+            true
         }
 
         fn session_dormant(&self) -> bool {
