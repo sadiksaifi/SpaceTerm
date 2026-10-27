@@ -9,8 +9,8 @@ use crate::{
     cancellation::CancellationToken,
     repository_status::{
         self as policy, ProbeOutcome, ProgramError, ProgramExit, ProgramRequest,
-        RepositoryProgramRunner, RepositoryRoot, RepositoryToolDiscovery, RepositoryWatch,
-        RepositoryWatcher, WatchDirectory,
+        RepositoryProgramRunner, RepositoryRoot, RepositoryToolDiscovery, WatchDirectory,
+        WatchSet, WatchSets,
     },
 };
 use spaceterm_server::{
@@ -23,7 +23,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread::JoinHandle,
@@ -38,10 +37,12 @@ const COUNTING_DELAY: Duration = Duration::from_secs(1);
 const BACKPRESSURE: Duration = Duration::from_millis(10);
 /// Results waiting for the host. The host drains them each time the reader rings it.
 const RESULTS: usize = 64;
-/// How long after its last read a watched repository is read again. A build or checkout writes
-/// many files, and each write fires the watch. Reading at most this often bounds the git a busy
-/// tree costs, and nothing reads while the tree stays quiet.
-const SETTLE: Duration = Duration::from_secs(1);
+/// How long after its last read a watched repository is read again. A checkout or rebase writes
+/// many git files, and each write fires the watch. Reading at most this often bounds the git a
+/// busy repository costs, and nothing reads while it stays quiet.
+const SETTLE: Duration = Duration::from_secs(2);
+/// Changed paths kept between two looks of the supervisor. More means every repository changed.
+const MAX_CHANGED_PATHS: usize = 256;
 const MAX_DIRECTORIES: usize = 512;
 const MAX_WORKTREES: usize = 256;
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
@@ -67,8 +68,8 @@ enum Input {
     Sources(Sources),
     /// Read these directories and their repositories' changes again.
     Reread(Sources),
-    /// A watch on the git directories of the repository with this common directory fired.
-    Changed(PathBuf),
+    /// The watch set saw paths change. They wait in the supervisor's `Changed`.
+    Changed,
     /// A discovery or count job finished a step.
     Read(ReadEvent),
     /// The reader's cancellation token was cancelled.
@@ -94,7 +95,7 @@ pub(super) struct ServerRepositories {
     /// Each live Pane's finished command count, as last observed.
     commands: BTreeMap<Id, u64>,
     ring: Ring,
-    watcher: Arc<dyn RepositoryWatcher>,
+    watcher: Arc<dyn WatchSets>,
 }
 impl ServerRepositories {
     pub(super) fn new(boot: Id) -> Self {
@@ -137,8 +138,9 @@ impl ServerRepositories {
             self.start = Some(Instant::now());
         }
     }
-    /// Reads `directories` and their repositories' changes again, if a read runs. A read that
-    /// starts later reads every source anyway.
+    /// Reads `directories` and their repositories' changes again. Without a running read, it
+    /// starts one for the subscribers, which reads every source; a read that ended, for
+    /// example because git was missing, starts again this way.
     pub(super) fn reread(&mut self, directories: Sources) {
         let directories: Sources = directories
             .into_iter()
@@ -147,13 +149,17 @@ impl ServerRepositories {
         if directories.is_empty() {
             return;
         }
-        if let Some(worker) = &self.worker {
-            let _ = worker.inputs.send(Input::Reread(directories));
+        match &self.worker {
+            Some(worker) => {
+                let _ = worker.inputs.send(Input::Reread(directories));
+            }
+            None if !self.subscribers.is_empty() => self.start = Some(Instant::now()),
+            None => {}
         }
     }
     /// Notes each live Pane's finished command count. A command that finished since the last
     /// observation can have changed its directory's files, which no git directory watch sees, so
-    /// that directory is read again.
+    /// that directory and the rest of its repository are read again.
     pub(super) fn commands(&mut self, counts: BTreeMap<Id, u64>, state: &State) {
         let mut directories = Sources::new();
         for (pane, count) in &counts {
@@ -167,11 +173,13 @@ impl ServerRepositories {
         self.reread(directories);
     }
     /// A Pane gained focus, perhaps after its files changed in another application. Its
-    /// directory is read again, as a desktop reads local Repository Status on activation.
+    /// directory and the rest of its repository are read again, as a desktop reads local
+    /// Repository Status on activation.
     pub(super) fn focused(&mut self, pane: Id, state: &State) {
         if let Some((_, _, pane)) = state.pane(pane) {
             self.reread([pane_directory(pane).to_owned()].into());
         }
+        self.pin_membership.retry_now();
     }
     pub(super) fn disconnected(&mut self, connection: Id) {
         self.subscribers.remove(&connection);
@@ -191,14 +199,19 @@ impl ServerRepositories {
         }
         self.start = Some(Instant::now());
     }
-    /// When the next update has work: a subscriber's read that has not started. A running read
-    /// rings the host instead. `None` without subscribers.
+    /// When the next update has work: a subscriber's read that has not started, or a pin
+    /// check that could not finish. A running read rings the host instead. `None` without
+    /// subscribers.
     pub(super) fn due(&self, now: Instant) -> Option<Instant> {
-        if self.worker.is_some() || self.subscribers.is_empty() {
-            None
-        } else {
-            self.start.map(|start| start.max(now))
+        if self.subscribers.is_empty() {
+            return None;
         }
+        let start = self
+            .start
+            .filter(|_| self.worker.is_none())
+            .map(|start| start.max(now));
+        let pins = self.pin_membership.due().map(|due| due.max(now));
+        start.into_iter().chain(pins).min()
     }
     pub(super) fn snapshot(&self) -> Snapshot {
         self.snapshot.clone()
@@ -488,7 +501,7 @@ struct Reader {
     cancellation: CancellationToken,
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
     ring: Ring,
-    watcher: Arc<dyn RepositoryWatcher>,
+    watcher: Arc<dyn WatchSets>,
 }
 
 fn read(sources: Sources, reader: Reader) {
@@ -571,8 +584,8 @@ enum ReadEvent {
         id: u64,
         facts: Box<DirectoryFacts>,
         fsmonitor: FsmonitorPolicy,
-        /// The repository's common git directory, once discovery is complete.
-        common: Option<PathBuf>,
+        /// The repository's git directories, once discovery is complete.
+        git: Option<GitDirectories>,
         discovered: bool,
     },
     CountFinished {
@@ -581,50 +594,77 @@ enum ReadEvent {
         changes: Changes,
     },
 }
-/// What one repository's watch covers, keyed by its common git directory. The git directories
-/// are the common directory itself, with `HEAD`, `index`, `packed-refs` and operation state,
-/// everything below `refs/`, and every linked Worktree's own git directory below `worktrees/`.
-/// The work trees are the roots of the watched directories in that repository, so edits made
-/// outside any Pane, and a Worktree deleted outside git, are read too.
+/// A repository's git directories, canonical: the one a directory's Worktree uses and the
+/// common one. They are the same for a main Worktree.
 #[derive(Clone, PartialEq, Eq)]
-struct Coverage {
-    git: Vec<WatchDirectory>,
-    trees: Vec<PathBuf>,
+struct GitDirectories {
+    own: PathBuf,
+    common: PathBuf,
 }
-fn git_directories(common: &Path) -> Vec<WatchDirectory> {
-    let mut directories = vec![WatchDirectory {
-        path: common.to_owned(),
-        recursive: false,
-    }];
-    for name in ["refs", "worktrees"] {
-        let path = common.join(name);
+impl GitDirectories {
+    /// Adds what a repository's facts follow, and whether recursively: the Worktree's own git
+    /// directory with its `HEAD`, `index` and operation state; the common directory with
+    /// `packed-refs` and the main `HEAD` and `index`; the `refs/` tree; and the list of linked
+    /// Worktrees. Never a work tree.
+    fn watched(&self, into: &mut BTreeMap<PathBuf, bool>) {
+        into.insert(self.own.clone(), false);
+        into.insert(self.common.clone(), false);
+        let refs = self.common.join("refs");
+        if refs.is_dir() {
+            into.insert(refs, true);
+        }
         // A repository without linked Worktrees has no `worktrees/` yet. Creating it changes
         // the common directory, and the discovery that follows watches it.
-        if path.is_dir() {
-            directories.push(WatchDirectory {
-                path,
-                recursive: true,
-            });
+        let worktrees = self.common.join("worktrees");
+        if worktrees.is_dir() {
+            into.entry(worktrees).or_insert(false);
         }
     }
-    directories
+    /// Whether a change at `path` can change facts read from this repository.
+    fn concerns(&self, path: &Path) -> bool {
+        [&self.own, &self.common]
+            .into_iter()
+            .any(|root| path.strip_prefix(root).is_ok_and(|rest| !incidental(rest)))
+    }
 }
-/// A live watch on one repository.
-struct Watching {
-    coverage: Coverage,
-    /// Set by the watch until the supervisor handles its change, so a burst of file events
-    /// becomes one input.
-    pending: Arc<AtomicBool>,
-    _git: Box<dyn RepositoryWatch>,
-    _trees: Option<Box<dyn RepositoryWatch>>,
+/// Git writes objects, reflogs and lock files during ordinary work, and its built-in fsmonitor
+/// daemon writes cookies during a read. None of them changes what a read reports, and following
+/// the cookies would make each read start the next.
+fn incidental(within_git: &Path) -> bool {
+    within_git.components().any(|component| {
+        let component = component.as_os_str().to_string_lossy();
+        component == "objects" || component == "logs" || component.contains("fsmonitor--daemon")
+    }) || within_git.extension().is_some_and(|extension| extension == "lock")
+}
+/// Paths the watch set saw change since the supervisor last looked.
+#[derive(Default)]
+struct Changed {
+    paths: BTreeSet<PathBuf>,
+    /// Too many paths, or a watch error: every repository may have changed.
+    unknown: bool,
+    /// An input already tells the supervisor to look.
+    sent: bool,
+}
+impl Changed {
+    fn note(&mut self, paths: &[PathBuf], inputs: &mpsc::Sender<Input>) {
+        if paths.is_empty() || self.paths.len() + paths.len() > MAX_CHANGED_PATHS {
+            self.unknown = true;
+            self.paths.clear();
+        } else if !self.unknown {
+            self.paths.extend(paths.iter().cloned());
+        }
+        if !std::mem::replace(&mut self.sent, true) {
+            let _ = inputs.send(Input::Changed);
+        }
+    }
 }
 struct DirectoryRead {
     facts: Option<DirectoryFacts>,
     active: Option<ActiveRead>,
     /// Since when this directory waits to be read. `None` while nothing asked for a read.
     next_read: Option<Instant>,
-    /// The common git directory of its repository, as of the last discovery.
-    common: Option<PathBuf>,
+    /// Its repository's git directories, as of the last discovery.
+    git: Option<GitDirectories>,
     /// When its last discovery ended.
     finished: Option<Instant>,
 }
@@ -746,6 +786,20 @@ fn read_sources(sources: Sources, readers: Option<Readers>, status: GitToolStatu
                 }
             });
         }
+        // One watcher follows every repository. Without it, reads follow the other triggers.
+        let changed = Arc::new(Mutex::new(Changed::default()));
+        let watch = watcher
+            .start({
+                let changed = Arc::clone(&changed);
+                let inputs = inputs.clone();
+                Box::new(move |paths: &[PathBuf]| {
+                    changed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .note(paths, &inputs);
+                })
+            })
+            .ok();
         let mut supervisor = ReadSupervisor {
             directories: BTreeMap::new(),
             counts: BTreeMap::new(),
@@ -756,9 +810,10 @@ fn read_sources(sources: Sources, readers: Option<Readers>, status: GitToolStatu
             status,
             cancellation: cancellation.clone(),
             ring: ring.clone(),
-            watcher,
-            watches: BTreeMap::new(),
-            inputs: inputs.clone(),
+            watch,
+            watching: BTreeMap::new(),
+            unwatchable: BTreeMap::new(),
+            changed,
         };
         supervisor.set_sources(sources);
         supervisor.run(&receiver);
@@ -780,11 +835,13 @@ struct ReadSupervisor {
     status: GitToolStatus,
     cancellation: CancellationToken,
     ring: Ring,
-    watcher: Arc<dyn RepositoryWatcher>,
-    /// One watch per repository, by common git directory.
-    watches: BTreeMap<PathBuf, Watching>,
-    /// Watches report changes here.
-    inputs: mpsc::Sender<Input>,
+    /// The one watch set for every repository, absent when it could not start.
+    watch: Option<Box<dyn WatchSet>>,
+    /// Watched directories, and whether recursively.
+    watching: BTreeMap<PathBuf, bool>,
+    /// Directories whose watch failed. They are not tried again while they stay requested.
+    unwatchable: BTreeMap<PathBuf, bool>,
+    changed: Arc<Mutex<Changed>>,
 }
 
 impl ReadSupervisor {
@@ -808,7 +865,7 @@ impl ReadSupervisor {
                     facts: None,
                     active: None,
                     next_read: Some(Instant::now()),
-                    common: None,
+                    git: None,
                     finished: None,
                 });
         }
@@ -831,102 +888,62 @@ impl ReadSupervisor {
             false
         });
     }
-    /// Watches each repository a source belongs to, and stops watching the others. A
-    /// repository whose watch cannot start is read again only on the other triggers, and a
-    /// later discovery tries the watch again.
+    /// Watches the git directories of each repository a source belongs to, and stops watching
+    /// the others. A directory whose watch fails is read on the other triggers, and is tried
+    /// again only once it has stopped being requested and is requested again.
     fn rewatch(&mut self) {
-        let mut trees: BTreeMap<PathBuf, Sources> = BTreeMap::new();
+        let mut requested = BTreeMap::new();
         for read in self.directories.values() {
-            if let Some(common) = &read.common {
-                let roots = trees.entry(common.clone()).or_default();
-                if let Some(repository) = read.facts.as_ref().and_then(|f| f.repository.as_ref())
-                {
-                    roots.insert(repository.root.clone());
-                }
+            if let Some(git) = &read.git {
+                git.watched(&mut requested);
             }
         }
-        self.watches.retain(|common, _| trees.contains_key(common));
-        for (common, roots) in trees {
-            let coverage = Coverage {
-                git: git_directories(&common),
-                trees: roots.into_iter().collect(),
+        let Some(watch) = &mut self.watch else {
+            return;
+        };
+        self.unwatchable
+            .retain(|path, recursive| requested.get(path) == Some(recursive));
+        self.watching.retain(|path, recursive| {
+            let keep = requested.get(path) == Some(recursive);
+            if !keep {
+                watch.unwatch(path);
+            }
+            keep
+        });
+        let mut started = Vec::new();
+        for (path, recursive) in requested {
+            if self.watching.contains_key(&path) || self.unwatchable.contains_key(&path) {
+                continue;
+            }
+            let directory = WatchDirectory {
+                path: path.clone(),
+                recursive,
             };
-            if self
-                .watches
-                .get(&common)
-                .is_none_or(|watching| watching.coverage != coverage)
-            {
-                self.watch(common, coverage);
+            match watch.watch(&directory) {
+                Ok(()) => {
+                    self.watching.insert(path.clone(), recursive);
+                    started.push(path);
+                }
+                Err(_) => {
+                    self.unwatchable.insert(path, recursive);
+                }
             }
         }
-    }
-    fn watch(&mut self, common: PathBuf, mut coverage: Coverage) {
-        self.watches.remove(&common);
-        let pending = Arc::new(AtomicBool::new(false));
-        let signal: Arc<dyn Fn() + Send + Sync> = {
-            let pending = Arc::clone(&pending);
-            let inputs = self.inputs.clone();
-            let common = common.clone();
-            Arc::new(move || {
-                if !pending.swap(true, Ordering::AcqRel) {
-                    let _ = inputs.send(Input::Changed(common.clone()));
-                }
-            })
-        };
-        let git = {
-            let signal = Arc::clone(&signal);
-            match self
-                .watcher
-                .watch(coverage.git.clone(), Box::new(move || signal()))
-            {
-                Ok(watch) => watch,
-                Err(_) => return,
-            }
-        };
-        let trees = if coverage.trees.is_empty() {
-            None
-        } else {
-            let directories = coverage
-                .trees
-                .iter()
-                .map(|root| WatchDirectory {
-                    path: root.clone(),
-                    recursive: true,
-                })
-                .collect();
-            // The git directory watch covers the main Worktree's `.git/`. Git's own fsmonitor
-            // daemon writes there during a read, which must not start another read.
-            let ignored = common.clone();
-            let changed = Box::new(move |paths: &[PathBuf]| {
-                if paths.is_empty() || paths.iter().any(|path| !path.starts_with(&ignored)) {
-                    signal();
-                }
-            });
-            match self.watcher.watch_paths(directories, changed) {
-                Ok(watch) => Some(watch),
-                // A tree too large to watch is read on the other triggers. Its next discovery
-                // tries again.
-                Err(_) => {
-                    coverage.trees.clear();
-                    None
-                }
-            }
-        };
-        // A file event can be lost while the watch starts. One more read once it settles
-        // covers changes made between the read that found the repository and the watch.
+        if started.is_empty() {
+            return;
+        }
+        // A file event can be lost while a watch starts. One more read once it settles covers
+        // changes made between the read that found the repository and its watch.
         let settled = Instant::now() + SETTLE;
         self.reread(
-            |_, read| read.common.as_ref() == Some(&common),
-            |_| settled,
-        );
-        self.watches.insert(
-            common,
-            Watching {
-                coverage,
-                pending,
-                _git: git,
-                _trees: trees,
+            |_, read| {
+                read.git.as_ref().is_some_and(|git| {
+                    started
+                        .iter()
+                        .any(|path| path.starts_with(&git.common) || *path == git.own)
+                })
             },
+            |_| settled,
         );
     }
     /// Asks for another read of each directory `directories` selects, and another count of its
@@ -981,18 +998,38 @@ impl ReadSupervisor {
                     true
                 }
                 Input::Reread(directories) => {
-                    let now = Instant::now();
-                    self.reread(|directory, _| directories.contains(directory), |_| now);
-                    true
-                }
-                Input::Changed(common) => {
-                    // Clear first, so a change during the reads that follow reads again.
-                    if let Some(watching) = self.watches.get(&common) {
-                        watching.pending.store(false, Ordering::Release);
-                    }
+                    // A change seen in one Worktree can change what its repository lists for
+                    // the others, such as a Worktree deleted outside git.
+                    let repositories: BTreeSet<PathBuf> = directories
+                        .iter()
+                        .filter_map(|directory| self.directories.get(directory)?.git.as_ref())
+                        .map(|git| git.common.clone())
+                        .collect();
                     let now = Instant::now();
                     self.reread(
-                        |_, read| read.common.as_ref() == Some(&common),
+                        |directory, read| {
+                            directories.contains(directory)
+                                || read
+                                    .git
+                                    .as_ref()
+                                    .is_some_and(|git| repositories.contains(&git.common))
+                        },
+                        |_| now,
+                    );
+                    true
+                }
+                Input::Changed => {
+                    // Taking the paths lets the next change send another input.
+                    let Changed { paths, unknown, .. } = std::mem::take(
+                        &mut *self.changed.lock().unwrap_or_else(|e| e.into_inner()),
+                    );
+                    let now = Instant::now();
+                    self.reread(
+                        |_, read| {
+                            read.git.as_ref().is_some_and(|git| {
+                                unknown || paths.iter().any(|path| git.concerns(path))
+                            })
+                        },
                         |finished| finished.map_or(now, |finished| (finished + SETTLE).max(now)),
                     );
                     true
@@ -1137,7 +1174,7 @@ impl ReadSupervisor {
                 id,
                 facts,
                 fsmonitor,
-                common,
+                git,
                 discovered,
             } => {
                 let Some(read) = self.directories.get_mut(&facts.directory) else {
@@ -1151,7 +1188,7 @@ impl ReadSupervisor {
                 read.facts = Some(*facts);
                 if discovered {
                     read.active = None;
-                    read.common = common;
+                    read.git = git;
                     read.finished = Some(Instant::now());
                 }
                 self.prune_counts();
@@ -1246,7 +1283,7 @@ fn discover(
     events: &mpsc::Sender<Input>,
     cancellation: &CancellationToken,
 ) {
-    let mut common = None;
+    let mut git = None;
     let mut facts = DirectoryFacts {
         directory,
         repository: None,
@@ -1266,8 +1303,15 @@ fn discover(
             // Git can preserve an alias spelling. Full scans share the physical Worktree root.
             let root = std::fs::canonicalize(root).map_err(|_| RepositoryReadError::Unavailable)?;
             fsmonitor = probe.config.fsmonitor;
-            if let RepositoryRoot::Local(directory) = &probe.common_directory {
-                common = Some(directory.clone());
+            // Watches compare canonical paths: Git may spell a common directory as
+            // `<dir>/../.git`, or through a symbolic link such as `/tmp`.
+            if let (RepositoryRoot::Local(own), RepositoryRoot::Local(common)) =
+                (&probe.git_directory, &probe.common_directory)
+            {
+                git = std::fs::canonicalize(own)
+                    .ok()
+                    .zip(std::fs::canonicalize(common).ok())
+                    .map(|(own, common)| GitDirectories { own, common });
             }
             facts.repository = Some(Repository {
                 root,
@@ -1285,7 +1329,7 @@ fn discover(
                     id,
                     facts: Box::new(facts.clone()),
                     fsmonitor,
-                    common: None,
+                    git: None,
                     discovered: false,
                 },
                 cancellation,
@@ -1326,7 +1370,7 @@ fn discover(
             id,
             facts: Box::new(facts),
             fsmonitor,
-            common,
+            git,
             discovered: true,
         },
         cancellation,

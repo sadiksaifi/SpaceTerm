@@ -1,6 +1,6 @@
 use super::super::repository_tests::GitFixture;
 use super::*;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How long a test waits between looks at a reader it drives.
 const PAUSE: Duration = Duration::from_millis(10);
@@ -56,17 +56,14 @@ struct Reading {
     repositories: ServerRepositories,
     state: State,
 }
-/// Reports no change, so only explicit rereads read a directory again.
-struct Unwatched;
-struct NoWatch;
-impl RepositoryWatch for NoWatch {}
-impl RepositoryWatcher for Unwatched {
-    fn watch(
+/// A watch set that cannot start, so only explicit rereads read a directory again.
+struct Unwatchable;
+impl WatchSets for Unwatchable {
+    fn start(
         &self,
-        _: Vec<WatchDirectory>,
-        _: Box<dyn Fn() + Send + Sync>,
-    ) -> Result<Box<dyn RepositoryWatch>, policy::RepositoryWatchError> {
-        Ok(Box::new(NoWatch))
+        _: policy::ChangedPaths,
+    ) -> Result<Box<dyn WatchSet>, policy::RepositoryWatchError> {
+        Err(policy::RepositoryWatchError)
     }
 }
 impl Reading {
@@ -78,7 +75,7 @@ impl Reading {
         sources: Sources,
         runner: Arc<dyn RepositoryProgramRunner>,
         home: PathBuf,
-        watcher: Arc<dyn RepositoryWatcher>,
+        watcher: Arc<dyn WatchSets>,
     ) -> Self {
         let git = std::process::Command::new("/usr/bin/which")
             .arg("git")
@@ -295,7 +292,7 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
         sources,
         runner.clone(),
         other.0.join("unused-home"),
-        Arc::new(Unwatched),
+        Arc::new(Unwatchable),
     );
     let until = Instant::now() + Duration::from_secs(6);
     let mut published = BTreeMap::new();
@@ -786,7 +783,7 @@ fn assert_late_source_progresses_while_earlier_sources_refresh(stage: SaturatedR
         slow.clone(),
         runner.clone(),
         fast.0.join("unused-home"),
-        Arc::new(Unwatched),
+        Arc::new(Unwatchable),
     );
     saturation_snapshot(&mut reading, |snapshot| {
         runner.started().len() == workers
@@ -876,4 +873,62 @@ fn a_late_fast_source_finishes_counting_while_earlier_slow_roots_refresh() {
 #[test]
 fn a_late_fast_source_is_discovered_while_earlier_slow_sources_refresh() {
     assert_late_source_progresses_while_earlier_sources_refresh(SaturatedRead::Discovery);
+}
+
+/// Git's built-in fsmonitor daemon writes cookies below the git directory during every read.
+/// A read must not cause the next one, so the reader goes idle.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_worktree_using_the_builtin_fsmonitor_goes_idle() {
+    #[derive(Default)]
+    struct Counting(Mutex<usize>);
+    impl RepositoryProgramRunner for Counting {
+        fn run(
+            &self,
+            request: &ProgramRequest,
+            stdout: &mut dyn FnMut(&[u8]),
+            cancellation: &CancellationToken,
+        ) -> Result<ProgramExit, ProgramError> {
+            *self.0.lock().unwrap() += 1;
+            DeadlineRunner.run(request, stdout, cancellation)
+        }
+    }
+    let git = GitFixture::new();
+    let tree = git.0.join("linked");
+    git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+    git.git(&["config", "core.fsmonitor", "true"]);
+    let runner = Arc::new(Counting::default());
+    let mut reading = Reading::start(
+        [git.0.clone(), tree.clone()].into(),
+        runner.clone(),
+        git.0.join("unused-home"),
+    );
+    reading.finish();
+    let runs = || *runner.0.lock().unwrap();
+    // The reads that follow each new watch end within a few settling periods. Then nothing
+    // runs for longer than two of them.
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let before = runs();
+        let quiet = Instant::now() + SETTLE * 5 / 2;
+        while Instant::now() < quiet {
+            reading.poll();
+            std::thread::sleep(PAUSE);
+        }
+        if runs() == before {
+            break;
+        }
+        assert!(Instant::now() < until, "each read started another");
+    }
+    // The daemon keeps its cookies here. Its socket may live elsewhere for a long path.
+    let used = git.0.join(".git/worktrees/linked/fsmonitor--daemon").is_dir()
+        && git.0.join(".git/fsmonitor--daemon").is_dir();
+    for directory in [&git.0, &tree] {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(["fsmonitor--daemon", "stop"])
+            .output();
+    }
+    assert!(used, "the reads used the fsmonitor daemon");
 }

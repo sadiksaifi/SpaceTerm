@@ -1,7 +1,8 @@
 //! Resolve physical pins off the terminal request lock, with at most one filesystem worker.
 //!
 //! A check runs when the pins or the listed Worktree roots change, and rings the host when it
-//! ends. Nothing checks again on a timer.
+//! ends. A check that could not finish runs again with backoff, or at once when a Pane gains
+//! focus. Nothing checks a finished answer again on a timer.
 use super::*;
 use spaceterm_server::hierarchy::Inventory;
 
@@ -39,8 +40,10 @@ struct Resolution {
 pub(super) struct PinMembership {
     interests: Interests,
     worker: Option<Resolution>,
-    /// Whether the current interests were checked, or could not be.
+    /// Whether the current interests were checked.
     checked: bool,
+    /// When a check that could not finish runs again, and the backoff that chose it.
+    retry: Option<(Instant, Duration)>,
     resolver: Arc<dyn PinResolver>,
     seen_revision: Option<u64>,
 }
@@ -67,6 +70,7 @@ impl PinMembership {
             interests: Interests::default(),
             worker: None,
             checked: false,
+            retry: None,
             resolver,
             seen_revision: None,
         }
@@ -100,6 +104,7 @@ impl PinMembership {
         }
         if changed {
             self.checked = false;
+            self.retry = None;
             if let Some(worker) = &self.worker {
                 worker.cancellation.cancel();
             }
@@ -120,11 +125,17 @@ impl PinMembership {
             let result = worker.handle.join().unwrap_or(Some(Err(())));
             if current {
                 match result {
-                    Some(Ok(pinned)) => publish(snapshot, pinned, PinCheckState::Ready),
-                    Some(Err(())) => publish(snapshot, Vec::new(), PinCheckState::Unavailable),
+                    Some(Ok(pinned)) => {
+                        publish(snapshot, pinned, PinCheckState::Ready);
+                        self.checked = true;
+                        self.retry = None;
+                    }
+                    Some(Err(())) => {
+                        publish(snapshot, Vec::new(), PinCheckState::Unavailable);
+                        self.back_off();
+                    }
                     None => (),
                 }
-                self.checked = true;
             }
         }
         if self.interests.pins.is_empty() || self.interests.roots.is_empty() {
@@ -137,7 +148,10 @@ impl PinMembership {
             }
             return;
         }
-        if self.worker.is_some() || self.checked {
+        if self.worker.is_some()
+            || self.checked
+            || self.retry.is_some_and(|(at, _)| Instant::now() < at)
+        {
             return;
         }
         let cancellation = CancellationToken::default();
@@ -180,11 +194,37 @@ impl PinMembership {
             }
             Err(_) => {
                 publish(snapshot, Vec::new(), PinCheckState::Unavailable);
-                self.checked = true;
+                self.back_off();
             }
         }
     }
 }
+
+impl PinMembership {
+    fn back_off(&mut self) {
+        let delay = self
+            .retry
+            .map_or(RETRY_FIRST, |(_, delay)| (delay * 2).min(RETRY_MAX));
+        self.retry = Some((Instant::now() + delay, delay));
+    }
+    /// When a check that could not finish runs again.
+    pub(super) fn due(&self) -> Option<Instant> {
+        self.retry
+            .filter(|_| self.worker.is_none() && !self.checked)
+            .map(|(at, _)| at)
+    }
+    /// A Pane gained focus, perhaps after the filesystem recovered.
+    pub(super) fn retry_now(&mut self) {
+        if let Some((at, _)) = &mut self.retry {
+            *at = Instant::now();
+        }
+    }
+}
+
+/// The first wait before checking pins again after a check could not finish. Each failure
+/// doubles it, up to `RETRY_MAX`.
+const RETRY_FIRST: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(300);
 
 fn publish(snapshot: &mut Snapshot, pinned: Vec<PathBuf>, state: PinCheckState) {
     if pinned == snapshot.pinned_worktrees && state == snapshot.pin_check {

@@ -382,10 +382,7 @@ pub(crate) struct RepositoryWatchError;
 /// Dropping the value stops watching.
 pub(crate) trait RepositoryWatch: Send {}
 
-/// Called with the paths a watch saw change. An empty list means the paths are unknown.
-pub(crate) type ChangedPaths = Box<dyn Fn(&[PathBuf]) + Send + Sync>;
-
-/// Watches local directories. A desktop watches git directories, never a work tree.
+/// Watches local git directories, never a work tree.
 pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
     /// Calls `changed` after any change, and after any watch error, below `directories`.
     fn watch(
@@ -393,16 +390,22 @@ pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
         directories: Vec<WatchDirectory>,
         changed: Box<dyn Fn() + Send + Sync>,
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError>;
+}
 
-    /// Like [`Self::watch`], and tells `changed` which paths changed. An empty list means the
-    /// paths are unknown, as after a watch error.
-    fn watch_paths(
-        &self,
-        directories: Vec<WatchDirectory>,
-        changed: ChangedPaths,
-    ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
-        self.watch(directories, Box::new(move || changed(&[])))
-    }
+/// Called with the paths a watch set saw change. An empty list means the paths are unknown, as
+/// after a watch error.
+pub(crate) type ChangedPaths = Box<dyn Fn(&[PathBuf]) + Send + Sync>;
+
+/// One watcher, and one event thread, for every directory its owner follows. Dropping it stops
+/// every watch.
+pub(crate) trait WatchSet: Send {
+    fn watch(&mut self, directory: &WatchDirectory) -> Result<(), RepositoryWatchError>;
+    fn unwatch(&mut self, path: &Path);
+}
+
+/// Starts watch sets. A server follows every repository its subscribers see through one set.
+pub(crate) trait WatchSets: Send + Sync + 'static {
+    fn start(&self, changed: ChangedPaths) -> Result<Box<dyn WatchSet>, RepositoryWatchError>;
 }
 
 pub(crate) use spaceterm_server::repository::{

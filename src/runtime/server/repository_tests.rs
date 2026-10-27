@@ -369,6 +369,31 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
             repo.head == RepositoryHead::Branch("feature".into()) && repo.counting.is_none()
         }) && facts.worktrees.is_some()
     });
+    // Edits outside SpaceTerm change no git directory. Focusing a Pane in the repository reads
+    // it again.
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane: first.workspaces[0].tabs[0].root_pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("Root Pane did not start")
+    };
+    let mut focus = |host: &mut SharedWorkspaceHost| {
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Focus {
+                lease,
+                generation: 1,
+                target: spaceterm_server::pane::FocusTarget::Terminal,
+            },
+        );
+    };
     let tab = &first.workspaces[0].tabs[0];
     assert_eq!(tab.worktree.as_ref(), Some(&tree));
     let Reply::Inventory {
@@ -411,6 +436,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
         Reply::Outcome(_)
     ));
     std::fs::write(tree.join("external"), "changed externally").unwrap();
+    focus(&mut host);
     let changed = git_facts(&mut host, &tree, |facts| {
         facts.repository.as_ref().is_some_and(|repo| {
             repo.changes
@@ -427,6 +453,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
         .id;
     // Missing directories remain saved membership and are never recreated by reconciliation.
     std::fs::remove_dir_all(&tree).unwrap();
+    focus(&mut host);
     let missing = git_facts(&mut host, &git.0, |facts| {
         facts.worktrees.as_ref().is_some_and(|list| {
             list.worktrees
@@ -1659,13 +1686,13 @@ fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_send
                 .as_ref()
                 .is_some_and(|repository| repository.counting.is_none() && repository.changes.is_ok())
     });
-    // Let the shell print its prompt and the reads that follow a new watch finish, ticking
-    // whenever the host is woken, as the host's loop does.
-    let until = Instant::now() + Duration::from_secs(20);
+    // Let the shell print its prompt and the read that follows a new watch by 2 s finish,
+    // ticking whenever the host is woken, as the host's loop does.
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let before = wakes.load(Ordering::SeqCst) + rings.load(Ordering::SeqCst);
         HostCommands::tick(&mut host, Instant::now());
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_secs(5));
         if wakes.load(Ordering::SeqCst) + rings.load(Ordering::SeqCst) == before {
             break;
         }

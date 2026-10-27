@@ -1,12 +1,13 @@
 //! Watches repository directories through the Operating System's file events.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::repository_status::{
     ChangedPaths, RepositoryWatch, RepositoryWatchError, RepositoryWatcher, WatchDirectory,
+    WatchSet, WatchSets,
 };
 
 /// Reports changes below git directories through `notify`.
@@ -25,36 +26,51 @@ impl RepositoryWatcher for NotifyRepositoryWatcher {
         directories: Vec<WatchDirectory>,
         changed: Box<dyn Fn() + Send + Sync>,
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
-        self.watch_paths(directories, Box::new(move |_: &[PathBuf]| changed()))
+        let mut set = notify_set(Box::new(move |_: &[PathBuf]| changed()))?;
+        for directory in directories {
+            set.watch(&directory)?;
+        }
+        Ok(Box::new(NotifyRepositoryWatch(set.0)))
+    }
+}
+
+impl WatchSets for NotifyRepositoryWatcher {
+    fn start(&self, changed: ChangedPaths) -> Result<Box<dyn WatchSet>, RepositoryWatchError> {
+        Ok(Box::new(notify_set(changed)?))
+    }
+}
+
+fn notify_set(changed: ChangedPaths) -> Result<NotifyWatchSet, RepositoryWatchError> {
+    notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+        Ok(event) => {
+            if is_change(event.kind) {
+                changed(&event.paths);
+            }
+        }
+        // A lost or overflowed event may hide a change, so it counts as one.
+        Err(_) => changed(&[]),
+    })
+    .map(NotifyWatchSet)
+    .map_err(|_| RepositoryWatchError)
+}
+
+/// One `notify` watcher whose directories change while it runs.
+struct NotifyWatchSet(RecommendedWatcher);
+
+impl WatchSet for NotifyWatchSet {
+    fn watch(&mut self, directory: &WatchDirectory) -> Result<(), RepositoryWatchError> {
+        let mode = if directory.recursive {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        self.0
+            .watch(&directory.path, mode)
+            .map_err(|_| RepositoryWatchError)
     }
 
-    fn watch_paths(
-        &self,
-        directories: Vec<WatchDirectory>,
-        changed: ChangedPaths,
-    ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-                Ok(event) => {
-                    if is_change(event.kind) {
-                        changed(&event.paths);
-                    }
-                }
-                // A lost or overflowed event may hide a change, so it counts as one.
-                Err(_) => changed(&[]),
-            })
-            .map_err(|_| RepositoryWatchError)?;
-        for directory in directories {
-            let mode = if directory.recursive {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
-            watcher
-                .watch(&directory.path, mode)
-                .map_err(|_| RepositoryWatchError)?;
-        }
-        Ok(Box::new(NotifyRepositoryWatch(watcher)))
+    fn unwatch(&mut self, path: &Path) {
+        let _ = self.0.unwatch(path);
     }
 }
 
