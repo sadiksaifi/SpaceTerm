@@ -63,23 +63,18 @@ pub(super) fn tests_certificate(key: &[u8]) -> Vec<u8> {
     certificate(key).unwrap().to_vec()
 }
 
-/// The Ed25519 public key of a certificate's subject. The DER of an Ed25519
-/// SubjectPublicKeyInfo is this prefix and the 32-byte key.
+/// The Ed25519 public key of a certificate's subject, from the parsed certificate's
+/// SubjectPublicKeyInfo, which must be exactly an Ed25519 key. A key elsewhere in the
+/// certificate, such as in an extension, never counts.
 pub(super) fn certificate_key(certificate: &[u8]) -> Option<[u8; 32]> {
-    const SPKI: [u8; 12] = [
+    const ED25519_SPKI: [u8; 12] = [
         0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
     ];
-    let mut found = None;
-    for start in 0..certificate.len().saturating_sub(SPKI.len() + 32) + 1 {
-        if certificate[start..].starts_with(&SPKI) {
-            if found.is_some() {
-                return None;
-            }
-            let key = start + SPKI.len();
-            found = certificate.get(key..key + 32)?.try_into().ok();
-        }
-    }
-    found
+    let certificate = CertificateDer::from(certificate);
+    let parsed = webpki::EndEntityCert::try_from(&certificate).ok()?;
+    let spki = parsed.subject_public_key_info();
+    let key = spki.as_ref().strip_prefix(ED25519_SPKI.as_slice())?;
+    key.try_into().ok()
 }
 
 /// The client's configuration: the pinned server certificate, and this device's certificate.
@@ -89,12 +84,23 @@ fn client_config(
     mismatch: Arc<AtomicBool>,
 ) -> Result<noq_proto::ClientConfig, DirectError> {
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(credential.expose_bytes().to_vec()));
+    let certificate = certificate(credential.expose_bytes())?;
+    presenting(pin, certificate, key, mismatch)
+}
+
+/// A client configuration that verifies the pinned server and presents `certificate`.
+pub(super) fn presenting(
+    pin: &ServerPin,
+    certificate: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+    mismatch: Arc<AtomicBool>,
+) -> Result<noq_proto::ClientConfig, DirectError> {
     let mut tls = rustls::ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| DirectError::Transport)?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Pinned::new(pin.certificate, mismatch)))
-        .with_client_auth_cert(vec![certificate(credential.expose_bytes())?], key)
+        .with_client_auth_cert(vec![certificate], key)
         .map_err(|_| DirectError::StorageUnavailable)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     crate::connection::quic::client_config(tls).map_err(transport)
@@ -138,6 +144,13 @@ impl rustls::server::danger::ClientCertVerifier for AnyDevice {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        // rustls does not hold the client to `supported_verify_schemes`, so only an Ed25519
+        // signature, over the certificate's own Ed25519 key, proves a device.
+        if dss.scheme != rustls::SignatureScheme::ED25519 {
+            return Err(rustls::Error::PeerMisbehaved(
+                rustls::PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
+            ));
+        }
         rustls::crypto::verify_tls13_signature(
             message,
             cert,

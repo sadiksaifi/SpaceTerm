@@ -2706,6 +2706,123 @@ mod quic_connections {
         let _ = server.join().unwrap();
     }
 
+    /// A certificate whose subject key is ECDSA proves nothing about an Ed25519 key it carries
+    /// elsewhere, and a handshake signed with ECDSA does not authenticate a device.
+    #[test]
+    fn an_ecdsa_certificate_cannot_claim_an_embedded_device_key() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let victim = credential.public_key().unwrap();
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params =
+            rcgen::CertificateParams::new(vec![crate::connection::quic::SERVER_NAME.into()])
+                .unwrap();
+        let mut embedded = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        embedded.extend_from_slice(&victim);
+        params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(
+            &[1, 3, 6, 1, 4, 1, 99999, 1],
+            embedded.clone(),
+        )];
+        let certificate = params.self_signed(&pair).unwrap().der().clone();
+        assert!(
+            certificate
+                .windows(embedded.len())
+                .any(|window| window == embedded.as_slice()),
+            "the certificate carries the victim's key as Ed25519 SubjectPublicKeyInfo bytes"
+        );
+        assert_eq!(quic::certificate_key(&certificate), None);
+
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(mut stream) = listener.accept() {
+                    return stream.handshake(deadline).is_ok();
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into());
+        let config = quic::presenting(&pin, certificate, key, Arc::default()).unwrap();
+        let address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            QuicStream::connect(config, &address, Instant::now() + Duration::from_secs(3)).is_err()
+        );
+        assert!(
+            !server.join().unwrap(),
+            "the server must refuse the handshake"
+        );
+    }
+
+    /// An Initial packet from an address the server has not seen answer a retry creates no
+    /// connection and takes no slot, so spoofed sources cannot hold them. A real client still
+    /// connects through the retry.
+    #[test]
+    fn an_unvalidated_initial_gets_a_retry_and_takes_no_slot() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let credential = DeviceCredential::generate().unwrap();
+        let address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        // A client's first Initial packet, sent from a socket that never answers.
+        let config = quic::presenting(
+            &pin,
+            quic::tests_certificate(credential.expose_bytes()).into(),
+            rustls::pki_types::PrivateKeyDer::Pkcs8(credential.expose_bytes().to_vec().into()),
+            Arc::default(),
+        )
+        .unwrap();
+        let mut client = noq_proto::Endpoint::new(Arc::default(), None, true);
+        let (_, mut connection) = client
+            .connect(Instant::now(), config, address, "spaceterm.invalid")
+            .unwrap();
+        let mut initial = Vec::new();
+        let transmit = connection
+            .poll_transmit(Instant::now(), std::num::NonZeroUsize::MIN, &mut initial)
+            .unwrap();
+        let spoofer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        spoofer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        for _ in 0..40 {
+            spoofer.send_to(&initial[..transmit.size], address).unwrap();
+        }
+        let mut reply = [0; 2048];
+        let (count, _) = spoofer.recv_from(&mut reply).unwrap();
+        // A long header whose type bits name Retry.
+        assert!(
+            count > 0 && reply[0] & 0xf0 == 0xf0,
+            "the answer is a retry"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            listener.accept().is_none(),
+            "no connection waits for a slot"
+        );
+
+        let server = std::thread::spawn(move || {
+            let mut accepted = accept_from(&listener);
+            accepted.send(&"open").unwrap();
+            accepted
+        });
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        drop(server.join().unwrap());
+    }
+
     /// Measures a QUIC request's round trip on loopback, as `quic_request_round_trip_on_loopback`
     /// does for QUIC. Run it with `mise run bench:latency:quic`.
     #[test]

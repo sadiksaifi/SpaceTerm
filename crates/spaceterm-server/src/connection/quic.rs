@@ -43,8 +43,19 @@ pub const ALPN: &[u8] = b"spaceterm/2";
 /// Received frame bytes that `receive` has not taken yet. Above it the carrier stops reading
 /// streams, so the peer's sending waits on QUIC flow control.
 const INBOUND_BYTES: usize = 2 * limits::MAX_FRAME_BYTES;
-/// Largest UDP payload read at once.
-const DATAGRAM_BYTES: usize = 65_536;
+/// Largest UDP payload either side accepts: noq's default, an Ethernet MTU without the IP and UDP
+/// headers. Every endpoint advertises it, so a longer datagram is not QUIC's and is cut short.
+const DATAGRAM_BYTES: usize = 1472;
+/// Datagrams and bytes routed to one server connection that its thread has not taken yet. Above
+/// either, the listener drops datagrams as a full socket buffer would; QUIC retransmits.
+const ROUTED_DATAGRAMS: usize = 256;
+const ROUTED_BYTES: usize = ROUTED_DATAGRAMS * DATAGRAM_BYTES;
+/// Each side's flow-control credit for the whole connection until admission: the pairing and
+/// admission messages and nothing more, so an unauthenticated peer can make the other buffer
+/// little.
+const ADMISSION_WINDOW: u32 = 64 * 1024;
+/// The connection's credit after admission: one largest frame on each of two streams.
+const ADMITTED_WINDOW: u32 = 2 * limits::MAX_FRAME_BYTES as u32;
 /// Connections whose handshake started and that the host has not taken yet.
 const MAX_PENDING: usize = 32;
 /// The server name every client sends. The pinned certificate, not a name, authenticates.
@@ -79,7 +90,19 @@ fn transport() -> Arc<TransportConfig> {
         .ack_frequency_config(Some(acknowledgements))
         .congestion_controller_factory(Arc::new(Floored(Arc::default())))
         // Routers forget idle UDP flows after about 30 seconds.
-        .keep_alive_interval(Some(Duration::from_secs(10)));
+        .keep_alive_interval(Some(Duration::from_secs(10)))
+        // No unreliable datagrams. A stream holds at most one largest frame unread, and the
+        // connection only what admission needs until the carrier raises it.
+        .datagram_receive_buffer_size(None)
+        .stream_receive_window(VarInt::from_u32(limits::MAX_FRAME_BYTES as u32))
+        .receive_window(VarInt::from_u32(ADMISSION_WINDOW));
+    Arc::new(config)
+}
+
+fn endpoint_config() -> Arc<EndpointConfig> {
+    let mut config = EndpointConfig::default();
+    // Matches what the listener and clients read at once.
+    let _ = config.max_udp_payload_size(DATAGRAM_BYTES as u16);
     Arc::new(config)
 }
 
@@ -233,8 +256,40 @@ struct Server {
 
 /// Datagrams for one server connection, waiting for its thread.
 struct Route {
-    events: Mutex<VecDeque<ConnectionEvent>>,
+    events: Mutex<Bounded<ConnectionEvent>>,
     ring: UnixStream,
+}
+
+/// A queue that refuses items past a count and a byte total.
+struct Bounded<T> {
+    items: VecDeque<T>,
+    bytes: usize,
+}
+
+impl<T> Default for Bounded<T> {
+    fn default() -> Self {
+        Self {
+            items: VecDeque::new(),
+            bytes: 0,
+        }
+    }
+}
+
+impl<T> Bounded<T> {
+    /// Queues `item` of `bytes` unless that passes [`ROUTED_DATAGRAMS`] or [`ROUTED_BYTES`].
+    fn push(&mut self, item: T, bytes: usize) -> bool {
+        if self.items.len() >= ROUTED_DATAGRAMS || self.bytes + bytes > ROUTED_BYTES {
+            return false;
+        }
+        self.items.push_back(item);
+        self.bytes += bytes;
+        true
+    }
+
+    fn take(&mut self) -> VecDeque<T> {
+        self.bytes = 0;
+        std::mem::take(&mut self.items)
+    }
 }
 
 struct Shared {
@@ -267,11 +322,7 @@ struct Demux {
 impl QuicListener {
     pub fn bind(address: SocketAddr, config: Arc<ServerConfig>) -> Result<Self, QuicError> {
         let socket = Arc::new(nonblocking_socket(address)?);
-        let endpoint = Endpoint::new(
-            Arc::new(EndpointConfig::default()),
-            Some(Arc::clone(&config)),
-            true,
-        );
+        let endpoint = Endpoint::new(endpoint_config(), Some(Arc::clone(&config)), true);
         let demux = Arc::new(Demux {
             shared: Arc::new(Shared {
                 server: Mutex::new(Server {
@@ -371,13 +422,25 @@ impl Demux {
                 .handle(now, FourTuple::new(remote, None), None, data, send);
             match event {
                 Some(DatagramEvent::ConnectionEvent(handle, event)) => {
-                    if let Some(route) = server.routes.get(&handle) {
-                        route
+                    if let Some(route) = server.routes.get(&handle)
+                        && route
                             .events
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .push_back(event);
+                            .push(event, count)
+                    {
                         ring(&route.ring);
+                    }
+                }
+                // A client whose address is not yet proven gets a stateless retry: it must echo
+                // the token from that address before it holds any state or slot, so spoofed
+                // sources cannot.
+                Some(DatagramEvent::NewConnection(incoming))
+                    if !incoming.remote_address_validated() =>
+                {
+                    match server.endpoint.retry(incoming, send) {
+                        Ok(transmit) => self.send(&send[..transmit.size], transmit.destination),
+                        Err(error) => server.endpoint.ignore(error.into_incoming()),
                     }
                 }
                 Some(DatagramEvent::NewConnection(incoming)) => {
@@ -599,12 +662,11 @@ impl Driver {
             },
             Side::Server { route, bell, .. } => {
                 drain_bell(bell);
-                let events: Vec<_> = route
+                let events = route
                     .events
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .drain(..)
-                    .collect();
+                    .take();
                 for event in events {
                     self.connection.handle_event(event);
                 }
@@ -712,7 +774,29 @@ impl Driver {
             .connection
             .poll_timeout()
             .map_or(deadline, |timer| timer.min(deadline));
-        let _ = super::io::wait_fd(self.descriptor(), self.state.stashed.is_some(), until);
+        let mut descriptors = vec![libc::pollfd {
+            fd: self.descriptor(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // A stashed datagram waits for the socket to take it, not for the bell.
+        if self.state.stashed.is_some() {
+            descriptors.push(libc::pollfd {
+                fd: self.socket.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            });
+        }
+        let remaining = until.saturating_duration_since(Instant::now());
+        let timeout = remaining.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+        // SAFETY: `descriptors` is a live, writable array of `pollfd` for the whole call.
+        unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as libc::nfds_t,
+                timeout,
+            )
+        };
         Ok(())
     }
 
@@ -798,11 +882,7 @@ impl QuicStream {
                 continue;
             }
             let socket = Arc::new(socket);
-            let mut endpoint = Box::new(Endpoint::new(
-                Arc::new(EndpointConfig::default()),
-                None,
-                true,
-            ));
+            let mut endpoint = Box::new(Endpoint::new(endpoint_config(), None, true));
             let Ok((handle, connection)) =
                 endpoint.connect(Instant::now(), config.clone(), *address, SERVER_NAME)
             else {
@@ -1065,7 +1145,15 @@ pub struct QuicCarrier {
 
 impl QuicCarrier {
     fn new(stream: QuicStream) -> Self {
-        let QuicStream { driver, l0, read } = stream;
+        let QuicStream {
+            mut driver,
+            l0,
+            read,
+        } = stream;
+        // Admission proved the peer, so the connection may now hold frames.
+        driver
+            .connection
+            .set_receive_window(VarInt::from_u32(ADMITTED_WINDOW));
         let mut outgoing: [Outgoing; 3] = Default::default();
         outgoing[0].id = l0;
         let mut reader = FrameReader::default();
@@ -1363,5 +1451,30 @@ impl Carrier for QuicCarrier {
 
     fn close(&mut self) {
         self.closing = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Datagrams routed to a connection whose thread does not run, as a queued connection's,
+    /// stop at the count and byte bounds; taking them makes room again.
+    #[test]
+    fn routed_datagrams_stop_at_their_count_and_byte_bounds() {
+        let mut queue = Bounded::default();
+        let mut accepted = 0;
+        for index in 0..10 * ROUTED_DATAGRAMS {
+            accepted += usize::from(queue.push(index, 1));
+        }
+        assert_eq!(accepted, ROUTED_DATAGRAMS);
+        assert_eq!(queue.take().len(), ROUTED_DATAGRAMS);
+        let mut bytes = 0;
+        while queue.push(0, DATAGRAM_BYTES * 2) {
+            bytes += DATAGRAM_BYTES * 2;
+        }
+        assert!(bytes <= ROUTED_BYTES && bytes + DATAGRAM_BYTES * 2 > ROUTED_BYTES);
+        assert!(queue.take().len() < ROUTED_DATAGRAMS);
+        assert!(queue.push(0, DATAGRAM_BYTES));
     }
 }
