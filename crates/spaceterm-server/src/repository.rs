@@ -222,7 +222,7 @@ pub struct Repository {
     pub changes: Result<ChangeSummary, RepositoryReadError>,
     /// A pending count carries the last successful summary, or an unavailable placeholder.
     /// Readers that understand progress ignore that placeholder until the count finishes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub counting: Option<ChangeCounting>,
     /// Parsed target only. Raw remote URLs and Git configuration stay on the server.
     pub pull_request: Option<PullRequestQuery>,

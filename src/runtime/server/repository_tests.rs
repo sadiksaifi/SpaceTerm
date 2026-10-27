@@ -147,9 +147,14 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
             .presentation
             .is_none()
     );
-    let retained_json = String::from_utf8(serde_json::to_vec(&retained).unwrap()).unwrap();
-    assert!(!retained_json.contains("current_directory"));
-    assert!(!retained_json.contains("repository_directory"));
+    let retained_json = serde_json::to_value(&retained).unwrap();
+    let pane = &retained_json["shared"]["inventory"]["workspaces"][0]["tabs"][0]["panes"][0];
+    for live in ["current_directory", "repository_directory"] {
+        assert!(
+            pane.get(live).is_none_or(serde_json::Value::is_null),
+            "{live}"
+        );
+    }
     let restored = State::from_organization(
         &serde_json::from_slice(&serde_json::to_vec(&retained).unwrap()).unwrap(),
     );

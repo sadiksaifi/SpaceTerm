@@ -457,7 +457,7 @@ pub enum Reply {
     Refused(Refusal),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal {
     Controlled,
     Missing,
@@ -485,7 +485,7 @@ impl From<Refusal> for ServerError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Color {
     Default,
     Palette(u8),
@@ -506,7 +506,7 @@ pub struct Cell {
 pub struct Screen {
     #[serde(default)]
     pub accessibility_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
     #[serde(default)]
     pub cell_pixels: Option<(u16, u16)>,

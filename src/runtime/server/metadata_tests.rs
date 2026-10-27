@@ -322,12 +322,12 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
     );
     let mut metadata = metadata::encode(&tracker.snapshot());
     state.present_presentation(organization.pane, Some(Box::new(metadata.clone())));
-    let retained = state.envelope("/tmp".as_ref()).unwrap();
-    assert!(
-        !serde_json::to_string(&retained)
-            .unwrap()
-            .contains("presentation")
-    );
+    let retained = serde_json::to_value(state.envelope("/tmp".as_ref()).unwrap()).unwrap();
+    let panes = &retained["shared"]["inventory"]["workspaces"][0]["tabs"][0]["panes"];
+    assert!(panes.as_array().unwrap().iter().all(|pane| {
+        pane.get("presentation")
+            .is_none_or(serde_json::Value::is_null)
+    }));
     metadata.title = "界".repeat(pane::metadata::MAX_TITLE_CHARS);
     metadata.shell_name = metadata.title.clone();
     metadata.directory = "界".repeat(pane::metadata::MAX_DIRECTORY_CHARS);
@@ -346,13 +346,23 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
     inventory.workspaces[0].tabs[0].panes = vec![exemplar; MAX_PANES];
     assert!(
         serde_json::to_vec(&Reply::Inventory {
-            inventory,
+            inventory: inventory.clone(),
             next_sequence: 1
         })
         .unwrap()
         .len()
             < MAX_TERMINAL_FRAME
     );
+    let pushed = spaceterm_server::protocol::frame::encode_server(
+        &spaceterm_server::protocol::ServerMessage::Inventory(Box::new(
+            spaceterm_server::protocol::InventoryRevision {
+                inventory,
+                next_sequence: 1,
+            },
+        )),
+    )
+    .unwrap();
+    assert!(pushed.bytes() <= spaceterm_server::protocol::limits::MAX_INVENTORY_BYTES);
 }
 
 #[test]
