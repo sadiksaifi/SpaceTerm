@@ -313,16 +313,11 @@ fn every_operation_round_trips() {
             selection: None,
         },
         Operation::EndAccessibility { channel },
-        Operation::DirectoryRead(directories::Request::Begin {
-            id: 1,
-            operation: directories::Operation::Match {
-                path: PathBuf::from("/a"),
-                candidates: vec![PathBuf::from("/a/b")],
-            },
+        Operation::DirectoryRead(directories::Operation::Match {
+            path: PathBuf::from("/a"),
+            candidates: vec![PathBuf::from("/a/b")],
         }),
-        Operation::DirectoryRead(directories::Request::Cancel { id: 1 }),
-        Operation::DirectoryCreate(directories::CreationRequest::Begin {
-            id: 2,
+        Operation::DirectoryCreate(directories::Creation {
             path: PathBuf::from("/a/new"),
         }),
         Operation::WorktreeRead(crate::worktree::Read::Location {
@@ -345,7 +340,6 @@ fn every_operation_round_trips() {
             channel,
             visible: true,
         }),
-        Operation::Interim(Interim::Inventory),
         Operation::Interim(Interim::Read {
             channel,
             operation: pane::reading::Operation::Query {
@@ -556,15 +550,11 @@ fn every_server_message_round_trips() {
         })),
         ReplyBody::Graphics(Err(pane::graphics::Error::Missing)),
         ReplyBody::Accessibility(Err(pane::accessibility::Error::Pending)),
-        ReplyBody::Directory(Ok(directories::Progress::Ready(
-            directories::Value::Listing {
-                names: vec!["src".into()],
-                truncated: false,
-            },
-        ))),
-        ReplyBody::Directory(Ok(directories::Progress::Ready(
-            directories::Value::Match { index: None },
-        ))),
+        ReplyBody::Directory(Ok(directories::Value::Listing {
+            names: vec!["src".into()],
+            truncated: false,
+        })),
+        ReplyBody::Directory(Ok(directories::Value::Match { index: None })),
         ReplyBody::Worktree(Ok(crate::worktree::ReadReply::Settings(
             crate::worktree::Settings::default(),
         ))),
@@ -575,11 +565,6 @@ fn every_server_message_round_trips() {
             "spaceterm://pair/x".into(),
         ))),
         ReplyBody::Direct(Err(crate::direct::DirectError::Revoked)),
-        ReplyBody::Interim(InterimReply::Inventory {
-            inventory: inventory(),
-            next_sequence: 3,
-        }),
-        ReplyBody::Interim(InterimReply::MutationPending),
         ReplyBody::Interim(InterimReply::NativeEffects {
             request: Some(pane::effects::Request {
                 id: 1,

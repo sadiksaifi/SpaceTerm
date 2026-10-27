@@ -27,9 +27,7 @@ fn mutate(
     sequence: u64,
     mutation: Mutation,
 ) -> Result<[u8; 32], Box<dyn Error>> {
-    let Some(outcome) = support::mutate(link, sequence, mutation)? else {
-        return Err("mutation reply missing".into());
-    };
+    let outcome = support::mutate(link, sequence, mutation)?;
     let Outcome::Accepted { target } = outcome.outcome else {
         return Err("mutation refused".into());
     };

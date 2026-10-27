@@ -64,6 +64,10 @@ impl DirectoryOperations {
             self.retiring.push(job);
         }
     }
+    /// Whether a job runs or awaits its deadline.
+    pub(super) fn busy(&self) -> bool {
+        !self.jobs.is_empty() || !self.retiring.is_empty()
+    }
     pub(super) fn tick(&mut self) {
         let expired: Vec<_> = self
             .jobs

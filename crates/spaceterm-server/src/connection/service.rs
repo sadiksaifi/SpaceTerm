@@ -86,8 +86,15 @@ pub trait PaneService: Send {
     fn acknowledge(&mut self, peer: &Peer, sequence: u64);
     /// The client abandoned a cancellable read. The reply is still owed.
     fn cancel(&mut self, _peer: &Peer, _id: RequestId) {}
+    /// The host is stopping. Refuse every deferred reply still owed, so each connection drains
+    /// at once instead of waiting for work that no longer runs.
+    fn stopping(&mut self) {}
+    /// Gives the service the host's wake, once before any connection. A message that starts
+    /// timed work due before the host's current deadline calls it, so the host ticks again.
+    fn ticker(&mut self, _wake: Arc<dyn super::Wake>) {}
     /// Runs timed work and returns when it is next due. `None` means no timed work is pending.
-    /// The host waits for that deadline or the next message, never a fixed interval.
+    /// The host waits for that deadline, the wake from [`Self::ticker`] or a new connection,
+    /// never a fixed interval.
     fn tick(&mut self, _now: std::time::Instant) -> Option<std::time::Instant> {
         None
     }

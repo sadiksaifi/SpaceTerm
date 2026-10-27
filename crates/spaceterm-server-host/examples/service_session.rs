@@ -40,17 +40,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     client.setup()?;
     let first = support::connect(&client)?;
     let (_, next_sequence) = support::inventory(&first)?;
-    let Some(outcome) = support::mutate(
+    let outcome = support::mutate(
         &first,
         next_sequence,
         Mutation::CreateWorkspace {
             name: "Service lifecycle check".into(),
             directory: None,
         },
-    )?
-    else {
-        return Err("creation unavailable".into());
-    };
+    )?;
     let Outcome::Accepted { target } = outcome.outcome else {
         return Err("creation refused".into());
     };

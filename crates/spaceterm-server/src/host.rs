@@ -323,6 +323,12 @@ impl PaneService for HostService {
     fn cancel(&mut self, peer: &Peer, id: RequestId) {
         self.inner.cancel(peer, id)
     }
+    fn stopping(&mut self) {
+        self.inner.stopping()
+    }
+    fn ticker(&mut self, wake: Arc<dyn Wake>) {
+        self.inner.ticker(wake)
+    }
     fn tick(&mut self, now: Instant) -> Option<Instant> {
         self.inner.tick(now)
     }
@@ -455,6 +461,7 @@ fn serve_runtime_ready(
         &paths.data,
         false,
     )?))?;
+    panes.ticker(Arc::clone(&stop.wake));
     let socket = paths.socket();
     if let Some(identity) = runtime.socket_identity(c"s")? {
         runtime.verify_path(&paths.runtime)?;
@@ -567,6 +574,8 @@ fn serve_runtime_ready(
         crate::connection::io::discard_unread(stream.as_raw_fd());
     }
     drop(listener);
+    // Ticks no longer run, so replies they would have answered are refused now.
+    panes.lock().unwrap_or_else(|e| e.into_inner()).stopping();
     let threads: Vec<_> = connections
         .into_iter()
         .chain(network)
@@ -582,7 +591,9 @@ fn serve_runtime_ready(
     let _ = sync.flush();
     panes.lock().unwrap_or_else(|e| e.into_inner()).shutdown()?;
     let _ = sync.flush();
+    // The service and every connection's environment hold the last clones of the sync worker.
     drop(environment);
+    drop(panes);
     drop(sync);
     let _ = sync_thread.join();
     runtime.verify_path(&paths.runtime)?;
@@ -1507,8 +1518,10 @@ mod startup_tests {
                 data: root.join("d"),
                 runtime: root.join("r"),
             },
-            Some(crate::panes(move |_| {
+            // Like a real service, this one keeps the shared sync worker until it is dropped.
+            Some(crate::panes(move |sync| {
                 Ok(Answering(move |operation| {
+                    let _ = &sync;
                     if stopped {
                         late.fetch_add(1, Ordering::SeqCst);
                     }
@@ -1528,6 +1541,96 @@ mod startup_tests {
         );
     }
 
+    /// Defers every `Resolve` until the host stops, then refuses it.
+    #[derive(Default)]
+    struct Deferring {
+        outboxes: std::collections::BTreeMap<[u8; 32], Outbox>,
+        owed: Vec<([u8; 32], RequestId)>,
+    }
+    impl PaneService for Deferring {
+        fn admitted(&mut self, peer: &Peer, _: ClientName, outbox: Outbox) {
+            self.outboxes.insert(peer.connection, outbox);
+        }
+        fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+            if matches!(operation, Operation::Resolve { .. }) {
+                self.owed.push((peer.connection, id));
+                return Dispatch::Deferred;
+            }
+            Dispatch::reply(Ok(crate::protocol::ReplyBody::Done))
+        }
+        fn input(&mut self, _: &Peer, _: Input) {}
+        fn view(&mut self, _: &Peer, _: View) {}
+        fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+        fn acknowledge(&mut self, _: &Peer, _: u64) {}
+        fn stopping(&mut self) {
+            for (connection, id) in self.owed.drain(..) {
+                let _ = self.outboxes[&connection].reply(id, Err(Refusal::Failed));
+            }
+        }
+        fn disconnected(&mut self, _: &Peer) {}
+        fn shutdown(&mut self) -> Result<(), ServerError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the owed reply shutdown test"]
+    fn owed_reply_shutdown_child() {
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        serve_with_panes(
+            &Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            Some(crate::panes(|_| Ok(Deferring::default()))),
+        )
+        .unwrap();
+        fs::write(root.join("stopped"), []).unwrap();
+    }
+
+    #[test]
+    fn shutdown_refuses_owed_replies_instead_of_waiting_for_them() {
+        use crate::connection::link::RequestError;
+        let fixture = Fixture::new();
+        let mut child = fixture.start_test("host::startup_tests::owed_reply_shutdown_child", false);
+        let waiting = admitted_link(&fixture, &fixture.device);
+        let owed = waiting.request(Operation::Resolve { sequence: 1 }).unwrap();
+        // The deferred request reaches the service before shutdown begins.
+        assert!(matches!(
+            waiting.request(round_trip()).unwrap().wait(),
+            Ok(crate::protocol::ReplyBody::Done)
+        ));
+        let shutdown = admitted_link(&fixture, &fixture.device);
+        assert!(matches!(
+            shutdown.request(Operation::Shutdown).unwrap().wait(),
+            Ok(crate::protocol::ReplyBody::Done)
+        ));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !fixture.root.join("stopped").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "shutdown waited for a reply nothing would send"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            owed.wait().unwrap_err(),
+            RequestError::Refused(Refusal::Failed)
+        );
+        assert!(child.0.wait().unwrap().success());
+    }
+
+    /// A request the test service answers at once.
+    fn round_trip() -> Operation {
+        Operation::ReleaseAttachment {
+            attachment: crate::attachments::Attachment {
+                workspace: [2; 32],
+                generation: 1,
+            },
+        }
+    }
+
     #[test]
     #[ignore = "runs only as a child of the shared transport admission test"]
     fn shared_transport_child() {
@@ -1545,12 +1648,6 @@ mod startup_tests {
             Some(crate::panes(|_| {
                 Ok(Answering(|operation| {
                     Dispatch::reply(Ok(match operation {
-                        Operation::Interim(Interim::Inventory) => {
-                            ReplyBody::Interim(InterimReply::Inventory {
-                                inventory: crate::hierarchy::State::empty().inventory,
-                                next_sequence: 1,
-                            })
-                        }
                         Operation::Claim(claim) => {
                             ReplyBody::Claim(ClaimReply::Restored(Box::new(Restored {
                                 fresh: false,
@@ -1589,9 +1686,8 @@ mod startup_tests {
     #[test]
     fn a_client_that_stops_reading_bulk_replies_does_not_stall_another_client() {
         use crate::protocol::{
-            Channel, ClientMessage, ReplyBody, Request, RequestId,
-            frame::encode_client,
-            interim::{Interim, InterimReply},
+            Channel, ClientMessage, ReplyBody, Request, RequestId, frame::encode_client,
+            interim::Interim,
         };
         use std::io::Write;
         for graphics in [false, true] {
@@ -1636,14 +1732,8 @@ mod startup_tests {
             let current = admitted_link(&fixture, &fixture.device);
             let started = Instant::now();
             for _ in 0..16 {
-                let reply = current
-                    .request(Operation::Interim(Interim::Inventory))
-                    .unwrap()
-                    .wait();
-                assert!(matches!(
-                    reply,
-                    Ok(ReplyBody::Interim(InterimReply::Inventory { .. }))
-                ));
+                let reply = current.request(round_trip()).unwrap().wait();
+                assert!(matches!(reply, Ok(ReplyBody::Done)));
             }
             assert!(
                 started.elapsed() < Duration::from_secs(2),
@@ -1655,10 +1745,7 @@ mod startup_tests {
     #[test]
     fn two_desktops_claim_every_supported_pane_over_one_connection_each() {
         use crate::pane::{AttachmentClaim, PaneSize};
-        use crate::protocol::{
-            ClaimReply, ReplyBody,
-            interim::{Interim, InterimReply},
-        };
+        use crate::protocol::{ClaimReply, ReplyBody};
         let fixture = Fixture::new();
         let other = protocol::random().unwrap();
         let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
@@ -1666,10 +1753,8 @@ mod startup_tests {
         for device in [fixture.device, other] {
             let link = admitted_link(&fixture, &device);
             assert!(matches!(
-                link.request(Operation::Interim(Interim::Inventory))
-                    .unwrap()
-                    .wait(),
-                Ok(ReplyBody::Interim(InterimReply::Inventory { .. }))
+                link.request(round_trip()).unwrap().wait(),
+                Ok(ReplyBody::Done)
             ));
             for pane in 0..crate::hierarchy::MAX_PANES {
                 let channel = link.open_channel(Arc::new(|_| {})).unwrap();
@@ -1703,10 +1788,8 @@ mod startup_tests {
         let management = admitted_link(&fixture, &fixture.device);
         for link in &links {
             assert!(matches!(
-                link.request(Operation::Interim(Interim::Inventory))
-                    .unwrap()
-                    .wait(),
-                Ok(ReplyBody::Interim(InterimReply::Inventory { .. }))
+                link.request(round_trip()).unwrap().wait(),
+                Ok(ReplyBody::Done)
             ));
         }
         assert!(matches!(
@@ -1720,7 +1803,6 @@ mod startup_tests {
         use crate::protocol::{
             ClientMessage, Fatal, RawFrame, ReplyBody, Request, RequestId, ServerMessage,
             frame::{Assembler, FrameReader, encode_client},
-            interim::Interim,
         };
         use std::io::{Read, Write};
         let fixture = Fixture::new();
@@ -1736,7 +1818,7 @@ mod startup_tests {
         .unwrap();
         let frame = encode_client(&ClientMessage::Request(Box::new(Request {
             id: RequestId(1),
-            operation: Operation::Interim(Interim::Inventory),
+            operation: round_trip(),
         })))
         .unwrap()
         .frames

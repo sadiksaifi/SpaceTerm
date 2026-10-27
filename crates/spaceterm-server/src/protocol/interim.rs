@@ -18,8 +18,6 @@ pub enum Interim {
     NativeEffects { channel: Channel, generation: u64 },
     /// Deleted by push, which uses `ClientMessage::View`.
     PresentationDemand { channel: Channel, visible: bool },
-    /// Deleted by control-plane, which pushes `ServerMessage::Inventory`.
-    Inventory,
     /// Deleted by scrollback, which reads the client's Scrollback cache.
     Read {
         channel: Channel,
@@ -50,13 +48,6 @@ pub enum InterimReply {
         request: Option<effects::Request>,
         hidden_input: bool,
     },
-    /// Deleted by control-plane.
-    Inventory {
-        inventory: crate::hierarchy::Inventory,
-        next_sequence: u64,
-    },
-    /// Deleted by control-plane, which defers the `Mutate` and `Resolve` replies instead.
-    MutationPending,
     /// Deleted by scrollback.
     Reading { accepted: bool },
     /// Deleted by scrollback.

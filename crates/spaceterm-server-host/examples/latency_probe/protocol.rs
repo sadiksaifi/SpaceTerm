@@ -249,13 +249,11 @@ fn interim(link: &ServerLink, stage: &'static str, operation: Interim) -> Result
     }
 }
 
+/// The newest pushed inventory. The server pushes one when it admits the link.
 fn inventory(link: &ServerLink, stage: &'static str) -> Result<(Inventory, u64)> {
-    match interim(link, stage, Interim::Inventory)? {
-        InterimReply::Inventory {
-            inventory,
-            next_sequence,
-        } => Ok((inventory, next_sequence)),
-        _ => fail(stage),
+    match link.next_inventory(0) {
+        Ok((_, revision)) => Ok((revision.inventory.clone(), revision.next_sequence)),
+        Err(_) => fail(stage),
     }
 }
 
@@ -515,14 +513,7 @@ impl EchoPane {
 }
 
 fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
-    let mut reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while matches!(reply, ReplyBody::Interim(InterimReply::MutationPending))
-        && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(40));
-        reply = request(link, "resolve", Operation::Resolve { sequence })?;
-    }
+    let reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
     let ReplyBody::Outcome(result) = reply else {
         return fail("mutation outcome");
     };

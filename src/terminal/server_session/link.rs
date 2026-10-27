@@ -929,7 +929,6 @@ impl PaneLink {
                 generation,
                 offset: offset as u64,
             }),
-            Request::Inventory => interim(Interim::Inventory),
             Request::Focus {
                 lease,
                 generation,
@@ -1073,9 +1072,8 @@ impl PaneLink {
             Request::Mutate { sequence, mutation } => {
                 interim_reply(self.request(Operation::Mutate { sequence, mutation })?)
             }
-            Request::Resolve { sequence } => {
-                interim_reply(self.request(Operation::Resolve { sequence })?)
-            }
+            // The shared Workspace client reads pushed inventory and resolves by dispatching.
+            Request::Inventory | Request::Resolve { .. } => Err(ServerError::Unsupported),
             Request::Acknowledge { sequence } => {
                 self.link.acknowledge(sequence)?;
                 Ok(Reply::Unchanged)
@@ -1083,20 +1081,10 @@ impl PaneLink {
             Request::ReleaseAttachment { attachment } => self
                 .request(Operation::ReleaseAttachment { attachment })
                 .map(|_| Reply::Unchanged),
-            Request::DirectoryRead(read) => match self.request(Operation::DirectoryRead(read))? {
-                ReplyBody::Directory(progress) => Ok(Reply::DirectoryRead(progress)),
-                _ => Err(ServerError::Protocol),
-            },
-            Request::DirectoryCreate(create) => {
-                match self.request(Operation::DirectoryCreate(create))? {
-                    ReplyBody::Directory(progress) => Ok(Reply::DirectoryCreate(progress)),
-                    _ => Err(ServerError::Protocol),
-                }
+            // Directory and Worktree reads have their own deferred requests.
+            Request::DirectoryRead(_) | Request::DirectoryCreate(_) | Request::WorktreeRead(_) => {
+                Err(ServerError::Unsupported)
             }
-            Request::WorktreeRead(read) => match self.request(Operation::WorktreeRead(read))? {
-                ReplyBody::Worktree(result) => Ok(Reply::WorktreeRead(result)),
-                _ => Err(ServerError::Protocol),
-            },
             Request::Shutdown => self.request(Operation::Shutdown).map(|_| Reply::Closed),
             // Claims need this Pane's attachment permit. The single-key form predates focus
             // generations.
@@ -1165,14 +1153,6 @@ fn interim_reply(body: ReplyBody) -> Result<Reply, ServerError> {
                 request,
                 hidden_input,
             },
-            InterimReply::Inventory {
-                inventory,
-                next_sequence,
-            } => Reply::Inventory {
-                inventory,
-                next_sequence,
-            },
-            InterimReply::MutationPending => Reply::MutationPending,
             InterimReply::Reading { accepted } => Reply::Reading { accepted },
             InterimReply::ReadingReady {
                 generation,
