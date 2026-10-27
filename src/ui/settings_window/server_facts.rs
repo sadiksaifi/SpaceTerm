@@ -232,8 +232,8 @@ impl SettingsWindow {
             loop {
                 // A connection presented after the window heard of it registers its reader
                 // later, so each look finds it again until one read succeeds. A server that
-                // isn't live is never read, and one that reconnects may have restarted, so its
-                // facts are read again.
+                // isn't live is never read. Facts belong to the link they were read over: a new
+                // link may reach a restarted server, so its facts are read again.
                 let client = settings
                     .update(cx, |settings, cx| {
                         settings
@@ -244,17 +244,18 @@ impl SettingsWindow {
                     })
                     .ok()
                     .flatten();
-                if client.is_none() {
+                let link = client.as_ref().map(|client| client.server.link_generation());
+                if read.as_ref().is_none_or(|(read_over, _)| Some(*read_over) != link) {
                     read = None;
                 }
                 if read.is_none()
-                    && let Some(client) = client
+                    && let (Some(client), Some(link)) = (client, link)
                     && let Ok(ReadReply::ServerFacts(facts)) =
                         cx.update(|cx| client.read(Read::ServerFacts, cx)).await
                 {
-                    read = Some(facts);
+                    read = Some((link, facts));
                 }
-                let server = read.clone();
+                let server = read.as_ref().map(|(_, facts)| facts.clone());
                 let followed = settings.update(cx, |settings, cx| {
                     if settings.server_facts.generation != generation {
                         return false;
