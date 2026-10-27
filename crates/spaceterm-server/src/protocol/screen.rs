@@ -9,9 +9,6 @@ use super::{Fatal, limits};
 use crate::pane::{Color, effects::Hyperlink, graphics, reading};
 use serde::{Deserialize, Serialize};
 
-/// Style id 0 is the default style and is never defined.
-pub const DEFAULT_STYLE: u16 = 0;
-
 /// Bits of [`Style::flags`].
 pub mod flags {
     pub const INVERSE: u16 = 1;
@@ -158,10 +155,20 @@ pub struct Row {
 /// Consecutive cells sharing one style and one link.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Run {
-    pub style: u16,
+    pub style: StyleRef,
     pub link: Option<u16>,
     pub text: String,
     pub cells: Cells,
+}
+
+/// A run's style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StyleRef {
+    Default,
+    /// A definition in the channel's or the page's table. Ids start at 1.
+    Id(u16),
+    /// A style the full table cannot hold, so no cell loses its style.
+    Inline(Style),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -250,6 +257,10 @@ impl Style {
         flags: 0,
         underline: 0,
     };
+
+    fn valid(&self) -> bool {
+        self.flags & !flags::ALL == 0 && self.underline <= MAX_UNDERLINE
+    }
 }
 
 impl ScrollShift {
@@ -277,32 +288,55 @@ impl ScrollShift {
 }
 
 impl Run {
-    /// The cells of this run as byte ranges of `text`, or `None` when `cells` does not describe
-    /// `text`. An empty range is a spacer cell.
-    pub fn cells(&self) -> Option<Vec<std::ops::Range<usize>>> {
-        match &self.cells {
+    /// The cells of this run as byte ranges of `text`, in order. An empty range is a spacer
+    /// cell. The ranges of a run that failed validation may fall outside `text`.
+    pub fn cells(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        let narrow = match &self.cells {
             Cells::Narrow => Some(
                 self.text
                     .char_indices()
-                    .map(|(start, c)| start..start + c.len_utf8())
-                    .collect(),
+                    .map(|(start, c)| start..start + c.len_utf8()),
             ),
+            Cells::Explicit(_) => None,
+        };
+        let explicit = match &self.cells {
             Cells::Explicit(lengths) => {
-                let mut start = 0;
-                let mut cells = Vec::with_capacity(lengths.len());
-                for length in lengths {
-                    let end = start + usize::from(*length);
-                    if usize::from(*length) > limits::MAX_CELL_BYTES
-                        || !self.text.is_char_boundary(end)
-                    {
-                        return None;
-                    }
-                    cells.push(start..end);
-                    start = end;
-                }
-                (start == self.text.len()).then_some(cells)
+                Some(lengths.iter().scan(0, |start: &mut usize, length| {
+                    let cell = *start..*start + usize::from(*length);
+                    *start = cell.end;
+                    Some(cell)
+                }))
+            }
+            Cells::Narrow => None,
+        };
+        narrow
+            .into_iter()
+            .flatten()
+            .chain(explicit.into_iter().flatten())
+    }
+
+    /// The number of cells in this run.
+    pub fn width(&self) -> usize {
+        match &self.cells {
+            Cells::Narrow => self.text.chars().count(),
+            Cells::Explicit(lengths) => lengths.len(),
+        }
+    }
+
+    /// Whether explicit lengths cover `text` exactly, on character boundaries and within
+    /// [`limits::MAX_CELL_BYTES`]. Walks the lengths without allocating.
+    fn covers_text(&self) -> bool {
+        let Cells::Explicit(lengths) = &self.cells else {
+            return true;
+        };
+        let mut end = 0;
+        for length in lengths {
+            end += usize::from(*length);
+            if usize::from(*length) > limits::MAX_CELL_BYTES || !self.text.is_char_boundary(end) {
+                return false;
             }
         }
+        end == self.text.len()
     }
 }
 
@@ -316,12 +350,9 @@ fn tables(
     let mut defined = vec![false; limits::MAX_STYLES + 1];
     for definition in styles {
         let id = usize::from(definition.id);
-        check(definition.id != DEFAULT_STYLE && id <= limits::MAX_STYLES && !defined[id])?;
+        check((1..=limits::MAX_STYLES).contains(&id) && !defined[id])?;
         defined[id] = true;
-        check(
-            definition.style.flags & !flags::ALL == 0
-                && definition.style.underline <= MAX_UNDERLINE,
-        )?;
+        check(definition.style.valid())?;
     }
     let mut defined = vec![false; limits::MAX_LINKS];
     for definition in links {
@@ -336,19 +367,18 @@ fn tables(
         check(row.runs.len() <= usize::from(crate::pane::MAX_COLUMNS))?;
         let mut columns = 0;
         for run in &row.runs {
-            check(usize::from(run.style) <= limits::MAX_STYLES)?;
+            check(match run.style {
+                StyleRef::Default => true,
+                StyleRef::Id(id) => (1..=limits::MAX_STYLES).contains(&usize::from(id)),
+                StyleRef::Inline(style) => style.valid(),
+            })?;
             check(
                 run.link
                     .is_none_or(|link| usize::from(link) < limits::MAX_LINKS),
             )?;
-            columns += match &run.cells {
-                Cells::Narrow => run.text.chars().count(),
-                Cells::Explicit(cells) => {
-                    check(run.cells().is_some())?;
-                    cells.len()
-                }
-            };
-            check(columns <= usize::from(crate::pane::MAX_COLUMNS))?;
+            // Bound the cell count before walking the lengths.
+            columns += run.width();
+            check(columns <= usize::from(crate::pane::MAX_COLUMNS) && run.covers_text())?;
         }
     }
     Ok(())

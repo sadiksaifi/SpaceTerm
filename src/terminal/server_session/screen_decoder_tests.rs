@@ -5,7 +5,7 @@ use crate::runtime::screen_encoder::{HistoryTracker, ScreenCapture, ScreenEncode
 use crate::terminal::emulator::TerminalEmulator;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
 use spaceterm_server::protocol::frame::{Assembler, encode_server};
-use spaceterm_server::protocol::screen::{Cells, Row, Run, ScreenUpdate, ScrollShift};
+use spaceterm_server::protocol::screen::{Cells, Row, Run, ScreenUpdate, ScrollShift, StyleRef};
 use spaceterm_server::protocol::{Channel, Frame, RawFrame, ServerMessage, limits};
 
 fn geometry(columns: u16, rows: u16) -> TerminalGeometry {
@@ -163,6 +163,7 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
         }
     }
     assert_eq!(decoded.wrapped.as_ref(), screen.row_soft_wrapped.as_ref());
+    assert_eq!(decoded.graphics, Some(sent_graphics(&screen.graphics)));
     assert_eq!(
         (decoded.geometry.columns, decoded.geometry.rows),
         (screen.size.cols, screen.size.rows)
@@ -187,6 +188,8 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
     assert_eq!(rendered.scrollbar, screen.scrollbar);
     assert_eq!(rendered.viewport, screen.viewport);
     assert_eq!(rendered.text_blinking, screen.text_blinking);
+    assert_eq!(rendered.selection_present, screen.selection_present);
+    assert_eq!(rendered.find, screen.find);
     let colors = &screen.colors;
     assert_eq!(rendered.colors.foreground_source, colors.foreground_source);
     assert_eq!(rendered.colors.background_source, colors.background_source);
@@ -209,6 +212,33 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
     }
 }
 
+/// The graphics manifest a frame carries for `graphics`.
+fn sent_graphics(
+    graphics: &crate::terminal::GraphicsSnapshot,
+) -> Result<pane::graphics::Snapshot, pane::graphics::Error> {
+    if graphics.images.len() > pane::graphics::MAX_IMAGES
+        || graphics.placements.len() > pane::graphics::MAX_PLACEMENTS
+    {
+        return Err(pane::graphics::Error::TooLarge);
+    }
+    let snapshot = pane::graphics::Snapshot {
+        generation: graphics.generation,
+        placement_generation: graphics.placement_generation,
+        images: graphics
+            .images
+            .iter()
+            .map(|image| pane::graphics::Image {
+                key: image.key,
+                width: image.width,
+                height: image.height,
+            })
+            .collect(),
+        placements: graphics.placements.to_vec(),
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
 /// A small deterministic generator, so every run replays the same workload.
 struct Random(u64);
 
@@ -229,7 +259,7 @@ impl Random {
 fn step(random: &mut Random, session: &mut Session) {
     let rows = session.emulator.geometry().grid().rows;
     let columns = session.emulator.geometry().grid().cols;
-    let output = match random.below(19) {
+    let output = match random.below(22) {
         0 => ["hello ", "world", "x", " $ ", "ls -la"][random.below(5) as usize].to_owned(),
         1 => "界面宽字".to_owned(),
         2 => ["👨‍👩‍👧", "✅️", "🙂", "🇯🇵"][random.below(4) as usize].to_owned(),
@@ -344,6 +374,43 @@ fn step(random: &mut Random, session: &mut Session) {
             random.below(3) + 1,
             ["L", "M", "@", "P", "S", "T"][random.below(6) as usize]
         ),
+        // A selection drag, which the server presents in the cells' style.
+        18 => {
+            let point = |random: &mut Random| crate::terminal::SurfacePosition {
+                x: random.below(u64::from(columns) * 8) as f32,
+                y: random.below(u64::from(rows) * 16) as f32,
+            };
+            for phase in [
+                crate::terminal::PointerPhase::Press,
+                crate::terminal::PointerPhase::Motion,
+                crate::terminal::PointerPhase::Release,
+            ] {
+                let position = point(random);
+                let _ = session.emulator.pointer(crate::terminal::PointerInput {
+                    generation: session.emulator.presentation_generation(),
+                    phase,
+                    button: Some(crate::terminal::PointerButton::Left),
+                    position,
+                    modifiers: Default::default(),
+                    shift_selection: Default::default(),
+                });
+            }
+            String::new()
+        }
+        // Find, which the server presents in the reading state.
+        19 => {
+            let generation = crate::terminal::FindQueryGeneration::from_value(random.below(4) + 1);
+            let query = ["line", "o", "界", "zz"][random.below(4) as usize];
+            session
+                .emulator
+                .set_find_query(generation, query.to_owned());
+            String::new()
+        }
+        // An image placement, which changes the graphics manifest.
+        20 => format!(
+            "\x1b_Ga=T,t=d,f=32,i={},s=1,v=1,c=2,r=1,q=2;AQIDBA==\x1b\\",
+            random.below(3) + 1
+        ),
         _ => "abcdefghijklmnopqrstuvwxyz0123456789".repeat(random.below(4) as usize),
     };
     session.emulator.feed(output.as_bytes());
@@ -351,6 +418,9 @@ fn step(random: &mut Random, session: &mut Session) {
 
 #[test]
 fn random_terminal_output_round_trips_through_every_frame() {
+    let _graphics = crate::terminal::graphics::test_lock();
+    // Deltas that show a selection, find results or images, most of them carried forward.
+    let (mut selected, mut found, mut images) = (0, 0, 0);
     for seed in 1..=10_u64 {
         let mut random = Random(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let mut session = Session::new(2 + random.below(80) as u16, 2 + random.below(30) as u16);
@@ -368,11 +438,22 @@ fn random_terminal_output_round_trips_through_every_frame() {
                     session.sync();
                 }
                 _ => {
-                    session.sync();
+                    if let Some(decoded) = session.sync() {
+                        let reading = decoded.reading.as_ref().unwrap();
+                        selected += usize::from(reading.selection_present);
+                        found += usize::from(reading.find.is_some());
+                        images += usize::from(decoded.graphics.as_ref().is_some_and(|graphics| {
+                            graphics.as_ref().is_ok_and(|g| !g.images.is_empty())
+                        }));
+                    }
                 }
             }
         }
     }
+    assert!(
+        selected > 0 && found > 0 && images > 0,
+        "{selected} {found} {images}"
+    );
 }
 
 #[test]
@@ -427,6 +508,8 @@ fn an_unknown_base_empties_the_decoder_so_the_next_request_asks_for_a_keyframe()
     assert_eq!(session.decoder.frame(), Some(3));
 }
 
+/// The decoder refuses these by itself: they name what its tables or grid do not hold, or cells
+/// outside the run's text.
 #[test]
 fn malformed_updates_are_refused_and_reset_the_decoder() {
     let mut session = Session::new(10, 3);
@@ -436,7 +519,7 @@ fn malformed_updates_are_refused_and_reset_the_decoder() {
         rows,
         ..ScreenUpdate::default()
     };
-    let run = |style: u16, link: Option<u16>, text: &str, cells: Cells| Run {
+    let run = |style: StyleRef, link: Option<u16>, text: &str, cells: Cells| Run {
         style,
         link,
         text: text.into(),
@@ -449,22 +532,37 @@ fn malformed_updates_are_refused_and_reset_the_decoder() {
     };
     let cases = [
         // An undefined style or link.
-        delta(vec![row(vec![run(9, None, "x", Cells::Narrow)])]),
-        delta(vec![row(vec![run(0, Some(3), "x", Cells::Narrow)])]),
-        // More cells than columns.
-        delta(vec![row(vec![run(0, None, "elevencells", Cells::Narrow)])]),
-        // Lengths that split a character or do not cover the text.
         delta(vec![row(vec![run(
-            0,
+            StyleRef::Id(9),
+            None,
+            "x",
+            Cells::Narrow,
+        )])]),
+        delta(vec![row(vec![run(
+            StyleRef::Default,
+            Some(3),
+            "x",
+            Cells::Narrow,
+        )])]),
+        // More cells than columns.
+        delta(vec![row(vec![run(
+            StyleRef::Default,
+            None,
+            "elevencells",
+            Cells::Narrow,
+        )])]),
+        // Lengths that split a character or run past the text.
+        delta(vec![row(vec![run(
+            StyleRef::Default,
             None,
             "界",
             Cells::Explicit(vec![1, 2]),
         )])]),
         delta(vec![row(vec![run(
-            0,
+            StyleRef::Default,
             None,
             "ab",
-            Cells::Explicit(vec![1]),
+            Cells::Explicit(vec![1, 2]),
         )])]),
         // A row or a scroll outside the grid.
         delta(vec![Row {
@@ -548,7 +646,7 @@ fn snapshots_keep_program_colors_and_project_client_defaults() {
     configured.colors.normal[0] = crate::appearance::Color::rgb(0x112233);
     let link = |id, link| spaceterm_server::protocol::screen::LinkDefinition { id, link };
     let run = |link| Run {
-        style: 0,
+        style: StyleRef::Default,
         link: Some(link),
         text: "x".into(),
         cells: Cells::Narrow,
@@ -607,4 +705,25 @@ fn snapshots_keep_program_colors_and_project_client_defaults() {
         screen.colors.palette[1],
         crate::appearance::Color::rgb(0x28323c)
     );
+}
+
+#[test]
+fn truecolor_beyond_the_style_table_keeps_every_color() {
+    let mut session = Session::new(512, 12);
+    for row in 0..12 {
+        let mut line = format!("\x1b[{};1H", row + 1);
+        for column in 0..512 {
+            let value = row * 512 + column;
+            line.push_str(&format!(
+                "\x1b[48;2;{};{};{}m ",
+                value % 256,
+                value / 256 % 256,
+                value / 65_536
+            ));
+        }
+        session.emulator.feed(line.as_bytes());
+        session.sync().unwrap();
+    }
+    session.emulator.feed(b"\x1b[0m\x1b[1;1Hx");
+    session.sync().unwrap();
 }
