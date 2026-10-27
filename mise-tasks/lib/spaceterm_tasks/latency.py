@@ -237,3 +237,51 @@ def shell_directory(directory=None):
     if directory.startswith("~/"):
         return "~/" + shlex.quote(directory[2:])
     return shlex.quote(directory)
+
+
+def netem_commands(device, client, loss, delay):
+    """Shell commands that delay and drop only `device`'s traffic to `client`.
+
+    A `prio` qdisc with a fourth band carries netem. Its priomap keeps all other traffic in the
+    three usual bands, and a `u32` filter sends only IPv4 traffic to `client` into the fourth.
+    """
+    priomap = "1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1"
+    return [
+        f"sudo -n tc qdisc add dev {device} root handle 1: prio bands 4 priomap {priomap}",
+        f"sudo -n tc qdisc add dev {device} parent 1:4 handle 40: "
+        f"netem loss {loss:g}% delay {delay:g}ms",
+        f"sudo -n tc filter add dev {device} parent 1: protocol ip prio 1 u32 "
+        f"match ip dst {client}/32 flowid 1:4",
+    ]
+
+
+def netem_active(qdiscs):
+    """Whether `tc qdisc show` output has a netem or prio qdisc that a run would replace."""
+    return any(
+        line.split()[1:2] in (["netem"], ["prio"]) for line in qdiscs.splitlines() if line.strip()
+    )
+
+
+def cells(results):
+    """Group probe results by measurement and condition, joining their samples across rounds."""
+    grouped = {}
+    for result in results:
+        grouped.setdefault((result["measurement"], result["condition"]), []).extend(
+            result["samples"]
+        )
+    return grouped
+
+
+def table(results):
+    """A Markdown table of p50, p90, p99 and max for every measurement and condition."""
+    lines = [
+        "| Measurement | Condition | n | p50 | p90 | p99 | max |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for (measurement, condition), values in sorted(cells(results).items()):
+        lines.append(
+            f"| {measurement} | {condition} | {len(values)} | "
+            f"{percentile(values, 50):.2f} | {percentile(values, 90):.2f} | "
+            f"{percentile(values, 99):.2f} | {max(values):.2f} |"
+        )
+    return "\n".join(lines)
