@@ -3,14 +3,15 @@
 use spaceterm::runtime::PhysicalKey;
 use spaceterm_server::ServerConnection;
 use spaceterm_server::direct::{
-    DeviceCredential, DirectConnection, DirectConnector, DirectError, Enrollment, Invitation,
-    NetworkPolicy, PairedDevice,
+    ClaimId, DeviceCredential, DirectConnection, DirectConnector, DirectError, Enrollment,
+    Invitation, NetworkPolicy, PairedDevice,
 };
 use spaceterm_server::hierarchy::{CloseTarget, Id, Mutation, Outcome};
 use spaceterm_server::pane::{
     FocusTarget, InteractiveInput, Key, Lease, PaneConnection, PaneSize, Reply, Request,
     presentation::ScreenDecoder,
 };
+use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,58 +54,90 @@ pub fn name_client(name: &str) {
 }
 
 /// The owning machine's account-local authority over network exposure and pairing.
-pub struct Owner(ServerConnection);
+pub struct Owner {
+    server: ServerConnection,
+    /// Invitations this owner issued and has not seen consumed by an approved claim.
+    issued: RefCell<Vec<ClaimId>>,
+}
 
 /// Network exposure to restore after a temporary change.
 pub struct Exposure {
-    policy: Option<NetworkPolicy>,
-    enabled: bool,
+    /// The state before the change, or None when exposure already matched.
+    previous: Option<(Option<NetworkPolicy>, bool)>,
 }
 
 impl Owner {
     pub fn open(identity: &str) -> Result<Self> {
-        at("owner", ServerConnection::for_identity(identity)).map(Self)
-    }
-
-    pub fn expose(&self, bind: SocketAddr) -> Result<Exposure> {
-        let status = at("exposure status", self.0.direct_status())?;
-        let policy = at("exposure address", NetworkPolicy::new(bind))?;
-        at("expose", self.0.set_direct_policy(Some(policy), true))?;
-        Ok(Exposure {
-            policy: status.policy,
-            enabled: status.enabled,
+        Ok(Self {
+            server: at("owner", ServerConnection::for_identity(identity))?,
+            issued: RefCell::default(),
         })
     }
 
-    /// Restores the enabled state. A previously unset address stays configured.
+    /// Enables exposure at `bind`. A policy change disconnects every paired client, so an
+    /// exposure already enabled at `bind` stays untouched.
+    pub fn expose(&self, bind: SocketAddr) -> Result<Exposure> {
+        let status = at("exposure status", self.server.direct_status())?;
+        if status.enabled && status.policy.as_ref().map(|policy| policy.bind) == Some(bind) {
+            return Ok(Exposure { previous: None });
+        }
+        let policy = at("exposure address", NetworkPolicy::new(bind))?;
+        at("expose", self.server.set_direct_policy(Some(policy), true))?;
+        Ok(Exposure {
+            previous: Some((status.policy, status.enabled)),
+        })
+    }
+
+    /// Restores the previous address and enabled state. When no address was configured
+    /// before, the server keeps the probe's address, disabled.
     pub fn restore(&self, exposure: Exposure) -> Result<()> {
+        let Some((policy, enabled)) = exposure.previous else {
+            return Ok(());
+        };
         at(
             "restore exposure",
-            self.0.set_direct_policy(exposure.policy, exposure.enabled),
+            self.server.set_direct_policy(policy, enabled),
         )
         .map(drop)
     }
 
     pub fn invite(&self) -> Result<String> {
-        let invitation = at("invite", self.0.invite_device())?;
+        let invitation = at("invite", self.server.invite_device())?;
+        self.issued.borrow_mut().push(invitation.id());
         Ok(invitation.display_text().as_str().to_owned())
     }
 
-    /// Approves the pending claim from `device`. Returns false when no such claim exists.
+    /// Approves the pending claim from `device` on an invitation this owner issued. Returns
+    /// false when no such claim exists.
     pub fn approve(&self, device: &str) -> Result<bool> {
-        for claim in at("claims", self.0.pairing_claims())? {
-            if claim.device_name.as_str() == device {
-                at("approve", self.0.approve_device(&claim))?;
+        for claim in at("claims", self.server.pairing_claims())? {
+            if claim.device_name.as_str() == device
+                && self.issued.borrow().contains(&claim.invitation_id)
+            {
+                at("approve", self.server.approve_device(&claim))?;
+                self.issued
+                    .borrow_mut()
+                    .retain(|issued| *issued != claim.invitation_id);
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
+    /// Withdraws every invitation this owner issued that no approved claim used. The server
+    /// also refuses any pending claim on those invitations.
+    pub fn abandon(&self) -> Result<()> {
+        let issued = std::mem::take(&mut *self.issued.borrow_mut());
+        for id in issued {
+            at("withdraw invitation", self.server.withdraw_invitation(id))?;
+        }
+        Ok(())
+    }
+
     /// Revokes every pairing named `device` and returns how many it revoked.
     pub fn revoke(&self, device: &str) -> Result<usize> {
         let mut revoked = 0;
-        for paired in at("devices", self.0.paired_devices())? {
+        for paired in at("devices", self.server.paired_devices())? {
             if paired.name.as_str() == device {
                 let mut operation = [0; 32];
                 // SAFETY: getentropy writes exactly 32 bytes to this live writable array.
@@ -112,7 +145,10 @@ impl Owner {
                 {
                     return fail("randomness");
                 }
-                at("revoke", self.0.revoke_device(operation, paired.pairing))?;
+                at(
+                    "revoke",
+                    self.server.revoke_device(operation, paired.pairing),
+                )?;
                 revoked += 1;
             }
         }

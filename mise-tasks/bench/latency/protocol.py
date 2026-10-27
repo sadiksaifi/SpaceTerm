@@ -11,7 +11,8 @@
 # USAGE flag "--expose <address>" help="Enable this machine's server exposure at this address and port for the run"
 # USAGE flag "--samples <count>" help="Keys to echo" default="200"
 # USAGE flag "--requests <count>" help="Requests to time" default="50"
-# USAGE flag "--interface <interface>" help="Refuse to run unless the owner host routes through this interface"
+# USAGE flag "--route-host <host>" help="Server address the paired connection uses, for the route guard"
+# USAGE flag "--interface <interface>" help="Refuse to run unless the route host routes through this interface"
 """Measure request round trip and key-to-echo through the SpaceTerm protocol.
 
 The probe creates a Workspace whose Pane runs a raw cat, times requests that change nothing and
@@ -23,7 +24,9 @@ this repository at the same commit, with mise on its login shell's PATH.
 import argparse
 import json
 import shlex
+import signal
 import subprocess
+import sys
 
 from spaceterm_tasks import TaskError, main
 from spaceterm_tasks.cargo import build_executable
@@ -50,7 +53,7 @@ def run(args):
         raise TaskError("--owner-host and --expose apply only to --route paired")
     if args.owner_host and args.expose:
         raise TaskError("--expose changes only this machine's server")
-    check_route(args, args.owner_host)
+    check_route(args)
     executable = build_executable(*PROTOCOL_PROBE, binary="latency_probe", example=True)
     command = [executable, "measure", args.identity, args.route]
     command += ["--samples", str(args.samples), "--requests", str(args.requests)]
@@ -58,8 +61,17 @@ def run(args):
         command += ["--owner-command", owner_command(args)]
     if args.expose:
         command += ["--expose", args.expose]
-    probe = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=False)
-    for line in probe.stdout.splitlines():
+    # Its own session keeps a terminal interrupt from reaching the probe directly. The task
+    # forwards SIGTERM instead and waits while the probe closes its Workspace and pairing.
+    probe = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        output, _ = probe.communicate()
+    except BaseException:
+        probe.send_signal(signal.SIGTERM)
+        print("stopping; waiting for the probe to clean up", file=sys.stderr)
+        probe.communicate()
+        raise
+    for line in output.splitlines():
         if line.strip():
             report(json.loads(line))
     if probe.returncode:
@@ -79,6 +91,6 @@ if __name__ == "__main__":
     parser.add_argument("--expose")
     parser.add_argument("--samples", type=int, default=200)
     parser.add_argument("--requests", type=int, default=50)
-    add_route_arguments(parser, host=False)
+    add_route_arguments(parser)
     arguments = parser.parse_args()
     main(lambda: run(arguments))

@@ -9,13 +9,17 @@
 //! enrolls a fresh pairing through an owner on the server's machine and revokes it afterwards.
 //! Without `--owner-command` the owner is this process, so the server must be on this machine;
 //! `--expose` enables its network exposure for the run. `owner` serves the owner side as JSON
-//! lines on standard input and output. Protocol calls live in `protocol.rs`.
+//! lines on standard input and output; when its input ends, it withdraws unused invitations and
+//! revokes the devices it approved. SIGINT, SIGTERM and SIGHUP stop a measurement through the
+//! same cleanup. Protocol calls live in `protocol.rs`.
 mod protocol;
 
 use protocol::{Claim, EchoPane, Failure, Owner, Route, fail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, Failure>;
@@ -101,6 +105,7 @@ impl Gaps {
 fn sample(pane: &mut EchoPane, options: &Options, route: &str) -> Result<()> {
     let mut round_trips = Vec::with_capacity(options.requests);
     for _ in 0..options.requests {
+        continue_unless_interrupted()?;
         let start = Instant::now();
         pane.round_trip()?;
         round_trips.push(ms(start.elapsed()));
@@ -112,6 +117,7 @@ fn sample(pane: &mut EchoPane, options: &Options, route: &str) -> Result<()> {
     let mut echoes = Vec::with_capacity(options.samples);
     pane.rewind()?;
     for index in 0..options.samples {
+        continue_unless_interrupted()?;
         if index > 0 && index % 40 == 0 {
             pane.rewind()?;
         }
@@ -141,10 +147,13 @@ impl OwnerLink {
         let Some(command) = &options.owner_command else {
             return Owner::open(&options.identity).map(Self::Here);
         };
+        // Its own process group keeps a terminal interrupt from ending the owner before the
+        // probe revokes its pairing.
         let Ok(mut child) = Command::new("/bin/sh")
             .args(["-c", command])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .process_group(0)
             .spawn()
         else {
             return fail("the owner command did not start");
@@ -201,6 +210,13 @@ impl OwnerLink {
         Ok(reply["approved"] == true)
     }
 
+    fn abandon(&mut self) -> Result<()> {
+        if let Self::Here(owner) = self {
+            return owner.abandon();
+        }
+        self.ask(json!({ "abandon": true })).map(drop)
+    }
+
     fn revoke(&mut self, device: &str) -> Result<usize> {
         if let Self::Here(owner) = self {
             return owner.revoke(device);
@@ -231,8 +247,17 @@ fn measure_route(options: &Options, route: &Route, label: &str) -> Result<()> {
         ms(started.elapsed())
     );
     let result = sample(&mut pane, options, label);
-    let closed = pane.close();
-    result.and(closed)
+    combine([result, pane.close()])
+}
+
+/// Returns the first failure and prints the others, so a failed cleanup stays visible.
+fn combine(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
+    let mut failures = results.into_iter().filter_map(Result::err);
+    let first = failures.next();
+    for failure in failures {
+        eprintln!("latency_probe: {failure}");
+    }
+    first.map_or(Ok(()), Err)
 }
 
 fn measure_paired(options: &Options) -> Result<()> {
@@ -243,15 +268,20 @@ fn measure_paired(options: &Options) -> Result<()> {
     };
     let device = format!("latency-probe-{}", std::process::id());
     let result = (|| {
+        continue_unless_interrupted()?;
         let invitation = owner.invite()?;
         let claim = Claim::submit(&invitation, &device)?;
+        continue_unless_interrupted()?;
         if !owner.approve(&device)? {
             return fail("the owner found no pairing claim");
         }
         let route = claim.finish()?;
+        continue_unless_interrupted()?;
         measure_route(options, &route, "paired")
     })();
-    // Revoke even after a failure, since approval may have succeeded.
+    // Clean up even after a failure: an invitation or claim may be pending, and approval may
+    // have succeeded.
+    let abandoned = owner.abandon();
     let revoked = owner.revoke(&device);
     if let Ok(count) = revoked {
         eprintln!("latency_probe: revoked {count} probe pairing");
@@ -260,11 +290,20 @@ fn measure_paired(options: &Options) -> Result<()> {
         (OwnerLink::Here(here), Some(exposure)) => here.restore(exposure),
         _ => Ok(()),
     };
-    result.and(revoked.map(drop)).and(restored)
+    combine([result, abandoned, revoked.map(drop), restored])
 }
 
+/// Serves owner requests until its input ends, then withdraws its unused invitations and revokes
+/// every device it approved and was not asked to revoke.
 fn serve_owner(identity: &str) -> Result<()> {
     let owner = Owner::open(identity)?;
+    let mut approved = Vec::new();
+    let served = serve_requests(&owner, &mut approved);
+    let revoked = approved.iter().map(|device| owner.revoke(device).map(drop));
+    combine([served, owner.abandon()].into_iter().chain(revoked))
+}
+
+fn serve_requests(owner: &Owner, approved: &mut Vec<String>) -> Result<()> {
     let mut output = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else {
@@ -276,13 +315,18 @@ fn serve_owner(identity: &str) -> Result<()> {
         let reply = if request["invite"] == true {
             owner.invite().map(|text| json!({ "invitation": text }))
         } else if let Some(device) = request["approve"].as_str() {
-            owner
-                .approve(device)
-                .map(|approved| json!({ "approved": approved }))
+            let result = owner.approve(device);
+            if let Ok(true) = result {
+                approved.push(device.to_owned());
+            }
+            result.map(|done| json!({ "approved": done }))
         } else if let Some(device) = request["revoke"].as_str() {
+            approved.retain(|name| name != device);
             owner
                 .revoke(device)
                 .map(|count| json!({ "revoked": count }))
+        } else if request["abandon"] == true {
+            owner.abandon().map(|()| json!({ "abandoned": true }))
         } else {
             break;
         };
@@ -294,8 +338,39 @@ fn serve_owner(identity: &str) -> Result<()> {
     Ok(())
 }
 
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn interrupt(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+/// Turns SIGINT, SIGTERM and SIGHUP into a flag the measurement loops check, so an interrupted
+/// run still closes its Workspace, revokes its pairing and restores exposure.
+fn trap_interrupts() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe, and the
+        // action is fully initialized before sigaction reads it.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+fn continue_unless_interrupted() -> Result<()> {
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        fail("interrupted")
+    } else {
+        Ok(())
+    }
+}
+
 fn main() {
     protocol::name_client("latency-probe");
+    trap_interrupts();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let result = match arguments.split_first() {
         Some((command, rest)) if command == "measure" => options(rest).and_then(|options| {
