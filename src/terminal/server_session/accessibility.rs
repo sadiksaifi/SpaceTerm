@@ -185,7 +185,8 @@ impl Fetcher {
         }
     }
 
-    /// Whether the next chunk of a partial transfer can follow without an output check.
+    /// Whether the next chunk of a partial transfer follows on the worker's next turn, without
+    /// waiting for a wake.
     pub(super) fn can_continue(&self) -> bool {
         self.continues
     }
