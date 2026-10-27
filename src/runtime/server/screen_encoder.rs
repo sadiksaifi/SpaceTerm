@@ -280,6 +280,13 @@ impl Baseline {
 }
 
 /// Encodes Scrollback rows with page-local tables, so a page never depends on frame order.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Scrollback pages are encoded with it when scrollback merges"
+    )
+)]
 pub(crate) fn encode_page<'a>(
     epoch: u64,
     start: u64,

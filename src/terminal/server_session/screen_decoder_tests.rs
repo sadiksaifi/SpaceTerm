@@ -539,3 +539,72 @@ fn pages_round_trip_with_their_own_tables() {
         Some(UpdateError::Malformed)
     );
 }
+
+#[test]
+fn snapshots_keep_program_colors_and_project_client_defaults() {
+    let mut appearance = crate::terminal::test_terminal_appearance_update();
+    let configured = Arc::make_mut(&mut appearance.appearance);
+    configured.colors.background = crate::appearance::Color::rgb(0xffffff);
+    configured.colors.normal[0] = crate::appearance::Color::rgb(0x112233);
+    let link = |id, link| spaceterm_server::protocol::screen::LinkDefinition { id, link };
+    let run = |link| Run {
+        style: 0,
+        link: Some(link),
+        text: "x".into(),
+        cells: Cells::Narrow,
+    };
+    let update = ScreenUpdate {
+        geometry: Some(spaceterm_server::protocol::screen::Geometry {
+            columns: 2,
+            rows: 2,
+            cell_pixels: None,
+        }),
+        modes: Some(Default::default()),
+        colors: Some(spaceterm_server::protocol::screen::Colors {
+            foreground: [10, 20, 30],
+            background: [0, 0, 0],
+            cursor: [0, 0, 0],
+            cursor_text: [0, 0, 0],
+            palette: vec![[40, 50, 60]; 256],
+            foreground_overridden: true,
+            background_overridden: false,
+            cursor_overridden: false,
+            palette_overrides: [0b10, 0, 0, 0],
+        }),
+        links: vec![
+            link(
+                0,
+                pane::effects::Hyperlink::Url("https://example.test".into()),
+            ),
+            link(1, pane::effects::Hyperlink::File("/etc/passwd".into())),
+        ],
+        rows: vec![Row {
+            index: 0,
+            wrapped: false,
+            runs: vec![run(0), run(1)],
+        }],
+        ..ScreenUpdate::default()
+    };
+    let mut decoder = ScreenDecoder::default();
+    let decoded = decoder.apply(1, None, update, None).unwrap();
+    // A file link needs local authority, which this decoder was not given.
+    assert_eq!(
+        decoded.rows[0][0].hyperlink.as_ref().unwrap().kind,
+        crate::runtime::HyperlinkKind::Url
+    );
+    assert!(decoded.rows[0][1].hyperlink.is_none());
+    let screen = decoded.snapshot(PresentationGeneration::test(1), &appearance);
+    assert_eq!(
+        screen.colors.foreground,
+        crate::appearance::Color::rgb(0x0a141e)
+    );
+    assert_eq!(screen.background, crate::appearance::Color::rgb(0xffffff));
+    assert_eq!(
+        screen.colors.palette[0],
+        crate::appearance::Color::rgb(0x112233)
+    );
+    assert_eq!(
+        screen.colors.palette[1],
+        crate::appearance::Color::rgb(0x28323c)
+    );
+}

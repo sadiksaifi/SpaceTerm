@@ -7,7 +7,7 @@ use spaceterm_server::{
     connection::link::ServerLink,
     hierarchy::{Id, Inventory},
     pane::{
-        FocusTarget, Lease, Screen,
+        FocusTarget, Lease,
         metadata::{
             CommandState, DirectoryProvenance, Freshness, Progress, Snapshot, TitleGlyph,
             TitleProvenance,
@@ -16,7 +16,7 @@ use spaceterm_server::{
     },
     protocol::{
         Channel, Operation, ReplyBody,
-        interim::{Interim, InterimReply},
+        interim::{Interim, InterimReply, ScreenFrame},
     },
 };
 use std::time::{Duration, Instant};
@@ -105,7 +105,7 @@ fn send(pane: &Pane, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn screen(pane: &Pane, predicate: impl Fn(&Screen) -> bool) -> Result<Box<Screen>> {
+fn screen(pane: &Pane, predicate: impl Fn(&ScreenFrame) -> bool) -> Result<Box<ScreenFrame>> {
     let until = Instant::now() + WAIT;
     loop {
         if let Some(screen) = stage("presentation-screen", pane.screen())?
@@ -233,6 +233,7 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
     let before = screen(pane, |screen| {
         has_row(screen, READY)
             && screen
+                .update
                 .reading
                 .as_ref()
                 .is_some_and(|reading| reading.total_rows > reading.visible_rows)
@@ -271,8 +272,8 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
         "clear admission reply changed",
     )?;
     screen(pane, |screen| {
-        screen.generation != before.generation
-            && screen.reading.as_ref().is_some_and(|reading| {
+        screen.update.generation != before.update.generation
+            && screen.update.reading.as_ref().is_some_and(|reading| {
                 reading.total_rows == reading.visible_rows && reading.offset_rows == 0
             })
             && !support::rows(screen)

@@ -48,7 +48,7 @@ fn terminal_fixture_command(
     command: &str,
     stage: &'static str,
     witness: &'static str,
-) -> Result<Box<spaceterm_server::pane::Screen>, terminal_semantics::Failure> {
+) -> Result<Box<spaceterm_server::protocol::interim::ScreenFrame>, terminal_semantics::Failure> {
     let status = format!("ST-FIXTURE-{stage}-EXIT=");
     let command = format!("{command}; printf '\\n{status}%d\\n' \"$?\"");
     terminal_semantics::stage(stage, pane.command(&command))?;

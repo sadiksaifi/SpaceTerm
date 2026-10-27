@@ -10,6 +10,7 @@ use spaceterm_server::direct::{
 use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
 use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize, Refusal};
 use spaceterm_server::protocol::interim::{Interim, InterimReply};
+use spaceterm_server::protocol::screen::CursorPosition;
 use spaceterm_server::protocol::{
     ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
 };
@@ -212,8 +213,8 @@ pub enum Route {
 
 /// A probe Workspace whose Pane runs `cat` on a raw terminal, so each typed key echoes once.
 ///
-/// Screens are polled until the server pushes frames. The probe keeps only the generation of the
-/// last screen it saw, which `PollChanges` names as its base, and the cursor that the echo moves.
+/// Screens are polled until the server pushes frames. The probe keeps only the last frame it saw,
+/// which `PollChanges` names as its base, and the cursor that the echo moves.
 pub struct EchoPane {
     server: ServerConnection,
     link: ServerLink,
@@ -222,8 +223,8 @@ pub struct EchoPane {
     channel: Option<ChannelHandle>,
     /// The first input the server discarded. The connection's I/O thread records it.
     discarded: Arc<Mutex<Option<Refusal>>>,
-    generation: Option<u64>,
-    cursor: Option<(u16, u16, u8)>,
+    frame: Option<u64>,
+    cursor: Option<CursorPosition>,
 }
 
 const READY: &str = "PROBE-READY";
@@ -292,7 +293,7 @@ impl EchoPane {
             workspace,
             channel: None,
             discarded: Arc::default(),
-            generation: None,
+            frame: None,
             cursor: None,
         };
         // Close the Workspace if the Pane never becomes ready.
@@ -373,9 +374,10 @@ impl EchoPane {
                 channel: self.channel()?.channel(),
             };
             if let InterimReply::Screen(screen) = interim(&self.link, "ready", poll)?
-                && screen.rows.iter().any(|row| {
-                    row.iter()
-                        .map(|cell| cell.text.as_str())
+                && screen.update.rows.iter().any(|row| {
+                    row.runs
+                        .iter()
+                        .map(|run| run.text.as_str())
                         .collect::<String>()
                         .contains(READY)
                 })
@@ -388,7 +390,7 @@ impl EchoPane {
             std::thread::sleep(Duration::from_millis(20));
         }
         std::thread::sleep(Duration::from_millis(300));
-        self.generation = None;
+        self.frame = None;
         self.poll("screen")?;
         Ok(())
     }
@@ -423,19 +425,20 @@ impl EchoPane {
         self.reported()?;
         let poll = Interim::PollChanges {
             channel: self.channel()?.channel(),
-            base: self.generation,
+            base: self.frame,
         };
         let screen = match interim(&self.link, stage, poll)? {
             InterimReply::Screen(screen) => *screen,
-            InterimReply::ScreenChanges(changes) => changes.screen,
             InterimReply::Unchanged | InterimReply::AccessibilityRevision { .. } => {
                 return Ok(false);
             }
             _ => return fail(stage),
         };
-        self.generation = Some(screen.generation);
-        let moved = screen.cursor != self.cursor;
-        self.cursor = screen.cursor;
+        // The probe reads only the cursor, so every update applies whatever its base.
+        self.frame = Some(screen.frame);
+        let cursor = screen.update.cursor.position;
+        let moved = cursor != self.cursor;
+        self.cursor = cursor;
         Ok(moved)
     }
 
@@ -473,7 +476,7 @@ impl EchoPane {
     pub fn rewind(&mut self) -> Result<()> {
         self.input(vec![InputEvent::Key(enter_key())])?;
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.cursor.map(|cursor| cursor.0) != Some(0) {
+        while self.cursor.map(|cursor| cursor.column) != Some(0) {
             self.await_echo(deadline)?;
         }
         Ok(())

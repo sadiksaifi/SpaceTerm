@@ -56,7 +56,7 @@ pub const MAX_EFFECTS_PER_CHANNEL: usize = 8;
 /// Style definitions one channel keeps.
 pub const MAX_STYLES: usize = 4096;
 /// Hyperlink definitions one channel keeps.
-pub const MAX_LINKS: usize = crate::pane::effects::MAX_SCREEN_HYPERLINKS;
+pub const MAX_LINKS: usize = 1024;
 /// Largest hyperlink target in a link definition.
 pub const MAX_LINK_BYTES: usize = 4096;
 /// Largest text of one cell. Servers shorten longer grapheme clusters at a character boundary, so

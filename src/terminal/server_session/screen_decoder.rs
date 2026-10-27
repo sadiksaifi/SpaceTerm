@@ -37,6 +37,13 @@ pub(super) struct DecodedScreen {
     pub(super) modes: Modes,
     pub(super) colors: Colors,
     pub(super) cursor: Cursor,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the Scrollback cache reads it when scrollback merges"
+        )
+    )]
     pub(super) history: History,
     pub(super) reading: Option<pane::reading::Snapshot>,
     pub(super) graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
@@ -197,6 +204,13 @@ impl ScreenDecoder {
 }
 
 /// Decodes a Scrollback page against its own tables. Each row has `columns` cells.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Scrollback cache decodes pages when scrollback merges"
+    )
+)]
 pub(super) fn decode_page(
     page: &Page,
     columns: u16,
@@ -324,7 +338,26 @@ fn rgb(color: [u8; 3]) -> crate::appearance::Color {
     crate::appearance::Color::from_rgb_components(color[0], color[1], color[2])
 }
 
+/// The text of each row of a polled keyframe, with a wide character's spacer as a space.
+#[cfg(test)]
+pub(super) fn keyframe_lines(
+    frame: &spaceterm_server::protocol::interim::ScreenFrame,
+) -> Vec<String> {
+    ScreenDecoder::default()
+        .apply(frame.frame, frame.base, frame.update.clone(), None)
+        .map(DecodedScreen::lines)
+        .unwrap_or_default()
+}
+
 impl DecodedScreen {
+    #[cfg(test)]
+    pub(super) fn lines(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.text.as_str()).collect())
+            .collect()
+    }
+
     /// The screen the renderer draws, with the client's own colors wherever the program did not
     /// override them. Graphics and Pane metadata are left to the caller.
     pub(super) fn snapshot(

@@ -1,7 +1,7 @@
 //! Golden vectors pin the wire bytes. Round trips cover every operation and every reused payload
 //! type, including optional fields in both states, because postcard has no field names.
 use super::frame::{Assembler, DecodeError, FrameReader, Kind, encode_client, encode_server};
-use super::interim::{Interim, InterimReply};
+use super::interim::{self, Interim, InterimReply};
 use super::screen::{
     Cells, Cursor, CursorPosition, Geometry, History, Row, Run, ScrollShift, Style, StyleDefinition,
 };
@@ -591,7 +591,11 @@ fn every_server_message_round_trips() {
             }),
             hidden_input: true,
         }),
-        ReplyBody::Interim(InterimReply::Screen(Box::new(screen()))),
+        ReplyBody::Interim(InterimReply::Screen(Box::new(interim::ScreenFrame {
+            frame: 2,
+            base: Some(1),
+            update: update(),
+        }))),
         ReplyBody::Interim(InterimReply::ReadingReady {
             generation: 1,
             selection_revision: 2,
@@ -674,45 +678,6 @@ fn every_server_message_round_trips() {
     })));
     server_round_trip(ServerMessage::Ping(Ping { nonce: 1 }));
     server_round_trip(ServerMessage::Pong(Pong { nonce: 1 }));
-}
-
-fn screen() -> pane::Screen {
-    pane::Screen {
-        accessibility_revision: 1,
-        graphics: None,
-        cell_pixels: Some((8, 16)),
-        reading: None,
-        hyperlinks: vec![],
-        generation: 2,
-        mouse_tracking: false,
-        alternate_scroll: true,
-        columns: 2,
-        rows: vec![vec![pane::Cell {
-            hyperlink: None,
-            text: "a".into(),
-            foreground: pane::Color::Default,
-            background: pane::Color::Rgb([1, 2, 3]),
-            underline_color: pane::Color::Default,
-            flags: 0,
-            underline: 0,
-        }]],
-        wrapped: vec![false],
-        foreground: [0; 3],
-        background: [0; 3],
-        palette: vec![[0; 3]; 256],
-        reversed: false,
-        foreground_overridden: false,
-        background_overridden: false,
-        cursor_overridden: false,
-        palette_overrides: vec![false; 256],
-        cursor: None,
-        cursor_visible: true,
-        cursor_blinking: false,
-        cursor_shape: 0,
-        cursor_color: [0; 3],
-        cursor_text: [0; 3],
-        alternate: false,
-    }
 }
 
 #[test]
