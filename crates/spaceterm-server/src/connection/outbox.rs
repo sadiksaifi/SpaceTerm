@@ -23,7 +23,7 @@ use crate::protocol::{
     Channel, Fatal, Frame, InventoryRevision, PaneEvent, PaneMessage, Ping, Pong, Refusal, Reply,
     ReplyBody, RequestId, ServerMessage, limits,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -104,20 +104,30 @@ struct State {
     l0: VecDeque<Vec<u8>>,
     l0_bytes: usize,
     l1: VecDeque<Entry>,
+    /// Bytes of the queued `Entry::Message`s.
+    l1_bytes: usize,
     l1_rest: VecDeque<Vec<u8>>,
-    l2: VecDeque<Frames>,
+    /// The reply whose last frame is the last of `l1_rest`.
+    l1_rest_reply: Option<RequestId>,
+    l2: VecDeque<(RequestId, Frames)>,
+    l2_bytes: usize,
     l2_rest: VecDeque<Vec<u8>>,
+    l2_rest_reply: Option<RequestId>,
     inventory: Option<Frames>,
     inventory_queued: bool,
     channels: BTreeMap<Channel, Slot>,
     /// Channels closed since the connection last asked, for its serial bookkeeping.
     closed: Vec<Channel>,
-    requests: BTreeSet<RequestId>,
+    /// Requests the peer began, until their reply's last frame is taken for writing, so
+    /// [`limits::MAX_REQUESTS_IN_FLIGHT`] also bounds replies queued but not yet written. `true`
+    /// once the reply is queued.
+    requests: BTreeMap<RequestId, bool>,
     closing: bool,
 }
 
 enum Entry {
-    Message(Frames),
+    /// A whole message, and the request its last frame answers.
+    Message(Frames, Option<RequestId>),
     Inventory,
     Frame(Channel),
 }
@@ -166,11 +176,14 @@ impl Outbox {
         result
     }
 
-    /// Registers a request id from the peer. A duplicate in-flight id, or more than
+    /// Registers a request id from the peer. An id is in flight until its reply's last frame is
+    /// taken for writing. A duplicate in-flight id, or more than
     /// [`limits::MAX_REQUESTS_IN_FLIGHT`], is a violation.
     pub fn begin(&self, id: RequestId) -> Result<(), OutboxError> {
         let mut state = self.lock();
-        if state.requests.len() >= limits::MAX_REQUESTS_IN_FLIGHT || !state.requests.insert(id) {
+        if state.requests.len() >= limits::MAX_REQUESTS_IN_FLIGHT
+            || state.requests.insert(id, false).is_some()
+        {
             return Err(OutboxError::Violation);
         }
         Ok(())
@@ -187,18 +200,23 @@ impl Outbox {
         let frames = encode(&ServerMessage::Reply(Box::new(Reply { id, result })))?;
         self.with(|state| {
             state.open()?;
-            if !state.requests.contains(&id) {
+            if state.requests.get(&id) != Some(&false) {
                 return Err(OutboxError::Misuse);
             }
             if bulk {
-                if state.l2.len() >= limits::MAX_L2_MESSAGES {
+                let bytes = size(&frames);
+                if state.l2.len() >= limits::MAX_L2_MESSAGES
+                    || state.l2_bytes + bytes > limits::MAX_L2_BYTES
+                {
                     return Err(state.overflow());
                 }
-                state.l2.push_back(frames);
+                state.l2_bytes += bytes;
+                state.l2.push_back((id, frames));
             } else {
-                state.push_l1(Entry::Message(frames))?;
+                state.push_l1(Entry::Message(frames, Some(id)))?;
             }
-            state.requests.remove(&id);
+            // The id stays in flight until the reply's last frame is taken for writing.
+            state.requests.insert(id, true);
             Ok(())
         })
     }
@@ -226,7 +244,7 @@ impl Outbox {
     /// `SessionEnded`, `Failed`, `DirectoryUnavailable` and `Takeover`.
     pub fn pane(&self, channel: Channel, event: PaneEvent) -> Result<(), OutboxError> {
         let frames = encode(&ServerMessage::Pane(PaneMessage { channel, event }))?;
-        self.with(|state| state.push_l1(Entry::Message(frames)))
+        self.with(|state| state.push_l1(Entry::Message(frames, None)))
     }
 
     /// Replaces any inventory revision not yet written. A reply queued after this call is
@@ -325,7 +343,7 @@ impl Outbox {
             state.open()?;
             let Some(slot) = state.channels.get_mut(&channel) else {
                 state.closed.push(channel);
-                return state.push_l1(Entry::Message(frames));
+                return state.push_l1(Entry::Message(frames, None));
             };
             if slot.end.is_some() {
                 return Ok(());
@@ -333,7 +351,7 @@ impl Outbox {
             if slot.pending.is_none() && slot.in_flight.is_none() {
                 state.channels.remove(&channel);
                 state.closed.push(channel);
-                return state.push_l1(Entry::Message(frames));
+                return state.push_l1(Entry::Message(frames, None));
             }
             slot.end = Some(frames);
             Ok(())
@@ -364,7 +382,7 @@ impl Outbox {
             state.closed.push(channel);
             // A full L1 closes the outbox with `Goodbye(Stalled)`, so the event is not lost
             // silently: the whole connection ends.
-            let _ = state.push_l1(Entry::Message(frames));
+            let _ = state.push_l1(Entry::Message(frames, None));
             drop(state);
             self.shared.wake.wake();
         }
@@ -420,7 +438,7 @@ impl Outbox {
             } else if let Some(frames) = slot.end.take() {
                 state.channels.remove(&channel);
                 state.closed.push(channel);
-                state.push_l1(Entry::Message(frames))?;
+                state.push_l1(Entry::Message(frames, None))?;
             }
             Ok(())
         })
@@ -498,6 +516,10 @@ impl Outbox {
     }
 }
 
+fn size(frames: &Frames) -> usize {
+    frames.iter().map(Vec::len).sum()
+}
+
 fn encode(message: &ServerMessage) -> Result<Frames, OutboxError> {
     encode_server(message)
         .map(|wire| wire.frames)
@@ -541,11 +563,24 @@ impl State {
 
     fn push_l1(&mut self, entry: Entry) -> Result<(), OutboxError> {
         self.open()?;
-        if self.l1.len() >= limits::MAX_L1_MESSAGES {
+        let bytes = match &entry {
+            Entry::Message(frames, _) => size(frames),
+            Entry::Inventory | Entry::Frame(_) => 0,
+        };
+        if self.l1.len() >= limits::MAX_L1_MESSAGES || self.l1_bytes + bytes > limits::MAX_L1_BYTES
+        {
             return Err(self.overflow());
         }
+        self.l1_bytes += bytes;
         self.l1.push_back(entry);
         Ok(())
+    }
+
+    /// The reply's last frame was taken for writing, so its id leaves flight.
+    fn answered(&mut self, reply: Option<RequestId>) {
+        if let Some(id) = reply {
+            self.requests.remove(&id);
+        }
     }
 
     fn take(&mut self) -> Option<Taken> {
@@ -557,35 +592,57 @@ impl State {
             return None;
         }
         if let Some(frame) = self.l1_rest.pop_front() {
+            if self.l1_rest.is_empty() {
+                let reply = self.l1_rest_reply.take();
+                self.answered(reply);
+            }
             return Some(Taken::Frame(frame, Priority::L1));
         }
         if let Some(entry) = self.l1.pop_front() {
-            let frames = match entry {
-                Entry::Message(frames) => frames,
+            let (frames, reply) = match entry {
+                Entry::Message(frames, reply) => {
+                    self.l1_bytes = self.l1_bytes.saturating_sub(size(&frames));
+                    (frames, reply)
+                }
                 Entry::Inventory => {
                     self.inventory_queued = false;
-                    self.inventory.take().unwrap_or_default()
+                    (self.inventory.take().unwrap_or_default(), None)
                 }
                 Entry::Frame(channel) => return Some(self.present(channel)),
             };
-            return Some(self.first(frames, Priority::L1));
+            return Some(self.first(frames, reply, Priority::L1));
         }
         if let Some(frame) = self.l2_rest.pop_front() {
+            if self.l2_rest.is_empty() {
+                let reply = self.l2_rest_reply.take();
+                self.answered(reply);
+            }
             return Some(Taken::Frame(frame, Priority::L2));
         }
-        let frames = self.l2.pop_front()?;
-        Some(self.first(frames, Priority::L2))
+        let (id, frames) = self.l2.pop_front()?;
+        self.l2_bytes = self.l2_bytes.saturating_sub(size(&frames));
+        Some(self.first(frames, Some(id), Priority::L2))
     }
 
-    /// Returns the first frame of a message and keeps the rest ahead of its level's queue.
-    fn first(&mut self, frames: Frames, priority: Priority) -> Taken {
+    /// Returns the first frame of a message and keeps the rest ahead of its level's queue. A
+    /// reply leaves flight with its last frame.
+    fn first(&mut self, frames: Frames, reply: Option<RequestId>, priority: Priority) -> Taken {
         let mut frames = frames.into_iter();
         let Some(first) = frames.next() else {
+            self.answered(reply);
             return Taken::Skip;
         };
-        match priority {
-            Priority::L2 => self.l2_rest.extend(frames),
-            _ => self.l1_rest.extend(frames),
+        let rest = match priority {
+            Priority::L2 => &mut self.l2_rest,
+            _ => &mut self.l1_rest,
+        };
+        rest.extend(frames);
+        if rest.is_empty() {
+            self.answered(reply);
+        } else if priority == Priority::L2 {
+            self.l2_rest_reply = reply;
+        } else {
+            self.l1_rest_reply = reply;
         }
         Taken::Frame(first, priority)
     }

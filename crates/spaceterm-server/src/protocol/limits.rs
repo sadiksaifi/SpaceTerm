@@ -84,6 +84,11 @@ pub const MAX_CLIENT_L0_BYTES: usize = 2 * MAX_PASTE_BYTES;
 pub const MAX_L1_MESSAGES: usize = 4096;
 /// L2 messages a server queues before the connection is `Stalled`.
 pub const MAX_L2_MESSAGES: usize = MAX_REQUESTS_IN_FLIGHT;
+/// Bytes of replies and Pane events a server queues at L1, not counting the latest-state
+/// inventory and presentation, before the connection is `Stalled`. Room for two largest replies.
+pub const MAX_L1_BYTES: usize = 2 * MAX_REPLY_BYTES;
+/// Bytes of bulk replies a server queues at L2 before the connection is `Stalled`.
+pub const MAX_L2_BYTES: usize = 2 * MAX_REPLY_BYTES;
 
 /// A peer pings after receiving nothing for this long.
 pub const PING_AFTER: Duration = Duration::from_secs(5);
