@@ -6,7 +6,7 @@ use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::repository_status::{
-    RepositoryWatch, RepositoryWatchError, RepositoryWatcher, WatchDirectory,
+    ChangedPaths, RepositoryWatch, RepositoryWatchError, RepositoryWatcher, WatchDirectory,
 };
 
 /// Reports changes below git directories through `notify`.
@@ -31,7 +31,7 @@ impl RepositoryWatcher for NotifyRepositoryWatcher {
     fn watch_paths(
         &self,
         directories: Vec<WatchDirectory>,
-        changed: Box<dyn Fn(&[PathBuf]) + Send + Sync>,
+        changed: ChangedPaths,
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {

@@ -382,6 +382,9 @@ pub(crate) struct RepositoryWatchError;
 /// Dropping the value stops watching.
 pub(crate) trait RepositoryWatch: Send {}
 
+/// Called with the paths a watch saw change. An empty list means the paths are unknown.
+pub(crate) type ChangedPaths = Box<dyn Fn(&[PathBuf]) + Send + Sync>;
+
 /// Watches local directories. A desktop watches git directories, never a work tree.
 pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
     /// Calls `changed` after any change, and after any watch error, below `directories`.
@@ -396,7 +399,7 @@ pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
     fn watch_paths(
         &self,
         directories: Vec<WatchDirectory>,
-        changed: Box<dyn Fn(&[PathBuf]) + Send + Sync>,
+        changed: ChangedPaths,
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
         self.watch(directories, Box::new(move || changed(&[])))
     }
