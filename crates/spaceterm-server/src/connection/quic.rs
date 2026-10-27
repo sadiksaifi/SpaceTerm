@@ -17,7 +17,10 @@ use super::Wake;
 use super::carrier::{Carrier, CarrierError, Flush, Offer, Priority, Readiness};
 use crate::protocol::frame::FrameReader;
 use crate::protocol::{RawFrame, limits};
-use iroh::endpoint::{Connection, QuicTransportConfig, RecvStream, SendStream, VarInt, presets};
+use iroh::endpoint::{
+    AckFrequencyConfig, Connection, Controller, ControllerFactory, QuicTransportConfig, RecvStream,
+    RttEstimator, SendStream, VarInt, presets,
+};
 use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -108,11 +111,118 @@ pub fn secret_key(pkcs8: &[u8], public: &[u8; 32]) -> Result<SecretKey, QuicErro
 }
 
 fn transport() -> QuicTransportConfig {
+    // Terminal traffic is a few packets at a time, so most losses are tail losses that only a
+    // probe timeout recovers. Asking the peer to acknowledge every packet at once keeps its
+    // acknowledgement delay out of that timeout.
+    let mut acknowledgements = AckFrequencyConfig::default();
+    acknowledgements
+        .ack_eliciting_threshold(VarInt::from_u32(0))
+        .max_ack_delay(Some(Duration::from_millis(1)));
     QuicTransportConfig::builder()
         // The server opens the one L0 stream; each side opens one stream per other level.
         .max_concurrent_bidi_streams(VarInt::from_u32(1))
         .max_concurrent_uni_streams(VarInt::from_u32(2))
+        .ack_frequency_config(Some(acknowledgements))
+        .congestion_controller_factory(Arc::new(Floored(Arc::default())))
         .build()
+}
+
+/// Packets the congestion window always allows.
+const FLOOR_PACKETS: u64 = 10;
+
+/// Builds Cubic with a window of at least [`FLOOR_PACKETS`]. Cubic grows only while the window
+/// limits sending, and terminal traffic rarely fills it, so random loss alone ratchets it down to
+/// two packets and a screen of output then waits a round trip. The floor equals the usual initial
+/// window.
+#[derive(Debug)]
+struct Floored(Arc<noq_proto::congestion::CubicConfig>);
+
+impl ControllerFactory for Floored {
+    fn build(self: Arc<Self>, now: Instant, current_mtu: u16) -> Box<dyn Controller> {
+        Box::new(Floor {
+            inner: Arc::clone(&self.0).build(now, current_mtu),
+            mtu: current_mtu,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct Floor {
+    inner: Box<dyn Controller>,
+    mtu: u16,
+}
+
+impl Controller for Floor {
+    fn on_sent(&mut self, now: Instant, bytes: u64, largest: u64) {
+        self.inner.on_sent(now, bytes, largest);
+    }
+    fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet: u64) {
+        self.inner.on_packet_sent(now, bytes, packet);
+    }
+    fn on_cwnd_limited(&mut self) {
+        self.inner.on_cwnd_limited();
+    }
+    fn on_ack(
+        &mut self,
+        now: Instant,
+        sent: Instant,
+        bytes: u64,
+        packet: u64,
+        app_limited: bool,
+        rtt: &RttEstimator,
+    ) {
+        self.inner
+            .on_ack(now, sent, bytes, packet, app_limited, rtt);
+    }
+    fn on_end_acks(
+        &mut self,
+        now: Instant,
+        in_flight: u64,
+        app_limited: bool,
+        largest: Option<u64>,
+    ) {
+        self.inner.on_end_acks(now, in_flight, app_limited, largest);
+    }
+    fn on_congestion_event(
+        &mut self,
+        now: Instant,
+        sent: Instant,
+        persistent: bool,
+        ecn: bool,
+        lost: u64,
+        largest: u64,
+    ) {
+        self.inner
+            .on_congestion_event(now, sent, persistent, ecn, lost, largest);
+    }
+    fn on_packet_lost(&mut self, bytes: u16, packet: u64, now: Instant) {
+        self.inner.on_packet_lost(bytes, packet, now);
+    }
+    fn on_spurious_congestion_event(&mut self) {
+        self.inner.on_spurious_congestion_event();
+    }
+    fn on_mtu_update(&mut self, mtu: u16) {
+        self.mtu = mtu;
+        self.inner.on_mtu_update(mtu);
+    }
+    fn on_ack_frequency_update(&mut self, threshold: u64, delay: Duration) {
+        self.inner.on_ack_frequency_update(threshold, delay);
+    }
+    fn window(&self) -> u64 {
+        self.inner.window().max(FLOOR_PACKETS * u64::from(self.mtu))
+    }
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(Self {
+            inner: self.inner.clone_box(),
+            mtu: self.mtu,
+        })
+    }
+    fn initial_window(&self) -> u64 {
+        self.inner.initial_window()
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
 }
 
 async fn bind(

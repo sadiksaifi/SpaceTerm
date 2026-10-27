@@ -7184,6 +7184,7 @@ dependencies = [
  "flate2",
  "iroh",
  "libc",
+ "noq-proto",
  "postcard",
  "rcgen",
  "ring",

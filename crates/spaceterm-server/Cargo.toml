@@ -10,7 +10,7 @@ client = []
 # Lets another crate's tests serve a client handle in process.
 test-support = ["client"]
 # The QUIC carrier prototype of #671: iroh on direct addresses, beside WSS.
-iroh = ["dep:iroh", "dep:tokio"]
+iroh = ["dep:iroh", "dep:noq-proto", "dep:tokio"]
 
 [dependencies]
 base64 = "=0.22.1"
@@ -29,4 +29,5 @@ zeroize = "=1.9.0"
 spaceterm-directories = { path = "../spaceterm-directories" }
 thiserror = "2.0.17"
 iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"], optional = true }
+noq-proto = { version = "=1.4.0", default-features = false, optional = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync"], optional = true }
