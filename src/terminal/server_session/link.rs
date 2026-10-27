@@ -875,15 +875,16 @@ impl PaneLink {
     }
 
     /// Asks for a Scrollback page of the bound channel. `then` receives the page, or `None` when
-    /// the server refused it or the link ended, on the link's I/O thread.
+    /// the server refused it or the link ended, on the link's I/O thread. Returns `false`, without
+    /// calling `then`, when the link already carries as many requests as it allows.
     pub(super) fn scrollback_page(
         &self,
         lease: Lease,
         request: super::scrollback::PageRequest,
         then: impl FnOnce(Option<protocol::Page>) + Send + 'static,
-    ) -> Result<(), ServerError> {
+    ) -> Result<bool, ServerError> {
         let channel = self.bound(lease)?.channel();
-        self.link.request_then(
+        let sent = self.link.request_then(
             Operation::ScrollbackPage {
                 channel,
                 epoch: request.epoch,
@@ -896,8 +897,12 @@ impl PaneLink {
                     _ => None,
                 })
             },
-        )?;
-        Ok(())
+        );
+        match sent {
+            Ok(_) => Ok(true),
+            Err(LinkError::Busy) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Releases the channel after its last event or once its Terminal Session is gone.
@@ -1524,15 +1529,27 @@ pub(super) fn present(
                 let mut busy = false;
                 let mut deadline = None;
                 if ready && let Some((_, mapping)) = &mut latest_screen {
+                    // Pages decode outside the reading lock, which the main thread takes for
+                    // every key, pointer and wheel event; the lock is held only to add the rows.
+                    let pages = state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take_pages();
+                    if !pages.is_empty() {
+                        let decoded =
+                            reading::decode_pages(pages, mapping.size.columns, local_files.as_ref());
+                        state
+                            .reading
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .settle_pages(decoded);
+                    }
                     let turn = state
                         .reading
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .turn(
-                            std::time::Instant::now(),
-                            mapping.size.columns,
-                            local_files.as_ref(),
-                        );
+                        .turn(std::time::Instant::now());
                     if turn.copy_ready {
                         let _ = events.force_send(TerminalSessionEvent::SelectionCopyReady);
                     }
@@ -1556,16 +1573,30 @@ pub(super) fn present(
                         .unwrap_or_else(|e| e.into_inner())
                         .scrollback
                         .requests();
-                    for request in requests {
-                        let state = Arc::clone(&state);
-                        connection.scrollback_page(lease, request, move |page| {
-                            state
+                    for (index, request) in requests.iter().copied().enumerate() {
+                        let replies = Arc::clone(&state);
+                        let sent = connection.scrollback_page(lease, request, move |page| {
+                            replies
                                 .reading
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .page(request, page);
-                            state.wake.notify();
-                        })?;
+                            replies.wake.notify();
+                        });
+                        if !matches!(sent, Ok(true)) {
+                            // Requests the link did not take leave the in-flight count, and their
+                            // rows may be asked for again.
+                            state
+                                .reading
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .unsent(&requests[index..]);
+                            // A busy link takes them on a later turn.
+                            sent?;
+                            let retry = std::time::Instant::now() + reading::PAGE_RETRY;
+                            deadline = Some(deadline.map_or(retry, |due| due.min(retry)));
+                            break;
+                        }
                     }
                 }
                 // A hidden Pane transfers no images. Every image the manifest names is fetched,
