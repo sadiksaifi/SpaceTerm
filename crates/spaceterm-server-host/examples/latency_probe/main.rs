@@ -8,10 +8,11 @@
 //! and key-to-echo, closes the Workspace and prints one JSON result per line. A paired run
 //! enrolls a fresh pairing through an owner on the server's machine and revokes it afterwards.
 //! Without `--owner-command` the owner is this process, so the server must be on this machine;
-//! `--expose` enables its network exposure for the run. `owner` serves the owner side as JSON
-//! lines on standard input and output; when its input ends, it withdraws unused invitations and
-//! revokes the devices it approved. SIGINT, SIGTERM and SIGHUP stop a measurement through the
-//! same cleanup. Protocol calls live in `protocol.rs`.
+//! `--expose` enables the server's network exposure for the run, through the owner command when
+//! there is one. `owner` serves the owner side as JSON lines on standard input and output; when
+//! its input ends, it withdraws unused invitations, revokes the devices it approved and restores
+//! exposure. SIGINT, SIGTERM and SIGHUP stop a measurement through the same cleanup. Protocol
+//! calls live in `protocol.rs`.
 mod protocol;
 
 use protocol::{Claim, EchoPane, Failure, Owner, Route, fail};
@@ -69,9 +70,6 @@ fn options(arguments: &[String]) -> Result<Options> {
     }
     if options.route != "local" && options.route != "paired" {
         return fail("the route must be local or paired");
-    }
-    if options.expose.is_some() && options.owner_command.is_some() {
-        return fail("--expose needs the owner on this machine");
     }
     Ok(options)
 }
@@ -217,6 +215,16 @@ impl OwnerLink {
         self.ask(json!({ "abandon": true })).map(drop)
     }
 
+    /// Enables exposure at `bind`. Here it returns what to restore; an owner command restores
+    /// exposure itself when its input ends.
+    fn expose(&mut self, bind: std::net::SocketAddr) -> Result<Option<protocol::Exposure>> {
+        if let Self::Here(owner) = self {
+            return owner.expose(bind).map(Some);
+        }
+        self.ask(json!({ "expose": bind.to_string() }))
+            .map(|_| None)
+    }
+
     fn revoke(&mut self, device: &str) -> Result<usize> {
         if let Self::Here(owner) = self {
             return owner.revoke(device);
@@ -262,9 +270,9 @@ fn combine(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
 
 fn measure_paired(options: &Options) -> Result<()> {
     let mut owner = OwnerLink::open(options)?;
-    let exposure = match (&owner, options.expose) {
-        (OwnerLink::Here(here), Some(bind)) => Some(here.expose(bind)?),
-        _ => None,
+    let exposure = match options.expose {
+        Some(bind) => owner.expose(bind)?,
+        None => None,
     };
     let device = format!("latency-probe-{}", std::process::id());
     let result = (|| {
@@ -298,12 +306,23 @@ fn measure_paired(options: &Options) -> Result<()> {
 fn serve_owner(identity: &str) -> Result<()> {
     let owner = Owner::open(identity)?;
     let mut approved = Vec::new();
-    let served = serve_requests(&owner, &mut approved);
+    let mut exposure = None;
+    let served = serve_requests(&owner, &mut approved, &mut exposure);
     let revoked = approved.iter().map(|device| owner.revoke(device).map(drop));
-    combine([served, owner.abandon()].into_iter().chain(revoked))
+    let restored = exposure.map_or(Ok(()), |exposure| owner.restore(exposure));
+    combine(
+        [served, owner.abandon()]
+            .into_iter()
+            .chain(revoked)
+            .chain([restored]),
+    )
 }
 
-fn serve_requests(owner: &Owner, approved: &mut Vec<String>) -> Result<()> {
+fn serve_requests(
+    owner: &Owner,
+    approved: &mut Vec<String>,
+    exposure: &mut Option<protocol::Exposure>,
+) -> Result<()> {
     let mut output = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else {
@@ -325,6 +344,14 @@ fn serve_requests(owner: &Owner, approved: &mut Vec<String>) -> Result<()> {
             owner
                 .revoke(device)
                 .map(|count| json!({ "revoked": count }))
+        } else if let Some(bind) = request["expose"].as_str() {
+            match bind.parse() {
+                Ok(bind) if exposure.is_none() => owner.expose(bind).map(|previous| {
+                    *exposure = Some(previous);
+                    json!({ "exposed": true })
+                }),
+                _ => fail("owner exposure"),
+            }
         } else if request["abandon"] == true {
             owner.abandon().map(|()| json!({ "abandoned": true }))
         } else {
