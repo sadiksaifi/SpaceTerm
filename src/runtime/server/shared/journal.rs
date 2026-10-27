@@ -47,6 +47,17 @@ pub(in crate::runtime::server) struct Revision {
     number: u64,
 }
 
+impl Revision {
+    /// Whether retaining `self` retained `other`.
+    pub(in crate::runtime::server) fn covers(self, other: Revision) -> bool {
+        self.epoch == other.epoch && other.number <= self.number
+    }
+    /// Whether a recovery before `written` lost `self`, because it was never retained.
+    pub(in crate::runtime::server) fn lost_by(self, written: Revision) -> bool {
+        self.epoch < written.epoch
+    }
+}
+
 /// The revision may or may not be retained. The service reads the record back before relying on
 /// any retained state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,8 +65,11 @@ pub(in crate::runtime::server) struct Uncertain;
 
 pub(in crate::runtime::server) struct Journal {
     store: Box<dyn Retention>,
+    /// Called after each successful write with the revision it retained, outside the journal's
+    /// lock.
+    written: Box<dyn Fn(Revision) + Send + Sync>,
     progress: Mutex<Progress>,
-    written: Condvar,
+    wrote: Condvar,
 }
 
 #[derive(Default)]
@@ -68,17 +82,24 @@ struct Progress {
     writing: bool,
     /// Every revision of this epoch up to here is retained.
     durable: u64,
+    /// The write that retained `durable` has not reported it yet. Callers waiting for it wait
+    /// until it has, so what it publishes precedes their replies.
+    reporting: bool,
     failed: bool,
     /// The last durable revision of each earlier epoch. Later revisions of that epoch were lost.
     ended: BTreeMap<u64, u64>,
 }
 
 impl Journal {
-    pub(in crate::runtime::server) fn new(store: Box<dyn Retention>) -> Self {
+    pub(in crate::runtime::server) fn new(
+        store: Box<dyn Retention>,
+        written: Box<dyn Fn(Revision) + Send + Sync>,
+    ) -> Self {
         Self {
             store,
+            written,
             progress: Mutex::default(),
-            written: Condvar::new(),
+            wrote: Condvar::new(),
         }
     }
 
@@ -110,6 +131,18 @@ impl Journal {
         }
     }
 
+    /// Whether `revision` is retained already. Never waits.
+    pub(in crate::runtime::server) fn retained(&self, revision: Revision) -> bool {
+        let progress = self.progress();
+        if revision.epoch != progress.epoch {
+            return progress
+                .ended
+                .get(&revision.epoch)
+                .is_some_and(|durable| revision.number <= *durable);
+        }
+        revision.number <= progress.durable
+    }
+
     /// Returns once `revision` is retained. Writes the newest pending envelope unless another
     /// caller is already writing, in which case it waits for that write and checks again.
     pub(in crate::runtime::server) fn sync(&self, revision: Revision) -> Result<(), Uncertain> {
@@ -119,37 +152,45 @@ impl Journal {
                 let durable = progress.ended.get(&revision.epoch).ok_or(Uncertain)?;
                 return (revision.number <= *durable).then_some(()).ok_or(Uncertain);
             }
-            if revision.number <= progress.durable {
+            if revision.number <= progress.durable && !progress.reporting {
                 return Ok(());
             }
             if progress.failed {
                 return Err(Uncertain);
             }
-            if progress.writing {
+            if progress.writing || progress.reporting {
                 progress = self
-                    .written
+                    .wrote
                     .wait(progress)
                     .unwrap_or_else(|e| e.into_inner());
                 continue;
             }
             let (number, envelope) = progress.pending.take().ok_or(Uncertain)?;
+            let epoch = progress.epoch;
             progress.writing = true;
             drop(progress);
             let result = self.store.write(&envelope);
             progress = self.progress();
             progress.writing = false;
             match result {
-                Ok(()) => progress.durable = number,
+                Ok(()) => {
+                    progress.durable = number;
+                    progress.reporting = true;
+                    drop(progress);
+                    (self.written)(Revision { epoch, number });
+                    progress = self.progress();
+                    progress.reporting = false;
+                }
                 Err(_) => progress.failed = true,
             }
-            self.written.notify_all();
+            self.wrote.notify_all();
         }
     }
 
     /// Whether nothing waits to be written and the last write succeeded.
     pub(in crate::runtime::server) fn settled(&self) -> bool {
         let progress = self.progress();
-        !progress.failed && !progress.writing && progress.pending.is_none()
+        !progress.failed && !progress.writing && !progress.reporting && progress.pending.is_none()
     }
 
     /// Whether a write failed and the record must be read back.
@@ -240,7 +281,10 @@ mod tests {
     fn journal() -> (Arc<Journal>, Arc<Memory>) {
         let memory = Arc::new(Memory::default());
         (
-            Arc::new(Journal::new(Box::new(Shared(Arc::clone(&memory))))),
+            Arc::new(Journal::new(
+                Box::new(Shared(Arc::clone(&memory))),
+                Box::new(|_| {}),
+            )),
             memory,
         )
     }

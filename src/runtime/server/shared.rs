@@ -12,6 +12,7 @@ use std::time::Instant;
 mod close_control_tests;
 mod edits;
 mod journal;
+mod publication;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
@@ -36,10 +37,8 @@ pub struct SharedWorkspaceHost {
     /// The server's one sync worker. It writes the journal and sends deferred replies, in
     /// submission order.
     sync: SyncWorker,
-    /// Every admitted connection, which receives each inventory revision.
-    subscribers: BTreeMap<Id, edits::Subscriber>,
-    /// The inventory last pushed, so an unchanged one is not pushed again.
-    published: Option<Inventory>,
+    /// Every admitted connection, and the inventory each still waits to receive.
+    publication: Arc<publication::Publication>,
     /// Edits whose replies wait for a Worktree write to settle.
     waiting: Vec<edits::Waiting>,
     /// The host's wake, and the deadline the host last received from a tick.
@@ -92,8 +91,7 @@ impl SharedWorkspaceHost {
             fresh_panes: BTreeSet::new(),
             journal: None,
             sync,
-            subscribers: BTreeMap::new(),
-            published: None,
+            publication: Arc::default(),
             waiting: Vec::new(),
             ticker: None,
             armed: None,
@@ -941,7 +939,11 @@ impl SharedWorkspaceHost {
         if self.state.worktree_settings.is_none() && record.is_some() {
             self.state.worktree_settings = Some(Default::default());
         }
-        self.journal = Some(Arc::new(Journal::new(retention)));
+        let publication = Arc::clone(&self.publication);
+        self.journal = Some(Arc::new(Journal::new(
+            retention,
+            Box::new(move |revision| publication.release(revision)),
+        )));
         self.prepare_initial_organization()
             .map_err(|_| ServerError::StorageUnavailable)
     }
@@ -1176,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_replies_after_its_revision_is_pushed_and_retained() {
+    fn an_edit_is_pushed_and_replied_only_once_its_revision_is_retained() {
         use spaceterm_server::protocol::{ReplyBody, ServerMessage};
         let (mut host, memory) = journaled();
         let device = [1; 32];
@@ -1198,25 +1200,60 @@ mod tests {
         // What the connection does with `After` work, under the lock.
         host.sync.reply(&outbox, id, work).unwrap();
         assert!(
-            matches!(
-                drain(&outbox).as_slice(),
-                [ServerMessage::Inventory(revision)]
-                    if revision.inventory.workspaces[0].name == "Edited"
-                        && revision.next_sequence == 2
-            ),
-            "the revision is pushed while its write is held, and the reply waits"
+            drain(&outbox).is_empty(),
+            "neither the revision nor the reply leaves while its write is held"
         );
         release.send(()).unwrap();
         host.sync.flush().unwrap();
         assert!(matches!(
             drain(&outbox).as_slice(),
-            [ServerMessage::Reply(reply)] if matches!(reply.result, Ok(ReplyBody::Outcome(_)))
+            [ServerMessage::Inventory(revision), ServerMessage::Reply(reply)]
+                if revision.inventory.workspaces[0].name == "Edited"
+                    && revision.next_sequence == 2
+                    && matches!(reply.result, Ok(ReplyBody::Outcome(_)))
         ));
         assert!(retained_outcome(&memory, device, 1));
         HostCommands::acknowledge(&mut host, device, 1);
         host.sync.flush().unwrap();
         assert!(!retained_outcome(&memory, device, 1));
         assert!(drain(&outbox).is_empty(), "an acknowledgement has no reply");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_revision_whose_write_fails_is_never_pushed() {
+        use spaceterm_server::protocol::ServerMessage;
+        use std::sync::atomic::Ordering;
+        let (mut host, memory) = journaled();
+        let device = [1; 32];
+        let outbox = Outbox::new(Arc::new(|| {}));
+        HostCommands::connected(&mut host, device, device, &outbox);
+        drain(&outbox);
+        memory.fail.store(true, Ordering::SeqCst);
+        let id = RequestId(1);
+        outbox.begin(id).unwrap();
+        let mutation = rename(&host, "Lost");
+        let Dispatch::After(work) =
+            HostCommands::mutate(&mut host, device, device, id, 1, Some(mutation))
+        else {
+            panic!("an edit replies after its write");
+        };
+        host.sync.reply(&outbox, id, work).unwrap();
+        host.sync.flush().unwrap();
+        assert!(matches!(
+            drain(&outbox).as_slice(),
+            [ServerMessage::Reply(reply)] if matches!(reply.result, Err(Refusal::StorageUnavailable))
+        ));
+        memory.fail.store(false, Ordering::SeqCst);
+        host.tick(Instant::now());
+        assert!(
+            drain(&outbox).iter().all(|message| !matches!(
+                message,
+                ServerMessage::Inventory(revision)
+                    if revision.inventory.workspaces[0].name == "Lost"
+            )),
+            "recovery publishes only retained organization"
+        );
         host.shutdown().unwrap();
     }
 

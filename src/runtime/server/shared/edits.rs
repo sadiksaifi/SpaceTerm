@@ -1,22 +1,15 @@
 //! Pushes Workspace Inventory to every connection and answers shared edits after the revision
 //! that holds their outcome.
 //!
-//! An edit commits under the lock, and its revision is queued on every connection before its
-//! reply. The reply itself waits on the sync worker until that revision is retained, so the lock
-//! is never held for a sync and a client never retires an outcome the server could lose. An edit
-//! that waits for a Worktree write is answered when the write settles.
+//! An edit commits under the lock and stages the inventory that holds it. Its reply waits on the
+//! sync worker until that revision is retained. The write that retains it pushes the inventory
+//! first, so the lock is never held for a sync, no client sees organization the server could
+//! lose, and the reply follows the revision that holds its outcome. An edit that waits for a
+//! Worktree write is answered when the write settles.
 use super::*;
 use spaceterm_server::connection::outbox::Outbox;
 use spaceterm_server::connection::service::{AfterLock, Dispatch};
-use spaceterm_server::protocol::{InventoryRevision, ReplyBody, RequestId};
-
-/// One admitted connection.
-pub(super) struct Subscriber {
-    device: Id,
-    outbox: Outbox,
-    /// The next operation sequence last pushed to this client.
-    sent: Option<u64>,
-}
+use spaceterm_server::protocol::{ReplyBody, RequestId};
 
 /// An edit whose reply waits for a Worktree write to settle.
 pub(super) struct Waiting {
@@ -33,43 +26,33 @@ impl SharedWorkspaceHost {
     /// Starts pushing inventory to a connection, beginning with the current revision.
     pub(super) fn subscribe(&mut self, device: Id, connection: Id, outbox: Outbox) {
         self.repositories.subscribe(connection);
-        self.subscribers.insert(
-            connection,
-            Subscriber {
-                device,
-                outbox,
-                sent: None,
-            },
-        );
+        self.publication.subscribe(device, connection, outbox);
         self.publish();
     }
 
     /// Forgets a closed connection and the replies it can no longer receive.
     pub(super) fn unsubscribe(&mut self, connection: Id) {
-        self.subscribers.remove(&connection);
+        self.publication.unsubscribe(connection);
         self.waiting.retain(|waiting| waiting.connection != connection);
     }
 
-    /// Pushes the inventory to each connection that has not received it. A newer revision
-    /// replaces one a connection has not written yet.
+    /// Stages the current inventory for every connection that has not received it. It is pushed
+    /// once the newest revision is retained, and a newer revision replaces one a connection has
+    /// not written yet.
     pub(super) fn publish(&mut self) {
-        if self.subscribers.is_empty() {
+        let devices = self.publication.devices();
+        if devices.is_empty() {
             return;
         }
-        let inventory = self.inventory();
-        let changed = self.published.as_ref() != Some(&inventory);
-        for subscriber in self.subscribers.values_mut() {
-            let next_sequence = self.state.next_sequence(subscriber.device);
-            if changed || subscriber.sent != Some(next_sequence) {
-                // A closing connection no longer needs it.
-                let _ = subscriber.outbox.inventory(InventoryRevision {
-                    inventory: inventory.clone(),
-                    next_sequence,
-                });
-                subscriber.sent = Some(next_sequence);
-            }
-        }
-        self.published = Some(inventory);
+        let staged = publication::Staged {
+            revision: self.latest(),
+            inventory: self.inventory(),
+            sequences: devices
+                .into_iter()
+                .map(|device| (device, self.state.next_sequence(device)))
+                .collect(),
+        };
+        self.publication.stage(staged, self.journal.as_deref());
     }
 
     /// Validates and commits an edit, or with `None` resolves a recorded one, pushes the
@@ -120,13 +103,13 @@ impl SharedWorkspaceHost {
         // Each reply follows the revision that holds its outcome.
         self.publish();
         for (waiting, answer) in answered {
-            let Some(subscriber) = self.subscribers.get(&waiting.connection) else {
+            let Some(outbox) = self.publication.outbox(waiting.connection) else {
                 continue;
             };
             // A closing connection no longer needs the reply.
             let _ = match answer {
-                Ok(work) => self.sync.reply(&subscriber.outbox, waiting.id, work),
-                Err(refusal) => subscriber.outbox.reply(waiting.id, Err(refusal)),
+                Ok(work) => self.sync.reply(&outbox, waiting.id, work),
+                Err(refusal) => outbox.reply(waiting.id, Err(refusal)),
             };
         }
     }
