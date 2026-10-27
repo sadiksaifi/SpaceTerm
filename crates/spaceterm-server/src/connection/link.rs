@@ -62,7 +62,9 @@ impl From<LinkError> for crate::ServerError {
             LinkError::Goodbye(Fatal::Stopping) => Self::NotRunning,
             LinkError::Goodbye(Fatal::Revoked) => Self::AuthenticationRefused,
             LinkError::Goodbye(Fatal::Incompatible) => Self::IncompatibleProtocol,
-            LinkError::Busy | LinkError::Goodbye(Fatal::Capacity) => Self::Capacity,
+            LinkError::Goodbye(Fatal::Capacity) => Self::Capacity,
+            // The link stays usable; a brief stall is worth a retry.
+            LinkError::Busy => Self::Protocol,
             LinkError::Unclaimed => Self::StaleControl,
             LinkError::OutOfBounds => Self::Unsupported,
             LinkError::Closed
