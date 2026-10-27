@@ -1054,6 +1054,34 @@ fn wss_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity()
 }
 
 #[test]
+fn an_unadmitted_peer_cannot_send_a_message_larger_than_the_preamble_bound() {
+    let fixture = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (certificate, key, pin) = {
+        let state = fixture.state.lock().unwrap();
+        let (certificate, key) = state.certificate();
+        (
+            certificate.to_vec(),
+            zeroize::Zeroizing::new(key.to_vec()),
+            state.pin.clone(),
+        )
+    };
+    let server = std::thread::spawn(move || {
+        let mut ws = wss::accept(listener.accept().unwrap().0, &certificate, &key).unwrap();
+        wss::receive::<serde_json::Value>(&mut ws)
+    });
+    let mut ws = wss::connect(&format!("wss://{address}/spaceterm"), &pin).unwrap();
+    let oversized = vec![b'1'; crate::connection::wss::PREAMBLE_MESSAGE_BYTES + 1];
+    let _ = ws.write(tungstenite::Message::Binary(oversized.into()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ws.flush().is_err() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(server.join().unwrap().err(), Some(DirectError::Transport));
+}
+
+#[test]
 fn the_wss_carrier_moves_frames_larger_than_its_socket_buffers_in_order() {
     use crate::connection::carrier::{Carrier, Offer, Priority};
     let fixture = Fixture::new();

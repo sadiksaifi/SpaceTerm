@@ -72,7 +72,7 @@ Consent, cancellation, credential and save-failure tests have separate function 
 
 ## Connections
 
-Each client holds one SpaceTerm Protocol connection per server: the account-local Unix socket, or WSS for a paired server. Every Pane, edit and inventory read of that client shares it. Pings on the live connection judge its health, so a client opens a new connection only after the previous one ends. [ADR 0050](adr/0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns the exchange. A server of another protocol major refuses admission with a typed incompatibility; replace both together.
+Each client holds one SpaceTerm Protocol connection per server: the account-local Unix socket, or WSS for a paired server. Every Pane, edit, inventory read and Settings read of that client shares it. Two uses open a connection of their own: each open directory picker, so the server cancels its reads when the picker closes, and the check for running Terminal Sessions when the client quits. Pings on the live connection judge its health, so a client opens a new connection only after the previous one ends. [ADR 0050](adr/0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns the exchange. A server of another protocol major refuses admission with a typed incompatibility; replace both together.
 
 ## Paired connections
 

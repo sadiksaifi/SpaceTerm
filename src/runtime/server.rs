@@ -64,6 +64,8 @@ pub(crate) mod screen_encoder;
 mod screen_encoder_tests;
 #[cfg(test)]
 mod screen_tests;
+#[cfg(test)]
+mod served_tests;
 mod shared;
 pub use shared::SharedWorkspaceHost;
 #[cfg(test)]
