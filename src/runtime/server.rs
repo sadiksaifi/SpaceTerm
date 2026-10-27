@@ -44,11 +44,9 @@ mod graphics_tests;
 mod metadata;
 #[cfg(test)]
 mod metadata_tests;
-// `pane` already names the spaceterm_server Pane protocol in this module.
-#[path = "server/pane.rs"]
 mod pane_host;
 #[cfg(test)]
-mod pane_tests;
+mod pane_host_tests;
 mod reading;
 #[cfg(test)]
 mod reading_tests;
