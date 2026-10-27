@@ -356,6 +356,8 @@ pub(super) struct WorkspaceSidebar {
 
 impl WorkspaceSidebar {
     pub(super) fn new(visible: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The Workspace Manager draws the sidebar as a cached view.
+        super::cached_view::redraw_on_presentation_change(cx);
         let scrollbar = cx.new(|_| {
             OverlayScrollbar::<f32>::new("workspace-scrollbar").accessibility_name("Workspace list")
         });
