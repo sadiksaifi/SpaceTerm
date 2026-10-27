@@ -448,8 +448,7 @@ impl Scrollback {
             lines,
             &self.placeholders,
             top,
-            self.selection.range(),
-            self.selection.revision(),
+            (self.selection.range(), self.selection.revision()),
             find,
             generation,
         ))

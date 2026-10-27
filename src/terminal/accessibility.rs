@@ -1202,6 +1202,7 @@ pub(crate) struct TerminalAccessibilityState {
 
 impl TerminalAccessibilityState {
     /// The model this state published last.
+    #[cfg(feature = "desktop")]
     pub(crate) fn latest(&self) -> Option<&TerminalAccessibilityModel> {
         self.latest.as_ref()
     }

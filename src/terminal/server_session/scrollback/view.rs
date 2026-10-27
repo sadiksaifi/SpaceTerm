@@ -61,8 +61,7 @@ pub(super) fn compose(
     lines: Lines<'_>,
     placeholders: &BTreeMap<u64, (RowSnapshot, bool)>,
     top: u64,
-    selection: Option<(Point, Point)>,
-    selection_revision: u64,
+    (selection, selection_revision): (Option<(Point, Point)>, u64),
     find: Option<Arc<TerminalFindSnapshot>>,
     generation: PresentationGeneration,
 ) -> Arc<ScreenSnapshot> {
