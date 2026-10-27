@@ -1616,8 +1616,9 @@ pub(super) fn present(
                 // The worker waits for pushed events, input or a view change. Only reading work
                 // the server is still applying has a deadline.
                 match next {
-                    reading::Next::Idle => state.wake.wait(None),
-                    reading::Next::Recheck | reading::Next::Refresh => state
+                    // A screen that reading work produced is pushed and wakes the worker.
+                    reading::Next::Idle | reading::Next::Refresh => state.wake.wait(None),
+                    reading::Next::Recheck => state
                         .wake
                         .wait(Some(std::time::Instant::now() + inbox::READING_RECHECK)),
                     reading::Next::Continue => {}
