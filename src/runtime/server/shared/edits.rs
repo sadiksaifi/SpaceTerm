@@ -127,6 +127,16 @@ impl SharedWorkspaceHost {
         }
     }
 
+    /// The server is stopping, so edits waiting for a Worktree write are refused. Each remains
+    /// an Original Operation its client dispatches again after reconnecting.
+    pub(super) fn refuse_waiting(&mut self) {
+        for waiting in std::mem::take(&mut self.waiting) {
+            if let Some(outbox) = self.publication.outbox(waiting.connection) {
+                let _ = outbox.reply(waiting.id, Err(Refusal::Failed));
+            }
+        }
+    }
+
     /// The reply to a settled edit, sent from the sync worker once `revision` is retained.
     fn deliver(
         &self,

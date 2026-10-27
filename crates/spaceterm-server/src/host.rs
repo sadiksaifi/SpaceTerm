@@ -323,6 +323,9 @@ impl PaneService for HostService {
     fn cancel(&mut self, peer: &Peer, id: RequestId) {
         self.inner.cancel(peer, id)
     }
+    fn stopping(&mut self) {
+        self.inner.stopping()
+    }
     fn ticker(&mut self, wake: Arc<dyn Wake>) {
         self.inner.ticker(wake)
     }
@@ -566,6 +569,8 @@ fn serve_runtime_ready(
     stop.request();
     SIGNAL_WAKE.store(-1, Ordering::Release);
     drop(listener);
+    // Ticks no longer run, so replies they would have answered are refused now.
+    panes.lock().unwrap_or_else(|e| e.into_inner()).stopping();
     let threads: Vec<_> = connections
         .into_iter()
         .chain(network)
@@ -1529,6 +1534,86 @@ mod startup_tests {
             0,
             "request reached service after shutdown"
         );
+    }
+
+    /// Defers every `Resolve` until the host stops, then refuses it.
+    #[derive(Default)]
+    struct Deferring {
+        outboxes: std::collections::BTreeMap<[u8; 32], Outbox>,
+        owed: Vec<([u8; 32], RequestId)>,
+    }
+    impl PaneService for Deferring {
+        fn admitted(&mut self, peer: &Peer, _: ClientName, outbox: Outbox) {
+            self.outboxes.insert(peer.connection, outbox);
+        }
+        fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+            if matches!(operation, Operation::Resolve { .. }) {
+                self.owed.push((peer.connection, id));
+                return Dispatch::Deferred;
+            }
+            Dispatch::reply(Ok(crate::protocol::ReplyBody::Done))
+        }
+        fn input(&mut self, _: &Peer, _: Input) {}
+        fn view(&mut self, _: &Peer, _: View) {}
+        fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+        fn acknowledge(&mut self, _: &Peer, _: u64) {}
+        fn stopping(&mut self) {
+            for (connection, id) in self.owed.drain(..) {
+                let _ = self.outboxes[&connection].reply(id, Err(Refusal::Failed));
+            }
+        }
+        fn disconnected(&mut self, _: &Peer) {}
+        fn shutdown(&mut self) -> Result<(), ServerError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the owed reply shutdown test"]
+    fn owed_reply_shutdown_child() {
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        serve_with_panes(
+            &Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            Some(crate::panes(|_| Ok(Deferring::default()))),
+        )
+        .unwrap();
+        fs::write(root.join("stopped"), []).unwrap();
+    }
+
+    #[test]
+    fn shutdown_refuses_owed_replies_instead_of_waiting_for_them() {
+        use crate::connection::link::RequestError;
+        let fixture = Fixture::new();
+        let mut child = fixture.start_test("host::startup_tests::owed_reply_shutdown_child", false);
+        let waiting = admitted_link(&fixture, &fixture.device);
+        let owed = waiting.request(Operation::Resolve { sequence: 1 }).unwrap();
+        // The deferred request reaches the service before shutdown begins.
+        assert!(matches!(
+            waiting.request(round_trip()).unwrap().wait(),
+            Ok(crate::protocol::ReplyBody::Done)
+        ));
+        let shutdown = admitted_link(&fixture, &fixture.device);
+        assert!(matches!(
+            shutdown.request(Operation::Shutdown).unwrap().wait(),
+            Ok(crate::protocol::ReplyBody::Done)
+        ));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !fixture.root.join("stopped").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "shutdown waited for a reply nothing would send"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            owed.wait().unwrap_err(),
+            RequestError::Refused(Refusal::Failed)
+        );
+        assert!(child.0.wait().unwrap().success());
     }
 
     /// A request the test service answers at once.

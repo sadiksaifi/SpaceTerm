@@ -433,6 +433,8 @@ pub trait HostCommands: Send {
     }
     /// The host's wake, which makes it tick again; see `PaneService::ticker`.
     fn ticker(&mut self, _wake: Arc<dyn spaceterm_server::connection::Wake>) {}
+    /// The host is stopping; refuse every deferred reply still owed. See `PaneService::stopping`.
+    fn stopping(&mut self) {}
     /// Records the Client Name an admitted client supplied, before any of its requests.
     fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
     /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
@@ -1205,6 +1207,14 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.answer_reads();
         let reads = (!self.reads.is_empty()).then_some(now + TICK);
         [host, reads].into_iter().flatten().min()
+    }
+    fn stopping(&mut self) {
+        for read in std::mem::take(&mut self.reads) {
+            if let Some(connection) = self.connections.get(&read.connection) {
+                let _ = connection.outbox.reply(read.id, Err(Refusal::Failed));
+            }
+        }
+        self.host.stopping();
     }
     /// The client abandoned a read. It replies `Stale` at once; a directory read stops, while a
     /// creation and a Worktree read finish unobserved.

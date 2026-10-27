@@ -992,6 +992,9 @@ impl HostCommands for SharedWorkspaceHost {
     fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
         self.ticker = Some(wake);
     }
+    fn stopping(&mut self) {
+        self.refuse_waiting();
+    }
     fn admitted(&mut self, client: Id, name: control::ClientName) {
         self.prototype.admitted(client, name);
     }
