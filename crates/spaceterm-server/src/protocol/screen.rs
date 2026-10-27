@@ -6,7 +6,7 @@
 //! blanks every row when the grid's size changes, then `shift`, then the replacement rows.
 use super::message::check;
 use super::{Fatal, limits};
-use crate::pane::{Color, effects::Hyperlink, graphics, reading};
+use crate::pane::{Color, effects::Hyperlink, graphics};
 use serde::{Deserialize, Serialize};
 
 /// Bits of [`Style::flags`].
@@ -53,9 +53,6 @@ pub struct ScreenUpdate {
     pub accessibility_revision: u64,
     /// Fences pointer and wheel coordinates. Increases when the visible grid's identity changes.
     pub generation: u64,
-    /// Server-side reading state, present in keyframes and when it changes. Deleted by
-    /// scrollback.
-    pub reading: Option<reading::Snapshot>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

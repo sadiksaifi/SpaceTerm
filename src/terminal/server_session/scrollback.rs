@@ -9,9 +9,15 @@
 //! `p`; visible row `r` is line `total + r`. When output scrolls, a visible row becomes history
 //! under the same line number, so Selection, Find matches and a scrolled view stay on their
 //! content.
+//!
+//! The server pushes only the screen, so a scrolled view shows images placed on rows still on the
+//! screen and none placed on history rows. Frames carry no shell-integration prompt marks, so a
+//! triple-click selects whole lines without stopping at a prompt. Rows that scroll off the screen
+//! reach the cache through pages, never from frames, whose rows may have changed before they
+//! scrolled.
 mod cache;
 mod find;
-mod route;
+pub(super) mod route;
 mod row;
 mod selection;
 #[cfg(test)]
@@ -146,13 +152,6 @@ impl Scrollback {
         self.selection.observe(floor.max(readable.start)..readable.end);
     }
 
-    /// Adds rows that the frame just applied reports entered history at consecutive positions
-    /// from `start`.
-    pub(crate) fn entered(&mut self, start: u64, rows: Vec<CachedRow>) {
-        let focus = self.focus();
-        self.cache.insert(start, rows, focus);
-    }
-
     /// Moves the view by native wheel steps; positive steps move toward older rows.
     pub(crate) fn wheel(&mut self, vertical_steps: i32) -> bool {
         if self.alternate() || vertical_steps == 0 {
@@ -224,8 +223,9 @@ impl Scrollback {
         self.selection.continue_drag(grid, lines, top)
     }
 
-    pub(crate) fn clear_selection(&mut self) -> bool {
-        self.selection.clear()
+    /// Another owner took the pointer, such as the program or a hidden view.
+    pub(crate) fn pointer_cancel(&mut self) {
+        self.selection.cancel_gesture();
     }
 
     pub(crate) fn selection_present(&self) -> bool {

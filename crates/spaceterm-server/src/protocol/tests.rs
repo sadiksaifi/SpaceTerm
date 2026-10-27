@@ -181,7 +181,7 @@ fn golden_server_vectors() {
             update: update(),
         }))),
         [
-            0, 0, 0, 47, 0x43, // header
+            0, 0, 0, 46, 0x43, // header
             1, 2, 1, 1, 5, // channel, frame, base, input
             1, 3, 0, 1, 1, 0, 0, // cursor
             1, 0, 0, // history
@@ -190,7 +190,7 @@ fn golden_server_vectors() {
             1, 1, 1, 1, 0, 0, 1, 0, // one style definition
             0, // links
             1, 23, 0, 1, 1, 1, 0, 2, b'$', b' ', 0, // one row with one run in style id 1
-            0, 0, 0, 0, // graphics, accessibility, generation, reading
+            0, 0, 0, // graphics, accessibility, generation
         ]
     );
 }
@@ -337,19 +337,6 @@ fn every_operation_round_trips() {
         Operation::Direct(crate::direct::Management::Invite),
         Operation::Shutdown,
         Operation::Interim(Interim::Inventory),
-        Operation::Interim(Interim::Read {
-            channel,
-            operation: pane::reading::Operation::Query {
-                generation: 1,
-                text: "needle".into(),
-            },
-        }),
-        Operation::Interim(Interim::ReadingStatus { channel }),
-        Operation::Interim(Interim::SelectionChunk {
-            channel,
-            generation: 1,
-            offset: 0,
-        }),
     ]);
     for operation in operations {
         client_round_trip(request(operation));
@@ -571,11 +558,6 @@ fn every_server_message_round_trips() {
             next_sequence: 3,
         }),
         ReplyBody::Interim(InterimReply::MutationPending),
-        ReplyBody::Interim(InterimReply::ReadingReady {
-            generation: 1,
-            selection_revision: 2,
-            selection_present: true,
-        }),
         ReplyBody::Done,
     ];
     for body in bodies {

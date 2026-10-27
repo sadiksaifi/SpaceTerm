@@ -33,8 +33,7 @@ pub(super) fn submit_input(
             || matches!(
                 input,
                 Input::Resize(_) | Input::Style(_) | Input::ClearScreenAndScrollback
-            )
-            || matches!(input, Input::Read(_)) && interaction.reading)
+            ))
         && eligible;
     if !available {
         drop(interaction);
@@ -320,10 +319,7 @@ impl ActiveInput {
             state.epoch.load(Ordering::Acquire) == self.epoch
                 && (matches!(
                     submitted.command,
-                    Input::Resize(_)
-                        | Input::Style(_)
-                        | Input::Read(_)
-                        | Input::ClearScreenAndScrollback
+                    Input::Resize(_) | Input::Style(_) | Input::ClearScreenAndScrollback
                 ) || (interaction.interactive
                     && (submitted.focus_generation == interaction.focus_generation
                         || matches!(&submitted.command, Input::ResolvePaste(pending, ..) if interaction.resolution_is_current(*pending)))
@@ -352,22 +348,12 @@ impl ActiveInput {
                 Request::ClearScreenAndScrollback { lease: self.lease },
                 None,
             ),
-            Input::Read(operation) => {
-                state
-                    .reading
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .enqueue(operation);
-                return Ok(());
-            }
-            Input::CopyOrForward(modifiers) => {
-                state
-                    .reading
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .pending_copy = Some((self.epoch, generation, modifiers));
-                return Ok(());
-            }
+            Input::CopyOrForward(modifiers) => (
+                input_request(pane::InteractiveInput::CopyOrForward {
+                    modifiers: encode_modifiers(modifiers),
+                }),
+                None,
+            ),
             Input::Key(key) => (
                 input_request(pane::InteractiveInput::Key(encode_key(key))),
                 None,
@@ -406,7 +392,7 @@ impl ActiveInput {
                     focus_generation: generation,
                     selection,
                 })? {
-                    Reply::Reading { .. } => Ok(()),
+                    Reply::Unchanged => Ok(()),
                     _ => Err(ServerError::Protocol),
                 };
             }
@@ -652,8 +638,7 @@ const PASTE_SETTLES: Duration = Duration::from_secs(10);
 
 /// The Pane worker's connection: its channel on the server's shared link. It maps the worker's
 /// commands onto the channel: claims bind it, input is sent without waiting, pushed frames and
-/// Pane events queue for the worker's loop, and reading travels as `Operation::Interim` until
-/// scrollback replaces it. Discarded input is reported by the server and fails the next command,
+/// Pane events queue for the worker's loop, and Scrollback pages answer in the background. Discarded input is reported by the server and fails the next command,
 /// as a refused exchange did.
 pub(super) struct PaneLink {
     link: ServerLink,
@@ -890,6 +875,32 @@ impl PaneLink {
         result
     }
 
+    /// Asks for a Scrollback page of the bound channel. `then` receives the page, or `None` when
+    /// the server refused it or the link ended, on the link's I/O thread.
+    pub(super) fn scrollback_page(
+        &self,
+        lease: Lease,
+        request: super::scrollback::PageRequest,
+        then: impl FnOnce(Option<protocol::Page>) + Send + 'static,
+    ) -> Result<(), ServerError> {
+        let channel = self.bound(lease)?.channel();
+        self.link.request_then(
+            Operation::ScrollbackPage {
+                channel,
+                epoch: request.epoch,
+                start: request.start,
+                rows: request.rows,
+            },
+            move |reply| {
+                then(match reply {
+                    Ok(ReplyBody::Page(page)) => Some(page),
+                    _ => None,
+                })
+            },
+        )?;
+        Ok(())
+    }
+
     /// Releases the channel after its last event or once its Terminal Session is gone.
     pub(super) fn release(&mut self) {
         self.channel = None;
@@ -939,22 +950,6 @@ impl PaneLink {
                 self.bound(lease)?.view(visible, max_hz)?;
                 Ok(Reply::Unchanged)
             }
-            Request::Read { lease, operation } => interim(Interim::Read {
-                channel: channel(lease)?,
-                operation,
-            }),
-            Request::ReadingStatus { lease } => interim(Interim::ReadingStatus {
-                channel: channel(lease)?,
-            }),
-            Request::SelectionChunk {
-                lease,
-                generation,
-                offset,
-            } => interim(Interim::SelectionChunk {
-                channel: channel(lease)?,
-                generation,
-                offset: offset as u64,
-            }),
             Request::Inventory => interim(Interim::Inventory),
             Request::Focus {
                 lease,
@@ -1072,8 +1067,8 @@ impl PaneLink {
                     selection,
                 })?;
                 match body {
-                    ReplyBody::Done => Ok(Reply::Reading { accepted: true }),
-                    body => interim_reply(body),
+                    ReplyBody::Done => Ok(Reply::Unchanged),
+                    _ => Err(ServerError::Protocol),
                 }
             }
             Request::EndAccessibilityDemand { lease } => self
@@ -1186,28 +1181,6 @@ fn interim_reply(body: ReplyBody) -> Result<Reply, ServerError> {
                 next_sequence,
             },
             InterimReply::MutationPending => Reply::MutationPending,
-            InterimReply::Reading { accepted } => Reply::Reading { accepted },
-            InterimReply::ReadingReady {
-                generation,
-                selection_revision,
-                selection_present,
-            } => Reply::ReadingReady {
-                generation,
-                selection_revision,
-                selection_present,
-            },
-            InterimReply::SelectionChunk {
-                generation,
-                offset,
-                total,
-                bytes,
-            } => Reply::SelectionChunk {
-                generation,
-                offset: usize::try_from(offset).map_err(|_| ServerError::Protocol)?,
-                total: usize::try_from(total).map_err(|_| ServerError::Protocol)?,
-                bytes,
-            },
-            InterimReply::SelectionPending => Reply::SelectionPending,
         },
         _ => return Err(ServerError::Protocol),
     })
@@ -1392,12 +1365,18 @@ pub(super) fn present(
             };
             let mut active_size = grant_size;
             let mut ready = false;
-            let mut reader = reading::Reader::default();
             let mut graphics = graphics::Graphics::default();
             let mut semantic = accessibility::Fetcher::new(lease);
             let mut latest_screen = None;
             let mut shown = None;
             let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
+            // Cached rows survive a reconnect to the same Terminal Session.
+            state
+                .reading
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .scrollback
+                .attach(lease.session);
             let mut demand = inbox::Demand::new(
                 state.presentable.load(Ordering::Acquire),
                 crate::terminal::session::DEFAULT_FRAME_RATE,
@@ -1542,10 +1521,14 @@ pub(super) fn present(
                         // worker's focus barrier is acknowledged.
                         ready = true;
                     }
-                    state.connected(epoch, mapping, paste_unconfirmed)?;
-                    reader.screen(&state, mapping, screen.selection_present);
-                    latest_screen = Some((Arc::clone(&screen), mapping));
-                    let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                    let mapping = reading::show(
+                        &state,
+                        &events,
+                        Some(Arc::clone(&screen)),
+                        (epoch, generation, mapping),
+                        paste_unconfirmed,
+                    )?;
+                    latest_screen = Some((screen, mapping));
                     if let Some(model) = semantic.rebind(&state, generation) {
                         let _ = semantics.force_send(model);
                     }
@@ -1566,13 +1549,53 @@ pub(super) fn present(
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
-                let mut next = reading::Next::Idle;
-                if ready {
-                    next = reader.poll(&state, lease, &mut |request| {
-                        send(&presenter, &alive, &mut connection, request)
-                    })?;
-                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
-                    reading.publish_ready(&events);
+                // Graphics and semantic transfers continue one chunk per turn without waiting.
+                let mut busy = false;
+                let mut deadline = None;
+                if ready && let Some((_, mapping)) = &mut latest_screen {
+                    let turn = state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .turn(
+                            std::time::Instant::now(),
+                            mapping.size.columns,
+                            local_files.as_ref(),
+                        );
+                    if turn.copy_ready {
+                        let _ = events.force_send(TerminalSessionEvent::SelectionCopyReady);
+                    }
+                    if turn.present {
+                        generation = generation.next();
+                        *mapping = reading::show(
+                            &state,
+                            &events,
+                            None,
+                            (epoch, generation, *mapping),
+                            paste_unconfirmed,
+                        )?;
+                        if let Some(model) = semantic.rebind(&state, generation) {
+                            let _ = semantics.force_send(model);
+                        }
+                    }
+                    deadline = turn.deadline;
+                    let requests = state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .scrollback
+                        .requests();
+                    for request in requests {
+                        let state = Arc::clone(&state);
+                        connection.scrollback_page(lease, request, move |page| {
+                            state
+                                .reading
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .page(request, page);
+                            state.wake.notify();
+                        })?;
+                    }
                 }
                 // A hidden Pane transfers no images. A new manifest or a transfer in progress
                 // continues one chunk per turn.
@@ -1595,17 +1618,18 @@ pub(super) fn present(
                         let next = Arc::make_mut(screen);
                         next.generation = generation;
                         next.graphics = graphics.snapshot();
-                        mapping.local = generation;
-                        state.connected(epoch, *mapping, paste_unconfirmed)?;
-                        reader.screen(&state, *mapping, next.selection_present);
-                        let _ = events.force_send(TerminalSessionEvent::Screen(Arc::clone(screen)));
+                        *mapping = reading::show(
+                            &state,
+                            &events,
+                            Some(Arc::clone(screen)),
+                            (epoch, generation, *mapping),
+                            paste_unconfirmed,
+                        )?;
                         if let Some(model) = semantic.rebind(&state, generation) {
                             let _ = semantics.force_send(model);
                         }
                     }
-                    if graphics.transferring() {
-                        next = next.max(reading::Next::Continue);
-                    }
+                    busy |= graphics.transferring();
                 }
                 // Semantic transfer follows its own explicit demand, even while hidden, and a
                 // partial document continues one chunk per turn. It sends nothing while the
@@ -1621,9 +1645,7 @@ pub(super) fn present(
                         let _ = semantics.force_send(model);
                     }
                 }
-                if semantic.can_continue() {
-                    next = next.max(reading::Next::Continue);
-                }
+                busy |= semantic.can_continue();
                 if ready {
                     // Each turn on a live channel renews recovery once it stays healthy.
                     state
@@ -1632,14 +1654,10 @@ pub(super) fn present(
                         .unwrap_or_else(|e| e.into_inner())
                         .connected(std::time::Instant::now());
                 }
-                // The worker waits for pushed events, input or a view change. Only reading work
-                // the server is still applying has a deadline.
-                match next {
-                    reading::Next::Idle => state.wake.wait(None),
-                    reading::Next::Recheck | reading::Next::Refresh => state
-                        .wake
-                        .wait(Some(std::time::Instant::now() + inbox::READING_RECHECK)),
-                    reading::Next::Continue => {}
+                // The worker waits for pushed events, input, a view change or a Scrollback page.
+                // Only a selection drag past an edge has a deadline.
+                if !busy {
+                    state.wake.wait(deadline);
                 }
             })();
             if alive.load(Ordering::Acquire) {

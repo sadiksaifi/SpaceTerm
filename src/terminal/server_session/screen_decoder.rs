@@ -37,15 +37,7 @@ pub(super) struct DecodedScreen {
     pub(super) modes: Modes,
     pub(super) colors: Colors,
     pub(super) cursor: Cursor,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Scrollback cache reads it when scrollback merges"
-        )
-    )]
     pub(super) history: History,
-    pub(super) reading: Option<pane::reading::Snapshot>,
     pub(super) graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
     pub(super) generation: u64,
     pub(super) accessibility_revision: u64,
@@ -167,18 +159,6 @@ impl ScreenDecoder {
         {
             return Err(UpdateError::Malformed);
         }
-        let reading = match update.reading {
-            Some(reading) => Some(reading),
-            None => previous
-                .as_ref()
-                .and_then(|previous| previous.reading.clone()),
-        };
-        if let Some(reading) = &reading
-            && (reading.visible_rows != row_count as u64
-                || reading.offset_rows > reading.total_rows.saturating_sub(reading.visible_rows))
-        {
-            return Err(UpdateError::Malformed);
-        }
         let graphics = match update.graphics {
             Some(graphics) => Some(graphics),
             None => previous
@@ -197,7 +177,6 @@ impl ScreenDecoder {
             colors,
             cursor: update.cursor,
             history: update.history,
-            reading,
             graphics,
             generation: update.generation,
             accessibility_revision: update.accessibility_revision,
@@ -217,13 +196,6 @@ impl ScreenDecoder {
 
 /// Decodes a Scrollback page against its own tables. Each row has `columns` cells. `page` must
 /// have passed [`Page::validate`], which the link runs on every reply.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Scrollback cache decodes pages when scrollback merges"
-    )
-)]
 pub(super) fn decode_page(
     page: &Page,
     columns: u16,
@@ -411,37 +383,12 @@ impl DecodedScreen {
         if let Some((width, height)) = self.geometry.cell_pixels {
             screen.cell_pixels = (u32::from(width), u32::from(height));
         }
-        if let Some(reading) = &self.reading {
-            screen.viewport = ViewportSnapshot {
-                offset_rows: reading.offset_rows,
-                visible_rows: reading.visible_rows,
-            };
-            screen.scrollbar = ScrollbarSnapshot {
-                total_rows: reading.total_rows,
-                offset_rows: reading.offset_rows,
-                visible_rows: reading.visible_rows,
-            };
-            screen.selection_present = reading.selection_present;
-            screen.find = reading.find.as_ref().map(|find| {
-                Arc::new(super::super::TerminalFindSnapshot {
-                    generation: super::super::FindQueryGeneration::from_value(find.generation),
-                    total_matches: find.total,
-                    current_match: find.current,
-                    visible_spans: find
-                        .spans
-                        .iter()
-                        .map(|&(row, start_column, end_column, current)| {
-                            super::super::FindHighlightSpan {
-                                row,
-                                start_column,
-                                end_column,
-                                current,
-                            }
-                        })
-                        .collect(),
-                })
-            });
-        }
+        // The history positions; the Scrollback view sets the viewport and scrollbar.
+        screen.history = crate::terminal::emulator::HistorySnapshot {
+            epoch: self.history.epoch,
+            oldest: self.history.oldest,
+            total: self.history.total,
+        };
         screen.mouse_tracking = self.modes.mouse_tracking;
         screen.alternate_scroll = self.modes.alternate_scroll;
         screen.size = ScreenSizeSnapshot {

@@ -201,7 +201,7 @@ fn an_unchanged_capture_sends_nothing_and_keeps_the_baseline() {
     let replaced = channel.encoder.encode(&capture, 9, Some(7)).unwrap();
     assert_eq!(replaced.rows.len(), 4);
     assert!(replaced.geometry.is_some() && replaced.colors.is_some());
-    assert!(replaced.modes.is_some() && replaced.reading.is_some());
+    assert!(replaced.modes.is_some());
     // The previous baseline is gone, so frame 1 is unknown now.
     let unknown = channel.encoder.encode(&capture, 10, Some(1)).unwrap();
     assert_eq!(unknown.rows.len(), 4);

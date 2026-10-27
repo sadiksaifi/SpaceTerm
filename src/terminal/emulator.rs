@@ -5,7 +5,7 @@ mod history;
 pub(crate) use history::HistoryPage;
 pub use history::HistorySnapshot;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -824,32 +824,12 @@ pub(crate) struct TerminalEmulator {
     presentation_generation: PresentationGeneration,
     /// The client Input serial the next snapshot reports.
     input_serial: u32,
-    reading_baselines: VecDeque<Rc<ReadingBaseline>>,
-    active_reading_baseline: Option<Rc<ReadingBaseline>>,
-    server_reading_enabled: bool,
     synchronized_output_last_activity: Option<Instant>,
     prompt_redraw: PromptRedraw,
     find: TerminalFindState,
     history: history::HistoryTracker,
     applied_appearance: TerminalAppearanceUpdate,
     reported_appearance: Rc<Cell<Appearance>>,
-}
-
-// Retained observed mappings are bounded independently of terminal output volume.
-const READING_BASELINES: usize = 32;
-const READING_BASELINE_BYTES: usize = 16 * 1024 * 1024;
-
-struct ReadingBaseline {
-    generation: PresentationGeneration,
-    geometry: TerminalGeometry,
-    screen: Screen,
-    modes: MouseModeState,
-    alternate_scroll: bool,
-    rows: Arc<[RowSnapshot]>,
-    soft_wrapped: Arc<[bool]>,
-    anchors: Vec<Rc<TrackedGridRef>>,
-    retained_bytes: usize,
-    row_bytes: Vec<usize>,
 }
 
 enum MetadataEvent {
@@ -1300,9 +1280,6 @@ impl TerminalEmulator {
             gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
             input_serial: 0,
-            reading_baselines: VecDeque::new(),
-            active_reading_baseline: None,
-            server_reading_enabled: false,
             synchronized_output_last_activity: None,
             prompt_redraw: PromptRedraw::default(),
             find: TerminalFindState::default(),
@@ -1310,10 +1287,6 @@ impl TerminalEmulator {
             applied_appearance: initial_appearance,
             reported_appearance,
         })
-    }
-
-    pub(super) fn enable_server_reading(&mut self) {
-        self.server_reading_enabled = true;
     }
 
     pub(crate) fn enable_client_clipboard(&mut self) {
@@ -1554,8 +1527,6 @@ impl TerminalEmulator {
         }
         self.end_explicit_synchronized_output()?;
         self.invalidate_selection_copy();
-        self.reading_baselines.clear();
-        self.active_reading_baseline = None;
         self.selection_gesture.reset(&self.terminal);
         self.active_pointer = None;
         self.selection_drag_position = None;
@@ -1800,164 +1771,6 @@ impl TerminalEmulator {
         EmulatorAction::screen_changed()
     }
 
-    fn reading_baseline(
-        &self,
-        generation: PresentationGeneration,
-    ) -> Result<Option<&ReadingBaseline>, TerminalFailure> {
-        let baseline = self
-            .reading_baselines
-            .iter()
-            .find(|baseline| baseline.generation == generation)
-            .or_else(|| {
-                self.active_reading_baseline
-                    .as_ref()
-                    .filter(|baseline| baseline.generation == generation)
-            });
-        let Some(baseline) = baseline else {
-            return Ok(None);
-        };
-        if baseline.geometry != self.geometry
-            || baseline.screen
-                != self.terminal.active_screen().map_err(|error| {
-                    TerminalFailure::emulator_error("query-reading-screen", error)
-                })?
-            || baseline.modes != self.mouse_mode_state()?
-            || baseline.alternate_scroll
-                != self.terminal.mode(Mode::ALT_SCROLL).map_err(|error| {
-                    TerminalFailure::emulator_error("query-reading-scroll-mode", error)
-                })?
-            || self.synchronized_output_deadline().is_some()
-        {
-            return Ok(None);
-        }
-        Ok(Some(baseline.as_ref()))
-    }
-
-    fn reading_row_is_current(&self, input: PointerInput) -> Result<bool, TerminalFailure> {
-        let Some(baseline) = self.reading_baseline(input.generation)? else {
-            return Ok(false);
-        };
-        let point = self.selection_viewport_point(input.position)?;
-        let row = usize::try_from(point.y).unwrap_or(usize::MAX);
-        let Some(anchor) = baseline.anchors.get(row) else {
-            return Ok(false);
-        };
-        if anchor
-            .point(PointSpace::Viewport)
-            .map_err(|error| TerminalFailure::emulator_error("validate-reading-anchor", error))?
-            != Some(PointCoordinate { x: 0, y: point.y })
-        {
-            return Ok(false);
-        }
-        let current = self
-            .terminal
-            .grid_ref(Point::Viewport(point))
-            .map_err(|error| TerminalFailure::emulator_error("validate-reading-row", error))?;
-        if current
-            .row()
-            .and_then(|row| row.is_dirty())
-            .map_err(|error| {
-                TerminalFailure::emulator_error("validate-reading-row-content", error)
-            })?
-        {
-            return Ok(false);
-        }
-        let rows = match baseline.screen {
-            Screen::Primary => &self.primary_row_cache,
-            Screen::Alternate => &self.alternate_row_cache,
-        };
-        let Some((old, current)) = baseline.rows.get(row).zip(rows.get(row)) else {
-            return Ok(false);
-        };
-        Ok(old.len() == current.len()
-            && old.iter().zip(current.iter()).all(|(old, current)| {
-                old.text == current.text && old.spacer_tail == current.spacer_tail
-            })
-            && baseline.soft_wrapped.get(row).copied()
-                == Some(
-                    self.terminal
-                        .grid_ref(Point::Viewport(point))
-                        .and_then(|reference| reference.row())
-                        .and_then(|row| row.is_wrapped())
-                        .map_err(|error| {
-                            TerminalFailure::emulator_error("validate-reading-wrap", error)
-                        })?,
-                ))
-    }
-
-    /// Reading requests retain their observed mapping and never become application input.
-    pub(crate) fn reading_pointer(
-        &mut self,
-        mut input: PointerInput,
-    ) -> Result<Option<EmulatorAction>, TerminalFailure> {
-        let selection_gesture = self
-            .active_pointer
-            .as_ref()
-            .is_some_and(|p| matches!(p.route, PointerRoute::Selection));
-        // Press validates its observed row. An accepted gesture's continuation keeps the
-        // anchor Press validated; it needs only its observed geometry, screen and modes, so
-        // native autoscroll may move the viewport before the client sees the result.
-        let current = if input.phase == PointerPhase::Press {
-            self.reading_row_is_current(input)?
-        } else {
-            self.reading_baseline(input.generation)?.is_some()
-        };
-        if !current
-            || (input.phase == PointerPhase::Press
-                && (self.active_pointer.is_some() || input.button != Some(PointerButton::Left)))
-            || (input.phase != PointerPhase::Press && !selection_gesture)
-            || (input.phase == PointerPhase::Release
-                && self
-                    .active_pointer
-                    .is_some_and(|active| input.button != Some(active.button)))
-            || self.terminal.is_mouse_tracking().map_err(|error| {
-                TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
-            })? && !shift_overrides_application_mouse(input.modifiers, input.shift_selection)
-        {
-            self.cancel_pointer_drag()?;
-            return Ok(None);
-        }
-        // The worker validated the observed row against live state. Generic native/application
-        // pointing retains its exact presentation-generation contract.
-        let original_generation = input.generation;
-        input.generation = self.presentation_generation;
-        self.pointer_mapping_invalidated = false;
-        let baseline = (input.phase == PointerPhase::Press)
-            .then(|| {
-                self.reading_baselines
-                    .iter()
-                    .find(|baseline| baseline.generation == original_generation)
-                    .cloned()
-            })
-            .flatten();
-        let action = self.pointer(input)?;
-        if input.phase == PointerPhase::Press {
-            self.active_reading_baseline = baseline;
-        }
-        if input.phase == PointerPhase::Release {
-            self.active_reading_baseline = None;
-        }
-        Ok(Some(action))
-    }
-
-    pub(crate) fn reading_wheel(
-        &mut self,
-        mut input: WheelInput,
-    ) -> Result<Option<EmulatorAction>, TerminalFailure> {
-        if self.reading_baseline(input.generation)?.is_none()
-            || self.terminal.is_mouse_tracking().map_err(|error| {
-                TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
-            })? && !shift_overrides_application_mouse(input.modifiers, input.shift_selection)
-            || self.terminal.active_screen().map_err(|error| {
-                TerminalFailure::emulator_error("query-active-terminal-screen", error)
-            })? == Screen::Alternate
-        {
-            return Ok(None);
-        }
-        input.generation = self.presentation_generation;
-        self.wheel(input).map(Some)
-    }
-
     /// Moves the viewport through Scrollback a page at a time or to either end, writing nothing
     /// to the PTY. The alternate screen has no Scrollback, so its viewport stays put, as it does
     /// for the wheel when the program has not requested alternate-scroll mode.
@@ -2111,10 +1924,6 @@ impl TerminalEmulator {
             .map_err(|error| TerminalFailure::emulator_error("query-bracketed-paste-mode", error))
     }
 
-    pub(super) fn set_selection_revision(&mut self, revision: u64) {
-        self.selection_revision = revision;
-    }
-
     #[cfg(test)]
     pub(crate) fn selection_text(&self) -> Result<Option<String>, TerminalFailure> {
         self.format_selection(Format::Plain, SelectionCopyOptions::default())
@@ -2126,10 +1935,6 @@ impl TerminalEmulator {
             self.selection_copy_generation =
                 self.selection_copy_generation.checked_add(1).unwrap_or(0);
         }
-    }
-
-    pub(super) fn selection_copy_generation(&self) -> Option<u64> {
-        (self.selection_copy_generation != 0).then_some(self.selection_copy_generation)
     }
 
     pub(crate) fn selection_copy(
@@ -2158,17 +1963,6 @@ impl TerminalEmulator {
             *self.selection_copy_cache.borrow_mut() = Some((options, copy.clone()));
         }
         Ok(copy)
-    }
-
-    pub(crate) fn reset_reading(&mut self) -> Result<EmulatorAction, TerminalFailure> {
-        self.reading_baselines.clear();
-        self.active_reading_baseline = None;
-        self.clear_selection()?;
-        self.find = TerminalFindState::default();
-        // A new controller needs an authoritative frame even when reading was already reset.
-        self.cached_geometry = None;
-        self.terminal.scroll_viewport(ScrollViewport::Bottom);
-        Ok(EmulatorAction::screen_changed())
     }
 
     fn format_selection(
@@ -2575,7 +2369,6 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn cancel_pointer_drag(&mut self) -> Result<EmulatorAction, TerminalFailure> {
-        self.active_reading_baseline = None;
         self.application_pointer_generation = None;
         let Some(active) = self.active_pointer.take() else {
             return Ok(EmulatorAction::none());
@@ -2819,86 +2612,6 @@ impl TerminalEmulator {
         }
         self.accessibility_generation = self.presentation_generation;
         self.accessibility_snapshot(false)
-    }
-
-    fn retain_reading_baseline(&mut self, screen: &Arc<ScreenSnapshot>) -> Result<(), Error> {
-        let active_screen = self.terminal.active_screen()?;
-        let mut anchors = Vec::with_capacity(screen.rows.len());
-        for y in 0..u32::from(screen.size.rows) {
-            let point = PointCoordinate { x: 0, y };
-            let previous = self
-                .reading_baselines
-                .back()
-                .filter(|baseline| {
-                    baseline.screen == active_screen && baseline.geometry == self.geometry
-                })
-                .and_then(|baseline| baseline.anchors.get(y as usize))
-                .filter(|anchor| anchor.point(PointSpace::Viewport).ok().flatten() == Some(point));
-            anchors.push(match previous {
-                Some(anchor) => Rc::clone(anchor),
-                None => Rc::new(self.terminal.track_grid_ref(Point::Viewport(point))?),
-            });
-        }
-        // Count shared rows again in each baseline. Sharing cannot bypass the budget.
-        let row_bytes = screen
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                if let Some(previous) = self.reading_baselines.back()
-                    && previous
-                        .rows
-                        .get(index)
-                        .is_some_and(|old| Arc::ptr_eq(old, row))
-                {
-                    return previous.row_bytes[index];
-                }
-                row.iter()
-                    .fold(std::mem::size_of::<RowSnapshot>() + 128, |total, cell| {
-                        total
-                            .saturating_add(std::mem::size_of::<CellSnapshot>())
-                            .saturating_add(cell.text.capacity())
-                            .saturating_add(cell.hyperlink.as_ref().map_or(0, |link| {
-                                std::mem::size_of_val(link.as_ref()) + 2 * link.value.capacity()
-                            }))
-                    })
-            })
-            .collect::<Vec<_>>();
-        let retained_bytes = row_bytes
-            .iter()
-            .fold(std::mem::size_of::<ReadingBaseline>(), |total, cost| {
-                total.saturating_add(*cost)
-            });
-        if retained_bytes > READING_BASELINE_BYTES {
-            return Ok(());
-        }
-        self.reading_baselines.push_back(Rc::new(ReadingBaseline {
-            generation: screen.generation,
-            geometry: self.geometry,
-            screen: active_screen,
-            modes: self.mouse_mode_state().map_err(|_| Error::InvalidValue)?,
-            alternate_scroll: screen.alternate_scroll,
-            rows: Arc::clone(&screen.rows),
-            soft_wrapped: Arc::clone(&screen.row_soft_wrapped),
-            anchors,
-            retained_bytes,
-            row_bytes,
-        }));
-        while self.reading_baselines.len() > READING_BASELINES
-            || self
-                .reading_baselines
-                .iter()
-                .map(|baseline| baseline.retained_bytes)
-                .sum::<usize>()
-                + self
-                    .active_reading_baseline
-                    .as_ref()
-                    .map_or(0, |baseline| baseline.retained_bytes)
-                > READING_BASELINE_BYTES
-        {
-            self.reading_baselines.pop_front();
-        }
-        Ok(())
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<Option<Arc<ScreenSnapshot>>, Error> {
@@ -3330,9 +3043,6 @@ impl TerminalEmulator {
             history,
             input_serial: self.input_serial,
         });
-        if self.server_reading_enabled {
-            self.retain_reading_baseline(&screen)?;
-        }
         Ok(Some(screen))
     }
 

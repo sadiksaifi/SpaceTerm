@@ -39,17 +39,6 @@ fn paired_panes_have_no_local_file_authority_even_with_local_composition() {
 }
 
 #[test]
-fn reading_commands_are_queued_without_terminal_input_focus() {
-    let adapter = Adapter::new();
-    adapter.handle.interactive_focus(false, true);
-    adapter.handle.scroll_scrollback(ScrollbackMovement::Top);
-    assert!(
-        adapter.input.try_recv().is_ok(),
-        "Scroll must reach the server worker"
-    );
-}
-
-#[test]
 fn clear_screen_and_scrollback_uses_the_current_epoch_and_exact_lease_without_focus() {
     let mut adapter = Adapter::new();
     adapter.handle.interactive_focus(false, false);
@@ -80,69 +69,28 @@ fn clear_screen_and_scrollback_uses_the_current_epoch_and_exact_lease_without_fo
 }
 
 #[test]
-fn copy_fallback_waits_for_queued_selection_input() {
-    let mut adapter = Adapter::new();
-    adapter
-        .handle
-        .read(pane::reading::Operation::Scroll(pane::reading::Scroll::Top));
-    adapter
-        .handle
-        .copy_or_forward(InputModifiers::default())
-        .unwrap();
-    adapter
-        .drain(|request| {
-            assert!(
-                !matches!(
-                    request,
-                    Request::Input {
-                        input: pane::InteractiveInput::CopyOrForward { .. },
-                        ..
-                    }
-                ),
-                "Copy overtook pending reading input"
-            );
-            Ok(Reply::Unchanged)
-        })
-        .unwrap();
-    let mapping = adapter.tracking_screen(4, 17, false);
-    let mut reader = reading::Reader::default();
-    reader.screen(&adapter.handle.state, mapping, false);
-    for _ in 0..3 {
-        reader
-            .poll(
-                &adapter.handle.state,
-                adapter.active.lease,
-                &mut |request| match request {
-                    Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
-                    Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
-                        generation: mapping.wire,
-                        selection_revision: mapping.selection,
-                        selection_present: true,
-                    }),
-                    Request::SelectionChunk { .. } => Ok(Reply::SelectionPending),
-                    _ => panic!(
-                        "Copy must not reach the application after selection input completes"
-                    ),
-                },
-            )
-            .unwrap();
-    }
+fn scrolling_reads_the_cache_without_input_focus_or_a_server_message() {
+    let adapter = Adapter::new();
+    adapter.frame(40);
+    adapter.handle.interactive_focus(false, true);
+    adapter.handle.scroll_scrollback(ScrollbackMovement::Top);
+    assert!(adapter.input.try_recv().is_err(), "scrolling sends nothing");
+    let shown = adapter.shown();
+    assert_eq!(shown.viewport.offset_rows, 0);
+    assert!(shown.scrollbar.total_rows > shown.scrollbar.visible_rows);
 }
 
 #[test]
-fn copy_without_a_prepared_selection_reaches_the_fenced_server_input_path() {
+fn copy_with_a_selection_is_local_and_without_one_forwards_through_the_fenced_input_path() {
+    use super::super::pointer_input::*;
     let mut adapter = Adapter::new();
-    assert!(
-        adapter
-            .handle
-            .copy_or_forward(InputModifiers {
-                platform: true,
-                ..Default::default()
-            })
-            .unwrap()
-            .is_none()
-    );
-    let mut requests = 0;
+    let mapping = adapter.frame(0);
+    let modifiers = InputModifiers {
+        platform: true,
+        ..Default::default()
+    };
+    assert!(adapter.handle.copy_or_forward(modifiers).unwrap().is_none());
+    let mut forwarded = 0;
     adapter
         .drain(|request| {
             if matches!(
@@ -152,73 +100,12 @@ fn copy_without_a_prepared_selection_reaches_the_fenced_server_input_path() {
                     ..
                 }
             ) {
-                requests += 1;
+                forwarded += 1;
             }
             Ok(Reply::Unchanged)
         })
         .unwrap();
-    let mut reader = reading::Reader::default();
-    reader
-        .poll(
-            &adapter.handle.state,
-            adapter.active.lease,
-            &mut |request| {
-                if matches!(
-                    request,
-                    Request::Input {
-                        input: pane::InteractiveInput::CopyOrForward { modifiers: 8 },
-                        ..
-                    }
-                ) {
-                    requests += 1;
-                }
-                Ok(Reply::Unchanged)
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        requests, 1,
-        "the server worker must decide whether Copy forwards a key"
-    );
-    adapter.handle.copy_or_forward(Default::default()).unwrap();
-    adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
-    adapter.handle.interactive_focus(false, true);
-    reader
-        .poll(&adapter.handle.state, adapter.active.lease, &mut |_| {
-            panic!("deferred Copy must not cross a changed focus generation")
-        })
-        .unwrap();
-    adapter
-        .drain(|request| {
-            assert!(
-                !matches!(request, Request::Input { .. }),
-                "Copy must not cross a changed focus generation"
-            );
-            Ok(Reply::Unchanged)
-        })
-        .unwrap();
-    adapter.handle.interactive_focus(true, true);
-    adapter
-        .handle
-        .state
-        .reading
-        .lock()
-        .unwrap()
-        .selection_present = true;
-    adapter.handle.copy_or_forward(Default::default()).unwrap();
-    assert!(
-        adapter.input.try_recv().is_err(),
-        "an unprepared selection must not forward Copy"
-    );
-}
-
-#[test]
-fn a_sustained_drag_coalesces_motion_and_keeps_its_press_and_release() {
-    use super::super::pointer_input::{
-        PointerButton, PointerPhase, ShiftSelectionPolicy, SurfacePosition,
-    };
-    let mut adapter = Adapter::new();
-    let mapping = adapter.tracking_screen(4, 17, false);
+    assert_eq!(forwarded, 1, "the program decides what Copy without a Selection does");
     let pointer = |phase, x| PointerInput {
         generation: mapping.local,
         phase,
@@ -228,62 +115,63 @@ fn a_sustained_drag_coalesces_motion_and_keeps_its_press_and_release() {
         shift_selection: ShiftSelectionPolicy::ReportToApplication,
     };
     adapter.handle.pointer(pointer(PointerPhase::Press, 1.0));
-    adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
-    for index in 0..1000 {
-        adapter
-            .handle
-            .pointer(pointer(PointerPhase::Motion, 1.0 + (index % 100) as f32));
-        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
-    }
+    adapter.handle.pointer(pointer(PointerPhase::Motion, 45.0));
+    let copy = adapter
+        .handle
+        .pointer_and_copy_selection(pointer(PointerPhase::Release, 45.0))
+        .unwrap()
+        .expect("a visible Selection copies at once");
+    assert_eq!(copy.plain_text.as_ref(), "line");
+    assert!(adapter.input.try_recv().is_err(), "selecting sends nothing");
+    let copied = adapter.handle.copy_or_forward(modifiers).unwrap().unwrap();
+    assert_eq!(copied.plain_text, copy.plain_text);
+    assert!(adapter.input.try_recv().is_err(), "Copy of a Selection forwards nothing");
+    // Typing clears the Selection, as in a local terminal.
+    adapter.handle.key(KeyInput {
+        action: KeyAction::Press,
+        physical_key: PhysicalKey::A,
+        native_key_code: None,
+        logical_key: "a".into(),
+        text: Some("a".into()),
+        unshifted_codepoint: Some('a'),
+        modifiers: InputModifiers::default(),
+        consumed_modifiers: InputModifiers::default(),
+        option_as_alt: OptionAsAltPolicy::default(),
+    });
+    assert!(adapter.handle.copy_selection().unwrap().is_none());
+}
+
+#[test]
+fn a_wheel_measured_against_an_earlier_paint_of_the_same_grid_still_scrolls() {
+    use super::super::pointer_input::*;
+    let adapter = Adapter::new();
+    let painted = adapter.frame(40);
+    // Output arrives between the paint and the wheel.
+    let current = ScreenMapping {
+        local: PresentationGeneration::test(5),
+        wire: 18,
+        ..painted
+    };
     adapter
         .handle
-        .pointer(pointer(PointerPhase::Release, 100.0));
-    adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
-    let mut reader = reading::Reader::default();
-    reader.screen(&adapter.handle.state, mapping, false);
-    let mut delivered = vec![];
-    for _ in 0..8 {
-        reader
-            .poll(
-                &adapter.handle.state,
-                adapter.active.lease,
-                &mut |request| match request {
-                    Request::Read {
-                        operation: pane::reading::Operation::Pointer(p),
-                        ..
-                    } => {
-                        delivered.push((
-                            match p.phase {
-                                pane::PointerPhase::Press => "press",
-                                pane::PointerPhase::Motion => "motion",
-                                pane::PointerPhase::Release => "release",
-                            },
-                            p.x,
-                        ));
-                        Ok(Reply::Reading { accepted: true })
-                    }
-                    Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
-                        generation: 17,
-                        selection_revision: 17,
-                        selection_present: false,
-                    }),
-                    _ => panic!("unexpected reading request"),
-                },
-            )
-            .unwrap();
-    }
+        .state
+        .connected(adapter.active.epoch, current, false)
+        .unwrap();
+    adapter.handle.wheel(WheelInput {
+        generation: painted.local,
+        horizontal_steps: 0,
+        vertical_steps: 3,
+        phase: WheelPhase::GestureChanged,
+        position: SurfacePosition { x: 1.0, y: 1.0 },
+        modifiers: InputModifiers::default(),
+        shift_selection: ShiftSelectionPolicy::ReportToApplication,
+    });
+    let shown = adapter.shown();
     assert_eq!(
-        delivered,
-        vec![("press", 1.0), ("motion", 100.0), ("release", 100.0)]
+        shown.viewport.offset_rows + 3,
+        shown.scrollbar.total_rows - shown.scrollbar.visible_rows
     );
-    assert_eq!(
-        adapter.handle.state.status(),
-        DevelopmentPaneStatus::Connected
-    );
-    assert_eq!(
-        adapter.handle.state.epoch.load(Ordering::Acquire),
-        mapping.epoch
-    );
+    assert!(adapter.input.try_recv().is_err());
 }
 
 pub(super) struct Adapter {
@@ -378,7 +266,6 @@ impl Adapter {
             epoch: self.active.epoch,
             local: PresentationGeneration::test(local),
             wire,
-            selection: wire,
             size: *self.handle.size.lock().unwrap(),
             mouse_tracking,
             alternate: false,
@@ -389,6 +276,41 @@ impl Adapter {
             .connected(self.active.epoch, mapping, false)
             .unwrap();
         mapping
+    }
+    /// Applies a frame of a real terminal that printed `history + 6` numbered lines, as the
+    /// worker applies frames, and returns its mapping.
+    fn frame(&self, history: u64) -> ScreenMapping {
+        use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(
+            TerminalGeometry::from_grid(
+                CellGridSize::new(20, 6),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ),
+        )
+        .unwrap();
+        emulator.snapshot().unwrap();
+        for _ in 0..history + 5 {
+            emulator.feed(b"line\r\n");
+        }
+        emulator.feed(b"line");
+        let screen = emulator.snapshot().unwrap().unwrap();
+        let mapping = self.tracking_screen(4, 17, false);
+        let mut reading = self.handle.state.reading.lock().unwrap();
+        reading.scrollback.attach(self.active.lease.session);
+        reading.scrollback.screen(screen);
+        mapping
+    }
+    /// What the worker presents now.
+    fn shown(&self) -> Arc<ScreenSnapshot> {
+        self.handle
+            .state
+            .reading
+            .lock()
+            .unwrap()
+            .scrollback
+            .present(PresentationGeneration::test(99))
+            .unwrap()
     }
     fn confirmation(&mut self) -> super::super::paste::PasteConfirmation {
         let reply = self
@@ -790,7 +712,6 @@ fn modal_paste_is_single_use_and_lost_confirmation_reply_is_typed_as_uncertain()
             epoch,
             local: PresentationGeneration::test(10),
             wire: 3,
-            selection: 3,
             size: *adapter.handle.size.lock().unwrap(),
             mouse_tracking: false,
             alternate: false,
@@ -982,14 +903,13 @@ fn assert_tracked_continuation_after_output(tracking_after_output: bool) {
     let mut delivered = Vec::new();
     let lease = adapter.active.lease;
     let mut server = |request: &Request| {
-        if matches!(
-            request,
-            Request::Input {
-                input: pane::InteractiveInput::Wheel(_),
-                ..
-            }
-        ) {
-            panic!("a stale wheel borrowed the continuation range");
+        // A wheel needs only its grid, so output arriving after the paint never drops it.
+        if let Request::Input {
+            input: pane::InteractiveInput::Wheel(wheel),
+            ..
+        } = request
+        {
+            delivered.push(("wheel", wheel.screen_generation));
         }
         if let Request::Input {
             lease: actual,
@@ -1055,14 +975,15 @@ fn assert_tracked_continuation_after_output(tracking_after_output: bool) {
         ..pointer
     });
     adapter.drain(&mut server).unwrap();
+    let mut expected = vec![("press", 91)];
+    // The program receives the wheel only while it tracks the mouse; otherwise it scrolls this
+    // client's view.
+    if tracking_after_output {
+        expected.push(("wheel", 92));
+    }
+    expected.extend([("motion", 92), ("release", 92), ("press", clickable.wire)]);
     assert_eq!(
-        delivered,
-        vec![
-            ("press", 91),
-            ("motion", 92),
-            ("release", 92),
-            ("press", clickable.wire)
-        ],
+        delivered, expected,
         "tracking after output: {tracking_after_output}"
     );
 }
@@ -1181,7 +1102,6 @@ fn same_wire_size_resize_keeps_quiet_pointer_and_wheel_input_at_the_new_fitted_c
                 epoch: adapter.active.epoch,
                 local: PresentationGeneration::test(8),
                 wire: 91,
-                selection: 91,
                 size: pane_size(original),
                 mouse_tracking: true,
                 alternate: false,
@@ -1271,7 +1191,6 @@ fn a_wire_size_change_waits_for_its_authoritative_pointer_mapping() {
         epoch: adapter.active.epoch,
         local: PresentationGeneration::test(8),
         wire: 91,
-        selection: 91,
         size: original,
         mouse_tracking: true,
         alternate: false,
@@ -1311,7 +1230,6 @@ fn a_wire_size_change_waits_for_its_authoritative_pointer_mapping() {
     let replacement = ScreenMapping {
         local: PresentationGeneration::test(9),
         wire: 92,
-        selection: 92,
         size: pane_size(resized),
         ..mapping
     };
@@ -1359,7 +1277,6 @@ fn pointer_coordinates_use_fitted_cells_and_the_authoritative_screen_revision() 
         epoch: adapter.active.epoch,
         local: PresentationGeneration::test(8),
         wire: 91,
-        selection: 91,
         size: pane_size(geometry),
         mouse_tracking: true,
         alternate: false,

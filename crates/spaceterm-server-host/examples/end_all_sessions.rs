@@ -17,7 +17,7 @@ mod exercise {
         connection::link::ServerLink,
         hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
         pane::{control::Controller, *},
-        protocol::{PaneEvent, interim::Interim},
+        protocol::PaneEvent,
     };
     use std::{
         error::Error,
@@ -360,25 +360,16 @@ mod exercise {
         {
             return Err("restart did not use measured dimensions and cleared output".into());
         }
-        fresh.interim(Interim::Read {
-            channel: fresh.channel(),
-            operation: reading::Operation::Query {
-                generation: 1,
-                text: format!("END_ALL_557_{stamp}"),
-            },
-        })?;
-        let find = |screen: &support::Screen| {
-            screen
-                .reading
-                .as_ref()
-                .and_then(|reading| reading.find.as_ref())
-                .filter(|find| find.generation == 1)
-                .map(|find| find.total)
-        };
+        // Read the whole fresh screen and Scrollback as a client caches it.
         let screen = fresh
-            .await_screen(Duration::from_secs(10), |screen| find(screen).is_some())?
-            .ok_or("cleared Scrollback query did not finish")?;
-        if find(&screen) != Some(0) {
+            .await_screen(Duration::from_secs(10), |screen| screen.frame.is_some())?
+            .ok_or("fresh screen did not arrive")?;
+        if fresh
+            .scrollback(screen.history)?
+            .iter()
+            .chain(&screen.rows)
+            .any(|row| row.contains(&format!("END_ALL_557_{stamp}")))
+        {
             return Err("ended output survived in Scrollback".into());
         }
         if fs::read(directory.join("retained-file"))? != b"repository-file-witness" {

@@ -124,10 +124,7 @@ impl DevelopmentPaneHost {
             Request::Accessibility { lease, .. }
             | Request::EndAccessibilityDemand { lease }
             | Request::AccessibilitySelection { lease, .. }
-            | Request::Read { lease, .. }
-            | Request::ReadingStatus { lease }
-            | Request::GraphicsChunk { lease, .. }
-            | Request::SelectionChunk { lease, .. } => lease,
+            | Request::GraphicsChunk { lease, .. } => lease,
             Request::CompleteClipboard { lease, .. }
             | Request::Focus { lease, .. }
             | Request::Input { lease, .. }
@@ -187,25 +184,10 @@ impl DevelopmentPaneHost {
                         .transpose()
                         .map_err(|_| Refusal::Unsupported)?,
                 );
-                pane.reading.fence(&pane.runtime);
-                Ok(Reply::Reading { accepted: true })
+                Ok(Reply::Unchanged)
             }
             Request::GraphicsChunk { image, offset, .. } => {
                 Ok(Reply::GraphicsChunk(pane.graphics_chunk(image, offset)))
-            }
-            Request::Read { operation, .. } => pane.read(operation),
-            Request::ReadingStatus { .. } => pane.reading_status(),
-            Request::SelectionChunk {
-                generation, offset, ..
-            } => {
-                if pane
-                    .screen
-                    .as_ref()
-                    .is_none_or(|screen| screen.selection_revision != generation)
-                {
-                    return Err(Refusal::Stale);
-                }
-                pane.reading.chunk(generation, offset)
             }
             Request::CompleteClipboard {
                 generation,
@@ -338,6 +320,16 @@ impl HostCommands for DevelopmentPaneHost {
     fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8) {
         DevelopmentPaneHost::view(self, lease, visible, max_hz);
     }
+    fn scrollback_page(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        lease: &Lease,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        DevelopmentPaneHost::scrollback_page(self, device, connection, lease, read, reply)
+    }
     fn input_written(&mut self, lease: &Lease, serial: u32) {
         DevelopmentPaneHost::input_written(self, lease, serial);
     }
@@ -419,6 +411,18 @@ pub trait HostCommands: Send {
     fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8);
     /// Marks the end of Input `serial`, so screens captured once its bytes reach the PTY carry it.
     fn input_written(&mut self, lease: &Lease, serial: u32);
+    /// Reads Scrollback rows of the Pane `lease` controls. `reply` runs exactly once, on the
+    /// Pane's terminal worker, unless this refuses the read.
+    fn scrollback_page(
+        &mut self,
+        _device: [u8; 32],
+        _connection: [u8; 32],
+        _lease: &Lease,
+        _read: ScrollbackRead,
+        _reply: PageReply,
+    ) -> Result<(), Refusal> {
+        Err(Refusal::Unsupported)
+    }
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
 }
@@ -429,8 +433,8 @@ pub(super) const TICK: Duration = Duration::from_millis(10);
 /// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
 /// opens and closes the channel in the connection's outbox, turns input into host commands, and
 /// pushes each bound Pane's presentation when the host's wake or a client `View` calls for it.
-/// Inventory and reading travel as `Operation::Interim` until control-plane and scrollback
-/// replace them.
+/// Inventory travels as `Operation::Interim` until control-plane replaces it. Scrollback pages
+/// are read on the Pane's terminal worker and replied from there.
 pub struct Served<H> {
     host: H,
     connections: BTreeMap<[u8; 32], Connection>,
@@ -887,28 +891,6 @@ fn body(reply: Reply) -> Result<ReplyBody, Refusal> {
             inventory,
             next_sequence,
         }),
-        Reply::Reading { accepted } => ReplyBody::Interim(InterimReply::Reading { accepted }),
-        Reply::ReadingReady {
-            generation,
-            selection_revision,
-            selection_present,
-        } => ReplyBody::Interim(InterimReply::ReadingReady {
-            generation,
-            selection_revision,
-            selection_present,
-        }),
-        Reply::SelectionChunk {
-            generation,
-            offset,
-            total,
-            bytes,
-        } => ReplyBody::Interim(InterimReply::SelectionChunk {
-            generation,
-            offset: offset as u64,
-            total: total as u64,
-            bytes,
-        }),
-        Reply::SelectionPending => ReplyBody::Interim(InterimReply::SelectionPending),
         Reply::Paste(_) => return Err(Refusal::Failed),
     })
 }
@@ -934,7 +916,16 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     fn revoked(&mut self, client: [u8; 32]) {
         self.host.revoked(client);
     }
-    fn request(&mut self, peer: &Peer, _id: RequestId, operation: Operation) -> Dispatch {
+    fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        if let Operation::ScrollbackPage {
+            channel,
+            epoch,
+            start,
+            rows,
+        } = operation
+        {
+            return self.scrollback_page(peer, id, channel, epoch, start, rows);
+        }
         Dispatch::reply(match operation {
             Operation::Claim(claim) => self.claim(peer, claim),
             Operation::ReleaseAttachment { attachment } => {
@@ -1005,8 +996,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
             Operation::WorktreeRead(read) => body(self.command(peer, Request::WorktreeRead(read))),
             Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
             Operation::Interim(interim) => self.interim(peer, interim),
-            // Scrollback pages arrive with the client Scrollback cache. Direct-network
-            // administration never reaches the service.
+            // Direct-network administration never reaches the service.
             Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
         })
     }
@@ -1063,24 +1053,47 @@ impl<H: HostCommands> ConnectionService for Served<H> {
 }
 
 impl<H: HostCommands> Served<H> {
+    /// Reads a Scrollback page for the channel's controlling client. The reply comes from the
+    /// Pane's terminal worker once it read the rows, so no lock is held while it reads.
+    fn scrollback_page(
+        &mut self,
+        peer: &Peer,
+        id: RequestId,
+        channel: Channel,
+        epoch: u64,
+        start: u64,
+        rows: u16,
+    ) -> Dispatch {
+        let (Ok(lease), Some(connection)) = (
+            self.lease(peer, channel),
+            self.connections.get(&peer.connection),
+        ) else {
+            return Dispatch::reply(Err(Refusal::Stale));
+        };
+        let outbox = connection.outbox.clone();
+        let reply = Box::new(move |result: Result<protocol::Page, Refusal>| {
+            // A connection that ended no longer owes the reply.
+            let _ = outbox.reply_or_refuse(id, result.map(ReplyBody::Page));
+        });
+        match self.host.scrollback_page(
+            peer.client,
+            peer.connection,
+            &lease,
+            ScrollbackRead {
+                epoch,
+                start,
+                rows,
+            },
+            reply,
+        ) {
+            Ok(()) => Dispatch::Deferred,
+            Err(refusal) => Dispatch::reply(Err(refusal)),
+        }
+    }
+
     fn interim(&mut self, peer: &Peer, interim: Interim) -> Result<ReplyBody, Refusal> {
         match interim {
             Interim::Inventory => body(self.command(peer, Request::Inventory)),
-            Interim::Read { channel, operation } => {
-                self.on_channel(peer, channel, |lease| Request::Read { lease, operation })
-            }
-            Interim::ReadingStatus { channel } => {
-                self.on_channel(peer, channel, |lease| Request::ReadingStatus { lease })
-            }
-            Interim::SelectionChunk {
-                channel,
-                generation,
-                offset,
-            } => self.on_channel(peer, channel, |lease| Request::SelectionChunk {
-                lease,
-                generation,
-                offset: offset as usize,
-            }),
         }
     }
 }

@@ -174,7 +174,7 @@ impl ReplyBody {
         matches!(
             self,
             Self::Page(_) | Self::Graphics(_) | Self::Accessibility(_)
-        ) || matches!(self, Self::Interim(reply) if reply.bulk())
+        )
     }
 
     pub fn validate(&self) -> Result<(), Fatal> {

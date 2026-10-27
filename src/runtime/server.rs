@@ -53,9 +53,6 @@ mod pane_host;
 #[cfg(test)]
 mod pane_host_tests;
 mod publish;
-mod reading;
-#[cfg(test)]
-mod reading_tests;
 mod repositories;
 #[cfg(test)]
 #[path = "server/repository_tests.rs"]
@@ -66,11 +63,8 @@ pub(crate) mod screen_encoder;
 mod screen_encoder_tests;
 #[cfg(test)]
 mod screen_tests;
-#[allow(
-    dead_code,
-    reason = "the push connection dispatches ScrollbackPage once transport and push merge"
-)]
 mod scrollback;
+pub use self::scrollback::{PageReply, ScrollbackRead};
 #[cfg(test)]
 mod served_tests;
 mod shared;
@@ -78,7 +72,6 @@ pub use shared::SharedWorkspaceHost;
 #[cfg(test)]
 mod tests;
 
-use self::pane_host::decode_modifiers;
 pub(crate) use self::pane_host::{decode_key, geometry};
 use self::screen::appearance;
 
@@ -130,7 +123,6 @@ struct OwnedPane {
     screen_generation: u64,
     size: PaneSize,
     effects: NativeEffects,
-    reading: reading::Reading,
     accessibility: accessibility::Accessibility,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {

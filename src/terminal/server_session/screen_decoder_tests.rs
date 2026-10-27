@@ -186,11 +186,9 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
     assert_eq!(rendered.mouse_tracking, screen.mouse_tracking);
     assert_eq!(rendered.alternate_scroll, screen.alternate_scroll);
     assert_eq!(rendered.colors.reversed, screen.colors.reversed);
-    assert_eq!(rendered.scrollbar, screen.scrollbar);
-    assert_eq!(rendered.viewport, screen.viewport);
+    // The client's Scrollback view sets the viewport, scrollbar, Selection and Find.
+    assert_eq!(rendered.history, screen.history);
     assert_eq!(rendered.text_blinking, screen.text_blinking);
-    assert_eq!(rendered.selection_present, screen.selection_present);
-    assert_eq!(rendered.find, screen.find);
     let colors = &screen.colors;
     assert_eq!(rendered.colors.foreground_source, colors.foreground_source);
     assert_eq!(rendered.colors.background_source, colors.background_source);
@@ -398,15 +396,8 @@ fn step(random: &mut Random, session: &mut Session) {
             }
             String::new()
         }
-        // Find, which the server presents in the reading state.
-        19 => {
-            let generation = crate::terminal::FindQueryGeneration::from_value(random.below(4) + 1);
-            let query = ["line", "o", "界", "zz"][random.below(4) as usize];
-            session
-                .emulator
-                .set_find_query(generation, query.to_owned());
-            String::new()
-        }
+        // Clearing the Scrollback, which moves the history's oldest position.
+        19 => "\x1b[3J".to_owned(),
         // An image placement, which changes the graphics manifest.
         20 => format!(
             "\x1b_Ga=T,t=d,f=32,i={},s=1,v=1,c=2,r=1,q=2;AQIDBA==\x1b\\",
@@ -421,7 +412,7 @@ fn step(random: &mut Random, session: &mut Session) {
 fn random_terminal_output_round_trips_through_every_frame() {
     let _graphics = crate::terminal::graphics::test_lock();
     // Deltas that show a selection, find results or images, most of them carried forward.
-    let (mut selected, mut found, mut images) = (0, 0, 0);
+    let (mut selected, mut images) = (0, 0);
     for seed in 1..=10_u64 {
         let mut random = Random(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let mut session = Session::new(2 + random.below(80) as u16, 2 + random.below(30) as u16);
@@ -440,9 +431,12 @@ fn random_terminal_output_round_trips_through_every_frame() {
                 }
                 _ => {
                     if let Some(decoded) = session.sync() {
-                        let reading = decoded.reading.as_ref().unwrap();
-                        selected += usize::from(reading.selection_present);
-                        found += usize::from(reading.find.is_some());
+                        selected += usize::from(
+                            decoded
+                                .rows
+                                .iter()
+                                .any(|row| row.iter().any(|cell| cell.selected)),
+                        );
                         images += usize::from(decoded.graphics.as_ref().is_some_and(|graphics| {
                             graphics.as_ref().is_ok_and(|g| !g.images.is_empty())
                         }));
@@ -452,8 +446,8 @@ fn random_terminal_output_round_trips_through_every_frame() {
         }
     }
     assert!(
-        selected > 0 && found > 0 && images > 0,
-        "{selected} {found} {images}"
+        selected > 0 && images > 0,
+        "{selected} {images}"
     );
 }
 

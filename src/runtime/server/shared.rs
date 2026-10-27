@@ -725,10 +725,7 @@ impl SharedWorkspaceHost {
                     Request::Accessibility { lease, .. }
                     | Request::EndAccessibilityDemand { lease }
                     | Request::AccessibilitySelection { lease, .. }
-                    | Request::ReadingStatus { lease }
-                    | Request::Read { lease, .. }
                     | Request::GraphicsChunk { lease, .. }
-                    | Request::SelectionChunk { lease, .. }
                     | Request::CompleteClipboard { lease, .. }
                     | Request::Focus { lease, .. }
                     | Request::Input { lease, .. }
@@ -853,6 +850,25 @@ impl HostCommands for SharedWorkspaceHost {
         for host in self.panes.values_mut() {
             host.view(lease, visible, max_hz);
         }
+    }
+    fn scrollback_page(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        lease: &Lease,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        let target = PaneTarget::from(*lease);
+        self.panes
+            .values_mut()
+            .find(|host| {
+                host.pane
+                    .as_ref()
+                    .is_some_and(|pane| PaneTarget::from(pane.lease) == target)
+            })
+            .ok_or(Refusal::Missing)?
+            .scrollback_page(device, connection, lease, read, reply)
     }
     fn input_written(&mut self, lease: &Lease, serial: u32) {
         for host in self.panes.values_mut() {

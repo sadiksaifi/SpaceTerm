@@ -820,6 +820,50 @@ pub(super) fn effects(
     effects
 }
 
+/// The text of every Scrollback row the Pane retains, read through `ScrollbackPage` as a client
+/// reads it, oldest first.
+pub(super) fn history_text(
+    host: &mut impl HostCommands,
+    device: [u8; 32],
+    lease: Lease,
+    history: spaceterm_server::protocol::screen::History,
+) -> Vec<String> {
+    let mut text = Vec::new();
+    let mut start = history.oldest;
+    while start < history.total {
+        let (sent, received) = std::sync::mpsc::channel();
+        host.scrollback_page(
+            device,
+            lease.connection,
+            &lease,
+            ScrollbackRead {
+                epoch: history.epoch,
+                start,
+                rows: spaceterm_server::protocol::limits::MAX_PAGE_ROWS,
+            },
+            Box::new(move |page| {
+                let _ = sent.send(page);
+            }),
+        )
+        .expect("the controller reads its Scrollback");
+        let page = received
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the terminal worker answers")
+            .expect("the epoch is current");
+        page.validate().expect("pages are within bounds");
+        if page.rows.is_empty() {
+            break;
+        }
+        start = page.start + page.rows.len() as u64;
+        text.extend(
+            page.rows
+                .iter()
+                .map(|row| row.runs.iter().map(|run| run.text.as_str()).collect()),
+        );
+    }
+    text
+}
+
 /// The text of each row of a keyframe. Rows the keyframe omits are blank, and a wide character's
 /// spacer adds nothing.
 pub(super) fn lines(update: &ScreenUpdate) -> Vec<String> {

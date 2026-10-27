@@ -12,9 +12,8 @@ use spaceterm_server::{
             CommandState, DirectoryProvenance, Freshness, Progress, Snapshot, TitleGlyph,
             TitleProvenance,
         },
-        reading,
     },
-    protocol::{Channel, Operation, ReplyBody, interim::Interim},
+    protocol::{Channel, Operation, ReplyBody},
 };
 use std::time::{Duration, Instant};
 
@@ -209,11 +208,7 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
     )?;
     stage("show-presentation", pane.view(true))?;
     let before = screen(pane, |screen| {
-        has_row(screen, READY)
-            && screen
-                .reading
-                .as_ref()
-                .is_some_and(|reading| reading.total_rows > reading.visible_rows)
+        has_row(screen, READY) && screen.history.total > screen.history.oldest
     })?;
     // Requests name a channel, not a lease, so a client can no longer present a lease with a
     // changed fence. The disconnected lease's channel ended with its connection; a channel this
@@ -228,14 +223,12 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
         "unbound channel admitted clear",
     )?;
     // The stale clear must have preserved the actual retained history.
-    stage(
-        "history-top",
-        pane.interim(Interim::Read {
-            channel: pane.channel(),
-            operation: reading::Operation::Scroll(reading::Scroll::Top),
-        }),
+    require(
+        stage("history-top", pane.scrollback(before.history))?
+            .iter()
+            .any(|row| row.trim_end() == HISTORY),
+        "refused clear lost retained history",
     )?;
-    screen(pane, |screen| has_row(screen, HISTORY))?;
     require(
         matches!(
             stage(
@@ -250,9 +243,7 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
     )?;
     screen(pane, |screen| {
         screen.generation != before.generation
-            && screen.reading.as_ref().is_some_and(|reading| {
-                reading.total_rows == reading.visible_rows && reading.offset_rows == 0
-            })
+            && screen.history.total == screen.history.oldest
             && !screen
                 .rows
                 .iter()

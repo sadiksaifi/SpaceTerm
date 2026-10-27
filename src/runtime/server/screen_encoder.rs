@@ -39,7 +39,6 @@ struct Baseline {
     modes: Modes,
     colors: Colors,
     graphics: GraphicsSnapshot,
-    reading: pane::reading::Snapshot,
     generation: u64,
     accessibility_revision: u64,
 }
@@ -182,7 +181,6 @@ impl ScreenEncoder {
         let (styles, links) = self.tables.take_definitions();
         let modes = modes(screen);
         let colors = colors(screen);
-        let reading = reading(screen);
         let update = ScreenUpdate {
             cursor: cursor(screen),
             history: History {
@@ -208,9 +206,6 @@ impl ScreenEncoder {
                 .then(|| super::graphics::encode(&screen.graphics)),
             accessibility_revision: capture.accessibility_revision,
             generation: capture.generation,
-            reading: previous
-                .is_none_or(|previous| previous.reading != reading)
-                .then_some(reading),
         };
         if let Some(previous) = previous
             && update.rows.is_empty()
@@ -221,7 +216,6 @@ impl ScreenEncoder {
             && update.modes.is_none()
             && update.colors.is_none()
             && update.graphics.is_none()
-            && update.reading.is_none()
             && update.cursor == previous.cursor
             && update.history == previous.history
             && update.generation == previous.generation
@@ -245,7 +239,6 @@ impl Baseline {
             modes: modes(screen),
             colors: colors(screen),
             graphics: screen.graphics.clone(),
-            reading: reading(screen),
             generation: update.generation,
             accessibility_revision: update.accessibility_revision,
         }
@@ -253,13 +246,6 @@ impl Baseline {
 }
 
 /// Encodes Scrollback rows with page-local tables, so a page never depends on frame order.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Scrollback pages are encoded with it when scrollback merges"
-    )
-)]
 pub(crate) fn encode_page<'a>(
     epoch: u64,
     start: u64,
@@ -641,25 +627,5 @@ fn cursor(screen: &ScreenSnapshot) -> Cursor {
             CursorShapeSnapshot::Underline => 2,
             CursorShapeSnapshot::BlockHollow => 3,
         },
-    }
-}
-
-fn reading(screen: &ScreenSnapshot) -> pane::reading::Snapshot {
-    pane::reading::Snapshot {
-        total_rows: screen.scrollbar.total_rows,
-        offset_rows: screen.scrollbar.offset_rows,
-        visible_rows: screen.scrollbar.visible_rows,
-        selection_present: screen.selection_present,
-        selection_revision: screen.selection_revision,
-        find: screen.find.as_ref().map(|find| pane::reading::Find {
-            generation: find.generation.value(),
-            total: find.total_matches,
-            current: find.current_match,
-            spans: find
-                .visible_spans
-                .iter()
-                .map(|span| (span.row, span.start_column, span.end_column, span.current))
-                .collect(),
-        }),
     }
 }

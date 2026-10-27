@@ -9,12 +9,7 @@ use spaceterm_server::connection::link::{ChannelEvent, ChannelSink};
 use spaceterm_server::protocol::{Frame, PaneEvent};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
-
-/// Rechecks reading work the server is still applying, such as an operation's presentation
-/// barrier or a selection being prepared. A quarter of a 60 Hz frame bounds each wait without
-/// turning the worker into a busy loop.
-pub(super) const READING_RECHECK: Duration = Duration::from_millis(4);
+use std::time::Instant;
 
 /// Wakes a Pane worker. A notification before the wait is never lost.
 #[derive(Default)]
@@ -221,6 +216,7 @@ impl Demand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use spaceterm_server::protocol::{Channel, ScreenUpdate};
     use std::sync::atomic::{AtomicUsize, Ordering};
 

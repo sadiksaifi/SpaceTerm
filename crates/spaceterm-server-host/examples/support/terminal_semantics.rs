@@ -2,11 +2,8 @@
 use super::support::{Pane, Screen, has_row, no_op, text_key};
 use spaceterm_server::{
     ServerError,
-    pane::{FocusTarget, accessibility, graphics, reading},
-    protocol::{
-        Operation, ReplyBody,
-        interim::{Interim, InterimReply},
-    },
+    pane::{FocusTarget, accessibility, graphics},
+    protocol::{Operation, ReplyBody},
 };
 use std::time::{Duration, Instant};
 
@@ -254,22 +251,6 @@ fn screen_at(
     stage(label, pane.await_screen(DEADLINE, matches))?
         .ok_or_else(|| Failure::from("terminal exercise deadline elapsed").at(label))
 }
-fn read(pane: &Pane, operation: reading::Operation) -> Result<()> {
-    let until = Instant::now() + DEADLINE;
-    loop {
-        match stage(
-            "reading-operation",
-            pane.interim(Interim::Read {
-                channel: pane.channel(),
-                operation: operation.clone(),
-            }),
-        )? {
-            InterimReply::Reading { accepted: true } => return Ok(()),
-            InterimReply::Reading { accepted: false } => pause(until)?,
-            _ => return Err("terminal reading response changed".into()),
-        }
-    }
-}
 fn semantics(pane: &Pane, until: Instant) -> Result<accessibility::Snapshot> {
     let mut revision = None;
     let mut bytes = Vec::new();
@@ -318,73 +299,8 @@ fn semantics(pane: &Pane, until: Instant) -> Result<accessibility::Snapshot> {
         }
     }
 }
-fn copy(pane: &Pane) -> Result<String> {
-    let until = Instant::now() + DEADLINE;
-    let channel = pane.channel();
-    let generation = loop {
-        match stage(
-            "selection-status",
-            pane.interim(Interim::ReadingStatus { channel }),
-        )? {
-            InterimReply::ReadingReady {
-                selection_revision,
-                selection_present: true,
-                ..
-            } => {
-                break selection_revision;
-            }
-            InterimReply::ReadingReady { .. } | InterimReply::SelectionPending => pause(until)?,
-            _ => return Err("selection preparation unavailable".into()),
-        }
-    };
-    let mut bytes = Vec::new();
-    let mut total = None;
-    let mut chunks = 0;
-    loop {
-        match stage(
-            "selection-chunk",
-            pane.interim(Interim::SelectionChunk {
-                channel,
-                generation,
-                offset: bytes.len() as u64,
-            }),
-        )? {
-            InterimReply::SelectionChunk {
-                generation: actual,
-                offset,
-                total: length,
-                bytes: part,
-            } => {
-                require(
-                    actual == generation
-                        && offset == bytes.len() as u64
-                        && total.is_none_or(|saved| saved == length)
-                        && length <= reading::MAX_SELECTION_BYTES as u64
-                        && !part.is_empty()
-                        && part.len() <= reading::SELECTION_CHUNK_BYTES
-                        && offset + part.len() as u64 <= length,
-                    "selection chunk binding or bounds changed",
-                )?;
-                total = Some(length);
-                bytes.extend(part);
-                chunks += 1;
-                if bytes.len() as u64 == length {
-                    require(
-                        chunks > 2,
-                        "full history copy did not cross chunk boundaries",
-                    )?;
-                    let selection: reading::Selection = api(serde_json::from_slice(&bytes))?;
-                    return Ok(selection.plain_text);
-                }
-            }
-            InterimReply::SelectionPending => pause(until)?,
-            _ => return Err("selection transfer unavailable".into()),
-        }
-    }
-}
-
-/// The caller owns the Pane. Every route of protocol major 2 carries reading, accessibility and
-/// graphics. No terminal content, remote path or native error is returned as evidence.
+/// The caller owns the Pane. Every route of protocol major 2 carries Scrollback pages,
+/// accessibility and graphics. No terminal content, remote path or native error is returned as evidence.
 pub fn exercise(pane: &Pane) -> Result<Report> {
     let script = "stty -echo; python3 -c 'import base64,sys; w=sys.stdout.write; w(\"\\033[3J\\033[2J\\033[H\"); [w(\"ST-NATIVE-%05d\\n\"%i) for i in range(5000)]; d=base64.b64encode(bytes([255,0,0,255])*320*240).decode(); [w(\"\\033_G\"+(\"a=T,f=32,s=320,v=240,i=541,q=2,\" if i==0 else \"\")+\"m=%d;\"%int(i+4096<len(d))+d[i:i+4096]+\"\\033\\\\\") for i in range(0,len(d),4096)]; w(\"\\nST-SEMANTICS-DONE\\n\"); sys.stdout.flush()'";
     stage("fixture-output-command", pane.command(script))?;
@@ -392,12 +308,23 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
     std::thread::sleep(Duration::from_millis(300));
     let complete = screen(pane, |screen| has_row(screen, DONE))
         .map_err(|failure| failure.at("bulk-output"))?;
+    let expected: Vec<_> = (0..ROWS).map(|i| format!("{PREFIX}{i:05}")).collect();
+    // A client reads history through Scrollback pages; every fixture row arrives once, in order,
+    // across many page boundaries.
+    let history = stage("scrollback-pages", pane.scrollback(complete.history))?;
     require(
-        complete
-            .reading
-            .as_ref()
-            .is_some_and(|s| s.total_rows >= ROWS as u64),
-        "bulk Scrollback did not retain its rows",
+        history.len() > 2 * usize::from(spaceterm_server::protocol::limits::MAX_PAGE_ROWS),
+        "bulk Scrollback did not span several pages",
+    )?;
+    let fixture: Vec<_> = history
+        .iter()
+        .chain(&complete.rows)
+        .map(|row| row.trim_end())
+        .filter(|row| row.starts_with(PREFIX))
+        .collect();
+    require(
+        fixture == expected,
+        "Scrollback pages changed or reordered retained rows",
     )?;
     let manifest = complete
         .graphics
@@ -439,68 +366,6 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         graphics_bytes == 320 * 240 * 4,
         "graphics transfer length changed",
     )?;
-    read(
-        pane,
-        reading::Operation::Query {
-            generation: 1,
-            text: PREFIX.into(),
-        },
-    )?;
-    screen_at("find-results", pane, |s| {
-        s.reading
-            .as_ref()
-            .and_then(|s| s.find.as_ref())
-            .is_some_and(|f| f.generation == 1 && f.total == ROWS)
-    })?;
-    read(
-        pane,
-        reading::Operation::Navigate {
-            generation: 1,
-            backwards: false,
-        },
-    )?;
-    let found = screen_at("find-first-navigation", pane, |s| {
-        s.reading
-            .as_ref()
-            .and_then(|s| s.find.as_ref())
-            .is_some_and(|f| {
-                f.generation == 1
-                    && f.total == ROWS
-                    && f.current
-                        .is_some_and(|current| (1..=ROWS).contains(&current))
-                    && f.spans.iter().any(|span| span.3)
-            })
-    })?;
-    let first = found
-        .reading
-        .as_ref()
-        .and_then(|s| s.find.as_ref())
-        .and_then(|f| f.current)
-        .ok_or("Find current match missing")?;
-    read(
-        pane,
-        reading::Operation::Navigate {
-            generation: 1,
-            backwards: false,
-        },
-    )?;
-    screen_at("find-next-navigation", pane, |s| {
-        s.reading
-            .as_ref()
-            .and_then(|s| s.find.as_ref())
-            .is_some_and(|f| f.total == ROWS && f.current == Some(first % ROWS + 1))
-    })?;
-    read(pane, reading::Operation::EndFind { generation: 1 })?;
-    read(pane, reading::Operation::Scroll(reading::Scroll::Top))?;
-    screen_at("scroll-top", pane, |s| has_row(s, "ST-NATIVE-00000"))?;
-    read(pane, reading::Operation::Scroll(reading::Scroll::Bottom))?;
-    screen_at("scroll-bottom", pane, |s| {
-        s.reading
-            .as_ref()
-            .is_some_and(|r| r.offset_rows + r.visible_rows == r.total_rows)
-    })?;
-
-    let expected: Vec<_> = (0..ROWS).map(|i| format!("{PREFIX}{i:05}")).collect();
     let until = Instant::now() + DEADLINE;
     // Visual and semantic publications are independent. As in the runtime's
     // server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_lease
@@ -590,7 +455,7 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
                     selection: Some(selection),
                 })
             )?,
-            ReplyBody::Done | ReplyBody::Interim(InterimReply::Reading { accepted: true })
+            ReplyBody::Done
         ),
         "accessible history selection refused",
     )?;
@@ -601,10 +466,6 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         }
         pause(until)?;
     }
-    require(
-        copy(pane)? == expected.join("\n"),
-        "full history Copy contents changed",
-    )?;
     stage(
         "accessibility-selection",
         pane.request(Operation::AccessibilitySelection {

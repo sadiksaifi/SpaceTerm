@@ -1,6 +1,7 @@
 use super::*;
 use crate::runtime::server::tests::{
-    await_text, command, focus, host, screen, shared_inventory, size,
+    await_screen, await_text, command, focus, history_text, host, lines, screen, shared_inventory,
+    size,
 };
 use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
 
@@ -683,12 +684,6 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
             id: 1,
             completion: pane::effects::Completion::Text("old".into()),
         },
-        Request::SelectionChunk {
-            lease: old,
-            generation: 1,
-            offset: 0,
-        },
-        Request::ReadingStatus { lease: old },
         Request::Resize {
             lease: old,
             size: size(),
@@ -705,39 +700,16 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
             Reply::Refused(Refusal::Stale)
         ));
     }
-    // Search the entire fresh screen and Scrollback before any client input can clear it.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Read {
-                lease: replacement,
-                operation: pane::reading::Operation::Query {
-                    generation: 7,
-                    text: "OLD-SESSION-OUTPUT".into(),
-                },
-            },
-        );
-        if let Ok(Some(update)) = screen(&mut host, [1; 32], replacement)
-            && let Some(find) = update
-                .reading
-                .as_ref()
-                .and_then(|reading| reading.find.as_ref())
-            && find.generation == 7
-        {
-            assert_eq!(
-                find.total, 0,
-                "the ended Session cannot survive in screen or Scrollback"
-            );
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "fresh Find did not complete"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // Read the entire fresh screen and Scrollback before any client input can clear it.
+    let update = await_screen(&mut host, [1; 32], replacement, |_| true);
+    let history = history_text(&mut host, [1; 32], replacement, update.history);
+    assert!(
+        !history
+            .iter()
+            .chain(lines(&update).iter())
+            .any(|line| line.contains("OLD-SESSION-OUTPUT")),
+        "the ended Session cannot survive in screen or Scrollback"
+    );
     host.shutdown().unwrap();
 }
 

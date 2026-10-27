@@ -26,8 +26,6 @@ pub(crate) enum PointerEvent {
     Press { x: f32, y: f32 },
     Drag { x: f32, y: f32 },
     Release,
-    /// Another owner took the pointer, such as the program or a hidden view.
-    Cancel,
 }
 
 /// The presented grid, in the same pixel units as [`PointerEvent`].
@@ -155,11 +153,11 @@ impl LocalSelection {
                 self.gesture.autoscroll = 0;
                 false
             }
-            PointerEvent::Cancel => {
-                self.gesture = Gesture::default();
-                false
-            }
         }
+    }
+
+    pub(super) fn cancel_gesture(&mut self) {
+        self.gesture = Gesture::default();
     }
 
     pub(super) fn autoscrolling(&self) -> bool {

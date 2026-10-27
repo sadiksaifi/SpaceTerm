@@ -267,17 +267,11 @@ fn a_scrolled_view_stays_on_its_rows_while_output_continues() {
     server.serve(&mut scrollback);
     scrollback.wheel(3);
     assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
-    // Two rows scroll into history and the server reports them in the frame.
+    // Two rows scroll into history; the scrolled view asks for them only if it needs them.
     server.rows.push(("a".into(), false));
     server.rows.push(("b".into(), false));
     scrollback.screen(screen(&["c", "$ ls", "x", "y"], server.history()));
-    scrollback.entered(
-        100,
-        vec![
-            CachedRow::new(&row("a"), false),
-            CachedRow::new(&row("b"), false),
-        ],
-    );
+    server.serve(&mut scrollback);
     assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
     assert!(scrollback.wheel(-5));
     assert_eq!(presented(&mut scrollback), ["c", "$ ls", "x", "y"]);
@@ -543,13 +537,12 @@ fn a_selection_stays_on_its_content_while_output_scrolls() {
     server.rows.push(("one".into(), false));
     server.rows.push(("two".into(), false));
     scrollback.screen(screen(&["three", "$ ls", "", ""], server.history()));
-    scrollback.entered(
-        0,
-        vec![
-            CachedRow::new(&row("one"), false),
-            CachedRow::new(&row("two"), false),
-        ],
+    assert_eq!(
+        scrollback.copy(SelectionCopyOptions::default()),
+        CopyOutcome::Pending,
+        "the selected row that scrolled into history arrives by page"
     );
+    server.serve(&mut scrollback);
     let copy = ready(scrollback.copy(SelectionCopyOptions::default()));
     assert_eq!(copy.plain_text.as_ref(), "two\nthree");
     let shown = scrollback.present(PresentationGeneration::test(1)).unwrap();

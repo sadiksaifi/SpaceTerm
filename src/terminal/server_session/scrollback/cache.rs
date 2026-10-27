@@ -82,7 +82,7 @@ impl ScrollbackCache {
     /// Adds rows the server reported for consecutive positions from `start`, keeping only
     /// retained positions. `focus` is the position the reader is closest to; rows farthest from
     /// it leave first when the cache is full.
-    pub(super) fn insert(
+    fn insert(
         &mut self,
         start: u64,
         rows: impl IntoIterator<Item = CachedRow>,
@@ -118,12 +118,6 @@ impl ScrollbackCache {
         {
             self.insert(start, rows, focus);
         }
-    }
-
-    /// Whether every retained position in `range` is cached.
-    pub(super) fn covers(&self, range: Range<u64>) -> bool {
-        let range = self.retained(range);
-        self.rows.range(range.clone()).count() as u64 == range.end - range.start
     }
 
     /// Pages to ask for so the retained positions in `wanted` become cached, nearest to `focus`
