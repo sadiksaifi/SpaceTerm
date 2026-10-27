@@ -51,7 +51,7 @@ class ServerCatalogTests(unittest.TestCase):
             target=native_target,
             commit="a" * 40,
             version="dev.aaaaaaaaaaaa",
-            protocol_major=1,
+            protocol_major=2,
             capabilities=["workspace_policy"],
         )
         info.update(changed)
@@ -240,7 +240,7 @@ int main(int argc, char **argv) {{
                     target for target in server_package.TARGETS.values() if target != self.target
                 )
             },
-            {"protocol_major": 2},
+            {"protocol_major": 1},
             {"capabilities": []},
         ]:
             with self.subTest(changed=changed):
