@@ -1141,7 +1141,6 @@ fn interim_reply(body: ReplyBody) -> Result<Reply, ServerError> {
         ReplyBody::Outcome(outcome) => Reply::Outcome(outcome),
         ReplyBody::Interim(reply) => match reply {
             InterimReply::Screen(screen) => Reply::Screen(screen),
-            InterimReply::ScreenChanges(changes) => Reply::ScreenChanges(changes),
             InterimReply::Unchanged => Reply::Unchanged,
             InterimReply::Ended => Reply::Ended,
             InterimReply::AccessibilityRevision { revision } => {
@@ -1407,23 +1406,13 @@ pub(super) fn present(
                 }
                 let polled = cadence.poll_due(now);
                 if polled {
-                    let reply = if changes {
-                        let base = screens.baseline();
-                        let reply = send(
-                            &presenter,
-                            &alive,
-                            &mut connection,
-                            &Request::PollChanges { lease, base },
-                        )?;
-                        screens.apply(reply)?
-                    } else {
-                        send(
-                            &presenter,
-                            &alive,
-                            &mut connection,
-                            &Request::Poll { lease },
-                        )?
-                    };
+                    let base = screens.baseline();
+                    let reply = send(
+                        &presenter,
+                        &alive,
+                        &mut connection,
+                        &Request::PollChanges { lease, base },
+                    )?;
                     // A reply that completed after a successor claimed the Pane is not published.
                     if !presenter.current() {
                         return Err(ServerError::NotRunning);
@@ -1432,16 +1421,21 @@ pub(super) fn present(
                         return Err(ServerError::Protocol);
                     }
                     match reply {
-                        Reply::Screen(screen) => {
-                            semantic.note_revision(screen.accessibility_revision);
-                            let (screen, mapping) = screens.decode(
-                                screen,
+                        Reply::Screen(frame) => 'screen: {
+                            // A frame for a lost baseline is skipped; the next poll asks for a
+                            // keyframe.
+                            let Some((screen, mapping, revision)) = screens.receive(
+                                *frame,
                                 epoch,
                                 &mut generation,
                                 active_size,
                                 &mut graphics,
                                 &appearance,
-                            )?;
+                            )?
+                            else {
+                                break 'screen;
+                            };
+                            semantic.note_revision(revision);
                             if !ready {
                                 // Claims apply their measured controller facts once.
                                 // Reconcile changes made while attachment was in flight.
@@ -1860,13 +1854,12 @@ mod tests {
             loop {
                 if let Reply::Screen(screen) =
                     host.request([1; 32], [1; 32], Request::Poll { lease })
-                    && screen.rows.iter().any(|row| {
-                        let line = row
-                            .iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>();
-                        marker.map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
-                    })
+                    && crate::terminal::server_session::screen_decoder::keyframe_lines(&screen)
+                        .iter()
+                        .any(|line| {
+                            marker
+                                .map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
+                        })
                 {
                     break;
                 }

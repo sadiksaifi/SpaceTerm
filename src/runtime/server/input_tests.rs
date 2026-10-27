@@ -70,11 +70,7 @@ fn await_line(served: &mut Served<SharedWorkspaceHost>, rows: &mut Vec<String>, 
             served,
             Operation::Interim(Interim::Poll { channel: CHANNEL }),
         ) {
-            *rows = screen
-                .rows
-                .iter()
-                .map(|row| row.iter().map(|cell| cell.text.as_str()).collect())
-                .collect();
+            *rows = super::tests::lines(&screen);
         }
         if rows.iter().any(|row| row.trim_end() == line) {
             return;

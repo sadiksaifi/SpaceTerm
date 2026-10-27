@@ -8,13 +8,11 @@ use spaceterm_server::{
     attachments::Attachment,
     connection::link::{ChannelEvent, ChannelHandle, LinkError, LinkEvent, ServerLink},
     hierarchy::{Id, Inventory, Mutation, RetainedOutcome},
-    pane::{
-        AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, Screen, effects,
-    },
+    pane::{AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, effects},
     protocol::{
         Channel, ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody, Restored,
         Takeover,
-        interim::{Interim, InterimReply},
+        interim::{Interim, InterimReply, ScreenFrame},
     },
 };
 use std::{
@@ -271,17 +269,24 @@ pub fn enter_key() -> Key {
     }
 }
 
-/// The screen's rows as text.
-pub fn rows(screen: &Screen) -> Vec<String> {
-    screen
-        .rows
-        .iter()
-        .map(|row| row.iter().map(|cell| cell.text.as_str()).collect())
-        .collect()
+/// The text of each row of a polled keyframe. Rows the keyframe omits are blank, and a wide
+/// character's spacer adds nothing.
+pub fn rows(screen: &ScreenFrame) -> Vec<String> {
+    let count = screen
+        .update
+        .geometry
+        .map_or(0, |geometry| usize::from(geometry.rows));
+    let mut rows = vec![String::new(); count];
+    for row in &screen.update.rows {
+        if let Some(text) = rows.get_mut(usize::from(row.index)) {
+            *text = row.runs.iter().map(|run| run.text.as_str()).collect();
+        }
+    }
+    rows
 }
 
 /// Whether a row of the screen reads exactly `marker`, ignoring trailing blanks.
-pub fn has_row(screen: &Screen, marker: &str) -> bool {
+pub fn has_row(screen: &ScreenFrame, marker: &str) -> bool {
     rows(screen).iter().any(|row| row.trim_end() == marker)
 }
 
@@ -486,7 +491,7 @@ impl Pane {
         interim(&self.link, operation)
     }
 
-    /// Polls the screen once.
+    /// Polls the screen once. A screen arrives as a keyframe.
     pub fn poll(&self) -> Result<InterimReply> {
         self.interim(Interim::Poll {
             channel: self.channel(),
@@ -494,7 +499,7 @@ impl Pane {
     }
 
     /// The screen, when it changed since the last poll.
-    pub fn screen(&self) -> Result<Option<Box<Screen>>> {
+    pub fn screen(&self) -> Result<Option<Box<ScreenFrame>>> {
         match self.poll()? {
             InterimReply::Screen(screen) => Ok(Some(screen)),
             _ => Ok(None),
@@ -505,8 +510,8 @@ impl Pane {
     pub fn await_screen(
         &self,
         wait: Duration,
-        matches: impl Fn(&Screen) -> bool,
-    ) -> Result<Option<Box<Screen>>> {
+        matches: impl Fn(&ScreenFrame) -> bool,
+    ) -> Result<Option<Box<ScreenFrame>>> {
         let deadline = Instant::now() + wait;
         while Instant::now() < deadline {
             if let Some(screen) = self.screen()?

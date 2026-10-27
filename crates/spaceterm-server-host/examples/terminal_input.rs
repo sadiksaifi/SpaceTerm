@@ -14,7 +14,7 @@ use spaceterm_server::{
     pane::*,
     protocol::{
         InputEvent, Operation,
-        interim::{Interim, InterimReply},
+        interim::{Interim, InterimReply, ScreenFrame},
     },
 };
 use std::{
@@ -109,7 +109,7 @@ fn command(pane: &Pane, generation: u64, text: &str) -> Result<(), ServerError> 
     )
     .map(drop)
 }
-fn await_marker(pane: &Pane, marker: &str) -> Result<Box<Screen>, Box<dyn Error>> {
+fn await_marker(pane: &Pane, marker: &str) -> Result<Box<ScreenFrame>, Box<dyn Error>> {
     pane.await_screen(Duration::from_secs(10), |screen| has_row(screen, marker))?
         .ok_or_else(|| format!("PTY marker missing: {marker}").into())
 }
@@ -118,7 +118,7 @@ fn capture(
     generation: u64,
     bytes: usize,
     modes: &str,
-) -> Result<Box<Screen>, Box<dyn Error>> {
+) -> Result<Box<ScreenFrame>, Box<dyn Error>> {
     let marker = format!("READY-{generation}-{bytes}");
     command(
         pane,
@@ -323,9 +323,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     await_marker(&taken, "6f6b610d62")?;
     taken.focus(2, FocusTarget::Terminal)?;
     let screen = capture(&taken, 2, 28, "\\033[?1000h\\033[?1006h")?;
-    assert!(screen.mouse_tracking);
+    assert!(
+        screen
+            .update
+            .modes
+            .is_some_and(|modes| modes.mouse_tracking)
+    );
     let pointer = Pointer {
-        screen_generation: screen.generation,
+        screen_generation: screen.update.generation,
         phase: PointerPhase::Press,
         button: Some(PointerButton::Left),
         x: 4.0,
@@ -344,7 +349,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     taken.input(
         2,
         vec![InputEvent::Wheel(Wheel {
-            screen_generation: screen.generation,
+            screen_generation: screen.update.generation,
             horizontal_steps: 0,
             vertical_steps: 1,
             phase: WheelPhase::GestureChanged,
@@ -382,8 +387,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "stty size; stty raw -echo; printf '\\033[?996n'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
     )?;
     let screen = await_marker(&taken, "1b5b3f3939373b326e")?;
+    let geometry = screen.update.geometry.ok_or("keyframe geometry missing")?;
+    let colors = screen
+        .update
+        .colors
+        .as_ref()
+        .ok_or("keyframe colors missing")?;
     assert_eq!(
-        (screen.columns, screen.rows.len(), screen.background),
+        (geometry.columns, geometry.rows, colors.background),
         (91, 31, [240; 3])
     );
     assert!(has_row(&screen, "31 91"));

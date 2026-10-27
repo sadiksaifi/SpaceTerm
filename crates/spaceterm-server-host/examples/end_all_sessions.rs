@@ -361,7 +361,7 @@ mod exercise {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let InterimReply::Screen(screen) = fresh.poll()?
-                && let Some(find) = screen.reading.and_then(|reading| reading.find)
+                && let Some(find) = screen.update.reading.and_then(|reading| reading.find)
                 && find.generation == 1
             {
                 if find.total != 0 {

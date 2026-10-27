@@ -36,7 +36,8 @@ mod exercise {
     };
     use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
     use spaceterm_server::pane::control::Controller;
-    use spaceterm_server::pane::{AttachmentClaim, Lease, PaneSize, Screen, directories};
+    use spaceterm_server::pane::{AttachmentClaim, Lease, PaneSize, directories};
+    use spaceterm_server::protocol::interim::ScreenFrame;
     use spaceterm_server::protocol::{Operation, ReplyBody};
     use spaceterm_server::{ServerConnection, ServerError};
 
@@ -199,7 +200,7 @@ mod exercise {
         output_snapshot(pane, marker).map(|_| ())
     }
 
-    fn output_snapshot(pane: &Pane, marker: &str) -> Result<Box<Screen>> {
+    fn output_snapshot(pane: &Pane, marker: &str) -> Result<Box<ScreenFrame>> {
         let until = Instant::now() + Duration::from_secs(10);
         while Instant::now() < until {
             if let Some(screen) = api(pane.screen())?

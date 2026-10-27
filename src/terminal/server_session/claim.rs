@@ -465,7 +465,7 @@ mod tests {
                 state.startup_pending(),
                 state.status(),
                 state.interactive_input(),
-                matches!(poll, Reply::Screen(_) | Reply::ScreenChanges(_)),
+                matches!(poll, Reply::Screen(_)),
             ));
         }
         // Stop every fixture PTY before any assertion can fail.
@@ -563,7 +563,7 @@ mod tests {
         // Read the same demand inputs that the production presentation worker uses.
         cadence.set_preparation(state.preparation.load(Ordering::Acquire));
         let mut prepared = false;
-        let mut decoder = pane::presentation::ScreenDecoder::default();
+        let mut decoder = crate::terminal::server_session::screen_decoder::ScreenDecoder::default();
         while start.elapsed() < Duration::from_secs(3) {
             if let Some(visible) = cadence.take_demand() {
                 assert!(matches!(
@@ -582,17 +582,17 @@ mod tests {
                     [1; 32],
                     Request::PollChanges {
                         lease,
-                        base: decoder.baseline(),
+                        base: decoder.frame(),
                     },
                 );
-                if let Reply::Screen(screen) = decoder.apply(reply).unwrap() {
-                    prepared = screen.rows.iter().any(|row| {
-                        row.iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>()
-                            .trim_end()
-                            == "HIDDEN-PREPARED"
-                    });
+                if let Reply::Screen(frame) = reply {
+                    let decoded = decoder
+                        .apply(frame.frame, frame.base, frame.update, None)
+                        .unwrap();
+                    prepared = decoded
+                        .lines()
+                        .iter()
+                        .any(|row| row.trim_end() == "HIDDEN-PREPARED");
                     if prepared {
                         break;
                     }

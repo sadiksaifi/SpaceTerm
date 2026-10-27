@@ -1,20 +1,19 @@
-use super::tests::{command, host, size};
+use super::tests::{command, host, lines, size};
 use super::*;
 use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
+use spaceterm_server::protocol::interim::ScreenFrame;
 use std::time::Instant;
 
-// Exercise the public request and actual server screen encoding across JSON decoding.
+// Exercise the host commands and the server's actual screen frames.
 fn exchange(host: &mut impl HostCommands, device: u8, connection: u8, request: Request) -> Reply {
-    let request = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
-    let reply = host.request([device; 32], [connection; 32], request);
-    serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap()
+    host.request([device; 32], [connection; 32], request)
 }
 
 fn screen(
     host: &mut impl HostCommands,
     lease: Lease,
-    ready: impl Fn(&Screen) -> bool,
-) -> Box<Screen> {
+    ready: impl Fn(&ScreenFrame) -> bool,
+) -> Box<ScreenFrame> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match exchange(
@@ -24,7 +23,7 @@ fn screen(
             Request::PollChanges { lease, base: None },
         ) {
             Reply::Screen(screen) if ready(&screen) => return screen,
-            Reply::Screen(_) | Reply::ScreenChanges(_) | Reply::Unchanged => {}
+            Reply::Screen(_) | Reply::Unchanged => {}
             reply => panic!("screen refused: {reply:?}"),
         }
         assert!(
@@ -35,13 +34,8 @@ fn screen(
     }
 }
 
-fn text(screen: &Screen) -> String {
-    screen
-        .rows
-        .iter()
-        .map(|r| r.iter().map(|c| c.text.as_str()).collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n")
+fn text(screen: &ScreenFrame) -> String {
+    lines(screen).join("\n")
 }
 
 #[test]
@@ -117,8 +111,8 @@ fn clear_under_lease(preserve_prompt: bool) {
     let second_before = screen(&mut host, second, |s| {
         text(s).lines().any(|r| r.trim_end() == "SECOND-prompt")
     });
-    assert!(first_before.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
-    assert!(second_before.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
+    assert!(first_before.update.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
+    assert!(second_before.update.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
 
     let mut wrong_control = first;
     wrong_control.control = [99; 32];
@@ -145,8 +139,8 @@ fn clear_under_lease(preserve_prompt: bool) {
     }
     let untouched = screen(&mut host, first, |_| true);
     assert_eq!(
-        untouched.reading.as_ref().unwrap().total_rows,
-        first_before.reading.as_ref().unwrap().total_rows
+        untouched.update.reading.as_ref().unwrap().total_rows,
+        first_before.update.reading.as_ref().unwrap().total_rows
     );
     assert_eq!(text(&untouched), text(&first_before));
 
@@ -213,8 +207,9 @@ fn clear_under_lease(preserve_prompt: bool) {
         ));
     }
     let cleared = screen(&mut host, resumed, |s| {
-        s.generation > first_before.generation
-            && s.reading
+        s.update.generation > first_before.update.generation
+            && s.update
+                .reading
                 .as_ref()
                 .is_some_and(|r| r.total_rows == r.visible_rows)
     });
@@ -234,8 +229,8 @@ fn clear_under_lease(preserve_prompt: bool) {
     let second_after = screen(&mut host, second, |_| true);
     assert_eq!(text(&second_after), text(&second_before));
     assert_eq!(
-        second_after.reading.as_ref().unwrap().total_rows,
-        second_before.reading.as_ref().unwrap().total_rows
+        second_after.update.reading.as_ref().unwrap().total_rows,
+        second_before.update.reading.as_ref().unwrap().total_rows
     );
     host.shutdown().unwrap();
 }

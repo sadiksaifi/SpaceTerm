@@ -5,7 +5,6 @@ pub mod directories;
 pub mod effects;
 pub mod graphics;
 pub mod metadata;
-pub mod presentation;
 pub mod reading;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
@@ -413,8 +412,7 @@ pub enum Reply {
     Attached {
         lease: Lease,
     },
-    Screen(Box<Screen>),
-    ScreenChanges(Box<presentation::RowChanges>),
+    Screen(Box<crate::protocol::interim::ScreenFrame>),
     Unchanged,
     Ended,
     Closed,
@@ -454,53 +452,4 @@ pub enum Color {
     Default,
     Palette(u8),
     Rgb([u8; 3]),
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Cell {
-    #[serde(default)]
-    pub hyperlink: Option<u16>,
-    pub text: String,
-    pub foreground: Color,
-    pub background: Color,
-    pub underline_color: Color,
-    pub flags: u16,
-    pub underline: u8,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Screen {
-    #[serde(default)]
-    pub accessibility_revision: u64,
-    #[serde(default)]
-    pub graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
-    #[serde(default)]
-    pub cell_pixels: Option<(u16, u16)>,
-    #[serde(default)]
-    pub reading: Option<reading::Snapshot>,
-    /// Per-screen targets; cells refer to indices in this bounded table.
-    #[serde(default)]
-    pub hyperlinks: Vec<effects::Hyperlink>,
-    #[serde(default)]
-    pub generation: u64,
-    #[serde(default)]
-    pub mouse_tracking: bool,
-    #[serde(default)]
-    pub alternate_scroll: bool,
-    pub columns: u16,
-    pub rows: Vec<Vec<Cell>>,
-    pub wrapped: Vec<bool>,
-    pub foreground: [u8; 3],
-    pub background: [u8; 3],
-    pub palette: Vec<[u8; 3]>,
-    pub reversed: bool,
-    pub foreground_overridden: bool,
-    pub background_overridden: bool,
-    pub cursor_overridden: bool,
-    pub palette_overrides: Vec<bool>,
-    pub cursor: Option<(u16, u16, u8)>,
-    pub cursor_visible: bool,
-    pub cursor_blinking: bool,
-    pub cursor_shape: u8,
-    pub cursor_color: [u8; 3],
-    pub cursor_text: [u8; 3],
-    pub alternate: bool,
 }

@@ -728,6 +728,7 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
         if let Reply::Screen(screen) =
             host.request([1; 32], [1; 32], Request::Poll { lease: replacement })
             && let Some(find) = screen
+                .update
                 .reading
                 .as_ref()
                 .and_then(|reading| reading.find.as_ref())

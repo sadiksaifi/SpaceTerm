@@ -1010,7 +1010,6 @@ fn body(reply: Reply, interim: bool) -> Result<ReplyBody, Refusal> {
         }
         Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
         Reply::Screen(screen) => ReplyBody::Interim(InterimReply::Screen(screen)),
-        Reply::ScreenChanges(changes) => ReplyBody::Interim(InterimReply::ScreenChanges(changes)),
         Reply::Ended => ReplyBody::Interim(InterimReply::Ended),
         Reply::AccessibilityRevision { revision } => {
             ReplyBody::Interim(InterimReply::AccessibilityRevision { revision })
