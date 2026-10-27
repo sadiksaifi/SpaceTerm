@@ -233,7 +233,10 @@ impl SharedWorkspaceHost {
         self.writes.reads.due()
     }
     /// Every Worktree read started from now on wakes `wake` when it settles.
-    pub(super) fn wake_worktree_reads(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+    pub(super) fn wake_worktree_reads(
+        &mut self,
+        wake: Arc<dyn spaceterm_server::connection::Wake>,
+    ) {
         self.writes.reads.set_wake(wake);
     }
     pub(super) fn stop_worktree_reads(&mut self) {
@@ -252,8 +255,7 @@ impl SharedWorkspaceHost {
                 self.state.worktree_settings.clone().unwrap_or_default(),
             )));
         }
-        if matches!(read, Read::CheckRemoval { .. }) && !self.state.pending_worktrees().is_empty()
-        {
+        if matches!(read, Read::CheckRemoval { .. }) && !self.state.pending_worktrees().is_empty() {
             return Err(Error::Unavailable);
         }
         let mut inventory = self.inventory();

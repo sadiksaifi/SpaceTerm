@@ -1,6 +1,6 @@
 //! Bounded directory reads and explicit idempotent writes outside the terminal operation lock.
-use crate::platform::local_filesystem::LocalFilesystemError;
 use super::dispatch::{HostRead, SettledRead};
+use crate::platform::local_filesystem::LocalFilesystemError;
 use spaceterm_server::connection::Wake;
 use spaceterm_server::pane::{Refusal, directories::*};
 use spaceterm_server::protocol::{ReplyBody, RequestId};
@@ -82,12 +82,7 @@ impl DirectoryOperations {
             return Err(Error::Unavailable);
         }
         if self.jobs.len() + self.retiring.len() >= 32
-            || self
-                .jobs
-                .keys()
-                .filter(|(c, _)| *c == connection)
-                .count()
-                >= 2
+            || self.jobs.keys().filter(|(c, _)| *c == connection).count() >= 2
         {
             return Err(Error::Capacity);
         }
@@ -162,7 +157,9 @@ impl DirectoryOperations {
             HostRead::Worktree(_) => return Some(Err(Refusal::Unsupported)),
         };
         let started = self.begin(connection, id, work);
-        started.err().map(|error| Ok(ReplyBody::Directory(Err(error))))
+        started
+            .err()
+            .map(|error| Ok(ReplyBody::Directory(Err(error))))
     }
     pub(super) fn settled_reads(&mut self) -> Vec<SettledRead> {
         self.settled()
@@ -502,7 +499,11 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let (mut operations, _woken) = operations();
         operations
-            .begin([1; 32], RequestId(1), Work::Create(root.join("parent/child")))
+            .begin(
+                [1; 32],
+                RequestId(1),
+                Work::Create(root.join("parent/child")),
+            )
             .unwrap();
         // Wait for the actual write, leaving its result unobserved before cancellation.
         let until = Instant::now() + Duration::from_secs(2);

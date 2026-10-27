@@ -13,16 +13,15 @@ fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
             (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
         ],
     );
-    inventory.close.as_mut().unwrap().controls =
-        [SHARED_CLOSE_ROOT_PANE, SHARED_CLOSE_SECOND_PANE]
-            .into_iter()
-            .map(|pane| ConfirmedControl {
-                pane,
-                session: None,
-                owner: [1; 32],
-                epoch: 1,
-            })
-            .collect();
+    inventory.close.as_mut().unwrap().controls = [SHARED_CLOSE_ROOT_PANE, SHARED_CLOSE_SECOND_PANE]
+        .into_iter()
+        .map(|pane| ConfirmedControl {
+            pane,
+            session: None,
+            owner: [1; 32],
+            epoch: 1,
+        })
+        .collect();
     harness.publish(inventory.clone(), cx);
     harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
     settle_shared_panes(cx);

@@ -364,15 +364,15 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
     let tabs = server.inventory().workspaces[0].tabs.clone();
     {
         let mut delivery = server.0.borrow_mut();
-        delivery.server.inventory.close.as_mut().unwrap().controls =
-            tabs.iter()
-                .map(|tab| ConfirmedControl {
-                    pane: tab.root_pane,
-                    session: None,
-                    owner: DEVICE,
-                    epoch: 0,
-                })
-                .collect();
+        delivery.server.inventory.close.as_mut().unwrap().controls = tabs
+            .iter()
+            .map(|tab| ConfirmedControl {
+                pane: tab.root_pane,
+                session: None,
+                owner: DEVICE,
+                epoch: 0,
+            })
+            .collect();
         delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
     }
     model.poll();

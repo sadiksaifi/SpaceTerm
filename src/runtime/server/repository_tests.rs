@@ -1305,9 +1305,7 @@ fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_c
     };
     let fixture = GitFixture::new();
     let mut host = SharedWorkspaceHost::new(host());
-    let Ok(ReadReply::Settings(original)) =
-        read_worktree(&mut host, Read::Settings)
-    else {
+    let Ok(ReadReply::Settings(original)) = read_worktree(&mut host, Read::Settings) else {
         panic!("initial settings unavailable")
     };
     let template = format!("{}/authoritative/{{branch}}", fixture.0.display());
@@ -1375,10 +1373,7 @@ fn git_settings_read_the_owning_servers_tools_without_a_workspace() {
     assert!(shared_inventory(&mut host).workspaces.is_empty());
     let reply = read_worktree(&mut host, Read::Git);
     assert!(
-        matches!(
-            reply,
-            Ok(ReadReply::Git(GitToolStatus::Ready(_)))
-        ),
+        matches!(reply, Ok(ReadReply::Git(GitToolStatus::Ready(_)))),
         "the fixture host's Git must be readable without a repository: {reply:?}"
     );
     assert!(shared_inventory(&mut host).workspaces.is_empty());

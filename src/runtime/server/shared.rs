@@ -947,8 +947,8 @@ impl SharedWorkspaceHost {
     /// lifetime changes, and a running Git facts read rings it when it has results, so neither
     /// needs a tick.
     pub(super) fn tick_until(&mut self, now: Instant) -> Option<Instant> {
-        let presenting = std::mem::take(&mut self.rung)
-            && self.armed.is_none_or(|armed| now < armed);
+        let presenting =
+            std::mem::take(&mut self.rung) && self.armed.is_none_or(|armed| now < armed);
         if presenting && self.paced.0.is_some_and(|next| now < next) {
             self.paced.1 = true;
             self.armed = self.due(now);

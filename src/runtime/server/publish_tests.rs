@@ -99,6 +99,12 @@ impl Rows {
     fn shows(&self, text: &str) -> bool {
         self.0.iter().any(|row| row.trim_end() == text)
     }
+
+    /// Whether a row ends with `output`. A shell such as dash prints its first prompt after
+    /// input that arrived early, so output can follow that prompt on its row.
+    fn shows_output(&self, output: &str) -> bool {
+        self.0.iter().any(|row| row.trim_end().ends_with(output))
+    }
 }
 
 /// A bound channel the client shows.
@@ -301,9 +307,12 @@ fn await_frame(
         }
         let mut notified = wake.0.lock().unwrap();
         while !*notified {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .expect("the session never notified the expected screen");
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                panic!(
+                    "the session never notified the expected screen; screen: {:?}",
+                    rows.0
+                );
+            };
             notified = wake.1.wait_timeout(notified, remaining).unwrap().0;
         }
         *notified = false;
@@ -329,7 +338,8 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
     let mut rows = Rows::default();
 
     assert!(matches!(
-        super::super::tests::command(&mut host, 1, lease, "echo pushed"),
+        // The typed command never contains the output it prints.
+        super::super::tests::command(&mut host, 1, lease, "printf 'PUSH%s\\n' ED"),
         Reply::Unchanged
     ));
     host.input_written(&lease, 2);
@@ -338,7 +348,7 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
         lease,
         &wake,
         (&outbox, &mut publication, &mut rows),
-        |rows| rows.shows("pushed"),
+        |rows| rows.shows_output("PUSHED"),
     );
     assert_eq!(input, 2);
 
@@ -347,7 +357,7 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
     publication.view(false);
     HostCommands::view(&mut host, &lease, false, 120);
     assert!(matches!(
-        super::super::tests::command(&mut host, 1, lease, "echo hidden"),
+        super::super::tests::command(&mut host, 1, lease, "printf 'HIDD%s\\n' EN"),
         Reply::Unchanged
     ));
     std::thread::sleep(Duration::from_millis(200));
@@ -361,7 +371,7 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
         lease,
         &wake,
         (&outbox, &mut publication, &mut rows),
-        |rows| rows.shows("hidden"),
+        |rows| rows.shows_output("HIDDEN"),
     );
     host.shutdown().unwrap();
 }
