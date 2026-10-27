@@ -38,6 +38,7 @@ desktop-tests = [
     "dep:gpui_wgpu",
 ]
 desktop = [
+    "dep:notify",
     "dep:gpui",
     "dep:gpui_platform",
     "dep:spaceterm-ui",
@@ -106,7 +107,9 @@ gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-20
 image = { version = "=0.25.10", default-features = false, optional = true }
 libghostty-vt = { path = "third_party/libghostty-vt", default-features = false, features = ["kitty-graphics", "png"] }
 libc = "=0.2.189"
-notify = "=8.2.0"
+# A macOS server links no Apple framework, so it watches git directories with kqueue directly
+# and needs `notify` only for the desktop, which uses FSEvents. A Linux server uses inotify.
+notify = { version = "=8.2.0", optional = true }
 portable-pty = "=0.9.0"
 pollster = "=0.4.0"
 smallvec = { version = "=1.15.2", optional = true }
@@ -134,6 +137,7 @@ jsonschema = { version = "=0.56.0", default-features = false, optional = true }
 spaceterm-server = { path = "crates/spaceterm-server", features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+notify = { version = "=8.2.0", default-features = false }
 async-io = { version = "=2.6.0", optional = true }
 fontconfig_sys = { package = "yeslogic-fontconfig-sys", version = "=6.0.1", optional = true }
 zbus = { version = "=5.19.0", features = ["blocking-api"], optional = true }

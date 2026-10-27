@@ -38,6 +38,9 @@ const RESULTS: usize = 64;
 /// many git files, and each write fires the watch. Reading at most this often bounds the git a
 /// busy repository costs, and nothing reads while it stays quiet.
 const SETTLE: Duration = Duration::from_secs(2);
+/// Directories of a repository's `refs/` tree that are watched. A ref in a directory past it,
+/// such as an unusually deep branch name, is read on the other triggers.
+const MAX_REF_DIRECTORIES: usize = 64;
 /// Changed paths kept between two looks of the supervisor. More means every repository changed.
 const MAX_CHANGED_PATHS: usize = 256;
 const MAX_DIRECTORIES: usize = 512;
@@ -112,7 +115,7 @@ impl ServerRepositories {
             pin_membership: pins::PinMembership::default(),
             commands: BTreeMap::new(),
             ring: Ring::default(),
-            watcher: Arc::new(crate::platform::repository_watch::NotifyRepositoryWatcher::new()),
+            watcher: crate::platform::server_watch_sets(),
         }
     }
     /// The host's wake. Readers ring it when they have results or end.
@@ -601,14 +604,32 @@ struct GitDirectories {
 impl GitDirectories {
     /// Adds what a repository's facts follow, and whether recursively: the Worktree's own git
     /// directory with its `HEAD`, `index` and operation state; the common directory with
-    /// `packed-refs` and the main `HEAD` and `index`; the `refs/` tree; and the list of linked
-    /// Worktrees. Never a work tree.
+    /// `packed-refs` and the main `HEAD` and `index`; each directory of the `refs/` tree; and
+    /// the list of linked Worktrees. Never a work tree.
+    ///
+    /// Git writes each of these files by renaming a lock file into its directory, so a watch on
+    /// the directory alone sees every write. Nothing is watched recursively, which keeps a
+    /// kqueue watch to one descriptor per directory however many refs a repository holds.
     fn watched(&self, into: &mut BTreeMap<PathBuf, bool>) {
         into.insert(self.own.clone(), false);
         into.insert(self.common.clone(), false);
-        let refs = self.common.join("refs");
-        if refs.is_dir() {
-            into.insert(refs, true);
+        let mut pending = vec![self.common.join("refs")];
+        let mut directories = 0;
+        while let Some(directory) = pending.pop() {
+            if directories == MAX_REF_DIRECTORIES {
+                break;
+            }
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            directories += 1;
+            pending.extend(
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path()),
+            );
+            into.insert(directory, false);
         }
         // A repository without linked Worktrees has no `worktrees/` yet. Creating it changes
         // the common directory, and the discovery that follows watches it.

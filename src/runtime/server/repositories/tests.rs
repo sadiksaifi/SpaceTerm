@@ -68,7 +68,7 @@ impl WatchSets for Unwatchable {
 }
 impl Reading {
     fn start(sources: Sources, runner: Arc<dyn RepositoryProgramRunner>, home: PathBuf) -> Self {
-        let watcher = Arc::new(crate::platform::repository_watch::NotifyRepositoryWatcher::new());
+        let watcher = crate::platform::server_watch_sets();
         Self::watched(sources, runner, home, watcher)
     }
     fn watched(
