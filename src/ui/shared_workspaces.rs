@@ -73,7 +73,7 @@ mod development {
 
     /// The one Workspace Window presenting this device's shared Workspaces.
     ///
-    /// One device holds one durable edit journal and one connection per Pane, so a second window
+    /// One device holds one durable edit journal and one claim on each Pane, so a second window
     /// cannot present the same server: it would stay offline behind the journal lock and fence
     /// every Pane the first window holds. Another window activates this one instead.
     pub(crate) struct SharedWorkspaceHost(

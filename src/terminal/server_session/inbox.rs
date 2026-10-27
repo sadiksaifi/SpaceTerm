@@ -16,9 +16,6 @@ use std::time::Instant;
 pub(super) struct Wake {
     pending: Mutex<bool>,
     ready: Condvar,
-    /// How many waits ended, so a test can prove an idle worker does not turn.
-    #[cfg(test)]
-    waits: std::sync::atomic::AtomicUsize,
 }
 
 impl Wake {
@@ -27,15 +24,8 @@ impl Wake {
         self.ready.notify_all();
     }
 
-    #[cfg(test)]
-    pub(super) fn waits(&self) -> usize {
-        self.waits.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// Returns on the first notification since the previous wait, or at `deadline`.
     pub(super) fn wait(&self, deadline: Option<Instant>) {
-        #[cfg(test)]
-        self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         while !*pending {
             pending = match deadline {
