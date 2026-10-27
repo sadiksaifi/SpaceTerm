@@ -817,6 +817,14 @@ impl HostCommands for SharedWorkspaceHost {
         self.handle(device, connection, request)
             .unwrap_or_else(Reply::Refused)
     }
+    fn lease_live(&self, lease: &Lease) -> bool {
+        self.panes.values().any(|host| host.lease_live(lease))
+    }
+    fn unbound(&mut self, connection: Id, lease: &Lease) {
+        for host in self.panes.values_mut() {
+            host.unbound(connection, lease);
+        }
+    }
     fn disconnected(&mut self, connection: Id) {
         self.cancel_worktree_reads(connection);
         self.prototype.directories.cancel_connection(connection);

@@ -641,6 +641,107 @@ mod tests {
     }
 
     #[test]
+    fn clones_share_one_live_link_that_fails_together_and_reconnects_after_it_ends() {
+        use crate::connection::link::Health;
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-link-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        };
+        let server = ServerConnection::with_paths(paths.clone()).unwrap();
+        server.setup().unwrap();
+        Directory::open(&paths.runtime, true).unwrap();
+        let listener = UnixListener::bind(paths.socket()).unwrap();
+        std::fs::set_permissions(paths.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let pin = server.server_id().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let (sockets, served) = std::sync::mpsc::channel();
+        {
+            let accepted = Arc::clone(&accepted);
+            let identity = paths.identity.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = stream.unwrap();
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    sockets.send(stream.try_clone().unwrap()).unwrap();
+                    let identity = identity.clone();
+                    std::thread::spawn(move || {
+                        let (_, client, name) =
+                            protocol::admit_server(&mut stream, &pin, &identity).unwrap();
+                        let (sync, _) = crate::connection::sync::SyncWorker::spawn().unwrap();
+                        let environment = host::Environment::for_tests(
+                            crate::direct::tests::service(crate::direct::tests::Refusing),
+                            sync,
+                            None,
+                        );
+                        let (waker, wake) = crate::connection::io::Waker::new().unwrap();
+                        host::serve_admitted(
+                            Box::new(crate::connection::unix::UnixCarrier::new(stream).unwrap()),
+                            crate::connection::service::Peer {
+                                client,
+                                connection: protocol::random().unwrap(),
+                                pairing: None,
+                            },
+                            name,
+                            crate::connection::outbox::Outbox::new(wake),
+                            waker,
+                            &environment,
+                        );
+                    });
+                }
+            });
+        }
+        let answers = |link: &ServerLink| {
+            matches!(
+                link.request(crate::protocol::Operation::Shutdown)
+                    .unwrap()
+                    .wait(),
+                Err(crate::connection::link::RequestError::Refused(
+                    crate::pane::Refusal::Unsupported
+                ))
+            )
+        };
+        let first = server.link().unwrap();
+        let second = server.clone().link().unwrap();
+        assert!(answers(&first) && answers(&second));
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "clones share one connection"
+        );
+        // The server's end of that connection closes: every holder sees the same failure.
+        served
+            .recv()
+            .unwrap()
+            .shutdown(std::net::Shutdown::Both)
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while first.health() == Health::Live || second.health() == Health::Live {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(first.health(), second.health());
+        let third = server.link().unwrap();
+        assert!(answers(&third));
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "an ended link reconnects once"
+        );
+        assert!(answers(&server.clone().link().unwrap()));
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        drop((first, second, third, server));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn paired_direct_policy_changes_are_refused_without_changing_policy_or_other_connections() {
         use crate::direct::{self, DirectConnection, DirectConnector, Management, ManagementReply};
         struct Connector {
