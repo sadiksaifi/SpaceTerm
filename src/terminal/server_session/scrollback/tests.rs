@@ -847,3 +847,54 @@ fn a_copy_survives_unrelated_output_and_follows_rewritten_selected_text() {
     let replaced = ready(scrollback.copy(SelectionCopyOptions::default()));
     assert_eq!(replaced.plain_text.as_ref(), "replaced");
 }
+
+#[test]
+fn requests_the_link_did_not_send_leave_the_in_flight_count_and_are_asked_again() {
+    let server = Server::new(5000);
+    let mut scrollback = attached(&server, &["$", "", "", ""]);
+    scrollback.set_find_query(FindQueryGeneration::test(1), "line".into());
+    let first = scrollback.requests();
+    assert_eq!(first.len(), 4);
+    // The link took the first two and was busy for the rest.
+    scrollback.unsent(&first[2..]);
+    assert_eq!(
+        scrollback.requests(),
+        first[2..],
+        "unsent rows are asked for again, within the limit"
+    );
+    // The link closed before taking any of them.
+    scrollback.unsent(&first);
+    let again = scrollback.requests();
+    assert_eq!(again.len(), 4, "no unsent request stays counted");
+    assert_eq!(
+        again[0].start + u64::from(again[0].rows),
+        5000,
+        "the rows nearest the screen are asked for again first"
+    );
+}
+
+#[test]
+fn a_scrolled_view_keeps_each_cached_rows_snapshot_between_presents() {
+    let mut server = Server::new(100);
+    let mut scrollback = attached(&server, &["a", "b", "c", "$"]);
+    server.serve(&mut scrollback);
+    scrollback.wheel(10);
+    let before = scrollback.present(PresentationGeneration::test(1)).unwrap();
+    // Output continues below the view.
+    server.rows.push(("a".into(), false));
+    scrollback.screen(screen(&["b", "c", "$", "x"], server.history()));
+    let after = scrollback.present(PresentationGeneration::test(2)).unwrap();
+    for (old, new) in before.rows.iter().zip(after.rows.iter()) {
+        assert!(Arc::ptr_eq(old, new), "an unchanged row is rebuilt");
+    }
+    // A Selection marks its rows anew, once.
+    let start = Instant::now();
+    press(&mut scrollback, 0.0, 5.0, start);
+    scrollback.pointer(PointerEvent::Drag { x: 79.0, y: 5.0 }, GRID, start);
+    scrollback.pointer(PointerEvent::Release, GRID, start);
+    let selected = scrollback.present(PresentationGeneration::test(3)).unwrap();
+    assert!(selected.rows[0][0].selected);
+    assert!(Arc::ptr_eq(&selected.rows[1], &after.rows[1]));
+    let again = scrollback.present(PresentationGeneration::test(4)).unwrap();
+    assert!(Arc::ptr_eq(&selected.rows[0], &again.rows[0]));
+}

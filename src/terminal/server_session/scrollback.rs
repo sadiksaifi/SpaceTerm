@@ -129,6 +129,7 @@ pub(crate) struct Scrollback {
     /// Rows earlier frames showed that scrolled into history before their page arrived. They
     /// stand in for those rows on screen only; Find and copy read cached rows alone.
     placeholders: BTreeMap<u64, (RowSnapshot, bool)>,
+    shown: view::Shown,
 }
 
 /// What assistive technology sees of this client's view: how far it is scrolled back, and the
@@ -435,6 +436,19 @@ impl Scrollback {
         requests
     }
 
+    /// Forgets requests the link could not send.
+    pub(crate) fn unsent(&mut self, requests: &[PageRequest]) {
+        self.cache.unsent(requests);
+    }
+
+    /// Whether the Selection's rows are all cached, so copying needs no page.
+    pub(crate) fn copy_available(&self) -> bool {
+        let Some((start, end)) = self.selection.range() else {
+            return false;
+        };
+        self.screen.is_some() && self.cache.covers(start.line..end.line + 1)
+    }
+
     /// Settles a page request. `page` is the reply's epoch, start and rows, or `None` when the
     /// server refused it or the connection ended.
     pub(crate) fn page(&mut self, request: PageRequest, page: Option<(u64, u64, Vec<CachedRow>)>) {
@@ -457,7 +471,7 @@ impl Scrollback {
         Some(view::compose(
             &screen,
             lines,
-            &self.placeholders,
+            (&self.placeholders, &mut self.shown),
             top,
             (self.selection.range(), self.selection.revision()),
             find,
@@ -467,6 +481,7 @@ impl Scrollback {
 
     fn reset_reading(&mut self) {
         self.placeholders.clear();
+        self.shown.clear();
         self.view.follow();
         self.selection.clear();
         self.find.invalidate();

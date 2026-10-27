@@ -811,7 +811,7 @@ impl TerminalSessionHandle for PresentationHandle {
         Ok(None)
     }
     fn selection_copy_ready(&self) -> bool {
-        self.take_deferred_copy().is_some()
+        self.copy_ready()
     }
     fn key(&self, k: KeyInput) {
         if k.validate().is_err()

@@ -134,6 +134,22 @@ impl ScrollbackCache {
         }
     }
 
+    /// Forgets requests that were never sent, so they neither count toward the in-flight limit
+    /// nor block asking for their rows again.
+    pub(super) fn unsent(&mut self, requests: &[PageRequest]) {
+        for request in requests {
+            if let Some(index) = self.in_flight.iter().position(|sent| sent == request) {
+                self.in_flight.swap_remove(index);
+            }
+        }
+    }
+
+    /// Whether every retained position in `range` is cached.
+    pub(super) fn covers(&self, range: Range<u64>) -> bool {
+        let range = self.retained(range);
+        self.rows.range(range.clone()).count() as u64 == range.end - range.start
+    }
+
     /// Pages to ask for so the retained positions in `wanted` become cached, nearest to `focus`
     /// first, within the in-flight limit.
     pub(super) fn request(&mut self, wanted: Range<u64>, focus: u64) -> Vec<PageRequest> {

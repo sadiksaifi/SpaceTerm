@@ -25,6 +25,9 @@ pub(super) struct Reading {
     deferred_copy: bool,
     /// Replies to page requests, waiting for the worker to decode them.
     pages: Vec<(PageRequest, Option<Page>)>,
+    /// Whether the Selection can be copied now, without a page. The worker keeps it current, so
+    /// the main thread reads it at no cost.
+    copy_available: bool,
     /// The grid of the latest presented screen, for autoscroll.
     grid: Option<Grid>,
     autoscroll_due: Option<std::time::Instant>,
@@ -56,33 +59,28 @@ impl Reading {
         self.pages.push((request, page));
     }
 
-    /// Decodes arrived pages and runs a due autoscroll step. `columns` is the screen's width,
-    /// which every row of the current history epoch shares.
-    pub(super) fn turn(
-        &mut self,
-        now: std::time::Instant,
-        columns: u16,
-        local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
-    ) -> Turn {
-        for (request, page) in std::mem::take(&mut self.pages) {
-            let rows = page
-                .filter(|page| {
-                    page.epoch == request.epoch
-                        && page.start >= request.start
-                        && page.rows.len() <= usize::from(request.rows)
-                })
-                .and_then(|page| {
-                    let rows = super::screen_decoder::decode_page(&page, columns, local_files)
-                        .ok()?
-                        .iter()
-                        .map(|(cells, wrapped)| CachedRow::new(cells, *wrapped))
-                        .collect::<Vec<_>>();
-                    Some((page.epoch, page.start, rows))
-                });
+
+    /// Takes the page replies that arrived, for decoding outside the lock.
+    pub(super) fn take_pages(&mut self) -> Vec<(PageRequest, Option<Page>)> {
+        std::mem::take(&mut self.pages)
+    }
+
+    /// Adds decoded pages to the cache.
+    pub(super) fn settle_pages(&mut self, pages: Vec<(PageRequest, Option<DecodedPage>)>) {
+        for (request, rows) in pages {
             self.scrollback.page(request, rows);
             // A page can fill rows the view, Find or the Selection shows.
             self.changed = true;
         }
+    }
+
+    /// Forgets page requests the link could not send.
+    pub(super) fn unsent(&mut self, requests: &[PageRequest]) {
+        self.scrollback.unsent(requests);
+    }
+
+    /// Runs a due autoscroll step and reports what the worker must do next.
+    pub(super) fn turn(&mut self, now: std::time::Instant) -> Turn {
         if self.scrollback.autoscrolling() {
             let due = *self.autoscroll_due.get_or_insert(now + AUTOSCROLL_INTERVAL);
             if now >= due {
@@ -98,6 +96,7 @@ impl Reading {
         if copy_ready {
             self.deferred_copy = false;
         }
+        self.copy_available = self.scrollback.copy_available();
         Turn {
             present: std::mem::take(&mut self.changed),
             copy_ready,
@@ -154,8 +153,7 @@ impl PresentationHandle {
             || (input.phase == PointerPhase::Motion && input.button.is_some());
         let (mapping, x, y) =
             self.pointer_position(input.generation, input.position, continuation)?;
-        let shift_selection =
-            input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
+        let shift_selection = input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
         let modes = modes(mapping, shift_selection && input.modifiers.shift);
         let phase = match input.phase {
             PointerPhase::Press => route::PointerPhase::Press,
@@ -230,14 +228,11 @@ impl PresentationHandle {
         else {
             return;
         };
-        let shift_selection =
-            input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
+        let shift_selection = input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
         match route::wheel_route(modes(mapping, shift_selection && input.modifiers.shift)) {
             WheelRoute::Ignore => {}
             WheelRoute::Scrollback => {
-                let steps = input
-                    .vertical_steps
-                    .clamp(-MAX_WHEEL_LINES, MAX_WHEEL_LINES);
+                let steps = input.vertical_steps.clamp(-MAX_WHEEL_LINES, MAX_WHEEL_LINES);
                 self.local(|reading| ((), reading.scrollback.wheel(steps)));
             }
             WheelRoute::Program => {
@@ -288,6 +283,17 @@ impl PresentationHandle {
         self.local(|reading| reading.copy())
     }
 
+    /// Whether the Selection can be copied now. It reads a flag the worker keeps, never the copy.
+    pub(super) fn copy_ready(&self) -> bool {
+        self.reading_mapping().is_some()
+            && self
+                .state
+                .reading
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .copy_available
+    }
+
     /// The copy a pointer release or an earlier request left waiting for rows.
     pub(super) fn take_deferred_copy(&self) -> Option<super::super::SelectionCopy> {
         self.reading_mapping()?;
@@ -319,6 +325,41 @@ impl PresentationHandle {
     }
 }
 
+/// A decoded page: its epoch, first position and rows.
+pub(super) type DecodedPage = (u64, u64, Vec<CachedRow>);
+
+/// Decodes page replies against the screen's width, which every row of the current history
+/// epoch shares. A reply that does not answer its request decodes to `None`.
+pub(super) fn decode_pages(
+    pages: Vec<(PageRequest, Option<Page>)>,
+    columns: u16,
+    local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
+) -> Vec<(PageRequest, Option<DecodedPage>)> {
+    pages
+        .into_iter()
+        .map(|(request, page)| {
+            let rows = page
+                .filter(|page| {
+                    page.epoch == request.epoch
+                        && page.start >= request.start
+                        && page.rows.len() <= usize::from(request.rows)
+                })
+                .and_then(|page| {
+                    let rows = super::screen_decoder::decode_page(&page, columns, local_files)
+                        .ok()?
+                        .iter()
+                        .map(|(cells, wrapped)| CachedRow::new(cells, *wrapped))
+                        .collect::<Vec<_>>();
+                    Some((page.epoch, page.start, rows))
+                });
+            (request, rows)
+        })
+        .collect()
+}
+
+/// How soon the worker asks again for pages the link was too busy to take.
+pub(super) const PAGE_RETRY: Duration = Duration::from_millis(16);
+
 /// Presents this client's view as `generation`: of `frame` when a new frame arrived, otherwise of
 /// the last frame after the reading changed. Returns the frame's mapping to that presentation.
 pub(super) fn show(
@@ -334,6 +375,7 @@ pub(super) fn show(
             reading.scrollback.screen(frame);
         }
         reading.grid = Some(grid(mapping));
+        reading.copy_available = reading.scrollback.copy_available();
         (
             reading.scrollback.present(generation),
             reading.scrollback.accessibility_view(),
