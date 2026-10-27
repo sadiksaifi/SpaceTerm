@@ -244,8 +244,13 @@ impl SettingsWindow {
                     })
                     .ok()
                     .flatten();
-                let link = client.as_ref().map(|client| client.server.link_generation());
-                if read.as_ref().is_none_or(|(read_over, _)| Some(*read_over) != link) {
+                let link = client
+                    .as_ref()
+                    .map(|client| client.server.link_generation());
+                if read
+                    .as_ref()
+                    .is_none_or(|(read_over, _)| Some(*read_over) != link)
+                {
                     read = None;
                 }
                 if read.is_none()

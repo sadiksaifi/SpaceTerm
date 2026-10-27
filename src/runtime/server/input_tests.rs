@@ -101,7 +101,11 @@ fn await_line(
     loop {
         served.tick(Instant::now());
         received.drain(outbox);
-        if received.rows.iter().any(|row| row.trim_end().ends_with(line)) {
+        if received
+            .rows
+            .iter()
+            .any(|row| row.trim_end().ends_with(line))
+        {
             return;
         }
         assert!(
@@ -129,6 +133,8 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         .unwrap()
         .id;
     let mut served = Served::new(shared);
+    // Terminal Sessions ring this wake; a tick publishes only after a ring.
+    served.ticker(Arc::new(|| {}));
     let outbox = Outbox::new(Arc::new(|| {}));
     served.admitted(&PEER, "Test".into(), outbox.clone());
     let claim = reply(
@@ -149,6 +155,16 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         claim,
         ReplyBody::Claim(ClaimReply::Attached { .. })
     ));
+    // A channel starts hidden; showing it pushes the current screen.
+    outbox.view(CHANNEL, true);
+    served.view(
+        &PEER,
+        protocol::View {
+            channel: CHANNEL,
+            visible: true,
+            max_hz: 60,
+        },
+    );
     send(
         &mut served,
         1,

@@ -1,59 +1,46 @@
 //! The Pane worker against a real server over an in-process connection.
 use super::*;
-use crate::runtime::{HostCommands as _, Served, SharedWorkspaceHost};
+use crate::runtime::{HostCommands as _, Served};
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, LogicalSize};
+use spaceterm_server::connection::carrier::{
+    Carrier, CarrierError, Flush, Offer, Priority, Readiness,
+};
+use spaceterm_server::connection::io;
 use spaceterm_server::connection::link::{LinkEvent, LinkSink};
 use spaceterm_server::connection::loopback::Loopback;
 use spaceterm_server::connection::outbox::Outbox;
 use spaceterm_server::connection::server::AdmittedConnection;
-use spaceterm_server::connection::service::{Dispatch, PaneService, Peer, SharedPaneService};
+use spaceterm_server::connection::service::{Peer, SharedPaneService};
 use spaceterm_server::connection::sync::SyncWorker;
-use spaceterm_server::connection::{Wake, io};
-use spaceterm_server::protocol::{EffectDone, Input, Operation, RequestId, View};
+use spaceterm_server::protocol::RawFrame;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
-/// Counts every client message the service handles.
+/// Counts every frame the client writes: requests, input, views, acknowledgements and pings.
 struct Counting {
-    inner: Served<SharedWorkspaceHost>,
+    inner: Loopback,
     received: Arc<AtomicUsize>,
 }
 
-impl PaneService for Counting {
-    fn set_wake(&mut self, wake: Arc<dyn Wake>) {
-        self.inner.set_wake(wake);
+impl Carrier for Counting {
+    fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
+        self.inner.offer(frame, priority)
     }
-    fn admitted(&mut self, peer: &Peer, name: pane::control::ClientName, outbox: Outbox) {
-        self.inner.admitted(peer, name, outbox);
+    fn flush(&mut self) -> Result<Flush, CarrierError> {
+        self.inner.flush()
     }
-    fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
-        self.received.fetch_add(1, Ordering::SeqCst);
-        self.inner.request(peer, id, operation)
+    fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
+        let frame = self.inner.receive()?;
+        if frame.is_some() {
+            self.received.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(frame)
     }
-    fn input(&mut self, peer: &Peer, input: Input) {
-        self.received.fetch_add(1, Ordering::SeqCst);
-        self.inner.input(peer, input);
+    fn readiness(&self) -> Readiness {
+        self.inner.readiness()
     }
-    fn view(&mut self, peer: &Peer, view: View) {
-        self.received.fetch_add(1, Ordering::SeqCst);
-        self.inner.view(peer, view);
-    }
-    fn effect_done(&mut self, peer: &Peer, done: EffectDone) {
-        self.received.fetch_add(1, Ordering::SeqCst);
-        self.inner.effect_done(peer, done);
-    }
-    fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
-        self.received.fetch_add(1, Ordering::SeqCst);
-        self.inner.acknowledge(peer, sequence);
-    }
-    fn tick(&mut self, now: Instant) -> Option<Instant> {
-        self.inner.tick(now)
-    }
-    fn disconnected(&mut self, peer: &Peer) {
-        self.inner.disconnected(peer);
-    }
-    fn shutdown(&mut self) -> Result<(), spaceterm_server::ServerError> {
-        self.inner.shutdown()
+    fn close(&mut self) {
+        self.inner.close();
     }
 }
 
@@ -62,29 +49,39 @@ impl LinkSink for Ignore {
     fn deliver(&self, _: LinkEvent) {}
 }
 
+type Bell = Arc<(Mutex<bool>, std::sync::Condvar)>;
+
+fn ring(bell: &Bell) {
+    *bell.0.lock().unwrap() = true;
+    bell.1.notify_all();
+}
+
 /// Runs the service's ticks when its wake rings or its deadline passes, as the host's accept
-/// loop does.
-fn ticking(service: SharedPaneService, running: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
-    let bell = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-    service.lock().unwrap().set_wake(Arc::new({
+/// loop does. It waits without a deadline when the service has no timed work.
+fn ticking(
+    service: SharedPaneService,
+    running: Arc<AtomicBool>,
+    bell: Bell,
+) -> std::thread::JoinHandle<()> {
+    service.lock().unwrap().ticker(Arc::new({
         let bell = Arc::clone(&bell);
-        move || {
-            *bell.0.lock().unwrap() = true;
-            bell.1.notify_all();
-        }
+        move || ring(&bell)
     }));
     std::thread::spawn(move || {
         while running.load(Ordering::Acquire) {
             let deadline = service.lock().unwrap().tick(Instant::now());
             let mut rung = bell.0.lock().unwrap();
-            while !*rung {
-                let wait = deadline.map_or(Duration::from_millis(100), |deadline| {
-                    deadline.saturating_duration_since(Instant::now())
-                });
-                if wait.is_zero() {
-                    break;
-                }
-                rung = bell.1.wait_timeout(rung, wait).unwrap().0;
+            while !*rung && running.load(Ordering::Acquire) {
+                rung = match deadline {
+                    None => bell.1.wait(rung).unwrap(),
+                    Some(deadline) => {
+                        let wait = deadline.saturating_duration_since(Instant::now());
+                        if wait.is_zero() {
+                            break;
+                        }
+                        bell.1.wait_timeout(rung, wait).unwrap().0
+                    }
+                };
             }
             *rung = false;
         }
@@ -104,14 +101,20 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
     let workspace = inventory.workspaces[0].id;
     let pane_id = inventory.workspaces[0].tabs[0].root_pane;
     let received = Arc::new(AtomicUsize::new(0));
-    let service: SharedPaneService = Arc::new(Mutex::new(Box::new(Counting {
-        inner: Served::new(host),
-        received: Arc::clone(&received),
-    })));
+    let service: SharedPaneService = Arc::new(Mutex::new(Box::new(Served::new(host))));
     let running = Arc::new(AtomicBool::new(true));
-    let ticks = ticking(Arc::clone(&service), Arc::clone(&running));
+    let bell = Bell::default();
+    let ticks = ticking(
+        Arc::clone(&service),
+        Arc::clone(&running),
+        Arc::clone(&bell),
+    );
 
     let (client, server) = Loopback::pair(1 << 20).unwrap();
+    let server = Counting {
+        inner: server,
+        received: Arc::clone(&received),
+    };
     let (waker, wake) = io::Waker::new().unwrap();
     let outbox = Outbox::new(Arc::clone(&wake));
     let peer = Peer {
@@ -192,12 +195,15 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
     // Let the claim's follow-up messages, such as the view and focus, settle.
     std::thread::sleep(Duration::from_millis(500));
     let settled = received.load(Ordering::SeqCst);
+    let turns = state.wake.waits();
     // The polling worker sent about 66 requests in this time.
     std::thread::sleep(Duration::from_secs(1));
     let idle = received.load(Ordering::SeqCst) - settled;
+    let spins = state.wake.waits() - turns;
 
     drop(started);
     running.store(false, Ordering::Release);
+    ring(&bell);
     stopping.store(true, Ordering::Release);
     wake.wake();
     link.close();
@@ -205,5 +211,6 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
     let _ = ticks.join();
     service.lock().unwrap().shutdown().unwrap();
     assert!(settled > 0, "the claim itself is counted");
-    assert_eq!(idle, 0, "a visible idle Pane sent {idle} messages");
+    assert_eq!(idle, 0, "a visible idle Pane sent {idle} frames");
+    assert_eq!(spins, 0, "an idle Pane worker woke {spins} times");
 }

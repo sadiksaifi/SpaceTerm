@@ -448,7 +448,7 @@ pub trait HostCommands: Send {
 }
 
 /// How soon a host's timed work runs again while it waits on another thread: a journal or Git
-/// write, a directory read, or a live terminal whose metadata and exit the tick observes.
+/// write, or a directory read. A live terminal rings the host's wake instead.
 pub(super) const TICK: Duration = Duration::from_millis(10);
 
 /// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
@@ -458,12 +458,33 @@ pub(super) const TICK: Duration = Duration::from_millis(10);
 pub struct Served<H> {
     host: H,
     connections: BTreeMap<[u8; 32], Connection>,
-    /// When the host's timed work is next due. `None` runs it at every tick.
-    host_due: Option<std::time::Instant>,
+    /// Rung when a Terminal Session has something to publish, or a request may have ended
+    /// another channel's binding. Only a tick after a ring publishes.
+    bell: Arc<Bell>,
     /// Reads whose replies wait for the host to finish them.
     reads: Vec<PendingRead>,
     /// The host's wake, so a new read is checked on the next tick.
     ticker: Option<Arc<dyn spaceterm_server::connection::Wake>>,
+}
+
+/// Records a ring for the next tick and wakes the host to run it.
+#[derive(Default)]
+struct Bell {
+    rung: std::sync::atomic::AtomicBool,
+    wake: std::sync::OnceLock<Arc<dyn Wake>>,
+}
+
+impl Bell {
+    fn ring(&self) {
+        self.rung.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(wake) = self.wake.get() {
+            wake.wake();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.rung.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
 }
 
 /// A directory or Worktree read, or a directory creation, still running on the host.
@@ -549,9 +570,41 @@ impl<H: HostCommands> Served<H> {
         Self {
             host,
             connections: BTreeMap::new(),
-            host_due: None,
             reads: Vec::new(),
             ticker: None,
+            bell: Arc::default(),
+        }
+    }
+
+    /// Pushes what changed for one bound channel, and forgets the binding once it ended.
+    fn publish(&mut self, connection: [u8; 32], channel: Channel) {
+        let Some(bound) = self.connections.get(&connection) else {
+            return;
+        };
+        let client = bound.client;
+        let Some(lease) = bound.channels.get(&channel).map(|bound| bound.lease) else {
+            return;
+        };
+        let observed = self.host.observe(client, &lease);
+        let Some(connection) = self.connections.get_mut(&connection) else {
+            return;
+        };
+        if let Some(bound) = connection.channels.get_mut(&channel)
+            && !bound.publication.publish(observed)
+        {
+            connection.channels.remove(&channel);
+        }
+    }
+
+    /// Pushes what changed for every bound channel.
+    fn publish_all(&mut self) {
+        let bound: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| connection.channels.keys().map(|channel| (*id, *channel)))
+            .collect();
+        for (connection, channel) in bound {
+            self.publish(connection, channel);
         }
     }
 
@@ -587,9 +640,11 @@ impl<H: HostCommands> Served<H> {
     /// Replies to each read that settled.
     fn answer_reads(&mut self) {
         for read in std::mem::take(&mut self.reads) {
-            let reply = self
-                .host
-                .request(self.peer_of(read.connection), read.connection, read.kind.poll(read.host));
+            let reply = self.host.request(
+                self.peer_of(read.connection),
+                read.connection,
+                read.kind.poll(read.host),
+            );
             match ReadAnswer::of(reply) {
                 ReadAnswer::Running(_) => self.reads.push(read),
                 ReadAnswer::Settled(result) => {
@@ -599,38 +654,6 @@ impl<H: HostCommands> Served<H> {
                     }
                 }
             }
-        }
-    }
-
-    /// Pushes what changed for one bound channel, and forgets the binding once it ended.
-    fn publish(&mut self, connection: [u8; 32], channel: Channel) {
-        let Some(bound) = self.connections.get(&connection) else {
-            return;
-        };
-        let client = bound.client;
-        let Some(lease) = bound.channels.get(&channel).map(|bound| bound.lease) else {
-            return;
-        };
-        let observed = self.host.observe(client, &lease);
-        let Some(connection) = self.connections.get_mut(&connection) else {
-            return;
-        };
-        if let Some(bound) = connection.channels.get_mut(&channel)
-            && !bound.publication.publish(observed)
-        {
-            connection.channels.remove(&channel);
-        }
-    }
-
-    /// Pushes what changed for every bound channel.
-    fn publish_all(&mut self) {
-        let bound: Vec<_> = self
-            .connections
-            .iter()
-            .flat_map(|(id, connection)| connection.channels.keys().map(|channel| (*id, *channel)))
-            .collect();
-        for (connection, channel) in bound {
-            self.publish(connection, channel);
         }
     }
 
@@ -668,18 +691,27 @@ impl<H: HostCommands> Served<H> {
         result
     }
 
-    /// Closes every channel whose lease the host no longer knows: a Session that ended and
-    /// reported it, a closed Pane, End All Sessions, or control another client took.
+    /// Ends every channel whose lease the host no longer knows: a Session that ended, a closed
+    /// Pane, End All Sessions, or control another client took. Each receives its last event, so
+    /// timed work that retired a Pane never closes a channel silently.
     fn sweep(&mut self) {
-        for connection in self.connections.values_mut() {
-            let dead: Vec<_> = connection
-                .channels
-                .iter()
-                .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
-                .map(|(channel, _)| *channel)
-                .collect();
-            for channel in dead {
-                connection.channels.remove(&channel);
+        let dead: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| {
+                connection
+                    .channels
+                    .iter()
+                    .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
+                    .map(move |(channel, _)| (*id, *channel))
+            })
+            .collect();
+        for (connection, channel) in dead {
+            self.publish(connection, channel);
+            // A host that still answers `Live` for a lease it no longer knows is not trusted.
+            if let Some(connection) = self.connections.get_mut(&connection)
+                && connection.channels.remove(&channel).is_some()
+            {
                 connection.outbox.close(channel);
             }
         }
@@ -726,9 +758,6 @@ impl<H: HostCommands> Served<H> {
         match &result {
             Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => {
                 self.bind(peer, channel, pane, *lease)?;
-                // The Terminal Session publishes only what changes; the channel needs the
-                // current screen now.
-                self.publish(peer.connection, channel);
             }
             // A claim that ends without binding leaves the channel closed.
             _ => {
@@ -774,6 +803,9 @@ impl<H: HostCommands> Served<H> {
                 publication,
             },
         );
+        // The Terminal Session publishes nothing until the client's first `View` shows it.
+        self.host
+            .view(&lease, false, crate::terminal::session::DEFAULT_FRAME_RATE);
         Ok(())
     }
 
@@ -797,11 +829,20 @@ impl<H: HostCommands> Served<H> {
     /// first refusal discards that event and every later one, and aborts a paste in progress.
     fn input_message(&mut self, peer: &Peer, input: protocol::Input) {
         let (channel, serial) = (input.channel, input.serial);
-        if let Some(outcome) = self.apply(peer, input) {
+        let outcome = self.apply(peer, input);
+        // A paste waiting for later chunks or for confirmation has written nothing yet, so its
+        // serial waits for the message that writes it. Even a discarded message may have applied
+        // the events before its refusal.
+        let waiting = matches!(
+            outcome,
+            Some(InputOutcome::Paste(PasteOutcome::ConfirmationRequired(_)))
+        ) || self
+            .bound(peer, channel)
+            .is_some_and(|bound| bound.paste.is_some());
+        if let Some(outcome) = outcome {
             self.report(peer, channel, serial, outcome);
         }
-        // Even a discarded message may have applied the events before its refusal.
-        if let Ok(lease) = self.lease(peer, channel) {
+        if !waiting && let Ok(lease) = self.lease(peer, channel) {
             self.host.input_written(&lease, serial);
         }
     }
@@ -1025,9 +1066,6 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
         self.host.restore(store)
     }
-    fn set_wake(&mut self, wake: Arc<dyn Wake>) {
-        self.host.set_notifier(Arc::new(move || wake.wake()));
-    }
     fn admitted(&mut self, peer: &Peer, name: control::ClientName, outbox: Outbox) {
         self.host.admitted(peer.client, name);
         self.host.connected(peer.client, peer.connection, &outbox);
@@ -1042,8 +1080,122 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn revoked(&mut self, client: [u8; 32]) {
         self.host.revoked(client);
+        self.bell.ring();
     }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        let dispatch = self.dispatch(peer, id, operation);
+        // A claim, close, release or edit may have ended another channel's binding.
+        self.bell.ring();
+        dispatch
+    }
+    fn input(&mut self, peer: &Peer, input: protocol::Input) {
+        self.input_message(peer, input);
+    }
+    /// The connection already applied `view` to the outbox. A revealed channel receives the
+    /// current screen again.
+    fn view(&mut self, peer: &Peer, view: protocol::View) {
+        let Some(bound) = self.bound(peer, view.channel) else {
+            return;
+        };
+        bound.publication.view(view.visible);
+        let lease = bound.lease;
+        self.host.view(&lease, view.visible, view.max_hz);
+        if view.visible {
+            self.publish(peer.connection, view.channel);
+        }
+    }
+    fn effect_done(&mut self, peer: &Peer, done: protocol::EffectDone) {
+        if let Ok(lease) = self.lease(peer, done.channel) {
+            self.command(
+                peer,
+                Request::CompleteClipboard {
+                    lease,
+                    generation: done.generation,
+                    id: done.effect,
+                    completion: done.completion,
+                },
+            );
+        }
+    }
+    fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
+        self.host.acknowledge(peer.client, sequence);
+    }
+    /// Terminal Sessions ring the bell, which wakes the host to tick and publish.
+    fn ticker(&mut self, wake: Arc<dyn Wake>) {
+        let _ = self.bell.wake.set(Arc::clone(&wake));
+        let bell = Arc::clone(&self.bell);
+        self.host.set_notifier(Arc::new(move || bell.ring()));
+        self.ticker = Some(Arc::clone(&wake));
+        self.host.ticker(wake);
+    }
+    /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
+    /// work when it is due. A host deadline alone publishes nothing.
+    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        // Publication ends each channel whose Pane is gone with its last event, and hands an
+        // ended shell's final screen over before the host's timed work retires its Pane.
+        if self.bell.take() {
+            self.publish_all();
+        }
+        let host = self.host.tick(now);
+        self.sweep();
+        self.answer_reads();
+        let reads = (!self.reads.is_empty()).then_some(now + TICK);
+        [host, reads].into_iter().flatten().min()
+    }
+    fn stopping(&mut self) {
+        for read in std::mem::take(&mut self.reads) {
+            if let Some(connection) = self.connections.get(&read.connection) {
+                let _ = connection.outbox.reply(read.id, Err(Refusal::Failed));
+            }
+        }
+        self.host.stopping();
+    }
+    /// The client abandoned a read. It replies `Stale` at once. A directory read stops. A
+    /// creation that has not started never runs, and one that has keeps what it created. A
+    /// Worktree read finishes unobserved.
+    fn cancel(&mut self, peer: &Peer, id: RequestId) {
+        let Some(index) = self
+            .reads
+            .iter()
+            .position(|read| read.connection == peer.connection && read.id == id)
+        else {
+            return;
+        };
+        let read = self.reads.remove(index);
+        match read.kind {
+            ReadKind::Directory => {
+                self.command(
+                    peer,
+                    Request::DirectoryRead(pane::directories::Request::Cancel { id: read.host }),
+                );
+            }
+            ReadKind::Creation => {
+                self.command(
+                    peer,
+                    Request::DirectoryCreate(pane::directories::CreationRequest::Cancel {
+                        id: read.host,
+                    }),
+                );
+            }
+            ReadKind::Worktree => {}
+        }
+        if let Some(connection) = self.connections.get(&peer.connection) {
+            let _ = connection.outbox.reply(id, Err(Refusal::Stale));
+        }
+    }
+    fn disconnected(&mut self, peer: &Peer) {
+        self.reads.retain(|read| read.connection != peer.connection);
+        self.connections.remove(&peer.connection);
+        self.host.disconnected(peer.connection);
+    }
+    fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.host.shutdown()
+    }
+}
+
+impl<H: HostCommands> Served<H> {
+    /// Answers one request.
+    fn dispatch(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         if let Operation::ScrollbackPage {
             channel,
             epoch,
@@ -1051,7 +1203,8 @@ impl<H: HostCommands> ConnectionService for Served<H> {
             rows,
         } = operation
         {
-            return self.scrollback_page(peer, id, channel, epoch, start, rows);
+            let read = ScrollbackRead { epoch, start, rows };
+            return self.scrollback_page(peer, id, channel, read);
         }
         Dispatch::reply(match operation {
             Operation::Claim(claim) => self.claim(peer, claim),
@@ -1144,111 +1297,12 @@ impl<H: HostCommands> ConnectionService for Served<H> {
                 return self.read(peer, id, ReadKind::Worktree, Request::WorktreeRead(read));
             }
             Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
-            // Direct-network administration never reaches the service.
+            // Scrollback pages reply from the terminal worker. Direct-network administration never
+            // reaches the service.
             Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
         })
     }
-    fn input(&mut self, peer: &Peer, input: protocol::Input) {
-        self.input_message(peer, input);
-    }
-    /// The connection already applied `view` to the outbox. A revealed channel receives the
-    /// current screen again.
-    fn view(&mut self, peer: &Peer, view: protocol::View) {
-        let Some(bound) = self.bound(peer, view.channel) else {
-            return;
-        };
-        bound.publication.view(view.visible);
-        let lease = bound.lease;
-        self.host.view(&lease, view.visible, view.max_hz);
-        if view.visible {
-            self.publish(peer.connection, view.channel);
-        }
-    }
-    fn effect_done(&mut self, peer: &Peer, done: protocol::EffectDone) {
-        if let Ok(lease) = self.lease(peer, done.channel) {
-            self.command(
-                peer,
-                Request::CompleteClipboard {
-                    lease,
-                    generation: done.generation,
-                    id: done.effect,
-                    completion: done.completion,
-                },
-            );
-        }
-    }
-    fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
-        self.host.acknowledge(peer.client, sequence);
-    }
-    fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
-        self.ticker = Some(Arc::clone(&wake));
-        self.host.ticker(wake);
-    }
-    /// Runs the host's timed work when it is due, then pushes what every bound Pane published.
-    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
-        // Publication ends each channel whose Pane is gone with its last event, and hands an
-        // ended shell's final screen over before the host's timed work retires its Pane.
-        self.publish_all();
-        if self.host_due.is_none_or(|due| now >= due) {
-            self.host_due = self.host.tick(now);
-        }
-        self.sweep();
-        self.answer_reads();
-        let reads = (!self.reads.is_empty()).then_some(now + TICK);
-        [self.host_due, reads].into_iter().flatten().min()
-    }
-    fn stopping(&mut self) {
-        for read in std::mem::take(&mut self.reads) {
-            if let Some(connection) = self.connections.get(&read.connection) {
-                let _ = connection.outbox.reply(read.id, Err(Refusal::Failed));
-            }
-        }
-        self.host.stopping();
-    }
-    /// The client abandoned a read. It replies `Stale` at once. A directory read stops. A
-    /// creation that has not started never runs, and one that has keeps what it created. A
-    /// Worktree read finishes unobserved.
-    fn cancel(&mut self, peer: &Peer, id: RequestId) {
-        let Some(index) = self
-            .reads
-            .iter()
-            .position(|read| read.connection == peer.connection && read.id == id)
-        else {
-            return;
-        };
-        let read = self.reads.remove(index);
-        match read.kind {
-            ReadKind::Directory => {
-                self.command(
-                    peer,
-                    Request::DirectoryRead(pane::directories::Request::Cancel { id: read.host }),
-                );
-            }
-            ReadKind::Creation => {
-                self.command(
-                    peer,
-                    Request::DirectoryCreate(pane::directories::CreationRequest::Cancel {
-                        id: read.host,
-                    }),
-                );
-            }
-            ReadKind::Worktree => {}
-        }
-        if let Some(connection) = self.connections.get(&peer.connection) {
-            let _ = connection.outbox.reply(id, Err(Refusal::Stale));
-        }
-    }
-    fn disconnected(&mut self, peer: &Peer) {
-        self.reads.retain(|read| read.connection != peer.connection);
-        self.connections.remove(&peer.connection);
-        self.host.disconnected(peer.connection);
-    }
-    fn shutdown(&mut self) -> Result<(), ServerError> {
-        self.host.shutdown()
-    }
-}
 
-impl<H: HostCommands> Served<H> {
     /// Reads a Scrollback page for the channel's controlling client. The reply comes from the
     /// Pane's terminal worker once it read the rows, so no lock is held while it reads.
     fn scrollback_page(
@@ -1256,9 +1310,7 @@ impl<H: HostCommands> Served<H> {
         peer: &Peer,
         id: RequestId,
         channel: Channel,
-        epoch: u64,
-        start: u64,
-        rows: u16,
+        read: ScrollbackRead,
     ) -> Dispatch {
         let (Ok(lease), Some(connection)) = (
             self.lease(peer, channel),
@@ -1271,17 +1323,10 @@ impl<H: HostCommands> Served<H> {
             // A connection that ended no longer owes the reply.
             let _ = outbox.reply_or_refuse(id, result.map(ReplyBody::Page));
         });
-        match self.host.scrollback_page(
-            peer.client,
-            peer.connection,
-            &lease,
-            ScrollbackRead {
-                epoch,
-                start,
-                rows,
-            },
-            reply,
-        ) {
+        match self
+            .host
+            .scrollback_page(peer.client, peer.connection, &lease, read, reply)
+        {
             Ok(()) => Dispatch::Deferred,
             Err(refusal) => Dispatch::reply(Err(refusal)),
         }

@@ -180,13 +180,17 @@ pub fn claim_in(
         .map_err(ServerError::from)
         .and_then(|pending| Ok(pending.wait()?));
     match reply {
-        Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => Ok(Claimed::Attached(Pane {
-            link: link.clone(),
-            id: channel.channel(),
-            channel: Some(channel),
-            lease,
-            events,
-        })),
+        Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => {
+            // A channel starts hidden; showing it pushes the current screen.
+            channel.view(true, 60)?;
+            Ok(Claimed::Attached(Pane {
+                link: link.clone(),
+                id: channel.channel(),
+                channel: Some(channel),
+                lease,
+                events,
+            }))
+        }
         // An unbound channel has nothing to release.
         Ok(ReplyBody::Claim(ClaimReply::Takeover(takeover))) => {
             channel.detach();

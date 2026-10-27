@@ -291,9 +291,6 @@ impl PaneService for HostService {
     ) -> Result<(), ServerError> {
         self.inner.restore(store)
     }
-    fn set_wake(&mut self, wake: Arc<dyn Wake>) {
-        self.inner.set_wake(wake)
-    }
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox) {
         self.inner.admitted(peer, name, outbox)
     }
@@ -460,8 +457,6 @@ fn serve_runtime_ready(
         paths: paths.clone(),
         stop: Arc::clone(&stop),
     });
-    // A Terminal Session's new screen rings the accept loop, whose tick publishes it.
-    panes.set_wake(Arc::clone(&stop.wake));
     panes.restore(crate::organization::OrganizationStore(Directory::open(
         &paths.data,
         false,

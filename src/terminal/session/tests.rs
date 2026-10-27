@@ -23,12 +23,13 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
     )
 }
 
-/// Makes later output continue a burst that is still running, so it coalesces instead of
-/// publishing at once as output after idle does.
+/// Fixes the worker's publication clock inside a frame of a publication, so later output
+/// coalesces instead of publishing at once as output after idle does.
 fn continue_output_burst(worker: &mut TerminalWorker) {
-    let later = Instant::now() + Duration::from_secs(1);
-    worker.schedules.request_pty_presentation(later);
-    worker.schedules.mark_presented(later);
+    let now = Instant::now();
+    worker.schedules.fix_clock(now);
+    worker.schedules.request_pty_presentation(now);
+    worker.schedules.mark_presented(now);
 }
 
 #[test]

@@ -101,8 +101,12 @@ impl Rows {
     }
 }
 
+/// A bound channel the client shows.
 fn bound(outbox: &Outbox) -> Publication {
-    Publication::bind(outbox, CHANNEL).unwrap()
+    let mut publication = Publication::bind(outbox, CHANNEL).unwrap();
+    outbox.view(CHANNEL, true);
+    publication.view(true);
+    publication
 }
 
 #[test]
@@ -360,4 +364,254 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
         |rows| rows.shows("hidden"),
     );
     host.shutdown().unwrap();
+}
+
+/// What rings a `Served` host's wake. A test ticks only after a ring, so a lost ring stalls it.
+mod bell {
+    use super::super::super::dispatch::Served;
+    use super::super::super::tests::{create_shared, host, shared_inventory, size};
+    use super::*;
+    use spaceterm_server::attachments::Attachment;
+    use spaceterm_server::connection::service::{Dispatch, PaneService as _, Peer};
+    use spaceterm_server::protocol::{
+        self, ClaimReply, InputEvent, Operation, ReplyBody, RequestId,
+    };
+    use std::sync::{Condvar, Mutex};
+
+    const FIRST: Peer = Peer {
+        client: [1; 32],
+        connection: [1; 32],
+        pairing: None,
+    };
+    const SECOND: Peer = Peer {
+        client: [2; 32],
+        connection: [2; 32],
+        pairing: None,
+    };
+
+    #[derive(Default)]
+    struct Rings {
+        rung: Mutex<bool>,
+        ready: Condvar,
+    }
+
+    struct Fixture {
+        served: Served<SharedWorkspaceHost>,
+        rings: Arc<Rings>,
+        outbox: Outbox,
+        workspace: [u8; 32],
+        pane: [u8; 32],
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let mut fixture = Self::hidden();
+            fixture.input(1, vec![InputEvent::Focus(FocusTarget::Terminal)]);
+            fixture.show();
+            fixture
+        }
+
+        /// A Pane the first client claimed and has not shown yet.
+        fn hidden() -> Self {
+            let mut shared = SharedWorkspaceHost::new(host());
+            let workspace = create_shared(&mut shared, 1);
+            let pane = shared_inventory(&mut shared)
+                .workspaces
+                .iter()
+                .find(|candidate| candidate.id == workspace)
+                .and_then(|workspace| workspace.tabs.first())
+                .and_then(|tab| tab.panes.first())
+                .unwrap()
+                .id;
+            let mut served = Served::new(shared);
+            let rings = Arc::new(Rings::default());
+            served.ticker(Arc::new({
+                let rings = Arc::clone(&rings);
+                move || {
+                    *rings.rung.lock().unwrap() = true;
+                    rings.ready.notify_all();
+                }
+            }));
+            let outbox = super::outbox();
+            served.admitted(&FIRST, "First".into(), outbox.clone());
+            let mut fixture = Self {
+                served,
+                rings,
+                outbox,
+                workspace,
+                pane,
+            };
+            let claim = fixture.claim(&FIRST, AttachmentClaim::Select { explicit: true });
+            assert!(matches!(claim, ClaimReply::Attached { .. }));
+            fixture
+        }
+
+        /// Shows the first client's channel, as its first `View` does.
+        fn show(&mut self) {
+            self.outbox.view(CHANNEL, true);
+            self.served.view(
+                &FIRST,
+                protocol::View {
+                    channel: CHANNEL,
+                    visible: true,
+                    max_hz: 60,
+                },
+            );
+        }
+
+        fn claim(&mut self, peer: &Peer, claim: AttachmentClaim) -> ClaimReply {
+            let operation = Operation::Claim(protocol::Claim {
+                channel: CHANNEL,
+                attachment: Attachment {
+                    workspace: self.workspace,
+                    generation: 1,
+                },
+                pane: self.pane,
+                claim,
+                size: size(),
+                style: None,
+            });
+            match self.served.request(peer, RequestId(1), operation) {
+                Dispatch::Reply(reply) => match *reply {
+                    Ok(ReplyBody::Claim(reply)) => reply,
+                    other => panic!("the claim failed: {other:?}"),
+                },
+                _ => panic!("a claim replies at once"),
+            }
+        }
+
+        fn input(&mut self, serial: u32, events: Vec<InputEvent>) {
+            self.served.input(
+                &FIRST,
+                protocol::Input {
+                    channel: CHANNEL,
+                    serial,
+                    generation: 1,
+                    events,
+                },
+            );
+        }
+
+        /// Types `command` and Return.
+        fn command(&mut self, serial: u32, command: &str) {
+            let InteractiveInput::Key(key) = super::super::super::tests::text_key(command, false)
+            else {
+                unreachable!()
+            };
+            let InteractiveInput::Key(enter) = super::super::super::tests::text_key("\r", false)
+            else {
+                unreachable!()
+            };
+            self.input(serial, vec![InputEvent::Key(key), InputEvent::Key(enter)]);
+        }
+
+        /// Waits until the wake rings or `deadline` passes, and returns whether it rang.
+        fn rang_by(&self, deadline: Instant) -> bool {
+            let mut rung = self.rings.rung.lock().unwrap();
+            while !*rung {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return false;
+                };
+                rung = self.rings.ready.wait_timeout(rung, remaining).unwrap().0;
+            }
+            *rung = false;
+            true
+        }
+
+        /// Ticks after each ring until a message satisfies `found`. Fails if nothing rings for
+        /// 10 seconds.
+        fn await_message(&mut self, found: impl Fn(&ServerMessage) -> bool) -> ServerMessage {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(self.rang_by(deadline), "nothing rang the host's wake");
+                self.served.tick(Instant::now());
+                if let Some(message) = drain(&self.outbox).into_iter().find(&found) {
+                    return message;
+                }
+            }
+        }
+
+        fn await_event(&mut self, found: impl Fn(&PaneEvent) -> bool) -> PaneEvent {
+            let message = self.await_message(
+                |message| matches!(message, ServerMessage::Pane(pane) if found(&pane.event)),
+            );
+            let ServerMessage::Pane(pane) = message else {
+                unreachable!()
+            };
+            pane.event
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = self.served.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_bell_and_a_clipboard_request_ring_the_wake() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "printf '\\007'");
+        let bell = fixture.await_event(|event| matches!(event, PaneEvent::Effect(_)));
+        assert!(matches!(
+            bell,
+            PaneEvent::Effect(pane::effects::Request {
+                effect: pane::effects::Effect::Bell,
+                ..
+            })
+        ));
+
+        fixture.command(3, "printf '\\033]52;c;?\\007'; sleep 5");
+        let read = fixture.await_event(|event| {
+            matches!(
+                event,
+                PaneEvent::Effect(pane::effects::Request {
+                    effect: pane::effects::Effect::ClipboardRead { .. },
+                    ..
+                })
+            )
+        });
+        assert!(matches!(read, PaneEvent::Effect(_)));
+    }
+
+    #[test]
+    fn an_exit_rings_the_wake_and_ends_the_channel() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "exit");
+        fixture.await_event(|event| matches!(event, PaneEvent::Ended));
+    }
+
+    #[test]
+    fn a_takeover_rings_the_wake_and_ends_the_former_channel() {
+        let mut fixture = Fixture::new();
+        let second = super::outbox();
+        fixture
+            .served
+            .admitted(&SECOND, "Second".into(), second.clone());
+        let ClaimReply::Takeover(offer) =
+            fixture.claim(&SECOND, AttachmentClaim::Select { explicit: true })
+        else {
+            panic!("the second client is offered Take Over");
+        };
+        let taken = fixture.claim(
+            &SECOND,
+            AttachmentClaim::TakeOver {
+                target: offer.target,
+            },
+        );
+        assert!(matches!(taken, ClaimReply::Attached { .. }));
+        fixture.await_event(|event| matches!(event, PaneEvent::Takeover(_)));
+    }
+
+    /// A Pane claimed while hidden receives no screen until its client shows it.
+    #[test]
+    fn a_claimed_pane_receives_no_screen_until_it_is_shown() {
+        let mut fixture = Fixture::hidden();
+        std::thread::sleep(Duration::from_millis(200));
+        fixture.served.tick(Instant::now());
+        assert!(frames(&drain(&fixture.outbox)).is_empty());
+
+        fixture.show();
+        assert_eq!(frames(&drain(&fixture.outbox)).len(), 1);
+    }
 }

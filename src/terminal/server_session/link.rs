@@ -1203,6 +1203,8 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             geometry: Mutex::new(geometry),
         };
         let factory = self.clone();
+        // The worker cannot read the displays off the main thread.
+        let max_hz = crate::platform::display_refresh::frame_rate();
         // Ownership follows creation order, however late each worker first runs.
         let reservation = self.control.reserve();
         std::thread::Builder::new()
@@ -1215,7 +1217,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
                     (events, accessibility_sender),
                     measured_size,
                     appearance,
-                    effects,
+                    (effects, max_hz),
                 );
             })
             .map_err(TerminalSessionError::from)?;
@@ -1262,7 +1264,7 @@ pub(super) fn present(
     ),
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
-    mut effects: ClientEffects,
+    (mut effects, max_hz): (ClientEffects, u8),
 ) {
     let DevelopmentServerSessionFactory {
         server,
@@ -1349,10 +1351,7 @@ pub(super) fn present(
                 .unwrap_or_else(|e| e.into_inner())
                 .scrollback
                 .attach(lease.session);
-            let mut demand = inbox::Demand::new(
-                state.presentable.load(Ordering::Acquire),
-                crate::terminal::session::DEFAULT_FRAME_RATE,
-            );
+            let mut demand = inbox::Demand::new(state.presentable.load(Ordering::Acquire), max_hz);
             let attached = (|| loop {
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
@@ -1569,15 +1568,16 @@ pub(super) fn present(
                         })?;
                     }
                 }
-                // A hidden Pane transfers no images. A new manifest or a transfer in progress
-                // continues one chunk per turn.
-                if ready && demand.visible() && (presented || graphics.transferring()) {
+                // A hidden Pane transfers no images. Every image the manifest names is fetched,
+                // one chunk per turn, whether or not a newer frame arrives.
+                if ready && demand.visible() && (presented || graphics.wants()) {
                     let result = graphics.poll(lease, &mut |request| {
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
                     }
+                    let completed = matches!(result, Ok(true));
                     let changed = match result {
                         Ok(changed) => changed,
                         Err(error) => graphics.failure(error),
@@ -1601,7 +1601,8 @@ pub(super) fn present(
                             let _ = semantics.force_send(model);
                         }
                     }
-                    busy |= graphics.transferring();
+                    // A failed image waits for the next turn; a finished one goes on at once.
+                    busy |= graphics.transferring() || (completed && graphics.wants());
                 }
                 // Semantic transfer follows its own explicit demand, even while hidden, and a
                 // partial document continues one chunk per turn. It sends nothing while the

@@ -117,6 +117,8 @@ impl TerminalEventPublisher {
         state.stopped = true;
         state.hidden_input = false;
         state.events.close();
+        // The subscriber learns that the session stopped without waiting for another event.
+        notify(state);
     }
 
     pub(super) fn hidden_input(&self) -> bool {

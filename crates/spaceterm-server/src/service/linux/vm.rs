@@ -68,6 +68,10 @@ fn claim(
     let ReplyBody::Claim(reply) = reply else {
         panic!("claim reply unavailable");
     };
+    if matches!(reply, ClaimReply::Attached { .. }) {
+        // A channel starts hidden; showing it pushes the current screen.
+        channel.view(true, 60).unwrap();
+    }
     (channel, reply, frames)
 }
 fn command(channel: &ChannelHandle, text: &str) {

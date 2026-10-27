@@ -935,7 +935,8 @@ impl SharedWorkspaceHost {
             .map_err(|_| ServerError::StorageUnavailable)
     }
     /// Runs timed work, pushes the inventory it changed, and returns when work is next due.
-    /// `None` means nothing waits: no write, Git or directory work, Git facts or live terminal.
+    /// `None` means nothing waits: no write, Git or directory work or Git facts. A live terminal
+    /// rings the host's wake when its screen, metadata or lifetime changes, so it needs no tick.
     pub(super) fn tick_until(&mut self, now: Instant) -> Option<Instant> {
         let _ = self.finish_worktrees(false);
         self.prototype.directories.tick();
@@ -951,8 +952,7 @@ impl SharedWorkspaceHost {
             || !self.settled()
             || self.writes.busy()
             || !self.waiting.is_empty()
-            || self.prototype.directories.busy()
-            || self.panes.values().any(|host| host.pane.is_some());
+            || self.prototype.directories.busy();
         let soon = waiting.then_some(now + super::dispatch::TICK);
         // A failed synchronization never reaches the Git read it would start, so its due time
         // stays past. Retrying waits for the tick instead.
@@ -1330,7 +1330,14 @@ mod tests {
         memory.fail.store(true, Ordering::SeqCst);
         let mutation = rename(&host, "Uncertain");
         assert!(matches!(
-            host.request([1; 32], [1; 32], Request::Mutate { sequence: 1, mutation }),
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 1,
+                    mutation
+                }
+            ),
             Reply::Refused(Refusal::StorageUnavailable)
         ));
         let now = Instant::now();
@@ -1366,12 +1373,15 @@ mod tests {
         assert!(matches!(outcome.outcome, Outcome::Accepted { .. }));
         host.tick(Instant::now());
         assert!(
-            HostCommands::lease_live(&host, &lease),
+            super::super::tests::screen(&mut host, [1; 32], lease).is_ok(),
             "the session runs while its ending is not retained"
         );
         host.retained(revision).unwrap();
         host.tick(Instant::now());
-        assert!(!HostCommands::lease_live(&host, &lease));
+        assert!(matches!(
+            super::super::tests::screen(&mut host, [1; 32], lease),
+            Err(PaneEvent::SessionEnded)
+        ));
         host.shutdown().unwrap();
     }
 

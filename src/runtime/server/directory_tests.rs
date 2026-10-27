@@ -307,7 +307,9 @@ fn a_directory_read_replies_when_it_settles_without_being_polled() {
         });
         assert!(matches!(
             result,
-            Ok(ReplyBody::Directory(Ok(pane::directories::Value::Directory(_))))
+            Ok(ReplyBody::Directory(Ok(
+                pane::directories::Value::Directory(_)
+            )))
         ));
     }
     served.shutdown().unwrap();

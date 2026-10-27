@@ -33,7 +33,8 @@ impl SharedWorkspaceHost {
     /// Forgets a closed connection and the replies it can no longer receive.
     pub(super) fn unsubscribe(&mut self, connection: Id) {
         self.publication.unsubscribe(connection);
-        self.waiting.retain(|waiting| waiting.connection != connection);
+        self.waiting
+            .retain(|waiting| waiting.connection != connection);
     }
 
     /// Stages the current inventory for every connection that has not received it. It is pushed
@@ -67,7 +68,9 @@ impl SharedWorkspaceHost {
     ) -> Dispatch {
         let answer = self.settle(device, sequence, mutation.clone());
         let dispatch = match answer {
-            Ok(Answer::Outcome { outcome, revision }) => Dispatch::After(self.deliver(outcome, revision)),
+            Ok(Answer::Outcome { outcome, revision }) => {
+                Dispatch::After(self.deliver(outcome, revision))
+            }
             Ok(Answer::Pending) => {
                 self.waiting.push(Waiting {
                     connection,
@@ -138,11 +141,7 @@ impl SharedWorkspaceHost {
     }
 
     /// The reply to a settled edit, sent from the sync worker once `revision` is retained.
-    fn deliver(
-        &self,
-        outcome: Box<RetainedOutcome>,
-        revision: Option<Revision>,
-    ) -> AfterLock {
+    fn deliver(&self, outcome: Box<RetainedOutcome>, revision: Option<Revision>) -> AfterLock {
         let journal = self.journal.clone();
         Box::new(move || {
             if let (Some(journal), Some(revision)) = (journal, revision) {

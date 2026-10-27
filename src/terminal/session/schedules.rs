@@ -138,9 +138,33 @@ pub(super) struct WorkerSchedules {
     metadata_presentation_queued: Arc<AtomicBool>,
     graphics_animation: Option<Instant>,
     compression: CompressionSchedule<CompressionActivity>,
+    clock: Clock,
+}
+
+/// Where publication reads the time. Tests fix it, so a slow run cannot change what coalesces.
+#[derive(Clone, Copy)]
+enum Clock {
+    System,
+    #[cfg(test)]
+    Fixed(Instant),
 }
 
 impl WorkerSchedules {
+    /// The time publication decisions use.
+    pub(super) fn now(&self) -> Instant {
+        match self.clock {
+            Clock::System => Instant::now(),
+            #[cfg(test)]
+            Clock::Fixed(now) => now,
+        }
+    }
+
+    /// Fixes the time publication decisions use.
+    #[cfg(test)]
+    pub(super) fn fix_clock(&mut self, now: Instant) {
+        self.clock = Clock::Fixed(now);
+    }
+
     pub(super) fn subscribe(&mut self, now: Instant) {
         self.metadata_presentation_queued
             .store(false, Ordering::Release);
@@ -422,6 +446,7 @@ impl WorkerSchedules {
             metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
             graphics_animation: None,
             compression: CompressionSchedule::new(),
+            clock: Clock::System,
         }
     }
 
