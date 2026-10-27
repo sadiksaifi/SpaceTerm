@@ -41,14 +41,19 @@ pub fn tune(tcp: &TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The WebSocket configuration of every paired connection: one binary message carries one frame.
+/// Largest WebSocket message before admission completes: the pairing and admission messages
+/// of an unauthenticated peer.
+pub const PREAMBLE_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// The WebSocket configuration of a paired socket until admission completes. A peer that has not
+/// proved itself sends messages of at most [`PREAMBLE_MESSAGE_BYTES`].
 pub fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
-        .read_buffer_size(64 * 1024)
+        .read_buffer_size(PREAMBLE_MESSAGE_BYTES)
         .write_buffer_size(0)
         .max_write_buffer_size(TLS_BUFFER)
-        .max_message_size(Some(limits::MAX_FRAME_BYTES))
-        .max_frame_size(Some(limits::MAX_FRAME_BYTES))
+        .max_message_size(Some(PREAMBLE_MESSAGE_BYTES))
+        .max_frame_size(Some(PREAMBLE_MESSAGE_BYTES))
 }
 
 /// A rustls connection on a nonblocking TCP socket.
@@ -187,8 +192,13 @@ pub struct WssCarrier {
 }
 
 impl WssCarrier {
-    /// Takes an admitted WebSocket whose socket is already nonblocking and tuned.
-    pub fn new(ws: Ws) -> Self {
+    /// Takes an admitted WebSocket whose socket is already nonblocking and tuned, and raises its
+    /// message bound to one whole frame, as admission proved the peer.
+    pub fn new(mut ws: Ws) -> Self {
+        ws.set_config(|config| {
+            config.max_message_size = Some(limits::MAX_FRAME_BYTES);
+            config.max_frame_size = Some(limits::MAX_FRAME_BYTES);
+        });
         Self {
             ws,
             unflushed: 0,
