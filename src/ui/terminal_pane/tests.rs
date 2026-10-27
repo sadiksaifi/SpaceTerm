@@ -733,6 +733,41 @@ fn visual_bell_presentation_state_clears_on_focus_or_input(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn input_takes_down_the_visual_bell_border_at_once(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_workspace: true,
+                active_tab: true,
+                focused_pane: false,
+                ..TerminalProductFocus::default()
+            },
+            cx,
+        );
+        pane.handle_event(
+            TerminalSessionEvent::Attention(crate::terminal::attention::AttentionEvent::Bell),
+            cx,
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("terminal-visual-bell").is_some());
+
+    // A key with no echo draws nothing else.
+    cx.update(|_window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.send_key_translation(
+                KeyTranslation::Encoded(KeyInput::input_method_commit("x")),
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("terminal-visual-bell").is_none());
+}
+
+#[gpui::test]
 fn accepted_input_method_commit_clears_pending_attention(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
@@ -3893,6 +3928,102 @@ fn occlusion_releases_the_cursor_batch_before_another_frame(cx: &mut TestAppCont
     }));
 }
 
+#[test]
+fn block_cursor_hides_overhang_from_a_neighboring_row_on_both_cursor_paths() {
+    // A steady cursor draws with its grid. A focused blinking cursor draws over a retained grid.
+    for blinking in [false, true] {
+        let mut app = gpui::TestAppContext::build_with_text_system(
+            gpui::TestDispatcher::new(0),
+            None,
+            Arc::new(crate::ui::terminal_element::RasterTextSystem {
+                base: gpui::NoopTextSystem,
+                // Every glyph reaches far above its cell, into the row above.
+                bounds: Bounds::new(
+                    point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+                    size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+                ),
+                observation: None,
+            }),
+        );
+        let (pane, cx, _records) = connected_terminal_pane(&mut app);
+        let red = Color::rgb(0xdd_00_00);
+        let mut screen = text_screen(10, &["xx", "AA"]);
+        {
+            let screen = Arc::make_mut(&mut screen);
+            for cell in Arc::make_mut(&mut Arc::make_mut(&mut screen.rows)[1]).iter_mut() {
+                cell.foreground_source = crate::terminal::TerminalColor::Rgb(red);
+            }
+            screen.cursor = blinking_cursor_screen(true, blinking).cursor;
+        }
+        cx.simulate_resize(gpui::size(px(324.0), px(162.0)));
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
+            pane.cell_width = px(8.0);
+            pane.line_height = 16.0;
+            pane.last_geometry = Some(TerminalGeometry::from_grid(
+                CellGridSize::new(40, 10),
+                LogicalCellSize::new(8.0, 16.0),
+                BackingScale::ONE,
+            ));
+            pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            let cursor = window
+                .pixel_snap_bounds(Bounds::new(
+                    point(px(2.0), px(0.0)),
+                    size(px(8.0), px(16.0)),
+                ))
+                .scale(window.scale_factor());
+            let quads = window.painted_quads();
+            let red: gpui::Hsla = gpui_color(red).into();
+            let overhang = window
+                .painted_monochrome_sprites()
+                .into_iter()
+                .filter(|sprite| sprite.color == red)
+                .filter_map(|sprite| {
+                    let visible = sprite
+                        .bounds
+                        .intersect(&sprite.content_mask.bounds)
+                        .intersect(&cursor);
+                    (!visible.is_empty()).then_some((sprite.order, visible))
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                window
+                    .painted_monochrome_sprites()
+                    .iter()
+                    .any(|sprite| sprite.color == red && sprite.bounds.intersects(&cursor)),
+                "blinking={blinking}: the fixture must reach into the cursor cell"
+            );
+            // The steady cursor clips the neighboring text out of its cell. The retained cursor
+            // paints its cell over the text.
+            for (order, visible) in &overhang {
+                assert!(
+                    quads.iter().any(|quad| {
+                        quad.order > *order
+                            && quad
+                                .bounds
+                                .intersect(&quad.content_mask.bounds)
+                                .intersect(visible)
+                                == *visible
+                    }),
+                    "blinking={blinking}: neighboring text must not show in the cursor cell"
+                );
+            }
+        });
+    }
+}
+
 #[gpui::test]
 fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     cx: &mut TestAppContext,
@@ -3918,27 +4049,29 @@ fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     cx.run_until_parked();
     let assert_composition = |cx: &mut VisualTestContext, cursor_visible: bool| {
         cx.update(|window, _| {
+            // The scene draws quads in this order.
             let quads = window.painted_quads();
             let selected: Vec<_> = quads
                 .iter()
-                .filter(|quad| quad.background == gpui::rgba(0x11_dd_77_ff).into())
+                .enumerate()
+                .filter(|(_, quad)| quad.background == gpui::rgba(0x11_dd_77_ff).into())
                 .collect();
             let cursor: Vec<_> = quads
                 .iter()
-                .filter(|quad| quad.background == gpui::rgba(0xff_00_00_ff).into())
+                .enumerate()
+                .filter(|(_, quad)| quad.background == gpui::rgba(0xff_00_00_ff).into())
                 .collect();
             let cell_bounds = Bounds::new(point(px(2.0), px(0.0)), gpui::size(px(8.0), px(16.0)))
                 .scale(window.scale_factor());
             assert_eq!(selected.len(), if cursor_visible { 2 } else { 1 });
-            for quad in &selected {
+            for (_, quad) in &selected {
                 assert_eq!(quad.bounds, cell_bounds);
             }
             assert_eq!(cursor.len(), usize::from(cursor_visible));
             if cursor_visible {
-                assert_eq!(cursor[0].bounds, cell_bounds);
-                assert!(selected[0].order < selected[1].order);
+                assert_eq!(cursor[0].1.bounds, cell_bounds);
                 assert!(
-                    selected[1].order < cursor[0].order,
+                    selected[1].0 < cursor[0].0,
                     "cursor must compose over Selection"
                 );
             }
@@ -4130,6 +4263,69 @@ fn cursor_blink_resets_on_accepted_input_and_focus_gain(cx: &mut TestAppContext)
     cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL);
     cx.run_until_parked();
     assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+}
+
+#[gpui::test]
+fn accepted_input_redraws_only_a_hidden_blinking_cursor(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    cx.update(|_window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
+            pane.handle_event(
+                TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+                cx,
+            );
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    let notifications = Rc::new(Cell::new(0));
+    cx.update(|_, cx| {
+        let notifications = notifications.clone();
+        cx.observe(&pane, move |_, _| {
+            notifications.set(notifications.get() + 1)
+        })
+        .detach();
+    });
+    let type_key = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.send_key_translation(
+                    KeyTranslation::Encoded(KeyInput::input_method_commit("x")),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+    };
+
+    // A visible cursor keeps its pixels, so input waits for the echo to draw.
+    cx.executor().advance_clock(PRESENTATION_BLINK_INTERVAL / 2);
+    type_key(cx);
+    assert_eq!(notifications.get(), 0);
+    cx.executor()
+        .advance_clock(PRESENTATION_BLINK_INTERVAL - Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    assert_eq!(notifications.get(), 0);
+
+    // A hidden cursor reappears with the input.
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(!pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    let hidden = notifications.get();
+    type_key(cx);
+    assert!(pane.read_with(cx, |pane, _| pane.blink_phase_visible));
+    assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+    assert_eq!(notifications.get(), hidden + 1);
 }
 
 #[gpui::test]
