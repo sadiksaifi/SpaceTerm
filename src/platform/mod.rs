@@ -30,6 +30,8 @@ pub(crate) mod application_quit;
 #[cfg(feature = "desktop")]
 pub(crate) mod desktop_events;
 #[cfg(feature = "desktop")]
+pub(crate) mod display_refresh;
+#[cfg(feature = "desktop")]
 pub(crate) mod https_transport;
 #[cfg(feature = "desktop")]
 pub(crate) mod keyboard_layout;

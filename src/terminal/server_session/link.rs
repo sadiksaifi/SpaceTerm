@@ -1238,6 +1238,8 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             geometry: Mutex::new(geometry),
         };
         let factory = self.clone();
+        // The worker cannot read the displays off the main thread.
+        let max_hz = crate::platform::display_refresh::frame_rate();
         // Ownership follows creation order, however late each worker first runs.
         let reservation = self.control.reserve();
         std::thread::Builder::new()
@@ -1250,7 +1252,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
                     (events, accessibility_sender),
                     measured_size,
                     appearance,
-                    effects,
+                    (effects, max_hz),
                 );
             })
             .map_err(TerminalSessionError::from)?;
@@ -1297,7 +1299,7 @@ pub(super) fn present(
     ),
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
-    mut effects: ClientEffects,
+    (mut effects, max_hz): (ClientEffects, u8),
 ) {
     let DevelopmentServerSessionFactory {
         server,
@@ -1378,10 +1380,7 @@ pub(super) fn present(
             let mut latest_screen = None;
             let mut shown = None;
             let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
-            let mut demand = inbox::Demand::new(
-                state.presentable.load(Ordering::Acquire),
-                crate::terminal::session::DEFAULT_FRAME_RATE,
-            );
+            let mut demand = inbox::Demand::new(state.presentable.load(Ordering::Acquire), max_hz);
             let attached = (|| loop {
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());

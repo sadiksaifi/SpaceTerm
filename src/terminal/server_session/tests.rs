@@ -575,7 +575,7 @@ fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_succes
             cell_height: 20,
         })),
         Arc::new(Mutex::new(TerminalAppearanceUpdate::builtin().unwrap())),
-        effects,
+        (effects, 60),
     );
     assert!(
         successor.send(&focus, |_| Ok(Reply::Unchanged)).is_ok(),
