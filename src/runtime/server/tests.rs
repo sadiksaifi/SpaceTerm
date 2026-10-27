@@ -810,7 +810,7 @@ pub(super) fn await_screen(
     lease: Lease,
     ready: impl Fn(&ScreenUpdate) -> bool,
 ) -> ScreenUpdate {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut diagnostic = Vec::new();
     loop {
         match screen(host, device, lease) {

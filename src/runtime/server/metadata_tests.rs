@@ -143,18 +143,21 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
     );
     // Publish the source directory before the command starts so completion changes only metadata.
     // Neither client requests a Screen. Only the owner sends input; the observer reads Inventory.
+    // Typed commands stay ASCII, because macOS `/bin/sh` reads UTF-8 bytes as Meta keys without a
+    // UTF-8 locale. `printf` writes the titles' UTF-8 from octal escapes: `\342\234\263` is "✳",
+    // `\302\267` is "·", `\342\240\213` is "⠋" and `\342\240\231` is "⠙".
     command(
         &mut host,
         1,
         lease,
-        "stty -echo; printf '\\033]7;file://localhost/tmp/api\\007\\033]133;C;cmdline=cargo%%20test\\007\\033]2;✳ cargo test · api\\007\\033]9;4;1;42\\007'",
+        "stty -echo; printf '\\033]7;file://localhost/tmp/api\\007\\033]133;C;cmdline=cargo%%20test\\007\\033]2;\\342\\234\\263 cargo test \\302\\267 api\\007\\033]9;4;1;42\\007'",
     );
     wait(&mut host, 20, "✳ cargo test · api");
     command(
         &mut host,
         1,
         lease,
-        "printf '\\033]2;⠋ cargo test · api\\007'",
+        "printf '\\033]2;\\342\\240\\213 cargo test \\302\\267 api\\007'",
     );
     wait(&mut host, 20, "⠋ cargo test · api");
     // Observe each frame before advancing so a delayed PTY reader cannot merge their times.
@@ -163,7 +166,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         &mut host,
         1,
         lease,
-        "printf '\\033]2;⠙ cargo test · api\\007'",
+        "printf '\\033]2;\\342\\240\\231 cargo test \\302\\267 api\\007'",
     );
     let first = wait(&mut host, 20, "⠙ cargo test · api");
     let snapshot = first.workspaces[0].tabs[0].panes[0]
