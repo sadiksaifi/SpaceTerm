@@ -1,7 +1,7 @@
 //! Golden vectors pin the wire bytes. Round trips cover every operation and every reused payload
 //! type, including optional fields in both states, because postcard has no field names.
 use super::frame::{Assembler, DecodeError, FrameReader, Kind, encode_client, encode_server};
-use super::interim::{self, Interim, InterimReply};
+use super::interim::{Interim, InterimReply};
 use super::screen::{
     Cells, Cursor, CursorPosition, Geometry, History, Row, Run, ScrollShift, Style,
     StyleDefinition, StyleRef,
@@ -336,19 +336,6 @@ fn every_operation_round_trips() {
         Operation::Direct(crate::direct::Management::Status),
         Operation::Direct(crate::direct::Management::Invite),
         Operation::Shutdown,
-        Operation::Interim(Interim::Poll { channel }),
-        Operation::Interim(Interim::PollChanges {
-            channel,
-            base: Some(4),
-        }),
-        Operation::Interim(Interim::NativeEffects {
-            channel,
-            generation: 1,
-        }),
-        Operation::Interim(Interim::PresentationDemand {
-            channel,
-            visible: true,
-        }),
         Operation::Interim(Interim::Inventory),
         Operation::Interim(Interim::Read {
             channel,
@@ -584,23 +571,6 @@ fn every_server_message_round_trips() {
             next_sequence: 3,
         }),
         ReplyBody::Interim(InterimReply::MutationPending),
-        ReplyBody::Interim(InterimReply::NativeEffects {
-            request: Some(pane::effects::Request {
-                id: 1,
-                generation: 2,
-                remaining_ms: 3,
-                effect: pane::effects::Effect::ClipboardWrite {
-                    target: pane::effects::ClipboardTarget::Standard,
-                    text: "x".into(),
-                },
-            }),
-            hidden_input: true,
-        }),
-        ReplyBody::Interim(InterimReply::Screen(Box::new(interim::ScreenFrame {
-            frame: 2,
-            base: Some(1),
-            update: update(),
-        }))),
         ReplyBody::Interim(InterimReply::ReadingReady {
             generation: 1,
             selection_revision: 2,
@@ -616,6 +586,7 @@ fn every_server_message_round_trips() {
         PaneEvent::Ended,
         PaneEvent::SessionEnded,
         PaneEvent::Failed,
+        PaneEvent::DirectoryUnavailable,
         PaneEvent::Effect(pane::effects::Request {
             id: 1,
             generation: 2,

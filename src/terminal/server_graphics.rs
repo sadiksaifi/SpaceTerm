@@ -130,6 +130,11 @@ impl Graphics {
         ready && self.reported.take().is_some()
     }
 
+    /// Whether an image transfer is in progress, so the next turn continues it.
+    pub(crate) fn transferring(&self) -> bool {
+        self.transfer.is_some()
+    }
+
     pub(crate) fn poll(
         &mut self,
         lease: Lease,

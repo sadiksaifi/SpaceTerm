@@ -467,6 +467,9 @@ pub struct ScreenSnapshot {
     pub graphics: GraphicsSnapshot,
     pub damage: SnapshotDamage,
     pub history: HistorySnapshot,
+    /// The highest client Input serial written to the PTY before this state was captured.
+    /// Zero before any, and in screens a client builds.
+    pub input_serial: u32,
 }
 
 impl PartialEq for ScreenSnapshot {
@@ -497,6 +500,7 @@ impl PartialEq for ScreenSnapshot {
             && self.graphics == other.graphics
             && self.damage == other.damage
             && self.history == other.history
+            && self.input_serial == other.input_serial
     }
 }
 
@@ -545,6 +549,7 @@ impl ScreenSnapshot {
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
             history: HistorySnapshot::default(),
+            input_serial: 0,
         })
     }
 
@@ -690,6 +695,7 @@ impl ScreenSnapshot {
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
             history: HistorySnapshot::default(),
+            input_serial: 0,
         }
     }
 }
@@ -816,6 +822,8 @@ pub(crate) struct TerminalEmulator {
     pointer_mapping_invalidated: bool,
     gesture_clock: GestureClock,
     presentation_generation: PresentationGeneration,
+    /// The client Input serial the next snapshot reports.
+    input_serial: u32,
     reading_baselines: VecDeque<Rc<ReadingBaseline>>,
     active_reading_baseline: Option<Rc<ReadingBaseline>>,
     server_reading_enabled: bool,
@@ -1291,6 +1299,7 @@ impl TerminalEmulator {
             pointer_mapping_invalidated: false,
             gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
+            input_serial: 0,
             reading_baselines: VecDeque::new(),
             active_reading_baseline: None,
             server_reading_enabled: false,
@@ -3319,11 +3328,18 @@ impl TerminalEmulator {
             graphics,
             damage,
             history,
+            input_serial: self.input_serial,
         });
         if self.server_reading_enabled {
             self.retain_reading_baseline(&screen)?;
         }
         Ok(Some(screen))
+    }
+
+    /// Sets the client Input serial that snapshots report from now on. A new serial alone does
+    /// not make a snapshot.
+    pub(crate) fn set_input_serial(&mut self, serial: u32) {
+        self.input_serial = serial;
     }
 
     pub(crate) fn mark_metadata_stale(&mut self) {

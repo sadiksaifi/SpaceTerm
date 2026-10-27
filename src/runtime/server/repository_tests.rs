@@ -103,7 +103,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
             tree.display(),
         ),
     );
-    await_text(&mut host, 1, lease, "OSC7-LIVE");
+    await_text(&mut host, lease, "OSC7-LIVE");
     let current = git_facts(&mut host, &tree, |facts| {
         facts.repository.is_some() && facts.worktrees.is_some()
     });
@@ -177,7 +177,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
         lease,
         "printf '\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOWNED-DIRECTORY\\n'",
     );
-    await_text(&mut host, 1, lease, "OWNED-DIRECTORY");
+    await_text(&mut host, lease, "OWNED-DIRECTORY");
     assert_eq!(
         shared_inventory(&mut host).workspaces[0].tabs[0].panes[0]
             .confirmed_directory
@@ -204,7 +204,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
                 git.0.display()
             ),
         );
-        await_text(&mut host, 1, lease, marker);
+        await_text(&mut host, lease, marker);
         let current = shared_inventory(&mut host);
         let workspace = &current.workspaces[0];
         assert_eq!(
@@ -230,7 +230,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
         lease,
         "printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOWNER-MOVED\\n'",
     );
-    await_text(&mut host, 1, lease, "OWNER-MOVED");
+    await_text(&mut host, lease, "OWNER-MOVED");
     let moved = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     let workspace = &moved.workspaces[0];
     assert_eq!(
@@ -648,7 +648,7 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
                 destination.0.display()
             ),
         );
-        await_text(&mut host, 1, lease, marker);
+        await_text(&mut host, lease, marker);
         let moved = git_facts(&mut host, &destination.0, |facts| {
             facts.repository.as_ref().is_some_and(|repository| {
                 repository.root == destination.0
@@ -773,7 +773,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
             outside.0.display()
         ),
     );
-    await_text(&mut host, 1, lease, "LEFT-REPOSITORY");
+    await_text(&mut host, lease, "LEFT-REPOSITORY");
     let left = git_facts(&mut host, &outside.0, |facts| {
         facts.failure.is_none() && facts.repository.is_none()
     });
@@ -814,7 +814,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
             git.0.display()
         ),
     );
-    await_text(&mut host, 1, lease, "ENTERED-REPOSITORY");
+    await_text(&mut host, lease, "ENTERED-REPOSITORY");
     let entered = shared_inventory(&mut host);
     assert!(
         entered.workspaces[0]
@@ -1055,7 +1055,7 @@ fn removal_revalidates_other_workspace_sessions_and_closes_unattached_work_befor
         lease,
         "printf '\\nunattached-work\\n'; sleep 30\n",
     );
-    await_text(&mut host, 3, lease, "unattached-work");
+    await_text(&mut host, lease, "unattached-work");
     assert!(matches!(
         host.request(
             [3; 32],

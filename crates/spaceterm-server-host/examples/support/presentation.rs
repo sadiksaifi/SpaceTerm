@@ -1,6 +1,6 @@
 //! One bounded presentation exercise for the existing IPC and WSS fixtures.
 //! The producer writes metadata without cell output while hidden and exits on request.
-use super::support::{self, Pane, has_row, text_key};
+use super::support::{self, Pane, Screen, has_row, text_key};
 use super::terminal_semantics::{Failure, stage};
 use spaceterm_server::{
     ServerError,
@@ -14,10 +14,7 @@ use spaceterm_server::{
         },
         reading,
     },
-    protocol::{
-        Channel, Operation, ReplyBody,
-        interim::{Interim, InterimReply, ScreenFrame},
-    },
+    protocol::{Channel, Operation, ReplyBody, interim::Interim},
 };
 use std::time::{Duration, Instant};
 
@@ -105,34 +102,23 @@ fn send(pane: &Pane, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn screen(pane: &Pane, predicate: impl Fn(&ScreenFrame) -> bool) -> Result<Box<ScreenFrame>> {
-    let until = Instant::now() + WAIT;
-    loop {
-        if let Some(screen) = stage("presentation-screen", pane.screen())?
-            && predicate(&screen)
-        {
-            return Ok(screen);
-        }
-        pause(until)?;
-    }
+fn screen(pane: &Pane, predicate: impl Fn(&Screen) -> bool) -> Result<Screen> {
+    stage("presentation-screen", pane.await_screen(WAIT, predicate))?
+        .ok_or_else(|| "presentation deadline elapsed".into())
 }
 
+/// Waits until the Pane's presentation satisfies `predicate`. `hidden` holds the number of frames
+/// the channel had received when it was hidden; a later frame fails.
 fn metadata(
     pane: &Pane,
-    hidden: bool,
+    hidden: Option<u64>,
     predicate: impl Fn(&Snapshot) -> bool,
 ) -> Result<Box<Snapshot>> {
     let lease = pane.lease();
     let until = Instant::now() + WAIT;
     loop {
-        if hidden {
-            require(
-                matches!(
-                    stage("hidden-screen-demand", pane.poll())?,
-                    InterimReply::Unchanged
-                ),
-                "hidden Pane published a Screen",
-            )?;
+        if let Some(frames) = hidden {
+            require(pane.frames() == frames, "hidden Pane published a Screen")?;
         }
         let (inventory, _) = stage("presentation-inventory", support::inventory(pane.link()))?;
         let pane = inventory
@@ -162,7 +148,7 @@ pub fn begin(pane: &Pane) -> Result<Witness> {
     let script = format!("python3 -c 'exec({})'", program.replace('\'', "'\\''"));
     stage("presentation-producer", pane.command(&script))?;
     screen(pane, |screen| has_row(screen, READY))?;
-    let initial = metadata(pane, false, |snapshot| {
+    let initial = metadata(pane, None, |snapshot| {
         snapshot.title == TITLE
             && snapshot.directory == "/tmp"
             && snapshot.progress == Progress::Normal(42)
@@ -189,15 +175,13 @@ pub fn begin(pane: &Pane) -> Result<Witness> {
                 .is_some_and(|value| value.starts_with('/')),
         "owning machine presentation facts missing",
     )?;
-    stage(
-        "hide-presentation",
-        pane.interim(Interim::PresentationDemand {
-            channel: pane.channel(),
-            visible: false,
-        }),
-    )?;
+    stage("hide-presentation", pane.view(false))?;
+    // The server applies the view before it answers this later request, so every frame it sent
+    // before hiding the channel arrives before the reply.
+    stage("hide-presentation", support::round_trip(pane.link()))?;
+    let frames = pane.frames();
     send(pane, "h")?;
-    let changed = metadata(pane, true, |snapshot| {
+    let changed = metadata(pane, Some(frames), |snapshot| {
         snapshot.title == HIDDEN_TITLE
             && snapshot.directory == "/"
             && snapshot.progress == Progress::Normal(73)
@@ -212,7 +196,7 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
         lease.session == previous.session && lease.connection != previous.connection,
         "reconnect did not retain the Session with a fresh connection",
     )?;
-    let resumed = metadata(pane, false, |snapshot| {
+    let resumed = metadata(pane, None, |snapshot| {
         snapshot.title == witness.metadata.title
             && snapshot.directory == witness.metadata.directory
             && snapshot.progress == witness.metadata.progress
@@ -223,17 +207,10 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
             && resumed.home == witness.metadata.home,
         "reconnect changed owning machine presentation facts",
     )?;
-    stage(
-        "show-presentation",
-        pane.interim(Interim::PresentationDemand {
-            channel: pane.channel(),
-            visible: true,
-        }),
-    )?;
+    stage("show-presentation", pane.view(true))?;
     let before = screen(pane, |screen| {
         has_row(screen, READY)
             && screen
-                .update
                 .reading
                 .as_ref()
                 .is_some_and(|reading| reading.total_rows > reading.visible_rows)
@@ -272,11 +249,12 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
         "clear admission reply changed",
     )?;
     screen(pane, |screen| {
-        screen.update.generation != before.update.generation
-            && screen.update.reading.as_ref().is_some_and(|reading| {
+        screen.generation != before.generation
+            && screen.reading.as_ref().is_some_and(|reading| {
                 reading.total_rows == reading.visible_rows && reading.offset_rows == 0
             })
-            && !support::rows(screen)
+            && !screen
+                .rows
                 .iter()
                 .any(|row| row.contains("ST-PRESENTATION"))
             && !has_row(screen, READY)

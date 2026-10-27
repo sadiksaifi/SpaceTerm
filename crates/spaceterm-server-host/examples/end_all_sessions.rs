@@ -11,13 +11,13 @@ mod support;
 
 #[cfg(feature = "client")]
 mod exercise {
-    use super::support::{self, Claimed, Pane};
+    use super::support::{self, Claimed, Ending, Pane};
     use spaceterm_server::{
         ServerConnection, ServerError,
         connection::link::ServerLink,
         hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
         pane::{control::Controller, *},
-        protocol::interim::{Interim, InterimReply},
+        protocol::{PaneEvent, interim::Interim},
     };
     use std::{
         error::Error,
@@ -174,10 +174,10 @@ mod exercise {
         Ok(())
     }
 
-    /// The channel of a Pane whose Session ended still names the old lease, so the server refuses
-    /// both a poll and a paste on it.
+    /// End All Sessions ends the channel of each Pane whose Session it ended, so the channel takes
+    /// no more input.
     fn stale(pane: &Pane) -> Result<()> {
-        if !matches!(pane.poll(), Err(ServerError::StaleControl))
+        if !matches!(pane.ending()?, Ending::Pane(PaneEvent::SessionEnded))
             || !matches!(pane.paste(1, "STALE_557"), Err(ServerError::StaleControl))
         {
             return Err("ended Session accepted an old lease or input".into());
@@ -367,21 +367,19 @@ mod exercise {
                 text: format!("END_ALL_557_{stamp}"),
             },
         })?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let InterimReply::Screen(screen) = fresh.poll()?
-                && let Some(find) = screen.update.reading.and_then(|reading| reading.find)
-                && find.generation == 1
-            {
-                if find.total != 0 {
-                    return Err("ended output survived in Scrollback".into());
-                }
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err("cleared Scrollback query did not finish".into());
-            }
-            std::thread::sleep(Duration::from_millis(30));
+        let find = |screen: &support::Screen| {
+            screen
+                .reading
+                .as_ref()
+                .and_then(|reading| reading.find.as_ref())
+                .filter(|find| find.generation == 1)
+                .map(|find| find.total)
+        };
+        let screen = fresh
+            .await_screen(Duration::from_secs(10), |screen| find(screen).is_some())?
+            .ok_or("cleared Scrollback query did not finish")?;
+        if find(&screen) != Some(0) {
+            return Err("ended output survived in Scrollback".into());
         }
         if fs::read(directory.join("retained-file"))? != b"repository-file-witness" {
             return Err("End All Sessions changed a repository-file witness".into());

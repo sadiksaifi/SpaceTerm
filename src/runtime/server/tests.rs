@@ -1,4 +1,7 @@
+use super::publish::Observed;
 use super::*;
+use spaceterm_server::protocol::PaneEvent;
+use spaceterm_server::protocol::screen::ScreenUpdate;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -195,8 +198,8 @@ fn shared_kill_ends_another_controllers_work_and_replays_without_touching_surviv
         );
     }
     assert!(matches!(
-        host.request([1; 32], [1; 32], Request::Poll { lease }),
-        Reply::Refused(Refusal::Missing)
+        screen(&mut host, [1; 32], lease),
+        Err(PaneEvent::Ended)
     ));
     assert!(matches!(
         host.request(
@@ -632,7 +635,7 @@ fn repeated_real_zsh_shutdown_confirms_owned_process_cleanup() {
             lease,
             "stty -echo; printf '\\033[2J\\033[HCLEANUP-READY\\r\\n'",
         );
-        await_text(&mut host, 1, lease, "CLEANUP-READY");
+        await_text(&mut host, lease, "CLEANUP-READY");
         assert_eq!(
             host.shutdown(),
             Ok(()),
@@ -740,35 +743,91 @@ pub(super) fn command(
     )
 }
 
-pub(super) fn await_text(host: &mut impl HostCommands, connection: u8, lease: Lease, text: &str) {
+/// What the channel bound to `lease`, claimed by `device`, receives now: the Pane's current screen
+/// as a keyframe, or the channel's last event once the lease no longer presents the Pane.
+pub(super) fn screen(
+    host: &mut impl HostCommands,
+    device: [u8; 32],
+    lease: Lease,
+) -> Result<Option<ScreenUpdate>, PaneEvent> {
+    match host.observe(device, &lease) {
+        Observed::Live(observation) => Ok(observation.screen.map(|capture| {
+            screen_encoder::ScreenEncoder::default()
+                .encode(&capture, 1, None)
+                .expect("a keyframe always encodes")
+        })),
+        Observed::Gone { event, .. } => Err(event),
+    }
+}
+
+/// Waits until a row of the Pane's screen reads exactly `text`, for the client `[1; 32]`.
+pub(super) fn await_text(host: &mut impl HostCommands, lease: Lease, text: &str) {
+    await_screen(host, [1; 32], lease, |update| {
+        lines(update).iter().any(|line| line.trim_end() == text)
+    });
+}
+
+/// Waits until the Pane's screen satisfies `ready` and returns it.
+pub(super) fn await_screen(
+    host: &mut impl HostCommands,
+    device: [u8; 32],
+    lease: Lease,
+    ready: impl Fn(&ScreenUpdate) -> bool,
+) -> ScreenUpdate {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut diagnostic = Vec::new();
     loop {
-        let reply = host.request([1; 32], [connection; 32], Request::Poll { lease });
-        if let Reply::Screen(screen) = &reply {
-            diagnostic = lines(screen);
-            if diagnostic.iter().any(|line| line.trim_end() == text) {
-                return;
+        match screen(host, device, lease) {
+            Ok(Some(update)) => {
+                diagnostic = lines(&update);
+                if ready(&update) {
+                    return update;
+                }
             }
+            Ok(None) => {}
+            Err(event) => panic!("the channel ended with {event:?}"),
         }
         assert!(
             Instant::now() < deadline,
-            "expected terminal output {text}; fixture screen: {:?}",
+            "expected terminal output; fixture screen: {:?}",
             diagnostic.join("\n")
         );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-/// The text of each row of a polled keyframe. Rows the keyframe omits are blank, and a wide
-/// character's spacer adds nothing.
-pub(super) fn lines(screen: &spaceterm_server::protocol::interim::ScreenFrame) -> Vec<String> {
-    let rows = screen
-        .update
+/// Observes the Pane until it has released `count` client effects to the client `[1; 32]`,
+/// oldest first.
+pub(super) fn effects(
+    host: &mut impl HostCommands,
+    lease: Lease,
+    count: usize,
+) -> Vec<pane::effects::Request> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut effects = Vec::new();
+    loop {
+        match host.observe([1; 32], &lease) {
+            Observed::Live(observation) => effects.extend(observation.effects),
+            Observed::Gone { event, .. } => panic!("the channel ended with {event:?}"),
+        }
+        if effects.len() >= count {
+            break;
+        }
+        assert!(Instant::now() < deadline, "native request missing");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(effects.len(), count, "unexpected native requests");
+    effects
+}
+
+/// The text of each row of a keyframe. Rows the keyframe omits are blank, and a wide character's
+/// spacer adds nothing.
+pub(super) fn lines(update: &ScreenUpdate) -> Vec<String> {
+    let rows = update
         .geometry
         .map_or(0, |geometry| usize::from(geometry.rows));
     let mut lines = vec![String::new(); rows];
-    for row in &screen.update.rows {
+    for row in &update.rows {
         if let Some(line) = lines.get_mut(usize::from(row.index)) {
             *line = row.runs.iter().map(|run| run.text.as_str()).collect();
         }
@@ -776,13 +835,29 @@ pub(super) fn lines(screen: &spaceterm_server::protocol::interim::ScreenFrame) -
     lines
 }
 
-/// `screen` encoded as a keyframe, as a poll returns it.
+/// The bytes `update` takes on the wire as a pushed keyframe, or `None` when it exceeds the
+/// protocol's bounds.
+pub(super) fn frame_bytes(update: ScreenUpdate) -> Option<usize> {
+    let message = spaceterm_server::protocol::ServerMessage::Frame(Box::new(
+        spaceterm_server::protocol::Frame {
+            channel: spaceterm_server::protocol::Channel(1),
+            frame: 1,
+            base: None,
+            input: 0,
+            update,
+        },
+    ));
+    spaceterm_server::protocol::frame::encode_server(&message)
+        .ok()
+        .map(|wire| wire.bytes())
+}
+
+/// `screen` encoded as a keyframe, as a new channel receives it.
 pub(super) fn keyframe(
     screen: &ScreenSnapshot,
 ) -> spaceterm_server::protocol::screen::ScreenUpdate {
     let capture = screen_encoder::ScreenCapture {
         screen: Arc::new(screen.clone()),
-        history: screen_encoder::HistoryTracker::default().observe(screen),
         generation: 1,
         accessibility_revision: 0,
     };

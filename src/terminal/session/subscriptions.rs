@@ -26,11 +26,16 @@ impl TerminalSubscription {
     }
 }
 
+/// Called after the session gives its subscription something to receive: an event, a client
+/// effect, an accessibility model or a clipboard request. It must not block.
+pub(crate) type SubscriptionNotifier = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub(super) struct TerminalEventPublisher(Arc<Mutex<EventState>>);
 
 struct EventState {
     events: async_channel::Sender<TerminalSessionEvent>,
+    notifier: Option<SubscriptionNotifier>,
     screen: Option<Arc<ScreenSnapshot>>,
     finished: Option<Result<TerminalSessionExit, TerminalSessionFailure>>,
     stopped: bool,
@@ -42,6 +47,7 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
     fn from(events: async_channel::Sender<TerminalSessionEvent>) -> Self {
         Self(Arc::new(Mutex::new(EventState {
             events,
+            notifier: None,
             screen: None,
             finished: None,
             stopped: false,
@@ -60,10 +66,19 @@ impl TerminalEventPublisher {
         if state.client_effects.len() < 8 {
             state.client_effects.push_back(request);
         }
+        notify(state);
     }
 
+    /// Tells the subscriber that something outside the event channel is ready to receive.
+    pub(super) fn notify(&self) {
+        notify(self.0.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+
+    /// Opens a subscription whose `notifier` is called whenever it has something to receive.
+    /// A later subscription replaces the notifier.
     pub(super) fn subscribe(
         &self,
+        notifier: Option<SubscriptionNotifier>,
     ) -> (
         async_channel::Receiver<TerminalSessionEvent>,
         async_channel::Sender<TerminalSessionEvent>,
@@ -72,6 +87,7 @@ impl TerminalEventPublisher {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.events.close();
         state.events = events.clone();
+        state.notifier = notifier;
         if state.stopped || state.finished.is_some() {
             if let Some(screen) = &state.screen {
                 let _ = events.try_send(TerminalSessionEvent::Screen(Arc::clone(screen)));
@@ -83,6 +99,7 @@ impl TerminalEventPublisher {
                 });
             }
             events.close();
+            notify(state);
         }
         (receiver, events)
     }
@@ -115,7 +132,11 @@ impl TerminalEventPublisher {
     ) -> Result<(), async_channel::TrySendError<TerminalSessionEvent>> {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.retain(&event);
-        state.events.try_send(event)
+        let sent = state.events.try_send(event);
+        if sent.is_ok() {
+            notify(state);
+        }
+        sent
     }
 
     pub(super) fn force_send(
@@ -124,7 +145,11 @@ impl TerminalEventPublisher {
     ) -> Result<Option<TerminalSessionEvent>, async_channel::SendError<TerminalSessionEvent>> {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.retain(&event);
-        state.events.force_send(event)
+        let sent = state.events.force_send(event);
+        if sent.is_ok() {
+            notify(state);
+        }
+        sent
     }
 
     pub(super) fn repeat_screen(&self) {
@@ -133,7 +158,17 @@ impl TerminalEventPublisher {
             let _ = state
                 .events
                 .force_send(TerminalSessionEvent::Screen(Arc::clone(screen)));
+            notify(state);
         }
+    }
+}
+
+/// Calls the notifier after releasing the event state, so a notifier never runs under it.
+fn notify(state: std::sync::MutexGuard<'_, EventState>) {
+    let notifier = state.notifier.clone();
+    drop(state);
+    if let Some(notifier) = notifier {
+        notifier();
     }
 }
 
@@ -180,7 +215,7 @@ mod tests {
             .unwrap();
 
         // A subscriber can replace its channel after final publication but before worker teardown.
-        let (replacement, _) = publisher.subscribe();
+        let (replacement, _) = publisher.subscribe(None);
         publisher.close();
 
         assert!(
@@ -191,5 +226,28 @@ mod tests {
             Ok(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         ));
         assert!(replacement.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_subscriber_is_notified_of_each_delivery_and_only_by_its_own_subscription() {
+        let (events, _receiver) = async_channel::bounded(2);
+        let publisher = TerminalEventPublisher::from(events);
+        let notified = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&notified);
+        let (receiver, _) = publisher.subscribe(Some(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })));
+
+        let screen = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+        publisher
+            .force_send(TerminalSessionEvent::Screen(screen))
+            .unwrap();
+        publisher.notify();
+        assert_eq!(notified.load(Ordering::Relaxed), 2);
+        assert!(receiver.try_recv().is_ok());
+
+        let (_replacement, _) = publisher.subscribe(None);
+        publisher.repeat_screen();
+        assert_eq!(notified.load(Ordering::Relaxed), 2);
     }
 }

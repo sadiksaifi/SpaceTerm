@@ -178,6 +178,9 @@ pub enum PaneEvent {
     SessionEnded,
     /// The Terminal Session failed. The channel is closed.
     Failed,
+    /// The Terminal Session could not start in its directory. The channel is closed, and a new
+    /// claim offers directory recovery.
+    DirectoryUnavailable,
     /// A native effect request. The client answers with `EffectDone`.
     Effect(effects::Request),
     /// The server discarded the Input message `serial`, or settled the paste it completed.
@@ -186,6 +189,21 @@ pub enum PaneEvent {
     Accessibility { revision: u64 },
     /// Whether the terminal hides typed input, such as at a password prompt.
     HiddenInput(bool),
+}
+
+impl PaneEvent {
+    /// Whether this is its channel's last event: `Ended`, `SessionEnded`, `Failed`,
+    /// `DirectoryUnavailable` or `Takeover`.
+    pub fn last(&self) -> bool {
+        matches!(
+            self,
+            Self::Ended
+                | Self::SessionEnded
+                | Self::Failed
+                | Self::DirectoryUnavailable
+                | Self::Takeover(_)
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

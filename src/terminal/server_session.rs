@@ -3,11 +3,13 @@ mod accessibility;
 mod claim;
 mod control;
 mod effects;
+mod inbox;
+#[cfg(test)]
+mod push_tests;
 use super::server_graphics as graphics;
 mod link;
 mod reading;
 mod recovery;
-mod schedule;
 #[allow(
     dead_code,
     reason = "the Pane worker reads over the cache once push merges"
@@ -90,7 +92,7 @@ pub(crate) struct DevelopmentPaneState {
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
     presentable: AtomicBool,
     preparation: AtomicBool,
-    wake: schedule::Wake,
+    wake: inbox::Wake,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -121,7 +123,7 @@ impl DevelopmentPaneState {
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             presentable: AtomicBool::new(true),
             preparation: AtomicBool::new(false),
-            wake: schedule::Wake::default(),
+            wake: inbox::Wake::default(),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
                 authority.route();
@@ -323,6 +325,8 @@ impl DevelopmentPaneState {
             .disconnect();
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.connected_epoch.store(epoch, Ordering::Release);
+        // A worker waiting for pushed events learns of the new epoch at once.
+        self.wake.notify();
         epoch
     }
     /// Starts a connection epoch whose focus continues above every generation this client

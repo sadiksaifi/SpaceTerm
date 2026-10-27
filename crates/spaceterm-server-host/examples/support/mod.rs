@@ -1,5 +1,5 @@
 //! The native checks' SpaceTerm Protocol client: requests on one admitted connection, and claimed
-//! Panes with their input, reported input outcomes and polled screens.
+//! Panes with their input, reported input outcomes, and pushed screens and Pane events.
 //!
 //! The spaceterm crate's native tests also include this file, so it names physical keys by their
 //! protocol codes instead of through the spaceterm crate.
@@ -8,15 +8,19 @@ use spaceterm_server::{
     attachments::Attachment,
     connection::link::{ChannelEvent, ChannelHandle, LinkError, LinkEvent, ServerLink},
     hierarchy::{Id, Inventory, Mutation, RetainedOutcome},
-    pane::{AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, effects},
+    pane::{
+        AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, effects,
+        graphics, reading,
+    },
     protocol::{
-        Channel, ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody, Restored,
-        Takeover,
-        interim::{Interim, InterimReply, ScreenFrame},
+        Channel, ClaimReply, Frame, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
+        Restored, Takeover,
+        interim::{Interim, InterimReply},
+        screen::{Colors, Cursor, Geometry, Modes},
     },
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     error::Error,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
@@ -24,7 +28,8 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, ServerError>;
 
-/// How long a helper waits for the server to report on input or to show terminal output.
+/// How long a helper waits for the server to report on input, show terminal output or end a
+/// channel.
 const WAIT: Duration = Duration::from_secs(10);
 /// The protocol's physical-key codes for Unidentified and Enter (libghostty-vt `Key`).
 const UNIDENTIFIED: u32 = 0;
@@ -276,29 +281,92 @@ pub fn enter_key() -> Key {
     }
 }
 
-/// The text of each row of a polled keyframe. Rows the keyframe omits are blank, and a wide
-/// character's spacer adds nothing.
-pub fn rows(screen: &ScreenFrame) -> Vec<String> {
-    let count = screen
-        .update
-        .geometry
-        .map_or(0, |geometry| usize::from(geometry.rows));
-    let mut rows = vec![String::new(); count];
-    for row in &screen.update.rows {
-        if let Some(text) = rows.get_mut(usize::from(row.index)) {
-            *text = row.runs.iter().map(|run| run.text.as_str()).collect();
+/// Whether a row of `screen` reads exactly `marker`, ignoring trailing blanks.
+pub fn has_row(screen: &Screen, marker: &str) -> bool {
+    screen.rows.iter().any(|row| row.trim_end() == marker)
+}
+
+/// A channel's screen as of the last frame applied to it: the text of each visible row and the
+/// state these checks assert on.
+#[derive(Clone, Debug, Default)]
+pub struct Screen {
+    /// The last applied frame, or `None` before the first keyframe.
+    pub frame: Option<u64>,
+    /// The highest Input serial the server wrote to the PTY before it captured this screen.
+    pub input: u32,
+    pub geometry: Option<Geometry>,
+    pub modes: Option<Modes>,
+    pub colors: Option<Colors>,
+    pub cursor: Cursor,
+    /// Fences pointer and wheel coordinates.
+    pub generation: u64,
+    pub reading: Option<reading::Snapshot>,
+    pub graphics: Option<std::result::Result<graphics::Snapshot, graphics::Error>>,
+    /// The text of each visible row. A wide character's spacer adds nothing.
+    pub rows: Vec<String>,
+}
+
+impl Screen {
+    /// Applies `frame`. Fails when the frame names a base other than the last applied frame or
+    /// does not fit the screen.
+    fn apply(&mut self, frame: &Frame) -> Result<()> {
+        let update = &frame.update;
+        update.validate().map_err(|_| ServerError::Protocol)?;
+        let keyframe = frame.base.is_none();
+        if !keyframe && frame.base != self.frame {
+            return Err(ServerError::Protocol);
         }
+        let geometry = update
+            .geometry
+            .or(self.geometry.filter(|_| !keyframe))
+            .ok_or(ServerError::Protocol)?;
+        // A keyframe and a new grid size start from blank rows.
+        let grid = |geometry: Geometry| (geometry.columns, geometry.rows);
+        if keyframe || self.geometry.map(grid) != Some(grid(geometry)) {
+            self.rows = vec![String::new(); usize::from(geometry.rows)];
+        }
+        if let Some(shift) = update.shift {
+            shift
+                .apply(&mut self.rows, String::new)
+                .ok_or(ServerError::Protocol)?;
+        }
+        for row in &update.rows {
+            *self
+                .rows
+                .get_mut(usize::from(row.index))
+                .ok_or(ServerError::Protocol)? =
+                row.runs.iter().map(|run| run.text.as_str()).collect();
+        }
+        self.geometry = Some(geometry);
+        if let Some(modes) = update.modes {
+            self.modes = Some(modes);
+        }
+        if let Some(colors) = &update.colors {
+            self.colors = Some(colors.clone());
+        }
+        if let Some(reading) = &update.reading {
+            self.reading = Some(reading.clone());
+        }
+        if let Some(graphics) = &update.graphics {
+            self.graphics = Some(graphics.clone());
+        }
+        self.cursor = update.cursor;
+        self.generation = update.generation;
+        self.input = frame.input;
+        self.frame = Some(frame.frame);
+        Ok(())
     }
-    rows
 }
 
-/// Whether a row of the screen reads exactly `marker`, ignoring trailing blanks.
-pub fn has_row(screen: &ScreenFrame, marker: &str) -> bool {
-    rows(screen).iter().any(|row| row.trim_end() == marker)
+/// How a channel ended: with its last Pane event, or with the end of its connection.
+#[derive(Clone, Debug)]
+pub enum Ending {
+    Pane(PaneEvent),
+    Link(LinkError),
 }
 
-/// What the server reported on a channel: the outcome of each Input message it discarded or each
-/// paste it settled, by serial, and the end of the connection.
+/// What the server pushed on a channel. The connection's I/O thread records it; a waiting caller
+/// applies the frames and acknowledges each.
 #[derive(Default)]
 struct Events {
     state: Mutex<Received>,
@@ -307,8 +375,17 @@ struct Events {
 
 #[derive(Default)]
 struct Received {
+    /// The outcome of each Input message the server discarded or each paste it settled, by
+    /// serial.
     outcomes: BTreeMap<u32, InputOutcome>,
-    closed: Option<LinkError>,
+    /// Frames not yet applied. The server sends the next frame only after an acknowledgement.
+    frames: VecDeque<Box<Frame>>,
+    /// Every frame the channel received.
+    received: u64,
+    screen: Screen,
+    /// Native effect requests not yet taken, oldest first.
+    effects: VecDeque<effects::Request>,
+    ending: Option<Ending>,
 }
 
 impl Events {
@@ -320,40 +397,27 @@ impl Events {
     fn deliver(&self, event: ChannelEvent) {
         let mut received = self.lock();
         match event {
+            ChannelEvent::Frame(frame) => {
+                received.received += 1;
+                received.frames.push_back(frame);
+            }
             ChannelEvent::Pane(PaneEvent::Input { serial, outcome }) => {
                 received.outcomes.insert(serial, outcome);
             }
-            ChannelEvent::Closed(error) => {
-                received.closed.get_or_insert(error);
+            ChannelEvent::Pane(PaneEvent::Effect(request)) => {
+                received.effects.push_back(request);
             }
-            // These checks poll screens, effects and accessibility until push replaces polling.
-            ChannelEvent::Frame(_) | ChannelEvent::Pane(_) => return,
+            ChannelEvent::Pane(event) if event.last() => {
+                received.ending.get_or_insert(Ending::Pane(event));
+            }
+            ChannelEvent::Closed(error) => {
+                received.ending.get_or_insert(Ending::Link(error));
+            }
+            // These checks read neither hidden input nor accessibility revisions.
+            ChannelEvent::Pane(_) => return,
         }
         drop(received);
         self.ready.notify_all();
-    }
-
-    /// Waits until the server reports on the Input message `serial`.
-    fn outcome(&self, serial: u32) -> Result<InputOutcome> {
-        let deadline = Instant::now() + WAIT;
-        let mut received = self.lock();
-        loop {
-            if let Some(outcome) = received.outcomes.remove(&serial) {
-                return Ok(outcome);
-            }
-            if let Some(error) = received.closed {
-                return Err(error.into());
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(ServerError::Protocol);
-            }
-            received = self
-                .ready
-                .wait_timeout(received, deadline - now)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-        }
     }
 }
 
@@ -397,7 +461,7 @@ impl Pane {
     /// refused input fails the next operation, as its refused exchange did in protocol major 1.
     fn reported(&self) -> Result<()> {
         let mut received = self.events.lock();
-        if let Some(error) = received.closed {
+        if let Some(Ending::Link(error)) = received.ending {
             return Err(error.into());
         }
         let discarded = received
@@ -452,7 +516,7 @@ impl Pane {
     /// Waits until the server discards the Input message `serial` and returns why. Accepted input
     /// has no report, so it fails after the wait.
     pub fn discarded(&self, serial: u32) -> Result<Refusal> {
-        match self.events.outcome(serial)? {
+        match self.outcome(serial)? {
             InputOutcome::Discarded(refusal) => Ok(refusal),
             InputOutcome::Paste(_) => Err(ServerError::Protocol),
         }
@@ -460,7 +524,7 @@ impl Pane {
 
     /// Waits for the outcome the server reports for the paste or paste resolution `serial`.
     fn settled(&self, serial: u32) -> Result<PasteOutcome> {
-        match self.events.outcome(serial)? {
+        match self.outcome(serial)? {
             InputOutcome::Paste(outcome) => Ok(outcome),
             InputOutcome::Discarded(refusal) => Err(refusal.into()),
         }
@@ -498,37 +562,61 @@ impl Pane {
         interim(&self.link, operation)
     }
 
-    /// Polls the screen once. A screen arrives as a keyframe.
-    pub fn poll(&self) -> Result<InterimReply> {
-        self.interim(Interim::Poll {
-            channel: self.channel(),
-        })
-    }
-
-    /// The screen, when it changed since the last poll.
-    pub fn screen(&self) -> Result<Option<Box<ScreenFrame>>> {
-        match self.poll()? {
-            InterimReply::Screen(screen) => Ok(Some(screen)),
-            _ => Ok(None),
+    /// Applies the frames the server pushed, acknowledging each, until `found` returns a value
+    /// or `wait` elapses. `None` means the wait elapsed. The end of the connection fails the wait
+    /// unless `found` accepts it.
+    fn until<T>(
+        &self,
+        wait: Duration,
+        mut found: impl FnMut(&mut Received) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let handle = self.handle()?;
+        let deadline = Instant::now() + wait;
+        let mut received = self.events.lock();
+        loop {
+            while let Some(frame) = received.frames.pop_front() {
+                received.screen.apply(&frame)?;
+                match handle.acknowledge(frame.frame) {
+                    // An ended channel takes no acknowledgement and needs none.
+                    Ok(()) | Err(LinkError::Unclaimed) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if let Some(value) = found(&mut received) {
+                return Ok(Some(value));
+            }
+            if let Some(Ending::Link(error)) = received.ending {
+                return Err(error.into());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            received = self
+                .events
+                .ready
+                .wait_timeout(received, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 
-    /// Polls until a screen satisfies `matches`, for at most `wait`. `None` means none did.
+    /// Waits until the server reports on the Input message `serial`.
+    fn outcome(&self, serial: u32) -> Result<InputOutcome> {
+        self.until(WAIT, |received| received.outcomes.remove(&serial))?
+            .ok_or(ServerError::Protocol)
+    }
+
+    /// Waits until the pushed screen satisfies `matches`, for at most `wait`, and returns it.
+    /// `None` means it did not.
     pub fn await_screen(
         &self,
         wait: Duration,
-        matches: impl Fn(&ScreenFrame) -> bool,
-    ) -> Result<Option<Box<ScreenFrame>>> {
-        let deadline = Instant::now() + wait;
-        while Instant::now() < deadline {
-            if let Some(screen) = self.screen()?
-                && matches(&screen)
-            {
-                return Ok(Some(screen));
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        Ok(None)
+        matches: impl Fn(&Screen) -> bool,
+    ) -> Result<Option<Screen>> {
+        self.until(wait, |received| {
+            matches(&received.screen).then(|| received.screen.clone())
+        })
     }
 
     /// Waits until a row reads exactly `marker` and returns the screen's text.
@@ -536,7 +624,31 @@ impl Pane {
         let screen = self
             .await_screen(WAIT, |screen| has_row(screen, marker))?
             .ok_or("terminal output did not arrive")?;
-        Ok(rows(&screen).join("\n"))
+        Ok(screen.rows.join("\n"))
+    }
+
+    /// Takes the oldest native effect request the server pushed, waiting at most `wait` for one.
+    /// Complete it with [`Pane::effect_done`].
+    pub fn await_effect(&self, wait: Duration) -> Result<Option<effects::Request>> {
+        self.until(wait, |received| received.effects.pop_front())
+    }
+
+    /// Waits until the channel ends and returns how it ended.
+    pub fn ending(&self) -> Result<Ending> {
+        self.until(WAIT, |received| received.ending.clone())?
+            .ok_or(ServerError::Protocol)
+    }
+
+    /// How many frames the channel has received.
+    pub fn frames(&self) -> u64 {
+        self.events.lock().received
+    }
+
+    /// Shows or hides the channel's presentation. A hidden channel receives no frames, and
+    /// showing it pushes the current screen.
+    pub fn view(&self, visible: bool) -> Result<()> {
+        self.reported()?;
+        Ok(self.handle()?.view(visible, 60)?)
     }
 
     /// Closes the Pane and ends its Terminal Session.

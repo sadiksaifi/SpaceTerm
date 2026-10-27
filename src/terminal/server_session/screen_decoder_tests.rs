@@ -1,7 +1,7 @@
 //! Round trips from a real emulator through the server encoder, the wire and this decoder.
 use super::screen_decoder::{DecodedScreen, ScreenDecoder, UpdateError, decode_page};
 use super::*;
-use crate::runtime::screen_encoder::{HistoryTracker, ScreenCapture, ScreenEncoder, encode_page};
+use crate::runtime::screen_encoder::{ScreenCapture, ScreenEncoder, encode_page};
 use crate::terminal::emulator::TerminalEmulator;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
 use spaceterm_server::protocol::frame::{Assembler, encode_server};
@@ -19,7 +19,6 @@ fn geometry(columns: u16, rows: u16) -> TerminalGeometry {
 /// An emulator on the server, its channel encoder, and the client's decoder.
 struct Session {
     emulator: TerminalEmulator,
-    history: HistoryTracker,
     encoder: ScreenEncoder,
     decoder: ScreenDecoder,
     screen: Option<Arc<ScreenSnapshot>>,
@@ -31,7 +30,6 @@ impl Session {
     fn new(columns: u16, rows: u16) -> Self {
         Self {
             emulator: TerminalEmulator::new(geometry(columns, rows)).unwrap(),
-            history: HistoryTracker::default(),
             encoder: ScreenEncoder::default(),
             decoder: ScreenDecoder::default(),
             screen: None,
@@ -47,7 +45,6 @@ impl Session {
         }
         let screen = Arc::clone(self.screen.as_ref().unwrap());
         ScreenCapture {
-            history: self.history.observe(&screen),
             screen,
             generation: self.generation,
             accessibility_revision: self.generation / 3,
@@ -168,7 +165,11 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
         (decoded.geometry.columns, decoded.geometry.rows),
         (screen.size.cols, screen.size.rows)
     );
-    assert_eq!(decoded.history, capture.history);
+    let history = capture.screen.history;
+    assert_eq!(
+        (decoded.history.epoch, decoded.history.oldest, decoded.history.total),
+        (history.epoch, history.oldest, history.total)
+    );
     assert_eq!(decoded.generation, capture.generation);
     assert_eq!(
         decoded.accessibility_revision,

@@ -219,7 +219,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     service.activate(approval)?;
     service.recover_activation()?;
-    if running.poll().is_ok() {
+    if !matches!(running.ending(), Ok(support::Ending::Link(_))) {
         return Err("old connection survived runtime replacement".into());
     }
     drop(running);

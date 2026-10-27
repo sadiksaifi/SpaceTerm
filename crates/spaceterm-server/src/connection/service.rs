@@ -68,6 +68,9 @@ pub trait PaneService: Send {
     ) -> Result<(), ServerError> {
         Ok(())
     }
+    /// Receives the host's wake once, before any connection. The service rings it when it has
+    /// work for [`PaneService::tick`], such as a Terminal Session's new screen.
+    fn set_wake(&mut self, _wake: Arc<dyn super::Wake>) {}
     /// Called once per connection before any of its messages. The service keeps `outbox` to push
     /// to this connection until [`PaneService::disconnected`].
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox);

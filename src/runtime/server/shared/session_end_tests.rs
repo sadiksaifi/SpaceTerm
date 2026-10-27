@@ -1,5 +1,7 @@
 use super::*;
-use crate::runtime::server::tests::{await_text, command, focus, host, shared_inventory, size};
+use crate::runtime::server::tests::{
+    await_text, command, focus, host, screen, shared_inventory, size,
+};
 use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
 
 fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) -> Reply {
@@ -151,7 +153,7 @@ fn end_all_sessions_retains_directory_confirmed_between_admission_and_shutdown()
         fresh,
         "stty -echo; printf '\\nRESTART-DIRECTORY:'; pwd\n",
     );
-    await_text(&mut host, 1, fresh, "RESTART-DIRECTORY:/");
+    await_text(&mut host, fresh, "RESTART-DIRECTORY:/");
     host.shutdown().unwrap();
 }
 
@@ -198,7 +200,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
                 restoration.display(),
             ),
         );
-        await_text(&mut host, 1, old, "RESTORATION-CONFIRMED");
+        await_text(&mut host, old, "RESTORATION-CONFIRMED");
     }
     // Automatic shell integration is disabled. This later directory has no owned marker.
     command(
@@ -210,7 +212,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
             live.display(),
         ),
     );
-    await_text(&mut host, 1, old, "LIVE-DIRECTORY");
+    await_text(&mut host, old, "LIVE-DIRECTORY");
     let source = if confirmed { &restoration } else { &live };
     let before = git_facts(&mut host, source, |facts| facts.worktrees.is_some());
     let workspace = &before.workspaces[0];
@@ -303,7 +305,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
             directory.display(),
         ),
     );
-    await_text(&mut host, 1, fresh, "RECOVERED-DIRECTORY");
+    await_text(&mut host, fresh, "RECOVERED-DIRECTORY");
     let after = shared_inventory(&mut host);
     assert_eq!(after.workspaces.len(), 1);
     let recovered = &after.workspaces[0];
@@ -635,7 +637,7 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
         old,
         "stty -echo; printf '\\033[2J\\033[HOLD-SESSION-OUTPUT\\n'\n",
     );
-    await_text(&mut host, 1, old, "OLD-SESSION-OUTPUT");
+    await_text(&mut host, old, "OLD-SESSION-OUTPUT");
     focus(&mut host, old, 1, FocusTarget::Terminal);
     let Reply::Paste(PasteOutcome::ConfirmationRequired(approval)) = host.request(
         [1; 32],
@@ -652,12 +654,11 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
     };
     end_all(&mut host, 2, 1);
     let replacement = start(&mut host, 1, pane);
+    assert!(matches!(
+        screen(&mut host, [1; 32], old),
+        Err(PaneEvent::SessionEnded)
+    ));
     let retired = [
-        Request::Poll { lease: old },
-        Request::PollChanges {
-            lease: old,
-            base: Some(1),
-        },
         Request::Focus {
             lease: old,
             generation: 1,
@@ -675,10 +676,6 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
                 id: approval.id,
                 confirm: true,
             },
-        },
-        Request::NativeEffects {
-            lease: old,
-            generation: 1,
         },
         Request::CompleteClipboard {
             lease: old,
@@ -722,10 +719,8 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
                 },
             },
         );
-        if let Reply::Screen(screen) =
-            host.request([1; 32], [1; 32], Request::Poll { lease: replacement })
-            && let Some(find) = screen
-                .update
+        if let Ok(Some(update)) = screen(&mut host, [1; 32], replacement)
+            && let Some(find) = update
                 .reading
                 .as_ref()
                 .and_then(|reading| reading.find.as_ref())

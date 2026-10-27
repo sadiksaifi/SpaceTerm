@@ -15,42 +15,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// A Pane's screen state, captured under the `PaneService` lock and encoded outside it.
 #[derive(Clone)]
-pub(crate) struct ScreenCapture {
+pub struct ScreenCapture {
     pub(crate) screen: Arc<ScreenSnapshot>,
-    pub(crate) history: History,
     /// Fences pointer and wheel coordinates.
     pub(crate) generation: u64,
     pub(crate) accessibility_revision: u64,
-}
-
-/// Numbers the identity of one Terminal Session's Scrollback.
-///
-/// The epoch changes when the Scrollback shrinks, when the columns change (the engine reflows
-/// it), and when the active screen changes.
-#[derive(Default)]
-pub(crate) struct HistoryTracker {
-    epoch: u64,
-    last: Option<(u64, u16, ActiveScreenSnapshot)>,
-}
-
-impl HistoryTracker {
-    pub(crate) fn observe(&mut self, screen: &ScreenSnapshot) -> History {
-        let total = screen
-            .scrollbar
-            .total_rows
-            .saturating_sub(screen.scrollbar.visible_rows);
-        let current = (total, screen.size.cols, screen.active_screen);
-        if self.last.is_none_or(|(last, columns, active)| {
-            total < last || columns != current.1 || active != current.2
-        }) {
-            self.epoch += 1;
-        }
-        self.last = Some(current);
-        History {
-            epoch: self.epoch,
-            total,
-        }
-    }
 }
 
 /// One channel's encoder. It holds the last frame it emitted and the style and link tables the
@@ -216,7 +185,11 @@ impl ScreenEncoder {
         let reading = reading(screen);
         let update = ScreenUpdate {
             cursor: cursor(screen),
-            history: capture.history,
+            history: History {
+                epoch: screen.history.epoch,
+                oldest: screen.history.oldest,
+                total: screen.history.total,
+            },
             geometry: previous
                 .is_none_or(|previous| previous.geometry != geometry)
                 .then_some(geometry),

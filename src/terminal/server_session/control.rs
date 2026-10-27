@@ -197,7 +197,6 @@ impl Presenter {
     pub(super) fn retire(
         &self,
         lease: Lease,
-        demand: bool,
         mut exchange: impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) {
         let mut floor = self.control.turn.lock().unwrap_or_else(|e| e.into_inner());
@@ -216,13 +215,12 @@ impl Presenter {
                 target: FocusTarget::Unfocused,
             });
         }
-        // Without a window the server need not materialize this Pane's screens.
-        if demand {
-            let _ = exchange(&Request::PresentationDemand {
-                lease,
-                visible: false,
-            });
-        }
+        // Without a window the server need not publish this Pane's screens.
+        let _ = exchange(&Request::View {
+            lease,
+            visible: false,
+            max_hz: crate::terminal::session::DEFAULT_FRAME_RATE,
+        });
     }
 }
 
@@ -328,7 +326,6 @@ mod tests {
                 control: [3; 32],
                 connection: [4; 32],
             },
-            false,
             |_| Ok(Reply::Unchanged),
         );
         assert!(present(&control).current());

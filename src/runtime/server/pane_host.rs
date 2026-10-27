@@ -142,7 +142,7 @@ impl DevelopmentPaneHost {
                 appearance(style, 1).map_err(|_| Refusal::Failed)?,
             )
             .map_err(|_| Refusal::Failed)?;
-        let subscription = runtime.subscribe();
+        let subscription = runtime.subscribe_notifying(self.notifier.clone());
         runtime.route_client_effects();
         self.pane = Some(OwnedPane {
             device: Some(device),
@@ -154,10 +154,6 @@ impl DevelopmentPaneHost {
             subscription,
             screen: None,
             graphics_transfer: None,
-            sent: None,
-            screen_encoder: screen_encoder::ScreenEncoder::default(),
-            frame: 0,
-            history: screen_encoder::HistoryTracker::default(),
             presentable: true,
             ended: false,
             failed: false,
@@ -288,7 +284,7 @@ impl DevelopmentPaneHost {
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| Refusal::CleanupUnresolved)?;
             // Ordinary exit closes the final Pane even without a subscribed client. Keep its
-            // final screen until the controller polls, but never retain it across a restart.
+            // final screen until its channel receives it, but never retain it across a restart.
             self.retain(None)?;
         }
         Ok(())
@@ -346,7 +342,6 @@ impl OwnedPane {
     pub(super) fn invalidate_input(&mut self) {
         self.presentable = false;
         self.runtime.set_presentable(false);
-        self.screen_encoder = screen_encoder::ScreenEncoder::default();
         self.graphics_transfer = None;
         self.accessibility.disconnect();
         self.runtime.end_server_accessibility_demand();
@@ -695,8 +690,6 @@ impl OwnedPane {
         self.connected = true;
         self.presentable = true;
         self.runtime.set_presentable(true);
-        self.sent = None;
-        self.screen_encoder = screen_encoder::ScreenEncoder::default();
         self.runtime.resize(geometry(size));
         self.size = size;
         if let Some(appearance) = appearance {

@@ -100,8 +100,8 @@ pub enum LinkEvent {
 pub enum ChannelEvent {
     /// Apply it, then call [`ChannelHandle::acknowledge`] before rendering.
     Frame(Box<Frame>),
-    /// `Ended`, `SessionEnded`, `Failed` and `Takeover` are the channel's last event. Every frame
-    /// before them is still applied and acknowledged.
+    /// An event for which [`PaneEvent::last`] holds is the channel's last. Every frame before it
+    /// is still applied and acknowledged.
     Pane(PaneEvent),
     /// The link ended. Final; the owner reconnects with a new link under ADR 0045.
     Closed(LinkError),
@@ -387,13 +387,7 @@ impl ServerLink {
                 }
             },
             ServerMessage::Pane(pane) => {
-                let last = matches!(
-                    pane.event,
-                    PaneEvent::Ended
-                        | PaneEvent::SessionEnded
-                        | PaneEvent::Failed
-                        | PaneEvent::Takeover(_)
-                );
+                let last = pane.event.last();
                 if let Some(sink) = self.sink(pane.channel, last) {
                     sink.deliver(ChannelEvent::Pane(pane.event));
                 }

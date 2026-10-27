@@ -57,7 +57,8 @@ pub(super) struct DecodedScreen {
 }
 
 impl ScreenDecoder {
-    /// The last applied frame. `None` asks the server for a keyframe.
+    /// The last applied frame.
+    #[cfg(test)]
     pub(super) fn frame(&self) -> Option<u64> {
         self.frame
     }
@@ -356,14 +357,31 @@ fn rgb(color: [u8; 3]) -> crate::appearance::Color {
     crate::appearance::Color::from_rgb_components(color[0], color[1], color[2])
 }
 
-/// The text of each row of a polled keyframe, with a wide character's spacer as a space.
+/// The text of each row of a keyframe, with a wide character's spacer as a space.
 #[cfg(test)]
-pub(super) fn keyframe_lines(
-    frame: &spaceterm_server::protocol::interim::ScreenFrame,
-) -> Vec<String> {
+pub(super) fn keyframe_lines(update: &ScreenUpdate) -> Vec<String> {
     ScreenDecoder::default()
-        .apply(frame.frame, frame.base, frame.update.clone(), None)
+        .apply(1, None, update.clone(), None)
         .map(DecodedScreen::lines)
+        .unwrap_or_default()
+}
+
+/// The rows a channel bound to `lease` receives now from `host`, or none once the lease no
+/// longer presents the Pane.
+#[cfg(test)]
+pub(super) fn observed_lines(
+    host: &mut impl crate::runtime::HostCommands,
+    lease: pane::Lease,
+) -> Vec<String> {
+    let crate::runtime::Observed::Live(observation) = host.observe([1; 32], &lease) else {
+        return Vec::new();
+    };
+    observation
+        .screen
+        .and_then(|capture| {
+            crate::runtime::screen_encoder::ScreenEncoder::default().encode(&capture, 1, None)
+        })
+        .map(|update| keyframe_lines(&update))
         .unwrap_or_default()
 }
 
