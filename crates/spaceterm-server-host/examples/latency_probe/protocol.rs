@@ -543,13 +543,14 @@ impl EchoPane {
             let Some(frame) = self.next_frame("page", deadline)? else {
                 return fail("page timed out");
             };
-            let shown = frame.update.rows.iter().any(|row| {
-                row.runs
-                    .iter()
-                    .map(|run| run.text.as_str())
-                    .collect::<String>()
-                    .contains(&end)
-            });
+            // Rows join in order, so a marker that wrapped across two rows still matches.
+            let shown = frame
+                .update
+                .rows
+                .iter()
+                .flat_map(|row| row.runs.iter().map(|run| run.text.as_str()))
+                .collect::<String>()
+                .contains(&end);
             if frame.input >= self.sent && shown {
                 return Ok(());
             }

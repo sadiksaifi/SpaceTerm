@@ -3,7 +3,7 @@
 # USAGE flag "--owner-host <host>" help="SSH host whose Linux Development server is measured and impaired"
 # USAGE flag "--owner-directory <directory>" help="Repository checkout on the owner host; defaults to this checkout's path from ~"
 # USAGE flag "--owner-target <directory>" help="CARGO_TARGET_DIR on the owner host; defaults to the checkout's target"
-# USAGE flag "--jail <directory>" help="Private Development server state on the owner host, mounted with bwrap, so another Development server there keeps running"
+# USAGE flag "--jail <directory>" help="Private Development server state on the owner host, mounted with bwrap and replaced at each run, so another Development server there keeps running"
 # USAGE flag "--expose <address>" help="Owner host address and port the server listens on, for TCP and UDP"
 # USAGE flag "--client-address <address>" help="This machine's IPv4 address as the owner host sees it; only traffic to it is impaired"
 # USAGE flag "--device <device>" help="Owner host network device to impair" default="eno1"
@@ -86,6 +86,7 @@ def build_owner(args):
     if args.jail:
         jail = shlex.quote(args.jail)
         command += (
+            f" && rm -rf {jail}/share {jail}/runtime"
             f' && mkdir -p {jail}/share {jail}/runtime "$HOME/.local/share/{IDENTITY}" '
             f'"/tmp/{IDENTITY}-server-$(id -u)" && chmod 700 {jail}/share {jail}/runtime'
         )
@@ -160,7 +161,7 @@ def ping(args, impaired):
     return " ".join(line.strip() for line in lines)
 
 
-def measure(args, probe, owner, transport, condition):
+def measure(args, probe, owner, transport, condition, round=0):
     command = [
         probe,
         "measure",
@@ -188,6 +189,7 @@ def measure(args, probe, owner, transport, condition):
             result = json.loads(line)
             result["transport"] = transport
             result["condition"] = condition
+            result["round"] = round
             result["app"] = f"{transport}, {condition}"
             report(result, samples=False)
             results.append(result)
@@ -238,7 +240,13 @@ def run(args):
                             impair(args)
                         pings.append(f"{condition}: {ping(args, condition == 'impaired')}")
                         started = time.monotonic()
-                        results += measure(args, probe, owner, transport, condition)
+                        try:
+                            results += measure(args, probe, owner, transport, condition, round)
+                        except TaskError:
+                            # A probe can miss one deadline. The failed cell's results are
+                            # discarded, and a second failure ends the run.
+                            print("netem: repeating the cell once", file=sys.stderr)
+                            results += measure(args, probe, owner, transport, condition, round)
                         print(
                             f"netem: cell took {time.monotonic() - started:.0f} s",
                             file=sys.stderr,

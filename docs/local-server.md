@@ -102,7 +102,7 @@ The workload task reports keystroke-to-pixels p99 with the other Pane idle, then
 
 `bench:latency:wss` measures a paired request's round trip through TLS and the WebSocket on loopback, in a release build, without a desktop or installed server. `bench:latency:quic` measures the same over the iroh QUIC prototype of #671, which the `iroh` Cargo feature builds beside WSS.
 
-`bench:latency:netem` compares paired WSS with that QUIC prototype against a foreground Development server on a Linux owner host, clean and with netem loss and delay. The impairment applies only to the owner host's traffic to this machine, and the task removes its qdisc after every impaired cell, also after a failure. The owner host needs passwordless sudo for `tc`. `--jail` keeps the server's state private with bwrap, so a Development server already running there is left alone.
+`bench:latency:netem` compares paired WSS with that QUIC prototype against a foreground Development server on a Linux owner host, clean and with netem loss and delay. The impairment applies only to the owner host's traffic to this machine, and the task removes its qdisc after every impaired cell, also after a failure. The owner host needs passwordless sudo for `tc`. `--jail` gives the server private, disposable state through bwrap, so a Development server already running there is left alone.
 
 The idle task reads per-connection byte counters with `nettop`, so it sees paired WSS connections but not account-local IPC.
 
