@@ -2148,8 +2148,10 @@ fn finish_owner_settlement(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
         pump_effect_batch(owner, DeferredEffectBatch::new(promotion, false), cx);
     }
 
-    let (window_id, suspension) = owner.update(cx, |state, _| {
+    let (window_id, suspension) = owner.update(cx, |state, cx| {
         state.finish_settlement();
+        // Observers waiting for the window's modal to close hear it only once settlement ends.
+        cx.notify();
         (state.window_id, state.finish_transient_coordination())
     });
     if let Some(suspension) = suspension {

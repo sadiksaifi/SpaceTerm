@@ -290,6 +290,47 @@ fn repeated_settled_presentations_do_not_retain_caller_release_callbacks(cx: &mu
     );
 }
 
+#[gpui::test]
+fn an_observer_hears_when_the_window_modal_closes(cx: &mut TestAppContext) {
+    cx.set_global(ModalDesktopPolicy::mac_os());
+    let (_, cx) = cx.add_window_view(|_, _| ReleaseListenerRoot);
+    let caller = cx.update(|_, cx| cx.new(|_| ReleaseListenerCaller));
+    let outcomes = Rc::new(RefCell::new(Vec::new()));
+    let presented = cx.update(|window, cx| {
+        caller.update(cx, |_, cx| {
+            present(
+                test_request("observed", cx.weak_entity().into(), outcomes.clone()),
+                window,
+                cx,
+            )
+            .expect("request should present")
+        })
+    });
+    cx.run_until_parked();
+    let closed = Rc::new(std::cell::Cell::new(0));
+    let _subscription = cx.update(|window, cx| {
+        assert!(window_modal_is_open(window, cx));
+        caller.update(cx, |_, cx| {
+            let closed = Rc::clone(&closed);
+            when_window_modal_closes(window, cx, move |_, _, _| closed.set(closed.get() + 1))
+                .expect("a window that presented a modal can be observed")
+        })
+    });
+    assert_eq!(closed.get(), 0, "the modal is still open");
+
+    cx.update(|window, cx| {
+        caller.update(cx, |_, cx| {
+            presented
+                .dismiss(window, cx)
+                .expect("the presentation should dismiss")
+        })
+    });
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| !window_modal_is_open(window, cx)));
+    assert!(closed.get() > 0, "the observer hears that the modal closed");
+}
+
 #[test]
 fn queue_is_fifo_and_bounded_to_eight_waiting_requests() {
     let window_id = WindowId::from(1);
