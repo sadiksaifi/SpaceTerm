@@ -4974,7 +4974,8 @@ impl WorkspaceManager {
         let rows = self.sidebar_rows(cx);
         let remote_servers = self.remote_creation_servers(cx);
 
-        self.sidebar
+        let rows_changed = self
+            .sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, remote_servers, cx));
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
@@ -5020,7 +5021,13 @@ impl WorkspaceManager {
                     .child(stage),
             )
             .when(!recovery && sidebar_frame.reveal > 0.0, |root| {
-                root.child(self.sidebar.clone())
+                root.child(self.render_sidebar(
+                    sidebar_layout.width,
+                    sidebar_frame,
+                    rows_changed,
+                    window,
+                    cx,
+                ))
             })
             .when(!recovery, |root| {
                 root.child(
@@ -5050,6 +5057,42 @@ impl WorkspaceManager {
             .children(self.active_directory_recovery(cx))
             .children(super::application_commands::overlay(window, cx));
         ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
+    }
+}
+
+impl WorkspaceManager {
+    /// The sidebar below the top chrome, sliding in from the window's leading edge as it shows.
+    ///
+    /// It is a cached view, so a Pane update does not redraw it. It draws uncached while
+    /// assistive technology reads the window, because GPUI republishes no accessibility nodes
+    /// from a reused view. It also draws uncached in a frame that changed its rows, because GPUI
+    /// applies a notification issued while a frame renders only to the next frame.
+    fn render_sidebar(
+        &self,
+        width: Pixels,
+        frame: super::sidebar_motion::SidebarFrame,
+        rows_changed: bool,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement {
+        let appearance = super::appearance::chrome(cx);
+        let sidebar = if rows_changed || window.is_a11y_active() {
+            self.sidebar.clone().into_any_element()
+        } else {
+            gpui::AnyView::from(self.sidebar.clone())
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element()
+        };
+        div()
+            .absolute()
+            .top(
+                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .top_chrome_height(appearance.top_height()),
+            )
+            .bottom_0()
+            .left(frame.between(-width, gpui::px(0.0)))
+            .w(width)
+            .child(sidebar)
     }
 }
 

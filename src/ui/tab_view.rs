@@ -14,7 +14,7 @@ use super::terminal_status::{
 use crate::repository_status::presentation::{HeadGlyph, RepositoryCaption, RepositoryMark};
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, TerminalProductFocus};
@@ -54,7 +54,7 @@ struct SharedPaneSurface {
 
 /// What a shared server Pane's caption controls offer. A split or a close goes to the server, so
 /// each waits while this client is offline or an edit is unanswered.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct SharedCaptionControls {
     edits: bool,
     edits_reason: Option<&'static str>,
@@ -484,6 +484,16 @@ pub(crate) struct TabView {
     stage_stretch: Pixels,
     /// Where each Split's gap is in the Pane Layout while only the stage stretches the Panes.
     stretched_split_gaps: BTreeMap<SplitId, Bounds<Pixels>>,
+    /// Whether this frame embeds each Pane as a cached view. GPUI republishes no accessibility
+    /// nodes from a reused view, so Panes cache only while no assistive technology reads the
+    /// window. GPUI redraws every view when that changes.
+    panes_cached: bool,
+    /// Each Pane's caption as its own view, so a frame redraws a caption only when it changes.
+    pane_caption_views: BTreeMap<PaneId, Entity<PaneCaptionView>>,
+    /// The Panes and captions this frame changed while rendering. GPUI applies a notification
+    /// issued while a frame renders only to the next frame, so these draw uncached in this one.
+    refreshed_panes: BTreeSet<PaneId>,
+    refreshed_captions: BTreeSet<PaneId>,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -575,6 +585,10 @@ impl TabView {
             pane_frames: PaneFrames::default(),
             stage_stretch: px(0.0),
             stretched_split_gaps: BTreeMap::new(),
+            panes_cached: false,
+            pane_caption_views: BTreeMap::new(),
+            refreshed_panes: BTreeSet::new(),
+            refreshed_captions: BTreeSet::new(),
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -1130,6 +1144,7 @@ impl TabView {
             &PaneCaption {
                 pane_id,
                 terminal,
+                background,
                 text: text.clone(),
                 focused,
                 zoomed: false,
@@ -1554,7 +1569,8 @@ impl TabView {
             .is_some_and(|view| view.connection().startup_pending())
     }
 
-    fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
+    /// Gives each Pane the focus it presents. Returns the Panes whose presentation inputs changed.
+    fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) -> BTreeSet<PaneId> {
         let focused_terminal_id = self
             .tab
             .pane(self.tab.focused_pane_id())
@@ -1568,7 +1584,9 @@ impl TabView {
             self.resizing_split_id.is_some(),
         );
         let signature = (self.active, self.tab.focused_pane_id(), blocker);
-        if self.native_service_focus_signature != Some(signature) {
+        let mut changed = BTreeSet::new();
+        let generation_changed = self.native_service_focus_signature != Some(signature);
+        if generation_changed {
             self.advance_native_service_hierarchy_generation(cx);
             self.native_service_focus_signature = Some(signature);
         }
@@ -1591,7 +1609,7 @@ impl TabView {
                 focused_pane: Some(terminal.entity_id()) == focused_terminal_id,
                 blocker,
             };
-            terminal.update(cx, |terminal, cx| {
+            let product_focus_changed = terminal.update(cx, |terminal, cx| {
                 let product_focus_changed = terminal.set_product_focus(product_focus, cx);
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
                 terminal
@@ -1599,8 +1617,13 @@ impl TabView {
                 if product_focus_changed {
                     cx.notify();
                 }
+                product_focus_changed
             });
+            if product_focus_changed || generation_changed {
+                changed.insert(pane_id);
+            }
         }
+        changed
     }
 
     fn advance_native_service_hierarchy_generation(&mut self, cx: &mut Context<Self>) {
@@ -1795,6 +1818,88 @@ impl TabView {
             .collect()
     }
 
+    /// Gives each Pane's caption view what this frame shows, creating and dropping views with
+    /// their Panes.
+    fn sync_pane_caption_views(
+        &mut self,
+        hovers: &PaneHovers,
+        appearance: &std::sync::Arc<super::appearance::ChromeAppearance>,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.entity().downgrade();
+        let focused_pane_id = self.tab.focused_pane_id();
+        let has_multiple_panes = self.tab.pane_count() > 1;
+        let zoomed = matches!(self.tab.zoom_state(), ZoomState::Zoomed(_));
+        let panes = self
+            .tab
+            .panes_with_ids()
+            .map(|(pane_id, terminal)| (pane_id, terminal.clone()))
+            .collect::<Vec<_>>();
+        self.pane_caption_views
+            .retain(|pane_id, _| panes.iter().any(|(id, _)| id == pane_id));
+        self.refreshed_captions.clear();
+        for (pane_id, terminal) in panes {
+            let focused = focused_pane_id == pane_id;
+            let props = PaneCaptionProps {
+                caption: PaneCaption {
+                    pane_id,
+                    background: terminal.read(cx).surface_background(),
+                    terminal,
+                    text: self
+                        .pane_captions
+                        .get(&pane_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    focused,
+                    zoomed,
+                    attention: self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0,
+                    has_multiple_panes,
+                    shared: self.shared_caption_controls(pane_id),
+                },
+                controls_reveal: hovers
+                    .get(&pane_id)
+                    .map_or(if focused { 1.0 } else { 0.0 }, |(_, reveal)| *reveal),
+                view: view.clone(),
+                appearance: appearance.clone(),
+            };
+            match self.pane_caption_views.get(&pane_id) {
+                Some(caption) => {
+                    if caption.update(cx, |caption, cx| caption.set_props(props, cx)) {
+                        self.refreshed_captions.insert(pane_id);
+                    }
+                }
+                None => {
+                    let caption = cx.new(|_| PaneCaptionView { props });
+                    self.pane_caption_views.insert(pane_id, caption);
+                }
+            }
+        }
+    }
+
+    /// A Pane's caption, cached under the same rule as its Pane. A caption this frame changed
+    /// draws uncached.
+    fn render_pane_caption_view(
+        &self,
+        pane_id: PaneId,
+        appearance: &super::appearance::ChromeAppearance,
+    ) -> Option<AnyElement> {
+        let caption = self.pane_caption_views.get(&pane_id)?.clone();
+        Some(
+            if self.panes_cached && !self.refreshed_captions.contains(&pane_id) {
+                gpui::AnyView::from(caption)
+                    .cached(
+                        gpui::StyleRefinement::default()
+                            .w_full()
+                            .h(appearance.caption_height())
+                            .flex_shrink_0(),
+                    )
+                    .into_any_element()
+            } else {
+                caption.into_any_element()
+            },
+        )
+    }
+
     fn render_leaf(
         &self,
         pane_id: PaneId,
@@ -1814,20 +1919,8 @@ impl TabView {
                 )))
                 .into_any_element();
         };
-        let focused = self.tab.focused_pane_id() == pane_id;
         let shared_surface = self.shared_pane_surface(pane_id, &view, cx);
-        let has_multiple_panes = self.tab.pane_count() > 1;
-        let zoomed = matches!(self.tab.zoom_state(), ZoomState::Zoomed(_));
-        let text = self
-            .pane_captions
-            .get(&pane_id)
-            .cloned()
-            .unwrap_or_default();
         let hover = hovers.get(&pane_id).cloned();
-        let controls_reveal = hover
-            .as_ref()
-            .map_or(if focused { 1.0 } else { 0.0 }, |(_, reveal)| *reveal);
-        let attention = self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0;
         let drop_edge = self
             .pane_drag
             .as_ref()
@@ -1927,21 +2020,7 @@ impl TabView {
                 .absolute()
                 .inset_0(),
             )
-            .child(render_pane_caption(
-                PaneCaption {
-                    pane_id,
-                    terminal: terminal.clone(),
-                    text,
-                    focused,
-                    zoomed,
-                    attention,
-                    has_multiple_panes,
-                    shared: self.shared_caption_controls(pane_id),
-                },
-                controls_reveal,
-                view.clone(),
-                appearance.clone(),
-            ))
+            .children(self.render_pane_caption_view(pane_id, appearance))
             .child(
                 div()
                     .relative()
@@ -1955,6 +2034,14 @@ impl TabView {
                     // or accessible text of a former shell paints behind it.
                     .map(|body| match shared_surface.screen {
                         Some(screen) => body.child(screen),
+                        // A cached Pane redraws only when it or what it read changes, so one
+                        // Pane's output never repaints the grids of the others.
+                        None if self.panes_cached && !self.refreshed_panes.contains(&pane_id) => {
+                            body.child(
+                                gpui::AnyView::from(terminal)
+                                    .cached(gpui::StyleRefinement::default().size_full()),
+                            )
+                        }
                         None => body.child(terminal),
                     })
                     .children(shared_surface.notice),
@@ -3410,7 +3497,8 @@ impl Render for TabView {
         ) {
             self.tab.set_minimum_pane_size(minimum);
         }
-        self.sync_terminal_focus(cx);
+        self.refreshed_panes = self.sync_terminal_focus(cx);
+        self.panes_cached = !window.is_a11y_active();
         let view = cx.entity().downgrade();
         let zoom_state = self.tab.zoom_state();
         let minimum_size = match zoom_state {
@@ -3424,6 +3512,7 @@ impl Render for TabView {
             },
         };
         let hovers = self.pane_hovers(appearance.active, window, cx);
+        self.sync_pane_caption_views(&hovers, &appearance, cx);
         let places = self
             .pane_layout_size
             .map(|layout_size| {
@@ -3735,9 +3824,12 @@ fn split_directory_leaf(directory: &str) -> (gpui::SharedString, gpui::SharedStr
     }
 }
 
+#[derive(Clone, PartialEq)]
 struct PaneCaption {
     pane_id: PaneId,
     terminal: Entity<TerminalPane>,
+    /// The Pane's surface color, which the caption shares.
+    background: crate::appearance::Color,
     text: PaneCaptionText,
     focused: bool,
     zoomed: bool,
@@ -3745,6 +3837,53 @@ struct PaneCaption {
     has_multiple_panes: bool,
     /// Present when a SpaceTerm Server owns the Pane, which changes what its controls offer.
     shared: Option<SharedCaptionControls>,
+}
+
+/// A Pane's caption. It reads no Pane state of its own, so the frames a Pane draws for its
+/// output reuse the caption unless what it shows changed.
+struct PaneCaptionView {
+    props: PaneCaptionProps,
+}
+
+#[derive(Clone)]
+struct PaneCaptionProps {
+    caption: PaneCaption,
+    controls_reveal: f32,
+    view: gpui::WeakEntity<TabView>,
+    appearance: std::sync::Arc<super::appearance::ChromeAppearance>,
+}
+
+impl PartialEq for PaneCaptionProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.caption == other.caption
+            && self.controls_reveal == other.controls_reveal
+            && self.view == other.view
+            && std::sync::Arc::ptr_eq(&self.appearance, &other.appearance)
+    }
+}
+
+impl PaneCaptionView {
+    /// Returns whether the caption changed.
+    fn set_props(&mut self, props: PaneCaptionProps, cx: &mut Context<Self>) -> bool {
+        if self.props == props {
+            return false;
+        }
+        self.props = props;
+        cx.notify();
+        true
+    }
+}
+
+impl Render for PaneCaptionView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let PaneCaptionProps {
+            caption,
+            controls_reveal,
+            view,
+            appearance,
+        } = self.props.clone();
+        render_pane_caption(caption, controls_reveal, view, appearance)
+    }
 }
 
 fn render_pane_caption(
@@ -3774,7 +3913,7 @@ fn render_pane_caption(
                 let caption_style = appearance.typography.style(TextRole::Body);
                 reported_glyph_is_drawable(glyph, &caption_style.font, caption_style.size, window)
             });
-            let background = caption.terminal.read(cx).surface_background();
+            let background = caption.background;
             let pane_radius =
                 super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx)
                     .pane_radius();
@@ -3861,6 +4000,7 @@ fn render_pane_caption_content(
     let PaneCaption {
         pane_id,
         terminal,
+        background: _,
         text,
         focused,
         zoomed,
@@ -6780,6 +6920,167 @@ mod tests {
             }
             cx.update(|_, cx| assert_eq!(super::super::appearance::chrome(cx), &chrome_before));
         }
+    }
+
+    #[gpui::test]
+    fn cached_captions_redraw_when_title_attention_focus_or_zoom_change(cx: &mut TestAppContext) {
+        let (_, view, _, cx) = caption_view(cx);
+        click_caption_control("pane-split-right-1", cx);
+        // The second caption was never under the pointer, so only these changes redraw it.
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+        fn present(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+            cx.debug_bounds(selector).is_some()
+        }
+
+        let name =
+            |cx: &mut VisualTestContext| cx.debug_bounds("pane-caption-name-2").unwrap().size.width;
+        let short = name(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions.get_mut(&second).unwrap().name =
+                "a pane name long enough to take more room".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(name(cx) > short, "the caption must show its new title");
+
+        view.update(cx, |view, cx| {
+            view.pane_attention.insert(second, 1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(present("pane-status-2-attention", cx));
+        view.update(cx, |view, cx| {
+            view.pane_attention.remove(&second);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!present("pane-status-2-attention", cx));
+
+        for (pane_id, focused, unfocused) in [
+            (first, "pane-caption-1-focused", "pane-caption-2-unfocused"),
+            (second, "pane-caption-2-focused", "pane-caption-1-unfocused"),
+        ] {
+            view.update(cx, |view, cx| view.focus_pane(pane_id, cx));
+            cx.run_until_parked();
+            assert!(present(focused, cx) && present(unfocused, cx));
+        }
+
+        let split_width = cx
+            .debug_bounds("pane-caption-2-focused")
+            .unwrap()
+            .size
+            .width;
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-caption-2-focused")
+                .unwrap()
+                .size
+                .width
+                > split_width
+        );
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("pane-caption-2-focused")
+                .unwrap()
+                .size
+                .width,
+            split_width
+        );
+    }
+
+    #[gpui::test]
+    fn a_cached_pane_redraws_after_a_focus_change_but_not_for_another_panes_output(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, records, cx) = caption_view(cx);
+        click_caption_control("pane-split-right-1", cx);
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+        let screen = |generation: u64, blinking: bool| {
+            let mut screen = ScreenSnapshot::from_test_parts_at(
+                Arc::from([Arc::from([crate::terminal::CellSnapshot {
+                    text: "x".to_owned(),
+                    foreground_source: crate::terminal::TerminalColor::Default,
+                    background_source: crate::terminal::TerminalColor::Default,
+                    inverse: false,
+                    bold: false,
+                    faint: false,
+                    italic: false,
+                    blinking: false,
+                    invisible: false,
+                    underline: crate::terminal::TerminalUnderlineSnapshot::None,
+                    underline_source: crate::terminal::TerminalColor::Default,
+                    strikethrough: false,
+                    overline: false,
+                    selected: false,
+                    spacer_tail: false,
+                    semantic_content: crate::terminal::CellSemanticSnapshot::Output,
+                    hyperlink: None,
+                }])]),
+                Default::default(),
+                "zsh",
+                generation,
+            );
+            let screen_mut = Arc::make_mut(&mut screen);
+            screen_mut.cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+                column: 0,
+                row: 0,
+                width_cells: 1,
+            });
+            screen_mut.cursor.visible = true;
+            screen_mut.cursor.blinking = blinking;
+            screen
+        };
+        let send = |pane: usize, screen: Arc<ScreenSnapshot>| {
+            records
+                .event_sender(pane)
+                .unwrap()
+                .try_send(TerminalSessionEvent::Screen(screen))
+                .unwrap();
+        };
+        let terminal = |pane_id: PaneId, cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.tab.pane(pane_id).unwrap().clone())
+        };
+        // The cursor draws with every paint of its Pane, so its count is the Pane's draw count.
+        let draws = |pane_id: PaneId, cx: &mut VisualTestContext| {
+            let terminal = terminal(pane_id, cx);
+            terminal.read_with(cx, |terminal, _| terminal.grid_paint_counts().1)
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(first, cx);
+                view.focus(window, cx);
+            })
+        });
+        send(1, screen(1, true));
+        send(2, screen(1, false));
+        cx.run_until_parked();
+        let before = draws(first, cx);
+        assert!(before > 0, "the focused Pane must draw its cursor");
+
+        for generation in 2..=4 {
+            send(2, screen(generation, false));
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            draws(first, cx),
+            before,
+            "another Pane's output must not redraw it"
+        );
+
+        // Losing focus hollows the cursor. Moving the Focused Pane alone refreshes no window.
+        view.update(cx, |view, cx| view.focus_pane(second, cx));
+        cx.run_until_parked();
+        let hollow = cx.update(|window, _| {
+            window.painted_quads().iter().any(|quad| {
+                quad.border_widths.left > gpui::ScaledPixels(0.0)
+                    && quad.background == gpui::transparent_black().into()
+            })
+        });
+        assert!(hollow, "the unfocused Pane must draw a hollow cursor");
     }
 
     #[gpui::test]
