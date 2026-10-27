@@ -1,19 +1,30 @@
 //! Cancellable, bounded reads of validated host directories, shared by every inventory subscriber.
+//!
+//! A subscriber's first read covers every source. After that a directory is read again only when
+//! something can have changed its facts: a change below its repository's git directories, a
+//! command finishing in a Pane that shows it, or that Pane gaining focus. Nothing reads on a
+//! timer, so an idle server runs no git. The reader rings the host when it has results or ends,
+//! so the host never ticks to look for them.
 use crate::{
     cancellation::CancellationToken,
     repository_status::{
         self as policy, ProbeOutcome, ProgramError, ProgramExit, ProgramRequest,
-        RepositoryProgramRunner, RepositoryRoot, RepositoryToolDiscovery,
+        RepositoryProgramRunner, RepositoryRoot, RepositoryToolDiscovery, WatchDirectory,
+        WatchSet, WatchSets,
     },
 };
 use spaceterm_server::{
+    connection::Wake,
     hierarchy::{Id, State},
     repository::*,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock,
+        mpsc,
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -21,8 +32,17 @@ use std::{
 const DISCOVERY_WORKERS: usize = 4;
 const COUNT_WORKERS: usize = 2;
 const COUNTING_DELAY: Duration = Duration::from_secs(1);
-const POLL: Duration = Duration::from_millis(10);
-const REFRESH: Duration = Duration::from_secs(2);
+/// How long a reader waits before offering a result again while the host has not drained the
+/// last ones. It waits only under that backpressure, never while idle.
+const BACKPRESSURE: Duration = Duration::from_millis(10);
+/// Results waiting for the host. The host drains them each time the reader rings it.
+const RESULTS: usize = 64;
+/// How long after its last read a watched repository is read again. A checkout or rebase writes
+/// many git files, and each write fires the watch. Reading at most this often bounds the git a
+/// busy repository costs, and nothing reads while it stays quiet.
+const SETTLE: Duration = Duration::from_secs(2);
+/// Changed paths kept between two looks of the supervisor. More means every repository changed.
+const MAX_CHANGED_PATHS: usize = 256;
 const MAX_DIRECTORIES: usize = 512;
 const MAX_WORKTREES: usize = 256;
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
@@ -30,11 +50,37 @@ const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 mod pins;
 
 type Sources = BTreeSet<PathBuf>;
+
+/// Rings the host's wake once the host has set it. Reader threads hold a clone.
+#[derive(Clone, Default)]
+pub(super) struct Ring(Arc<OnceLock<Arc<dyn Wake>>>);
+impl Ring {
+    fn ring(&self) {
+        if let Some(wake) = self.0.get() {
+            wake.wake();
+        }
+    }
+}
+
+/// What the reader's supervisor waits for. It waits for nothing else.
+enum Input {
+    /// The directories subscribers see now.
+    Sources(Sources),
+    /// Read these directories and their repositories' changes again.
+    Reread(Sources),
+    /// The watch set saw paths change. They wait in the supervisor's `Changed`.
+    Changed,
+    /// A discovery or count job finished a step.
+    Read(ReadEvent),
+    /// The reader's cancellation token was cancelled.
+    Stop,
+}
+
 struct Worker {
     cancellation: CancellationToken,
     handle: JoinHandle<()>,
     results: mpsc::Receiver<(GitToolStatus, DirectoryFacts)>,
-    interests: mpsc::SyncSender<Sources>,
+    inputs: mpsc::Sender<Input>,
     sent_sources: Sources,
 }
 pub(super) struct ServerRepositories {
@@ -42,8 +88,14 @@ pub(super) struct ServerRepositories {
     sources: Sources,
     snapshot: Snapshot,
     worker: Option<Worker>,
-    next_read: Instant,
+    /// When a subscriber's read starts while none runs. `None` waits for a new subscriber, a
+    /// source change or a refresh, so a reader that ended because git is missing stays ended.
+    start: Option<Instant>,
     pin_membership: pins::PinMembership,
+    /// Each live Pane's finished command count, as last observed.
+    commands: BTreeMap<Id, u64>,
+    ring: Ring,
+    watcher: Arc<dyn WatchSets>,
 }
 impl ServerRepositories {
     pub(super) fn new(boot: Id) -> Self {
@@ -59,9 +111,16 @@ impl ServerRepositories {
                 pin_check: PinCheckState::Ready,
             },
             worker: None,
-            next_read: Instant::now(),
+            start: Some(Instant::now()),
             pin_membership: pins::PinMembership::default(),
+            commands: BTreeMap::new(),
+            ring: Ring::default(),
+            watcher: Arc::new(crate::platform::repository_watch::NotifyRepositoryWatcher::new()),
         }
+    }
+    /// The host's wake. Readers ring it when they have results or end.
+    pub(super) fn set_wake(&mut self, wake: Arc<dyn Wake>) {
+        let _ = self.ring.0.set(wake);
     }
 }
 impl Drop for ServerRepositories {
@@ -75,6 +134,52 @@ impl ServerRepositories {
     }
     pub(super) fn subscribe(&mut self, connection: Id) {
         self.subscribers.insert(connection);
+        if self.worker.is_none() {
+            self.start = Some(Instant::now());
+        }
+    }
+    /// Reads `directories` and their repositories' changes again. Without a running read, it
+    /// starts one for the subscribers, which reads every source; a read that ended, for
+    /// example because git was missing, starts again this way.
+    pub(super) fn reread(&mut self, directories: Sources) {
+        let directories: Sources = directories
+            .into_iter()
+            .filter(|directory| self.sources.contains(directory))
+            .collect();
+        if directories.is_empty() {
+            return;
+        }
+        match &self.worker {
+            Some(worker) => {
+                let _ = worker.inputs.send(Input::Reread(directories));
+            }
+            None if !self.subscribers.is_empty() => self.start = Some(Instant::now()),
+            None => {}
+        }
+    }
+    /// Notes each live Pane's finished command count. A command that finished since the last
+    /// observation can have changed its directory's files, which no git directory watch sees, so
+    /// that directory and the rest of its repository are read again.
+    pub(super) fn commands(&mut self, counts: BTreeMap<Id, u64>, state: &State) {
+        let mut directories = Sources::new();
+        for (pane, count) in &counts {
+            if self.commands.get(pane).is_some_and(|seen| count > seen)
+                && let Some((_, _, pane)) = state.pane(*pane)
+            {
+                directories.insert(pane_directory(pane).to_owned());
+            }
+        }
+        self.commands = counts;
+        self.reread(directories);
+    }
+    /// A Pane gained focus, perhaps after its files changed in another application. Its
+    /// directory and the rest of its repository are read again, as a desktop reads local
+    /// Repository Status on activation.
+    pub(super) fn focused(&mut self, pane: Id, state: &State) {
+        if let Some((_, _, pane)) = state.pane(pane) {
+            self.reread([pane_directory(pane).to_owned()].into());
+        }
+        self.pin_membership.retry_now();
     }
     pub(super) fn disconnected(&mut self, connection: Id) {
         self.subscribers.remove(&connection);
@@ -89,20 +194,24 @@ impl ServerRepositories {
     fn stop(&mut self) {
         if let Some(worker) = self.worker.take() {
             worker.cancellation.cancel();
+            let _ = worker.inputs.send(Input::Stop);
             let _ = worker.handle.join();
         }
-        self.next_read = Instant::now();
+        self.start = Some(Instant::now());
     }
-    /// When the next update has work: a running read's results, or the next refresh for a
-    /// subscriber. `None` without subscribers or a read.
+    /// When the next update has work: a subscriber's read that has not started, or a pin
+    /// check that could not finish. A running read rings the host instead. `None` without
+    /// subscribers.
     pub(super) fn due(&self, now: Instant) -> Option<Instant> {
-        if self.worker.is_some() {
-            Some(now + POLL)
-        } else if self.subscribers.is_empty() {
-            None
-        } else {
-            Some(self.next_read.max(now))
+        if self.subscribers.is_empty() {
+            return None;
         }
+        let start = self
+            .start
+            .filter(|_| self.worker.is_none())
+            .map(|start| start.max(now));
+        let pins = self.pin_membership.due().map(|due| due.max(now));
+        start.into_iter().chain(pins).min()
     }
     pub(super) fn snapshot(&self) -> Snapshot {
         self.snapshot.clone()
@@ -151,12 +260,16 @@ impl ServerRepositories {
                 .directories
                 .retain(|facts| self.sources.contains(&facts.directory));
             self.snapshot.revision = self.snapshot.revision.saturating_add(1);
-            self.next_read = Instant::now();
+            if self.worker.is_none() {
+                self.start = Some(Instant::now());
+            }
         }
         if let Some(worker) = &mut self.worker {
-            // Retry the latest interests on the next update if the bounded mailbox is full.
             if worker.sent_sources != self.sources
-                && worker.interests.try_send(self.sources.clone()).is_ok()
+                && worker
+                    .inputs
+                    .send(Input::Sources(self.sources.clone()))
+                    .is_ok()
             {
                 worker.sent_sources.clone_from(&self.sources);
             }
@@ -227,29 +340,38 @@ impl ServerRepositories {
             &state.inventory,
             &mut self.snapshot,
             !self.subscribers.is_empty(),
+            &self.ring,
         );
         reconcile_membership(state, &self.snapshot);
-        if !self.subscribers.is_empty() && self.worker.is_none() && Instant::now() >= self.next_read
+        if !self.subscribers.is_empty()
+            && self.worker.is_none()
+            && self.start.is_some_and(|start| Instant::now() >= start)
         {
+            self.start = None;
             let cancellation = CancellationToken::default();
-            let token = cancellation.clone();
             let sources = self.sources.clone();
             let sent_sources = sources.clone();
-            let (interests, updates) = mpsc::sync_channel(1);
-            let (sender, results) = mpsc::sync_channel(1);
+            let (inputs, receiver) = mpsc::channel();
+            let (sender, results) = mpsc::sync_channel(RESULTS);
+            let reader = Reader {
+                inputs: (inputs.clone(), receiver),
+                cancellation: cancellation.clone(),
+                sender,
+                ring: self.ring.clone(),
+                watcher: Arc::clone(&self.watcher),
+            };
             if let Ok(handle) = std::thread::Builder::new()
                 .name("spaceterm-server-git".into())
-                .spawn(move || read(sources, updates, token, sender))
+                .spawn(move || read(sources, reader))
             {
                 self.worker = Some(Worker {
                     cancellation,
                     handle,
                     results,
-                    interests,
+                    inputs,
                     sent_sources,
                 });
             }
-            self.next_read = Instant::now() + REFRESH;
         }
     }
 }
@@ -373,13 +495,17 @@ impl RepositoryProgramRunner for DeadlineRunner {
             .run(&request, stdout, token)
     }
 }
-fn read(
-    sources: Sources,
-    interests: mpsc::Receiver<Sources>,
+/// What a reader thread owns besides its sources.
+struct Reader {
+    inputs: (mpsc::Sender<Input>, mpsc::Receiver<Input>),
     cancellation: CancellationToken,
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
-) {
-    let (git, home, status) = discover_git(&cancellation);
+    ring: Ring,
+    watcher: Arc<dyn WatchSets>,
+}
+
+fn read(sources: Sources, reader: Reader) {
+    let (git, home, status) = discover_git(&reader.cancellation);
     let runner: Arc<dyn RepositoryProgramRunner> = Arc::new(DeadlineRunner);
     let readers = match (git, status) {
         (Some(git), GitToolStatus::Ready(version)) => Some((
@@ -396,7 +522,7 @@ fn read(
         )),
         _ => None,
     };
-    read_sources(sources, interests, readers, status, cancellation, sender);
+    read_sources(sources, readers, status, reader);
 }
 
 pub(super) fn git_status(cancellation: &CancellationToken) -> GitToolStatus {
@@ -458,6 +584,8 @@ enum ReadEvent {
         id: u64,
         facts: Box<DirectoryFacts>,
         fsmonitor: FsmonitorPolicy,
+        /// The repository's git directories, once discovery is complete.
+        git: Option<GitDirectories>,
         discovered: bool,
     },
     CountFinished {
@@ -466,19 +594,91 @@ enum ReadEvent {
         changes: Changes,
     },
 }
+/// A repository's git directories, canonical: the one a directory's Worktree uses and the
+/// common one. They are the same for a main Worktree.
+#[derive(Clone, PartialEq, Eq)]
+struct GitDirectories {
+    own: PathBuf,
+    common: PathBuf,
+}
+impl GitDirectories {
+    /// Adds what a repository's facts follow, and whether recursively: the Worktree's own git
+    /// directory with its `HEAD`, `index` and operation state; the common directory with
+    /// `packed-refs` and the main `HEAD` and `index`; the `refs/` tree; and the list of linked
+    /// Worktrees. Never a work tree.
+    fn watched(&self, into: &mut BTreeMap<PathBuf, bool>) {
+        into.insert(self.own.clone(), false);
+        into.insert(self.common.clone(), false);
+        let refs = self.common.join("refs");
+        if refs.is_dir() {
+            into.insert(refs, true);
+        }
+        // A repository without linked Worktrees has no `worktrees/` yet. Creating it changes
+        // the common directory, and the discovery that follows watches it.
+        let worktrees = self.common.join("worktrees");
+        if worktrees.is_dir() {
+            into.entry(worktrees).or_insert(false);
+        }
+    }
+    /// Whether a change at `path` can change facts read from this repository.
+    fn concerns(&self, path: &Path) -> bool {
+        [&self.own, &self.common]
+            .into_iter()
+            .any(|root| path.strip_prefix(root).is_ok_and(|rest| !incidental(rest)))
+    }
+}
+/// Git writes objects, reflogs and lock files during ordinary work, and its built-in fsmonitor
+/// daemon writes cookies during a read. None of them changes what a read reports, and following
+/// the cookies would make each read start the next.
+fn incidental(within_git: &Path) -> bool {
+    within_git.components().any(|component| {
+        let component = component.as_os_str().to_string_lossy();
+        component == "objects" || component == "logs" || component.contains("fsmonitor--daemon")
+    }) || within_git.extension().is_some_and(|extension| extension == "lock")
+}
+/// Paths the watch set saw change since the supervisor last looked.
+#[derive(Default)]
+struct Changed {
+    paths: BTreeSet<PathBuf>,
+    /// Too many paths, or a watch error: every repository may have changed.
+    unknown: bool,
+    /// An input already tells the supervisor to look.
+    sent: bool,
+}
+impl Changed {
+    fn note(&mut self, paths: &[PathBuf], inputs: &mpsc::Sender<Input>) {
+        if paths.is_empty() || self.paths.len() + paths.len() > MAX_CHANGED_PATHS {
+            self.unknown = true;
+            self.paths.clear();
+        } else if !self.unknown {
+            self.paths.extend(paths.iter().cloned());
+        }
+        if !std::mem::replace(&mut self.sent, true) {
+            let _ = inputs.send(Input::Changed);
+        }
+    }
+}
 struct DirectoryRead {
     facts: Option<DirectoryFacts>,
     active: Option<ActiveRead>,
-    next_read: Instant,
+    /// Since when this directory waits to be read. `None` while nothing asked for a read.
+    next_read: Option<Instant>,
+    /// Its repository's git directories, as of the last discovery.
+    git: Option<GitDirectories>,
+    /// When its last discovery ended.
+    finished: Option<Instant>,
 }
 struct CountRead {
     fsmonitor: FsmonitorPolicy,
     active: Option<ActiveRead>,
-    next_read: Instant,
+    /// Since when this root waits to be counted. `None` while nothing asked for a count.
+    next_read: Option<Instant>,
     // Queue time counts toward progress, including when both scan workers are occupied.
     requested: Option<Instant>,
     counting: Option<ChangeCounting>,
     changes: Changes,
+    /// When its last count ended.
+    finished: Option<Instant>,
 }
 impl CountRead {
     fn apply(&self, facts: &mut DirectoryFacts) {
@@ -489,16 +689,17 @@ impl CountRead {
     }
 }
 
-/// One subscriber lifetime owns fixed discovery and count pools. Recurring discovery never
+/// One subscriber lifetime owns fixed discovery and count pools. Repeated discovery never
 /// waits for a full scan; source edits update interests without restarting scans still in use.
-fn read_sources(
-    sources: Sources,
-    interests: mpsc::Receiver<Sources>,
-    readers: Option<Readers>,
-    status: GitToolStatus,
-    cancellation: CancellationToken,
-    sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
-) {
+/// The supervisor waits only for inputs and the counting indicator, never on a timer.
+fn read_sources(sources: Sources, readers: Option<Readers>, status: GitToolStatus, reader: Reader) {
+    let Reader {
+        inputs: (inputs, receiver),
+        cancellation,
+        sender,
+        ring,
+        watcher,
+    } = reader;
     let Some((repository, worktrees)) = readers else {
         for directory in sources {
             if !send(
@@ -513,23 +714,26 @@ fn read_sources(
                     },
                 ),
                 &cancellation,
+                &ring,
             ) {
-                return;
+                break;
             }
         }
+        // The host joins the ended reader once it hears this.
+        ring.ring();
         return;
     };
     // Queues hold only a bounded window of jobs. The supervisor retains at most one pending
-    // discovery per interested source and one pending count per physical Worktree root.
+    // discovery per interested source and one pending count per physical Worktree root, so
+    // each job sends at most two events to the supervisor's inputs.
     let (discoveries, discovery_receiver) = mpsc::sync_channel::<DiscoveryJob>(DISCOVERY_WORKERS);
     let discovery_receiver = Mutex::new(discovery_receiver);
     let (counts, count_receiver) = mpsc::sync_channel::<CountJob>(COUNT_WORKERS);
     let count_receiver = Mutex::new(count_receiver);
-    let (events, receiver) = mpsc::sync_channel(8);
     std::thread::scope(|scope| {
         for _ in 0..DISCOVERY_WORKERS {
             let jobs = &discovery_receiver;
-            let events = &events;
+            let events = &inputs;
             let cancellation = &cancellation;
             let repository = &repository;
             let worktrees = &worktrees;
@@ -553,7 +757,7 @@ fn read_sources(
         }
         for _ in 0..COUNT_WORKERS {
             let jobs = &count_receiver;
-            let events = &events;
+            let events = &inputs;
             let repository = &repository;
             let cancellation = &cancellation;
             scope.spawn(move || {
@@ -568,7 +772,7 @@ fn read_sources(
                     let changes = repository
                         .count(&job.root, job.fsmonitor, &job.active.cancellation)
                         .map(|summary| summary.changes);
-                    if !send(
+                    if !report(
                         events,
                         ReadEvent::CountFinished {
                             id: job.active.id,
@@ -582,6 +786,20 @@ fn read_sources(
                 }
             });
         }
+        // One watcher follows every repository. Without it, reads follow the other triggers.
+        let changed = Arc::new(Mutex::new(Changed::default()));
+        let watch = watcher
+            .start({
+                let changed = Arc::clone(&changed);
+                let inputs = inputs.clone();
+                Box::new(move |paths: &[PathBuf]| {
+                    changed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .note(paths, &inputs);
+                })
+            })
+            .ok();
         let mut supervisor = ReadSupervisor {
             directories: BTreeMap::new(),
             counts: BTreeMap::new(),
@@ -591,13 +809,20 @@ fn read_sources(
             sender,
             status,
             cancellation: cancellation.clone(),
+            ring: ring.clone(),
+            watch,
+            watching: BTreeMap::new(),
+            unwatchable: BTreeMap::new(),
+            changed,
         };
         supervisor.set_sources(sources);
-        supervisor.run(interests, receiver);
+        supervisor.run(&receiver);
         // Every queued or running job observes this token. Join the fixed pools before the
         // owning worker exits, including when publication or source delivery disconnects.
         cancellation.cancel();
     });
+    // The host joins the ended reader once it hears this.
+    ring.ring();
 }
 
 struct ReadSupervisor {
@@ -609,7 +834,16 @@ struct ReadSupervisor {
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
     status: GitToolStatus,
     cancellation: CancellationToken,
+    ring: Ring,
+    /// The one watch set for every repository, absent when it could not start.
+    watch: Option<Box<dyn WatchSet>>,
+    /// Watched directories, and whether recursively.
+    watching: BTreeMap<PathBuf, bool>,
+    /// Directories whose watch failed. They are not tried again while they stay requested.
+    unwatchable: BTreeMap<PathBuf, bool>,
+    changed: Arc<Mutex<Changed>>,
 }
+
 impl ReadSupervisor {
     fn set_sources(&mut self, sources: Sources) {
         let sources: Sources = sources.into_iter().take(MAX_DIRECTORIES).collect();
@@ -630,10 +864,13 @@ impl ReadSupervisor {
                 .or_insert_with(|| DirectoryRead {
                     facts: None,
                     active: None,
-                    next_read: Instant::now(),
+                    next_read: Some(Instant::now()),
+                    git: None,
+                    finished: None,
                 });
         }
         self.prune_counts();
+        self.rewatch();
     }
     fn prune_counts(&mut self) {
         let roots: Sources = self
@@ -651,36 +888,194 @@ impl ReadSupervisor {
             false
         });
     }
-    fn run(&mut self, interests: mpsc::Receiver<Sources>, events: mpsc::Receiver<ReadEvent>) {
-        while !self.cancellation.is_cancelled() {
-            match interests.try_recv() {
-                Ok(sources) => self.set_sources(sources),
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => return,
+    /// Watches the git directories of each repository a source belongs to, and stops watching
+    /// the others. A directory whose watch fails is read on the other triggers, and is tried
+    /// again only once it has stopped being requested and is requested again.
+    fn rewatch(&mut self) {
+        let mut requested = BTreeMap::new();
+        for read in self.directories.values() {
+            if let Some(git) = &read.git {
+                git.watched(&mut requested);
             }
-            if !self.schedule() {
-                return;
+        }
+        let Some(watch) = &mut self.watch else {
+            return;
+        };
+        self.unwatchable
+            .retain(|path, recursive| requested.get(path) == Some(recursive));
+        self.watching.retain(|path, recursive| {
+            let keep = requested.get(path) == Some(recursive);
+            if !keep {
+                watch.unwatch(path);
             }
-            match events.recv_timeout(POLL) {
-                Ok(event) => {
-                    if !self.accept(event) {
-                        return;
-                    }
+            keep
+        });
+        let mut started = Vec::new();
+        for (path, recursive) in requested {
+            if self.watching.contains_key(&path) || self.unwatchable.contains_key(&path) {
+                continue;
+            }
+            let directory = WatchDirectory {
+                path: path.clone(),
+                recursive,
+            };
+            match watch.watch(&directory) {
+                Ok(()) => {
+                    self.watching.insert(path.clone(), recursive);
+                    started.push(path);
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(_) => {
+                    self.unwatchable.insert(path, recursive);
+                }
+            }
+        }
+        if started.is_empty() {
+            return;
+        }
+        // A file event can be lost while a watch starts. One more read once it settles covers
+        // changes made between the read that found the repository and its watch.
+        let settled = Instant::now() + SETTLE;
+        self.reread(
+            |_, read| {
+                read.git.as_ref().is_some_and(|git| {
+                    started
+                        .iter()
+                        .any(|path| path.starts_with(&git.common) || *path == git.own)
+                })
+            },
+            |_| settled,
+        );
+    }
+    /// Asks for another read of each directory `directories` selects, and another count of its
+    /// repository, no sooner than `due` gives for its last read. A read in flight may predate
+    /// the change, so it runs again once it ends.
+    fn reread(
+        &mut self,
+        directories: impl Fn(&Path, &DirectoryRead) -> bool,
+        due: impl Fn(Option<Instant>) -> Instant,
+    ) {
+        let mut roots = Sources::new();
+        for (directory, read) in &mut self.directories {
+            if !directories(directory, read) {
+                continue;
+            }
+            let at = due(read.finished);
+            read.next_read = Some(read.next_read.map_or(at, |next| next.min(at)));
+            if let Some(repository) = read.facts.as_ref().and_then(|f| f.repository.as_ref()) {
+                roots.insert(repository.root.clone());
+            }
+        }
+        for root in roots {
+            if let Some(count) = self.counts.get_mut(&root) {
+                let at = due(count.finished);
+                count.next_read = Some(count.next_read.map_or(at, |next| next.min(at)));
             }
         }
     }
+    fn run(&mut self, inputs: &mpsc::Receiver<Input>) {
+        while !self.cancellation.is_cancelled() {
+            if !self.schedule() {
+                return;
+            }
+            // Only the counting indicator and a settling repository have deadlines; every
+            // other read waits for an input.
+            let input = match self.deadline() {
+                Some(due) => {
+                    match inputs.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                        Ok(input) => input,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                None => match inputs.recv() {
+                    Ok(input) => input,
+                    Err(_) => return,
+                },
+            };
+            let proceed = match input {
+                Input::Sources(sources) => {
+                    self.set_sources(sources);
+                    true
+                }
+                Input::Reread(directories) => {
+                    // A change seen in one Worktree can change what its repository lists for
+                    // the others, such as a Worktree deleted outside git.
+                    let repositories: BTreeSet<PathBuf> = directories
+                        .iter()
+                        .filter_map(|directory| self.directories.get(directory)?.git.as_ref())
+                        .map(|git| git.common.clone())
+                        .collect();
+                    let now = Instant::now();
+                    self.reread(
+                        |directory, read| {
+                            directories.contains(directory)
+                                || read
+                                    .git
+                                    .as_ref()
+                                    .is_some_and(|git| repositories.contains(&git.common))
+                        },
+                        |_| now,
+                    );
+                    true
+                }
+                Input::Changed => {
+                    // Taking the paths lets the next change send another input.
+                    let Changed { paths, unknown, .. } = std::mem::take(
+                        &mut *self.changed.lock().unwrap_or_else(|e| e.into_inner()),
+                    );
+                    let now = Instant::now();
+                    self.reread(
+                        |_, read| {
+                            read.git.as_ref().is_some_and(|git| {
+                                unknown || paths.iter().any(|path| git.concerns(path))
+                            })
+                        },
+                        |finished| finished.map_or(now, |finished| (finished + SETTLE).max(now)),
+                    );
+                    true
+                }
+                Input::Read(event) => self.accept(event),
+                Input::Stop => false,
+            };
+            if !proceed {
+                return;
+            }
+        }
+    }
+    /// When the next requested count announces counting, or the next settling read is due. Work
+    /// already due but waiting for a full queue is scheduled when a job in flight ends.
+    fn deadline(&self) -> Option<Instant> {
+        let now = Instant::now();
+        let indicator = self
+            .counts
+            .values()
+            .filter(|read| read.counting != Some(ChangeCounting::Counting))
+            .filter_map(|read| read.requested)
+            .map(|requested| requested + COUNTING_DELAY);
+        let settling = self
+            .directories
+            .values()
+            .filter(|read| read.active.is_none())
+            .filter_map(|read| read.next_read)
+            .chain(
+                self.counts
+                    .values()
+                    .filter(|read| read.active.is_none())
+                    .filter_map(|read| read.next_read),
+            )
+            .filter(|due| *due > now);
+        indicator.chain(settling).min()
+    }
     fn schedule(&mut self) -> bool {
         let now = Instant::now();
-        // Keep waiting work ahead of recurring refreshes, including after a bounded queue
-        // fills. A completed read receives a new due time; unscheduled work keeps its place.
+        // Keep the longest waiting work first, including after a bounded queue fills.
+        // Unscheduled work keeps its place.
         let mut directories: Vec<_> = self
             .directories
             .iter()
-            .filter(|(_, read)| read.active.is_none() && now >= read.next_read)
-            .map(|(directory, read)| (read.next_read, directory.clone()))
+            .filter(|(_, read)| read.active.is_none())
+            .filter_map(|(directory, read)| Some((read.next_read?, directory.clone())))
+            .filter(|(due, _)| *due <= now)
             .collect();
         directories.sort_unstable();
         for (_, directory) in directories {
@@ -697,11 +1092,13 @@ impl ReadSupervisor {
             };
             match self.discoveries.try_send(job) {
                 Ok(()) => {
+                    read.next_read = None;
                     read.active = Some(ActiveRead {
                         id: self.next_id,
                         cancellation,
                     })
                 }
+                // A job in flight ends with an input, which schedules the rest.
                 Err(mpsc::TrySendError::Full(_)) => break,
                 Err(mpsc::TrySendError::Disconnected(_)) => return false,
             }
@@ -716,11 +1113,17 @@ impl ReadSupervisor {
         roots.sort_unstable();
         for (_, root) in roots {
             let read = self.counts.get_mut(&root).unwrap();
-            if read.active.is_none() && now >= read.next_read {
-                if read.counting.is_none() {
-                    read.counting = Some(ChangeCounting::Pending);
+            if read.active.is_none() && read.next_read.is_some_and(|due| due <= now) {
+                if read.requested.is_none() {
                     read.requested = Some(now);
-                    progress.push(root.clone());
+                    // A first count shows that it is pending. A count that follows a finished
+                    // one keeps the known changes and says nothing unless it runs long enough
+                    // to announce counting, so a repository that did not change publishes
+                    // nothing.
+                    if read.finished.is_none() && read.counting.is_none() {
+                        read.counting = Some(ChangeCounting::Pending);
+                        progress.push(root.clone());
+                    }
                 }
                 if count_capacity {
                     self.next_id = self.next_id.saturating_add(1);
@@ -738,6 +1141,7 @@ impl ReadSupervisor {
                     };
                     match self.count_jobs.try_send(job) {
                         Ok(()) => {
+                            read.next_read = None;
                             read.active = Some(ActiveRead {
                                 id: self.next_id,
                                 cancellation,
@@ -748,7 +1152,7 @@ impl ReadSupervisor {
                     }
                 }
             }
-            if read.counting == Some(ChangeCounting::Pending)
+            if read.counting != Some(ChangeCounting::Counting)
                 && read
                     .requested
                     .is_some_and(|requested| now.duration_since(requested) >= COUNTING_DELAY)
@@ -770,6 +1174,7 @@ impl ReadSupervisor {
                 id,
                 facts,
                 fsmonitor,
+                git,
                 discovered,
             } => {
                 let Some(read) = self.directories.get_mut(&facts.directory) else {
@@ -783,7 +1188,8 @@ impl ReadSupervisor {
                 read.facts = Some(*facts);
                 if discovered {
                     read.active = None;
-                    read.next_read = Instant::now() + REFRESH;
+                    read.git = git;
+                    read.finished = Some(Instant::now());
                 }
                 self.prune_counts();
                 if let Some(root) = self.directories[&directory]
@@ -797,12 +1203,16 @@ impl ReadSupervisor {
                         .or_insert_with(|| CountRead {
                             fsmonitor,
                             active: None,
-                            next_read: Instant::now(),
+                            next_read: Some(Instant::now()),
                             requested: Some(Instant::now()),
                             counting: Some(ChangeCounting::Pending),
                             changes: Err(RepositoryReadError::Unavailable),
+                            finished: None,
                         })
                         .fsmonitor = fsmonitor;
+                }
+                if discovered {
+                    self.rewatch();
                 }
                 self.publish_directory(&directory) && !missing_tool
             }
@@ -817,7 +1227,7 @@ impl ReadSupervisor {
                 read.requested = None;
                 read.counting = None;
                 read.changes = changes;
-                read.next_read = Instant::now() + REFRESH;
+                read.finished = Some(Instant::now());
                 self.publish_root(&root)
             }
         }
@@ -860,6 +1270,7 @@ impl ReadSupervisor {
             &self.sender,
             (self.status, facts.clone()),
             &self.cancellation,
+            &self.ring,
         )
     }
 }
@@ -869,9 +1280,10 @@ fn discover(
     id: u64,
     repository: &policy::local_read::LocalRepositoryReader,
     worktrees: &crate::worktrees::git::LocalWorktreeGit,
-    events: &mpsc::SyncSender<ReadEvent>,
+    events: &mpsc::Sender<Input>,
     cancellation: &CancellationToken,
 ) {
+    let mut git = None;
     let mut facts = DirectoryFacts {
         directory,
         repository: None,
@@ -891,6 +1303,16 @@ fn discover(
             // Git can preserve an alias spelling. Full scans share the physical Worktree root.
             let root = std::fs::canonicalize(root).map_err(|_| RepositoryReadError::Unavailable)?;
             fsmonitor = probe.config.fsmonitor;
+            // Watches compare canonical paths: Git may spell a common directory as
+            // `<dir>/../.git`, or through a symbolic link such as `/tmp`.
+            if let (RepositoryRoot::Local(own), RepositoryRoot::Local(common)) =
+                (&probe.git_directory, &probe.common_directory)
+            {
+                git = std::fs::canonicalize(own)
+                    .ok()
+                    .zip(std::fs::canonicalize(common).ok())
+                    .map(|(own, common)| GitDirectories { own, common });
+            }
             facts.repository = Some(Repository {
                 root,
                 pull_request: policy::pull_request::pull_request_query(&probe.config, &probe.head),
@@ -901,12 +1323,13 @@ fn discover(
                 changes: Err(RepositoryReadError::Unavailable),
                 counting: Some(ChangeCounting::Pending),
             });
-            if !send(
+            if !report(
                 events,
                 ReadEvent::Facts {
                     id,
                     facts: Box::new(facts.clone()),
                     fsmonitor,
+                    git: None,
                     discovered: false,
                 },
                 cancellation,
@@ -941,30 +1364,50 @@ fn discover(
         Ok(())
     })();
     facts.failure = result.err();
-    send(
+    report(
         events,
         ReadEvent::Facts {
             id,
             facts: Box::new(facts),
             fsmonitor,
+            git,
             discovered: true,
         },
         cancellation,
     );
 }
 
-/// Bounded backpressure must remain cancellable when a subscriber stops draining publications.
-fn send<T>(sender: &mpsc::SyncSender<T>, mut value: T, cancellation: &CancellationToken) -> bool {
+/// Hands a job's step to the supervisor.
+fn report(
+    events: &mpsc::Sender<Input>,
+    event: ReadEvent,
+    cancellation: &CancellationToken,
+) -> bool {
+    !cancellation.is_cancelled() && events.send(Input::Read(event)).is_ok()
+}
+
+/// Publishes a result to the host and rings it. Bounded backpressure must remain cancellable
+/// when a subscriber stops draining publications.
+fn send<T>(
+    sender: &mpsc::SyncSender<T>,
+    mut value: T,
+    cancellation: &CancellationToken,
+    ring: &Ring,
+) -> bool {
     loop {
         if cancellation.is_cancelled() {
             return false;
         }
         match sender.try_send(value) {
-            Ok(()) => return true,
+            Ok(()) => {
+                ring.ring();
+                return true;
+            }
             Err(mpsc::TrySendError::Disconnected(_)) => return false,
             Err(mpsc::TrySendError::Full(pending)) => {
                 value = pending;
-                std::thread::sleep(POLL);
+                ring.ring();
+                std::thread::sleep(BACKPRESSURE);
             }
         }
     }

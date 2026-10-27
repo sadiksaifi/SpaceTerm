@@ -61,7 +61,6 @@ pub(crate) mod microphone_access;
     )
 )]
 pub(crate) mod permission_access;
-#[cfg(feature = "desktop")]
 pub(crate) mod repository_watch;
 #[cfg_attr(
     not(feature = "desktop"),

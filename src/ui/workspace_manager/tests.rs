@@ -9465,8 +9465,6 @@ fn focus_active_workspace(manager: &Entity<WorkspaceManager>, cx: &mut VisualTes
 
 /// Lets every shared Pane read its connection and paints the frame that follows.
 fn settle_shared_panes(cx: &mut VisualTestContext) {
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();

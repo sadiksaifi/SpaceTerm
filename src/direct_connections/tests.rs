@@ -469,6 +469,7 @@ fn connected_fixture(
                 server: Some(server),
                 gate,
                 retry: Retry::new(Interaction::Quiet),
+                health: None,
             },
         );
         state.document.routes.push(saved);
@@ -775,6 +776,29 @@ fn confirmed_self_unpair_retires_its_key_after_another_original_finishes_using_i
     connections.resume_unpair(other);
     await_condition(|| connections.pending_unpairs().is_empty());
     assert!(!credentials.values.lock().unwrap().contains_key(&[5; 32]));
+}
+
+#[test]
+fn a_disconnected_route_stops_following_its_old_link() {
+    let (connections, ids) = connected_routes(&["Studio"]);
+    let id = ids[0];
+    let health = worker::follow_link(&connections.0, id);
+    connections.0.state.lock().unwrap().routes.get_mut(&id).unwrap().health = Some(health);
+    connections.disconnect(&id);
+    assert!(
+        connections.0.state.lock().unwrap().routes[&id]
+            .health
+            .is_none(),
+        "the next connection's link must be followed instead"
+    );
+    connections.connect(&id);
+    // Once the route connects again, the worker follows the new link and checks the route only
+    // when that link ends.
+    await_condition(|| {
+        let state = connections.0.state.lock().unwrap();
+        let route = &state.routes[&id];
+        route.status == DirectRouteStatus::Connected && route.health.is_some()
+    });
 }
 
 #[test]

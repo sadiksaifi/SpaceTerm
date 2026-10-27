@@ -1281,6 +1281,7 @@ pub(super) fn present(
         state,
     } = factory;
     let presenter = reservation.activate(&alive);
+    let _control = claim::ControlWatch::start(&server, Arc::clone(&state), pane_id, attachment.as_ref());
     let mut attached_session = false;
     let mut generation = PresentationGeneration::default();
     let mut takeover = false;
@@ -1701,18 +1702,14 @@ pub(super) fn present(
                     clear_presentation(&events, &mut generation, &appearance);
                 }
                 let retryable = state.connection_failed(error, takeover);
-                // Retry waits for its backoff, or wakes for Retry, Take Over or dismissal.
+                // Retry waits for its backoff, or wakes for Retry, Take Over or dismissal. A
+                // failure that needs the person waits for them alone.
                 let backoff = std::time::Instant::now() + Duration::from_secs(1);
                 while alive.load(Ordering::Acquire) && !state.retry.swap(false, Ordering::AcqRel) {
-                    let now = std::time::Instant::now();
-                    if retryable && now >= backoff {
+                    if retryable && std::time::Instant::now() >= backoff {
                         break;
                     }
-                    state.wake.wait(Some(if retryable {
-                        backoff
-                    } else {
-                        now + Duration::from_secs(1)
-                    }));
+                    state.wake.wait(retryable.then_some(backoff));
                 }
             }
         }

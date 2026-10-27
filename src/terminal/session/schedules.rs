@@ -6,7 +6,6 @@ use libghostty_vt::terminal::{CompressionActivity, CompressionResult};
 use std::sync::{Mutex, MutexGuard};
 
 const HIDDEN_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
-const HIDDEN_INPUT_IDLE_INTERVAL: Duration = Duration::from_secs(30);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 const ACCESSIBILITY_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
 /// How often a hidden Terminal Session reports changed metadata. A program that retitles its
@@ -482,7 +481,7 @@ impl WorkerSchedules {
             self.metadata_deadline(),
             self.graphics_animation,
             self.compression.deadline(),
-            Some(self.hidden_input.deadline),
+            self.hidden_input.deadline,
         ]
         .into_iter()
         .flatten()
@@ -513,7 +512,10 @@ impl WorkerSchedules {
         if self.metadata_deadline().is_some_and(|due| now >= due) {
             return Some(Command::PublishMetadata);
         }
-        (now >= self.hidden_input.deadline).then_some(Command::PollHiddenInput)
+        self.hidden_input
+            .deadline
+            .is_some_and(|deadline| now >= deadline)
+            .then_some(Command::PollHiddenInput)
     }
 }
 
@@ -636,9 +638,12 @@ impl AccessibilityContinuationSchedule {
     }
 }
 
+/// Checks whether the program hides input after output, focus changes and written input. An
+/// idle session checks nothing: a program that hides input silently is seen at the next of
+/// those, which is no later than the person's first keystroke reaching it.
 struct HiddenInputSchedule {
     active: bool,
-    deadline: Instant,
+    deadline: Option<Instant>,
     settle: bool,
 }
 
@@ -646,15 +651,15 @@ impl HiddenInputSchedule {
     fn new(now: Instant) -> Self {
         Self {
             active: false,
-            deadline: now,
+            deadline: Some(now),
             settle: false,
         }
     }
 
     fn transition(&mut self, now: Instant) {
-        self.deadline = now;
+        self.deadline = Some(now);
         // Programs may write their prompt before changing termios. Check again once the
-        // transition has settled, then return to the long fallback for silent changes.
+        // transition has settled.
         self.settle = true;
     }
 
@@ -663,12 +668,7 @@ impl HiddenInputSchedule {
         now: Instant,
         result: Result<bool, NativePtyOperationFailure>,
     ) -> Option<bool> {
-        self.deadline = now
-            + if std::mem::take(&mut self.settle) {
-                HIDDEN_INPUT_SETTLE_INTERVAL
-            } else {
-                HIDDEN_INPUT_IDLE_INTERVAL
-            };
+        self.deadline = std::mem::take(&mut self.settle).then(|| now + HIDDEN_INPUT_SETTLE_INTERVAL);
         let active = match result {
             Ok(active) => active,
             Err(_) => {
@@ -1036,19 +1036,16 @@ mod tests {
             ),
             Some(false)
         );
-        assert_eq!(schedule.deadline, start + HIDDEN_INPUT_IDLE_INTERVAL);
+        assert_eq!(schedule.deadline, None);
     }
 
     #[test]
-    fn hidden_input_idles_for_thirty_seconds_after_one_transition_followup() {
+    fn hidden_input_idles_without_a_deadline_after_one_transition_followup() {
         let now = Instant::now();
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
         schedules.update_hidden_input(now, Ok(false));
-        assert_eq!(
-            schedules.deadline(None),
-            Some(now + Duration::from_secs(30))
-        );
-        assert!(schedules.take_due(now + Duration::from_secs(29)).is_none());
+        assert_eq!(schedules.deadline(None), None);
+        assert!(schedules.take_due(now + Duration::from_secs(3600)).is_none());
 
         let prompt = now + Duration::from_secs(1);
         schedules.hidden_input_transition(prompt);
@@ -1064,10 +1061,7 @@ mod tests {
             Some(Command::PollHiddenInput)
         ));
         assert_eq!(schedules.update_hidden_input(settled, Ok(true)), Some(true));
-        assert_eq!(
-            schedules.deadline(None),
-            Some(settled + Duration::from_secs(30))
-        );
+        assert_eq!(schedules.deadline(None), None);
 
         let focused = settled + Duration::from_secs(1);
         schedules.hidden_input_transition(focused);
@@ -1116,6 +1110,8 @@ mod tests {
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
         schedules.update_hidden_input(now, Ok(false));
         let due = now + Duration::from_secs(30);
+        // Output just before `due` asks for a hidden-input check.
+        schedules.hidden_input_transition(due);
         schedules.update_selection_autoscroll(now, Some(Duration::from_secs(30)));
         schedules
             .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)

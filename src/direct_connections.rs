@@ -138,6 +138,15 @@ struct Inner {
     state: Mutex<State>,
     changes: Mutex<Vec<async_channel::Sender<()>>>,
     resolver: Mutex<Option<Arc<dyn AccountRevocationResolver>>>,
+    /// Wakes the worker thread. The worker holds only this and a weak owner while it waits.
+    work: Arc<worker::WorkerWake>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // The waiting worker finds its owner gone and ends.
+        self.work.wake();
+    }
 }
 
 #[derive(Default)]
@@ -159,6 +168,8 @@ struct RouteState {
     server: Option<ServerConnection>,
     gate: Arc<std::sync::atomic::AtomicBool>,
     retry: Retry,
+    /// Follows the connected route's link, so its end, not a timer, makes the route due.
+    health: Option<Arc<dyn spaceterm_server::connection::link::LinkSink>>,
 }
 
 struct JoinState {
@@ -222,6 +233,7 @@ impl DirectConnections {
             state: Mutex::new(State::default()),
             changes: Mutex::default(),
             resolver: Mutex::default(),
+            work: Arc::default(),
         }))
     }
 
@@ -255,6 +267,7 @@ impl DirectConnections {
                             server: None,
                             gate: Arc::new(std::sync::atomic::AtomicBool::new(saved.active)),
                             retry: Retry::new(Interaction::Quiet),
+                            health: None,
                         },
                     );
                 }
@@ -389,7 +402,9 @@ impl DirectConnections {
             // Old connectors stay disabled even if the person reconnects before an
             // in-flight attempt returns. Its result belongs to the previous gate.
             route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // The next connection is a new link, which the worker follows afresh.
             route.server = None;
+            route.health = None;
             route.status = DirectRouteStatus::Disconnected;
         }
         self.0.save(&mut state);
@@ -607,6 +622,8 @@ impl DirectConnections {
 
 impl Inner {
     fn notify(&self) {
+        // Every change the views hear of may also make worker jobs due.
+        self.work.wake();
         self.changes
             .lock()
             .unwrap_or_else(|e| e.into_inner())

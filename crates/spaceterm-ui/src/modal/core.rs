@@ -2928,6 +2928,28 @@ pub(super) fn request_action_from_renderer(
     settle_owner(&owner, effects, cx);
 }
 
+pub(super) fn when_window_modal_closes<V: 'static>(
+    window: &mut Window,
+    cx: &mut Context<V>,
+    mut closed: impl FnMut(&mut V, &mut Window, &mut Context<V>) + 'static,
+) -> Option<Subscription> {
+    let owner = cx
+        .try_global::<ModalCoordinator>()?
+        .owners
+        .get(&window.window_handle().window_id())?
+        .upgrade()?;
+    Some(
+        cx.observe_in(&owner, window, move |view, owner, window, cx| {
+            let open = owner.read_with(cx, |state, _| {
+                state.active.is_some() || state.settlement == SettlementState::Settling
+            });
+            if !open {
+                closed(view, window, cx);
+            }
+        }),
+    )
+}
+
 pub(super) fn window_modal_is_open(window: &Window, cx: &App) -> bool {
     if !cx.has_global::<ModalCoordinator>() {
         return false;

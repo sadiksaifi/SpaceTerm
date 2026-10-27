@@ -1,4 +1,8 @@
 //! Resolve physical pins off the terminal request lock, with at most one filesystem worker.
+//!
+//! A check runs when the pins or the listed Worktree roots change, and rings the host when it
+//! ends. A check that could not finish runs again with backoff, or at once when a Pane gains
+//! focus. Nothing checks a finished answer again on a timer.
 use super::*;
 use spaceterm_server::hierarchy::Inventory;
 
@@ -36,7 +40,10 @@ struct Resolution {
 pub(super) struct PinMembership {
     interests: Interests,
     worker: Option<Resolution>,
-    next_check: Option<Instant>,
+    /// Whether the current interests were checked.
+    checked: bool,
+    /// When a check that could not finish runs again, and the backoff that chose it.
+    retry: Option<(Instant, Duration)>,
     resolver: Arc<dyn PinResolver>,
     seen_revision: Option<u64>,
 }
@@ -62,13 +69,20 @@ impl PinMembership {
         Self {
             interests: Interests::default(),
             worker: None,
-            next_check: None,
+            checked: false,
+            retry: None,
             resolver,
             seen_revision: None,
         }
     }
 
-    pub(super) fn update(&mut self, inventory: &Inventory, snapshot: &mut Snapshot, active: bool) {
+    pub(super) fn update(
+        &mut self,
+        inventory: &Inventory,
+        snapshot: &mut Snapshot,
+        active: bool,
+        ring: &Ring,
+    ) {
         let pins = inventory
             .workspaces
             .iter()
@@ -89,7 +103,8 @@ impl PinMembership {
             self.seen_revision = Some(snapshot.revision);
         }
         if changed {
-            self.next_check = None;
+            self.checked = false;
+            self.retry = None;
             if let Some(worker) = &self.worker {
                 worker.cancellation.cancel();
             }
@@ -110,11 +125,17 @@ impl PinMembership {
             let result = worker.handle.join().unwrap_or(Some(Err(())));
             if current {
                 match result {
-                    Some(Ok(pinned)) => publish(snapshot, pinned, PinCheckState::Ready),
-                    Some(Err(())) => publish(snapshot, Vec::new(), PinCheckState::Unavailable),
+                    Some(Ok(pinned)) => {
+                        publish(snapshot, pinned, PinCheckState::Ready);
+                        self.checked = true;
+                        self.retry = None;
+                    }
+                    Some(Err(())) => {
+                        publish(snapshot, Vec::new(), PinCheckState::Unavailable);
+                        self.back_off();
+                    }
                     None => (),
                 }
-                self.next_check = Some(Instant::now() + REFRESH);
             }
         }
         if self.interests.pins.is_empty() || self.interests.roots.is_empty() {
@@ -127,7 +148,10 @@ impl PinMembership {
             }
             return;
         }
-        if self.worker.is_some() || self.next_check.is_some_and(|next| Instant::now() < next) {
+        if self.worker.is_some()
+            || self.checked
+            || self.retry.is_some_and(|(at, _)| Instant::now() < at)
+        {
             return;
         }
         let cancellation = CancellationToken::default();
@@ -138,21 +162,28 @@ impl PinMembership {
         // the host itself never enter this worker.
         let pins = interests.pins.clone();
         let resolver = Arc::clone(&self.resolver);
+        let ring = ring.clone();
         match std::thread::Builder::new()
             .name("spaceterm-worktree-pins".into())
             .spawn(move || {
-                let mut pinned = Vec::new();
-                for root in roots {
-                    if token.is_cancelled() {
-                        return None;
+                let resolve = || {
+                    let mut pinned = Vec::new();
+                    for root in roots {
+                        if token.is_cancelled() {
+                            return None;
+                        }
+                        match resolver.holds(&pins, &root) {
+                            Ok(true) => pinned.push(root),
+                            Ok(false) => (),
+                            Err(_) => return Some(Err(())),
+                        }
                     }
-                    match resolver.holds(&pins, &root) {
-                        Ok(true) => pinned.push(root),
-                        Ok(false) => (),
-                        Err(_) => return Some(Err(())),
-                    }
-                }
-                Some(Ok(pinned))
+                    Some(Ok(pinned))
+                };
+                let result = resolve();
+                // The host joins the finished check once it hears this.
+                ring.ring();
+                result
             }) {
             Ok(handle) => {
                 self.worker = Some(Resolution {
@@ -163,11 +194,37 @@ impl PinMembership {
             }
             Err(_) => {
                 publish(snapshot, Vec::new(), PinCheckState::Unavailable);
-                self.next_check = Some(Instant::now() + REFRESH);
+                self.back_off();
             }
         }
     }
 }
+
+impl PinMembership {
+    fn back_off(&mut self) {
+        let delay = self
+            .retry
+            .map_or(RETRY_FIRST, |(_, delay)| (delay * 2).min(RETRY_MAX));
+        self.retry = Some((Instant::now() + delay, delay));
+    }
+    /// When a check that could not finish runs again.
+    pub(super) fn due(&self) -> Option<Instant> {
+        self.retry
+            .filter(|_| self.worker.is_none() && !self.checked)
+            .map(|(at, _)| at)
+    }
+    /// A Pane gained focus, perhaps after the filesystem recovered.
+    pub(super) fn retry_now(&mut self) {
+        if let Some((at, _)) = &mut self.retry {
+            *at = Instant::now();
+        }
+    }
+}
+
+/// The first wait before checking pins again after a check could not finish. Each failure
+/// doubles it, up to `RETRY_MAX`.
+const RETRY_FIRST: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(300);
 
 fn publish(snapshot: &mut Snapshot, pinned: Vec<PathBuf>, state: PinCheckState) {
     if pinned == snapshot.pinned_worktrees && state == snapshot.pin_check {
@@ -248,7 +305,7 @@ mod tests {
             }],
         };
         let start = Instant::now();
-        membership.update(&state.inventory, &mut snapshot, true);
+        membership.update(&state.inventory, &mut snapshot, true, &Ring::default());
         assert!(
             start.elapsed() < Duration::from_millis(250),
             "filesystem work must not run in synchronization"
@@ -258,12 +315,12 @@ mod tests {
         assert!(snapshot.pinned_worktrees.is_empty());
         // An inventory change remains publishable while the old physical check is blocked.
         state.inventory.workspaces[0].pinned_directory = None;
-        membership.update(&state.inventory, &mut snapshot, true);
+        membership.update(&state.inventory, &mut snapshot, true, &Ring::default());
         assert_eq!(snapshot.pin_check, PinCheckState::Ready);
         release.send(()).unwrap();
         let until = Instant::now() + Duration::from_secs(1);
         while membership.worker.is_some() && Instant::now() < until {
-            membership.update(&state.inventory, &mut snapshot, true);
+            membership.update(&state.inventory, &mut snapshot, true, &Ring::default());
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(membership.worker.is_none());
@@ -272,7 +329,7 @@ mod tests {
             "a stale physical result grants no restriction to the new inventory"
         );
         state.inventory.workspaces[0].pinned_directory = Some("/server/another-pin".into());
-        membership.update(&state.inventory, &mut snapshot, false);
+        membership.update(&state.inventory, &mut snapshot, false, &Ring::default());
         assert!(
             membership.worker.is_none(),
             "disconnected subscribers start no filesystem work"

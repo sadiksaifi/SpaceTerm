@@ -195,8 +195,6 @@ fn pane_count(harness: &SharedHarness, cx: &mut VisualTestContext) -> usize {
 
 /// Lets every Pane read its connection and paints the frame that follows.
 fn settle(_: &SharedHarness, cx: &mut VisualTestContext) {
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -644,6 +642,28 @@ fn a_takeover_screen_should_replace_the_pane_and_offer_take_over(cx: &mut TestAp
         harness.panes.pane(ROOT_PANE).take_overs(),
         1,
         "Take Over should ask the server once"
+    );
+}
+
+/// Each change to a Pane's connection hints the Tab, which shows it without a timer, including a
+/// change that follows the Tab's previous reading.
+#[gpui::test]
+fn each_pane_change_should_show_without_a_timer(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+
+    pane.set(DevelopmentPaneStatus::Takeover);
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        "the first change shows"
+    );
+
+    pane.reconnect();
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_none(),
+        "a change after the Tab's reading shows too"
     );
 }
 

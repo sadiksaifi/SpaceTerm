@@ -257,6 +257,11 @@ impl AttachmentPermit {
     pub fn attachment(&self) -> Attachment {
         self.attachment
     }
+    /// Calls `watcher` after each detach while it lives, so a holder learns when this permit
+    /// may have stopped being active.
+    pub fn watch(&self, watcher: std::sync::Weak<dyn Fn() + Send + Sync>) {
+        self.attachments.watch(watcher);
+    }
     /// The claim this permit makes for a Pane request that selects, starts, repairs or takes over
     /// its Pane. Releases of earlier attachments go first, and the saved generation precedes every
     /// claim, including one whose reply is lost.

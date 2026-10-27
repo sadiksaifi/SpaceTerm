@@ -124,7 +124,7 @@ pub use modal::{
     ProgressCancellationCompletion, ProgressDialog, ProgressDialogHandle, ProgressDialogOutcome,
     ProgressDialogUpdate, ProgressState, ProgressValueError, TextDirection,
     install_modal_keybindings, install_modal_policy, install_modal_theme,
-    install_portable_modal_keybindings, window_modal_is_open,
+    install_portable_modal_keybindings, when_window_modal_closes, window_modal_is_open,
 };
 pub use overlay_scrollbar::{
     OverlayScrollbar, OverlayScrollbarEvent, ScrollMetrics, ScrollOffset, ScrollbarMetrics,

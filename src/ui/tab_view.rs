@@ -2334,12 +2334,11 @@ impl TabView {
             root_state,
             cx.focus_handle(),
         );
+        let changes = shared.changes();
         self.shared = Some(shared);
+        // Each Pane's connection hints after it changes, so the Tab reads its Panes only then.
         self._shared_status = Some(cx.spawn_in(window, async move |view, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(super::shared_workspaces::POLL_INTERVAL)
-                    .await;
+            while changes.recv().await.is_ok() {
                 if view
                     .update_in(cx, |view, window, cx| view.sync_shared_panes(window, cx))
                     .is_err()

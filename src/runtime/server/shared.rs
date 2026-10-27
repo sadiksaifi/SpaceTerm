@@ -25,6 +25,8 @@ use spaceterm_server::connection::sync::SyncWorker;
 use spaceterm_server::protocol::{ReplyBody, RequestId};
 pub(super) use worktrees::pinned_in_worktree;
 
+/// How soon a failed synchronization runs again.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// How often what Terminal Sessions present, such as titles and progress, is synchronized and
 /// pushed at most. Edits and claims push at once.
 const PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
@@ -254,6 +256,7 @@ impl SharedWorkspaceHost {
             }
         }
         let mut next = self.state.clone();
+        let mut commands = BTreeMap::new();
         for (id, host) in &mut self.panes {
             host.retain_directory()?;
             host.retire_exited()?;
@@ -262,6 +265,7 @@ impl SharedWorkspaceHost {
                 .as_ref()
                 .and_then(|pane| pane.runtime.metadata_snapshot())
             {
+                commands.insert(*id, metadata.finished_commands);
                 // Keep live OSC 7 display separate from the owning shell's Repository Source
                 // Directory and retain_directory's independently confirmed restoration target.
                 next.present_directory(*id, metadata.directory.path.as_ref().into());
@@ -278,6 +282,7 @@ impl SharedWorkspaceHost {
                 next.remove_pane(*id);
             }
         }
+        self.repositories.commands(commands, &next);
         self.repositories.update(&mut next);
         if next != self.state {
             let revision = self.commit(next)?;
@@ -937,8 +942,10 @@ impl SharedWorkspaceHost {
             .map_err(|_| ServerError::StorageUnavailable)
     }
     /// Runs timed work, pushes the inventory it changed, and returns when work is next due.
-    /// `None` means nothing waits: no write, Git or directory work or Git facts. A live terminal
-    /// rings the host's wake when its screen, metadata or lifetime changes, so it needs no tick.
+    /// `None` means nothing waits: no write, Git or directory work, and no Git facts read that
+    /// has yet to start. A live terminal rings the host's wake when its screen, metadata or
+    /// lifetime changes, and a running Git facts read rings it when it has results, so neither
+    /// needs a tick.
     pub(super) fn tick_until(&mut self, now: Instant) -> Option<Instant> {
         let presenting = std::mem::take(&mut self.rung)
             && self.armed.is_none_or(|armed| now < armed);
@@ -958,11 +965,16 @@ impl SharedWorkspaceHost {
     }
     /// When timed work is next due, without running it.
     fn due(&self, now: Instant) -> Option<Instant> {
-        let waiting = self.blocked.is_some()
-            || !self.settled()
+        let waiting = !self.settled()
             || self.writes.busy()
             || !self.waiting.is_empty();
-        let soon = waiting.then_some(now + super::dispatch::TICK);
+        // A failed synchronization reads the record back from storage on each retry, and a stuck
+        // process or full disk rarely recovers within milliseconds, so it retries once a second.
+        let soon = if self.blocked.is_some() {
+            Some(now + RETRY)
+        } else {
+            waiting.then_some(now + super::dispatch::TICK)
+        };
         let paced = self.paced.0.filter(|_| self.paced.1);
         // A read that settles wakes the host. A read that outlasts its deadline settles then.
         let reads = [self.prototype.directories.due(), self.worktree_reads_due()];
@@ -998,6 +1010,7 @@ impl HostCommands for SharedWorkspaceHost {
         self.tick_until(now)
     }
     fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.repositories.set_wake(Arc::clone(&wake));
         self.prototype.directories.set_wake(Arc::clone(&wake));
         self.wake_worktree_reads(Arc::clone(&wake));
         self.ticker = Some(wake);
@@ -1032,6 +1045,15 @@ impl HostCommands for SharedWorkspaceHost {
         self.rearm();
     }
     fn request(&mut self, device: Id, connection: Id, request: Request) -> Reply {
+        if let Request::Focus { lease, target, .. } = &request
+            && *target != pane::FocusTarget::Unfocused
+            && let Some(pane) = self
+                .panes
+                .iter()
+                .find_map(|(id, host)| host.lease_live(lease).then_some(*id))
+        {
+            self.repositories.focused(pane, &self.state);
+        }
         // Claims and releases move control and start or end sessions. Terminal work on a lease
         // changes no inventory; the tick pushes what it changes in a Pane's metadata.
         let control = matches!(

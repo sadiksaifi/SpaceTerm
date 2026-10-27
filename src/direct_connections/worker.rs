@@ -96,6 +96,7 @@ impl DirectConnections {
         }
         state.worker = true;
         let weak = Arc::downgrade(&self.0);
+        let wake = Arc::clone(&self.0.work);
         if std::thread::Builder::new()
             .name("direct-connections".into())
             .spawn(move || {
@@ -103,9 +104,11 @@ impl DirectConnections {
                     let Some(owner) = weak.upgrade() else {
                         break;
                     };
-                    work(&owner);
+                    let next = work(&owner);
                     drop(owner);
-                    std::thread::sleep(Duration::from_millis(250));
+                    // A change, a finished job or the owner's end wakes it, and otherwise the
+                    // next retry. A connected route waits for its link to end.
+                    wake.wait(next);
                 }
             })
             .is_err()
@@ -249,8 +252,35 @@ impl Drop for JobPermit {
                     state.recovery_jobs.remove(&id);
                 }
             }
+            drop(state);
+            // A freed job slot may start waiting work.
+            owner.work.wake();
         }
     }
+}
+
+/// Makes a connected route due again when its shared link ends. The link judges its own health
+/// with pings, so a live link needs no check.
+pub(super) fn follow_link(
+    owner: &Arc<Inner>,
+    id: DirectRouteId,
+) -> Arc<dyn spaceterm_server::connection::link::LinkSink> {
+    use spaceterm_server::connection::link::{Health, LinkEvent};
+    let owner = Arc::downgrade(owner);
+    Arc::new(move |event: LinkEvent| {
+        let (LinkEvent::Health(Health::Closed(_)), Some(owner)) = (event, owner.upgrade()) else {
+            return;
+        };
+        let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(runtime) = state.routes.get_mut(&id)
+            && runtime.status == DirectRouteStatus::Connected
+        {
+            runtime.status = DirectRouteStatus::Reconnecting;
+            runtime.retry.due = Instant::now();
+        }
+        drop(state);
+        owner.notify();
+    })
 }
 struct RouteJob {
     saved: SavedRoute,
@@ -260,10 +290,74 @@ struct RouteJob {
     due: Instant,
 }
 
-fn work(owner: &Arc<Inner>) {
-    let (routes, pending) = {
+/// Wakes the worker thread. A wake before the wait is never lost.
+#[derive(Default)]
+pub(super) struct WorkerWake {
+    pending: Mutex<bool>,
+    ready: std::sync::Condvar,
+}
+
+impl WorkerWake {
+    pub(super) fn wake(&self) {
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ready.notify_all();
+    }
+
+    /// Returns on the first wake since the last wait, or at `deadline`.
+    fn wait(&self, deadline: Option<Instant>) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        while !*pending {
+            pending = match deadline {
+                None => self.ready.wait(pending).unwrap_or_else(|e| e.into_inner()),
+                Some(deadline) => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return;
+                    };
+                    self.ready
+                        .wait_timeout(pending, remaining)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+            };
+        }
+        *pending = false;
+    }
+}
+
+/// Whether the worker checks this route when its retry is due. A connected route whose link
+/// the worker follows is checked only once that link ends.
+fn checkable(runtime: &RouteState) -> bool {
+    !matches!(
+        runtime.status,
+        DirectRouteStatus::NeedsInteraction | DirectRouteStatus::Refused(_)
+    ) && !(runtime.status == DirectRouteStatus::Connected && runtime.health.is_some())
+}
+
+/// Starts the jobs that are due, and returns when the next one that is not running will be.
+fn work(owner: &Arc<Inner>) -> Option<Instant> {
+    let (routes, pending, next) = {
         let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
+        let next = state
+            .document
+            .routes
+            .iter()
+            .filter_map(|saved| {
+                let runtime = state.routes.get(&saved.route.id)?;
+                (saved.active && !state.route_jobs.contains(&saved.route.id) && checkable(runtime))
+                    .then_some(runtime.retry.due)
+            })
+            .chain(state.document.pending.iter().filter_map(|record| {
+                let retry = state.pending.get(&record.operation)?;
+                (retry.state != UnpairState::NeedsInteraction
+                    && !state.recovery_jobs.contains(&record.operation)
+                    && (!matches!(record.authority, Authority::Enrollment { .. })
+                        || record.cancel_requested))
+                    .then_some(retry.due)
+            }))
+            // Work already due but over the job limits starts when a running job ends.
+            .filter(|due| *due > now)
+            .min();
         let mut routes = state
             .document
             .routes
@@ -273,10 +367,7 @@ fn work(owner: &Arc<Inner>) {
                 (saved.active
                     && runtime.retry.due <= now
                     && !state.route_jobs.contains(&saved.route.id)
-                    && !matches!(
-                        runtime.status,
-                        DirectRouteStatus::NeedsInteraction | DirectRouteStatus::Refused(_)
-                    ))
+                    && checkable(runtime))
                 .then(|| RouteJob {
                     saved: saved.clone(),
                     interaction: runtime.retry.interaction,
@@ -310,7 +401,7 @@ fn work(owner: &Arc<Inner>) {
         state
             .recovery_jobs
             .extend(pending.iter().map(|(record, _, _)| record.operation));
-        (routes, pending)
+        (routes, pending, next)
     };
     // Separate limits reserve recovery capacity even while every route slot waits on a host.
     for (record, interaction, due) in pending {
@@ -363,6 +454,7 @@ fn work(owner: &Arc<Inner>) {
             route.retry.delay();
         }
     }
+    next
 }
 
 fn check_route(owner: &Arc<Inner>, job: RouteJob) {
@@ -387,10 +479,19 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
         Ok(server) => {
             if runtime.server.is_none() {
                 runtime.server = Some(server);
+                // A new connection has a new link to follow.
+                runtime.health = None;
             }
             runtime.status = DirectRouteStatus::Connected;
             runtime.retry.attempt = 0;
-            runtime.retry.due = Instant::now() + Duration::from_secs(5);
+            runtime.retry.due = Instant::now();
+            if runtime.health.is_none()
+                && let Some(server) = &runtime.server
+            {
+                let health = follow_link(owner, job.saved.route.id);
+                server.subscribe(Arc::downgrade(&health));
+                runtime.health = Some(health);
+            }
         }
         Err(error) => {
             runtime.status = route_failure(error, runtime.server.is_some());
@@ -825,6 +926,7 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
                 server: None,
                 gate: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 retry: Retry::new(Interaction::Quiet),
+                health: None,
             },
         );
     } else {
