@@ -17,12 +17,15 @@ fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) 
     )
 }
 
+/// Commits one edit, then ticks as the server does, which ends the work a retained edit deleted.
 fn mutate(host: &mut SharedWorkspaceHost, device: u8, sequence: u64, mutation: Mutation) -> Id {
-    match host.request(
+    let reply = host.request(
         [device; 32],
         [device; 32],
         Request::Mutate { sequence, mutation },
-    ) {
+    );
+    host.tick(Instant::now());
+    match reply {
         Reply::Outcome(result) => match result.outcome {
             Outcome::Accepted { target } => target,
             other => panic!("mutation refused: {other:?}"),

@@ -246,3 +246,71 @@ fn stale_and_missing_replacements_cannot_change_or_create_directories() {
     assert!(host.organization.as_ref() == Some(&org));
     assert!(host.pane.is_none());
 }
+
+/// A directory read is one request: the tick replies when it settles, and a cancelled one replies
+/// `Stale` at once.
+#[test]
+fn a_directory_read_replies_when_it_settles_without_being_polled() {
+    use spaceterm_server::connection::outbox::Outbox;
+    use spaceterm_server::connection::service::{Dispatch, PaneService as _, Peer};
+    use spaceterm_server::protocol::{
+        Operation, RawFrame, ReplyBody, RequestId, ServerMessage, frame::Assembler,
+    };
+    use std::time::Instant;
+    const PEER: Peer = Peer {
+        client: [1; 32],
+        connection: [1; 32],
+        pairing: None,
+    };
+    let mut served = super::dispatch::Served::new(SharedWorkspaceHost::new(host()));
+    let outbox = Outbox::new(Arc::new(|| {}));
+    served.admitted(&PEER, "Test".into(), outbox.clone());
+    let replies = |outbox: &Outbox| {
+        let mut assembler = Assembler::default();
+        let mut replies = Vec::new();
+        while let Some((frame, _)) = outbox.next_frame() {
+            if let Some(ServerMessage::Reply(reply)) =
+                assembler.server(RawFrame::parse(&frame).unwrap()).unwrap()
+            {
+                replies.push(*reply);
+            }
+        }
+        replies
+    };
+    replies(&outbox);
+    for (id, cancel) in [(RequestId(1), false), (RequestId(2), true)] {
+        outbox.begin(id).unwrap();
+        let operation = Operation::DirectoryRead(pane::directories::Operation::Home);
+        let settled = match served.request(&PEER, id, operation) {
+            Dispatch::Reply(result) => Some(*result),
+            Dispatch::Deferred => None,
+            Dispatch::After(_) => panic!("a read needs no sync"),
+        };
+        if cancel && settled.is_none() {
+            served.cancel(&PEER, id);
+            let [reply] = replies(&outbox).try_into().ok().unwrap();
+            assert_eq!(reply.id, id);
+            assert!(matches!(reply.result, Err(Refusal::Stale)));
+            continue;
+        }
+        let result = settled.unwrap_or_else(|| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                served.tick(Instant::now());
+                if let [reply] = replies(&outbox).as_slice() {
+                    assert_eq!(reply.id, id);
+                    break reply.result.clone();
+                }
+                assert!(Instant::now() < deadline, "the read never replied");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        assert!(matches!(
+            result,
+            Ok(ReplyBody::Directory(Ok(
+                pane::directories::Value::Directory(_)
+            )))
+        ));
+    }
+    served.shutdown().unwrap();
+}

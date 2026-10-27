@@ -25,15 +25,10 @@ struct Witness {
 fn request(link: &ServerLink, operation: Operation) -> ReplyBody {
     link.request(operation).unwrap().wait().unwrap()
 }
+/// The newest pushed inventory. It holds every outcome whose reply already arrived.
 fn inventory(link: &ServerLink) -> (Inventory, u64) {
-    let ReplyBody::Interim(InterimReply::Inventory {
-        inventory,
-        next_sequence,
-    }) = request(link, Operation::Interim(Interim::Inventory))
-    else {
-        panic!("inventory unavailable");
-    };
-    (inventory, next_sequence)
+    let (_, revision) = link.next_inventory(0).expect("inventory unavailable");
+    (revision.inventory.clone(), revision.next_sequence)
 }
 /// Claims `pane` on a new channel under attachment generation 1 of its Workspace, and returns
 /// the frames the server pushes on it. The fixture releases no attachment, so the server holds no

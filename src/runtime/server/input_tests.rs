@@ -134,7 +134,7 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         .id;
     let mut served = Served::new(shared);
     // Terminal Sessions ring this wake; a tick publishes only after a ring.
-    served.set_wake(Arc::new(|| {}));
+    served.ticker(Arc::new(|| {}));
     let outbox = Outbox::new(Arc::new(|| {}));
     served.admitted(&PEER, "Test".into(), outbox.clone());
     let claim = reply(

@@ -12,7 +12,6 @@ use crate::ServerError;
 use crate::direct::{DirectError, Management, ManagementReply};
 use crate::pane::control::ClientName;
 use crate::pane::{AttachmentClaim, Lease, PaneSize};
-use crate::protocol::interim::Interim;
 use crate::protocol::{
     Channel, ClaimReply, EffectDone, Fatal, Input, InputEvent, InventoryRevision, Operation,
     PaneEvent, Refusal, ReplyBody, RequestId, ScreenUpdate, View,
@@ -67,11 +66,11 @@ impl PaneService for Toy {
                 recorded.released.push(channel);
                 Dispatch::reply(Ok(ReplyBody::Done))
             }
-            Operation::Resolve { .. } => {
+            Operation::Mutate { .. } => {
                 recorded.deferred.push(id);
                 Dispatch::Deferred
             }
-            Operation::Interim(Interim::Inventory) => {
+            Operation::WorktreeRead(_) => {
                 let recorded = Arc::clone(&self.0);
                 Dispatch::After(Box::new(move || {
                     let thread = std::thread::current().id();
@@ -250,6 +249,17 @@ fn claimed(harness: &mut Harness) -> (super::link::ChannelHandle, Events) {
     (channel, events)
 }
 
+/// An edit the toy service defers.
+fn edit() -> Operation {
+    Operation::Mutate {
+        sequence: 1,
+        mutation: crate::hierarchy::Mutation::CreateTab {
+            workspace: [1; 32],
+            source: None,
+        },
+    }
+}
+
 fn frames(events: &Events) -> Vec<(u64, Option<u64>, u32)> {
     std::mem::take(&mut *events.lock().unwrap())
         .into_iter()
@@ -263,10 +273,7 @@ fn frames(events: &Events) -> Vec<(u64, Option<u64>, u32)> {
 #[test]
 fn requests_are_concurrent_and_sync_work_runs_off_the_io_thread() {
     let mut harness = Harness::new(None);
-    let resolve = harness
-        .link
-        .request(Operation::Resolve { sequence: 1 })
-        .unwrap();
+    let mutate = harness.link.request(edit()).unwrap();
     let release = harness
         .link
         .request(Operation::ReleaseAttachment {
@@ -275,7 +282,7 @@ fn requests_are_concurrent_and_sync_work_runs_off_the_io_thread() {
         .unwrap();
     let after = harness
         .link
-        .request(Operation::Interim(Interim::Inventory))
+        .request(Operation::WorktreeRead(crate::worktree::Read::Settings))
         .unwrap();
     let direct = harness
         .link
@@ -283,7 +290,7 @@ fn requests_are_concurrent_and_sync_work_runs_off_the_io_thread() {
         .unwrap();
     harness.pump().unwrap();
     assert!(
-        resolve.try_take().is_none(),
+        mutate.try_take().is_none(),
         "the deferred reply is still owed"
     );
     assert!(matches!(release.wait(), Ok(ReplyBody::Done)));
@@ -314,7 +321,7 @@ fn requests_are_concurrent_and_sync_work_runs_off_the_io_thread() {
         harness.events.lock().unwrap().as_slice(),
         [LinkEvent::Inventory(_)]
     ));
-    assert!(matches!(resolve.wait(), Ok(ReplyBody::Done)));
+    assert!(matches!(mutate.wait(), Ok(ReplyBody::Done)));
 }
 
 #[test]
@@ -500,7 +507,7 @@ fn revocation_ends_a_live_paired_connection() {
             Box::new(Severed(Arc::clone(&severed))),
         )
         .unwrap();
-    let pending = harness.link.request(Operation::Resolve { sequence: 1 });
+    let pending = harness.link.request(edit());
     registry.revoke([4; 32]);
     harness.pump().unwrap();
     assert!(*severed.lock().unwrap());
@@ -524,10 +531,7 @@ fn health_comes_from_traffic_and_failure_settles_every_pending_request() {
     harness.pump().unwrap();
     assert_eq!(harness.link.health(), Health::Live);
 
-    let pending = harness
-        .link
-        .request(Operation::Resolve { sequence: 1 })
-        .unwrap();
+    let pending = harness.link.request(edit()).unwrap();
     harness.pump().unwrap();
     harness
         .connection

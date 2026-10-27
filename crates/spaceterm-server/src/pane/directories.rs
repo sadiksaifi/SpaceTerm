@@ -20,7 +20,8 @@ pub enum Request {
     Cancel { id: u64 },
 }
 /// An explicit, idempotent filesystem write, independent of Workspace or pin edits.
-/// Cancellation stops observation; directories already created are never rolled back.
+/// Cancellation prevents a creation that has not started. Directories already created are never
+/// rolled back.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CreationRequest {
     Begin { id: u64, path: PathBuf },
@@ -28,6 +29,17 @@ pub enum CreationRequest {
     Cancel { id: u64 },
 }
 impl std::fmt::Debug for CreationRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirectoryCreation(<redacted>)")
+    }
+}
+/// Creates a directory and any missing parents. The protocol's form of
+/// [`CreationRequest::Begin`]; its reply follows when the write settles.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Creation {
+    pub path: PathBuf,
+}
+impl std::fmt::Debug for Creation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("DirectoryCreation(<redacted>)")
     }

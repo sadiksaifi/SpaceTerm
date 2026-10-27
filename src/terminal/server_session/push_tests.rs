@@ -20,8 +20,8 @@ struct Counting {
 }
 
 impl PaneService for Counting {
-    fn set_wake(&mut self, wake: Arc<dyn Wake>) {
-        self.inner.set_wake(wake);
+    fn ticker(&mut self, wake: Arc<dyn Wake>) {
+        self.inner.ticker(wake);
     }
     fn admitted(&mut self, peer: &Peer, name: pane::control::ClientName, outbox: Outbox) {
         self.inner.admitted(peer, name, outbox);
@@ -66,7 +66,7 @@ impl LinkSink for Ignore {
 /// loop does.
 fn ticking(service: SharedPaneService, running: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     let bell = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-    service.lock().unwrap().set_wake(Arc::new({
+    service.lock().unwrap().ticker(Arc::new({
         let bell = Arc::clone(&bell);
         move || {
             *bell.0.lock().unwrap() = true;

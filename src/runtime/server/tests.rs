@@ -197,6 +197,8 @@ fn shared_kill_ends_another_controllers_work_and_replays_without_touching_surviv
             matches!(reply, Reply::Outcome(result) if result.outcome == Outcome::Accepted { target: workspace })
         );
     }
+    // The tick after the retained deletion ends its work.
+    host.tick(Instant::now());
     assert!(matches!(
         screen(&mut host, [1; 32], lease),
         Err(PaneEvent::Ended)

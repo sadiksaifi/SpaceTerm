@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Interim {
-    /// Deleted by control-plane, which pushes `ServerMessage::Inventory`.
-    Inventory,
     /// Deleted by scrollback, which reads the client's Scrollback cache.
     Read {
         channel: Channel,
@@ -27,13 +25,6 @@ pub enum Interim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum InterimReply {
-    /// Deleted by control-plane.
-    Inventory {
-        inventory: crate::hierarchy::Inventory,
-        next_sequence: u64,
-    },
-    /// Deleted by control-plane, which defers the `Mutate` and `Resolve` replies instead.
-    MutationPending,
     /// Deleted by scrollback.
     Reading { accepted: bool },
     /// Deleted by scrollback.

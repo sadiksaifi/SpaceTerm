@@ -33,6 +33,8 @@ struct State {
     choices: Choices,
     catalog: BTreeMap<Id, Id>,
     blocked: bool,
+    /// Called after a detach leaves a release to send.
+    watchers: Vec<std::sync::Weak<dyn Fn() + Send + Sync>>,
     #[cfg(feature = "client")]
     storage: Option<(crate::storage::Directory, std::fs::File, Id, Id)>,
 }
@@ -53,6 +55,7 @@ impl Attachments {
             choices: Choices::default(),
             catalog: BTreeMap::new(),
             blocked: false,
+            watchers: Vec::new(),
             #[cfg(feature = "client")]
             storage: None,
         })))
@@ -99,6 +102,7 @@ impl Attachments {
             choices,
             catalog: BTreeMap::new(),
             blocked: false,
+            watchers: Vec::new(),
             storage: Some((directory, lock, server, client)),
         }))))
     }
@@ -169,17 +173,34 @@ impl Attachments {
         Ok(true)
     }
     /// Publish removal and its exact deferred release together, without contacting the server.
+    /// Watchers learn that a release waits.
     pub fn detach(&self, workspace: Id) -> Result<(), ServerError> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next = state.choices.clone();
-        if let Some(index) = next.attached.iter().position(|a| a.workspace == workspace) {
-            let attachment = next.attached.remove(index);
-            // A later release subsumes earlier generations of the same Workspace, since server
-            // claims are fenced by the highest released generation for this exact client.
-            next.pending.retain(|a| a.workspace != workspace);
-            next.pending.push(attachment);
+        let watchers = {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut next = state.choices.clone();
+            if let Some(index) = next.attached.iter().position(|a| a.workspace == workspace) {
+                let attachment = next.attached.remove(index);
+                // A later release subsumes earlier generations of the same Workspace, since server
+                // claims are fenced by the highest released generation for this exact client.
+                next.pending.retain(|a| a.workspace != workspace);
+                next.pending.push(attachment);
+            }
+            state.save(next)?;
+            state.watchers.retain(|watcher| watcher.strong_count() > 0);
+            state.watchers.clone()
+        };
+        for watcher in watchers.iter().filter_map(std::sync::Weak::upgrade) {
+            watcher();
         }
-        state.save(next)
+        Ok(())
+    }
+    /// Calls `watcher` after each detach while it lives, outside this writer's lock.
+    pub fn watch(&self, watcher: std::sync::Weak<dyn Fn() + Send + Sync>) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .watchers
+            .push(watcher);
     }
     pub fn permit(&self, pane: Id) -> Option<AttachmentPermit> {
         let state = self.0.lock().unwrap_or_else(|e| e.into_inner());

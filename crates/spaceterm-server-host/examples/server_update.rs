@@ -62,17 +62,14 @@ fn create_workspace(
     name: &str,
 ) -> Result<spaceterm_server::hierarchy::Id, Box<dyn Error>> {
     let (_, next_sequence) = support::inventory(link)?;
-    let Some(outcome) = support::mutate(
+    let outcome = support::mutate(
         link,
         next_sequence,
         Mutation::CreateWorkspace {
             name: name.into(),
             directory: None,
         },
-    )?
-    else {
-        return Err("creation unavailable".into());
-    };
+    )?;
     let Outcome::Accepted { target } = outcome.outcome else {
         return Err("creation refused".into());
     };

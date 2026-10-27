@@ -236,12 +236,9 @@ fn native_server_owned_work(
         let created_directory = path.join("created-directory");
         let value = directory_operation(
             &connection,
-            1,
-            protocol::Operation::DirectoryCreate(directories::CreationRequest::Begin {
-                id: 1,
+            protocol::Operation::DirectoryCreate(directories::Creation {
                 path: created_directory.clone(),
             }),
-            true,
         )?;
         if !matches!(value, directories::Value::Directory(ref value) if value == &created_directory)
         {
@@ -249,12 +246,7 @@ fn native_server_owned_work(
         }
         let value = directory_operation(
             &connection,
-            2,
-            protocol::Operation::DirectoryRead(directories::Request::Begin {
-                id: 2,
-                operation: directories::Operation::List { path: path.clone() },
-            }),
-            false,
+            protocol::Operation::DirectoryRead(directories::Operation::List { path: path.clone() }),
         )?;
         if !matches!(value, directories::Value::Listing { names, truncated: false } if names.iter().any(|name| name == "created-directory"))
         {
@@ -268,15 +260,10 @@ fn native_server_owned_work(
         )?;
         let value = directory_operation(
             &connection,
-            3,
-            protocol::Operation::DirectoryRead(directories::Request::Begin {
-                id: 3,
-                operation: directories::Operation::Match {
-                    path: path.join("alias"),
-                    candidates: vec![created_directory],
-                },
+            protocol::Operation::DirectoryRead(directories::Operation::Match {
+                path: path.join("alias"),
+                candidates: vec![created_directory],
             }),
-            false,
         )?;
         if !matches!(value, directories::Value::Match { index: Some(0) }) {
             return Err("WSS directory comparison did not resolve the owning-server alias".into());
@@ -1189,45 +1176,22 @@ fn native_server_setup_reports_unavailable_credentials_without_publishing_a_conn
     assert!(!phases.lock().unwrap().contains(&SetupPhase::Connecting));
 }
 
+/// One directory request. Its reply arrives when the operation settles.
 fn directory_operation(
     link: &spaceterm_server::connection::link::ServerLink,
-    id: u64,
-    begin: spaceterm_server::protocol::Operation,
-    creating: bool,
+    operation: spaceterm_server::protocol::Operation,
 ) -> Result<spaceterm_server::pane::directories::Value, terminal_semantics::Failure> {
-    use spaceterm_server::{
-        pane::directories,
-        protocol::{Operation, ReplyBody},
-    };
-    let mut reply = support::request(link, begin).map_err(|_| "WSS directory request failed")?;
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        match reply {
-            ReplyBody::Directory(Ok(directories::Progress::Ready(value))) => return Ok(value),
-            ReplyBody::Directory(Ok(directories::Progress::Pending)) => {}
-            _ => return Err("WSS directory operation refused".into()),
+    use spaceterm_server::protocol::ReplyBody;
+    let pending = link
+        .request(operation)
+        .map_err(|_| "WSS directory request failed")?;
+    match pending.wait_for(Duration::from_secs(8)) {
+        Some(Ok(ReplyBody::Directory(Ok(value)))) => Ok(value),
+        Some(_) => Err("WSS directory operation refused".into()),
+        None => {
+            pending.cancel();
+            Err("WSS directory operation exceeded its deadline".into())
         }
-        if Instant::now() >= deadline {
-            let _ = support::request(
-                link,
-                if creating {
-                    Operation::DirectoryCreate(directories::CreationRequest::Cancel { id })
-                } else {
-                    Operation::DirectoryRead(directories::Request::Cancel { id })
-                },
-            );
-            return Err("WSS directory operation exceeded its deadline".into());
-        }
-        std::thread::sleep(Duration::from_millis(20));
-        reply = support::request(
-            link,
-            if creating {
-                Operation::DirectoryCreate(directories::CreationRequest::Poll { id })
-            } else {
-                Operation::DirectoryRead(directories::Request::Poll { id })
-            },
-        )
-        .map_err(|_| "WSS directory reply lost")?;
     }
 }
 

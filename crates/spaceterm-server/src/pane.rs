@@ -271,6 +271,7 @@ pub enum Request {
     ReleaseAttachment {
         attachment: crate::attachments::Attachment,
     },
+    /// What a connection receives pushed: the inventory and this client's next sequence.
     Inventory,
     Mutate {
         sequence: u64,

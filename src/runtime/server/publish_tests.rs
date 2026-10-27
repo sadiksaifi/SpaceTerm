@@ -414,7 +414,7 @@ mod bell {
                 .id;
             let mut served = Served::new(shared);
             let rings = Arc::new(Rings::default());
-            served.set_wake(Arc::new({
+            served.ticker(Arc::new({
                 let rings = Arc::clone(&rings);
                 move || {
                     *rings.rung.lock().unwrap() = true;

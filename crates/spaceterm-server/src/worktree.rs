@@ -224,30 +224,30 @@ pub enum ReadReply {
     Removal(Removal),
 }
 
-/// Poll one bounded read on `link`. Uncertain requests are never retried.
+/// One bounded read on `link`. Its reply arrives when the read settles; one that outlasts the
+/// limit is cancelled. Uncertain requests are never retried.
 #[cfg(feature = "client")]
 pub fn read_worktree(
     link: &crate::connection::link::ServerLink,
-    mut read: Read,
+    read: Read,
 ) -> Result<Result<ReadReply, Error>, crate::ServerError> {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let reply = link
-            .request(crate::protocol::Operation::WorktreeRead(read))?
-            .wait()?;
-        match reply {
-            crate::protocol::ReplyBody::Worktree(Ok(ReadReply::Pending { id })) => {
-                if std::time::Instant::now() >= until {
-                    return Ok(Err(Error::Unavailable));
-                }
-                read = Read::Poll { id };
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            crate::protocol::ReplyBody::Worktree(result) => return Ok(result),
-            _ => return Err(crate::ServerError::Protocol),
+    if matches!(read, Read::Poll { .. }) {
+        return Err(crate::ServerError::Unsupported);
+    }
+    let pending = link.request(crate::protocol::Operation::WorktreeRead(read))?;
+    match pending.wait_for(READ_LIMIT) {
+        Some(Ok(crate::protocol::ReplyBody::Worktree(result))) => Ok(result),
+        Some(Ok(_)) => Err(crate::ServerError::Protocol),
+        Some(Err(error)) => Err(error.into()),
+        None => {
+            pending.cancel();
+            Ok(Err(Error::Unavailable))
         }
     }
 }
+/// How long a Worktree read may run before the client abandons it.
+#[cfg(feature = "client")]
+const READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AffectedTab {
     pub workspace: Id,

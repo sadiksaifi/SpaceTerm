@@ -9,7 +9,6 @@ use spaceterm_server::direct::{
 };
 use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
 use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize, Refusal};
-use spaceterm_server::protocol::interim::{Interim, InterimReply};
 use spaceterm_server::protocol::screen::CursorPosition;
 use spaceterm_server::protocol::{
     ClaimReply, Frame, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
@@ -287,20 +286,11 @@ fn request(link: &ServerLink, stage: &'static str, operation: Operation) -> Resu
     at(stage, pending.wait())
 }
 
-fn interim(link: &ServerLink, stage: &'static str, operation: Interim) -> Result<InterimReply> {
-    match request(link, stage, Operation::Interim(operation))? {
-        ReplyBody::Interim(reply) => Ok(reply),
-        _ => fail(stage),
-    }
-}
-
+/// The newest pushed inventory. The server pushes one when it admits the link.
 fn inventory(link: &ServerLink, stage: &'static str) -> Result<(Inventory, u64)> {
-    match interim(link, stage, Interim::Inventory)? {
-        InterimReply::Inventory {
-            inventory,
-            next_sequence,
-        } => Ok((inventory, next_sequence)),
-        _ => fail(stage),
+    match link.next_inventory(0) {
+        Ok((_, revision)) => Ok((revision.inventory.clone(), revision.next_sequence)),
+        Err(_) => fail(stage),
     }
 }
 
@@ -556,14 +546,7 @@ fn discarded(received: &Received) -> Result<()> {
 }
 
 fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
-    let mut reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while matches!(reply, ReplyBody::Interim(InterimReply::MutationPending))
-        && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(40));
-        reply = request(link, "resolve", Operation::Resolve { sequence })?;
-    }
+    let reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
     let ReplyBody::Outcome(result) = reply else {
         return fail("mutation outcome");
     };
