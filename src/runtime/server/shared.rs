@@ -299,12 +299,14 @@ impl SharedWorkspaceHost {
             );
         }
         // Keep an exited runtime until its controller has observed its final screen, and a
-        // deleted Pane's process until its deletion is retained and the process stopped.
+        // deleted Pane's process until its deletion is retained and the process stopped. An
+        // exited shell's Pane leaves the state at once, but its host stays while a channel is
+        // bound to it, so that channel still receives the final screen.
         self.panes.retain(|id, h| {
             if self.state.pane(*id).is_some() {
                 h.pane.is_some() || h.directory_unavailable || h.dormant.is_some()
             } else {
-                h.pane.as_ref().is_some_and(|p| !p.ended)
+                h.pane.as_ref().is_some_and(|p| !p.ended || p.connected)
             }
         });
         self.attachment_generations.retain(|(_, workspace), _| {
@@ -1377,6 +1379,84 @@ mod tests {
             [ServerMessage::Inventory(revision)]
                 if revision.inventory.workspaces[0].name == "Title 9"
         ));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_shell_that_exits_with_another_keeps_its_final_screen_for_its_channel() {
+        use super::super::publish::Observed;
+        use super::super::tests::command;
+        let mut host = SharedWorkspaceHost::new(host());
+        host.prepare_initial_organization().unwrap();
+        let workspace = shared_inventory(&mut host).workspaces[0].id;
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 1,
+                    mutation: Mutation::CreateTab {
+                        workspace,
+                        source: None
+                    },
+                }
+            ),
+            Reply::Outcome(_)
+        ));
+        let panes: Vec<_> = shared_inventory(&mut host).workspaces[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.root_pane)
+            .collect();
+        let leases: Vec<_> = panes
+            .iter()
+            .map(|pane| {
+                let Reply::Attached { lease } = host.request(
+                    [1; 32],
+                    [1; 32],
+                    Request::SelectPane {
+                        pane: *pane,
+                        explicit: true,
+                        size: size(),
+                        style: None,
+                    },
+                ) else {
+                    panic!("explicit first use");
+                };
+                lease
+            })
+            .collect();
+        for lease in &leases {
+            command(&mut host, 1, *lease, "printf 'FINAL\\n'; exit");
+        }
+        // Both shells exit before either channel looks.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !panes.iter().all(|pane| {
+            host.panes
+                .get_mut(pane)
+                .and_then(|host| host.pane.as_mut())
+                .is_some_and(|owned| {
+                    owned.drain();
+                    owned.ended
+                })
+        }) {
+            assert!(Instant::now() < deadline, "the shells did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The first channel's end synchronizes, which retires every exited shell.
+        assert!(matches!(
+            HostCommands::observe(&mut host, [1; 32], &leases[0]),
+            Observed::Gone { last: Some(_), .. }
+        ));
+        assert!(
+            matches!(
+                HostCommands::observe(&mut host, [1; 32], &leases[1]),
+                Observed::Gone { last: Some(_), .. }
+            ),
+            "the second channel still receives its final screen"
+        );
+        host.tick(Instant::now());
+        assert!(host.panes.is_empty(), "observed hosts retire");
         host.shutdown().unwrap();
     }
 
