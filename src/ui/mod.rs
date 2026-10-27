@@ -5,6 +5,7 @@ pub(crate) mod application_commands;
 pub(crate) mod application_prompt;
 pub(crate) mod askpass_dialog;
 pub(crate) mod background_image_runtime;
+mod cached_view;
 pub(crate) mod chrome_geometry;
 pub(crate) mod chrome_icons;
 mod chrome_semantic_pairs;

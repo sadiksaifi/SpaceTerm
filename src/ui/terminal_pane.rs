@@ -741,6 +741,8 @@ impl TerminalPane {
             },
         )
         .detach();
+        // A Tab draws the Pane as a cached view.
+        super::cached_view::redraw_on_presentation_change(cx);
         cx.on_focus(&focus_handle, window, |pane, window, cx| {
             cx.emit(TerminalPaneEvent::FocusRequested);
             pane.refresh_surface(window, cx);
