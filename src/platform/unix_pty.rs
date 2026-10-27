@@ -12,6 +12,7 @@ use anyhow::Error as AnyError;
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system,
 };
+use spaceterm_server::pane::LineMode;
 use thiserror::Error;
 
 use crate::platform::native_pty::{
@@ -509,6 +510,8 @@ struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
+    /// The shell's process group, which leads its own session.
+    shell_process_group: libc::pid_t,
     // Fields drop in declaration order. Close the PTY handles before waiting for a child whose
     // kernel exit can be waiting for terminal teardown.
     process: SpawnedChild,
@@ -559,12 +562,21 @@ impl SpawnedPty {
         self.master.resize(size)
     }
 
-    fn hidden_input(&self) -> io::Result<bool> {
+    fn line_mode(&self) -> io::Result<LineMode> {
         let descriptor = self
             .master
             .as_raw_fd()
             .ok_or_else(|| io::Error::other("PTY master descriptor is unavailable"))?;
-        read_termios(descriptor).map(|termios| termios_hidden_input(&termios))
+        let termios = read_termios(descriptor)?;
+        // SAFETY: descriptor is a live PTY master.
+        let foreground = unsafe { libc::tcgetpgrp(descriptor) };
+        if foreground == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(termios_line_mode(
+            &termios,
+            foreground == self.shell_process_group,
+        ))
     }
 }
 
@@ -787,8 +799,8 @@ impl NativePtyAdapter for SpawnedPty {
         })
     }
 
-    fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
-        Self::hidden_input(self).map_err(|error| NativePtyOperationFailure::new(error.kind()))
+    fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
+        Self::line_mode(self).map_err(|error| NativePtyOperationFailure::new(error.kind()))
     }
 
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
@@ -1003,6 +1015,7 @@ fn spawn_command_in_pty(
             master: pair.master,
             reader: Some(Box::new(reader)),
             writer,
+            shell_process_group: process_group,
             process: SpawnedChild {
                 child: Some(child),
                 termination,
@@ -1043,8 +1056,13 @@ fn read_termios(descriptor: RawFd) -> io::Result<libc::termios> {
     Ok(unsafe { termios.assume_init() })
 }
 
-const fn termios_hidden_input(termios: &libc::termios) -> bool {
-    termios.c_lflag & libc::ICANON != 0 && termios.c_lflag & libc::ECHO == 0
+const fn termios_line_mode(termios: &libc::termios, shell_foreground: bool) -> LineMode {
+    LineMode {
+        canonical: termios.c_lflag & libc::ICANON != 0,
+        echo: termios.c_lflag & libc::ECHO != 0,
+        signals: termios.c_lflag & libc::ISIG != 0,
+        shell_foreground,
+    }
 }
 
 /// Translate already-decided launch values into the private process library representation.
@@ -1094,6 +1112,10 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
         );
     }
 }
+
+#[cfg(all(test, feature = "native-tests"))]
+#[path = "unix_pty_test_program.rs"]
+pub(crate) mod test_program;
 
 #[cfg(all(test, feature = "native-tests"))]
 mod tests {
@@ -1208,17 +1230,24 @@ mod tests {
     }
 
     #[test]
-    fn hidden_input_requires_canonical_mode_without_echo() {
+    fn line_mode_reads_hidden_input_and_the_line_editor_from_termios() {
         // SAFETY: termios is a plain C data structure whose zero value is valid for flag tests.
         let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
-        termios.c_lflag = libc::ICANON | libc::ECHO;
-        assert!(!termios_hidden_input(&termios));
+        termios.c_lflag = libc::ICANON | libc::ECHO | libc::ISIG;
+        let cooked = termios_line_mode(&termios, true);
+        assert!(!cooked.hidden_input() && !cooked.line_editor());
 
-        termios.c_lflag = libc::ICANON;
-        assert!(termios_hidden_input(&termios));
+        termios.c_lflag = libc::ICANON | libc::ISIG;
+        let password = termios_line_mode(&termios, false);
+        assert!(password.hidden_input() && !password.line_editor());
+
+        termios.c_lflag = libc::ISIG;
+        assert!(termios_line_mode(&termios, true).line_editor());
+        assert!(!termios_line_mode(&termios, false).line_editor());
 
         termios.c_lflag = 0;
-        assert!(!termios_hidden_input(&termios));
+        let raw = termios_line_mode(&termios, true);
+        assert!(!raw.hidden_input() && !raw.line_editor());
     }
 
     const CONTROLLED_CHILD_ENV: &str = "SPACETERM_CONTROLLED_PTY_CHILD";
@@ -2463,6 +2492,7 @@ mod tests {
                 master: Box::new(TestMasterPty::default()),
                 reader: Some(Box::new(io::empty())),
                 writer: Box::new(io::sink()),
+                shell_process_group: 0,
                 process: SpawnedChild {
                     child: Some(child),
                     termination,

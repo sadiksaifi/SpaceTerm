@@ -219,6 +219,11 @@ _Avoid_: session, terminal
 
 **Scrollback Cache**: The Scrollback rows a SpaceTerm Client holds for one Pane, over which it scrolls, selects, and runs Terminal Find.
 
+**Line Mode**: Whether a Terminal Session's PTY collects lines, echoes input and turns signal keys into signals, and whether the shell owns its foreground, as the SpaceTerm Server last read them.
+
+**Predictive Echo**: A SpaceTerm Client drawing printable keys typed at the shell's line editor before the SpaceTerm Server's echo arrives, marked until a frame confirms them.
+_Avoid_: local echo, speculative echo
+
 ## Terminal interaction and safety
 
 **Selection**: A logical range of terminal content.

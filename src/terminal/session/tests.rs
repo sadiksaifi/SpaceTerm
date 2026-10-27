@@ -6,6 +6,14 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::platform::native_pty::{NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination};
+use spaceterm_server::pane::{LineMode, LineState};
+
+const PASSWORD: LineMode = LineMode {
+    canonical: true,
+    echo: false,
+    signals: true,
+    shell_foreground: false,
+};
 
 #[cfg(feature = "desktop")]
 pub(in crate::terminal) fn metadata_changed() -> TerminalSessionEvent {
@@ -147,8 +155,8 @@ enum LifecycleStep {
 #[derive(Clone, Debug, Default)]
 struct ScriptedPtyState {
     initial_screen: Option<Arc<ScreenSnapshot>>,
-    hidden_input: bool,
-    hidden_input_polls: usize,
+    line_mode: LineMode,
+    line_reads: usize,
     take_reader_calls: usize,
     write_attempts: usize,
     write_blocked: bool,
@@ -299,9 +307,9 @@ impl Write for ScriptedPty {
 }
 
 impl NativePtyAdapter for ScriptedPty {
-    fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
-        self.records.update(|state| state.hidden_input_polls += 1);
-        Ok(self.records.snapshot().hidden_input)
+    fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
+        self.records.update(|state| state.line_reads += 1);
+        Ok(self.records.snapshot().line_mode)
     }
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         self.records.update(|state| state.take_reader_calls += 1);
@@ -630,6 +638,19 @@ fn start_scripted_session(
     (result, reader_steps, records)
 }
 
+/// Waits until the subscription's retained line state satisfies `condition`.
+fn wait_for_line(
+    subscription: &TerminalSubscription,
+    description: &str,
+    condition: impl Fn(LineState) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !condition(subscription.line()) {
+        assert!(Instant::now() < deadline, "{description} never arrived");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn receive_event(
     events: &async_channel::Receiver<TerminalSessionEvent>,
     description: &str,
@@ -757,23 +778,21 @@ fn a_replacement_subscription_receives_accessibility_without_new_output() {
 }
 
 #[test]
-fn replacement_subscriptions_seed_unchanged_hidden_input_state() {
+fn replacement_subscriptions_seed_unchanged_line_state() {
     let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut runtime, events, accessibility) = result.unwrap();
-    records.update(|state| state.hidden_input = true);
+    let original = runtime.subscribe();
+    records.update(|state| state.line_mode = PASSWORD);
     runtime.focus(false);
-    receive_event(&events, "the original hidden-input transition", |event| {
-        matches!(event, TerminalSessionEvent::HiddenInputChanged(true))
+    wait_for_line(&original, "the original hidden-input transition", |line| {
+        line.mode.hidden_input()
     });
     drop(events);
     drop(accessibility);
+    drop(original);
 
     let replacement = runtime.subscribe();
-    receive_event(
-        &replacement.events,
-        "the unchanged hidden-input seed",
-        |event| matches!(event, TerminalSessionEvent::HiddenInputChanged(true)),
-    );
+    assert!(replacement.line().mode.hidden_input());
     reader_steps
         .send(ReaderStep::Bytes(b"after hidden seed\r\n".repeat(12)))
         .unwrap();
@@ -782,9 +801,9 @@ fn replacement_subscriptions_seed_unchanged_hidden_input_state() {
         "screen output after the hidden-input seed",
         |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("after hidden seed")),
     );
-    assert!(replacement.hidden_input());
+    assert!(replacement.line().mode.hidden_input());
     runtime.shutdown_and_join();
-    assert!(!replacement.hidden_input());
+    assert!(!replacement.line().mode.hidden_input());
 }
 
 #[test]
@@ -2154,7 +2173,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
     };
     worker
         .schedules
-        .update_hidden_input(Instant::now(), Ok(false));
+        .update_line(Instant::now(), Ok(LineMode::UNKNOWN));
     worker.emulator.feed(
         b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\\
           \x1b_Ga=f,t=d,f=32,i=1,s=1,v=1,z=40;BQYHCA==\x1b\\\
@@ -2211,7 +2230,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
         };
         worker
             .schedules
-            .update_hidden_input(Instant::now(), Ok(false));
+            .update_line(Instant::now(), Ok(LineMode::UNKNOWN));
         worker
             .emulator
             .feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1;AQIDBA==\x1b\\");
@@ -2609,13 +2628,16 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         assert!(worker.feed_test_output(vec![b"\x1b]7;file:///srv/alpha\x07".to_vec()]));
         assert!(worker.feed_test_output(vec![b"\x1b]7;file:///srv/latest\x07".to_vec()]));
         // Overflow the production-sized queue before the UI can consume the directory wake.
-        assert!(worker.send_terminal_event(TerminalSessionEvent::HiddenInputChanged(true)));
-        assert!(worker.send_terminal_event(TerminalSessionEvent::HiddenInputChanged(false)));
-        for expected in [true, false] {
-            assert!(
-                matches!(receiver.try_recv().unwrap(), TerminalSessionEvent::HiddenInputChanged(actual) if actual == expected)
-            );
-        }
+        assert!(worker.send_terminal_event(TerminalSessionEvent::PasteUnconfirmed));
+        assert!(worker.send_terminal_event(TerminalSessionEvent::SelectionCopyReady));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            TerminalSessionEvent::PasteUnconfirmed
+        ));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            TerminalSessionEvent::SelectionCopyReady
+        ));
         let expected = if remote {
             crate::domain::CurrentDirectory::Remote(
                 crate::domain::RemoteDirectory::new("/srv/latest".into()).unwrap(),
@@ -4371,28 +4393,27 @@ fn worker_autoscroll_ticks_publish_scrollback_without_more_pointer_motion() {
 }
 
 #[test]
-fn hidden_input_transitions_are_reported_on_output_and_focus_during_idle_backoff() {
+fn line_mode_changes_are_reported_on_output_and_focus_during_idle_backoff() {
     let (started, reader, records) = start_scripted_session(ScriptedPtyOptions::default());
-    let (mut session, events, _accessibility) = started.unwrap();
-    records.wait_for("initial hidden-input poll", |state| {
-        state.hidden_input_polls > 0
-    });
-    records.update(|state| state.hidden_input = true);
+    let (mut session, _events, _accessibility) = started.unwrap();
+    let subscription = session.subscribe();
+    records.wait_for("initial hidden-input poll", |state| state.line_reads > 0);
+    records.update(|state| state.line_mode = PASSWORD);
     reader
         .send(ReaderStep::Bytes(b"Password: ".to_vec()))
         .unwrap();
-    receive_event(&events, "password prompt", |event| {
-        matches!(event, TerminalSessionEvent::HiddenInputChanged(true))
+    wait_for_line(&subscription, "password prompt", |line| {
+        line.mode.hidden_input()
     });
-    records.update(|state| state.hidden_input = false);
+    records.update(|state| state.line_mode = LineMode::UNKNOWN);
     session.focus(false);
-    receive_event(&events, "focus transition", |event| {
-        matches!(event, TerminalSessionEvent::HiddenInputChanged(false))
+    wait_for_line(&subscription, "focus transition", |line| {
+        !line.mode.hidden_input()
     });
-    records.update(|state| state.hidden_input = true);
+    records.update(|state| state.line_mode = PASSWORD);
     session.focus(true);
-    receive_event(&events, "focus restoration", |event| {
-        matches!(event, TerminalSessionEvent::HiddenInputChanged(true))
+    wait_for_line(&subscription, "focus restoration", |line| {
+        line.mode.hidden_input()
     });
     session.shutdown_and_join();
 }

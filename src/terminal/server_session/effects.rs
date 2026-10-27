@@ -63,18 +63,20 @@ impl ClientEffects {
         Ok(())
     }
 
-    /// Publishes a pushed hidden-input state once per epoch and value.
-    pub(super) fn hidden_input(
+    /// Publishes a pushed line state to the view once per epoch and hidden-input value. The view
+    /// needs only whether input is hidden, and each event can displace a queued screen.
+    pub(super) fn line(
         &mut self,
         state: &DevelopmentPaneState,
         events: &async_channel::Sender<TerminalSessionEvent>,
-        hidden_input: bool,
+        line: pane::LineState,
     ) -> Result<(), ServerError> {
+        let hidden_input = line.mode.hidden_input();
         state.hidden_input.store(hidden_input, Ordering::Release);
         let hidden_state = (state.epoch.load(Ordering::Acquire), hidden_input);
         if self.hidden_input != Some(hidden_state) {
             events
-                .force_send(TerminalSessionEvent::HiddenInputChanged(hidden_input))
+                .force_send(TerminalSessionEvent::Line(line))
                 .map_err(|_| ServerError::NotRunning)?;
             self.hidden_input = Some(hidden_state);
         }
@@ -225,7 +227,9 @@ mod tests {
         let (events, receiver) = async_channel::bounded(1);
         let state = &adapter.handle.state;
         let generation = state.interaction.lock().unwrap().focus_generation;
-        effects.hidden_input(state, &events, false).unwrap();
+        effects
+            .line(state, &events, pane::LineState::default())
+            .unwrap();
         effects
             .request(
                 state,
@@ -239,10 +243,10 @@ mod tests {
                 },
             )
             .unwrap();
-        // Hidden-input publication filled the sole presentation slot before the native wakeup.
+        // Line state publication filled the sole presentation slot before the native wakeup.
         assert!(matches!(
             receiver.try_recv(),
-            Ok(TerminalSessionEvent::HiddenInputChanged(false))
+            Ok(TerminalSessionEvent::Line(line)) if !line.mode.hidden_input()
         ));
         let requests = adapter.handle.take_client_effects();
         assert_eq!(requests.len(), 1);
@@ -321,7 +325,15 @@ mod tests {
         let generation = state.interaction.lock().unwrap().focus_generation;
         adapter.handle.interactive_focus(false, false);
         adapter.handle.interactive_focus(true, true);
-        effects.hidden_input(state, &events, true).unwrap();
+        let password = pane::LineState {
+            epoch: 1,
+            mode: pane::LineMode {
+                canonical: true,
+                signals: true,
+                ..pane::LineMode::UNKNOWN
+            },
+        };
+        effects.line(state, &events, password).unwrap();
         effects
             .request(
                 state,

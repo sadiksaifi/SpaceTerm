@@ -1,5 +1,16 @@
 //! Bounded presentation delivery, independent of worker and PTY ownership.
 use super::*;
+use spaceterm_server::pane::{LineMode, LineState};
+
+/// A stopped Terminal Session reads no mode: it hides no input and has no line editor.
+fn stop(line: &mut LineState) {
+    if line.mode != LineMode::UNKNOWN {
+        *line = LineState {
+            epoch: line.epoch + 1,
+            mode: LineMode::UNKNOWN,
+        };
+    }
+}
 
 pub struct TerminalSubscription {
     pub events: async_channel::Receiver<TerminalSessionEvent>,
@@ -19,10 +30,10 @@ impl TerminalSubscription {
             .collect()
     }
 
-    /// The retained PTY hidden-input state. Read it after receiving events to reconcile
-    /// coalesced change notifications. A stopped runtime always returns false.
-    pub fn hidden_input(&self) -> bool {
-        self.state.hidden_input()
+    /// The retained PTY line state. Read it after receiving events to reconcile coalesced change
+    /// notifications. A stopped runtime reports [`LineMode::UNKNOWN`], which hides no input.
+    pub fn line(&self) -> LineState {
+        self.state.line()
     }
 }
 
@@ -39,7 +50,7 @@ struct EventState {
     screen: Option<Arc<ScreenSnapshot>>,
     finished: Option<Result<TerminalSessionExit, TerminalSessionFailure>>,
     stopped: bool,
-    hidden_input: bool,
+    line: LineState,
     client_effects: std::collections::VecDeque<ClientEffectRequest>,
 }
 
@@ -51,7 +62,7 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
             screen: None,
             finished: None,
             stopped: false,
-            hidden_input: false,
+            line: LineState::default(),
             client_effects: std::collections::VecDeque::new(),
         })))
     }
@@ -115,17 +126,25 @@ impl TerminalEventPublisher {
     pub(super) fn close(&self) {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.stopped = true;
-        state.hidden_input = false;
+        stop(&mut state.line);
         state.events.close();
         // The subscriber learns that the session stopped without waiting for another event.
         notify(state);
     }
 
-    pub(super) fn hidden_input(&self) -> bool {
+    pub(super) fn line(&self) -> LineState {
         self.0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .hidden_input
+            .line
+    }
+
+    /// Retains a changed line state and tells the subscriber. It queues no event, so a change
+    /// never displaces a screen waiting in the bounded event queue.
+    pub(super) fn set_line(&self, line: LineState) {
+        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        state.line = line;
+        notify(state);
     }
 
     pub(super) fn try_send(
@@ -179,14 +198,13 @@ impl EventState {
         match event {
             TerminalSessionEvent::Screen(screen) => self.screen = Some(Arc::clone(screen)),
             TerminalSessionEvent::Exited(exit) => {
-                self.hidden_input = false;
+                stop(&mut self.line);
                 self.finished = Some(Ok(exit.clone()));
             }
             TerminalSessionEvent::Failed(failure) => {
-                self.hidden_input = false;
+                stop(&mut self.line);
                 self.finished = Some(Err(failure.clone()));
             }
-            TerminalSessionEvent::HiddenInputChanged(active) => self.hidden_input = *active,
             _ => {}
         }
     }
@@ -228,6 +246,35 @@ mod tests {
             Ok(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         ));
         assert!(replacement.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_line_state_change_notifies_without_displacing_a_queued_screen() {
+        let (events, _receiver) = async_channel::bounded(2);
+        let publisher = TerminalEventPublisher::from(events);
+        let notified = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&notified);
+        let (receiver, _) = publisher.subscribe(Some(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })));
+        let screen = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+        publisher
+            .force_send(TerminalSessionEvent::Screen(Arc::clone(&screen)))
+            .unwrap();
+
+        for epoch in 1..=3 {
+            publisher.set_line(LineState {
+                epoch,
+                mode: LineMode::UNKNOWN,
+            });
+        }
+
+        assert_eq!(publisher.line().epoch, 3);
+        assert_eq!(notified.load(Ordering::Relaxed), 4);
+        assert!(
+            matches!(receiver.try_recv(), Ok(TerminalSessionEvent::Screen(actual)) if Arc::ptr_eq(&actual, &screen))
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

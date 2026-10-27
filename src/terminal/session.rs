@@ -97,7 +97,10 @@ pub enum TerminalSessionEvent {
     ClientEffectsReady,
     /// A complete asynchronous pointer selection is ready for the initiating client.
     SelectionCopyReady,
-    HiddenInputChanged(bool),
+    /// A server Pane's line mode changed. A server Pane's client sends it to its view. A
+    /// Terminal Session retains its line state in its subscription instead, so a change never
+    /// displaces a queued screen.
+    Line(spaceterm_server::pane::LineState),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
     /// A program asked for a Permission Setup.
@@ -1264,7 +1267,7 @@ enum Command {
     ReaderReady(Option<u64>),
     CompressScrollback,
     Shutdown,
-    PollHiddenInput,
+    ReadLineMode,
     CopyOrForward(
         InputModifiers,
         mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
@@ -1338,7 +1341,7 @@ impl fmt::Debug for Command {
             Self::ReaderReady(_) => "ReaderReady",
             Self::CompressScrollback => "CompressScrollback",
             Self::Shutdown => "Shutdown",
-            Self::PollHiddenInput => "PollHiddenInput",
+            Self::ReadLineMode => "ReadLineMode",
             Self::CopyOrForward(..) => "CopyOrForward",
             Self::CompleteClipboard(..) => "CompleteClipboard",
             Self::ClipboardExpired => "ClipboardExpired",
@@ -1814,9 +1817,8 @@ impl TerminalWorker {
                 }
                 self.events.repeat_screen();
                 self.schedules.note_screen_published();
-                self.send_terminal_event(TerminalSessionEvent::HiddenInputChanged(
-                    self.events.hidden_input(),
-                ))
+                // The new subscription reads the retained line state.
+                true
             }
             Command::Key(input) => self.process_key(input),
             Command::ClearScreenAndScrollback => {
@@ -2117,27 +2119,25 @@ impl TerminalWorker {
                 }
             }
             Command::Shutdown => false,
-            Command::PollHiddenInput => self.poll_hidden_input(),
+            Command::ReadLineMode => {
+                self.read_line_mode();
+                true
+            }
         }
     }
 
-    fn poll_hidden_input(&mut self) -> bool {
-        if let Some(active) = self
+    fn read_line_mode(&mut self) {
+        if let Some(state) = self
             .schedules
-            .update_hidden_input(Instant::now(), self.native_pty.hidden_input())
+            .update_line(Instant::now(), self.native_pty.line_mode())
         {
-            send_session_event(
-                &self.events,
-                TerminalSessionEvent::HiddenInputChanged(active),
-            )
-        } else {
-            true
+            self.events.set_line(state);
         }
     }
 
-    fn hidden_input_transition(&mut self) -> bool {
-        self.schedules.hidden_input_transition(Instant::now());
-        self.poll_hidden_input()
+    fn line_transition(&mut self) {
+        self.schedules.line_transition(Instant::now());
+        self.read_line_mode();
     }
 
     fn process_paste_request(
@@ -2418,11 +2418,10 @@ impl TerminalWorker {
                 self.metadata_state.publish(metadata);
                 self.schedules.note_metadata_changed();
             }
-            if !self.flush_ordered_terminal_replies(&mut focus_reports)
-                || !self.hidden_input_transition()
-            {
+            if !self.flush_ordered_terminal_replies(&mut focus_reports) {
                 return false;
             }
+            self.line_transition();
             // A presentable Terminal Session's next Screen carries the metadata wakeup. A separate
             // event first can evict lossless attention when that Screen replaces an older queue
             // entry. Hidden Terminal Sessions receive no Screens, so they still need the wakeup.
@@ -2600,9 +2599,7 @@ impl TerminalWorker {
         if !focused && !self.cancel_pointer_drag() {
             return false;
         }
-        if !self.hidden_input_transition() {
-            return false;
-        }
+        self.line_transition();
         if self.terminal_input_focused == focused {
             return true;
         }
@@ -2646,8 +2643,8 @@ impl TerminalWorker {
         if !action.bytes.is_empty() && !self.write_pty(&action.bytes) {
             return false;
         }
-        if !action.bytes.is_empty() && !self.hidden_input_transition() {
-            return false;
+        if !action.bytes.is_empty() {
+            self.line_transition();
         }
         !action.screen_changed || self.publish_visible_screen_change()
     }

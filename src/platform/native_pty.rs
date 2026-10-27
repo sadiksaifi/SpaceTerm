@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use spaceterm_server::pane::LineMode;
 use thiserror::Error;
 
 use super::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
@@ -129,8 +130,10 @@ pub trait NativePtyOutputSink: Send + Sync + 'static {
 pub trait NativePtyAdapter: Write + Send {
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure>;
-    fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
-        Ok(false)
+    /// The line discipline's flags and whether the shell owns the foreground. Each read costs a
+    /// few microseconds, so callers read it after input, output and focus changes.
+    fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
+        Ok(LineMode::UNKNOWN)
     }
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure>;
 }
@@ -360,8 +363,8 @@ impl NativePtyOwner {
         self.adapter().resize(size)
     }
 
-    pub fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
-        self.adapter().hidden_input()
+    pub fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
+        self.adapter().line_mode()
     }
 
     pub fn wait_for_exit(
@@ -526,8 +529,11 @@ mod tests {
             Ok(())
         }
 
-        fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
-            Ok(true)
+        fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
+            Ok(LineMode {
+                canonical: true,
+                ..LineMode::UNKNOWN
+            })
         }
 
         fn wait_for_exit(
@@ -743,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_delegates_io_geometry_hidden_input_and_exit_outcomes() {
+    fn owner_delegates_io_geometry_line_mode_and_exit_outcomes() {
         let exits = [
             NativePtyExit::Success,
             NativePtyExit::ExitCode(23),
@@ -769,8 +775,9 @@ mod tests {
             owner.resize(size).expect("resize should be delegated");
             assert!(
                 owner
+                    .line_mode()
+                    .expect("line mode should be delegated")
                     .hidden_input()
-                    .expect("hidden input should be delegated")
             );
             owner
                 .write_all(b"input")

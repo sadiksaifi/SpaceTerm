@@ -651,6 +651,8 @@ pub(super) struct PaneLink {
     /// The bound channel's pushed frames and Pane events, waiting for the worker.
     pushed: Option<Arc<super::inbox::Inbox>>,
     notify: Arc<dyn Fn() + Send + Sync>,
+    /// The highest Input serial sent on the bound channel.
+    last_input: std::cell::Cell<u32>,
 }
 
 #[derive(Default)]
@@ -682,7 +684,23 @@ impl PaneLink {
             inbox: Arc::default(),
             pushed: None,
             notify,
+            last_input: std::cell::Cell::new(0),
         }
+    }
+
+    /// The highest Input serial sent on the bound channel, or 0 before any.
+    pub(super) fn last_input(&self) -> u32 {
+        self.last_input.get()
+    }
+
+    /// When the oldest pushed event held by a Development push delay becomes due.
+    pub(super) fn pushed_due(&self) -> Option<std::time::Instant> {
+        self.pushed.as_ref().and_then(|pushed| pushed.due())
+    }
+
+    fn sent(&self, serial: u32) -> u32 {
+        self.last_input.set(self.last_input.get().max(serial));
+        serial
     }
 
     /// Input outcomes and the link's end settle here. Frames and every other Pane event queue in
@@ -756,14 +774,18 @@ impl PaneLink {
         generation: u64,
         events: Vec<InputEvent>,
     ) -> Result<u32, ServerError> {
-        Ok(self.bound(lease)?.input(generation, events)?)
+        Ok(self.sent(self.bound(lease)?.input(generation, events)?))
     }
 
     /// Sends pointer or wheel input. While the link's urgent queue is full the event is dropped:
     /// later motion replaces it, and a stall must not end the Pane's connection.
     fn pointer(&self, lease: Lease, generation: u64, event: InputEvent) -> Result<(), ServerError> {
         match self.bound(lease)?.input(generation, vec![event]) {
-            Ok(_) | Err(LinkError::Busy) => Ok(()),
+            Ok(serial) => {
+                self.sent(serial);
+                Ok(())
+            }
+            Err(LinkError::Busy) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
@@ -805,7 +827,7 @@ impl PaneLink {
     ) -> Result<Reply, ServerError> {
         let channel = self.bound(lease)?;
         let mut received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
-        let serial = send(channel)?;
+        let serial = self.sent(send(channel)?);
         // The sink waits for this lock, so the outcome cannot arrive before its registration.
         received.awaited.insert(serial);
         drop(received);
@@ -820,6 +842,8 @@ impl PaneLink {
             old.detach();
         }
         self.pushed = None;
+        // A new channel numbers its Input from 1.
+        self.last_input.set(0);
         let pushed = super::inbox::Inbox::new(Arc::clone(&self.notify));
         let channel = self.link.open_channel(self.sink(Arc::clone(&pushed)))?;
         let reply = Self::wait(channel.claim(
@@ -1358,6 +1382,7 @@ pub(super) fn present(
             let mut latest_screen = None;
             let mut shown = None;
             let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
+            let mut predictor = prediction::Predictor::default();
             // Cached rows survive a reconnect to the same Terminal Session.
             state
                 .reading
@@ -1383,7 +1408,14 @@ pub(super) fn present(
                     &input,
                     true,
                     &mut |request| {
+                        // A send can wait for a reply, such as a settled paste, so the round trip
+                        // starts before it. Only input that took a new serial is timed.
+                        let (before, sent_at) =
+                            (connection.last_input(), std::time::Instant::now());
                         let reply = send(&presenter, &alive, &mut connection, request)?;
+                        let serial =
+                            Some(connection.last_input()).filter(|serial| *serial > before);
+                        predictor.sent(request, serial, sent_at);
                         if let Request::Resize { size, .. } = request {
                             active_size = *size;
                         }
@@ -1418,6 +1450,7 @@ pub(super) fn present(
                         appearance: &appearance,
                         semantic: &mut semantic,
                         shown: &mut shown,
+                        predictor: &mut predictor,
                     },
                     |delivery| delivered.push(delivery),
                 )?;
@@ -1440,9 +1473,7 @@ pub(super) fn present(
                                     &events,
                                     request,
                                 )?,
-                                PaneEvent::HiddenInput(active) => {
-                                    effects.hidden_input(&state, &events, active)?
-                                }
+                                PaneEvent::Line(line) => effects.line(&state, &events, line)?,
                                 PaneEvent::Accessibility { revision } => {
                                     semantic.note_revision(revision)
                                 }
@@ -1507,6 +1538,11 @@ pub(super) fn present(
                         // worker's focus barrier is acknowledged.
                         ready = true;
                     }
+                    state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .predict(predictor.overlay());
                     let mapping = reading::show(
                         &state,
                         &events,
@@ -1558,15 +1594,17 @@ pub(super) fn present(
                             .unwrap_or_else(|e| e.into_inner())
                             .settle_pages(decoded);
                     }
-                    let turn = state
-                        .reading
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .turn(std::time::Instant::now());
+                    let now = std::time::Instant::now();
+                    predictor.expire(now);
+                    let (turn, predicted) = {
+                        let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                        (reading.turn(now), reading.predict(predictor.overlay()))
+                    };
                     if turn.copy_ready {
                         let _ = events.force_send(TerminalSessionEvent::SelectionCopyReady);
                     }
-                    if turn.present {
+                    // A changed prediction shows without waiting for a frame.
+                    if turn.present || predicted {
                         generation = generation.next();
                         *mapping = reading::show(
                             &state,
@@ -1664,7 +1702,12 @@ pub(super) fn present(
                 }
                 busy |= semantic.can_continue();
                 // The worker waits for pushed events, input, a view change or a Scrollback page.
-                // Only a selection drag past an edge has a deadline.
+                // A selection drag past an edge, an unechoed prediction and a Development push
+                // delay have deadlines.
+                let deadline = [deadline, predictor.deadline(), connection.pushed_due()]
+                    .into_iter()
+                    .flatten()
+                    .min();
                 if !busy {
                     state.wake.wait(deadline);
                 }
@@ -1700,6 +1743,16 @@ pub(super) fn present(
                     state.invalidate();
                 }
                 drain_input(&state, &input);
+                // The frozen screen shows only what the server confirmed.
+                let withdrawn = state
+                    .reading
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .withdraw(generation.next());
+                if let Some(screen) = withdrawn {
+                    generation = generation.next();
+                    let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                }
                 if matches!(error, ServerError::StaleControl | ServerError::Controlled) {
                     takeover = true;
                     paste_unconfirmed = false;

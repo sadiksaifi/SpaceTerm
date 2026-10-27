@@ -273,7 +273,9 @@ fn publication_order_holds_within_l1_and_l0_preempts_l2_chunks() {
         .unwrap();
     outbox.reply(RequestId(2), Ok(ReplyBody::Done)).unwrap();
     outbox.present(channel, Box::new(State(1))).unwrap();
-    outbox.pane(channel, PaneEvent::HiddenInput(true)).unwrap();
+    outbox
+        .pane(channel, PaneEvent::Line(Default::default()))
+        .unwrap();
 
     let mut assembler = Assembler::default();
     let mut order = Vec::new();

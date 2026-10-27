@@ -2608,8 +2608,8 @@ impl TerminalPane {
                 }
                 cx.emit(TerminalPaneEvent::AttentionChanged { unread_count });
             }
-            TerminalSessionEvent::HiddenInputChanged(hidden_input) => {
-                self.hidden_input = hidden_input;
+            TerminalSessionEvent::Line(line) => {
+                self.hidden_input = line.mode.hidden_input();
                 self.sync_secure_input();
             }
             TerminalSessionEvent::PasteUnconfirmed => {

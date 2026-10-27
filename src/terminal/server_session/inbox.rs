@@ -9,7 +9,7 @@ use spaceterm_server::connection::link::{ChannelEvent, ChannelSink};
 use spaceterm_server::protocol::{Frame, PaneEvent};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Wakes a Pane worker. A notification before the wait is never lost.
 #[derive(Default)]
@@ -56,12 +56,36 @@ pub(super) type Notify = Arc<dyn Fn() + Send + Sync>;
 pub(super) struct Inbox {
     queue: Mutex<Queue>,
     notify: Notify,
+    /// How long each event waits before the worker may drain it. Zero outside Development
+    /// builds started with a push delay.
+    delay: Duration,
 }
 
 #[derive(Default)]
 struct Queue {
-    events: VecDeque<ChannelEvent>,
+    /// Each event with the instant the worker may drain it.
+    events: VecDeque<(Instant, ChannelEvent)>,
     overflowed: bool,
+}
+
+/// Holds every pushed event back by `SPACETERM_DEVELOPER_PUSH_DELAY_MS`, so a local Pane shows
+/// a distant server's round trip and its predictive echo. Development builds only.
+#[cfg(feature = "developer-tools")]
+fn push_delay() -> Duration {
+    static DELAY: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::env::var("SPACETERM_DEVELOPER_PUSH_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .map_or(Duration::ZERO, |millis| {
+                Duration::from_millis(u64::from(millis))
+            })
+    })
+}
+
+#[cfg(not(feature = "developer-tools"))]
+fn push_delay() -> Duration {
+    Duration::ZERO
 }
 
 /// The channel broke a bound the client relies on. The worker ends the claim.
@@ -76,18 +100,36 @@ impl From<Overflow> for crate::server_connection::ServerError {
 
 impl Inbox {
     pub(super) fn new(notify: Notify) -> Arc<Self> {
+        Self::delayed(notify, push_delay())
+    }
+
+    fn delayed(notify: Notify, delay: Duration) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::default(),
             notify,
+            delay,
         })
     }
 
-    fn take(&self) -> Result<VecDeque<ChannelEvent>, Overflow> {
+    /// Takes the events that are due, in order.
+    fn take(&self) -> Result<Vec<ChannelEvent>, Overflow> {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         if queue.overflowed {
             return Err(Overflow);
         }
-        Ok(std::mem::take(&mut queue.events))
+        let now = Instant::now();
+        let due = queue
+            .events
+            .iter()
+            .take_while(|(due, _)| *due <= now)
+            .count();
+        Ok(queue.events.drain(..due).map(|(_, event)| event).collect())
+    }
+
+    /// When the oldest held event becomes due, if one waits.
+    pub(super) fn due(&self) -> Option<Instant> {
+        let queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.events.front().map(|(due, _)| *due)
     }
 
     /// Applies every queued event in order. Each frame is applied, then acknowledged. The newest
@@ -116,6 +158,7 @@ impl Inbox {
                     acknowledge(number)?;
                 }
                 ChannelEvent::Pane(event) => {
+                    applier.event(&event);
                     if let Some(screen) = changed.take() {
                         deliver(Delivery::Screen(screen));
                     }
@@ -142,7 +185,7 @@ impl ChannelSink for Inbox {
                 queue.overflowed = true;
                 queue.events.clear();
             } else if !queue.overflowed {
-                queue.events.push_back(event);
+                queue.events.push_back((Instant::now() + self.delay, event));
             }
         }
         (self.notify)();
@@ -155,6 +198,8 @@ pub(super) trait Apply {
     type Error;
     /// Returns the new screen when the frame changed anything visible, otherwise `None`.
     fn apply(&mut self, frame: Frame) -> Result<Option<Self::Screen>, Self::Error>;
+    /// Sees each Pane event in channel order with the frames, before the worker handles it.
+    fn event(&mut self, _event: &PaneEvent) {}
 }
 
 /// What a drain hands to the view and the worker, in channel order.
@@ -216,9 +261,9 @@ impl Demand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spaceterm_server::pane::LineState;
     use spaceterm_server::protocol::{Channel, ScreenUpdate};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     /// Applies a frame's generation as the screen; generation 0 changes nothing visible.
     struct Generations;
@@ -301,7 +346,7 @@ mod tests {
     fn each_delivery_wakes_the_worker() {
         let (inbox, wakes) = inbox();
         inbox.deliver(frame(1, 1));
-        inbox.deliver(ChannelEvent::Pane(PaneEvent::HiddenInput(true)));
+        inbox.deliver(ChannelEvent::Pane(PaneEvent::Line(LineState::default())));
         assert_eq!(wakes.load(Ordering::Relaxed), 2);
     }
 
@@ -335,7 +380,7 @@ mod tests {
         let (inbox, _) = inbox();
         inbox.deliver(frame(1, 1));
         inbox.deliver(ChannelEvent::Pane(PaneEvent::Ended));
-        inbox.deliver(ChannelEvent::Pane(PaneEvent::HiddenInput(true)));
+        inbox.deliver(ChannelEvent::Pane(PaneEvent::Line(LineState::default())));
 
         let (flow, _, delivered) = drain(&inbox);
 
@@ -350,13 +395,32 @@ mod tests {
     fn a_flooding_channel_overflows_instead_of_growing() {
         let (inbox, _) = inbox();
         for _ in 0..=MAX_QUEUED {
-            inbox.deliver(ChannelEvent::Pane(PaneEvent::HiddenInput(true)));
+            inbox.deliver(ChannelEvent::Pane(PaneEvent::Line(LineState::default())));
         }
 
         let (flow, acknowledged, delivered) = drain(&inbox);
 
         assert_eq!(flow, Err(Overflow));
         assert!(acknowledged.is_empty() && delivered.is_empty());
+    }
+
+    #[test]
+    fn a_push_delay_holds_each_event_until_it_is_due() {
+        let delay = Duration::from_millis(40);
+        let inbox = Inbox::delayed(Arc::new(|| {}), delay);
+        let delivered_at = Instant::now();
+        inbox.deliver(frame(1, 1));
+        assert!(inbox.due().is_some_and(|due| due >= delivered_at + delay));
+
+        let (flow, acknowledged, delivered) = drain(&inbox);
+        assert_eq!(flow, Ok(Flow::Open));
+        assert!(acknowledged.is_empty() && delivered.is_empty());
+
+        std::thread::sleep(delay);
+        let (_, acknowledged, delivered) = drain(&inbox);
+        assert_eq!(acknowledged, [1]);
+        assert!(matches!(delivered.as_slice(), [Delivery::Screen(1)]));
+        assert_eq!(inbox.due(), None);
     }
 
     #[test]

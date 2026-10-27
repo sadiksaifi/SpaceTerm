@@ -84,7 +84,7 @@ impl HostCommands for Host {
             Observed::Live(Observation {
                 screen: None,
                 effects: Vec::new(),
-                hidden_input: false,
+                line: pane::LineState::default(),
                 accessibility: None,
             })
         } else {
