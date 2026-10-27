@@ -44,6 +44,8 @@ mod graphics;
 mod graphics_tests;
 #[cfg(test)]
 mod input_tests;
+#[cfg(test)]
+mod served_tests;
 mod metadata;
 #[cfg(test)]
 mod metadata_tests;

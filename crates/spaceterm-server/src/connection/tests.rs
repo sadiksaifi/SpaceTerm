@@ -548,3 +548,50 @@ fn health_comes_from_traffic_and_failure_settles_every_pending_request() {
     );
     assert_eq!(harness.link.check(start + Duration::from_secs(60)), None);
 }
+
+#[test]
+fn a_claim_past_the_channel_bound_is_refused_and_the_connection_continues() {
+    use crate::protocol::frame::encode_client;
+    use crate::protocol::{Claim, ClientMessage, Request};
+    let mut harness = Harness::new(None);
+    let mut channels = Vec::new();
+    for _ in 0..crate::protocol::limits::MAX_CHANNELS {
+        channels.push(claimed(&mut harness).0);
+    }
+    // The link never opens more channels, so a claim past the bound comes from another client.
+    let message = ClientMessage::Request(Box::new(Request {
+        id: RequestId(9999),
+        operation: Operation::Claim(Claim {
+            channel: Channel(10_000),
+            attachment: attachment(),
+            pane: [2; 32],
+            claim: AttachmentClaim::Select { explicit: true },
+            size: size(),
+            style: None,
+        }),
+    }));
+    let frame = encode_client(&message).unwrap().frames.remove(0);
+    let received = harness.connection.receive(
+        crate::protocol::RawFrame::parse(&frame).unwrap(),
+        Instant::now(),
+    );
+    assert!(
+        matches!(received, Ok(None)),
+        "the claim is refused, not fatal"
+    );
+    let outbox = harness.connection.outbox().clone();
+    let mut assembler = crate::protocol::frame::Assembler::default();
+    let mut refused = false;
+    while let Some((frame, _)) = outbox.next_frame() {
+        if let Some(crate::protocol::ServerMessage::Reply(reply)) = assembler
+            .server(crate::protocol::RawFrame::parse(&frame).unwrap())
+            .unwrap()
+        {
+            refused |=
+                reply.id == RequestId(9999) && matches!(reply.result, Err(Refusal::Capacity));
+        }
+    }
+    assert!(refused);
+    assert!(!outbox.is_closing());
+    drop(channels);
+}

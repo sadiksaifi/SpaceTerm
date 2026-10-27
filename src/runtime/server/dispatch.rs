@@ -363,6 +363,18 @@ impl HostCommands for DevelopmentPaneHost {
         self.handle(device, connection, request)
             .unwrap_or_else(Reply::Refused)
     }
+    fn lease_live(&self, lease: &Lease) -> bool {
+        self.pane.as_ref().is_some_and(|pane| pane.lease == *lease)
+    }
+    fn unbound(&mut self, connection: [u8; 32], lease: &Lease) {
+        if let Some(pane) = &mut self.pane
+            && pane.lease == *lease
+            && pane.lease.connection == connection
+        {
+            pane.invalidate_input();
+            pane.connected = false;
+        }
+    }
     fn disconnected(&mut self, connection: [u8; 32]) {
         self.directories.cancel_connection(connection);
         if let Some(pane) = &mut self.pane
@@ -424,6 +436,14 @@ pub trait HostCommands: Send {
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
+    /// Whether `lease` still names a Pane's Terminal Session, ended or not, under its current
+    /// control. A channel bound to a lease that is not live is closed.
+    fn lease_live(&self, _lease: &Lease) -> bool {
+        true
+    }
+    /// The connection's channel bound to `lease` is gone, as if the connection had ended for that
+    /// Pane: its input state resets and the next claim starts afresh.
+    fn unbound(&mut self, _connection: [u8; 32], _lease: &Lease) {}
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
 }
@@ -447,6 +467,8 @@ struct Connection {
 
 /// A channel bound to the lease its claim attached.
 struct Bound {
+    /// The Pane the claim named.
+    pane: [u8; 32],
     lease: Lease,
     paste: Option<PendingPaste>,
 }
@@ -489,7 +511,31 @@ impl<H: HostCommands> Served<H> {
         request: impl FnOnce(Lease) -> Request,
     ) -> Result<ReplyBody, Refusal> {
         let lease = self.lease(peer, channel)?;
-        body(self.command(peer, request(lease)), interim)
+        let result = body(self.command(peer, request(lease)), interim);
+        // A Session that ended, or a lease the host no longer knows, frees the channel.
+        if matches!(result, Ok(ReplyBody::Interim(InterimReply::Ended)))
+            || !self.host.lease_live(&lease)
+        {
+            self.unbind(peer, channel);
+        }
+        result
+    }
+
+    /// Closes every channel whose lease the host no longer knows: a Session that ended and
+    /// reported it, a closed Pane, End All Sessions, or control another client took.
+    fn sweep(&mut self) {
+        for connection in self.connections.values_mut() {
+            let dead: Vec<_> = connection
+                .channels
+                .iter()
+                .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
+                .map(|(channel, _)| *channel)
+                .collect();
+            for channel in dead {
+                connection.channels.remove(&channel);
+                connection.outbox.close(channel);
+            }
+        }
     }
 
     /// Forgets the channel's binding and closes it in the outbox.
@@ -502,6 +548,23 @@ impl<H: HostCommands> Served<H> {
 
     fn claim(&mut self, peer: &Peer, claim: Claim) -> Result<ReplyBody, Refusal> {
         let channel = claim.channel;
+        let pane = claim.pane;
+        // A new claim of a Pane this connection already holds replaces that binding. The host
+        // resets the Pane's input state, focus and transfers as a disconnect would, so recovery
+        // over the shared connection starts afresh.
+        if let Some(connection) = self.connections.get_mut(&peer.connection) {
+            let replaced: Vec<_> = connection
+                .channels
+                .iter()
+                .filter(|(_, bound)| bound.pane == pane)
+                .map(|(channel, bound)| (*channel, bound.lease))
+                .collect();
+            for (old, lease) in replaced {
+                connection.channels.remove(&old);
+                connection.outbox.close(old);
+                self.host.unbound(peer.connection, &lease);
+            }
+        }
         let reply = self.command(
             peer,
             Request::ClaimPane {
@@ -515,7 +578,7 @@ impl<H: HostCommands> Served<H> {
         let result = body(reply, false);
         match &result {
             Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => {
-                self.bind(peer, channel, *lease)?
+                self.bind(peer, channel, pane, *lease)?
             }
             // A claim that ends without binding leaves the channel closed.
             _ => {
@@ -530,7 +593,13 @@ impl<H: HostCommands> Served<H> {
     /// Binds `channel` to the lease its claim attached and opens it in the connection's outbox.
     /// A Pane is bound to at most one channel of a connection, so an older binding of the same
     /// Terminal Session closes.
-    fn bind(&mut self, peer: &Peer, channel: Channel, lease: Lease) -> Result<(), Refusal> {
+    fn bind(
+        &mut self,
+        peer: &Peer,
+        channel: Channel,
+        pane: [u8; 32],
+        lease: Lease,
+    ) -> Result<(), Refusal> {
         let Some(connection) = self.connections.get_mut(&peer.connection) else {
             return Err(Refusal::Stale);
         };
@@ -548,9 +617,14 @@ impl<H: HostCommands> Served<H> {
             .outbox
             .open(channel)
             .map_err(|_| Refusal::Capacity)?;
-        connection
-            .channels
-            .insert(channel, Bound { lease, paste: None });
+        connection.channels.insert(
+            channel,
+            Bound {
+                pane,
+                lease,
+                paste: None,
+            },
+        );
         Ok(())
     }
 
@@ -975,7 +1049,9 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.command(peer, Request::Acknowledge { sequence });
     }
     fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
-        self.host.tick(now)
+        let next = self.host.tick(now);
+        self.sweep();
+        next
     }
     fn disconnected(&mut self, peer: &Peer) {
         self.connections.remove(&peer.connection);
