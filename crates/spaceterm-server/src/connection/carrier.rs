@@ -64,13 +64,15 @@ pub struct Flush {
 
 /// `read` becomes readable when `receive` may return a frame, or when a `Full` carrier has room.
 /// `write`, when present, becomes writable when buffered bytes can make progress. `progress`, when
-/// present, becomes readable when accepted frames made progress; a carrier whose runtime writes on
-/// another thread reports it instead of `write`.
+/// present, becomes readable when accepted frames can make progress, for a carrier whose writes
+/// wait on what it receives. `deadline`, when present, is when the carrier must be called again
+/// even without readiness, such as a retransmission timer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Readiness {
     pub read: RawFd,
     pub write: Option<RawFd>,
     pub progress: Option<RawFd>,
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// Classifications only. Native errors and peer bytes never cross this boundary.

@@ -1,116 +1,64 @@
-//! The QUIC carrier prototype of #671: iroh on direct addresses only.
+//! The QUIC carrier: noq-proto, n0's fork of quinn's protocol state machine, driven on the
+//! connection's own I/O thread.
 //!
-//! - **No n0 services.** Endpoints use iroh's minimal preset: no relay, no address lookup and no
-//!   port mapping, so nothing contacts n0's servers. A client dials the server's IP addresses.
-//! - **Pinned keys.** An endpoint's iroh key is its pinned Ed25519 key: the server's pin public
-//!   key, or the device credential. iroh's TLS proves both, so the client reaches only the pinned
-//!   server and the server learns the device key before admission. Pairing proofs and admission
-//!   still run on top, unchanged.
+//! - **No runtime.** noq-proto does no I/O. Each connection's thread reads and writes UDP itself,
+//!   so a frame crosses no other thread on the client. On the server one UDP socket carries every
+//!   connection: a thread of the listener reads it and hands each datagram to its connection's
+//!   thread, which sends its own datagrams directly.
+//! - **Pinned keys.** TLS 1.3 runs inside QUIC with the same pinned server certificate as before.
+//!   The client presents a self-signed certificate of its device key, which the server compares
+//!   with the enrolled key. The callers build both rustls configurations.
 //! - **Streams.** L0 is the bidirectional stream the server opens for pairing and admission. Each
 //!   side opens one unidirectional stream for L1 and one for L2 when it first sends at that level;
 //!   such a stream starts with its level byte. Frames follow back to back with their length
 //!   prefix, as on the Unix socket. A lost packet stalls only its own level.
-//! - **Readiness.** iroh is asynchronous, so a tokio runtime with one worker lives inside this
-//!   module. The connection's I/O thread never waits on it: tasks move frames through shared
-//!   queues and ring a wake descriptor, which [`Carrier::readiness`] reports as readable.
-use super::Wake;
+//! - **Readiness.** The carrier reports its socket or bell as readable when datagrams arrive, and
+//!   QUIC's next timer as a deadline. Write progress needs incoming acknowledgements, so the same
+//!   descriptor is the progress descriptor.
 use super::carrier::{Carrier, CarrierError, Flush, Offer, Priority, Readiness};
 use crate::protocol::frame::FrameReader;
 use crate::protocol::{RawFrame, limits};
-use iroh::endpoint::{
-    AckFrequencyConfig, Connection, Controller, ControllerFactory, QuicTransportConfig, RecvStream,
-    RttEstimator, SendStream, VarInt, presets,
+use bytes::BytesMut;
+use noq_proto::congestion::{Controller, ControllerFactory, CubicConfig};
+use noq_proto::{
+    AckFrequencyConfig, ClientConfig, Connection, ConnectionError, ConnectionEvent,
+    ConnectionHandle, DatagramEvent, Dir, Endpoint, EndpointConfig, EndpointEvent, Event,
+    FourTuple, RttEstimator, ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt,
 };
-use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
-use std::collections::VecDeque;
-use std::io::{Read, Write};
-use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
+use std::collections::{HashMap, VecDeque};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, UdpSocket};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tokio::sync::{Notify, mpsc};
 
-/// The protocol's own ALPN, so no other iroh protocol is accepted on this endpoint.
+/// The protocol's own ALPN.
 pub const ALPN: &[u8] = b"spaceterm/2";
-/// Received frame bytes that `receive` has not taken yet. Readers pause above it, so the peer's
-/// sending waits on QUIC flow control.
+/// Received frame bytes that `receive` has not taken yet. Above it the carrier stops reading
+/// streams, so the peer's sending waits on QUIC flow control.
 const INBOUND_BYTES: usize = 2 * limits::MAX_FRAME_BYTES;
-const READ_CHUNK: usize = 64 * 1024;
-/// Handshakes the server runs at once, and connections that wait for the host to take them.
+/// Largest UDP payload read at once.
+const DATAGRAM_BYTES: usize = 65_536;
+/// Connections whose handshake started and that the host has not taken yet.
 const MAX_PENDING: usize = 32;
-const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
+/// The server name every client sends. The pinned certificate, not a name, authenticates.
+pub const SERVER_NAME: &str = "spaceterm.invalid";
 
 /// Failures before the carrier exists. Classifications only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum QuicError {
-    #[error("the QUIC runtime is unavailable")]
-    Runtime,
-    #[error("the key is not an Ed25519 key")]
-    Key,
+    #[error("the QUIC configuration is invalid")]
+    Configuration,
     #[error("the QUIC connection failed")]
     Transport,
     #[error("the QUIC connection timed out")]
     TimedOut,
+    #[error("the peer closed the QUIC connection")]
+    Closed,
 }
 
-fn runtime() -> Result<&'static tokio::runtime::Runtime, QuicError> {
-    static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .thread_name("spaceterm-quic")
-                .enable_all()
-                .build()
-                .ok()
-        })
-        .as_ref()
-        .ok_or(QuicError::Runtime)
-}
-
-/// Runs `future` on the runtime from a thread outside it, until `deadline`.
-fn block_on<T>(
-    deadline: Instant,
-    future: impl Future<Output = Result<T, QuicError>>,
-) -> Result<T, QuicError> {
-    let runtime = runtime()?;
-    runtime.block_on(async {
-        tokio::time::timeout_at(deadline.into(), future)
-            .await
-            .unwrap_or(Err(QuicError::TimedOut))
-    })
-}
-
-/// The iroh secret key of an Ed25519 PKCS#8 document of version 1 or 2, as ring writes it. It
-/// must match `public`, the key the pin or pairing already holds.
-pub fn secret_key(pkcs8: &[u8], public: &[u8; 32]) -> Result<SecretKey, QuicError> {
-    // SEQUENCE { INTEGER version, AlgorithmIdentifier { id-Ed25519 }, OCTET STRING { OCTET
-    // STRING seed } ... }: the seed's position is fixed for both versions.
-    const ALGORITHM: [u8; 11] = [
-        0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
-    ];
-    let header = pkcs8.get(..16).ok_or(QuicError::Key)?;
-    if header[0] != 0x30
-        || usize::from(header[1]) + 2 != pkcs8.len()
-        || header[2..4] != [0x02, 0x01]
-        || header[4] > 1
-        || header[5..] != ALGORITHM
-    {
-        return Err(QuicError::Key);
-    }
-    let seed: [u8; 32] = pkcs8
-        .get(16..48)
-        .and_then(|seed| seed.try_into().ok())
-        .ok_or(QuicError::Key)?;
-    let secret = SecretKey::from_bytes(&seed);
-    if secret.public().as_bytes() != public {
-        return Err(QuicError::Key);
-    }
-    Ok(secret)
-}
-
-fn transport() -> QuicTransportConfig {
+fn transport() -> Arc<TransportConfig> {
     // Terminal traffic is a few packets at a time, so most losses are tail losses that only a
     // probe timeout recovers. Asking the peer to acknowledge every packet at once keeps its
     // acknowledgement delay out of that timeout.
@@ -118,13 +66,34 @@ fn transport() -> QuicTransportConfig {
     acknowledgements
         .ack_eliciting_threshold(VarInt::from_u32(0))
         .max_ack_delay(Some(Duration::from_millis(1)));
-    QuicTransportConfig::builder()
+    let mut config = TransportConfig::default();
+    config
         // The server opens the one L0 stream; each side opens one stream per other level.
         .max_concurrent_bidi_streams(VarInt::from_u32(1))
         .max_concurrent_uni_streams(VarInt::from_u32(2))
         .ack_frequency_config(Some(acknowledgements))
         .congestion_controller_factory(Arc::new(Floored(Arc::default())))
-        .build()
+        // Routers forget idle UDP flows after about 30 seconds.
+        .keep_alive_interval(Some(Duration::from_secs(10)));
+    Arc::new(config)
+}
+
+/// A client configuration from rustls, which must offer [`ALPN`].
+pub fn client_config(tls: rustls::ClientConfig) -> Result<ClientConfig, QuicError> {
+    let crypto = noq_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(tls))
+        .map_err(|_| QuicError::Configuration)?;
+    let mut config = ClientConfig::new(Arc::new(crypto));
+    config.transport_config(transport());
+    Ok(config)
+}
+
+/// A server configuration from rustls, which must offer [`ALPN`].
+pub fn server_config(tls: rustls::ServerConfig) -> Result<Arc<ServerConfig>, QuicError> {
+    let crypto = noq_proto::crypto::rustls::QuicServerConfig::try_from(Arc::new(tls))
+        .map_err(|_| QuicError::Configuration)?;
+    let mut config = ServerConfig::with_crypto(Arc::new(crypto));
+    config.transport_config(transport());
+    Ok(Arc::new(config))
 }
 
 /// Packets the congestion window always allows.
@@ -135,7 +104,7 @@ const FLOOR_PACKETS: u64 = 10;
 /// two packets and a screen of output then waits a round trip. The floor equals the usual initial
 /// window.
 #[derive(Debug)]
-struct Floored(Arc<noq_proto::congestion::CubicConfig>);
+struct Floored(Arc<CubicConfig>);
 
 impl ControllerFactory for Floored {
     fn build(self: Arc<Self>, now: Instant, current_mtu: u16) -> Box<dyn Controller> {
@@ -225,92 +194,659 @@ impl Controller for Floor {
     }
 }
 
-async fn bind(
-    secret: SecretKey,
-    address: Option<SocketAddr>,
-    alpns: Vec<Vec<u8>>,
-) -> Result<Endpoint, QuicError> {
-    let mut builder = Endpoint::builder(presets::Minimal)
-        .secret_key(secret)
-        .alpns(alpns)
-        .transport_config(transport());
-    if let Some(address) = address {
-        builder = builder
-            .clear_ip_transports()
-            .bind_addr(address)
-            .map_err(|_| QuicError::Transport)?;
+fn nonblocking_socket(address: SocketAddr) -> Result<UdpSocket, QuicError> {
+    let socket = UdpSocket::bind(address).map_err(|_| QuicError::Transport)?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|_| QuicError::Transport)?;
+    Ok(socket)
+}
+
+fn bell() -> Result<(UnixStream, UnixStream), QuicError> {
+    let (bell, ring) = UnixStream::pair().map_err(|_| QuicError::Transport)?;
+    bell.set_nonblocking(true)
+        .and_then(|()| ring.set_nonblocking(true))
+        .map_err(|_| QuicError::Transport)?;
+    Ok((bell, ring))
+}
+
+fn ring(ring: &UnixStream) {
+    // A full socket already wakes the thread, so a refused byte is harmless.
+    let _ = (&*ring).write(&[1]);
+}
+
+fn drain_bell(bell: &UnixStream) {
+    let mut bytes = [0; 64];
+    while matches!((&*bell).read(&mut bytes), Ok(count) if count > 0) {}
+}
+
+/// The server's endpoint and the connections it routes datagrams to.
+struct Server {
+    endpoint: Endpoint,
+    routes: HashMap<ConnectionHandle, Arc<Route>>,
+}
+
+/// Datagrams for one server connection, waiting for its thread.
+struct Route {
+    events: Mutex<VecDeque<ConnectionEvent>>,
+    ring: UnixStream,
+}
+
+struct Shared {
+    server: Mutex<Server>,
+    socket: Arc<UdpSocket>,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Server> {
+        self.server.lock().unwrap_or_else(|e| e.into_inner())
     }
-    builder.bind().await.map_err(|_| QuicError::Transport)
+}
+
+/// The server's UDP socket and endpoint. A thread of its own reads every datagram and routes it
+/// to its connection's thread. New connections wait in a queue; the host takes them with
+/// [`QuicListener::accept`] after the wake it set rings.
+pub struct QuicListener {
+    demux: Arc<Demux>,
+    stop: UnixStream,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct Demux {
+    shared: Arc<Shared>,
+    config: Arc<ServerConfig>,
+    accepted: Mutex<VecDeque<QuicStream>>,
+    wake: Mutex<Option<Arc<dyn super::Wake>>>,
+}
+
+impl QuicListener {
+    pub fn bind(address: SocketAddr, config: Arc<ServerConfig>) -> Result<Self, QuicError> {
+        let socket = Arc::new(nonblocking_socket(address)?);
+        let endpoint = Endpoint::new(
+            Arc::new(EndpointConfig::default()),
+            Some(Arc::clone(&config)),
+            true,
+        );
+        let demux = Arc::new(Demux {
+            shared: Arc::new(Shared {
+                server: Mutex::new(Server {
+                    endpoint,
+                    routes: HashMap::new(),
+                }),
+                socket,
+            }),
+            config,
+            accepted: Mutex::default(),
+            wake: Mutex::default(),
+        });
+        let (stopped, stop) = bell()?;
+        let running = Arc::clone(&demux);
+        let thread = std::thread::Builder::new()
+            .name("spaceterm-quic".into())
+            .spawn(move || running.run(&stopped))
+            .map_err(|_| QuicError::Transport)?;
+        Ok(Self {
+            demux,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// Rings `wake` whenever a new connection waits.
+    pub fn set_wake(&self, wake: Arc<dyn super::Wake>) {
+        *self.demux.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
+    }
+
+    /// The next new connection. Its own thread completes the handshake.
+    pub fn accept(&self) -> Option<QuicStream> {
+        self.demux
+            .accepted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+}
+
+impl Drop for QuicListener {
+    fn drop(&mut self) {
+        ring(&self.stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Demux {
+    /// Waits on the socket and the stop bell, and routes every datagram.
+    fn run(&self, stopped: &UnixStream) {
+        let mut buffer = vec![0; DATAGRAM_BYTES];
+        let mut send = Vec::new();
+        loop {
+            let mut descriptors = [
+                libc::pollfd {
+                    fd: self.shared.socket.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: stopped.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: `descriptors` is a live, writable array of `pollfd` for the whole call.
+            unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
+            if descriptors[1].revents != 0 {
+                return;
+            }
+            self.route(&mut buffer, &mut send);
+        }
+    }
+
+    fn send(&self, bytes: &[u8], destination: SocketAddr) {
+        let _ = self.shared.socket.send_to(bytes, destination);
+    }
+
+    /// Reads every waiting datagram and hands it to its connection, or starts a new one.
+    fn route(&self, buffer: &mut [u8], send: &mut Vec<u8>) {
+        let mut arrived = false;
+        loop {
+            let (count, remote) = match self.shared.socket.recv_from(buffer) {
+                Ok(received) => received,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                // WouldBlock, or a transient error such as an ICMP report: try again later.
+                Err(_) => break,
+            };
+            let now = Instant::now();
+            let data = BytesMut::from(&buffer[..count]);
+            let mut server = self.shared.lock();
+            send.clear();
+            let event = server
+                .endpoint
+                .handle(now, FourTuple::new(remote, None), None, data, send);
+            match event {
+                Some(DatagramEvent::ConnectionEvent(handle, event)) => {
+                    if let Some(route) = server.routes.get(&handle) {
+                        route
+                            .events
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push_back(event);
+                        ring(&route.ring);
+                    }
+                }
+                Some(DatagramEvent::NewConnection(incoming)) => {
+                    let waiting = self
+                        .accepted
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .len();
+                    if waiting >= MAX_PENDING {
+                        let transmit = server.endpoint.refuse(incoming, send);
+                        self.send(&send[..transmit.size], transmit.destination);
+                        continue;
+                    }
+                    match server.endpoint.accept(
+                        incoming,
+                        now,
+                        send,
+                        Some(Arc::clone(&self.config)),
+                    ) {
+                        Ok((handle, connection)) => {
+                            let Ok((bell, ringer)) = bell() else {
+                                server
+                                    .endpoint
+                                    .handle_event(handle, EndpointEvent::drained());
+                                continue;
+                            };
+                            let route = Arc::new(Route {
+                                events: Mutex::default(),
+                                ring: ringer,
+                            });
+                            server.routes.insert(handle, Arc::clone(&route));
+                            drop(server);
+                            self.accepted
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push_back(QuicStream::new(Driver {
+                                    connection,
+                                    handle,
+                                    socket: Arc::clone(&self.shared.socket),
+                                    peer: None,
+                                    side: Side::Server {
+                                        shared: Arc::clone(&self.shared),
+                                        route,
+                                        bell,
+                                    },
+                                    state: DriverState::new(),
+                                }));
+                            arrived = true;
+                        }
+                        Err(error) => {
+                            if let Some(transmit) = error.response {
+                                self.send(&send[..transmit.size], transmit.destination);
+                            }
+                        }
+                    }
+                }
+                Some(DatagramEvent::Response(transmit)) => {
+                    self.send(&send[..transmit.size], transmit.destination);
+                }
+                None => {}
+            }
+        }
+        if arrived && let Some(wake) = &*self.wake.lock().unwrap_or_else(|e| e.into_inner()) {
+            wake.wake();
+        }
+    }
+}
+
+/// Where a connection's datagrams come from.
+enum Side {
+    /// A client owns its socket and endpoint.
+    Client {
+        endpoint: Box<Endpoint>,
+        buffer: Vec<u8>,
+    },
+    /// A server connection receives what the listener routes to it, and rings its bell.
+    Server {
+        shared: Arc<Shared>,
+        route: Arc<Route>,
+        bell: UnixStream,
+    },
+}
+
+/// What the connection's events reported.
+struct DriverState {
+    connected: bool,
+    lost: Option<CarrierError>,
+    /// Send streams whose data the peer acknowledged after this end finished them.
+    finished: usize,
+    /// A datagram that would have blocked, retried before any other.
+    stashed: Option<(SocketAddr, Vec<u8>)>,
+    transmit: Vec<u8>,
+}
+
+impl DriverState {
+    fn new() -> Self {
+        Self {
+            connected: false,
+            lost: None,
+            finished: 0,
+            stashed: None,
+            transmit: Vec::new(),
+        }
+    }
+}
+
+/// Sends one datagram. A client's socket is connected to its server, which keeps the kernel's
+/// route lookup off every send; macOS refuses an explicit address on a connected socket.
+fn send(
+    socket: &UdpSocket,
+    peer: Option<SocketAddr>,
+    bytes: &[u8],
+    destination: SocketAddr,
+) -> std::io::Result<usize> {
+    if peer == Some(destination) {
+        socket.send(bytes)
+    } else {
+        socket.send_to(bytes, destination)
+    }
+}
+
+/// One QUIC connection and its I/O, driven only when its thread calls it.
+struct Driver {
+    connection: Connection,
+    handle: ConnectionHandle,
+    socket: Arc<UdpSocket>,
+    /// The server a client's socket is connected to.
+    peer: Option<SocketAddr>,
+    side: Side,
+    state: DriverState,
+}
+
+impl Driver {
+    /// The descriptor that becomes readable when datagrams arrive for this connection.
+    fn descriptor(&self) -> RawFd {
+        match &self.side {
+            Side::Client { .. } => self.socket.as_raw_fd(),
+            Side::Server { bell, .. } => bell.as_raw_fd(),
+        }
+    }
+
+    /// Takes arrived datagrams, runs expired timers, exchanges endpoint events, records the
+    /// connection's events and sends what it has.
+    fn pump(&mut self) {
+        let now = Instant::now();
+        self.ingest(now);
+        self.advance(now);
+    }
+
+    /// Like [`Self::pump`] without taking datagrams, so the descriptor stays readable for the
+    /// I/O thread's next `receive`.
+    fn advance(&mut self, now: Instant) {
+        if self
+            .connection
+            .poll_timeout()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.connection.handle_timeout(now);
+        }
+        self.endpoint_events();
+        while let Some(event) = self.connection.poll() {
+            match event {
+                Event::Connected => self.state.connected = true,
+                Event::ConnectionLost { reason } => {
+                    self.state.lost.get_or_insert(match reason {
+                        ConnectionError::ApplicationClosed(_)
+                        | ConnectionError::ConnectionClosed(_)
+                        | ConnectionError::LocallyClosed => CarrierError::Closed,
+                        _ => CarrierError::Failed,
+                    });
+                }
+                Event::Stream(StreamEvent::Finished { .. }) => self.state.finished += 1,
+                _ => {}
+            }
+        }
+        self.transmit(now);
+    }
+
+    fn ingest(&mut self, now: Instant) {
+        match &mut self.side {
+            Side::Client { endpoint, buffer } => loop {
+                let (count, remote) = match self.socket.recv_from(buffer) {
+                    Ok(received) => received,
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
+                let data = BytesMut::from(&buffer[..count]);
+                self.state.transmit.clear();
+                match endpoint.handle(
+                    now,
+                    FourTuple::new(remote, None),
+                    None,
+                    data,
+                    &mut self.state.transmit,
+                ) {
+                    Some(DatagramEvent::ConnectionEvent(handle, event))
+                        if handle == self.handle =>
+                    {
+                        self.connection.handle_event(event);
+                    }
+                    Some(DatagramEvent::Response(transmit)) => {
+                        let _ = send(
+                            &self.socket,
+                            self.peer,
+                            &self.state.transmit[..transmit.size],
+                            transmit.destination,
+                        );
+                    }
+                    _ => {}
+                }
+            },
+            Side::Server { route, bell, .. } => {
+                drain_bell(bell);
+                let events: Vec<_> = route
+                    .events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drain(..)
+                    .collect();
+                for event in events {
+                    self.connection.handle_event(event);
+                }
+            }
+        }
+    }
+
+    fn endpoint_events(&mut self) {
+        while let Some(event) = self.connection.poll_endpoint_events() {
+            let reply = match &mut self.side {
+                Side::Client { endpoint, .. } => endpoint.handle_event(self.handle, event),
+                Side::Server { shared, .. } => {
+                    let drained = event.is_drained();
+                    let mut server = shared.lock();
+                    let reply = server.endpoint.handle_event(self.handle, event);
+                    if drained {
+                        server.routes.remove(&self.handle);
+                    }
+                    reply
+                }
+            };
+            if let Some(event) = reply {
+                self.connection.handle_event(event);
+            }
+        }
+    }
+
+    /// Sends datagrams until QUIC has none or the socket would block.
+    fn transmit(&mut self, now: Instant) {
+        if let Some((destination, bytes)) = self.state.stashed.take() {
+            match send(&self.socket, self.peer, &bytes, destination) {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    self.state.stashed = Some((destination, bytes));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        loop {
+            self.state.transmit.clear();
+            let Some(transmit) = self.connection.poll_transmit(
+                now,
+                std::num::NonZeroUsize::MIN,
+                &mut self.state.transmit,
+            ) else {
+                return;
+            };
+            let bytes = &self.state.transmit[..transmit.size];
+            match send(&self.socket, self.peer, bytes, transmit.destination) {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    self.state.stashed = Some((transmit.destination, bytes.to_vec()));
+                    return;
+                }
+                // A lost datagram is QUIC's to recover.
+                _ => {}
+            }
+        }
+    }
+
+    /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
+    fn wait(&self, deadline: Instant) -> Result<(), QuicError> {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(QuicError::TimedOut);
+        }
+        let until = self
+            .connection
+            .poll_timeout()
+            .map_or(deadline, |timer| timer.min(deadline));
+        let _ = super::io::wait_fd(self.descriptor(), self.state.stashed.is_some(), until);
+        Ok(())
+    }
+
+    fn check(&self) -> Result<(), QuicError> {
+        match self.state.lost {
+            Some(CarrierError::Closed) => Err(QuicError::Closed),
+            Some(_) => Err(QuicError::Transport),
+            None => Ok(()),
+        }
+    }
+
+    /// The certificates the peer presented in the handshake.
+    fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        self.connection
+            .crypto_session()
+            .peer_identity()?
+            .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+            .ok()
+            .map(|certificates| *certificates)
+    }
+}
+
+impl Drop for Driver {
+    /// Closes the connection, sends the close, and makes a server forget it at once.
+    fn drop(&mut self) {
+        let now = Instant::now();
+        if !self.connection.is_closed() {
+            self.connection
+                .close(now, VarInt::from_u32(0), bytes::Bytes::new());
+        }
+        self.transmit(now);
+        if let Side::Server { shared, .. } = &self.side {
+            let mut server = shared.lock();
+            server
+                .endpoint
+                .handle_event(self.handle, EndpointEvent::drained());
+            server.routes.remove(&self.handle);
+        }
+    }
 }
 
 /// The L0 stream of a QUIC connection before admission: the pairing exchange and the admission
-/// preamble. [`QuicStream::into_carrier`] turns it into the connection's carrier.
+/// preamble, each wait under a deadline. [`QuicStream::into_carrier`] turns it into the
+/// connection's carrier.
 pub struct QuicStream {
-    connection: Connection,
-    send: SendStream,
-    recv: RecvStream,
-    /// A client's own endpoint, which lives as long as its connection.
-    endpoint: Option<Endpoint>,
+    driver: Driver,
+    l0: Option<StreamId>,
+    /// L0 bytes read past the last preamble message, which the carrier reads first.
+    read: Vec<u8>,
 }
 
 impl QuicStream {
-    /// Dials the server whose iroh key is `server` at `addresses` and waits for its L0 stream.
+    fn new(driver: Driver) -> Self {
+        Self {
+            driver,
+            l0: None,
+            read: Vec::new(),
+        }
+    }
+
+    /// Dials `addresses` in turn until one completes the handshake, then waits for the server's
+    /// L0 stream.
     pub fn connect(
-        secret: SecretKey,
-        server: &[u8; 32],
+        config: ClientConfig,
         addresses: &[SocketAddr],
         deadline: Instant,
     ) -> Result<Self, QuicError> {
-        let server = PublicKey::from_bytes(server).map_err(|_| QuicError::Key)?;
-        let address = EndpointAddr::new(server).with_addrs(
-            addresses
-                .iter()
-                .map(|address| iroh::TransportAddr::Ip(*address)),
-        );
-        block_on(deadline, async move {
-            let endpoint = bind(secret, None, Vec::new()).await?;
-            let connection = endpoint
-                .connect(address, ALPN)
-                .await
-                .map_err(|_| QuicError::Transport)?;
-            let (send, recv) = connection
-                .accept_bi()
-                .await
-                .map_err(|_| QuicError::Transport)?;
-            send.set_priority(level_priority(Priority::L0))
-                .map_err(|_| QuicError::Transport)?;
-            Ok(Self {
+        let mut last = QuicError::Transport;
+        for address in addresses {
+            let local: SocketAddr = if address.is_ipv4() {
+                (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+            } else {
+                (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+            };
+            let socket = nonblocking_socket(local)?;
+            if socket.connect(address).is_err() {
+                continue;
+            }
+            let socket = Arc::new(socket);
+            let mut endpoint = Box::new(Endpoint::new(
+                Arc::new(EndpointConfig::default()),
+                None,
+                true,
+            ));
+            let Ok((handle, connection)) =
+                endpoint.connect(Instant::now(), config.clone(), *address, SERVER_NAME)
+            else {
+                continue;
+            };
+            let driver = Driver {
                 connection,
-                send,
-                recv,
-                endpoint: Some(endpoint),
-            })
-        })
+                handle,
+                socket,
+                peer: Some(*address),
+                side: Side::Client {
+                    endpoint,
+                    buffer: vec![0; DATAGRAM_BYTES],
+                },
+                state: DriverState::new(),
+            };
+            let mut stream = Self::new(driver);
+            match stream.open_l0(deadline) {
+                Ok(()) => return Ok(stream),
+                Err(error) => last = error,
+            }
+        }
+        Err(last)
     }
 
-    /// The peer's iroh key, which its TLS handshake proved.
-    pub fn remote_key(&self) -> [u8; 32] {
-        *self.connection.remote_id().as_bytes()
+    /// The server opens L0 once the handshake completes; the client accepts it when its first
+    /// bytes arrive.
+    fn open_l0(&mut self, deadline: Instant) -> Result<(), QuicError> {
+        loop {
+            self.driver.pump();
+            self.driver.check()?;
+            if self.driver.state.connected {
+                let opened = match self.driver.connection.side() {
+                    noq_proto::Side::Server => self.driver.connection.streams().open(Dir::Bi),
+                    noq_proto::Side::Client => self.driver.connection.streams().accept(Dir::Bi),
+                };
+                if let Some(id) = opened {
+                    let _ = self
+                        .driver
+                        .connection
+                        .send_stream(id)
+                        .set_priority(level_priority(Priority::L0));
+                    self.l0 = Some(id);
+                    return Ok(());
+                }
+            }
+            self.driver.wait(deadline)?;
+        }
     }
 
-    /// Writes `bytes` before `deadline`.
-    pub fn send_bytes(&mut self, bytes: &[u8], deadline: Instant) -> Result<(), QuicError> {
-        block_on(deadline, async {
-            self.send
-                .write_all(bytes)
-                .await
-                .map_err(|_| QuicError::Transport)
-        })
+    /// Completes a server connection's handshake and opens its L0 stream.
+    pub fn handshake(&mut self, deadline: Instant) -> Result<(), QuicError> {
+        self.open_l0(deadline)
     }
 
-    /// Reads exactly `bytes.len()` bytes before `deadline`.
-    pub fn receive_exact(&mut self, bytes: &mut [u8], deadline: Instant) -> Result<(), QuicError> {
-        block_on(deadline, async {
-            self.recv
-                .read_exact(bytes)
-                .await
-                .map_err(|_| QuicError::Transport)
-        })
+    /// The certificates the peer presented.
+    pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        self.driver.peer_certificates()
+    }
+
+    fn l0(&self) -> Result<StreamId, QuicError> {
+        self.l0.ok_or(QuicError::Transport)
+    }
+
+    /// Writes `bytes` on L0 and sends them before `deadline`.
+    pub fn send_bytes(&mut self, mut bytes: &[u8], deadline: Instant) -> Result<(), QuicError> {
+        let id = self.l0()?;
+        loop {
+            match self.driver.connection.send_stream(id).write(bytes) {
+                Ok(count) => bytes = &bytes[count..],
+                Err(noq_proto::WriteError::Blocked) => {}
+                Err(_) => return Err(QuicError::Transport),
+            }
+            self.driver.pump();
+            self.driver.check()?;
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            self.driver.wait(deadline)?;
+        }
+    }
+
+    /// Reads exactly `count` L0 bytes before `deadline`.
+    fn receive_exact(&mut self, count: usize, deadline: Instant) -> Result<Vec<u8>, QuicError> {
+        let id = self.l0()?;
+        loop {
+            if self.read.len() >= count {
+                let rest = self.read.split_off(count);
+                return Ok(std::mem::replace(&mut self.read, rest));
+            }
+            self.driver.pump();
+            self.driver.check()?;
+            let ended = read_stream(&mut self.driver.connection, id, &mut self.read, count)?;
+            if self.read.len() >= count {
+                continue;
+            }
+            if ended {
+                return Err(QuicError::Closed);
+            }
+            self.driver.wait(deadline)?;
+        }
     }
 
     /// One length-prefixed message of at most `max` bytes, without its prefix.
@@ -319,21 +855,50 @@ impl QuicStream {
         max: usize,
         deadline: Instant,
     ) -> Result<Vec<u8>, QuicError> {
-        let mut size = [0; 4];
-        self.receive_exact(&mut size, deadline)?;
-        let size = u32::from_be_bytes(size) as usize;
+        let size = self.receive_exact(4, deadline)?;
+        let size = u32::from_be_bytes([size[0], size[1], size[2], size[3]]) as usize;
         if size > max {
             return Err(QuicError::Transport);
         }
-        let mut bytes = vec![0; size];
-        self.receive_exact(&mut bytes, deadline)?;
-        Ok(bytes)
+        self.receive_exact(size, deadline)
     }
 
-    /// Starts the carrier's tasks on this connection.
-    pub fn into_carrier(self) -> Result<IrohCarrier, QuicError> {
-        IrohCarrier::start(self)
+    /// Starts the connection's carrier. Bytes read past the preamble stay first on L0.
+    pub fn into_carrier(self) -> QuicCarrier {
+        QuicCarrier::new(self)
     }
+}
+
+/// Reads `id` into `into` while it has data and `into` is under `limit` bytes. Returns whether
+/// the stream ended.
+fn read_stream(
+    connection: &mut Connection,
+    id: StreamId,
+    into: &mut Vec<u8>,
+    limit: usize,
+) -> Result<bool, QuicError> {
+    let mut stream = connection.recv_stream(id);
+    let mut chunks = match stream.read(true) {
+        Ok(chunks) => chunks,
+        Err(_) => return Err(QuicError::Transport),
+    };
+    let mut ended = false;
+    while into.len() < limit {
+        match chunks.next(limit.saturating_sub(into.len()).max(1)) {
+            Ok(Some(chunk)) => into.extend_from_slice(&chunk.bytes),
+            Ok(None) => {
+                ended = true;
+                break;
+            }
+            Err(noq_proto::ReadError::Blocked) => break,
+            Err(_) => {
+                let _ = chunks.finalize();
+                return Err(QuicError::Transport);
+            }
+        }
+    }
+    let _ = chunks.finalize();
+    Ok(ended)
 }
 
 impl crate::protocol::Preamble for QuicStream {
@@ -348,104 +913,6 @@ impl crate::protocol::Preamble for QuicStream {
     }
 }
 
-/// The server's QUIC endpoint. A task accepts connections, completes their handshakes and opens
-/// their L0 streams; the host takes them with [`QuicListener::accept`] after a wake.
-pub struct QuicListener {
-    endpoint: Endpoint,
-    shared: Arc<Accepted>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-struct Accepted {
-    ready: Mutex<VecDeque<QuicStream>>,
-    wake: Mutex<Option<Arc<dyn Wake>>>,
-    handshakes: Arc<tokio::sync::Semaphore>,
-}
-
-impl Accepted {
-    fn lock(&self) -> MutexGuard<'_, VecDeque<QuicStream>> {
-        self.ready.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-impl QuicListener {
-    /// Binds UDP at `address` under the server's pinned key.
-    pub fn bind(secret: SecretKey, address: SocketAddr) -> Result<Self, QuicError> {
-        let endpoint = block_on(Instant::now() + HANDSHAKE_LIMIT, async move {
-            bind(secret, Some(address), vec![ALPN.to_vec()]).await
-        })?;
-        let shared = Arc::new(Accepted {
-            ready: Mutex::default(),
-            wake: Mutex::default(),
-            handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING)),
-        });
-        let task = runtime()?.spawn(accept_loop(endpoint.clone(), Arc::clone(&shared)));
-        Ok(Self {
-            endpoint,
-            shared,
-            task,
-        })
-    }
-
-    /// Rings `wake` whenever a connection becomes ready to take.
-    pub fn set_wake(&self, wake: Arc<dyn Wake>) {
-        *self.shared.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
-    }
-
-    /// The next connection whose handshake completed.
-    pub fn accept(&self) -> Option<QuicStream> {
-        self.shared.lock().pop_front()
-    }
-}
-
-impl Drop for QuicListener {
-    fn drop(&mut self) {
-        self.task.abort();
-        let endpoint = self.endpoint.clone();
-        if let Ok(runtime) = runtime() {
-            runtime.spawn(async move { endpoint.close().await });
-        }
-    }
-}
-
-async fn accept_loop(endpoint: Endpoint, shared: Arc<Accepted>) {
-    while let Some(incoming) = endpoint.accept().await {
-        let Ok(permit) = Arc::clone(&shared.handshakes).try_acquire_owned() else {
-            incoming.refuse();
-            continue;
-        };
-        let shared = Arc::clone(&shared);
-        tokio::spawn(async move {
-            let _permit = permit;
-            let handshake = async {
-                let connection = incoming.accept().ok()?.await.ok()?;
-                let (send, recv) = connection.open_bi().await.ok()?;
-                send.set_priority(level_priority(Priority::L0)).ok()?;
-                Some(QuicStream {
-                    connection,
-                    send,
-                    recv,
-                    endpoint: None,
-                })
-            };
-            let Ok(Some(stream)) = tokio::time::timeout(HANDSHAKE_LIMIT, handshake).await else {
-                return;
-            };
-            {
-                let mut ready = shared.lock();
-                if ready.len() >= MAX_PENDING {
-                    stream.connection.close(VarInt::from_u32(1), b"");
-                    return;
-                }
-                ready.push_back(stream);
-            }
-            if let Some(wake) = &*shared.wake.lock().unwrap_or_else(|e| e.into_inner()) {
-                wake.wake();
-            }
-        });
-    }
-}
-
 /// Higher sends first when several levels have data.
 fn level_priority(priority: Priority) -> i32 {
     match priority {
@@ -455,8 +922,6 @@ fn level_priority(priority: Priority) -> i32 {
     }
 }
 
-const LEVELS: [Priority; 3] = [Priority::L0, Priority::L1, Priority::L2];
-
 fn index(priority: Priority) -> usize {
     match priority {
         Priority::L0 => 0,
@@ -465,175 +930,255 @@ fn index(priority: Priority) -> usize {
     }
 }
 
-/// What the runtime's tasks and the carrier share.
-struct Shared {
-    state: Mutex<State>,
-    /// Signalled when `receive` takes a frame, so a paused reader checks for room.
-    room: Notify,
-    ring: UnixStream,
-}
+const LEVELS: [Priority; 3] = [Priority::L0, Priority::L1, Priority::L2];
 
+/// One level's outgoing stream and the accepted frames not yet written to it.
 #[derive(Default)]
-struct State {
-    inbound: VecDeque<RawFrame>,
-    inbound_bytes: usize,
-    /// Accepted frames not yet handed to QUIC.
-    unflushed: usize,
-    /// Frames handed to QUIC, so `flush` reports progress.
-    written: u64,
-    /// Writers that finished their stream after `close`.
-    finished: usize,
-    ended: Option<CarrierError>,
-    /// The registry severed the connection: `receive` reports it closed.
-    severed: bool,
+struct Outgoing {
+    id: Option<StreamId>,
+    frames: VecDeque<Vec<u8>>,
+    /// Bytes of the first frame already written.
+    offset: usize,
+    finished: bool,
 }
 
-impl Shared {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn ring(&self) {
-        // A full socket already wakes the thread, so a refused byte is harmless.
-        let _ = (&self.ring).write(&[1]);
-    }
-
-    fn end(&self, error: CarrierError) {
-        self.lock().ended.get_or_insert(error);
-        self.ring();
-    }
+/// One incoming stream: L0, or a peer's L1 or L2 once its level byte arrived.
+struct Incoming {
+    id: StreamId,
+    /// Whether the level byte is still to be read.
+    unlabelled: bool,
+    reader: FrameReader,
+    ended: bool,
 }
 
 /// Stops a QUIC carrier from receiving, for revocation. Writing continues, so a queued goodbye
 /// still leaves.
-pub struct QuicSever(Arc<Shared>);
+pub struct QuicSever {
+    severed: Arc<std::sync::atomic::AtomicBool>,
+    ring: Option<UnixStream>,
+}
 
 impl super::registry::Sever for QuicSever {
     fn sever(&self) {
-        self.0.lock().severed = true;
-        self.0.ring();
-    }
-}
-
-pub struct IrohCarrier {
-    shared: Arc<Shared>,
-    /// One queue per level, in [`LEVELS`] order. Dropped by `close`, which finishes the streams.
-    senders: Option<[mpsc::UnboundedSender<Vec<u8>>; 3]>,
-    bell: UnixStream,
-    connection: Connection,
-    endpoint: Option<Endpoint>,
-    /// `State::written` at the last flush.
-    seen: u64,
-    closing: bool,
-}
-
-impl IrohCarrier {
-    fn start(stream: QuicStream) -> Result<Self, QuicError> {
-        let runtime = runtime()?;
-        let (bell, ring) = UnixStream::pair().map_err(|_| QuicError::Runtime)?;
-        bell.set_nonblocking(true)
-            .and_then(|()| ring.set_nonblocking(true))
-            .map_err(|_| QuicError::Runtime)?;
-        let shared = Arc::new(Shared {
-            state: Mutex::default(),
-            room: Notify::new(),
-            ring,
-        });
-        let QuicStream {
-            connection,
-            send,
-            recv,
-            endpoint,
-        } = stream;
-        let mut first = Some(send);
-        let senders = LEVELS.map(|level| {
-            let (sender, frames) = mpsc::unbounded_channel();
-            runtime.spawn(write_level(
-                Arc::clone(&shared),
-                connection.clone(),
-                level,
-                first.take().filter(|_| level == Priority::L0),
-                frames,
-            ));
-            sender
-        });
-        runtime.spawn(read_stream(Arc::clone(&shared), connection.clone(), recv));
-        runtime.spawn(accept_levels(Arc::clone(&shared), connection.clone()));
-        // A stream's end is not the connection's, so one task watches the connection itself.
-        let watched = connection.clone();
-        let watcher = Arc::clone(&shared);
-        runtime.spawn(async move {
-            watched.closed().await;
-            watcher.end(ended(&watched));
-        });
-        Ok(Self {
-            shared,
-            senders: Some(senders),
-            bell,
-            connection,
-            endpoint,
-            seen: 0,
-            closing: false,
-        })
-    }
-
-    /// A handle that severs this connection's receiving.
-    pub fn sever(&self) -> QuicSever {
-        QuicSever(Arc::clone(&self.shared))
-    }
-
-    fn drain_bell(&self) {
-        let mut bytes = [0; 64];
-        while matches!((&self.bell).read(&mut bytes), Ok(count) if count > 0) {}
-    }
-}
-
-impl Drop for IrohCarrier {
-    /// Closes the connection. After a drain the peer already read every stream to its end.
-    fn drop(&mut self) {
-        self.connection.close(VarInt::from_u32(0), b"");
-        if let (Some(endpoint), Ok(runtime)) = (self.endpoint.take(), runtime()) {
-            runtime.spawn(async move { endpoint.close().await });
+        self.severed
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(bell) = &self.ring {
+            ring(bell);
         }
     }
 }
 
-impl Carrier for IrohCarrier {
+pub struct QuicCarrier {
+    driver: Driver,
+    outgoing: [Outgoing; 3],
+    incoming: Vec<Incoming>,
+    inbound: VecDeque<RawFrame>,
+    inbound_bytes: usize,
+    /// Peer streams of other levels this end accepted, so a third is a violation.
+    labelled: [bool; 3],
+    severed: Arc<std::sync::atomic::AtomicBool>,
+    /// Packets sent, so a flush reports progress.
+    sent: u64,
+    closing: bool,
+    violation: Option<CarrierError>,
+}
+
+impl QuicCarrier {
+    fn new(stream: QuicStream) -> Self {
+        let QuicStream { driver, l0, read } = stream;
+        let mut outgoing: [Outgoing; 3] = Default::default();
+        outgoing[0].id = l0;
+        let mut reader = FrameReader::default();
+        reader.feed(&read);
+        let incoming = l0
+            .map(|id| Incoming {
+                id,
+                unlabelled: false,
+                reader,
+                ended: false,
+            })
+            .into_iter()
+            .collect();
+        Self {
+            driver,
+            outgoing,
+            incoming,
+            inbound: VecDeque::new(),
+            inbound_bytes: 0,
+            labelled: [true, false, false],
+            severed: Arc::default(),
+            sent: 0,
+            closing: false,
+            violation: None,
+        }
+    }
+
+    /// A handle that severs this connection's receiving. A server connection's bell wakes its
+    /// thread.
+    pub fn sever(&self) -> QuicSever {
+        let ring = match &self.driver.side {
+            Side::Server { route, .. } => route.ring.try_clone().ok(),
+            Side::Client { .. } => None,
+        };
+        QuicSever {
+            severed: Arc::clone(&self.severed),
+            ring,
+        }
+    }
+
+    fn packets_sent(&mut self) -> u64 {
+        self.driver.connection.stats().udp_tx.datagrams
+    }
+
+    /// Writes accepted frames into their streams until QUIC's buffers are full.
+    fn write_streams(&mut self) -> Result<(), CarrierError> {
+        for level in LEVELS {
+            let outgoing = &mut self.outgoing[index(level)];
+            while let Some(front) = outgoing.frames.front() {
+                let id = match outgoing.id {
+                    Some(id) => id,
+                    None => {
+                        let Some(id) = self.driver.connection.streams().open(Dir::Uni) else {
+                            break;
+                        };
+                        let mut stream = self.driver.connection.send_stream(id);
+                        let _ = stream.set_priority(level_priority(level));
+                        if stream.write(&[index(level) as u8]) != Ok(1) {
+                            return Err(CarrierError::Failed);
+                        }
+                        outgoing.id = Some(id);
+                        id
+                    }
+                };
+                match self
+                    .driver
+                    .connection
+                    .send_stream(id)
+                    .write(&front[outgoing.offset..])
+                {
+                    Ok(count) => {
+                        outgoing.offset += count;
+                        if outgoing.offset == front.len() {
+                            outgoing.frames.pop_front();
+                            outgoing.offset = 0;
+                        }
+                    }
+                    Err(noq_proto::WriteError::Blocked) => break,
+                    Err(_) => return Err(CarrierError::Failed),
+                }
+            }
+            if self.closing && outgoing.frames.is_empty() && !outgoing.finished {
+                outgoing.finished = true;
+                if let Some(id) = outgoing.id {
+                    let _ = self.driver.connection.send_stream(id).finish();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn unflushed(&self) -> usize {
+        self.outgoing.iter().map(|level| level.frames.len()).sum()
+    }
+
+    /// Accepts the peer's L1 and L2 streams and reads every stream until the inbound bound.
+    fn read_streams(&mut self) -> Result<(), CarrierError> {
+        while let Some(id) = self.driver.connection.streams().accept(Dir::Uni) {
+            self.incoming.push(Incoming {
+                id,
+                unlabelled: true,
+                reader: FrameReader::default(),
+                ended: false,
+            });
+        }
+        let mut bytes = Vec::new();
+        for stream in &mut self.incoming {
+            while !stream.ended && self.inbound_bytes < INBOUND_BYTES {
+                bytes.clear();
+                let ended = read_stream(
+                    &mut self.driver.connection,
+                    stream.id,
+                    &mut bytes,
+                    READ_CHUNK,
+                )
+                .map_err(|_| CarrierError::Failed)?;
+                stream.ended = ended;
+                let mut data = bytes.as_slice();
+                if stream.unlabelled
+                    && let Some((&level, rest)) = data.split_first()
+                {
+                    let level = usize::from(level);
+                    if !matches!(level, 1 | 2) || self.labelled[level] {
+                        return Err(CarrierError::Decode(
+                            crate::protocol::DecodeError::Malformed,
+                        ));
+                    }
+                    self.labelled[level] = true;
+                    stream.unlabelled = false;
+                    data = rest;
+                }
+                stream.reader.feed(data);
+                while let Some(frame) = stream.reader.next_frame()? {
+                    self.inbound_bytes += limits::HEADER_BYTES + frame.body.len();
+                    self.inbound.push_back(frame);
+                }
+                if ended && stream.reader.partial() {
+                    return Err(CarrierError::Decode(
+                        crate::protocol::DecodeError::Malformed,
+                    ));
+                }
+                if bytes.is_empty() {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Stream bytes read at once.
+const READ_CHUNK: usize = 64 * 1024;
+
+impl Carrier for QuicCarrier {
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
         if self.closing {
             return Err(CarrierError::Closed);
         }
-        let Some(senders) = &self.senders else {
-            return Err(CarrierError::Closed);
-        };
-        {
-            let mut state = self.shared.lock();
-            if let Some(error) = state.ended {
-                return Err(error);
-            }
-            if state.unflushed > 1 {
-                return Ok(Offer::Full);
-            }
-            state.unflushed += 1;
+        if let Some(error) = self.driver.state.lost {
+            return Err(error);
         }
-        senders[index(priority)]
-            .send(frame.to_vec())
-            .map_err(|_| CarrierError::Failed)?;
+        if self.unflushed() > 1 {
+            return Ok(Offer::Full);
+        }
+        self.outgoing[index(priority)]
+            .frames
+            .push_back(frame.to_vec());
         Ok(Offer::Accepted)
     }
 
     fn flush(&mut self) -> Result<Flush, CarrierError> {
-        self.drain_bell();
-        let state = self.shared.lock();
-        let progressed = state.written != self.seen;
-        self.seen = state.written;
+        // Frames first, so acknowledgements of what `receive` took ride on them.
+        self.write_streams()?;
+        if self.closing {
+            // Nothing receives any more, so acknowledgements are taken here.
+            self.driver.pump();
+            self.write_streams()?;
+        }
+        self.driver.advance(Instant::now());
+        let sent = self.packets_sent();
+        let progressed = sent != self.sent;
+        self.sent = sent;
+        let opened = self
+            .outgoing
+            .iter()
+            .filter(|level| level.id.is_some())
+            .count();
         let pending = if self.closing {
-            state.finished < LEVELS.len()
+            self.unflushed() > 0 || self.driver.state.finished < opened
         } else {
-            state.unflushed > 0
-        };
-        // Nothing accepted can leave a connection that ended.
-        if pending && let Some(error) = state.ended {
+            self.unflushed() > 0
+        } || self.driver.state.stashed.is_some();
+        if pending && let Some(error) = self.driver.state.lost {
             return Err(error);
         }
         Ok(Flush {
@@ -643,189 +1188,47 @@ impl Carrier for IrohCarrier {
     }
 
     fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
-        self.drain_bell();
-        if self.closing {
+        if self.closing || self.severed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(CarrierError::Closed);
         }
-        let mut state = self.shared.lock();
-        if state.severed {
-            return Err(CarrierError::Closed);
+        if let Some(error) = self.violation {
+            return Err(error);
         }
-        if let Some(frame) = state.inbound.pop_front() {
-            state.inbound_bytes -= limits::HEADER_BYTES + frame.body.len();
-            drop(state);
-            self.shared.room.notify_waiters();
+        if self.inbound.is_empty() {
+            // Datagrams only: acknowledgements, timers and flow-control updates wait for the
+            // `flush` that follows every turn, so a frame reaches the caller before any send.
+            self.driver.ingest(Instant::now());
+            if let Err(error) = self.read_streams() {
+                self.violation = Some(error);
+            }
+        }
+        if let Some(frame) = self.inbound.pop_front() {
+            self.inbound_bytes -= limits::HEADER_BYTES + frame.body.len();
             return Ok(Some(frame));
         }
-        match state.ended {
-            Some(error) => Err(error),
-            None => Ok(None),
+        if let Some(error) = self.violation.or(self.driver.state.lost) {
+            return Err(error);
         }
+        Ok(None)
     }
 
     fn readiness(&self) -> Readiness {
-        let bell = self.bell.as_raw_fd();
+        let descriptor = self.driver.descriptor();
         Readiness {
-            read: bell,
-            write: None,
-            progress: Some(bell),
+            read: descriptor,
+            write: self
+                .driver
+                .state
+                .stashed
+                .is_some()
+                .then(|| self.driver.socket.as_raw_fd()),
+            // Acknowledgements arrive on the same descriptor and free QUIC's buffers.
+            progress: Some(descriptor),
+            deadline: self.driver.connection.poll_timeout(),
         }
     }
 
     fn close(&mut self) {
         self.closing = true;
-        // The writers drain their queues, then finish their streams and wait until the peer read
-        // them to the end.
-        self.senders = None;
-    }
-}
-
-/// Writes one level's frames in order. L0 already has its stream; L1 and L2 open theirs with
-/// the first frame.
-async fn write_level(
-    shared: Arc<Shared>,
-    connection: Connection,
-    level: Priority,
-    mut stream: Option<SendStream>,
-    mut frames: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
-    while let Some(frame) = frames.recv().await {
-        if stream.is_none() {
-            let opened = async {
-                let mut send = connection.open_uni().await.ok()?;
-                send.set_priority(level_priority(level)).ok()?;
-                send.write_all(&[index(level) as u8]).await.ok()?;
-                Some(send)
-            };
-            stream = opened.await;
-        }
-        let written = match &mut stream {
-            Some(send) => send.write_all(&frame).await.is_ok(),
-            None => false,
-        };
-        if !written {
-            shared.end(ended(&connection));
-            return;
-        }
-        {
-            let mut state = shared.lock();
-            state.unflushed -= 1;
-            state.written += 1;
-        }
-        shared.ring();
-    }
-    if let Some(send) = &mut stream
-        && send.finish().is_ok()
-    {
-        let _ = tokio::time::timeout(limits::STALL_AFTER, send.stopped()).await;
-    }
-    shared.lock().finished += 1;
-    shared.ring();
-}
-
-/// Why a stream failed: the peer closed the connection, or it was lost.
-fn ended(connection: &Connection) -> CarrierError {
-    match connection.close_reason() {
-        Some(
-            iroh::endpoint::ConnectionError::ApplicationClosed(_)
-            | iroh::endpoint::ConnectionError::LocallyClosed,
-        ) => CarrierError::Closed,
-        _ => CarrierError::Failed,
-    }
-}
-
-/// Accepts the peer's L1 and L2 streams. A stream with another level byte, or a second stream
-/// of one level, violates the protocol.
-async fn accept_levels(shared: Arc<Shared>, connection: Connection) {
-    let mut seen = [false; 3];
-    while let Ok(mut recv) = connection.accept_uni().await {
-        let mut level = [0];
-        if recv.read_exact(&mut level).await.is_err() {
-            return;
-        }
-        let level = level[0] as usize;
-        if !matches!(level, 1 | 2) || seen[level] {
-            shared.end(CarrierError::Decode(
-                crate::protocol::DecodeError::Malformed,
-            ));
-            return;
-        }
-        seen[level] = true;
-        tokio::spawn(read_stream(Arc::clone(&shared), connection.clone(), recv));
-    }
-}
-
-/// Reads one stream's frames into the shared queue, pausing while the queue is full. A stream's
-/// end is not the connection's: the peer closes the connection once every stream was read.
-async fn read_stream(shared: Arc<Shared>, connection: Connection, mut recv: RecvStream) {
-    let mut reader = FrameReader::default();
-    let mut buffer = vec![0; READ_CHUNK];
-    loop {
-        loop {
-            let room = shared.room.notified();
-            if shared.lock().inbound_bytes < INBOUND_BYTES {
-                break;
-            }
-            room.await;
-        }
-        let count = match recv.read(&mut buffer).await {
-            Ok(Some(count)) => count,
-            Ok(None) if reader.partial() => {
-                shared.end(CarrierError::Decode(
-                    crate::protocol::DecodeError::Malformed,
-                ));
-                return;
-            }
-            Ok(None) => return,
-            Err(_) => {
-                shared.end(ended(&connection));
-                return;
-            }
-        };
-        reader.feed(&buffer[..count]);
-        let mut arrived = false;
-        loop {
-            match reader.next_frame() {
-                Ok(Some(frame)) => {
-                    let mut state = shared.lock();
-                    state.inbound_bytes += limits::HEADER_BYTES + frame.body.len();
-                    state.inbound.push_back(frame);
-                    arrived = true;
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    shared.end(CarrierError::Decode(error));
-                    return;
-                }
-            }
-        }
-        if arrived {
-            shared.ring();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_device_credential_becomes_the_iroh_key_of_its_own_public_key_only() {
-        let credential = crate::direct::DeviceCredential::generate().unwrap();
-        let public = credential.public_key().unwrap();
-        let secret = secret_key(credential.expose_bytes(), &public).unwrap();
-        assert_eq!(secret.public().as_bytes(), &public);
-        let other = crate::direct::DeviceCredential::generate()
-            .unwrap()
-            .public_key()
-            .unwrap();
-        assert_eq!(
-            secret_key(credential.expose_bytes(), &other).err(),
-            Some(QuicError::Key)
-        );
-        assert_eq!(
-            secret_key(&credential.expose_bytes()[..40], &public).err(),
-            Some(QuicError::Key)
-        );
     }
 }

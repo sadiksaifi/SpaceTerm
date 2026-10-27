@@ -580,7 +580,7 @@ fn serve_runtime_ready(
                 Err(_) => break,
             }
         }
-        #[cfg(feature = "iroh")]
+        #[cfg(feature = "quic")]
         while network.len() < MAX_NETWORK_CONNECTIONS
             && let Some(state) = &direct
         {
@@ -896,7 +896,7 @@ fn spawn_network(
 
 /// Serves one QUIC connection of the prototype. Its handshake waits under deadlines, and an
 /// admitted connection stops on the wake, so stopping needs no sever.
-#[cfg(feature = "iroh")]
+#[cfg(feature = "quic")]
 fn spawn_quic(
     stream: crate::connection::quic::QuicStream,
     generation: [u8; 32],

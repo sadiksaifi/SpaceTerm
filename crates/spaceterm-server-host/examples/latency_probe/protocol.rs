@@ -216,11 +216,11 @@ impl DirectConnector for Paired {
             Transport::Wss => {
                 DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(feature = "quic")]
             Transport::Quic => {
                 DirectConnection::connect_quic(&self.endpoint, &self.paired, &self.credential)
             }
-            #[cfg(not(feature = "iroh"))]
+            #[cfg(not(feature = "quic"))]
             Transport::Quic => Err(DirectError::Transport),
         }
     }

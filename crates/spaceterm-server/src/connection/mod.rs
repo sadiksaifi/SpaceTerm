@@ -21,7 +21,7 @@ pub mod io;
 pub mod link;
 pub mod loopback;
 pub mod outbox;
-#[cfg(feature = "iroh")]
+#[cfg(feature = "quic")]
 pub mod quic;
 pub mod registry;
 pub mod server;

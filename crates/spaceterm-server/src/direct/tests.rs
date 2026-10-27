@@ -214,7 +214,7 @@ impl Fixture {
         })
     }
     /// Serves the next QUIC connection of the prototype.
-    #[cfg(feature = "iroh")]
+    #[cfg(feature = "quic")]
     pub(crate) fn serve_next_quic(
         &self,
         panes: SharedPaneService,
@@ -2487,10 +2487,9 @@ fn wss_request_round_trip_on_loopback() {
     let _ = server.join().unwrap();
 }
 
-#[cfg(feature = "iroh")]
+#[cfg(feature = "quic")]
 mod quic_prototype {
     use super::*;
-    use crate::connection::quic::{QuicStream, secret_key};
 
     /// A request the refusing service answers without effect.
     fn nothing() -> Operation {
@@ -2529,22 +2528,17 @@ mod quic_prototype {
         server.join().unwrap().unwrap();
     }
 
-    /// iroh's TLS proves the device's key. Proofs signed by an enrolled credential do not admit a
-    /// connection whose iroh key is another device's.
+    /// The client's TLS certificate proves its key. Proofs signed by an enrolled credential do not
+    /// admit a connection whose certificate is another device's.
     #[test]
-    fn quic_refuses_a_device_proof_from_another_iroh_key() {
+    fn quic_refuses_a_device_proof_from_another_certificate() {
         let fixture = Fixture::new();
         fixture.enable();
         let credential = DeviceCredential::generate().unwrap();
         let paired = fixture.enroll(&credential);
         let other = DeviceCredential::generate().unwrap();
         let server = fixture.serve_next_quic(service(Refusing));
-        let address = Endpoint::from_url(&fixture.endpoint()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let addresses = address.resolve(deadline).unwrap();
-        let secret = secret_key(other.expose_bytes(), &other.public_key().unwrap()).unwrap();
-        let mut stream =
-            QuicStream::connect(secret, &paired.pin.public_key, &addresses, deadline).unwrap();
+        let mut stream = quic::dial(&fixture.endpoint(), &paired.pin, &other).unwrap();
         let answer = client::exchange_on(
             &mut stream,
             &paired.pin,
@@ -2563,16 +2557,28 @@ mod quic_prototype {
     }
 
     #[test]
-    fn a_client_reaches_only_the_pinned_server_key() {
+    fn a_client_reaches_only_the_pinned_server_certificate() {
         let fixture = Fixture::new();
         fixture.enable();
         let credential = DeviceCredential::generate().unwrap();
         let mut paired = fixture.enroll(&credential);
-        paired.pin.public_key = DeviceCredential::generate().unwrap().public_key().unwrap();
+        paired.pin.certificate = [7; 32];
+        let server = fixture.serve_next_quic(service(Refusing));
         assert!(matches!(
             DirectConnection::connect_quic(&fixture.endpoint(), &paired, &credential),
-            Err(DirectError::Transport)
+            Err(DirectError::PinMismatch)
         ));
+        assert!(server.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn a_device_certificate_names_the_device_key() {
+        let credential = DeviceCredential::generate().unwrap();
+        let certificate = quic::tests_certificate(credential.expose_bytes());
+        assert_eq!(
+            quic::certificate_key(&certificate),
+            Some(credential.public_key().unwrap())
+        );
     }
 
     #[test]

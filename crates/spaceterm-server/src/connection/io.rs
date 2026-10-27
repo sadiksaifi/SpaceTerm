@@ -167,6 +167,7 @@ fn wait(
             revents: 0,
         });
     }
+    let deadline = [deadline, readiness.deadline].into_iter().flatten().min();
     let _ = poll(&mut descriptors, deadline);
     waker.drain();
 }
@@ -551,6 +552,7 @@ mod tests {
                 read: self.bell.as_raw_fd(),
                 write: None,
                 progress: None,
+                deadline: None,
             }
         }
         fn close(&mut self) {
@@ -618,6 +620,7 @@ mod tests {
                 read: self.bell.as_raw_fd(),
                 write: None,
                 progress: None,
+                deadline: None,
             }
         }
         fn close(&mut self) {}

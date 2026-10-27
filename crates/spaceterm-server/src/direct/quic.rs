@@ -1,11 +1,20 @@
-//! Paired connections over the QUIC prototype ([`crate::connection::quic`]). The pairing messages
-//! run on the L0 stream as length-prefixed JSON, with the same bounds and deadlines as WSS. The
-//! prototype carries connections only: pairing, claims and revocation stay on WSS.
+//! Paired connections over QUIC ([`crate::connection::quic`]): the pinned TLS configurations and
+//! the pairing messages, which run on the L0 stream as length-prefixed JSON with the same bounds
+//! and deadlines as WSS.
+//!
+//! The server presents its pinned certificate. The client presents a self-signed certificate of
+//! its device key, made for each connection; the server accepts any such certificate during the
+//! handshake and later requires its key to be the enrolled key of the device that authenticates.
 use super::*;
-use crate::connection::quic::{QuicError, QuicStream, secret_key};
+use crate::connection::quic::{ALPN, QuicError, QuicStream};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
-const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
+pub(super) const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
 
 impl client::Messages for QuicStream {
     fn send(&mut self, value: &impl Serialize) -> Result<(), DirectError> {
@@ -28,27 +37,168 @@ impl client::Messages for QuicStream {
     }
 }
 
-fn transport(error: QuicError) -> DirectError {
+pub(super) fn transport(error: QuicError) -> DirectError {
     match error {
-        QuicError::Key => DirectError::AuthenticationRefused,
-        QuicError::Runtime | QuicError::Transport | QuicError::TimedOut => DirectError::Transport,
+        QuicError::Configuration => DirectError::StorageUnavailable,
+        QuicError::Transport | QuicError::TimedOut | QuicError::Closed => DirectError::Transport,
     }
 }
 
-/// Dials the endpoint's address and port in UDP. iroh's TLS proves the pinned server key, and the
-/// pairing exchange then proves the device as over WSS.
+fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
+/// A self-signed certificate of an Ed25519 PKCS#8 key, as the server's own was made.
+fn certificate(key: &[u8]) -> Result<CertificateDer<'static>, DirectError> {
+    let pair = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&key.into(), &rcgen::PKCS_ED25519)
+        .map_err(|_| DirectError::StorageUnavailable)?;
+    rcgen::CertificateParams::new(vec![crate::connection::quic::SERVER_NAME.into()])
+        .and_then(|params| params.self_signed(&pair))
+        .map(|certificate| certificate.der().clone())
+        .map_err(|_| DirectError::StorageUnavailable)
+}
+
+#[cfg(test)]
+pub(super) fn tests_certificate(key: &[u8]) -> Vec<u8> {
+    certificate(key).unwrap().to_vec()
+}
+
+/// The Ed25519 public key of a certificate's subject. The DER of an Ed25519
+/// SubjectPublicKeyInfo is this prefix and the 32-byte key.
+pub(super) fn certificate_key(certificate: &[u8]) -> Option<[u8; 32]> {
+    const SPKI: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    let mut found = None;
+    for start in 0..certificate.len().saturating_sub(SPKI.len() + 32) + 1 {
+        if certificate[start..].starts_with(&SPKI) {
+            if found.is_some() {
+                return None;
+            }
+            let key = start + SPKI.len();
+            found = certificate.get(key..key + 32)?.try_into().ok();
+        }
+    }
+    found
+}
+
+/// The client's configuration: the pinned server certificate, and this device's certificate.
+fn client_config(
+    pin: &ServerPin,
+    credential: &DeviceCredential,
+    mismatch: Arc<AtomicBool>,
+) -> Result<noq_proto::ClientConfig, DirectError> {
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(credential.expose_bytes().to_vec()));
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| DirectError::Transport)?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(wss::Pinned::new(pin.certificate, mismatch)))
+        .with_client_auth_cert(vec![certificate(credential.expose_bytes())?], key)
+        .map_err(|_| DirectError::StorageUnavailable)?;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    crate::connection::quic::client_config(tls).map_err(transport)
+}
+
+/// Accepts any client certificate whose handshake signature verifies. The pairing exchange that
+/// follows decides which device it belongs to.
+#[derive(Debug)]
+struct AnyDevice;
+
+impl rustls::server::danger::ClientCertVerifier for AnyDevice {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        if !intermediates.is_empty() {
+            return Err(rustls::Error::General(
+                "Unexpected certificate chain".into(),
+            ));
+        }
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &provider().signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![rustls::SignatureScheme::ED25519]
+    }
+}
+
+/// The server's configuration: its pinned certificate, and a certificate from every client.
+pub(super) fn server_config(
+    certificate: &[u8],
+    key: &[u8],
+) -> Result<Arc<noq_proto::ServerConfig>, DirectError> {
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| DirectError::Transport)?
+        .with_client_cert_verifier(Arc::new(AnyDevice))
+        .with_single_cert(
+            vec![CertificateDer::from(certificate.to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())),
+        )
+        .map_err(|_| DirectError::StorageUnavailable)?;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    // 0-RTT data could be replayed; nothing here needs it.
+    tls.max_early_data_size = 0;
+    crate::connection::quic::server_config(tls).map_err(transport)
+}
+
+/// Dials the endpoint's address and port in UDP, verifies the pinned certificate, and opens the
+/// L0 stream on which the pairing exchange runs.
+pub(super) fn dial(
+    endpoint: &str,
+    pin: &ServerPin,
+    credential: &DeviceCredential,
+) -> Result<QuicStream, DirectError> {
+    let address = wss::validate_endpoint(endpoint)?;
+    let deadline = Instant::now() + HANDSHAKE_LIMIT;
+    let addresses = address.resolve(deadline)?;
+    let mismatch = Arc::new(AtomicBool::new(false));
+    let config = client_config(pin, credential, Arc::clone(&mismatch))?;
+    QuicStream::connect(config, &addresses, deadline).map_err(|error| {
+        if mismatch.load(Ordering::Acquire) {
+            DirectError::PinMismatch
+        } else {
+            transport(error)
+        }
+    })
+}
+
+/// Connects a paired device over QUIC: the pinned handshake, then the same pairing exchange as
+/// over WSS.
 pub(super) fn connect(
     endpoint: &str,
     paired: &PairedDevice,
     credential: &DeviceCredential,
 ) -> Result<DirectConnection, DirectError> {
-    let address = wss::validate_endpoint(endpoint)?;
-    let deadline = Instant::now() + HANDSHAKE_LIMIT;
-    let addresses = address.resolve(deadline)?;
-    let secret =
-        secret_key(credential.expose_bytes(), &credential.public_key()?).map_err(transport)?;
-    let mut stream = QuicStream::connect(secret, &paired.pin.public_key, &addresses, deadline)
-        .map_err(transport)?;
+    let mut stream = dial(endpoint, &paired.pin, credential)?;
     let answer = client::exchange_on(
         &mut stream,
         &paired.pin,
@@ -63,7 +213,7 @@ pub(super) fn connect(
         return Err(DirectError::AuthenticationRefused);
     }
     Ok(DirectConnection {
-        transport: Transport::Quic(stream),
+        transport: Transport::Quic(Box::new(stream)),
         paired: paired.clone(),
     })
 }

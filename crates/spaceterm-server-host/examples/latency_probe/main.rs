@@ -79,7 +79,7 @@ fn options(arguments: &[String]) -> Result<Options> {
             },
             "--transport" => match value.as_str() {
                 "wss" => options.transport = Transport::Wss,
-                "quic" if cfg!(feature = "iroh") => options.transport = Transport::Quic,
+                "quic" if cfg!(feature = "quic") => options.transport = Transport::Quic,
                 "quic" => return fail("--transport quic needs a build with the iroh feature"),
                 _ => return fail("--transport must be wss or quic"),
             },

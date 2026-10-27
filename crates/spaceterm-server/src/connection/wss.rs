@@ -297,6 +297,7 @@ impl Carrier for WssCarrier {
             read: fd,
             write: Some(fd),
             progress: None,
+            deadline: None,
         }
     }
 

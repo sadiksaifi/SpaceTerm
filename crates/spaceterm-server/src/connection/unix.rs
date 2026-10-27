@@ -110,6 +110,7 @@ impl Carrier for UnixCarrier {
             read: fd,
             write: Some(fd),
             progress: None,
+            deadline: None,
         }
     }
 

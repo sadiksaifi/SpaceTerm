@@ -22,10 +22,19 @@ use tungstenite::Message;
 
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
 
+/// Accepts only the server certificate whose hash is pinned, and records a mismatch.
 #[derive(Debug)]
-struct Pinned {
+pub(super) struct Pinned {
     certificate: [u8; 32],
     mismatch: Arc<AtomicBool>,
+}
+impl Pinned {
+    pub(super) fn new(certificate: [u8; 32], mismatch: Arc<AtomicBool>) -> Self {
+        Self {
+            certificate,
+            mismatch,
+        }
+    }
 }
 impl rustls::client::danger::ServerCertVerifier for Pinned {
     fn verify_server_cert(

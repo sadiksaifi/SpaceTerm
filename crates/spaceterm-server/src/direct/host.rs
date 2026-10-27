@@ -47,7 +47,7 @@ pub(crate) struct State {
     pub(super) pin: ServerPin,
     listener: Option<TcpListener>,
     /// The QUIC prototype's endpoint on the same address and port in UDP.
-    #[cfg(feature = "iroh")]
+    #[cfg(feature = "quic")]
     quic: Option<crate::connection::quic::QuicListener>,
     listener_state: ListenerState,
     invitations: Vec<PendingInvitation>,
@@ -76,7 +76,7 @@ impl State {
             record,
             pin,
             listener: None,
-            #[cfg(feature = "iroh")]
+            #[cfg(feature = "quic")]
             quic: None,
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
@@ -92,7 +92,7 @@ impl State {
         Ok(Arc::new(Mutex::new(state)))
     }
     pub(crate) fn set_wake(&mut self, wake: Arc<dyn Wake>) {
-        #[cfg(feature = "iroh")]
+        #[cfg(feature = "quic")]
         if let Some(quic) = &self.quic {
             quic.set_wake(Arc::clone(&wake));
         }
@@ -110,7 +110,7 @@ impl State {
     fn listen(&mut self) {
         self.listener_changed();
         self.listener = None;
-        #[cfg(feature = "iroh")]
+        #[cfg(feature = "quic")]
         {
             self.quic = None;
         }
@@ -124,28 +124,27 @@ impl State {
                 Err(_) => ListenerState::Failed(DirectError::Transport),
             },
         };
-        #[cfg(feature = "iroh")]
+        #[cfg(feature = "quic")]
         if let ListenerState::Listening { addr } = self.listener_state {
             self.quic = self.bind_quic(addr);
         }
     }
-    /// Binds the QUIC prototype under the server's pinned key. WSS keeps working without it.
-    #[cfg(feature = "iroh")]
+    /// Binds QUIC on the same address and port in UDP, under the pinned certificate. WSS keeps
+    /// working without it.
+    #[cfg(feature = "quic")]
     fn bind_quic(
         &self,
         address: std::net::SocketAddr,
     ) -> Option<crate::connection::quic::QuicListener> {
-        use crate::connection::quic;
-        let secret = quic::secret_key(&self.record.key, &self.pin.public_key).ok()?;
-        let listener = quic::QuicListener::bind(secret, address).ok()?;
+        let config = super::quic::server_config(&self.record.certificate, &self.record.key).ok()?;
+        let listener = crate::connection::quic::QuicListener::bind(address, config).ok()?;
         if let Some(wake) = &self.wake {
             listener.set_wake(Arc::clone(wake));
         }
         Some(listener)
     }
-    /// The next QUIC connection whose handshake completed, and the listener generation it
-    /// belongs to.
-    #[cfg(feature = "iroh")]
+    /// The next new QUIC connection, with the listener generation it belongs to.
+    #[cfg(feature = "quic")]
     pub(crate) fn accept_quic(
         &mut self,
     ) -> Option<(crate::connection::quic::QuicStream, [u8; 32])> {
@@ -170,7 +169,7 @@ impl State {
             // A renamed but unsynced revocation must never leave ordinary authority usable.
             self.connections.end_all();
             self.listener = None;
-            #[cfg(feature = "iroh")]
+            #[cfg(feature = "quic")]
             {
                 self.quic = None;
             }
@@ -270,7 +269,7 @@ impl State {
             .map_err(|_| DirectError::Capacity)
     }
     /// The enrolled public key of `paired`'s device.
-    #[cfg(feature = "iroh")]
+    #[cfg(feature = "quic")]
     fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
         self.record
             .devices
@@ -1143,7 +1142,7 @@ impl State {
     }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
-        #[cfg(feature = "iroh")]
+        #[cfg(feature = "quic")]
         {
             self.quic = None;
         }
@@ -1263,7 +1262,7 @@ pub(crate) fn serve(
 /// paired device whose proven iroh key is its enrolled key, admission and then the protocol
 /// connection over a [`crate::connection::quic::IrohCarrier`]. The prototype carries connections
 /// only, so any other action is refused.
-#[cfg(feature = "iroh")]
+#[cfg(feature = "quic")]
 pub(crate) fn serve_quic(
     mut stream: crate::connection::quic::QuicStream,
     generation: [u8; 32],
@@ -1273,6 +1272,14 @@ pub(crate) fn serve_quic(
     wake: Arc<dyn Wake>,
 ) -> Result<(), ServerError> {
     use super::client::Messages;
+    stream
+        .handshake(std::time::Instant::now() + super::quic::HANDSHAKE_LIMIT)
+        .map_err(super::quic::transport)?;
+    // The handshake verified the client's signature with this certificate's key.
+    let device = stream
+        .peer_certificates()
+        .and_then(|certificates| super::quic::certificate_key(certificates.first()?))
+        .ok_or(ServerError::AuthenticationRefused)?;
     let challenge = {
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         if generation != state.generation {
@@ -1288,7 +1295,7 @@ pub(crate) fn serve_quic(
     let paired = paired.clone();
     let answer = {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.device_key(&paired) != Some(stream.remote_key()) {
+        if state.device_key(&paired) != Some(device) {
             return Err(ServerError::AuthenticationRefused);
         }
         state
@@ -1303,7 +1310,7 @@ pub(crate) fn serve_quic(
     let (_, client, name) = crate::protocol::admit_direct_server(&mut stream, &paired)?;
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
-    let carrier = stream.into_carrier().map_err(|_| ServerError::Protocol)?;
+    let carrier = stream.into_carrier();
     state
         .lock()
         .unwrap_or_else(|e| e.into_inner())

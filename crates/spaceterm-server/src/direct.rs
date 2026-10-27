@@ -12,7 +12,7 @@ mod endpoint;
 pub use endpoint::Endpoint;
 pub(crate) mod host;
 mod network;
-#[cfg(feature = "iroh")]
+#[cfg(feature = "quic")]
 mod quic;
 mod storage;
 #[cfg(test)]
@@ -335,7 +335,7 @@ impl DirectConnection {
     }
     /// Like [`Self::connect`], over QUIC to the same address and port in UDP. The server's iroh
     /// key is its pinned public key, and this device's is its credential.
-    #[cfg(feature = "iroh")]
+    #[cfg(feature = "quic")]
     pub fn connect_quic(
         endpoint: &str,
         paired: &PairedDevice,
@@ -348,8 +348,8 @@ impl DirectConnection {
 /// The authenticated connection under a [`DirectConnection`].
 pub(crate) enum Transport {
     Wss(Box<wss::Ws>),
-    #[cfg(feature = "iroh")]
-    Quic(crate::connection::quic::QuicStream),
+    #[cfg(feature = "quic")]
+    Quic(Box<crate::connection::quic::QuicStream>),
 }
 #[cfg_attr(
     not(any(feature = "client", test)),
@@ -375,8 +375,9 @@ impl Transport {
                 )?;
                 Ok(Box::new(crate::connection::wss::WssCarrier::new(ws)))
             }
-            #[cfg(feature = "iroh")]
-            Self::Quic(mut stream) => {
+            #[cfg(feature = "quic")]
+            Self::Quic(stream) => {
+                let mut stream = *stream;
                 crate::protocol::admit_transport(
                     &mut stream,
                     client,
@@ -384,9 +385,7 @@ impl Transport {
                     &pin.build,
                     &versions,
                 )?;
-                Ok(Box::new(
-                    stream.into_carrier().map_err(|_| ServerError::Protocol)?,
-                ))
+                Ok(Box::new(stream.into_carrier()))
             }
         }
     }
