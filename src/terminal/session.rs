@@ -2815,7 +2815,7 @@ impl TerminalWorker {
                     .is_ok()
                     || self.events.is_closed();
                 if result {
-                    let now = Instant::now();
+                    let now = self.schedules.now();
                     self.schedules.metadata_presented();
                     self.schedules.mark_presented(now);
                     if self.accessibility.is_closed() {
@@ -2844,11 +2844,11 @@ impl TerminalWorker {
     }
 
     fn request_presentation(&mut self) -> bool {
-        self.request_presentation_at(Instant::now())
+        self.request_presentation_at(self.schedules.now())
     }
 
     fn request_pty_presentation(&mut self) -> bool {
-        let now = Instant::now();
+        let now = self.schedules.now();
         self.schedules.request_pty_presentation(now);
         if self.schedules.presentation_due(now) {
             self.publish_screen()
