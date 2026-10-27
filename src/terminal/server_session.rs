@@ -3,6 +3,14 @@ mod accessibility;
 mod claim;
 mod control;
 mod effects;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the push cutover replaces the polling loop with it"
+    )
+)]
+mod inbox;
 use super::server_graphics as graphics;
 mod link;
 mod reading;

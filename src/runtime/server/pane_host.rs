@@ -170,6 +170,7 @@ impl DevelopmentPaneHost {
             effects: NativeEffects::default(),
             reading: reading::Reading::default(),
             accessibility: accessibility::Accessibility::default(),
+            publication: publish::Publication::default(),
         });
         self.dormant = None;
         Ok(lease)

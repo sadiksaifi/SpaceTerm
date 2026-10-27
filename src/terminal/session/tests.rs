@@ -23,6 +23,14 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
     )
 }
 
+/// Makes later output continue a burst that is still running, so it coalesces instead of
+/// publishing at once as output after idle does.
+fn continue_output_burst(worker: &mut TerminalWorker) {
+    let later = Instant::now() + Duration::from_secs(1);
+    worker.schedules.request_pty_presentation(later);
+    worker.schedules.mark_presented(later);
+}
+
 #[test]
 fn native_factory_routes_local_launches_through_injected_factory() {
     let (factory, constructions) = recording_native_terminal_session_factory();
@@ -1594,11 +1602,6 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         b"\x1b]52;c;c2VjcmV0\x1b\\".to_vec(),
     ]));
     assert_eq!(records.snapshot().written, b"\x1b]52;c;\x07");
-    assert!(matches!(
-        worker.receive_next_command(),
-        Some(Command::PublishPendingScreen)
-    ));
-    assert!(worker.process_command(Command::PublishPendingScreen));
     let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("denied clipboard operations must only publish the ordinary screen");
     };
@@ -1764,14 +1767,9 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         clipboard: WorkerClipboard::default(),
     };
 
+    // Output after idle publishes at once, and one batch of reads makes one screen.
     assert!(worker.process_reader_events(Some(3)));
     assert!(worker.pending_command.is_none());
-    assert!(receiver.try_recv().is_err());
-    assert!(matches!(
-        worker.receive_next_command(),
-        Some(Command::PublishPendingScreen)
-    ));
-    assert!(worker.process_command(Command::PublishPendingScreen));
     let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
         panic!("coalesced output must publish a terminal screen")
     };
@@ -1782,6 +1780,46 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         Err(mpsc::TryRecvError::Empty)
     ));
 
+    worker.finish();
+}
+
+#[test]
+fn a_published_screen_reports_the_input_serial_written_before_its_capture() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
+        native_pty: direct_native_pty(records.clone()),
+        input: PtyInput::default(),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        server_reading: None,
+        commands,
+        reader_events,
+        events: events.into(),
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+        permission_requests: PermissionRequestFilter::default(),
+        clipboard: WorkerClipboard::default(),
+    };
+
+    assert!(worker.write_pty(b"a"));
+    assert!(worker.process_command(Command::InputSerial(7)));
+    assert_eq!(records.snapshot().written, b"a");
+    assert!(worker.feed_test_output(vec![b"a".to_vec()]));
+
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+        panic!("the echo must publish a screen")
+    };
+    assert_eq!(screen.input_serial, 7);
     worker.finish();
 }
 
@@ -1812,9 +1850,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
     };
-    worker
-        .schedules
-        .mark_presented(Instant::now() + Duration::from_secs(1));
+    continue_output_burst(&mut worker);
 
     let generation = worker.emulator.presentation_generation();
     for index in 0..64 {
@@ -2647,11 +2683,6 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
 
     assert!(worker.feed_test_output(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
     assert!(matches!(
-        worker.receive_next_command(),
-        Some(Command::PublishPendingScreen)
-    ));
-    assert!(worker.process_command(Command::PublishPendingScreen));
-    assert!(matches!(
         receiver.try_recv().unwrap(),
         TerminalSessionEvent::Attention(_)
     ));
@@ -2692,6 +2723,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
 
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
+    continue_output_burst(&mut worker);
     assert!(worker.feed_test_output(vec![b"\x1b]2;latest title\x07".to_vec()]));
     assert!(receiver.try_recv().is_err());
 

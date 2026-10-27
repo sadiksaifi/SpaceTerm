@@ -47,6 +47,7 @@ mod metadata_tests;
 mod pane_host;
 #[cfg(test)]
 mod pane_host_tests;
+mod publish;
 mod reading;
 #[cfg(test)]
 mod reading_tests;
@@ -116,6 +117,7 @@ struct OwnedPane {
     effects: NativeEffects,
     reading: reading::Reading,
     accessibility: accessibility::Accessibility,
+    publication: publish::Publication,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];
