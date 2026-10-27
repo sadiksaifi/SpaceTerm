@@ -11,9 +11,18 @@ from spaceterm_tasks.processes import OWN_GROUP, stop_group, terminating_signals
 
 
 def build_executable(
-    *cargo_args, binary="spaceterm", env=None, portable_linux=False, target=None, metadata=None
+    *cargo_args,
+    binary="spaceterm",
+    example=False,
+    env=None,
+    portable_linux=False,
+    target=None,
+    metadata=None,
 ):
-    """Return Cargo's executable path and, if requested, its package's emitted metadata."""
+    """Return Cargo's executable path and, if requested, its package's emitted metadata.
+
+    With `example`, `binary` names a Cargo example instead of a binary target.
+    """
     build = ["build"]
     if target is not None:
         if portable_linux:
@@ -27,7 +36,7 @@ def build_executable(
     command = [
         "cargo",
         *build,
-        "--bin",
+        "--example" if example else "--bin",
         binary,
         "--message-format=json-render-diagnostics",
         *cargo_args,
