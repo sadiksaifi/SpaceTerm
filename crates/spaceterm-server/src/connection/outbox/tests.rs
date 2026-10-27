@@ -346,3 +346,91 @@ fn goodbye_is_last_and_bounds_stall_the_connection() {
     }
     assert_eq!(outbox.open(Channel(999)), Err(OutboxError::Capacity));
 }
+
+fn graphics(bytes: usize) -> Result<ReplyBody, Refusal> {
+    Ok(ReplyBody::Graphics(Ok(crate::pane::graphics::Chunk {
+        image: crate::pane::graphics::ImageKey {
+            image_id: 1,
+            generation: 1,
+        },
+        offset: 0,
+        bytes: vec![7; bytes],
+    })))
+}
+
+/// A reply's id stays in flight until its last frame is taken for writing, so the in-flight
+/// bound also bounds replies a peer leaves unread.
+#[test]
+fn a_reply_holds_its_request_id_until_its_last_frame_is_taken() {
+    let (outbox, _) = fresh();
+    for id in 0..limits::MAX_REQUESTS_IN_FLIGHT as u32 {
+        outbox.begin(RequestId(id)).unwrap();
+        outbox.reply(RequestId(id), Ok(ReplyBody::Done)).unwrap();
+    }
+    let extra = RequestId(limits::MAX_REQUESTS_IN_FLIGHT as u32);
+    assert_eq!(outbox.begin(extra), Err(OutboxError::Violation));
+    assert_eq!(drain(&outbox).len(), limits::MAX_REQUESTS_IN_FLIGHT);
+    outbox.begin(extra).unwrap();
+    // A reply of several frames frees its id with the last one.
+    outbox
+        .reply(extra, graphics(3 * limits::BULK_CHUNK_BYTES))
+        .unwrap();
+    assert!(outbox.owes_replies());
+    let (_, priority) = outbox.next_frame().unwrap();
+    assert_eq!(priority, Priority::L2);
+    assert!(
+        outbox.owes_replies(),
+        "frames of the reply are still queued"
+    );
+    while outbox.next_frame().is_some() {}
+    assert!(!outbox.owes_replies());
+    // A reply already queued cannot be sent twice.
+    outbox.begin(RequestId(1)).unwrap();
+    outbox.reply(RequestId(1), Ok(ReplyBody::Done)).unwrap();
+    assert_eq!(
+        outbox.reply(RequestId(1), Ok(ReplyBody::Done)),
+        Err(OutboxError::Misuse)
+    );
+}
+
+/// Queued replies and Pane events are bounded by bytes at L1 and L2, and passing a bound closes
+/// the connection with `Goodbye(Stalled)`.
+#[test]
+fn queued_bytes_are_bounded_at_l1_and_l2() {
+    let (outbox, _) = fresh();
+    let chunk = limits::MAX_REPLY_BYTES / 2;
+    let mut result = Ok(());
+    for id in 0..8 {
+        outbox.begin(RequestId(id)).unwrap();
+        result = outbox.reply(RequestId(id), graphics(chunk));
+        if result.is_err() {
+            assert!(
+                (id as usize + 1) * chunk >= limits::MAX_L2_BYTES,
+                "refused reply {id}: {result:?}"
+            );
+            break;
+        }
+    }
+    assert_eq!(result, Err(OutboxError::Stalled));
+    assert!(outbox.is_closing());
+
+    let (outbox, _) = fresh();
+    let write = |text: String| {
+        outbox.pane(
+            Channel(1),
+            PaneEvent::Effect(crate::pane::effects::Request {
+                id: 1,
+                generation: 1,
+                remaining_ms: 1,
+                effect: crate::pane::effects::Effect::ClipboardWrite {
+                    target: crate::pane::effects::ClipboardTarget::Standard,
+                    text,
+                },
+            }),
+        )
+    };
+    let text = "x".repeat(crate::pane::effects::MAX_CLIPBOARD_BYTES);
+    let events = (0..).find(|_| write(text.clone()).is_err()).unwrap();
+    assert!(events * crate::pane::effects::MAX_CLIPBOARD_BYTES <= limits::MAX_L1_BYTES);
+    assert!(outbox.is_closing());
+}
