@@ -57,6 +57,11 @@ mod repository_tests;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
+#[allow(
+    dead_code,
+    reason = "the push connection dispatches ScrollbackPage once transport and push merge"
+)]
+mod scrollback;
 mod shared;
 pub use shared::SharedWorkspaceHost;
 #[cfg(test)]

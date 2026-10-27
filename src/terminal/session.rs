@@ -3,6 +3,16 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
+#[allow(
+    dead_code,
+    reason = "the push connection dispatches ScrollbackPage once transport and push merge"
+)]
+mod scrollback;
+#[allow(
+    unused_imports,
+    reason = "the push connection dispatches ScrollbackPage once transport and push merge"
+)]
+pub(crate) use scrollback::ScrollbackReply;
 mod server_reading;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
@@ -1192,6 +1202,11 @@ enum Command {
     ResetReading,
     ReadingBarrier(mpsc::SyncSender<()>),
     PrepareServerSelection(u64, mpsc::SyncSender<server_reading::PreparedSelection>),
+    #[allow(
+        dead_code,
+        reason = "the push connection dispatches ScrollbackPage once transport and push merge"
+    )]
+    ReadScrollback(scrollback::ScrollbackRead),
     ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
     RouteClientEffects,
@@ -1300,6 +1315,7 @@ impl fmt::Debug for Command {
             Self::ResetReading => "ResetReading",
             Self::ReadingBarrier(_) => "ReadingBarrier",
             Self::PrepareServerSelection(..) => "PrepareServerSelection",
+            Self::ReadScrollback(..) => "ReadScrollback",
             Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
             Self::RouteClientEffects => "RouteClientEffects",
@@ -1814,6 +1830,7 @@ impl TerminalWorker {
                 let _ = reply.send(selection);
                 true
             }
+            Command::ReadScrollback(read) => self.read_scrollback(read),
             Command::ServerAccessibilitySelection(selection, reply) => {
                 match self.emulator.set_accessibility_selection_refs(selection) {
                     Ok(changed) => {

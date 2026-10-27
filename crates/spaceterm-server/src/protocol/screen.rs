@@ -53,10 +53,18 @@ pub struct CursorPosition {
     pub width: u8,
 }
 
-/// The Scrollback above the visible rows. A new `epoch` invalidates every cached row.
+/// The primary screen's Scrollback above the visible rows.
+///
+/// Positions count every row that entered history in this `epoch`, so a position names the same
+/// row while the server discards the oldest rows. Rows `oldest..total` are retained, and visible
+/// row `r` is position `total + r`. Erased rows are never renumbered: clearing the Scrollback
+/// moves `oldest` up to `total`. A new `epoch`, after the engine rewraps or resets history,
+/// invalidates every cached row. The epoch belongs to the Terminal Session, so it survives a
+/// reconnect. While the alternate screen is active, the primary screen's history stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct History {
     pub epoch: u64,
+    pub oldest: u64,
     pub total: u64,
 }
 
@@ -162,6 +170,7 @@ pub struct Page {
 impl ScreenUpdate {
     /// Checks the semantic bounds postcard cannot express.
     pub fn validate(&self) -> Result<(), Fatal> {
+        check(self.history.oldest <= self.history.total)?;
         if let Some(geometry) = self.geometry {
             check(
                 (2..=crate::pane::MAX_COLUMNS).contains(&geometry.columns)

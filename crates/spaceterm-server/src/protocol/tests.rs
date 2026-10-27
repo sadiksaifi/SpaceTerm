@@ -79,7 +79,11 @@ fn update() -> ScreenUpdate {
             blinking: false,
             shape: 0,
         },
-        history: History { epoch: 1, total: 0 },
+        history: History {
+            epoch: 1,
+            oldest: 0,
+            total: 0,
+        },
         shift: Some(ScrollShift {
             top: 0,
             bottom: 24,
@@ -176,10 +180,10 @@ fn golden_server_vectors() {
             update: update(),
         }))),
         [
-            0, 0, 0, 45, 0x43, // header
+            0, 0, 0, 46, 0x43, // header
             1, 2, 1, 1, 5, // channel, frame, base, input
             1, 3, 0, 1, 1, 0, 0, // cursor
-            1, 0, // history
+            1, 0, 0, // history
             0, 0, 0, // geometry, modes, colors
             1, 0, 24, 2, // shift
             1, 1, 1, 1, 0, 0, 1, 0, // one style definition

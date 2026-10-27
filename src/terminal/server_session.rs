@@ -8,6 +8,11 @@ mod link;
 mod reading;
 mod recovery;
 mod schedule;
+#[allow(
+    dead_code,
+    reason = "the Pane worker reads over the cache once push merges"
+)]
+mod scrollback;
 mod screen;
 #[cfg(test)]
 mod tests;

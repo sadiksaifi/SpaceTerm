@@ -1,6 +1,9 @@
 use super::failure::{FailureReason, TerminalFailure};
 use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesystemAuthority};
 mod compression;
+mod history;
+pub(crate) use history::HistoryPage;
+pub use history::HistorySnapshot;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::mem;
@@ -463,6 +466,7 @@ pub struct ScreenSnapshot {
     pub find: Option<Arc<TerminalFindSnapshot>>,
     pub graphics: GraphicsSnapshot,
     pub damage: SnapshotDamage,
+    pub history: HistorySnapshot,
 }
 
 impl PartialEq for ScreenSnapshot {
@@ -492,6 +496,7 @@ impl PartialEq for ScreenSnapshot {
             && self.find == other.find
             && self.graphics == other.graphics
             && self.damage == other.damage
+            && self.history == other.history
     }
 }
 
@@ -539,6 +544,7 @@ impl ScreenSnapshot {
             find: None,
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
+            history: HistorySnapshot::default(),
         })
     }
 
@@ -683,6 +689,7 @@ impl ScreenSnapshot {
             find: None,
             graphics: GraphicsSnapshot::default(),
             damage: SnapshotDamage::initial(),
+            history: HistorySnapshot::default(),
         }
     }
 }
@@ -815,6 +822,7 @@ pub(crate) struct TerminalEmulator {
     synchronized_output_last_activity: Option<Instant>,
     prompt_redraw: PromptRedraw,
     find: TerminalFindState,
+    history: history::HistoryTracker,
     applied_appearance: TerminalAppearanceUpdate,
     reported_appearance: Rc<Cell<Appearance>>,
 }
@@ -1289,6 +1297,7 @@ impl TerminalEmulator {
             synchronized_output_last_activity: None,
             prompt_redraw: PromptRedraw::default(),
             find: TerminalFindState::default(),
+            history: history::HistoryTracker::default(),
             applied_appearance: initial_appearance,
             reported_appearance,
         })
@@ -3279,6 +3288,7 @@ impl TerminalEmulator {
             .find
             .snapshot(cols, scrollbar.offset_rows, scrollbar.visible_rows);
         self.find.mark_published();
+        let history = self.history.update(&mut self.terminal)?;
         let screen = Arc::new(ScreenSnapshot {
             generation: self.presentation_generation,
             appearance_generation: self.applied_appearance.generation,
@@ -3308,6 +3318,7 @@ impl TerminalEmulator {
             find,
             graphics,
             damage,
+            history,
         });
         if self.server_reading_enabled {
             self.retain_reading_baseline(&screen)?;

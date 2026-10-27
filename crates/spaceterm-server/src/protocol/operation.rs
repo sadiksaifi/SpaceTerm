@@ -47,8 +47,10 @@ pub enum Operation {
     Resolve {
         sequence: u64,
     },
-    /// Reads `rows` Scrollback rows from `start`, counted from the oldest retained row of
-    /// history `epoch`.
+    /// Reads `rows` Scrollback rows from position `start` of history `epoch` (see
+    /// [`super::screen::History`]). The page leaves out rows the server already discarded, so it
+    /// may start later. An ended epoch, or history hidden by the alternate screen, is refused as
+    /// `Refusal::Stale`.
     ScrollbackPage {
         channel: Channel,
         epoch: u64,
