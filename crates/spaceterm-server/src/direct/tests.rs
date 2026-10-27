@@ -41,15 +41,10 @@ pub(crate) fn admitted(
     name: &str,
     paired: &PairedDevice,
 ) -> Result<ServerLink, ServerError> {
-    let mut ws = connection.into_ws();
-    crate::protocol::admit_transport(
-        &mut ws,
-        (client, &name.into()),
-        &paired.pin.server,
-        &paired.pin.build,
-        &[crate::protocol::MAJOR],
-    )?;
-    Ok(spawn_link(Box::new(WssCarrier::new(ws)), Arc::new(|_| {})).unwrap())
+    let carrier = connection
+        .into_transport()
+        .admit((client, &name.into()), &paired.pin)?;
+    Ok(spawn_link(carrier, Arc::new(|_| {})).unwrap())
 }
 
 /// Connects and admits a paired device under its own client identity.
@@ -214,6 +209,27 @@ impl Fixture {
                     return host::serve(tcp, generation, state, &environment, waker, wake);
                 }
                 assert!(Instant::now() < deadline, "WSS accept deadline");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    }
+    /// Serves the next QUIC connection of the prototype.
+    #[cfg(feature = "iroh")]
+    pub(crate) fn serve_next_quic(
+        &self,
+        panes: SharedPaneService,
+    ) -> std::thread::JoinHandle<Result<(), ServerError>> {
+        let state = Arc::clone(&self.state);
+        let environment = self.environment(panes);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let accepted = state.lock().unwrap().accept_quic();
+                if let Some((stream, generation)) = accepted {
+                    let (waker, wake) = Waker::new().unwrap();
+                    return host::serve_quic(stream, generation, state, &environment, waker, wake);
+                }
+                assert!(Instant::now() < deadline, "QUIC accept deadline");
                 std::thread::sleep(Duration::from_millis(2));
             }
         })
@@ -2469,4 +2485,158 @@ fn wss_request_round_trip_on_loopback() {
     );
     drop(connection);
     let _ = server.join().unwrap();
+}
+
+#[cfg(feature = "iroh")]
+mod quic_prototype {
+    use super::*;
+    use crate::connection::quic::{QuicStream, secret_key};
+
+    /// A request the refusing service answers without effect.
+    fn nothing() -> Operation {
+        Operation::ReleaseAttachment {
+            attachment: crate::attachments::Attachment {
+                workspace: [1; 32],
+                generation: 1,
+            },
+        }
+    }
+
+    fn connect_quic(
+        endpoint: &str,
+        paired: &PairedDevice,
+        credential: &DeviceCredential,
+    ) -> ServerLink {
+        let connection = DirectConnection::connect_quic(endpoint, paired, credential).unwrap();
+        admitted(connection, &paired.client, "Test", paired).unwrap()
+    }
+
+    #[test]
+    fn a_paired_device_is_admitted_over_quic_and_its_requests_round_trip() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next_quic(service(Refusing));
+        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
+        for _ in 0..20 {
+            assert!(matches!(
+                request(&link, nothing()),
+                Err(RequestError::Refused(Refusal::Unsupported))
+            ));
+        }
+        drop(link);
+        server.join().unwrap().unwrap();
+    }
+
+    /// iroh's TLS proves the device's key. Proofs signed by an enrolled credential do not admit a
+    /// connection whose iroh key is another device's.
+    #[test]
+    fn quic_refuses_a_device_proof_from_another_iroh_key() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let other = DeviceCredential::generate().unwrap();
+        let server = fixture.serve_next_quic(service(Refusing));
+        let address = Endpoint::from_url(&fixture.endpoint()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let addresses = address.resolve(deadline).unwrap();
+        let secret = secret_key(other.expose_bytes(), &other.public_key().unwrap()).unwrap();
+        let mut stream =
+            QuicStream::connect(secret, &paired.pin.public_key, &addresses, deadline).unwrap();
+        let answer = client::exchange_on(
+            &mut stream,
+            &paired.pin,
+            &credential,
+            wire::Action::Connect {
+                paired: paired.clone(),
+            },
+            None,
+            None,
+        );
+        assert!(answer.is_err());
+        assert!(matches!(
+            server.join().unwrap(),
+            Err(ServerError::AuthenticationRefused)
+        ));
+    }
+
+    #[test]
+    fn a_client_reaches_only_the_pinned_server_key() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let mut paired = fixture.enroll(&credential);
+        paired.pin.public_key = DeviceCredential::generate().unwrap().public_key().unwrap();
+        assert!(matches!(
+            DirectConnection::connect_quic(&fixture.endpoint(), &paired, &credential),
+            Err(DirectError::Transport)
+        ));
+    }
+
+    #[test]
+    fn revocation_ends_a_quic_connection_with_a_typed_goodbye() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next_quic(service(Refusing));
+        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        fixture
+            .management(Management::Revoke {
+                operation: crypto::random().unwrap(),
+                target: paired.pairing,
+            })
+            .unwrap();
+        assert_eq!(
+            ended(&link),
+            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// Measures a QUIC request's round trip on loopback, as `wss_request_round_trip_on_loopback`
+    /// does for WSS. Run it with `mise run bench:latency:quic`.
+    #[test]
+    #[ignore = "a measurement; run with `mise run bench:latency:quic`"]
+    fn quic_request_round_trip_on_loopback() {
+        const ROUNDS: usize = 2000;
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next_quic(service(Refusing));
+        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
+        let operation = nothing;
+        for _ in 0..200 {
+            let _ = request(&link, operation());
+        }
+        let mut samples: Vec<Duration> = (0..ROUNDS)
+            .map(|_| {
+                let started = Instant::now();
+                assert!(matches!(
+                    request(&link, operation()),
+                    Err(RequestError::Refused(Refusal::Unsupported))
+                ));
+                started.elapsed()
+            })
+            .collect();
+        samples.sort();
+        let percentile = |p: usize| samples[(ROUNDS * p / 100).min(ROUNDS - 1)];
+        println!(
+            "QUIC request round trip on loopback over {ROUNDS} requests: p50 {:?}, p95 {:?}, p99 {:?}, max {:?}",
+            percentile(50),
+            percentile(95),
+            percentile(99),
+            samples[ROUNDS - 1]
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+    }
 }

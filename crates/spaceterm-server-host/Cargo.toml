@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 client = ["spaceterm-server/client"]
+iroh = ["spaceterm-server/iroh"]
 
 [[example]]
 name = "persistent_pane"

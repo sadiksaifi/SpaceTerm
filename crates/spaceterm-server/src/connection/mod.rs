@@ -1,8 +1,8 @@
 //! One full-duplex SpaceTerm Protocol connection between a client and a server.
 //!
 //! - [`carrier`] moves whole frames over one socket. [`unix`] carries account-local IPC, [`wss`]
-//!   paired WSS, and [`loopback`] is an in-memory carrier for tests. A later QUIC carrier replaces
-//!   TCP and WSS without changing messages.
+//!   paired WSS, and [`loopback`] is an in-memory carrier for tests. With the `iroh` feature,
+//!   `quic` is the QUIC carrier prototype of #671 beside WSS.
 //! - [`io`] runs one I/O thread per connection, waiting on carrier readiness and a wake pipe.
 //! - [`outbox`] orders a server's outgoing messages by priority and holds the latest presentation
 //!   per channel under one frame of credit.
@@ -21,6 +21,8 @@ pub mod io;
 pub mod link;
 pub mod loopback;
 pub mod outbox;
+#[cfg(feature = "iroh")]
+pub mod quic;
 pub mod registry;
 pub mod server;
 pub mod service;

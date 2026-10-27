@@ -71,7 +71,32 @@ fn exchange_checked(
     exchanges: Option<&mut Vec<[u8; 32]>>,
 ) -> Result<(wss::Ws, wire::Answer), DirectError> {
     let mut ws = wss::connect(endpoint, pin)?;
-    let challenge: wire::Challenge = wss::receive(&mut ws)?;
+    let answer = exchange_on(&mut ws, pin, credential, action, expected_name, exchanges)?;
+    Ok((ws, answer))
+}
+/// The pairing messages of one authenticated connection, as length-bounded JSON.
+pub(super) trait Messages {
+    fn send(&mut self, value: &impl Serialize) -> Result<(), DirectError>;
+    fn receive<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, DirectError>;
+}
+impl Messages for wss::Ws {
+    fn send(&mut self, value: &impl Serialize) -> Result<(), DirectError> {
+        wss::send(self, value)
+    }
+    fn receive<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, DirectError> {
+        wss::receive(self)
+    }
+}
+/// Verifies the server's challenge on `stream`, proves the device and returns the server's answer.
+pub(super) fn exchange_on(
+    stream: &mut impl Messages,
+    pin: &ServerPin,
+    credential: &DeviceCredential,
+    action: wire::Action,
+    expected_name: Option<&str>,
+    exchanges: Option<&mut Vec<[u8; 32]>>,
+) -> Result<wire::Answer, DirectError> {
+    let challenge: wire::Challenge = stream.receive()?;
     if challenge.pin != *pin {
         return Err(DirectError::WrongServer);
     }
@@ -111,9 +136,9 @@ fn exchange_checked(
         // This live-only bounded set contains no invitation or device proof.
         exchanges.push(wire::exchange_hash(&challenge, &authentication)?);
     }
-    wss::send(&mut ws, &authentication)?;
-    let answer: Result<wire::Answer, DirectError> = wss::receive(&mut ws)?;
-    Ok((ws, answer?))
+    stream.send(&authentication)?;
+    let answer: Result<wire::Answer, DirectError> = stream.receive()?;
+    answer
 }
 pub(super) fn connect(
     endpoint: &str,
@@ -132,7 +157,7 @@ pub(super) fn connect(
         return Err(DirectError::AuthenticationRefused);
     }
     Ok(DirectConnection {
-        ws,
+        transport: Transport::Wss(Box::new(ws)),
         paired: paired.clone(),
     })
 }
@@ -266,12 +291,12 @@ impl DirectConnection {
     pub(crate) fn paired(&self) -> &PairedDevice {
         &self.paired
     }
-    /// The authenticated WebSocket, for admission and then the connection's carrier.
+    /// The authenticated connection, for admission and then the connection's carrier.
     #[cfg_attr(
         not(any(feature = "client", test)),
         allow(dead_code, reason = "the desktop admits and carries the socket")
     )]
-    pub(crate) fn into_ws(self) -> wss::Ws {
-        self.ws
+    pub(crate) fn into_transport(self) -> Transport {
+        self.transport
     }
 }
