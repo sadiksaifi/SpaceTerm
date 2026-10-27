@@ -661,6 +661,27 @@ impl PendingReply {
         }
     }
 
+    /// Waits up to `timeout` for the reply. `None` means it has not arrived.
+    pub fn wait_for(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<Result<ReplyBody, RequestError>> {
+        let deadline = Instant::now() + timeout;
+        let mut value = self.slot.value.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(result) = value.take() {
+                return Some(result);
+            }
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            value = self
+                .slot
+                .ready
+                .wait_timeout(value, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
     /// The reply, if it arrived.
     pub fn try_take(&self) -> Option<Result<ReplyBody, RequestError>> {
         self.slot

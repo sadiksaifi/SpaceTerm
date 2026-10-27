@@ -77,8 +77,11 @@ pub enum Operation {
     EndAccessibility {
         channel: Channel,
     },
-    DirectoryRead(directories::Request),
-    DirectoryCreate(directories::CreationRequest),
+    /// Replied when the read settles. `Cancel` abandons it.
+    DirectoryRead(directories::Operation),
+    /// Replied when the write settles. Cancelling it stops observation only.
+    DirectoryCreate(directories::Creation),
+    /// Replied when the read settles. `Cancel` abandons it. `Read::Poll` is refused.
     WorktreeRead(crate::worktree::Read),
     /// Direct-network administration. Paired connections may send only what the host allows.
     Direct(crate::direct::Management),
@@ -108,7 +111,7 @@ pub enum ReplyBody {
     Page(Page),
     Graphics(Result<graphics::Chunk, graphics::Error>),
     Accessibility(Result<accessibility::Chunk, accessibility::Error>),
-    Directory(Result<directories::Progress, directories::Error>),
+    Directory(Result<directories::Value, directories::Error>),
     Worktree(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
     Interim(InterimReply),
@@ -164,6 +167,7 @@ impl Operation {
                 | Self::Graphics { .. }
                 | Self::Accessibility { .. }
                 | Self::DirectoryRead(_)
+                | Self::DirectoryCreate(_)
                 | Self::WorktreeRead(_)
         )
     }

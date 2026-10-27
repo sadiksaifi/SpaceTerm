@@ -458,9 +458,68 @@ pub(super) const TICK: Duration = Duration::from_millis(10);
 pub struct Served<H> {
     host: H,
     connections: BTreeMap<[u8; 32], Connection>,
+    /// Reads whose replies wait for the host to finish them.
+    reads: Vec<PendingRead>,
+    /// The host's wake, so a new read is checked on the next tick.
+    ticker: Option<Arc<dyn spaceterm_server::connection::Wake>>,
+}
+
+/// A directory or Worktree read, or a directory creation, still running on the host.
+struct PendingRead {
+    connection: [u8; 32],
+    id: RequestId,
+    kind: ReadKind,
+    /// The host's identity of the read.
+    host: u64,
+}
+
+#[derive(Clone, Copy)]
+enum ReadKind {
+    Directory,
+    Creation,
+    Worktree,
+}
+
+impl ReadKind {
+    fn poll(self, id: u64) -> Request {
+        match self {
+            Self::Directory => Request::DirectoryRead(pane::directories::Request::Poll { id }),
+            Self::Creation => {
+                Request::DirectoryCreate(pane::directories::CreationRequest::Poll { id })
+            }
+            Self::Worktree => Request::WorktreeRead(spaceterm_server::worktree::Read::Poll { id }),
+        }
+    }
+}
+
+/// A host's answer to a read: settled with its reply, or still running as host read `id`.
+enum ReadAnswer {
+    Settled(Box<Result<ReplyBody, Refusal>>),
+    Running(u64),
+}
+
+impl ReadAnswer {
+    fn of(reply: Reply) -> Self {
+        use pane::directories::{Error, Progress};
+        use spaceterm_server::worktree::ReadReply;
+        Self::Settled(Box::new(match reply {
+            Reply::DirectoryRead(progress) | Reply::DirectoryCreate(progress) => match progress {
+                Ok(Progress::Ready(value)) => Ok(ReplyBody::Directory(Ok(value))),
+                // The host keeps a running read under the identity the server chose.
+                Ok(Progress::Pending) => return Self::Running(0),
+                Ok(Progress::Cancelled) => Ok(ReplyBody::Directory(Err(Error::Cancelled))),
+                Err(error) => Ok(ReplyBody::Directory(Err(error))),
+            },
+            Reply::WorktreeRead(Ok(ReadReply::Pending { id })) => return Self::Running(id),
+            Reply::WorktreeRead(result) => Ok(ReplyBody::Worktree(result)),
+            Reply::Refused(refusal) => Err(refusal),
+            _ => Err(Refusal::Failed),
+        }))
+    }
 }
 
 struct Connection {
+    client: [u8; 32],
     outbox: Outbox,
     channels: BTreeMap<Channel, Bound>,
 }
@@ -485,7 +544,62 @@ impl<H: HostCommands> Served<H> {
         Self {
             host,
             connections: BTreeMap::new(),
+            reads: Vec::new(),
+            ticker: None,
         }
+    }
+
+    /// Starts a read and replies when it settles, from a later tick when it runs on.
+    fn read(&mut self, peer: &Peer, id: RequestId, kind: ReadKind, request: Request) -> Dispatch {
+        let host = u64::from(id.0);
+        let answer = match ReadAnswer::of(self.command(peer, request)) {
+            // Directory reads run under the identity the server chose: the request id.
+            ReadAnswer::Running(0) if !matches!(kind, ReadKind::Worktree) => {
+                ReadAnswer::Running(host)
+            }
+            answer => answer,
+        };
+        match answer {
+            ReadAnswer::Settled(result) => Dispatch::Reply(result),
+            ReadAnswer::Running(host) => {
+                if self.reads.is_empty()
+                    && let Some(ticker) = &self.ticker
+                {
+                    ticker.wake();
+                }
+                self.reads.push(PendingRead {
+                    connection: peer.connection,
+                    id,
+                    kind,
+                    host,
+                });
+                Dispatch::Deferred
+            }
+        }
+    }
+
+    /// Replies to each read that settled.
+    fn answer_reads(&mut self) {
+        for read in std::mem::take(&mut self.reads) {
+            let reply = self
+                .host
+                .request(self.peer_of(read.connection), read.connection, read.kind.poll(read.host));
+            match ReadAnswer::of(reply) {
+                ReadAnswer::Running(_) => self.reads.push(read),
+                ReadAnswer::Settled(result) => {
+                    if let Some(connection) = self.connections.get(&read.connection) {
+                        // A closing connection no longer needs the reply.
+                        let _ = connection.outbox.reply_or_refuse(read.id, *result);
+                    }
+                }
+            }
+        }
+    }
+
+    fn peer_of(&self, connection: [u8; 32]) -> [u8; 32] {
+        self.connections
+            .get(&connection)
+            .map_or([0; 32], |connection| connection.client)
     }
 
     fn lease(&self, peer: &Peer, channel: Channel) -> Result<Lease, Refusal> {
@@ -816,10 +930,10 @@ fn body(reply: Reply, interim: bool) -> Result<ReplyBody, Refusal> {
         Reply::Outcome(outcome) => ReplyBody::Outcome(outcome),
         Reply::GraphicsChunk(chunk) => ReplyBody::Graphics(chunk),
         Reply::Accessibility(chunk) => ReplyBody::Accessibility(chunk),
-        Reply::DirectoryRead(progress) | Reply::DirectoryCreate(progress) => {
-            ReplyBody::Directory(progress)
+        // Reads settle through `ReadAnswer`.
+        Reply::DirectoryRead(_) | Reply::DirectoryCreate(_) | Reply::WorktreeRead(_) => {
+            return Err(Refusal::Failed);
         }
-        Reply::WorktreeRead(result) => ReplyBody::Worktree(result),
         Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
         Reply::Screen(screen) => ReplyBody::Interim(InterimReply::Screen(screen)),
         Reply::ScreenChanges(changes) => ReplyBody::Interim(InterimReply::ScreenChanges(changes)),
@@ -870,6 +984,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.connections.insert(
             peer.connection,
             Connection {
+                client: peer.client,
                 outbox,
                 channels: BTreeMap::new(),
             },
@@ -957,14 +1072,26 @@ impl<H: HostCommands> ConnectionService for Served<H> {
                     Request::EndAccessibilityDemand { lease }
                 })
             }
-            Operation::DirectoryRead(request) => {
-                body(self.command(peer, Request::DirectoryRead(request)), false)
+            Operation::DirectoryRead(operation) => {
+                let request = Request::DirectoryRead(pane::directories::Request::Begin {
+                    id: u64::from(id.0),
+                    operation,
+                });
+                return self.read(peer, id, ReadKind::Directory, request);
             }
-            Operation::DirectoryCreate(request) => {
-                body(self.command(peer, Request::DirectoryCreate(request)), false)
+            Operation::DirectoryCreate(creation) => {
+                let request = Request::DirectoryCreate(pane::directories::CreationRequest::Begin {
+                    id: u64::from(id.0),
+                    path: creation.path,
+                });
+                return self.read(peer, id, ReadKind::Creation, request);
+            }
+            // Polling is the server's own business.
+            Operation::WorktreeRead(spaceterm_server::worktree::Read::Poll { .. }) => {
+                Err(Refusal::Unsupported)
             }
             Operation::WorktreeRead(read) => {
-                body(self.command(peer, Request::WorktreeRead(read)), false)
+                return self.read(peer, id, ReadKind::Worktree, Request::WorktreeRead(read));
             }
             Operation::Shutdown => body(self.command(peer, Request::Shutdown), false),
             Operation::Interim(interim) => self.interim(peer, interim),
@@ -996,12 +1123,49 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.host.acknowledge(peer.client, sequence);
     }
     fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.ticker = Some(Arc::clone(&wake));
         self.host.ticker(wake);
     }
     fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
-        self.host.tick(now)
+        let host = self.host.tick(now);
+        self.answer_reads();
+        let reads = (!self.reads.is_empty()).then_some(now + TICK);
+        [host, reads].into_iter().flatten().min()
+    }
+    /// The client abandoned a read. It replies `Stale` at once; a directory read stops, while a
+    /// creation and a Worktree read finish unobserved.
+    fn cancel(&mut self, peer: &Peer, id: RequestId) {
+        let Some(index) = self
+            .reads
+            .iter()
+            .position(|read| read.connection == peer.connection && read.id == id)
+        else {
+            return;
+        };
+        let read = self.reads.remove(index);
+        match read.kind {
+            ReadKind::Directory => {
+                self.command(
+                    peer,
+                    Request::DirectoryRead(pane::directories::Request::Cancel { id: read.host }),
+                );
+            }
+            ReadKind::Creation => {
+                self.command(
+                    peer,
+                    Request::DirectoryCreate(pane::directories::CreationRequest::Cancel {
+                        id: read.host,
+                    }),
+                );
+            }
+            ReadKind::Worktree => {}
+        }
+        if let Some(connection) = self.connections.get(&peer.connection) {
+            let _ = connection.outbox.reply(id, Err(Refusal::Stale));
+        }
     }
     fn disconnected(&mut self, peer: &Peer) {
+        self.reads.retain(|read| read.connection != peer.connection);
         self.connections.remove(&peer.connection);
         self.host.disconnected(peer.connection);
     }

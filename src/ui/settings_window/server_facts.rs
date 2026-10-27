@@ -24,13 +24,14 @@ use crate::server_connection::service::ServiceStatus;
 use crate::server_context::{LastKnownFacts, ObservedServerStatus};
 use crate::ui::server_worktrees::Client;
 
-/// How often the presented server's observations are looked at again.
-const POLL: Duration = Duration::from_secs(5);
+/// How often the presented server's local observations are looked at again. Its own facts are
+/// read once per connection, because they change only when the server restarts.
+const LOOK_AGAIN: Duration = Duration::from_secs(5);
 /// How long an unchanged live observation goes before it is retained again with its new time, so
 /// the time a disconnected server's facts show stays close to when it was last connected.
 const UNCHANGED_RETENTION: u64 = 60;
 
-/// The poll following the presented server's facts.
+/// The task following the presented server's facts.
 #[derive(Default)]
 pub(super) struct FactsFollower {
     target: Option<ServerChoice>,
@@ -227,9 +228,12 @@ impl SettingsWindow {
         };
         let generation = follower.generation;
         follower.poll = Some(cx.spawn(async move |settings, cx| {
+            let mut read = None;
             loop {
                 // A connection presented after the window heard of it registers its reader
-                // later, so each look finds it again. A server that isn't live is never read.
+                // later, so each look finds it again until one read succeeds. A server that
+                // isn't live is never read, and one that reconnects may have restarted, so its
+                // facts are read again.
                 let client = settings
                     .update(cx, |settings, cx| {
                         settings
@@ -240,15 +244,17 @@ impl SettingsWindow {
                     })
                     .ok()
                     .flatten();
-                let server = match client {
-                    Some(client) => {
-                        match cx.update(|cx| client.read(Read::ServerFacts, cx)).await {
-                            Ok(ReadReply::ServerFacts(facts)) => Some(facts),
-                            _ => None,
-                        }
-                    }
-                    None => None,
-                };
+                if client.is_none() {
+                    read = None;
+                }
+                if read.is_none()
+                    && let Some(client) = client
+                    && let Ok(ReadReply::ServerFacts(facts)) =
+                        cx.update(|cx| client.read(Read::ServerFacts, cx)).await
+                {
+                    read = Some(facts);
+                }
+                let server = read.clone();
                 let followed = settings.update(cx, |settings, cx| {
                     if settings.server_facts.generation != generation {
                         return false;
@@ -259,7 +265,7 @@ impl SettingsWindow {
                 if !matches!(followed, Ok(true)) {
                     return;
                 }
-                cx.background_executor().timer(POLL).await;
+                cx.background_executor().timer(LOOK_AGAIN).await;
             }
         }));
     }

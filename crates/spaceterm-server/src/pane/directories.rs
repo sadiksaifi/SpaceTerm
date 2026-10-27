@@ -32,6 +32,17 @@ impl std::fmt::Debug for CreationRequest {
         f.write_str("DirectoryCreation(<redacted>)")
     }
 }
+/// Creates a directory and any missing parents. The protocol's form of
+/// [`CreationRequest::Begin`]; its reply follows when the write settles.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Creation {
+    pub path: PathBuf,
+}
+impl std::fmt::Debug for Creation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirectoryCreation(<redacted>)")
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Operation {
     Home,
