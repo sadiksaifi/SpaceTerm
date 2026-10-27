@@ -1,5 +1,5 @@
-//! Connection-scoped Git reads. The server looks at a running read on its tick and replies when
-//! it settles; nothing waits for a Git process.
+//! Connection-scoped Git reads. Each runs on its own thread, which wakes the host when it settles;
+//! nothing waits for a Git process.
 use super::*;
 use std::collections::BTreeMap;
 
@@ -13,20 +13,28 @@ const READS_PER_KIND: usize = 2;
 /// Reads the server runs at once across every connection.
 const READS: usize = 32;
 
+/// A read of one connection, by its request id.
+type Key = (Id, RequestId);
 struct Job {
     kind: std::mem::Discriminant<Read>,
     token: CancellationToken,
-    worker: std::thread::JoinHandle<Result<PreparedRead, Error>>,
+    result: std::sync::mpsc::Receiver<Result<PreparedRead, Error>>,
+    worker: std::thread::JoinHandle<()>,
     deadline: Instant,
 }
 #[derive(Default)]
 pub(super) struct Reads {
-    next: u64,
-    jobs: BTreeMap<(Id, u64), Job>,
+    jobs: BTreeMap<Key, Job>,
     retiring: Vec<Job>,
+    wake: Option<Arc<dyn spaceterm_server::connection::Wake>>,
 }
 impl Reads {
-    fn cancel(&mut self, key: (Id, u64)) {
+    /// Every read started from now on wakes `wake` when it settles.
+    pub fn set_wake(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.wake = Some(wake);
+    }
+    /// Stops a running read. It never settles.
+    pub fn cancel(&mut self, key: Key) {
         if let Some(job) = self.jobs.remove(&key) {
             job.token.cancel();
             self.retiring.push(job);
@@ -49,27 +57,20 @@ impl Reads {
             self.cancel(key);
         }
     }
-    fn tick(&mut self) {
-        let expired: Vec<_> = self
-            .jobs
-            .iter()
-            .filter(|(_, job)| job.deadline <= Instant::now())
-            .map(|(key, _)| *key)
-            .collect();
-        for key in expired {
-            self.cancel(key);
-        }
-        self.retiring.retain(|job| !job.worker.is_finished());
+    /// When the earliest running read outlasts its deadline.
+    pub fn due(&self) -> Option<Instant> {
+        self.jobs.values().map(|job| job.deadline).min()
     }
     pub fn begin(
         &mut self,
-        connection: Id,
+        key: Key,
         device: Id,
         read: Read,
         inventory: Inventory,
         settings: Settings,
-    ) -> Result<ReadReply, Error> {
-        self.tick();
+    ) -> Result<(), Error> {
+        self.retiring.retain(|job| !job.worker.is_finished());
+        let (connection, _) = key;
         let kind = std::mem::discriminant(&read);
         if self.jobs.len() + self.retiring.len() >= READS
             || self
@@ -81,41 +82,62 @@ impl Reads {
         {
             return Err(Error::Unavailable);
         }
-        let id = self.next.checked_add(1).ok_or(Error::Unavailable)?;
-        self.next = id;
+        if self.jobs.contains_key(&key) {
+            return Err(Error::Unavailable);
+        }
         let token = CancellationToken::default();
         let cancellation = token.clone();
+        let wake = self.wake.clone();
+        let (sender, result) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
             .name("spaceterm-worktree-read".into())
-            .spawn(move || read_git(device, read, inventory, settings, &cancellation))
+            .spawn(move || {
+                let _ = sender.send(read_git(device, read, inventory, settings, &cancellation));
+                if let Some(wake) = wake {
+                    wake.wake();
+                }
+            })
             .map_err(|_| Error::Unavailable)?;
         self.jobs.insert(
-            (connection, id),
+            key,
             Job {
                 kind,
                 token,
+                result,
                 worker,
                 deadline: Instant::now() + Duration::from_secs(30),
             },
         );
-        Ok(ReadReply::Pending { id })
+        Ok(())
     }
-    pub fn poll(&mut self, connection: Id, id: u64) -> Result<PreparedRead, Error> {
-        self.tick();
-        let key = (connection, id);
-        let job = self.jobs.get(&key).ok_or(Error::Unavailable)?;
-        if !job.worker.is_finished() {
-            return Ok(PreparedRead {
-                reply: ReadReply::Pending { id },
-                approval: None,
-            });
+    /// The reads that finished, and those that outlasted their deadline as
+    /// [`Error::Unavailable`].
+    pub fn settled(&mut self) -> Vec<(Key, Result<PreparedRead, Error>)> {
+        use std::sync::mpsc::TryRecvError;
+        self.retiring.retain(|job| !job.worker.is_finished());
+        let now = Instant::now();
+        let mut settled = Vec::new();
+        let mut expired = Vec::new();
+        self.jobs.retain(|key, job| match job.result.try_recv() {
+            Ok(prepared) => {
+                settled.push((*key, prepared));
+                false
+            }
+            Err(TryRecvError::Empty) if now < job.deadline => true,
+            Err(TryRecvError::Empty) => {
+                expired.push(*key);
+                true
+            }
+            Err(TryRecvError::Disconnected) => {
+                settled.push((*key, Err(Error::Unavailable)));
+                false
+            }
+        });
+        for key in expired {
+            self.cancel(key);
+            settled.push((key, Err(Error::Unavailable)));
         }
-        self.jobs
-            .remove(&key)
-            .ok_or(Error::Unavailable)?
-            .worker
-            .join()
-            .unwrap_or(Err(Error::Unavailable))
+        settled
     }
 }
 impl Drop for Reads {
@@ -254,9 +276,11 @@ mod tests {
     fn each_kind_of_read_has_its_own_bound_per_connection() {
         let mut reads = Reads::default();
         let inventory = State::empty().inventory;
-        let begin = |reads: &mut Reads, read: Read| {
+        let mut next = 0;
+        let mut begin = |reads: &mut Reads, read: Read| {
+            next += 1;
             reads.begin(
-                [1; 32],
+                ([1; 32], RequestId(next)),
                 [2; 32],
                 read,
                 inventory.clone(),

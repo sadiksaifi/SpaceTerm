@@ -55,10 +55,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         host: &mut SharedWorkspaceHost,
         connection: u8,
     ) -> spaceterm_server::hierarchy::Inventory {
-        let request: Request =
-            serde_json::from_slice(&serde_json::to_vec(&Request::Inventory).unwrap()).unwrap();
-        let reply = host.request([2; 32], [connection; 32], request);
-        let reply: Reply = serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        let reply = host.request([2; 32], [connection; 32], Request::Inventory);
         let Reply::Inventory { inventory, .. } = reply else {
             panic!("observer inventory refused")
         };

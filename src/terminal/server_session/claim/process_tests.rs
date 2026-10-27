@@ -3,6 +3,7 @@
 use super::*;
 use crate::runtime::HostCommands as _;
 use spaceterm_server::hierarchy::Mutation;
+use spaceterm_server::protocol;
 use std::{
     io::{Read, Write},
     os::unix::net::{UnixListener, UnixStream},
@@ -12,6 +13,204 @@ use std::{
 
 const CHILD: &str = "terminal::server_session::claim::process_tests::client_process";
 const SOCKET: &str = "SPACETERM_START_TEST_SOCKET";
+
+/// The Pane commands this fixture carries between its processes. `Request` stays in process, so
+/// the fixture names the few a claim sends.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum Carried {
+    Inventory,
+    SelectPane {
+        pane: spaceterm_server::hierarchy::Id,
+        explicit: bool,
+        size: PaneSize,
+        style: Option<pane::PresentationStyle>,
+    },
+    StartRestored {
+        server: [u8; 32],
+        pane: [u8; 32],
+        size: PaneSize,
+        style: Option<pane::PresentationStyle>,
+    },
+    RepairDirectory {
+        target: pane::directories::Target,
+        replacement: Option<std::path::PathBuf>,
+        size: PaneSize,
+        style: Option<pane::PresentationStyle>,
+    },
+    TakeOver {
+        target: pane::PaneTarget,
+        size: PaneSize,
+        style: Option<pane::PresentationStyle>,
+    },
+}
+impl Carried {
+    fn of(request: &Request) -> Self {
+        match request.clone() {
+            Request::Inventory => Self::Inventory,
+            Request::SelectPane {
+                pane,
+                explicit,
+                size,
+                style,
+            } => Self::SelectPane {
+                pane,
+                explicit,
+                size,
+                style,
+            },
+            Request::StartRestored {
+                server,
+                pane,
+                size,
+                style,
+            } => Self::StartRestored {
+                server,
+                pane,
+                size,
+                style,
+            },
+            Request::RepairDirectory {
+                target,
+                replacement,
+                size,
+                style,
+            } => Self::RepairDirectory {
+                target,
+                replacement,
+                size,
+                style,
+            },
+            Request::TakeOver {
+                target,
+                size,
+                style,
+            } => Self::TakeOver {
+                target,
+                size,
+                style,
+            },
+            _ => panic!("a claim sent a command the fixture does not carry"),
+        }
+    }
+    fn request(self) -> Request {
+        match self {
+            Self::Inventory => Request::Inventory,
+            Self::SelectPane {
+                pane,
+                explicit,
+                size,
+                style,
+            } => Request::SelectPane {
+                pane,
+                explicit,
+                size,
+                style,
+            },
+            Self::StartRestored {
+                server,
+                pane,
+                size,
+                style,
+            } => Request::StartRestored {
+                server,
+                pane,
+                size,
+                style,
+            },
+            Self::RepairDirectory {
+                target,
+                replacement,
+                size,
+                style,
+            } => Request::RepairDirectory {
+                target,
+                replacement,
+                size,
+                style,
+            },
+            Self::TakeOver {
+                target,
+                size,
+                style,
+            } => Request::TakeOver {
+                target,
+                size,
+                style,
+            },
+        }
+    }
+}
+/// The replies to [`Carried`] commands.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum CarriedReply {
+    Inventory(spaceterm_server::hierarchy::Inventory),
+    Claim(Result<protocol::ClaimReply, pane::Refusal>),
+}
+impl CarriedReply {
+    fn of(reply: Reply) -> Self {
+        match reply {
+            Reply::Inventory { inventory, .. } => Self::Inventory(inventory),
+            Reply::Attached { lease } => Self::Claim(Ok(protocol::ClaimReply::Attached { lease })),
+            Reply::Takeover {
+                session_ended,
+                target,
+                controller,
+            } => Self::Claim(Ok(protocol::ClaimReply::Takeover(protocol::Takeover {
+                session_ended,
+                target,
+                controller,
+            }))),
+            Reply::Restored {
+                fresh,
+                session_ended,
+                recovery,
+                directory_unavailable,
+                server,
+                workspace,
+                tab,
+                pane,
+            } => Self::Claim(Ok(protocol::ClaimReply::Restored(Box::new(
+                protocol::Restored {
+                    fresh,
+                    session_ended,
+                    recovery,
+                    directory_unavailable,
+                    server,
+                    workspace,
+                    tab,
+                    pane,
+                },
+            )))),
+            Reply::Refused(refusal) => Self::Claim(Err(refusal)),
+            _ => panic!("the host sent a reply the fixture does not carry"),
+        }
+    }
+    fn reply(self) -> Reply {
+        match self {
+            Self::Inventory(inventory) => Reply::Inventory {
+                inventory,
+                next_sequence: 1,
+            },
+            Self::Claim(Ok(protocol::ClaimReply::Attached { lease })) => Reply::Attached { lease },
+            Self::Claim(Ok(protocol::ClaimReply::Takeover(takeover))) => Reply::Takeover {
+                session_ended: takeover.session_ended,
+                target: takeover.target,
+                controller: takeover.controller,
+            },
+            Self::Claim(Ok(protocol::ClaimReply::Restored(restored))) => Reply::Restored {
+                fresh: restored.fresh,
+                session_ended: restored.session_ended,
+                recovery: restored.recovery,
+                directory_unavailable: restored.directory_unavailable,
+                server: restored.server,
+                workspace: restored.workspace,
+                tab: restored.tab,
+                pane: restored.pane,
+            },
+            Self::Claim(Err(refusal)) => Reply::Refused(refusal),
+        }
+    }
+}
 
 fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(value).unwrap();
@@ -171,7 +370,8 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
         let mut stream = accept(&listener);
         let mut original = None;
         let mut starts = 0;
-        while let Some(request) = read::<Request>(&mut stream).unwrap() {
+        while let Some(request) = read::<Carried>(&mut stream).unwrap() {
+            let request = request.request();
             let produces_start = matches!(
                 request,
                 Request::StartRestored { .. }
@@ -192,7 +392,7 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                 // The PTY exists. Its successful acknowledgement never reaches the client.
                 break;
             }
-            write(&mut stream, &reply).unwrap();
+            write(&mut stream, &CarriedReply::of(reply)).unwrap();
         }
         drop(stream);
         host.disconnected([3; 32]);
@@ -212,7 +412,8 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
         let mut session_observed = false;
         let mut attached = false;
         let mut takeover = false;
-        while let Some(request) = read::<Request>(&mut stream).unwrap() {
+        while let Some(request) = read::<Carried>(&mut stream).unwrap() {
+            let request = request.request();
             if !matches!(request, Request::Inventory) && !observed {
                 assert!(
                     matches!(
@@ -264,7 +465,7 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                 }
                 _ => {}
             }
-            write(&mut stream, &reply).unwrap();
+            write(&mut stream, &CarriedReply::of(reply)).unwrap();
         }
         host.disconnected([5; 32]);
         reopened.finish();
@@ -290,8 +491,8 @@ fn client_process() {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
-    write(&mut stream, &Request::Inventory).unwrap();
-    let Some(Reply::Inventory { inventory, .. }) = read(&mut stream).unwrap() else {
+    write(&mut stream, &Carried::Inventory).unwrap();
+    let Some(CarriedReply::Inventory(inventory)) = read(&mut stream).unwrap() else {
         panic!("inventory missing")
     };
     let pane = inventory.workspaces[0].tabs[0].panes[0].id;
@@ -334,10 +535,11 @@ fn client_process() {
             }
             let result = presenter.send(request, |request| {
                 exchange(&state, pane, request, |request| {
-                    write(&mut stream, request).map_err(|_| ServerError::Protocol)?;
-                    let reply = read::<Reply>(&mut stream)
+                    write(&mut stream, &Carried::of(request)).map_err(|_| ServerError::Protocol)?;
+                    let reply = read::<CarriedReply>(&mut stream)
                         .map_err(|_| ServerError::Protocol)?
-                        .ok_or(ServerError::Protocol)?;
+                        .ok_or(ServerError::Protocol)?
+                        .reply();
                     match reply {
                         Reply::Refused(refusal) => Err(refusal.into()),
                         reply => Ok(reply),

@@ -1097,10 +1097,6 @@ impl PaneLink {
             Request::ReleaseAttachment { attachment } => self
                 .request(Operation::ReleaseAttachment { attachment })
                 .map(|_| Reply::Unchanged),
-            // Directory and Worktree reads have their own deferred requests.
-            Request::DirectoryRead(_) | Request::DirectoryCreate(_) | Request::WorktreeRead(_) => {
-                Err(ServerError::Unsupported)
-            }
             Request::Shutdown => self.request(Operation::Shutdown).map(|_| Reply::Closed),
             // Claims need this Pane's attachment permit. The single-key form predates focus
             // generations.
