@@ -1331,6 +1331,13 @@ pub(super) fn present(
             attached_session = true;
             // Authenticate and receive the authoritative screen before enabling input.
             let epoch = state.attach(&presenter)?;
+            // Health is judged by time when the connection fails, so a hidden or idle Pane
+            // whose worker never turns still renews recovery.
+            state
+                .connection_recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .connected(std::time::Instant::now());
             drain_input(&state, &input);
             let mut active_input = ActiveInput {
                 epoch,
@@ -1619,14 +1626,6 @@ pub(super) fn present(
                     }
                 }
                 busy |= semantic.can_continue();
-                if ready {
-                    // Each turn on a live channel renews recovery once it stays healthy.
-                    state
-                        .connection_recovery
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .connected(std::time::Instant::now());
-                }
                 // The worker waits for pushed events, input, a view change or a Scrollback page.
                 // Only a selection drag past an edge has a deadline.
                 if !busy {
