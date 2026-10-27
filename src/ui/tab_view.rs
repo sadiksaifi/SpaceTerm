@@ -484,6 +484,10 @@ pub(crate) struct TabView {
     stage_stretch: Pixels,
     /// Where each Split's gap is in the Pane Layout while only the stage stretches the Panes.
     stretched_split_gaps: BTreeMap<SplitId, Bounds<Pixels>>,
+    /// Whether this frame embeds each Pane as a cached view. GPUI republishes no accessibility
+    /// nodes from a reused view, so Panes cache only while no assistive technology reads the
+    /// window. GPUI redraws every view when that changes.
+    panes_cached: bool,
     active: bool,
     focus_branch_blocker: Option<TerminalFocusBlocker>,
     native_service_hierarchy_generation: u64,
@@ -575,6 +579,7 @@ impl TabView {
             pane_frames: PaneFrames::default(),
             stage_stretch: px(0.0),
             stretched_split_gaps: BTreeMap::new(),
+            panes_cached: false,
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -1955,6 +1960,12 @@ impl TabView {
                     // or accessible text of a former shell paints behind it.
                     .map(|body| match shared_surface.screen {
                         Some(screen) => body.child(screen),
+                        // A cached Pane redraws only when it or what it read changes, so one
+                        // Pane's output never repaints the grids of the others.
+                        None if self.panes_cached => body.child(
+                            gpui::AnyView::from(terminal)
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        ),
                         None => body.child(terminal),
                     })
                     .children(shared_surface.notice),
@@ -3411,6 +3422,7 @@ impl Render for TabView {
             self.tab.set_minimum_pane_size(minimum);
         }
         self.sync_terminal_focus(cx);
+        self.panes_cached = !window.is_a11y_active();
         let view = cx.entity().downgrade();
         let zoom_state = self.tab.zoom_state();
         let minimum_size = match zoom_state {
