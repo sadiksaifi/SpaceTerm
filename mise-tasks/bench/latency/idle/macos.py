@@ -9,9 +9,9 @@
 """Measure the TCP traffic a SpaceTerm app sends while its visible Panes stay idle.
 
 Show a remote Pane, leave it idle and run this task. nettop reports the app's byte counters for
-each TCP connection, so this covers paired WSS connections; account-local IPC uses a Unix
-socket that nettop does not count. A client that sends no periodic requests sends only its
-connection keepalive.
+each TCP connection, so this covers paired WSS connections. Account-local IPC uses a Unix socket
+that nettop does not count; a connection-level test covers that path. A client that sends no
+periodic requests sends only its keepalive: one ping after 5 seconds of silence.
 """
 
 import argparse
@@ -20,6 +20,12 @@ import time
 
 from spaceterm_tasks import TaskError, main
 from spaceterm_tasks.latency import APPS, add_route_arguments, check_route, resolve
+
+# The keepalive sends one ping after this much silence.
+KEEPALIVE_SECONDS = 5
+# A generous ceiling for one ping on the wire, with WebSocket and TLS framing.
+PING_BYTES = 128
+BUDGET = PING_BYTES / KEEPALIVE_SECONDS
 
 
 def app_pid(name):
@@ -79,12 +85,17 @@ def run(args):
         raise TaskError("the app kept no TCP connection open through the window")
     if set(before) != set(after):
         print("note: connections opened or closed during the window; only lasting ones count")
+    print(
+        f"keepalive budget: one ping of at most {PING_BYTES} B after {KEEPALIVE_SECONDS} s "
+        f"of silence, {BUDGET:.1f} B/s from client to server"
+    )
     for connection in lasting:
         received = (after[connection][0] - before[connection][0]) / elapsed
         sent = (after[connection][1] - before[connection][1]) / elapsed
+        verdict = "within" if sent <= BUDGET else "over"
         print(
             f"{connection}: client to server {sent:.1f} B/s, "
-            f"server to client {received:.1f} B/s over {elapsed:.1f} s"
+            f"server to client {received:.1f} B/s over {elapsed:.1f} s; {verdict} the budget"
         )
 
 
