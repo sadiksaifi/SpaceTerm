@@ -1,11 +1,13 @@
 //! Protocol latency probe for `mise run bench:latency:protocol`.
 //!
-//! latency_probe measure IDENTITY local [--samples N] [--requests N]
+//! latency_probe measure IDENTITY local [--samples N] [--requests N] [--pages N] [--fetches N]
 //! latency_probe measure IDENTITY paired [--owner-command COMMAND] [--expose ADDRESS] [...]
 //! latency_probe owner IDENTITY
 //!
 //! `measure` creates a probe Workspace whose Pane runs a raw `cat`, times request round trips
-//! and key-to-echo, closes the Workspace and prints one JSON result per line. A paired run
+//! and key-to-echo, closes the Workspace and prints one JSON result per line. `--pages` also
+//! times a typed screenful until its last row is pushed, a scroll by one page of output.
+//! `--fetches` then times reads of 200-row Scrollback pages from that history. A paired run
 //! enrolls a fresh pairing through an owner on the server's machine and revokes it afterwards.
 //! Without `--owner-command` the owner is this process, so the server must be on this machine;
 //! `--expose` enables the server's network exposure for the run, through the owner command when
@@ -32,6 +34,8 @@ struct Options {
     expose: Option<std::net::SocketAddr>,
     samples: usize,
     requests: usize,
+    pages: usize,
+    fetches: usize,
 }
 
 fn options(arguments: &[String]) -> Result<Options> {
@@ -45,6 +49,8 @@ fn options(arguments: &[String]) -> Result<Options> {
         expose: None,
         samples: 200,
         requests: 50,
+        pages: 0,
+        fetches: 0,
     };
     let mut flags = flags.iter();
     while let Some(flag) = flags.next() {
@@ -65,11 +71,22 @@ fn options(arguments: &[String]) -> Result<Options> {
                 Ok(count) if count > 0 => options.requests = count,
                 _ => return fail("--requests needs a positive count"),
             },
+            "--pages" => match value.parse() {
+                Ok(count) => options.pages = count,
+                _ => return fail("--pages needs a count"),
+            },
+            "--fetches" => match value.parse() {
+                Ok(count) => options.fetches = count,
+                _ => return fail("--fetches needs a count"),
+            },
             _ => return fail("unknown option"),
         }
     }
     if options.route != "local" && options.route != "paired" {
         return fail("the route must be local or paired");
+    }
+    if options.fetches > 0 && options.pages * 30 < 400 {
+        return fail("--fetches needs at least 14 --pages of history");
     }
     Ok(options)
 }
@@ -91,12 +108,15 @@ fn ms(duration: Duration) -> f64 {
 /// A small xorshift generator for human-like gaps between keys.
 struct Gaps(u64);
 impl Gaps {
-    fn next(&mut self) -> Duration {
+    fn unit(&mut self) -> f64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
-        let unit = (self.0 >> 11) as f64 / (1u64 << 53) as f64;
-        Duration::from_millis(80 + (unit * 80.0) as u64)
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn next(&mut self) -> Duration {
+        Duration::from_millis(80 + (self.unit() * 80.0) as u64)
     }
 }
 
@@ -127,8 +147,40 @@ fn sample(pane: &mut EchoPane, options: &Options, route: &str) -> Result<()> {
         std::thread::sleep(gaps.next());
     }
     emit("key to echo", route, &echoes);
+
+    if options.pages > 0 {
+        let mut pages = Vec::with_capacity(options.pages);
+        pane.rewind()?;
+        for index in 0..options.pages {
+            continue_unless_interrupted()?;
+            let start = Instant::now();
+            pane.page(index, start + Duration::from_secs(10))?;
+            pages.push(ms(start.elapsed()));
+            std::thread::sleep(gaps.next());
+        }
+        emit("page of output", route, &pages);
+    }
+
+    if options.fetches > 0 {
+        let available = pane.history_rows();
+        let mut fetches = Vec::with_capacity(options.fetches);
+        for _ in 0..options.fetches {
+            continue_unless_interrupted()?;
+            // Anywhere in the history the pages wrote, so no page repeats a cached read.
+            let span = available.saturating_sub(u64::from(FETCH_ROWS));
+            let back = u64::from(FETCH_ROWS) + (gaps.unit() * span as f64) as u64;
+            let start = Instant::now();
+            pane.fetch(back, FETCH_ROWS)?;
+            fetches.push(ms(start.elapsed()));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        emit("scrollback page", route, &fetches);
+    }
     Ok(())
 }
+
+/// Rows in one timed Scrollback page, as a client's first page after opening a channel.
+const FETCH_ROWS: u16 = 200;
 
 /// The owner of the server under test, in this process or behind an owner command.
 enum OwnerLink {

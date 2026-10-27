@@ -102,6 +102,20 @@ The workload task reports keystroke-to-pixels p99 with the other Pane idle, then
 
 `bench:latency:wss` measures a paired request's round trip through TLS and the WebSocket on loopback, in a release build, without a desktop or installed server.
 
+### Loss test
+
+`bench:latency:netem` measures a paired connection to a foreground Development server on a Linux owner host, first clean and then with netem loss and delay. Besides key-to-echo and request round trip, it times a typed screenful until its last row arrives and 200-row Scrollback page reads. The impairment applies only to the owner host's traffic to this machine, so only the server's direction is impaired. The owner host needs passwordless sudo for `tc`. The task removes its qdisc after every impaired cell, also after a failure or an interrupt, and refuses to start while the device already has a `prio` or `netem` qdisc. If a run is killed outright, remove the qdisc by hand with `sudo tc qdisc del dev DEVICE root`.
+
+For example, from the Mac against Penguin:
+
+```sh
+mise run bench:latency:netem --owner-host penguin --jail /var/tmp/spaceterm-netem \
+  --expose 192.168.1.206:9341 --client-address "$(ipconfig getifaddr en8)" --interface en8 \
+  --rounds 2 --output .snap/loss-test
+```
+
+`--client-address` must be an address of this machine. `--expose` uses a port of its own, so an installed server keeps its listener. The owner host builds the server and probe from the same checkout path; `--owner-target` selects its Cargo target directory. `--jail` gives the server private, disposable state through bwrap, so a Development server already running there is left alone. Defaults are 2% loss, 25 ms delay and 300 samples of each measurement per cell. `--output` receives raw results and a percentile table.
+
 The idle task reads per-connection byte counters with `nettop`, so it sees paired WSS connections but not account-local IPC.
 
 On macOS, remote tasks accept `--interface` with a remote host, and the pixel, idle and protocol tasks take that host as `--route-host`. A task given them refuses to run unless the route to the host uses that interface and every established TCP connection to the host uses an address on it. Use them to keep a wired batch on Ethernet.
