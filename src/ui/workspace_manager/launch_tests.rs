@@ -35,7 +35,7 @@ fn inventory() -> Inventory {
             root_tab: TAB,
             tabs: vec![Tab {
                 worktree: None,
-                worktree_membership_fixed: false,
+                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                 worktree_repository: None,
                 id: TAB,
                 root_pane: PANE,
@@ -1690,7 +1690,7 @@ fn with_hidden_tab(
     inventory.revision = revision;
     inventory.workspaces[0].tabs.push(Tab {
         worktree: None,
-        worktree_membership_fixed: false,
+        worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
         worktree_repository: None,
         id: HIDDEN_TAB,
         root_pane: HIDDEN_PANE,
@@ -1842,7 +1842,7 @@ fn with_detached_workspace() -> Inventory {
     };
     let tab = |id, root_pane, pane| Tab {
         worktree: None,
-        worktree_membership_fixed: false,
+        worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
         worktree_repository: None,
         id,
         root_pane,

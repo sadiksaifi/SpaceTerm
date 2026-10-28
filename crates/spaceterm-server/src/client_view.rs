@@ -1,6 +1,8 @@
 //! Client-owned arrangements. These records never enter the protocol or server organization.
 use crate::ServerError;
-use crate::hierarchy::{Axis, Id, Inventory, MAX_PANES, MAX_TABS, MAX_WORKSPACES, Tab, Workspace};
+use crate::hierarchy::{
+    Axis, Id, Inventory, MAX_PANES, MAX_TABS, MAX_WORKSPACES, Tab, Workspace, WorktreeMembership,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -398,7 +400,7 @@ impl RetainedInventory {
                         .tabs
                         .iter()
                         .map(|tab| Tab {
-                            worktree_membership_fixed: false,
+                            worktree_membership: WorktreeMembership::Following,
                             worktree: None,
                             worktree_repository: None,
                             id: tab.id,
@@ -627,7 +629,7 @@ mod tests {
     fn tab(id: u8, panes: Vec<Pane>) -> Tab {
         Tab {
             worktree: None,
-            worktree_membership_fixed: false,
+            worktree_membership: WorktreeMembership::Following,
             worktree_repository: None,
             id: [id; 32],
             root_pane: panes[0].id,
@@ -733,7 +735,7 @@ mod reconciliation_tests {
         };
         let tab = Tab {
             worktree: None,
-            worktree_membership_fixed: false,
+            worktree_membership: WorktreeMembership::Following,
             worktree_repository: None,
             id: [3; 32],
             root_pane: [2; 32],
@@ -882,7 +884,7 @@ mod retained_inventory_tests {
                 pinned_directory: Some("/home/tester/project".into()),
                 root_tab: [2; 32],
                 tabs: vec![Tab {
-                    worktree_membership_fixed: true,
+                    worktree_membership: WorktreeMembership::Opened,
                     worktree: Some("/home/tester/project".into()),
                     worktree_repository: Some("/home/tester/project".into()),
                     id: [2; 32],

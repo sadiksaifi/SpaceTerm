@@ -520,7 +520,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                 tabs: vec![Tab {
                     id: tab,
                     root_pane: ids.pane,
-                    worktree_membership_fixed: false,
+                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                     worktree: None,
                     worktree_repository: None,
                     panes: vec![new_pane(
@@ -601,7 +601,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
             workspace.tabs.push(Tab {
                 id: ids.tab.expect("a Tab projection has an identity"),
                 root_pane: ids.pane,
-                worktree_membership_fixed: false,
+                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                 worktree: source_tab.and_then(|t| t.worktree.clone()),
                 worktree_repository: source_tab.and_then(|t| t.worktree_repository.clone()),
                 panes: vec![new_pane(ids.pane, None, Axis::Right, directory)],
