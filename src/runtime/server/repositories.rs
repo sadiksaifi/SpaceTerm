@@ -576,6 +576,8 @@ struct ActiveRead {
 }
 struct DiscoveryJob {
     directory: PathBuf,
+    /// The git directories the directory's last successful discovery found.
+    known: Option<GitDirectories>,
     active: ActiveRead,
 }
 struct CountJob {
@@ -604,8 +606,18 @@ enum ReadEvent {
 struct GitDirectories {
     own: PathBuf,
     common: PathBuf,
+    /// The root of the Worktree they belong to.
+    root: PathBuf,
 }
 impl GitDirectories {
+    /// Whether this linked Worktree is being removed. `rm -rf` and `git worktree remove` delete
+    /// its `.git` file with the rest of its work tree, and its own git directory only afterwards
+    /// or at prune. Until then git finds the repository that contains the Worktree, or none.
+    fn removing(&self) -> bool {
+        self.own != self.common
+            && self.own.is_dir()
+            && std::fs::symlink_metadata(self.root.join(".git")).is_err()
+    }
     /// Adds what a repository's facts follow, and whether recursively: the Worktree's own git
     /// directory with its `HEAD`, `index` and operation state; the common directory with
     /// `packed-refs` and the main `HEAD` and `index`; each directory of the `refs/` tree; and
@@ -687,7 +699,7 @@ struct DirectoryRead {
     active: Option<ActiveRead>,
     /// Since when this directory waits to be read. `None` while nothing asked for a read.
     next_read: Option<Instant>,
-    /// Its repository's git directories, as of the last discovery.
+    /// Its repository's git directories, as of the last discovery that did not fail.
     git: Option<GitDirectories>,
     /// When its last discovery ended.
     finished: Option<Instant>,
@@ -767,6 +779,7 @@ fn read_sources(sources: Sources, readers: Option<Readers>, status: GitToolStatu
                     match job {
                         Ok(job) if !job.active.cancellation.is_cancelled() => discover(
                             job.directory,
+                            job.known,
                             job.active.id,
                             repository,
                             worktrees,
@@ -1109,6 +1122,7 @@ impl ReadSupervisor {
                 CancellationToken::linked(&self.cancellation, &CancellationToken::default());
             let job = DiscoveryJob {
                 directory: directory.clone(),
+                known: read.git.clone(),
                 active: ActiveRead {
                     id: self.next_id,
                     cancellation: cancellation.clone(),
@@ -1209,10 +1223,17 @@ impl ReadSupervisor {
                 }
                 let directory = facts.directory.clone();
                 let missing_tool = facts.failure == Some(RepositoryReadError::ToolMissing);
+                let failed = facts.failure.is_some();
                 read.facts = Some(*facts);
                 if discovered {
                     read.active = None;
-                    read.git = git;
+                    // A failed read keeps the repository it last found, as the host keeps its
+                    // facts. Its git directories stay watched, and a reread of the directory
+                    // still reads the rest of that repository, which lists a removed Worktree
+                    // as missing.
+                    if !failed {
+                        read.git = git;
+                    }
                     read.finished = Some(Instant::now());
                 }
                 self.prune_counts();
@@ -1301,6 +1322,7 @@ impl ReadSupervisor {
 
 fn discover(
     directory: PathBuf,
+    known: Option<GitDirectories>,
     id: u64,
     repository: &policy::local_read::LocalRepositoryReader,
     worktrees: &crate::worktrees::git::LocalWorktreeGit,
@@ -1320,6 +1342,12 @@ fn discover(
             .validate_directory(&facts.directory)
             .map_err(|_| RepositoryReadError::Unavailable)?;
         let directory = validated.path();
+        // Facts read while the directory's Worktree is being removed describe the repository
+        // that contains it, or none. They must not change saved membership.
+        let removing = || known.as_ref().is_some_and(GitDirectories::removing);
+        if removing() {
+            return Err(RepositoryReadError::Unavailable);
+        }
         if let ProbeOutcome::Repository(probe) = repository.probe(directory, cancellation)? {
             let RepositoryRoot::Local(root) = &probe.root else {
                 return Err(RepositoryReadError::InvalidResponse);
@@ -1335,7 +1363,11 @@ fn discover(
                 git = std::fs::canonicalize(own)
                     .ok()
                     .zip(std::fs::canonicalize(common).ok())
-                    .map(|(own, common)| GitDirectories { own, common });
+                    .map(|(own, common)| GitDirectories {
+                        own,
+                        common,
+                        root: root.clone(),
+                    });
             }
             facts.repository = Some(Repository {
                 root,
@@ -1347,23 +1379,36 @@ fn discover(
                 changes: Err(RepositoryReadError::Unavailable),
                 counting: Some(ChangeCounting::Pending),
             });
-            if !report(
-                events,
-                ReadEvent::Facts {
-                    id,
-                    facts: Box::new(facts.clone()),
-                    fsmonitor,
-                    git: None,
-                    discovered: false,
-                },
-                cancellation,
-            ) {
+            // Early facts show only the repository the directory last belonged to. Another one
+            // waits for the whole read, which a removal fails.
+            if (known.is_none() || known == git)
+                && !report(
+                    events,
+                    ReadEvent::Facts {
+                        id,
+                        facts: Box::new(facts.clone()),
+                        fsmonitor,
+                        git: None,
+                        discovered: false,
+                    },
+                    cancellation,
+                )
+            {
                 return Err(RepositoryReadError::Cancelled);
             }
             // Every Pane needs its actual membership from Git, including inactive Tabs.
             if let Some(mut list) = worktrees.list(directory, cancellation)? {
                 if list.worktrees.len() > MAX_WORKTREES {
                     return Err(RepositoryReadError::OutputTooLarge);
+                }
+                // Each git run finds the repository again, so a directory read for the first
+                // time can change repository between runs. A list that names another Worktree
+                // is not this directory's.
+                if let Some(record) = list.current.and_then(|current| list.worktrees.get(current))
+                    && std::fs::canonicalize(&record.root).ok().as_ref()
+                        != facts.repository.as_ref().map(|repository| &repository.root)
+                {
+                    return Err(RepositoryReadError::Unavailable);
                 }
                 for record in &mut list.worktrees {
                     record.missing |= matches!(
@@ -1378,16 +1423,25 @@ fn discover(
                     worktrees: list.worktrees,
                 });
             }
-        } else {
-            // Git also reports no repository when its working directory disappears after spawn.
-            // Only a read of the same directory can authoritatively clear saved membership.
-            super::local_filesystem()
-                .revalidate_directory(&validated)
-                .map_err(|_| RepositoryReadError::Unavailable)?;
+        }
+        // Git also reports no repository, or the one that contains the directory, while the
+        // directory is being removed. Only a read of a directory that outlasts the read can
+        // change saved membership.
+        super::local_filesystem()
+            .revalidate_directory(&validated)
+            .map_err(|_| RepositoryReadError::Unavailable)?;
+        if removing() {
+            return Err(RepositoryReadError::Unavailable);
         }
         Ok(())
     })();
-    facts.failure = result.err();
+    // A failed read reports no repository. The host keeps the last one it published.
+    if let Err(failure) = result {
+        facts.failure = Some(failure);
+        facts.repository = None;
+        facts.worktrees = None;
+        git = None;
+    }
     report(
         events,
         ReadEvent::Facts {

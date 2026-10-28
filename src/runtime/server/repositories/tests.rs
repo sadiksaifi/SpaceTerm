@@ -1,9 +1,11 @@
 use super::super::repository_tests::GitFixture;
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// How long a test waits between looks at a reader it drives.
 const PAUSE: Duration = Duration::from_millis(10);
+/// How long a test waits before it calls a read stuck, as the shared-host tests do.
+const STUCK: Duration = Duration::from_secs(12);
 
 /// Delay only a full scan at the process boundary; discovery, porcelain parsing, Worktree
 /// listing, physical directory validation, and publication all use the production readers.
@@ -253,6 +255,264 @@ fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
     assert_eq!(
         restored.inventory.workspaces[0].tabs[0].worktree.as_ref(),
         Some(&tree)
+    );
+}
+
+/// Polls until `predicate` holds, and fails with `what` once the read looks stuck.
+fn wait(reading: &mut Reading, what: &str, predicate: impl Fn(&Snapshot) -> bool) {
+    let until = Instant::now() + STUCK;
+    while !predicate(&reading.poll()) {
+        assert!(Instant::now() < until, "{what}");
+        std::thread::sleep(PAUSE);
+    }
+}
+
+/// A discovery run, as the readers issue it.
+fn is_discovery(request: &ProgramRequest) -> bool {
+    let discovery: Vec<std::ffi::OsString> = policy::local_read::DISCOVERY_ARGUMENTS
+        .iter()
+        .map(Into::into)
+        .collect();
+    request.arguments.ends_with(&discovery)
+}
+
+#[test]
+fn a_worktree_emptied_during_discovery_keeps_membership_and_its_repository_lists_it_missing() {
+    /// Removes the Worktree's `.git` file before discovery run `at` of an armed read, as
+    /// `rm -rf` does before it removes the directory. Git then finds the containing repository.
+    struct EmptyDuringDiscovery {
+        tree: PathBuf,
+        at: usize,
+        armed: AtomicBool,
+        runs: AtomicUsize,
+    }
+    impl RepositoryProgramRunner for EmptyDuringDiscovery {
+        fn run(
+            &self,
+            request: &ProgramRequest,
+            stdout: &mut dyn FnMut(&[u8]),
+            cancellation: &CancellationToken,
+        ) -> Result<ProgramExit, ProgramError> {
+            if request.directory == self.tree
+                && is_discovery(request)
+                && self.armed.load(Ordering::Acquire)
+                && self.runs.fetch_add(1, Ordering::AcqRel) == self.at
+            {
+                std::fs::remove_file(self.tree.join(".git")).unwrap();
+            }
+            DeadlineRunner.run(request, stdout, cancellation)
+        }
+    }
+    // Before the probe, so every run finds the containing repository, or between the probe
+    // and the Worktree list.
+    for at in [0, 1] {
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        let runner = Arc::new(EmptyDuringDiscovery {
+            tree: tree.clone(),
+            at,
+            armed: AtomicBool::new(false),
+            runs: AtomicUsize::new(0),
+        });
+        // Without watches, only the rereads below read a directory again.
+        let mut reading = Reading::watched(
+            [git.0.clone(), tree.clone()].into(),
+            runner.clone(),
+            git.0.join("unused-home"),
+            Arc::new(Unwatchable),
+        );
+        wait(&mut reading, "the first reads did not finish", |snapshot| {
+            snapshot.directories.len() == 2
+                && snapshot
+                    .directories
+                    .iter()
+                    .all(|facts| facts.failure.is_none() && facts.worktrees.is_some())
+        });
+        let membership = |reading: &Reading| {
+            reading
+                .state
+                .inventory
+                .workspaces
+                .iter()
+                .find(|workspace| workspace_directory(workspace) == Some(tree.as_path()))
+                .unwrap()
+                .tabs[0]
+                .worktree
+                .clone()
+        };
+        assert_eq!(membership(&reading), Some(tree.clone()));
+
+        runner.armed.store(true, Ordering::Release);
+        reading.repositories.reread([tree.clone()].into());
+        wait(
+            &mut reading,
+            "the emptied Worktree's read did not fail",
+            |snapshot| {
+                snapshot
+                    .directories
+                    .iter()
+                    .any(|facts| facts.directory == tree && facts.failure.is_some())
+            },
+        );
+        assert_eq!(
+            membership(&reading),
+            Some(tree.clone()),
+            "a read that found the containing repository moved the Tab"
+        );
+        assert_own_facts(&reading.poll(), &tree);
+
+        // A focus on the removed Worktree reads its repository again, after a failed read too.
+        std::fs::remove_dir_all(&tree).unwrap();
+        reading.repositories.reread([tree.clone()].into());
+        wait(
+            &mut reading,
+            "the repository did not list the removed Worktree as missing",
+            |snapshot| {
+                snapshot.directories.iter().any(|facts| {
+                    facts.directory == git.0
+                        && facts.worktrees.as_ref().is_some_and(|list| {
+                            list.worktrees
+                                .iter()
+                                .any(|record| record.root == tree && record.missing)
+                        })
+                })
+            },
+        );
+        assert_eq!(membership(&reading), Some(tree.clone()));
+    }
+}
+
+/// The last facts published for `tree` are its own Worktree's, failed or not.
+fn assert_own_facts(snapshot: &Snapshot, tree: &Path) {
+    let facts = snapshot
+        .directories
+        .iter()
+        .find(|facts| facts.directory == tree)
+        .unwrap();
+    assert_eq!(
+        facts
+            .repository
+            .as_ref()
+            .map(|repository| repository.root.as_path()),
+        Some(tree),
+        "the published repository is not the Worktree's own"
+    );
+    let list = facts.worktrees.as_ref().unwrap();
+    assert_eq!(
+        list.current
+            .map(|current| list.worktrees[current].root.as_path()),
+        Some(tree),
+        "the published current Worktree is not the Worktree's own"
+    );
+}
+
+#[test]
+fn a_read_while_a_worktree_is_being_removed_keeps_membership_and_its_own_facts() {
+    // A Worktree inside its repository, and one outside any repository.
+    for nested in [true, false] {
+        let git = GitFixture::new();
+        let parent = GitFixture::new();
+        std::fs::remove_dir_all(parent.0.join(".git")).unwrap();
+        let tree = if nested { &git.0 } else { &parent.0 }.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        let mut reading = Reading::watched(
+            [tree.clone()].into(),
+            Arc::new(DeadlineRunner),
+            git.0.join("unused-home"),
+            Arc::new(Unwatchable),
+        );
+        wait(&mut reading, "the first read did not finish", |snapshot| {
+            snapshot
+                .directories
+                .iter()
+                .any(|facts| facts.failure.is_none() && facts.worktrees.is_some())
+        });
+        assert_eq!(
+            reading.state.inventory.workspaces[0].tabs[0]
+                .worktree
+                .as_ref(),
+            Some(&tree)
+        );
+        // `rm -rf` and `git worktree remove` can delete `.git` long before the directory.
+        std::fs::remove_file(tree.join(".git")).unwrap();
+        reading.repositories.reread([tree.clone()].into());
+        wait(
+            &mut reading,
+            "the read during removal did not fail",
+            |snapshot| {
+                snapshot
+                    .directories
+                    .iter()
+                    .any(|facts| facts.failure == Some(RepositoryReadError::Unavailable))
+            },
+        );
+        assert_eq!(
+            reading.state.inventory.workspaces[0].tabs[0]
+                .worktree
+                .as_ref(),
+            Some(&tree),
+            "nested: {nested}"
+        );
+        assert_own_facts(&reading.poll(), &tree);
+    }
+}
+
+#[test]
+fn a_failed_read_keeps_following_its_repositorys_git_directories() {
+    /// Times out the first discovery run once armed, as a loaded host can.
+    struct FailOnce {
+        armed: AtomicBool,
+    }
+    impl RepositoryProgramRunner for FailOnce {
+        fn run(
+            &self,
+            request: &ProgramRequest,
+            stdout: &mut dyn FnMut(&[u8]),
+            cancellation: &CancellationToken,
+        ) -> Result<ProgramExit, ProgramError> {
+            if is_discovery(request) && self.armed.swap(false, Ordering::AcqRel) {
+                return Err(ProgramError::TimedOut);
+            }
+            DeadlineRunner.run(request, stdout, cancellation)
+        }
+    }
+    let git = GitFixture::new();
+    let runner = Arc::new(FailOnce {
+        armed: AtomicBool::new(false),
+    });
+    let mut reading = Reading::start(
+        [git.0.clone()].into(),
+        runner.clone(),
+        git.0.join("unused-home"),
+    );
+    wait(&mut reading, "the first read did not finish", |snapshot| {
+        snapshot
+            .directories
+            .iter()
+            .any(|facts| facts.failure.is_none() && facts.worktrees.is_some())
+    });
+    runner.armed.store(true, Ordering::Release);
+    reading.repositories.reread([git.0.clone()].into());
+    wait(&mut reading, "the armed read did not fail", |snapshot| {
+        snapshot
+            .directories
+            .iter()
+            .any(|facts| facts.failure == Some(RepositoryReadError::TimedOut))
+    });
+    // Only the watch on the git directories can see this change.
+    git.git(&["branch", "-m", "renamed"]);
+    wait(
+        &mut reading,
+        "a failed read stopped following its repository",
+        |snapshot| {
+            snapshot.directories.iter().any(|facts| {
+                facts.failure.is_none()
+                    && facts.repository.as_ref().is_some_and(|repository| {
+                        repository.head == RepositoryHead::Branch("renamed".into())
+                    })
+            })
+        },
     );
 }
 

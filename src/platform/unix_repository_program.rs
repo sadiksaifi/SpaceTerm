@@ -69,8 +69,8 @@ impl UnixRepositoryProgramRunner {
         {
             return Err(ProgramError::TimedOut);
         }
-        // A missing directory and a missing program both fail `exec` with ENOENT, so the directory
-        // is checked first to keep NotFound about the program.
+        // A missing directory and a missing program both fail `exec` with ENOENT. The directory
+        // is checked here and again after a failed spawn, to keep NotFound about the program.
         if !request.directory.is_dir() {
             return Err(ProgramError::Failed);
         }
@@ -155,7 +155,12 @@ impl ProgramGroup {
             }
         }
         let mut child = command.spawn().map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => ProgramError::NotFound,
+            // The directory can disappear between the check in `run_locked` and the spawn.
+            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                if request.directory.is_dir() =>
+            {
+                ProgramError::NotFound
+            }
             _ => ProgramError::Failed,
         })?;
         match libc::pid_t::try_from(child.id()) {
@@ -677,6 +682,20 @@ mod tests {
             Err(ProgramError::NotFound)
         );
         assert_eq!(run(&missing_directory).0, Err(ProgramError::Failed));
+    }
+
+    #[test]
+    fn a_spawn_in_a_directory_removed_after_the_check_does_not_report_a_missing_program() {
+        let fixture = Fixture::new("vanished");
+        let spawn = |request: &ProgramRequest| ProgramGroup::spawn(request, None).err();
+        // A program that is missing while its directory remains is missing.
+        let mut absent = request(&fixture.0.join("absent").to_string_lossy(), &[]);
+        absent.directory = fixture.0.clone();
+        assert_eq!(spawn(&absent), Some(ProgramError::NotFound));
+        // The spawn fails with ENOENT once the directory `run_locked` checked is gone.
+        let mut vanished = shell("exit 0");
+        vanished.directory = fixture.0.join("removed");
+        assert_eq!(spawn(&vanished), Some(ProgramError::Failed));
     }
 
     struct SignalMaskRestore(libc::sigset_t);
