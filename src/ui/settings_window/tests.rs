@@ -21,6 +21,10 @@ use crate::ui::sidebar_window::SidebarOwner as _;
 
 use crate::settings::storage::testing::MemoryStorage;
 
+/// What Reset All Settings says it can't give back and what it keeps.
+const RESET_ALL_DETAIL: &str =
+    "This can\u{2019}t be undone. Server connections and system permissions are kept.";
+
 pub(super) struct Harness {
     storage: Arc<MemoryStorage>,
     settings: crate::settings::Settings,
@@ -4359,7 +4363,7 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
     cx.run_until_parked();
 
     window.read_with(cx, |settings, _| {
-        assert_eq!(settings.reset_all_detail(), "This cannot be undone.");
+        assert_eq!(settings.reset_all_detail(), RESET_ALL_DETAIL);
         assert!(
             settings
                 .navigable_sections()
@@ -4410,7 +4414,7 @@ fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut Test
     let (window, _harness, cx) = open_settings(cx);
 
     window.read_with(cx, |settings, _| {
-        assert_eq!(settings.reset_all_detail(), "This cannot be undone.");
+        assert_eq!(settings.reset_all_detail(), RESET_ALL_DETAIL);
     });
 
     assert!(

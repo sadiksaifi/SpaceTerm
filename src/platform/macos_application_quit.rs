@@ -435,9 +435,9 @@ pub(in crate::platform) mod tests {
         let prompt = |destructive| QuitPrompt {
             title: "Quit SpaceTerm?".to_owned(),
             detail: if destructive {
-                "This ends 3 Terminal Sessions.".to_owned()
+                "This development build runs its own server. Quitting ends its 3 Terminal Sessions and stops their running commands.".to_owned()
             } else {
-                String::new()
+                "SpaceTerm leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it.".to_owned()
             },
             destructive,
         };

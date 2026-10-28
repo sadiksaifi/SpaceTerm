@@ -53,7 +53,7 @@ pub(crate) enum UpdateError {
     Unavailable,
     #[error("Try again when you are online.")]
     Check,
-    #[error("Try the update again.")]
+    #[error("Check your network, then try again.")]
     Download,
     #[error("Try again later.")]
     Verification,

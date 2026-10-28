@@ -345,7 +345,7 @@ fn up_to_date_alert() -> Alert<PromptAction> {
         ModalId::new("update-up-to-date"),
         "SpaceTerm is up to date",
         "SpaceTerm Is Up to Date",
-        "",
+        format!("Version {CURRENT_VERSION} is the latest release."),
         vec![action(
             PromptAction::Acknowledge,
             "OK",
@@ -363,7 +363,7 @@ fn available_alert(version: &str) -> Alert<PromptAction> {
     Alert::new(
         ModalId::new("update-available"),
         "Update available",
-        format!("SpaceTerm {version} Available"),
+        format!("SpaceTerm {version} Is Available"),
         format!("You have version {CURRENT_VERSION}."),
         vec![
             action(
@@ -428,9 +428,21 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
     let (title, retry, intent) = match error {
         UpdateError::Unavailable => ("Updates Unavailable", false, AlertIntent::Informational),
         UpdateError::Check => ("Couldn’t Check for Updates", true, AlertIntent::Warning),
-        UpdateError::Download => ("Couldn't Download", true, AlertIntent::Warning),
-        UpdateError::Verification => ("Couldn't Verify", true, AlertIntent::Warning),
-        UpdateError::Installation => ("Couldn't Install", true, AlertIntent::Warning),
+        UpdateError::Download => (
+            "Couldn\u{2019}t Download the Update",
+            true,
+            AlertIntent::Warning,
+        ),
+        UpdateError::Verification => (
+            "Couldn\u{2019}t Verify the Update",
+            true,
+            AlertIntent::Warning,
+        ),
+        UpdateError::Installation => (
+            "Couldn\u{2019}t Install the Update",
+            true,
+            AlertIntent::Warning,
+        ),
         UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
     };
     let mut actions = Vec::with_capacity(2);
@@ -506,7 +518,7 @@ fn install_alert(version: &str) -> Alert<PromptAction> {
         ModalId::new("update-install"),
         "Install update",
         format!("Restart to Install SpaceTerm {version}?"),
-        "",
+        "SpaceTerm quits, installs the update, and opens again. Your Terminal Sessions keep running.",
         vec![
             action(
                 PromptAction::Restart,
@@ -1773,7 +1785,9 @@ mod tests {
         for action in ["Restart and Install", "Release Notes", "Later"] {
             tree.node(action);
         }
-        assert!(cx.debug_bounds("modal-alert-message").is_none());
+        tree.text(
+            "SpaceTerm quits, installs the update, and opens again. Your Terminal Sessions keep running.",
+        );
         assert!(cx.debug_bounds("modal-alert-detail").is_none());
     }
 }

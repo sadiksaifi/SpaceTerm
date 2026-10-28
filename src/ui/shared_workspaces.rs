@@ -1951,6 +1951,18 @@ mod development {
                 target,
                 scope,
                 workspace: workspace.name.clone(),
+                tabs: workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| {
+                        tab.panes.iter().any(|pane| {
+                            confirmation
+                                .panes
+                                .iter()
+                                .any(|confirmed| confirmed.id == pane.id)
+                        })
+                    })
+                    .count(),
                 confirmation,
                 controls: inventory.close.as_ref().map(|live| live.controls.clone()),
             })
@@ -2523,6 +2535,8 @@ mod development {
         confirmation: ServerCloseConfirmation,
         controls: Option<Vec<ConfirmedControl>>,
         scope: SharedCloseScope,
+        /// The Tabs that hold the reviewed Panes.
+        tabs: usize,
         /// The Workspace's name as the server published it.
         workspace: String,
     }
@@ -2582,7 +2596,7 @@ mod development {
                 SharedCloseScope::Tab => "Close Tab?".to_owned(),
                 SharedCloseScope::Worktree => "Close Tabs?".to_owned(),
                 SharedCloseScope::Workspace => {
-                    format!("Kill Workspace \"{}\"?", self.workspace)
+                    format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
                 }
             }
         }
@@ -2599,30 +2613,96 @@ mod development {
         /// What closes, what ends, and for whom. Every client loses these Panes and Sessions,
         /// including a client that controls one of the Panes.
         pub(crate) fn message(&self) -> String {
-            let sessions = match self.sessions() {
-                0 => String::new(),
-                1 => "This ends 1 Terminal Session for every client.".to_owned(),
-                count => format!("This ends {count} Terminal Sessions for every client."),
+            let sessions = self.sessions();
+            let ends = match sessions {
+                0 => None,
+                1 => Some("1 Terminal Session".to_owned()),
+                count => Some(format!("{count} Terminal Sessions")),
             };
-            if self.scope == SharedCloseScope::Workspace {
-                if sessions.is_empty() {
-                    "This can't be undone.".to_owned()
-                } else {
-                    format!("{sessions} This can't be undone.")
+            let stops = if sessions == 1 { "its" } else { "their" };
+            match self.target {
+                ServerCloseTarget::Workspace { .. } => {
+                    let tabs = match self.tabs {
+                        1 => "1 Tab".to_owned(),
+                        count => format!("{count} Tabs"),
+                    };
+                    match ends {
+                        Some(ends) => format!(
+                            "Its {tabs} and {ends} end for every client. This can\u{2019}t be undone."
+                        ),
+                        None => format!(
+                            "Its {tabs} close for every client. This can\u{2019}t be undone."
+                        ),
+                    }
                 }
-            } else {
-                sessions
+                ServerCloseTarget::Pane { .. } | ServerCloseTarget::Tab { .. }
+                    if self.confirmation.removes_workspace =>
+                {
+                    let only = if matches!(self.target, ServerCloseTarget::Pane { .. }) {
+                        "Pane"
+                    } else {
+                        "Tab"
+                    };
+                    let removal = format!(
+                        "This is the only {only} in \u{201C}{}\u{201D}, so the Workspace is removed for every client.",
+                        self.workspace
+                    );
+                    match ends {
+                        Some(ends) => format!("{removal} This ends {ends}."),
+                        None => removal,
+                    }
+                }
+                ServerCloseTarget::Pane { .. } if self.confirmation.removes_tab => {
+                    let removal =
+                        "This is the only Pane in its Tab, so the Tab closes for every client.";
+                    match ends {
+                        Some(ends) => format!(
+                            "{removal} This ends {ends} and stops {stops} running commands."
+                        ),
+                        None => format!("{removal} No Terminal Session is running in it."),
+                    }
+                }
+                ServerCloseTarget::Pane { .. } => match ends {
+                    Some(ends) => format!(
+                        "This ends {ends} and stops {stops} running commands for every client."
+                    ),
+                    None => {
+                        "The Pane closes for every client. No Terminal Session is running in it."
+                            .to_owned()
+                    }
+                },
+                ServerCloseTarget::Tab { .. } => {
+                    let removal = match self.confirmation.panes.len() {
+                        1 => "The Tab and its Pane close for every client.".to_owned(),
+                        count => format!("The Tab and its {count} Panes close for every client."),
+                    };
+                    match ends {
+                        Some(ends) => format!(
+                            "{removal} This ends {ends} and stops {stops} running commands."
+                        ),
+                        None => format!("{removal} No Terminal Session is running in it."),
+                    }
+                }
+                ServerCloseTarget::Worktree { .. } => ends
+                    .map(|ends| format!("This ends {ends} for every client."))
+                    .unwrap_or_default(),
             }
         }
 
-        /// What a removed Workspace leaves behind, when the close removes one.
+        /// What the close keeps, and whether it can be undone.
         pub(crate) fn detail(&self) -> Option<&'static str> {
-            if self.scope == SharedCloseScope::Worktree {
-                return Some("The Worktree, its files, and its branch are kept.");
+            match self.target {
+                ServerCloseTarget::Worktree { .. } if !self.confirmation.removes_workspace => {
+                    Some("The Worktree, its files, and its branch are kept.")
+                }
+                ServerCloseTarget::Workspace { .. } => {
+                    Some("Repository files and Worktrees stay on disk.")
+                }
+                _ if self.confirmation.removes_workspace => Some(
+                    "Repository files and Worktrees stay on disk. This can\u{2019}t be undone.",
+                ),
+                _ => None,
             }
-            self.confirmation.removes_workspace.then_some(
-                "Repository files and Worktree directories stay on disk. This Workspace cannot be restored.",
-            )
         }
 
         /// The title of the notice that replaces a confirmation another client made stale.
@@ -2646,10 +2726,10 @@ mod development {
     /// after the confirmation opened.
     pub(crate) const fn shared_close_changed_title(target: ServerCloseTarget) -> &'static str {
         match target {
-            ServerCloseTarget::Pane { .. } => "Pane Changed",
-            ServerCloseTarget::Tab { .. } => "Tab Changed",
-            ServerCloseTarget::Worktree { .. } => "Tabs Changed",
-            ServerCloseTarget::Workspace { .. } => "Workspace Changed",
+            ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
+            ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
+            ServerCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
+            ServerCloseTarget::Workspace { .. } => "Workspace Changed on Another Client",
         }
     }
 

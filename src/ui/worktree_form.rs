@@ -26,7 +26,7 @@ use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
 const FORM_MODAL_ID: &str = "new-worktree-form";
 const CREATE_ACTION_SELECTOR: &str = "new-worktree-create";
 const CANCEL_ACTION_SELECTOR: &str = "new-worktree-cancel";
-pub(crate) const BRANCHES_FAILED: &str = "Couldn't read this repository's branches.";
+pub(crate) const BRANCHES_FAILED: &str = "Couldn\u{2019}t read this repository\u{2019}s branches.";
 const CREATE_FAILED: &str = "Git couldn\u{2019}t create the Worktree.";
 
 /// Runs the dialog's git work for one repository.
@@ -252,7 +252,7 @@ impl WorktreeForm {
         )
         .description(match (self.backend.server(), self.backend.machine()) {
             (true, Some(machine)) => format!(
-                "Create a Worktree for a branch of {} on \"{machine}\".",
+                "Create a Worktree for a branch of {} on \u{201C}{machine}\u{201D}.",
                 self.context.repository_name
             ),
             (true, None) => format!(
@@ -513,7 +513,7 @@ impl WorktreeForm {
                                 ..FormErrors::default()
                             }),
                             Err(_) => Err(FormErrors {
-                                location: Some("Can't use this location.".into()),
+                                location: Some("Can\u{2019}t use this location.".into()),
                                 ..FormErrors::default()
                             }),
                         });
@@ -617,7 +617,7 @@ impl WorktreeForm {
             Err(WorktreeCreateError::NotSubmitted(reason)) => (None,reason.into()),
             Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location)) => (Some(FormField::Location),"Choose a new or empty directory.".into()),
             Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Missing)) => (None,"The repository is no longer available. Reopen it before creating a Worktree.".into()),
-            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Branch)) => (None,"Git couldn't finish creating the Worktree. Check for leftover files before trying again.".into()),
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Branch)) => (None,"Git couldn\u{2019}t finish creating the Worktree. Check for leftover files before trying again.".into()),
             Err(WorktreeCreateError::Server(_)) => (None,"SpaceTerm could not confirm whether the Worktree was created. Review the sidebar before trying again.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
@@ -793,7 +793,7 @@ impl Render for WorktreeForm {
                 cx,
             )
         };
-        let mut notes = vec!["Git hooks don't run."];
+        let mut notes = vec!["Git hooks don\u{2019}t run."];
         if self.source == BranchSource::Remote {
             notes.insert(0, "Shows only fetched branches.");
         }
@@ -1007,11 +1007,15 @@ fn branch_listed(branches: &BranchList, branch: &BranchName) -> bool {
 fn name_message(error: BranchNameError) -> SharedString {
     match error {
         BranchNameError::Empty => "Enter a branch name.",
-        BranchNameError::LeadingDash => "Can't start with a dash.",
-        BranchNameError::InvalidCharacter => "Spaces and ~ ^ : ? * [ \\ aren't allowed.",
-        BranchNameError::InvalidSequence => "\"..\", \"//\", and \"@{\" aren't allowed.",
-        BranchNameError::InvalidComponent => "A part can't start with a dot or end with \".lock\".",
-        BranchNameError::InvalidEnd => "Can't start or end with a slash or end with a dot.",
+        BranchNameError::LeadingDash => "Can\u{2019}t start with a dash.",
+        BranchNameError::InvalidCharacter => "Spaces and ~ ^ : ? * [ \\ aren\u{2019}t allowed.",
+        BranchNameError::InvalidSequence => {
+            "\u{201C}..\u{201D}, \u{201C}//\u{201D}, and \u{201C}@{\u{201D} aren\u{2019}t allowed."
+        }
+        BranchNameError::InvalidComponent => {
+            "A part can\u{2019}t start with a dot or end with \u{201C}.lock\u{201D}."
+        }
+        BranchNameError::InvalidEnd => "Can\u{2019}t start or end with a slash or end with a dot.",
         BranchNameError::Reserved => "Git reserves this name.",
     }
     .into()
@@ -1351,7 +1355,7 @@ mod tests {
         assert_eq!(
             (invalid[0].as_deref(), taken[0].as_deref(), valid),
             (
-                Some("Spaces and ~ ^ : ? * [ \\ aren't allowed."),
+                Some("Spaces and ~ ^ : ? * [ \\ aren\u{2019}t allowed."),
                 Some("Branch name already exists."),
                 [None, None, None],
             )

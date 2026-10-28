@@ -1556,6 +1556,15 @@ fn title_only_alert_presents_its_heading_and_decisions_without_a_message(cx: &mu
     );
     assert_eq!(labels, ["Quit SpaceTerm?"]);
     assert!(cx.debug_bounds("modal-alert-message").is_none());
+    assert!(
+        cx.debug_bounds("modal-body-viewport").is_none(),
+        "a title-only Alert draws no empty body row"
+    );
+    assert!(
+        cx.debug_bounds("modal-alert-intent-mark-informational")
+            .is_none(),
+        "a title-only Alert draws no intent mark"
+    );
     assert!(tree.exposed(tree.node("Quit")) && tree.exposed(tree.node("Cancel")));
     assert!(
         cx.debug_bounds("modal-action-quit-keyboard-focus")

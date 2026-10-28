@@ -72,7 +72,7 @@ impl SettingsWindow {
     /// confirmation, so only a failure speaks.
     pub(super) fn begin_document_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(contents) = self.editor.export_document() else {
-            present_export_failure("Couldn't export settings.", window, cx);
+            present_export_failure("Couldn\u{2019}t export settings.", window, cx);
             return;
         };
         let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -87,7 +87,7 @@ impl SettingsWindow {
                 .await;
             if written.is_err() {
                 let _ = owner.update_in(cx, |_, window, cx| {
-                    present_export_failure("Couldn't write file.", window, cx);
+                    present_export_failure("Couldn\u{2019}t write file.", window, cx);
                 });
             }
         })

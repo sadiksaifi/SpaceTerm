@@ -366,6 +366,8 @@ fn render_overlay(
 
     let press_owner = state.press_owner();
     let blocker = render_blocker(geometry, press_owner.clone());
+    let body_presented = has_body(&snapshot.semantics);
+    // Without a body, the footer's own divider separates the title from the decisions.
     let header = render_header(
         &snapshot,
         geometry.size.height * metrics.header_maximum_fraction(),
@@ -373,6 +375,7 @@ fn render_overlay(
         paint,
         shell,
         typography.heading().clone(),
+        body_presented || snapshot.actions.is_empty(),
     );
     let suppression_is_focused = suppression_focus.is_focused(window);
     let body = render_body(
@@ -517,7 +520,7 @@ fn render_overlay(
         })
         .child(div().size_0().track_focus(&leading))
         .child(header)
-        .child(body)
+        .when(body_presented, |surface| surface.child(body))
         .when(!snapshot.actions.is_empty(), |surface| {
             surface.child(footer)
         })
@@ -681,6 +684,26 @@ fn alert_message(message: &SharedString) -> Option<SharedString> {
     (!message.trim().is_empty()).then(|| message.clone())
 }
 
+/// Whether the modal has anything below its title. A title-only Alert draws no body, so no empty
+/// row or intent mark sits between its title and its decisions.
+fn has_body(semantics: &PreparedModalSemantics) -> bool {
+    match semantics {
+        PreparedModalSemantics::Alert {
+            message,
+            detail,
+            accessory,
+            suppression,
+            ..
+        } => {
+            alert_message(message).is_some()
+                || detail.is_some()
+                || accessory.is_some()
+                || suppression.is_some()
+        }
+        PreparedModalSemantics::Dialog { .. } | PreparedModalSemantics::Progress { .. } => true,
+    }
+}
+
 fn render_header(
     snapshot: &ModalRenderSnapshot,
     maximum_height: gpui::Pixels,
@@ -688,6 +711,7 @@ fn render_header(
     paint: ModalPaint,
     shell: FloatingShell,
     heading_font: gpui::Font,
+    divided: bool,
 ) -> AnyElement {
     let (title, description) = match &snapshot.semantics {
         PreparedModalSemantics::Alert { visible_title, .. } => (visible_title.clone(), None),
@@ -710,8 +734,11 @@ fn render_header(
         .px(metrics.surface_padding)
         .pt(metrics.surface_padding)
         .pb(metrics.section_gap)
-        .border_b(shell.hairline())
-        .border_color(shell.divider())
+        .when(divided, |header| {
+            header
+                .border_b(shell.hairline())
+                .border_color(shell.divider())
+        })
         .child(
             div()
                 .id(("modal-header-title", snapshot.presentation.value()))
@@ -812,6 +839,7 @@ fn render_body(
             } else {
                 px(0.0)
             };
+            let has_text = message.is_some() || detail.is_some();
             let message_panel = div()
                 .debug_selector(move || intent_selector.clone())
                 .flex()
@@ -879,7 +907,7 @@ fn render_body(
                             .child(accessory),
                     )
                 })
-                .child(message_panel)
+                .when(has_text, |body| body.child(message_panel))
                 .when_some(suppression, move |body, (label, selected)| {
                     body.child(render_alert_suppression(
                         label,

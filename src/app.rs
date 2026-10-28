@@ -649,7 +649,7 @@ impl ApplicationQuitCoordinator {
             window.activate_window();
             window.prompt(
                 PromptLevel::Warning,
-                "Couldn't check Terminal Sessions",
+                "Couldn\u{2019}t check Terminal Sessions",
                 Some("Reconnect to the development server, then try again."),
                 &[PromptButton::cancel("Cancel")],
                 cx,
@@ -901,20 +901,26 @@ fn quit_confirmation_window(
 }
 
 fn quit_prompt(
-    _status_area: StatusAreaName,
+    status_area: StatusAreaName,
     sessions: Option<&spaceterm_server::hierarchy::CloseInventory>,
 ) -> QuitPrompt {
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
-    let detail = match sessions {
-        Some(sessions) => {
-            let count = sessions
-                .sessions
-                .iter()
-                .filter(|pane| pane.session.is_some())
-                .count();
-            format!("This ends {count} Terminal Sessions.")
-        }
-        None => String::new(),
+    let count = sessions.map_or(0, |sessions| {
+        sessions
+            .sessions
+            .iter()
+            .filter(|pane| pane.session.is_some())
+            .count()
+    });
+    let detail = match count {
+        0 => format!(
+            "{name} leaves the {}. Your Terminal Sessions keep running, so everything is where you left it.",
+            status_area.phrase()
+        ),
+        1 => "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
+        count => format!(
+            "This development build runs its own server. Quitting ends its {count} Terminal Sessions and stops their running commands."
+        ),
     };
     QuitPrompt {
         title: format!("Quit {name}?"),
@@ -1634,14 +1640,40 @@ mod tests {
     }
 
     #[test]
-    fn installed_quit_warning_names_the_build_without_body_text() {
+    fn installed_quit_warning_says_terminal_sessions_keep_running() {
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        for status_area in [StatusAreaName::MenuBar, StatusAreaName::StatusArea] {
+        for (status_area, place) in [
+            (StatusAreaName::MenuBar, "menu bar"),
+            (StatusAreaName::StatusArea, "status area"),
+        ] {
             let prompt = quit_prompt(status_area, None);
             assert_eq!(prompt.title, format!("Quit {name}?"));
-            assert!(prompt.detail.is_empty());
+            assert_eq!(
+                prompt.detail,
+                format!(
+                    "{name} leaves the {place}. Your Terminal Sessions keep running, so everything is where you left it."
+                )
+            );
             assert!(!prompt.destructive);
         }
+    }
+
+    #[test]
+    fn development_quit_warning_counts_the_terminal_sessions_it_ends() {
+        let name = crate::application_identity::ApplicationIdentity::current().display_name();
+        let idle = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[None])));
+        assert_eq!(
+            idle.detail,
+            format!(
+                "{name} leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it."
+            )
+        );
+        let one = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[Some(1)])));
+        assert_eq!(
+            one.detail,
+            "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands."
+        );
+        assert!(one.destructive);
     }
 
     /// A client whose status item is showing and that has no window open.
@@ -1748,7 +1780,10 @@ mod tests {
         let (_, detail) = cx
             .pending_prompt()
             .expect("server-owned work confirms without windows");
-        assert_eq!(detail, "This ends 3 Terminal Sessions.");
+        assert_eq!(
+            detail,
+            "This development build runs its own server. Quitting ends its 3 Terminal Sessions and stops their running commands."
+        );
         cx.simulate_prompt_answer("Quit");
         cx.run_until_parked();
         assert_eq!(quit.confirmations(), 1);
@@ -1795,7 +1830,7 @@ mod tests {
             }
             assert_eq!(
                 cx.pending_prompt().unwrap().0,
-                "Couldn't check Terminal Sessions"
+                "Couldn\u{2019}t check Terminal Sessions"
             );
             assert_eq!(quit.confirmations(), 0);
             cx.simulate_prompt_answer("Cancel");
