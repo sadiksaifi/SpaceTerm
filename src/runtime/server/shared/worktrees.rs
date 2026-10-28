@@ -477,6 +477,10 @@ impl SharedWorkspaceHost {
                 self.settle_worktree(device, record.sequence, Err(Error::Interrupted))?;
             }
         }
+        // A revoked device's record waits for its Worktree outcome, however that settled.
+        for device in std::mem::take(&mut self.forgetting) {
+            self.forget(device);
+        }
         Ok(())
     }
     fn settle_worktree(
@@ -536,6 +540,65 @@ mod tests {
 
     mod close_fallback {
         include!("worktrees/close_fallback_tests.rs");
+    }
+
+    /// Revokes the device while `operation` is in progress, and checks that its record is
+    /// forgotten once the operation settles.
+    fn revoke_during(git: &GitFixture, operation: impl FnOnce(Id) -> Operation) {
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 2,
+                    mutation: Mutation::Worktree(operation(workspace)),
+                }
+            ),
+            Reply::MutationPending
+        ));
+        host.revoked([1; 32]);
+        assert!(
+            host.state.outcome([1; 32], 2).is_some(),
+            "the running operation keeps its record"
+        );
+        host.finish_worktrees(true).unwrap();
+        assert!(host.state.outcome([1; 32], 1).is_none());
+        assert!(host.state.outcome([1; 32], 2).is_none());
+        assert_eq!(host.state.next_sequence([1; 32]), 1);
+        assert!(host.forgetting.is_empty());
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_device_revoked_during_its_worktree_write_is_forgotten_once_the_write_settles() {
+        use spaceterm_server::worktree::{Branch, BranchName};
+        let git = GitFixture::new();
+        revoke_during(&git, |workspace| Operation::Create {
+            workspace,
+            root: git.0.clone(),
+            path: git.0.join("created"),
+            branch: Branch::New {
+                name: "created".into(),
+                base: BranchName::Local("main".into()),
+            },
+        });
+    }
+
+    #[test]
+    fn a_device_revoked_while_opening_a_worktree_tab_is_forgotten_once_it_opens() {
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        revoke_during(&git, |workspace| Operation::OpenTab {
+            workspace,
+            source: None,
+            root: git.0.clone(),
+            path: tree.clone(),
+        });
     }
 
     #[test]
