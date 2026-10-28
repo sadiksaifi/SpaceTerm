@@ -266,7 +266,13 @@ impl Directory {
         }
         // SAFETY: successful openat transferred a fresh descriptor.
         let file = unsafe { File::from_raw_fd(fd) };
-        private(&file, false)?;
+        let meta = file
+            .metadata()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        // A writer can replace a record while a reader opens it, and the opened file then has no
+        // links left. It still holds the complete previous record, so a read may use it. A lock
+        // file is never replaced, so it must keep its one link.
+        private_metadata(&meta, false, !create)?;
         Ok(file)
     }
     /// Take an exclusive lock that ends when the returned guard drops.
@@ -509,13 +515,23 @@ fn private(file: &File, directory: bool) -> Result<(), ServerError> {
     let meta = file
         .metadata()
         .map_err(|_| ServerError::StorageUnavailable)?;
+    private_metadata(&meta, directory, false)
+}
+/// `replaced` accepts a file that a writer unlinked after it was opened. A second link is
+/// always unsafe.
+fn private_metadata(
+    meta: &std::fs::Metadata,
+    directory: bool,
+    replaced: bool,
+) -> Result<(), ServerError> {
+    let links_safe = meta.nlink() == 1 || (replaced && meta.nlink() == 0);
     // SAFETY: geteuid has no preconditions.
     if meta.uid() != unsafe { libc::geteuid() }
         || meta.mode() & 0o7777 != if directory { 0o700 } else { 0o600 }
         || if directory {
             !meta.is_dir()
         } else {
-            !meta.is_file() || meta.nlink() != 1
+            !meta.is_file() || !links_safe
         }
     {
         return Err(ServerError::UnsafeStorage);
@@ -555,6 +571,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    /// A reader may open a record just before a writer replaces it. The replaced file then has
+    /// no links, which is not unsafe storage: it holds the complete previous record.
+    #[test]
+    fn a_record_replaced_while_it_is_read_reads_whole() {
+        let fixture = Fixture::new();
+        let directory = fixture.open();
+        directory.write_json(c"record.json", &0_u64).unwrap();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for value in 1_u64..=2000 {
+                    directory.write_json(c"record.json", &value).unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::Release);
+            });
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                let read: Option<u64> = directory.read_json("record.json").unwrap();
+                assert!(read.is_some());
+            }
+        });
     }
     #[cfg(feature = "client")]
     #[test]
