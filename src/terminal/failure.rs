@@ -158,7 +158,9 @@ impl TerminalFailure {
 impl fmt::Display for TerminalFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let action = match self.recoverability {
-            Recoverability::Recoverable => "SpaceTerm couldn't complete the action. Try again.",
+            Recoverability::Recoverable => {
+                "SpaceTerm couldn\u{2019}t complete the action. Try again."
+            }
             Recoverability::Fatal => "This Terminal Session failed. Close this Pane.",
         };
         formatter.write_str(action)

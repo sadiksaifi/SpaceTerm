@@ -11131,14 +11131,14 @@ fn the_offline_empty_view_should_name_the_unreachable_server_and_offer_a_way_bac
     assert_eq!(count, 0);
     assert_eq!(
         empty["aria"]["description"],
-        super::empty::offline_detail("This Computer").as_ref()
+        super::empty::offline_detail("this computer").as_ref()
     );
     assert!(
         tree.find(super::empty::EMPTY_TITLE).is_none(),
         "an unreachable server says so instead of listing nothing to choose"
     );
     assert!(
-        cx.debug_bounds("server-launch-retry").is_some(),
+        cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_some(),
         "Try Again"
     );
     assert!(
@@ -11148,6 +11148,59 @@ fn the_offline_empty_view_should_name_the_unreachable_server_and_offer_a_way_bac
     assert!(
         cx.debug_bounds("empty-workspace-choose").is_none(),
         "the switcher lists nothing to attach while the server is unreachable"
+    );
+}
+
+#[gpui::test]
+fn try_again_on_the_offline_empty_view_should_reconnect_now_and_say_when_it_fails(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.edits.set_connected(false);
+    harness.sync(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    click(super::empty::RECONNECT_SELECTOR, cx);
+    let retries = harness.edits.retries();
+    let trying = A11yTree::read(cx)
+        .find_text("Reconnecting\u{2026}")
+        .is_some();
+    harness
+        .edits
+        .fail_attempt(spaceterm_server::ServerError::NotRunning);
+    harness.sync(cx);
+    let failed = A11yTree::read(cx)
+        .find_text("Still not connected. The server is not running.")
+        .is_some();
+
+    assert_eq!(retries, 1, "Try Again asks the connection to reconnect now");
+    assert!(trying, "the view says it is reconnecting");
+    assert!(failed, "an attempt that fails says so");
+}
+
+#[gpui::test]
+fn a_stopped_server_offers_start_server_on_the_empty_view(cx: &mut TestAppContext) {
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.edits.set_connected(false);
+    harness
+        .edits
+        .set_error(spaceterm_server::ServerError::Stopped);
+    harness.sync(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    assert!(
+        cx.debug_bounds("server-launch-start").is_some(),
+        "Start Server"
+    );
+    assert!(
+        cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_none(),
+        "a stopped server answers no reconnect"
     );
 }
 

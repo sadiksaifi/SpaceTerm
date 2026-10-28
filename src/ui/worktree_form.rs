@@ -621,7 +621,7 @@ impl WorktreeForm {
             Err(WorktreeCreateError::Server(_)) => (None,"SpaceTerm could not confirm whether the Worktree was created. Review the sidebar before trying again.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
-                "Git doesn't accept this name.".into(),
+                "Git doesn\u{2019}t accept this name.".into(),
             ),
             Err(WorktreeCreateError::BranchExists) => (
                 Some(FormField::Name),
@@ -958,7 +958,7 @@ impl WorktreeForm {
         let owner = cx.weak_entity();
         let error = self.visible_error(FormField::Branch, cx);
         let prompt = if self.branches.is_none() {
-            "Loading Branches..."
+            "Loading Branches\u{2026}"
         } else if items.is_empty() {
             "No Branches"
         } else {
@@ -975,7 +975,7 @@ impl WorktreeForm {
                     .busy(self.branches.is_none())
                     .copy(
                         ComboBoxCopy::new("Filter branches", "Search")
-                            .busy_status("Loading Branches...")
+                            .busy_status("Loading Branches\u{2026}")
                             .empty_status("No Matching Branches"),
                     )
                     .disabled(self.pending)

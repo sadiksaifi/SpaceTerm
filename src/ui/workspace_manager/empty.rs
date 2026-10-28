@@ -16,6 +16,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, AnyView, Context, Edges, Pixels, SharedString, Window, div, px};
 use spaceterm_ui::{Button, CustomIconName, EmptyStateTone, IconName, Tooltip};
 
+use super::super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::super::workspace_creation::WorkspaceCreation;
 use super::super::workspace_frame::WorkspaceFrame;
 use super::launch::LaunchAction;
@@ -225,14 +226,20 @@ impl WorkspaceManager {
     ) -> gpui::Stateful<gpui::Div> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let reachable = self.shared_reachable();
+        let place = presentation.wording().this_computer_phrase;
+        let local = self.shared.local();
+        let stopped = local.and_then(|shared| shared.connection_error())
+            == Some(spaceterm_server::ServerError::Stopped);
         let (title, detail): (&'static str, SharedString) = if reachable {
+            // A reachable server ends any reconnect the person asked for.
+            self.launch.reconnect_from.set(None);
             (EMPTY_TITLE, EMPTY_DETAIL.into())
+        } else if stopped {
+            (OFFLINE_TITLE, stopped_detail(place))
         } else {
-            (
-                OFFLINE_TITLE,
-                offline_detail(presentation.wording().this_computer),
-            )
+            (OFFLINE_TITLE, offline_detail(place))
         };
+        let reconnect = self.reconnect_status(cx);
         let state = if reachable {
             let choose_manager = manager.clone();
             let mut choose = Button::new("empty-workspace-choose", EMPTY_ACTION)
@@ -274,11 +281,28 @@ impl WorkspaceManager {
                         });
                     })
             };
-            crate::ui::empty_state::empty_state(title, cx)
+            // A stopped server answers no reconnect: only Start reverses Stop.
+            let primary = if stopped {
+                action(LaunchAction::Start)
+            } else {
+                let owner = manager.clone();
+                Button::new(RECONNECT_SELECTOR, LaunchAction::Retry.label())
+                    .tab_stop(true)
+                    .disabled(matches!(reconnect, Some(Reconnect::Trying)))
+                    .debug_selector(RECONNECT_SELECTOR)
+                    .on_activate(move |_, _, cx| {
+                        let _ = owner.update(cx, |manager, cx| manager.reconnect_local(cx));
+                    })
+            };
+            let state = crate::ui::empty_state::empty_state(title, cx)
                 .icon(IconName::TriangleAlert)
                 .tone(EmptyStateTone::Warning)
-                .primary(action(LaunchAction::Retry))
-                .link(action(LaunchAction::Settings))
+                .primary(primary)
+                .link(action(LaunchAction::Settings));
+            match reconnect.filter(|_| !stopped) {
+                Some(status) => state.footer(status.render(cx)),
+                None => state,
+            }
         };
         div()
             .id("empty-workspace")
@@ -304,11 +328,92 @@ impl WorkspaceManager {
 }
 
 /// Why the window shows no Workspace while this computer's server is unreachable.
-pub(super) fn offline_detail(this_computer: &str) -> SharedString {
-    // "This Mac" reads "this Mac"; "This Computer" reads "this computer".
-    let place = this_computer
-        .replacen("This ", "this ", 1)
-        .replace("Computer", "computer");
+impl WorkspaceManager {
+    /// Asks this computer's server connection to reconnect now, and remembers the failed
+    /// attempts so far, so the view can say whether this attempt failed.
+    fn reconnect_local(&mut self, cx: &mut Context<Self>) {
+        let Some(shared) = self.shared.local() else {
+            return;
+        };
+        self.launch
+            .reconnect_from
+            .set(Some(shared.failed_attempts()));
+        shared.retry_connection();
+        cx.notify();
+    }
+
+    /// Where the reconnect the person asked for stands, if they asked for one.
+    fn reconnect_status(&self, _: &Context<Self>) -> Option<Reconnect> {
+        let from = self.launch.reconnect_from.get()?;
+        let shared = self.shared.local()?;
+        Some(if shared.failed_attempts() > from {
+            Reconnect::Failed(shared.connection_error())
+        } else {
+            Reconnect::Trying
+        })
+    }
+}
+
+pub(super) const RECONNECT_SELECTOR: &str = "empty-workspace-reconnect";
+const RECONNECTING: &str = "Reconnecting\u{2026}";
+
+/// The reconnect the person asked for from the empty view.
+#[derive(Clone, Copy)]
+enum Reconnect {
+    Trying,
+    /// The attempt ended without a connection, for the reason the connection gave.
+    Failed(Option<spaceterm_server::ServerError>),
+}
+
+impl Reconnect {
+    fn render(self, cx: &Context<WorkspaceManager>) -> AnyElement {
+        let appearance = crate::ui::appearance::chrome(cx);
+        let content = match self {
+            Self::Trying => div()
+                .flex()
+                .items_center()
+                .gap(appearance.spacing(6.0))
+                .child(
+                    spaceterm_ui::ProgressRing::new(
+                        "empty-workspace-reconnect-progress",
+                        RECONNECTING,
+                        spaceterm_ui::ProgressState::Indeterminate,
+                    )
+                    .size(spaceterm_ui::ProgressSize::Compact),
+                )
+                .child(gpui::Text::new(
+                    "empty-workspace-reconnect-progress-label".into(),
+                    RECONNECTING.into(),
+                ))
+                .into_any_element(),
+            Self::Failed(error) => {
+                let note: SharedString = match error {
+                    Some(error) => format!("Still not connected. {error}").into(),
+                    None => "Still not connected.".into(),
+                };
+                gpui::Text::new("empty-workspace-reconnect-failed".into(), note).into_any_element()
+            }
+        };
+        div()
+            .debug_selector(|| "empty-workspace-reconnect-status".to_owned())
+            .mt(appearance.spacing(12.0))
+            .chrome_text(appearance.typography.style(TextRole::Secondary))
+            .text_color(gpui_color(appearance.colors.text_secondary))
+            .flex()
+            .justify_center()
+            .child(content)
+            .into_any_element()
+    }
+}
+
+/// Why the window shows no Workspace while this computer's server is stopped. `place` is the
+/// host's phrase for this computer.
+pub(super) fn stopped_detail(place: &str) -> SharedString {
+    format!("You stopped the server on {place}. Start it to use its Workspaces.").into()
+}
+
+/// `place` is the host's phrase for this computer, such as "this Mac".
+pub(super) fn offline_detail(place: &str) -> SharedString {
     format!(
         "SpaceTerm can\u{2019}t reach the server on {place}, so its Workspaces aren\u{2019}t \
          available."

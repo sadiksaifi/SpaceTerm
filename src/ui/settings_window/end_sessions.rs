@@ -145,14 +145,15 @@ impl EndAllSessions {
     }
 }
 
-/// The row's caption, derived from its state alone so every state reads one way.
+/// The row's caption, derived from its state alone so every state reads one way. A server
+/// with Terminal Sessions to end needs none: the row's count and its confirmation say it.
 pub(super) fn caption(
     server: &str,
     availability: &Availability,
     working: bool,
     ended: Option<Ended>,
-) -> (SharedString, CaptionTone) {
-    let guidance = |text: String| (SharedString::from(text), CaptionTone::Guidance);
+) -> Option<(SharedString, CaptionTone)> {
+    let guidance = |text: String| Some((SharedString::from(text), CaptionTone::Guidance));
     if working {
         return guidance(format!("Ending every Terminal Session on {server}\u{2026}"));
     }
@@ -164,35 +165,35 @@ pub(super) fn caption(
             ));
         }
         Some(Ended::Restarted) => {
-            return (
+            return Some((
                 format!("{server} restarted, so nothing ended. Try again.").into(),
                 CaptionTone::Warning,
-            );
+            ));
         }
         Some(Ended::Changed) => {
-            return (
+            return Some((
                 format!("The Terminal Sessions on {server} changed, so nothing ended. Try again.")
                     .into(),
                 CaptionTone::Warning,
-            );
+            ));
         }
         Some(Ended::Refused(reason)) => {
-            return (reason.explanation().into(), CaptionTone::Error);
+            return Some((reason.explanation().into(), CaptionTone::Error));
         }
         Some(Ended::Failed) => {
-            return (
+            return Some((
                 format!("{server} couldn\u{2019}t end its Terminal Sessions.").into(),
                 CaptionTone::Error,
-            );
+            ));
         }
         Some(Ended::Unconfirmed) => {
-            return (
+            return Some((
                 format!(
                     "SpaceTerm couldn\u{2019}t confirm whether {server}\u{2019}s Terminal Sessions ended. It will check when the connection returns."
                 )
                 .into(),
                 CaptionTone::Warning,
-            );
+            ));
         }
         None => {}
     }
@@ -209,19 +210,8 @@ pub(super) fn caption(
         )),
         Availability::Ready(close) => match live_sessions(close).len() {
             0 => guidance(format!("No Terminal Sessions are running on {server}.")),
-            live => guidance(format!(
-                "Ends {} on {server} for every client and clears their output. The server keeps \
-                 running, and its Workspaces, Tabs, and Panes remain.",
-                sessions(live)
-            )),
+            _ => None,
         },
-    }
-}
-
-fn sessions(count: usize) -> String {
-    match count {
-        1 => "the 1 running Terminal Session".to_owned(),
-        count => format!("all {count} running Terminal Sessions"),
     }
 }
 
@@ -308,20 +298,8 @@ impl SettingsWindow {
         }
     }
 
-    /// The caption under the button: why the last End All didn't end what the person
-    /// confirmed, or that the server runs no Terminal Session to end.
-    pub(super) fn end_all_sessions_note(&self) -> Option<SharedString> {
-        let state = &self.end_all_sessions;
-        let failed = !matches!(state.ended, None | Some(Ended::Accepted));
-        let none_running = state.ended.is_none() && self.running_sessions() == Some(0);
-        if state.working || !(failed || none_running) {
-            return None;
-        }
-        let (caption, _) = self.end_all_sessions_caption();
-        Some(caption)
-    }
-
-    pub(super) fn end_all_sessions_caption(&self) -> (SharedString, CaptionTone) {
+    /// The caption under the button, in every state that needs one.
+    pub(super) fn end_all_sessions_caption(&self) -> Option<(SharedString, CaptionTone)> {
         let state = &self.end_all_sessions;
         caption(
             &self.selected_server_name(),

@@ -4,7 +4,7 @@ Offer "End All…" in the account-local server's Terminal Sessions row in Settin
 
 End All Sessions preserves each Pane's control grant, including a disconnected client's grant. An unclaimed Pane remains unclaimed. Invoking the action gives its client no additional control; acquisition and takeover still follow [ADR 0022](0022-give-one-client-control-of-each-pane.md).
 
-The server discards each ended Session's terminal output and Scrollback. Its Controlling Client presents "Session ended" with a "Start Session" button using SpaceTerm's existing blue primary-button style. Other clients retain the Takeover Screen under ADR 0022. A disconnected client clears its frozen terminal screen when reconciliation confirms that the Session ended.
+The server discards each ended Session's terminal output and Scrollback. Its Controlling Client presents "Session Ended" with a "Start Session" button using SpaceTerm's existing blue primary-button style. Other clients retain the Takeover Screen under ADR 0022. A disconnected client clears its frozen terminal screen when reconciliation confirms that the Session ended.
 
 After completion, each affected Pane remains ended until a Controlling Client explicitly selects it again or opens its Tab to start a fresh shell. Closing Settings, restoring window focus, and routine rendering cannot restart an ended Session. Fresh shell startup uses the first-use policy in [ADR 0043](0043-start-restored-shells-on-first-use.md) and the directory policy in [ADR 0044](0044-restore-panes-in-their-last-confirmed-directory.md).
 

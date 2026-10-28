@@ -125,6 +125,9 @@ mod development {
         fn worktree_writes(&self) -> bool {
             self.snapshot().worktree_writes
         }
+
+        /// Reconnects now, rather than after the reconnect delay, while the connection is down.
+        fn retry(&self) {}
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
@@ -146,6 +149,10 @@ mod development {
 
         fn subscribe(&self) -> async_channel::Receiver<()> {
             Self::subscribe(self)
+        }
+
+        fn retry(&self) {
+            Self::retry(self);
         }
     }
 
@@ -206,6 +213,11 @@ mod development {
                 )),
                 subscribers: Rc::default(),
             }
+        }
+
+        /// Asks the transport to reconnect now.
+        pub(crate) fn retry(&self) {
+            self.transport().retry();
         }
 
         /// The transport this source submits to now.
@@ -1352,6 +1364,7 @@ mod development {
         presentation: Option<Inventory>,
         connected: bool,
         connection_error: Option<spaceterm_server::ServerError>,
+        failed_attempts: u64,
         pending: bool,
         pending_operation: Option<Mutation>,
         /// The sequence of the last outcome this client presented, so one answer is read once.
@@ -1423,6 +1436,7 @@ mod development {
                 presentation: None,
                 connected: false,
                 connection_error: None,
+                failed_attempts: 0,
                 pending: false,
                 pending_operation: None,
                 consumed: None,
@@ -2103,6 +2117,16 @@ mod development {
             self.connection_error
         }
 
+        /// How many connection attempts have failed, as the connection last published.
+        pub(crate) const fn failed_attempts(&self) -> u64 {
+            self.failed_attempts
+        }
+
+        /// Asks the server connection to reconnect now instead of after its delay.
+        pub(crate) fn retry_connection(&self) {
+            self.edits.retry();
+        }
+
         /// Wakes now, after each change the server connection publishes, and after each edit
         /// this window queues.
         pub(crate) fn subscribe(&self) -> SharedEditNotifications {
@@ -2192,8 +2216,11 @@ mod development {
             }
             self.pending_operation
                 .clone_from(&snapshot.pending_operation);
-            if self.connection_error != snapshot.error {
+            if self.connection_error != snapshot.error
+                || self.failed_attempts != snapshot.failed_attempts
+            {
                 self.connection_error = snapshot.error;
+                self.failed_attempts = snapshot.failed_attempts;
                 poll.changed = true;
             }
             if self.connected != snapshot.connected || self.pending != snapshot.pending {
@@ -3085,6 +3112,8 @@ mod development {
             submitted: Mutex<Vec<Mutation>>,
             /// The next sequence a settled answer carries.
             sequence: Mutex<u64>,
+            /// How many times a person asked to reconnect now.
+            retries: std::sync::atomic::AtomicUsize,
             /// Hints readers after each change, as the real client does.
             changes: crate::terminal::changes::Changes,
         }
@@ -3102,11 +3131,26 @@ mod development {
                         rejected: None,
                         outcome: None,
                         error: None,
+                        failed_attempts: 0,
                     }),
                     submitted: Mutex::new(Vec::new()),
                     sequence: Mutex::new(1),
+                    retries: std::sync::atomic::AtomicUsize::new(0),
                     changes: crate::terminal::changes::Changes::default(),
                 }
+            }
+
+            pub(crate) fn retries(&self) -> usize {
+                self.retries.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            /// One connection attempt failed with `error`, as the real client publishes it.
+            pub(crate) fn fail_attempt(&self, error: spaceterm_server::ServerError) {
+                self.publish(|snapshot| {
+                    snapshot.connected = false;
+                    snapshot.error = Some(error);
+                    snapshot.failed_attempts += 1;
+                });
             }
 
             /// Changes the snapshot, then hints its readers.
@@ -3202,6 +3246,11 @@ mod development {
 
             fn subscribe(&self) -> async_channel::Receiver<()> {
                 self.changes.subscribe()
+            }
+
+            fn retry(&self) {
+                self.retries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }

@@ -2403,8 +2403,7 @@ impl SettingsWindow {
             ),
             SettingsRowId::EndAllSessions => (
                 SharedString::new_static("Ending them keeps Workspaces."),
-                self.end_all_sessions_note()
-                    .map(|text| (text, self.end_all_sessions_caption().1)),
+                self.end_all_sessions_caption(),
             ),
             SettingsRowId::NetworkAccess => (
                 self.network_access_description(),
