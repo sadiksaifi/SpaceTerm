@@ -145,8 +145,8 @@ impl EndAllSessions {
     }
 }
 
-/// The row's caption, derived from its state alone so every state reads one way. A server
-/// with Terminal Sessions to end needs none: the row's count and its confirmation say it.
+/// The row's caption, derived from its state alone so every state reads one way. A connected
+/// server ready for End All Sessions needs none: the row's count and its confirmation say it.
 pub(super) fn caption(
     server: &str,
     availability: &Availability,
@@ -208,10 +208,8 @@ pub(super) fn caption(
         Availability::Pending => guidance(format!(
             "End All Sessions is available once {server} answers an earlier change."
         )),
-        Availability::Ready(close) => match live_sessions(close).len() {
-            0 => guidance(format!("No Terminal Sessions are running on {server}.")),
-            _ => None,
-        },
+        // The row's count says how many run, and End All waits until one does.
+        Availability::Ready(_) => None,
     }
 }
 

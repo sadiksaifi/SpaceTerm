@@ -103,12 +103,7 @@ impl ApplicationPalette {
         let palette = cx.new(|cx| {
             let mut palette = CommandPalette::new("Search commands", Vec::new(), window, cx);
             palette.set_empty(
-                spaceterm_ui::CommandPaletteEmpty::new("No Matching Commands").icon(
-                    |tint, size| {
-                        spaceterm_ui::Icon::new(spaceterm_ui::IconName::Search, size, tint)
-                            .into_any_element()
-                    },
-                ),
+                spaceterm_ui::CommandPaletteEmpty::no_match("No commands match"),
                 cx,
             );
             palette

@@ -3876,7 +3876,8 @@ fn a_query_matching_no_choice_should_say_so_above_the_commands_heading(cx: &mut 
     cx.update(|_, cx| {
         root.update(cx, |root, cx| {
             root.copy = ComboBoxCopy::new("Filter workspaces", "Search")
-                .choices_note("No workspaces match", "Create")
+                .no_match("No workspaces match")
+                .commands_heading("Create")
                 .no_choices("No workspaces to attach.");
             cx.notify();
         });

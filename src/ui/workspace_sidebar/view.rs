@@ -156,8 +156,9 @@ fn worktree_text_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx
     worktree_indent(appearance, cx) + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
 }
 
-/// The one muted caption an empty Workspace list shows where its first row would be. It speaks
-/// for the whole list, never for one server, so the list keeps no per-server placeholder.
+/// The one muted line an empty Workspace list shows where its first row would be. It speaks for
+/// the whole list, never for one server, so the list keeps no per-server placeholder. The stage
+/// beside it already says no Workspace is attached, so the line only says where they appear.
 fn empty_list_caption(
     appearance: &crate::ui::appearance::ChromeAppearance,
     cx: &App,
@@ -167,34 +168,21 @@ fn empty_list_caption(
     div()
         .id("workspace-list-empty")
         .debug_selector(|| "workspace-list-empty".to_owned())
-        .role(accesskit::Role::Group)
-        .aria_label(EMPTY_LIST_TITLE)
-        .aria_description(EMPTY_LIST_DETAIL)
         .w_full()
         .flex_shrink_0()
         .pl(leading)
         .pr(trailing)
         .py(appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y + 4.0))
-        .flex()
-        .flex_col()
-        .gap(appearance.spacing(2.0))
-        .child(
-            div()
-                .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
-                .text_color(gpui_color(colors.row_secondary))
-                .child(EMPTY_LIST_TITLE),
-        )
-        .child(
-            div()
-                .whitespace_normal()
-                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                .text_color(gpui_color(colors.text_muted))
-                .child(EMPTY_LIST_DETAIL),
-        )
+        .whitespace_normal()
+        .chrome_text(appearance.typography.style(TextRole::Secondary))
+        .text_color(gpui_color(colors.text_muted))
+        .child(gpui::Text::new(
+            "workspace-list-empty-text".into(),
+            EMPTY_LIST_DETAIL.into(),
+        ))
         .into_any_element()
 }
 
-pub(super) const EMPTY_LIST_TITLE: &str = "No Workspaces";
 const NO_TABS: &str = "No Tabs";
 pub(super) const EMPTY_LIST_DETAIL: &str = "Workspaces you attach appear here.";
 
