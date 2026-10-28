@@ -5,24 +5,31 @@
 //! keeps its sidebar, its Workspace Switcher, and Client Settings, and the empty view points at
 //! the switcher, which attaches detached Workspaces and creates new ones.
 //!
+//! The stage is drawn as an empty Pane: the Pane's rim and corner radius on the Pane's surface,
+//! so the content area keeps its edge beside a sidebar of the same color. A window with Panes
+//! draws no such edge, because each Pane draws its own.
+//!
 //! Without usable server state the stage instead fills the window beneath its Window Controls
 //! and presents launch recovery alone: no sidebar, resize handle, or Workspace creation.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, AnyView, Context, Edges, Pixels, SharedString, Window, div, px};
-use spaceterm_ui::{Button, ButtonSize, ButtonVariant, Tooltip};
+use spaceterm_ui::{Button, CustomIconName, EmptyStateTone, IconName, Tooltip};
 
-use super::super::chrome_typography::{ChromeTextStyleExt, TextRole};
+use super::super::workspace_creation::WorkspaceCreation;
 use super::super::workspace_frame::WorkspaceFrame;
+use super::launch::LaunchAction;
 use super::{SwitchWorkspace, WindowDragRegion, WorkspaceManager};
 use crate::ui::appearance::gpui_color;
 
 pub(super) const EMPTY_TITLE: &str = "No Workspaces Attached";
 /// The detail while the server is reachable, so its detached Workspaces are in the switcher.
 pub(super) const EMPTY_DETAIL: &str = "Choose a Workspace to attach, or create one.";
-/// The detail while the server is unreachable, so the switcher lists no detached Workspace.
-pub(super) const EMPTY_OFFLINE_DETAIL: &str = "Reconnect to choose a Workspace.";
-pub(super) const EMPTY_ACTION: &str = "Choose Workspace…";
+pub(super) const EMPTY_ACTION: &str = "Choose Workspace\u{2026}";
+pub(super) const EMPTY_CREATE: &str = "New Local Workspace";
+/// The title while this computer's server is unreachable, so the switcher lists none of its
+/// Workspaces.
+pub(super) const OFFLINE_TITLE: &str = "Server Not Connected";
 
 /// Where the sidebar stands while the empty view lays out beside it.
 pub(super) struct EmptySidebar {
@@ -55,6 +62,11 @@ impl WorkspaceManager {
             crate::appearance::SurfaceRole::Base,
             super::super::workspace_frame::base_surface(&appearance.colors),
         ));
+        // The configured terminal background, as every Pane's surface takes it.
+        let terminal_background = super::super::appearance_runtime::current(cx)
+            .terminal
+            .colors
+            .background;
         let recovery = sidebar.is_none();
         let sidebar = sidebar.unwrap_or(EmptySidebar {
             width: px(0.0),
@@ -66,7 +78,7 @@ impl WorkspaceManager {
         let leading_inset =
             hidden_inset + (frame.stage_leading_inset(true) - hidden_inset) * sidebar.reveal;
         let drag_manager = cx.weak_entity();
-        let switcher_manager = cx.weak_entity();
+        let message_manager = cx.weak_entity();
         let client_controls = matches!(
             window.window_decorations(),
             gpui::Decorations::Client { .. }
@@ -145,7 +157,7 @@ impl WorkspaceManager {
                 self.render_launch_quiet(&self.empty_focus)
             }
             Some(launch) => self.render_launch_message(launch, &self.empty_focus, cx),
-            None => self.render_empty_message(switcher_manager, cx),
+            None => self.render_empty_message(message_manager, cx),
         };
         div()
             .id("empty-workspace-stage")
@@ -187,42 +199,92 @@ impl WorkspaceManager {
                     .border_r(frame.window_edge_inset())
                     .border_l(leading_inset)
                     .bg(stage_color)
-                    .child(with_tab_traversal(message)),
+                    .child(
+                        // An empty Pane: its surface, rim, and corner radius, with no content.
+                        div()
+                            .id("empty-workspace-pane")
+                            .debug_selector(|| "empty-workspace-pane".to_owned())
+                            .size_full()
+                            .overflow_hidden()
+                            .rounded(frame.pane_radius())
+                            .bg(gpui_color(appearance.pane_surface(terminal_background)))
+                            .border(frame.pane_rim_width())
+                            .border_color(gpui_color(appearance.pane_rim_on(terminal_background)))
+                            .child(with_tab_traversal(message)),
+                    ),
             )
             .into_any_element()
     }
 
-    /// The deliberately empty view's explanation and its one action.
+    /// The deliberately empty view: what it presents and how to attach or create a Workspace,
+    /// or, while this computer's server is unreachable, how to reach it again.
     fn render_empty_message(
         &self,
-        switcher_manager: gpui::WeakEntity<Self>,
+        manager: gpui::WeakEntity<Self>,
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let appearance = super::super::appearance::chrome(cx);
-        let detail = SharedString::new_static(self.empty_detail());
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let mut action = Button::new("empty-workspace-choose", EMPTY_ACTION)
-            .variant(ButtonVariant::Primary)
-            .size(ButtonSize::Regular)
-            .tab_stop(true)
-            .debug_selector("empty-workspace-choose")
-            .tooltip(
-                Tooltip::new("empty-workspace-choose-tooltip", "Switch Workspace")
-                    .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+        let reachable = self.shared_reachable();
+        let (title, detail): (&'static str, SharedString) = if reachable {
+            (EMPTY_TITLE, EMPTY_DETAIL.into())
+        } else {
+            (
+                OFFLINE_TITLE,
+                offline_detail(presentation.wording().this_computer),
             )
-            .on_activate(move |_, window, cx| {
-                let _ = switcher_manager.update(cx, |manager, cx| {
-                    manager.open_workspace_switcher(window, cx);
+        };
+        let state = if reachable {
+            let choose_manager = manager.clone();
+            let mut choose = Button::new("empty-workspace-choose", EMPTY_ACTION)
+                .tab_stop(true)
+                .debug_selector("empty-workspace-choose")
+                .tooltip(
+                    Tooltip::new("empty-workspace-choose-tooltip", "Choose Workspace")
+                        .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                )
+                .on_activate(move |_, window, cx| {
+                    let _ = choose_manager.update(cx, |manager, cx| {
+                        manager.open_workspace_switcher(window, cx);
+                    });
                 });
-            });
-        if let Some(shortcut) = presentation.shortcut(&SwitchWorkspace) {
-            action = action.shortcut(shortcut);
-        }
+            if let Some(shortcut) = presentation.shortcut(&SwitchWorkspace) {
+                choose = choose.shortcut(shortcut);
+            }
+            let create = Button::new("empty-workspace-create", EMPTY_CREATE)
+                .tab_stop(true)
+                .debug_selector("empty-workspace-create")
+                .on_activate(move |_, window, cx| {
+                    let _ = manager.update(cx, |manager, cx| {
+                        manager.run_workspace_creation(WorkspaceCreation::Local, window, cx);
+                    });
+                });
+            crate::ui::empty_state::empty_state(title, cx)
+                .custom_icon(CustomIconName::RectangleStack)
+                .primary(choose)
+                .link(create)
+        } else {
+            let action = |action: LaunchAction| {
+                let owner = manager.clone();
+                Button::new(action.selector(), action.label())
+                    .tab_stop(true)
+                    .debug_selector(action.selector())
+                    .on_activate(move |_, window, cx| {
+                        let _ = owner.update(cx, |manager, cx| {
+                            manager.run_launch_action(action, window, cx);
+                        });
+                    })
+            };
+            crate::ui::empty_state::empty_state(title, cx)
+                .icon(IconName::TriangleAlert)
+                .tone(EmptyStateTone::Warning)
+                .primary(action(LaunchAction::Retry))
+                .link(action(LaunchAction::Settings))
+        };
         div()
             .id("empty-workspace")
             .debug_selector(|| "empty-workspace".to_owned())
             .role(gpui::accesskit::Role::Group)
-            .aria_label(EMPTY_TITLE)
+            .aria_label(title)
             .aria_description(detail.clone())
             .size_full()
             .track_focus(&self.empty_focus)
@@ -230,43 +292,28 @@ impl WorkspaceManager {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(appearance.spacing(12.0))
-            .px(appearance.spacing(24.0))
+            .px(crate::ui::appearance::chrome(cx).spacing(24.0))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(appearance.spacing(4.0))
-                    .max_w(appearance.spacing(360.0))
-                    .text_center()
-                    .child(
-                        div()
-                            .chrome_text(appearance.typography.style(TextRole::Section))
-                            .text_color(gpui_color(appearance.colors.text))
-                            .child(EMPTY_TITLE),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "empty-workspace-detail".to_owned())
-                            .whitespace_normal()
-                            .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(appearance.colors.text_secondary))
-                            .child(detail),
-                    ),
+                state.detail_element(
+                    div()
+                        .debug_selector(|| "empty-workspace-detail".to_owned())
+                        .child(detail),
+                ),
             )
-            .child(action)
     }
+}
 
-    /// What the empty view says about detached Workspaces, which depends on whether the server
-    /// that holds them is reachable.
-    pub(super) fn empty_detail(&self) -> &'static str {
-        if self.shared_reachable() {
-            EMPTY_DETAIL
-        } else {
-            EMPTY_OFFLINE_DETAIL
-        }
-    }
+/// Why the window shows no Workspace while this computer's server is unreachable.
+pub(super) fn offline_detail(this_computer: &str) -> SharedString {
+    // "This Mac" reads "this Mac"; "This Computer" reads "this computer".
+    let place = this_computer
+        .replacen("This ", "this ", 1)
+        .replace("Computer", "computer");
+    format!(
+        "SpaceTerm can\u{2019}t reach the server on {place}, so its Workspaces aren\u{2019}t \
+         available."
+    )
+    .into()
 }
 
 /// Plain Tab moves from the view's own focus to its action, as it does on the screens that

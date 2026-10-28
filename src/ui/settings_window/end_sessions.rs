@@ -181,14 +181,14 @@ pub(super) fn caption(
         }
         Some(Ended::Failed) => {
             return (
-                format!("{server} couldn't end its Terminal Sessions.").into(),
+                format!("{server} couldn\u{2019}t end its Terminal Sessions.").into(),
                 CaptionTone::Error,
             );
         }
         Some(Ended::Unconfirmed) => {
             return (
                 format!(
-                    "SpaceTerm couldn't confirm whether {server}'s Terminal Sessions ended. It will check when the connection returns."
+                    "SpaceTerm couldn\u{2019}t confirm whether {server}\u{2019}s Terminal Sessions ended. It will check when the connection returns."
                 )
                 .into(),
                 CaptionTone::Warning,
@@ -308,10 +308,13 @@ impl SettingsWindow {
         }
     }
 
-    /// Why the last End All didn't end what the person confirmed, under its button.
-    pub(super) fn end_all_sessions_error(&self) -> Option<SharedString> {
+    /// The caption under the button: why the last End All didn't end what the person
+    /// confirmed, or that the server runs no Terminal Session to end.
+    pub(super) fn end_all_sessions_note(&self) -> Option<SharedString> {
         let state = &self.end_all_sessions;
-        if state.working || matches!(state.ended, None | Some(Ended::Accepted)) {
+        let failed = !matches!(state.ended, None | Some(Ended::Accepted));
+        let none_running = state.ended.is_none() && self.running_sessions() == Some(0);
+        if state.working || !(failed || none_running) {
             return None;
         }
         let (caption, _) = self.end_all_sessions_caption();

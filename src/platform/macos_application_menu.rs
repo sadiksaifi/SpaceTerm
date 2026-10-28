@@ -59,7 +59,7 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "Switch Workspace",
+        item: "Choose Workspace…",
         symbol: "magnifyingglass",
     },
     MenuItemIcon {
@@ -936,7 +936,7 @@ mod tests {
                 "New Workspace",
                 "Add Server…",
                 "Open Local Directory…",
-                "Switch Workspace",
+                "Choose Workspace…",
                 "|",
                 "New Tab",
                 "New Worktree…",

@@ -176,33 +176,92 @@ pub struct ComboBoxCopy {
     filter_placeholder: SharedString,
     busy_status: SharedString,
     empty_status: SharedString,
+    choices_note: Option<ChoicesNote>,
+}
+
+/// What a popup with commands says when no choice is listed, above its commands' heading.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChoicesNote {
+    /// The note without a query, such as "No Workspaces to attach.", for a popup whose choices
+    /// can run out.
+    none: Option<SharedString>,
+    /// The note's subject with a query, such as "No Workspaces match", which the popup completes
+    /// with the quoted query.
+    no_match: SharedString,
+    commands_heading: SharedString,
 }
 
 impl ComboBoxCopy {
-    /// Creates the complete bounded copy catalog.
+    /// Creates the editor's copy. The popup's busy and empty messages keep their defaults until
+    /// the caller supplies the ones its popup can show.
     pub fn new(
         filter_name: impl Into<SharedString>,
         filter_placeholder: impl Into<SharedString>,
-        busy_status: impl Into<SharedString>,
-        empty_status: impl Into<SharedString>,
     ) -> Self {
         Self {
             filter_name: filter_name.into(),
             filter_placeholder: filter_placeholder.into(),
-            busy_status: busy_status.into(),
-            empty_status: empty_status.into(),
+            ..Self::default()
+        }
+    }
+
+    /// What the popup says while the caller is still supplying its items.
+    pub fn busy_status(mut self, status: impl Into<SharedString>) -> Self {
+        self.busy_status = status.into();
+        self
+    }
+
+    /// The title-case title the popup shows when nothing matches and no command remains.
+    pub fn empty_status(mut self, status: impl Into<SharedString>) -> Self {
+        self.empty_status = status.into();
+        self
+    }
+
+    /// Says why a query lists no choice while commands remain, above a heading that names the
+    /// commands. The note reads `no_match` followed by the quoted query.
+    pub fn choices_note(
+        mut self,
+        no_match: impl Into<SharedString>,
+        commands_heading: impl Into<SharedString>,
+    ) -> Self {
+        self.choices_note = Some(ChoicesNote {
+            none: None,
+            no_match: no_match.into(),
+            commands_heading: commands_heading.into(),
+        });
+        self
+    }
+
+    /// What the note says when there is no query and still no choice, for a popup whose
+    /// choices can run out. Applies to the note [`Self::choices_note`] set.
+    pub fn no_choices(mut self, note: impl Into<SharedString>) -> Self {
+        if let Some(choices) = &mut self.choices_note {
+            choices.none = Some(note.into());
+        }
+        self
+    }
+}
+
+impl ChoicesNote {
+    fn text(&self, query: &str) -> Option<SharedString> {
+        let query = query.trim();
+        if query.is_empty() {
+            self.none.clone()
+        } else {
+            Some(format!("{} \u{201C}{query}\u{201D}.", self.no_match).into())
         }
     }
 }
 
 impl Default for ComboBoxCopy {
     fn default() -> Self {
-        Self::new(
-            "Filter options",
-            "Search",
-            "Loading\u{2026}",
-            "No matching options",
-        )
+        Self {
+            filter_name: "Filter options".into(),
+            filter_placeholder: "Search".into(),
+            busy_status: "Loading\u{2026}".into(),
+            empty_status: "No Matching Options".into(),
+            choices_note: None,
+        }
     }
 }
 
@@ -2759,21 +2818,26 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     };
     let content_viewport = crate::content_viewport(window);
     let viewport = content_viewport.size;
+    let choices_note = presented_choices_note(snapshot);
+    let note_height = choices_note
+        .as_ref()
+        .map_or(px(0.0), |_| choices_note_height(theme.metrics));
     let content_height = if snapshot.busy || snapshot.matches.is_empty() {
         theme.metrics.row_height
     } else {
-        snapshot
-            .matches
-            .iter()
-            .enumerate()
-            .fold(px(0.0), |height, (position, index)| {
-                let item = snapshot.presented_items.get(*index);
-                height
-                    + theme.metrics.list_item_height(
-                        item.is_some_and(|item| item.description.is_some()),
-                        group_separator_before(position, snapshot.choice_match_count, item),
-                    )
-            })
+        note_height
+            + snapshot
+                .matches
+                .iter()
+                .enumerate()
+                .fold(px(0.0), |height, (position, index)| {
+                    let item = snapshot.presented_items.get(*index);
+                    height
+                        + theme.metrics.list_item_height(
+                            item.is_some_and(|item| item.description.is_some()),
+                            group_separator_before(position, snapshot.choice_match_count, item),
+                        )
+                })
     };
     let panel_width = snapshot.panel_width.unwrap_or_else(|| {
         if snapshot.menu_with_filter_header {
@@ -2860,12 +2924,16 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     let busy = state.read(cx).busy;
     let copy = state.read(cx).copy.clone();
     let list_state = state.read(cx).list.clone();
+    let choices_note = presented_choices_note(state.read(cx));
     let rows_height = (bounds.size.height
         - theme.metrics.input_height
         - theme.metrics.border_width
         - theme.metrics.panel_padding * 2.0
-        - theme.metrics.border_width * 2.0)
-        .max(px(0.0));
+        - theme.metrics.border_width * 2.0
+        - choices_note
+            .as_ref()
+            .map_or(px(0.0), |_| choices_note_height(theme.metrics)))
+    .max(px(0.0));
     let row_owner = state.downgrade();
     let layout_owner = state.downgrade();
     let result_tracker = canvas(
@@ -2898,8 +2966,9 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     let content = if busy {
         status_row(copy.busy_status, "combo-box-loading", theme).into_any_element()
     } else if matches.is_empty() {
-        status_row(copy.empty_status, "combo-box-empty", theme).into_any_element()
+        empty_state(copy.empty_status, theme, &typography).into_any_element()
     } else {
+        let note_heading_font = typography.section_font().clone();
         let options = list(list_state, move |position, _, _| {
             matches
                 .get(position)
@@ -2941,11 +3010,20 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
         .h(rows_height)
         .w_full();
         div()
-            .id("combo-box-options")
-            .role(accesskit::Role::ListBox)
-            .aria_label(accessibility_name)
             .w_full()
-            .child(options)
+            .flex()
+            .flex_col()
+            .children(choices_note.map(|(note, heading)| {
+                render_choices_note(note, heading, theme, note_heading_font)
+            }))
+            .child(
+                div()
+                    .id("combo-box-options")
+                    .role(accesskit::Role::ListBox)
+                    .aria_label(accessibility_name)
+                    .w_full()
+                    .child(options),
+            )
             .into_any_element()
     };
     let panel = div()
@@ -3064,6 +3142,93 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     // The ComboBox retains one deferred viewport root. A nested editor menu joins that root as a
     // later sibling, so both surfaces escape ancestor clipping without scheduling nested defers.
     crate::floating_surface::present(theme.shell.layer(false), overlay)
+}
+
+/// The note and commands heading a popup shows while it lists commands and no choice.
+fn presented_choices_note<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
+    state: &ComboBoxState<I, C>,
+) -> Option<(SharedString, SharedString)> {
+    let note = state.copy.choices_note.as_ref()?;
+    if state.busy || state.choice_match_count > 0 || state.matches.is_empty() {
+        return None;
+    }
+    Some((note.text(&state.query)?, note.commands_heading.clone()))
+}
+
+/// The note's line, the heading's line, and a gap above, between, and below them.
+fn choices_note_height(metrics: ComboBoxMetrics) -> Pixels {
+    metrics.secondary_line_height * 2.0 + metrics.gap * 3.0
+}
+
+fn render_choices_note(
+    note: SharedString,
+    heading: SharedString,
+    theme: ComboBoxTheme,
+    heading_font: gpui::Font,
+) -> impl IntoElement {
+    let metrics = theme.metrics;
+    div()
+        .debug_selector(|| "combo-box-choices-note".to_owned())
+        .h(choices_note_height(metrics))
+        .px(metrics.horizontal_padding)
+        .pt(metrics.gap)
+        .flex()
+        .flex_col()
+        .gap(metrics.gap)
+        .text_size(metrics.secondary_size)
+        .line_height(metrics.secondary_line_height)
+        .text_color(theme.paint.muted)
+        .child(
+            div()
+                .id("combo-box-choices-note-text")
+                .role(accesskit::Role::Label)
+                .aria_label(note.clone())
+                .truncate()
+                .child(note),
+        )
+        .child(
+            div()
+                .id("combo-box-commands-heading")
+                .debug_selector(|| "combo-box-commands-heading".to_owned())
+                .role(accesskit::Role::Heading)
+                .aria_label(heading.clone())
+                .font(heading_font)
+                .truncate()
+                .child(heading),
+        )
+}
+
+/// What the popup shows when nothing matches: one title, through the shared empty state.
+fn empty_state(
+    title: SharedString,
+    theme: ComboBoxTheme,
+    typography: &crate::ControlTypography,
+) -> impl IntoElement {
+    let metrics = theme.metrics;
+    let style = crate::EmptyStateStyle::new(
+        crate::EmptyStateText::new(
+            typography.section_font().clone(),
+            metrics.label_size,
+            metrics.label_line_height,
+            theme.paint.foreground,
+        ),
+        crate::EmptyStateText::new(
+            typography.regular().clone(),
+            metrics.secondary_size,
+            metrics.secondary_line_height,
+            theme.paint.muted,
+        ),
+        metrics.label_line_height,
+        theme.paint.muted,
+        1.0,
+    );
+    div()
+        .h(metrics.row_height)
+        .px(metrics.horizontal_padding)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(crate::EmptyState::new(style, title).debug_selector("combo-box-empty"))
 }
 
 fn status_row(
@@ -3847,12 +4012,9 @@ mod tests {
         assert!(cx.debug_bounds("combo-box-empty").is_some());
 
         root.update(cx, |root, cx| {
-            root.copy = ComboBoxCopy::new(
-                "Filter workspaces",
-                "Find a workspace",
-                "Refreshing",
-                "Nothing available",
-            );
+            root.copy = ComboBoxCopy::new("Filter workspaces", "Find a workspace")
+                .busy_status("Refreshing")
+                .empty_status("Nothing available");
             cx.notify();
         });
         cx.run_until_parked();

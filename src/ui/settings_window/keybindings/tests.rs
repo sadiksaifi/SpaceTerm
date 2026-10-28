@@ -138,10 +138,15 @@ fn search_value(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> 
     })
 }
 
-/// The explanation a search that found nothing shows.
+/// The title and detail a search that found nothing shows, one line each.
 fn no_results(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<String> {
     window.read_with(cx, |settings, cx| {
-        settings.no_shortcuts_found(cx).map(String::from)
+        settings
+            .no_shortcuts_found(cx)
+            .map(|(title, detail)| match detail {
+                Some(detail) => format!("{title}\n{detail}"),
+                None => title.to_string(),
+            })
     })
 }
 
@@ -698,7 +703,7 @@ fn a_chord_no_command_uses_finds_nothing(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("settings-keybindings-no-results").is_some());
     assert_eq!(
         no_results(&window, cx).as_deref(),
-        Some("Ctrl+C is reserved for terminal programs.")
+        Some("Shortcut Reserved\nCtrl+C is reserved for terminal programs.")
     );
 }
 
@@ -713,7 +718,7 @@ fn searching_by_an_unused_shortcut_says_no_command_uses_it(cx: &mut TestAppConte
     assert!(found(&window, cx).is_empty());
     assert_eq!(
         no_results(&window, cx).as_deref(),
-        Some("No command uses Primary+Shift+Y.")
+        Some("No Command Uses Primary+Shift+Y")
     );
 }
 
@@ -728,7 +733,7 @@ fn searching_by_a_system_reserved_shortcut_names_its_owner(cx: &mut TestAppConte
     assert!(found(&window, cx).is_empty());
     assert_eq!(
         no_results(&window, cx).as_deref(),
-        Some("Primary+Q is reserved for Quit.")
+        Some("Shortcut Reserved\nPrimary+Q is reserved for Quit.")
     );
 }
 

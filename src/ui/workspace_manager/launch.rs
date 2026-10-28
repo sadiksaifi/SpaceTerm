@@ -12,14 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::prelude::*;
 use gpui::{App, Context, SharedString, Task, Window, div};
-use spaceterm_ui::{Button, ButtonSize, ButtonVariant, ProgressRing, ProgressSize, ProgressState};
+use spaceterm_ui::{Button, ProgressRing, ProgressSize, ProgressState};
 
 use super::WorkspaceManager;
 use crate::domain::ValidatedLocalDirectory;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::server_connection::{ServerConnection, ServerError};
-use crate::ui::appearance::gpui_color;
-use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
@@ -237,6 +235,28 @@ impl LaunchAction {
     }
 }
 
+/// What the launch screen's icon says about the state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LaunchIcon {
+    /// The person stopped the server.
+    Stopped,
+    /// Launch waits for the person's authorization.
+    Authorization,
+    /// Launch could not finish.
+    Failure,
+}
+
+impl LaunchIcon {
+    fn presentation(self) -> (spaceterm_ui::IconName, spaceterm_ui::EmptyStateTone) {
+        use spaceterm_ui::{EmptyStateTone, IconName};
+        match self {
+            Self::Stopped => (IconName::Pause, EmptyStateTone::Quiet),
+            Self::Authorization => (IconName::Lock, EmptyStateTone::Warning),
+            Self::Failure => (IconName::CircleAlert, EmptyStateTone::Error),
+        }
+    }
+}
+
 /// The launch screen's complete presentation, derived from the state alone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct LaunchPresentation {
@@ -246,6 +266,9 @@ pub(super) struct LaunchPresentation {
     pub(super) progress: Option<&'static str>,
     /// The first action is the default one.
     pub(super) actions: &'static [LaunchAction],
+    /// The icon above the title and whether it asks the person to act. A step that runs shows
+    /// its progress instead.
+    pub(super) icon: Option<LaunchIcon>,
     /// The window is only waiting for the server: nothing failed and nothing asks the person to
     /// act, so a short wait need not be presented at all.
     pub(super) waiting: bool,
@@ -333,6 +356,7 @@ const fn failed(error: ServerError, update: bool) -> LaunchState {
 
 pub(super) fn present(state: LaunchState) -> LaunchPresentation {
     use LaunchAction::{Authorize, Retry, Settings, Start, Update};
+    let failure = Some(LaunchIcon::Failure);
     let fixed = SharedString::new_static;
     match state {
         LaunchState::Launching | LaunchState::Ready => LaunchPresentation {
@@ -340,6 +364,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             detail: fixed(OPENING_DETAIL),
             progress: Some("Waiting for the server\u{2026}"),
             actions: &[],
+            icon: None,
             waiting: true,
         },
         LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
@@ -347,6 +372,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             detail: fixed(STOPPED_DETAIL),
             progress: Some("Starting the server\u{2026}"),
             actions: &[],
+            icon: None,
             waiting: false,
         },
         LaunchState::Working(LaunchStep::Authorize) => LaunchPresentation {
@@ -354,6 +380,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             detail: fixed(AUTHORIZING_DETAIL),
             progress: Some("Waiting for authorization\u{2026}"),
             actions: &[],
+            icon: None,
             waiting: false,
         },
         LaunchState::Stopped => LaunchPresentation {
@@ -361,6 +388,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             detail: fixed(STOPPED_DETAIL),
             progress: None,
             actions: &[Start, Settings],
+            icon: Some(LaunchIcon::Stopped),
             waiting: false,
         },
         LaunchState::AuthorizationRequired { declined } => LaunchPresentation {
@@ -376,6 +404,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             },
             progress: None,
             actions: &[Authorize, Settings],
+            icon: Some(LaunchIcon::Authorization),
             waiting: false,
         },
         LaunchState::Incompatible { reason, update } => {
@@ -393,6 +422,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
                 } else {
                     &[Retry, Settings]
                 },
+                icon: failure,
                 waiting: false,
             }
         }
@@ -401,6 +431,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             detail: failure_detail(error),
             progress: None,
             actions: &[Retry, Settings],
+            icon: failure,
             waiting: false,
         },
     }
@@ -878,6 +909,7 @@ impl WorkspaceManager {
             detail,
             progress,
             actions,
+            icon,
             waiting: _,
         } = presentation;
         self.launch.spoke.set(true);
@@ -886,24 +918,60 @@ impl WorkspaceManager {
             None if detail.is_empty() => title.into(),
             None => format!("{title}. {detail}").into(),
         };
-        let announcement = Some(self.launch.announcement(&message));
-        let buttons = actions.iter().enumerate().map(|(index, &action)| {
+        let announcement = self.launch.announcement(&message);
+        let mut state = crate::ui::empty_state::empty_state(title, cx)
+            .title_debug_selector(format!("{LAUNCH_SELECTOR}-title"));
+        if let Some((icon, tone)) = icon.map(LaunchIcon::presentation) {
+            state = state.icon(icon).tone(tone);
+        }
+        if !detail.is_empty() {
+            state = state.detail_element(
+                div()
+                    .id("server-launch-detail")
+                    .debug_selector(|| format!("{LAUNCH_SELECTOR}-detail"))
+                    .role(gpui::accesskit::Role::Group)
+                    .a11y_synthetic_children(move |builder| {
+                        let mut node = announcement.clone();
+                        if let Some(bounds) = builder.parent_node().bounds() {
+                            node.set_bounds(bounds);
+                        }
+                        builder.push_child(builder.synthetic_node_id("status"), node);
+                    })
+                    .child(detail.clone()),
+            );
+        }
+        for (index, &action) in actions.iter().enumerate() {
             let owner = cx.weak_entity();
-            Button::new(action.selector(), action.label())
-                .variant(if index == 0 {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Secondary
-                })
-                .size(ButtonSize::Regular)
+            let button = Button::new(action.selector(), action.label())
                 .tab_stop(true)
                 .debug_selector(action.selector())
                 .on_activate(move |_, window, cx| {
                     let _ = owner.update(cx, |manager, cx| {
                         manager.run_launch_action(action, window, cx);
                     });
-                })
-        });
+                });
+            state = if index == 0 {
+                state.primary(button)
+            } else {
+                state.link(button)
+            };
+        }
+        // The detail already says what launch waits for, so the progress label is spoken only.
+        if let Some(progress) = progress {
+            state = state.footer(
+                div()
+                    .debug_selector(|| format!("{LAUNCH_SELECTOR}-progress"))
+                    .mt(appearance.spacing(12.0))
+                    .child(
+                        ProgressRing::new(
+                            "server-launch-progress",
+                            progress,
+                            ProgressState::Indeterminate,
+                        )
+                        .size(ProgressSize::Compact),
+                    ),
+            );
+        }
         let default = actions.first().copied();
         let owner = cx.weak_entity();
         div()
@@ -911,7 +979,7 @@ impl WorkspaceManager {
             .debug_selector(|| LAUNCH_SELECTOR.to_owned())
             .role(gpui::accesskit::Role::Group)
             .aria_label(title)
-            .aria_description(detail.clone())
+            .aria_description(detail)
             .size_full()
             .track_focus(focus)
             .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
@@ -930,79 +998,8 @@ impl WorkspaceManager {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(appearance.spacing(12.0))
             .px(appearance.spacing(24.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(appearance.spacing(4.0))
-                    .max_w(appearance.spacing(400.0))
-                    .text_center()
-                    .child(
-                        div()
-                            .debug_selector(|| format!("{LAUNCH_SELECTOR}-title"))
-                            .chrome_text(appearance.typography.style(TextRole::Section))
-                            .text_color(gpui_color(appearance.colors.text))
-                            .child(title),
-                    )
-                    .when(!detail.is_empty(), |column| {
-                        column.child(
-                            div()
-                                .id("server-launch-detail")
-                                .debug_selector(|| format!("{LAUNCH_SELECTOR}-detail"))
-                                .role(gpui::accesskit::Role::Group)
-                                .when_some(announcement, |detail, node| {
-                                    detail.a11y_synthetic_children(move |builder| {
-                                        let mut node = node.clone();
-                                        if let Some(bounds) = builder.parent_node().bounds() {
-                                            node.set_bounds(bounds);
-                                        }
-                                        builder
-                                            .push_child(builder.synthetic_node_id("status"), node);
-                                    })
-                                })
-                                .whitespace_normal()
-                                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                                .text_color(gpui_color(appearance.colors.text_secondary))
-                                .child(detail),
-                        )
-                    }),
-            )
-            .when_some(progress, |stage, progress| {
-                stage.child(
-                    div()
-                        .debug_selector(|| format!("{LAUNCH_SELECTOR}-progress"))
-                        .flex()
-                        .items_center()
-                        .gap(appearance.spacing(6.0))
-                        .child(
-                            ProgressRing::new(
-                                "server-launch-progress",
-                                progress,
-                                ProgressState::Indeterminate,
-                            )
-                            .size(ProgressSize::Compact),
-                        )
-                        .child(
-                            div()
-                                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                                .text_color(gpui_color(appearance.colors.text_secondary))
-                                .child(progress),
-                        ),
-                )
-            })
-            .when(!actions.is_empty(), |stage| {
-                stage.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .justify_center()
-                        .gap(appearance.spacing(8.0))
-                        .children(buttons),
-                )
-            })
+            .child(state)
     }
 
     pub(super) fn run_launch_action(

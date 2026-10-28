@@ -10,9 +10,10 @@ use gpui::{
 };
 
 use crate::{
-    ComboButton, FloatingRole, FloatingShell, Icon, IconName, MenuAlignment, MenuEntry,
-    MenuPlacement, MenuPlacementConfig, ProgressBar, ProgressSize, ProgressState, TextInput,
-    TextInputEvent, TextInputTabBehavior, TextInputVariant,
+    ComboButton, EMPTY_STATE_ACTION_SIZE, EmptyState, EmptyStateStyle, EmptyStateText,
+    FloatingRole, FloatingShell, Icon, IconName, MenuAlignment, MenuEntry, MenuPlacement,
+    MenuPlacementConfig, ProgressBar, ProgressSize, ProgressState, TextInput, TextInputEvent,
+    TextInputTabBehavior, TextInputVariant,
     button::{Button, ButtonSize, ButtonVariant, IconButton},
     fuzzy::{FuzzyTarget, fuzzy_filter, highlight_ranges},
     leading_columns::{LeadingColumnMetrics, LeadingColumns},
@@ -23,8 +24,6 @@ const KEY_CONTEXT: &str = "SpaceTermCommandPalette";
 /// The palette is the window's focal search surface.
 const COMMAND_PALETTE_ROLE: FloatingRole = FloatingRole::Command;
 
-/// Empty-state actions are the content's only controls, so they take the ordinary control size.
-const EMPTY_ACTION_SIZE: ButtonSize = ButtonSize::Regular;
 /// A description longer than this many lines is truncated rather than growing the panel.
 const EMPTY_DESCRIPTION_LINE_LIMIT: usize = 3;
 /// How long a load may run before the palette shows its loading state.
@@ -1125,7 +1124,6 @@ pub struct CommandPaletteMetrics {
     separator_height: Pixels,
     empty_padding: Pixels,
     empty_line_gap: Pixels,
-    empty_actions_gap: Pixels,
     loading_bar_width: Pixels,
     horizontal_padding: Pixels,
     leading_width: Pixels,
@@ -1145,6 +1143,7 @@ pub struct CommandPaletteMetrics {
     section_line_height: Pixels,
     icon_size: Pixels,
     icon_baseline_center: Pixels,
+    spacing_scale: f32,
 }
 
 impl CommandPaletteMetrics {
@@ -1165,7 +1164,6 @@ impl CommandPaletteMetrics {
             separator_height: px(9.0),
             empty_padding: px(20.0),
             empty_line_gap: px(4.0),
-            empty_actions_gap: px(14.0),
             loading_bar_width: px(160.0),
             horizontal_padding: px(12.0),
             leading_width: px(18.0),
@@ -1185,6 +1183,7 @@ impl CommandPaletteMetrics {
             section_line_height: px(17.0),
             icon_size: px(12.0),
             icon_baseline_center: px(4.0),
+            spacing_scale: 1.0,
         }
     }
 
@@ -1308,10 +1307,6 @@ impl CommandPaletteMetrics {
             separator_height: crate::appearance::scale_metric(self.separator_height, spacing_scale),
             empty_padding: crate::appearance::scale_metric(self.empty_padding, spacing_scale),
             empty_line_gap: crate::appearance::scale_metric(self.empty_line_gap, spacing_scale),
-            empty_actions_gap: crate::appearance::scale_metric(
-                self.empty_actions_gap,
-                spacing_scale,
-            ),
             loading_bar_width: crate::appearance::scale_metric(
                 self.loading_bar_width,
                 spacing_scale,
@@ -1323,6 +1318,7 @@ impl CommandPaletteMetrics {
             leading_width: crate::appearance::scale_metric(self.leading_width, spacing_scale)
                 .max(self.icon_size),
             gap: crate::appearance::scale_metric(self.gap, spacing_scale),
+            spacing_scale: crate::appearance::normalized_scale(spacing_scale),
             accessory_padding: crate::appearance::scale_metric(
                 self.accessory_padding,
                 spacing_scale,
@@ -1341,10 +1337,6 @@ impl CommandPaletteMetrics {
             icon_width: self.leading_width,
             column_gap: px(0.0),
         }
-    }
-
-    fn empty_icon_size(&self) -> Pixels {
-        self.body_line_height * 2.0
     }
 
     fn header_action_size(&self) -> Pixels {
@@ -1806,7 +1798,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             ListState::new(presented_results.len(), ListAlignment::Top, px(0.0)).measure_all();
         let mut palette = Self {
             accessibility_name: placeholder.clone(),
-            empty: CommandPaletteEmpty::new("No matching items"),
+            empty: CommandPaletteEmpty::new("No Matching Items"),
             items,
             matches,
             presented_results,
@@ -3018,7 +3010,8 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
         // loading state once it shows.
         let content_height = match self.loading_presentation {
             LoadingPresentation::Settled if self.matches.is_empty() => {
-                self.empty_state_height(panel_width, metrics, &font, window, cx)
+                let style = empty_state_style(metrics, theme.paint, &typography);
+                self.empty_state_height(panel_width, metrics, &style, window, cx)
             }
             LoadingPresentation::Settled => self.presented_results.total_height(metrics),
             LoadingPresentation::Grace => self
@@ -3175,105 +3168,63 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         &self,
         panel_width: Pixels,
         metrics: CommandPaletteMetrics,
-        font: &gpui::Font,
+        style: &EmptyStateStyle,
         window: &Window,
         cx: &App,
     ) -> Pixels {
-        let mut height = metrics.empty_padding * 2.0 + metrics.body_line_height;
-        if self.empty.icon.is_some() {
-            height += metrics.empty_icon_size() + metrics.empty_line_gap * 2.0;
-        }
-        if let Some(description) = &self.empty.description {
-            let wrap_width = (panel_width - metrics.content_leading_inset() * 2.0).max(px(1.0));
-            let lines = wrapped_line_count(
-                description,
-                font,
-                metrics.secondary_size,
-                wrap_width,
-                window,
-            );
-            height += metrics.empty_line_gap + metrics.secondary_line_height * lines as f32;
-        }
-        if !self.empty.actions.is_empty() {
-            height += metrics.empty_actions_gap
-                + crate::ControlHost::Floating
-                    .button_theme(cx)
-                    .control_height(EMPTY_ACTION_SIZE);
-        }
-        height
+        let detail_lines = self.empty.description.as_ref().map_or(0, |description| {
+            let wrap_width = (panel_width - metrics.content_leading_inset() * 2.0)
+                .min(style.maximum_width())
+                .max(px(1.0));
+            let (font, size, _) = style.detail_font();
+            wrapped_line_count(description, font, size, wrap_width, window)
+        });
+        let actions = (!self.empty.actions.is_empty()).then(|| {
+            crate::ControlHost::Floating
+                .button_theme(cx)
+                .control_height(EMPTY_STATE_ACTION_SIZE)
+        });
+        metrics.empty_padding * 2.0 + style.height(self.empty.icon.is_some(), detail_lines, actions)
     }
 
     /// Renders the caller's title, description, and actions centered in the result area.
     fn render_empty_state(
         &self,
-        theme: CommandPaletteTheme,
+        style: EmptyStateStyle,
+        metrics: CommandPaletteMetrics,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
-        let metrics = theme.metrics;
-        let paint = theme.paint;
         let palette = cx.entity().downgrade();
+        let mut state = EmptyState::new(style, self.empty.title.clone())
+            .debug_selector("command-palette-empty")
+            .title_debug_selector("command-palette-empty-title")
+            .detail_line_limit(EMPTY_DESCRIPTION_LINE_LIMIT);
+        if let Some(icon) = self.empty.icon.clone() {
+            state = state.icon_with(icon);
+        }
+        if let Some(description) = self.empty.description.clone() {
+            state = state.detail_element(
+                div()
+                    .debug_selector(|| "command-palette-empty-description".to_owned())
+                    .child(description),
+            );
+        }
+        for (index, action) in self.empty.actions.iter().enumerate() {
+            let button = render_empty_action(palette.clone(), index, action);
+            state = if index == 0 {
+                state.primary(button)
+            } else {
+                state.link(button)
+            };
+        }
         div()
-            .debug_selector(|| "command-palette-empty".to_owned())
             .w_full()
             .px(metrics.content_leading_inset())
             .py(metrics.empty_padding)
             .flex()
             .flex_col()
             .items_center()
-            .when_some(self.empty.icon.as_ref(), |empty, icon| {
-                let size = metrics.empty_icon_size();
-                empty.child(
-                    div()
-                        .size(size)
-                        .flex_shrink_0()
-                        .mb(metrics.empty_line_gap * 2.0)
-                        .child(icon(paint.muted, size)),
-                )
-            })
-            .child(
-                div()
-                    .debug_selector(|| "command-palette-empty-title".to_owned())
-                    .w_full()
-                    .text_center()
-                    .truncate()
-                    .text_size(metrics.label_size)
-                    .line_height(metrics.body_line_height)
-                    .text_color(paint.foreground)
-                    .child(self.empty.title.clone()),
-            )
-            .when_some(self.empty.description.clone(), |empty, description| {
-                empty.child(
-                    div()
-                        .debug_selector(|| "command-palette-empty-description".to_owned())
-                        .w_full()
-                        .mt(metrics.empty_line_gap)
-                        .text_center()
-                        .line_clamp(EMPTY_DESCRIPTION_LINE_LIMIT)
-                        .text_size(metrics.secondary_size)
-                        .line_height(metrics.secondary_line_height)
-                        .text_color(paint.muted)
-                        .child(description),
-                )
-            })
-            .when(!self.empty.actions.is_empty(), |empty| {
-                empty.child(
-                    div()
-                        .mt(metrics.empty_actions_gap)
-                        .flex()
-                        .flex_row()
-                        .justify_center()
-                        .gap(metrics.gap)
-                        .children(
-                            self.empty
-                                .actions
-                                .iter()
-                                .enumerate()
-                                .map(|(index, action)| {
-                                    render_empty_action(palette.clone(), index, action)
-                                }),
-                        ),
-                )
-            })
+            .child(state)
             .into_any_element()
     }
 
@@ -3350,7 +3301,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         } else if matches!(self.loading_presentation, LoadingPresentation::Shown { .. }) {
             loading_state(list_height, metrics, paint).into_any_element()
         } else if self.matches.is_empty() {
-            self.render_empty_state(theme, cx)
+            self.render_empty_state(empty_state_style(metrics, paint, &typography), metrics, cx)
         } else {
             self.render_results(
                 list_height,
@@ -3584,6 +3535,31 @@ fn separator_line(theme: CommandPaletteTheme) -> impl IntoElement {
 }
 
 /// Counts the lines `text` occupies at `wrap_width`, bounded by the empty-state line limit.
+/// The palette's empty state: its section and secondary text on the panel's paint.
+fn empty_state_style(
+    metrics: CommandPaletteMetrics,
+    paint: CommandPalettePaint,
+    typography: &crate::ControlTypography,
+) -> EmptyStateStyle {
+    EmptyStateStyle::new(
+        EmptyStateText::new(
+            typography.section_font().clone(),
+            metrics.section_size,
+            metrics.section_line_height,
+            paint.foreground,
+        ),
+        EmptyStateText::new(
+            typography.regular().clone(),
+            metrics.secondary_size,
+            metrics.secondary_line_height,
+            paint.muted,
+        ),
+        metrics.body_line_height,
+        paint.muted,
+        metrics.spacing_scale,
+    )
+}
+
 fn wrapped_line_count(
     text: &SharedString,
     font: &gpui::Font,
@@ -3618,23 +3594,17 @@ fn wrapped_line_count(
         .clamp(1, EMPTY_DESCRIPTION_LINE_LIMIT)
 }
 
-/// Renders one empty-state action. The first action carries the default emphasis.
+/// Renders one empty-state action. The empty state gives the first the default emphasis.
 fn render_empty_action<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     index: usize,
     action: &CommandPaletteEmptyAction,
-) -> AnyElement {
+) -> Button {
     let id = action.id.clone();
     Button::new(
         ("command-palette-empty-action", index),
         action.label.clone(),
     )
-    .variant(if index == 0 {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Secondary
-    })
-    .size(EMPTY_ACTION_SIZE)
     .disabled(action.disabled)
     .tab_stop(true)
     .when_some(action.debug_selector.clone(), |button, selector| {
@@ -3646,7 +3616,6 @@ fn render_empty_action<I: Clone + Eq + 'static>(
             cx.emit(CommandPaletteEvent::<I>::EmptyAction(id));
         });
     })
-    .into_any_element()
 }
 
 /// Renders one trailing search-line control as a ghost icon button.

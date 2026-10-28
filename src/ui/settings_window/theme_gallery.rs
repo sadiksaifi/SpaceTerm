@@ -269,7 +269,6 @@ impl SettingsWindow {
                 self.render_theme_row(summary, slot, summary.id == selected, appearance, cx)
             })
             .collect::<Vec<_>>();
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let separator = gpui_color(appearance.separator(spaceterm_ui::ControlHost::Card));
         let empty = rows.is_empty();
         let rows = rows.into_iter().enumerate().flat_map(|(index, row)| {
@@ -318,13 +317,14 @@ impl SettingsWindow {
             .when(empty, |list| {
                 list.child(
                     div()
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(colors.text_secondary))
-                        .whitespace_normal()
-                        .child(Text::new(
-                            "settings-theme-gallery-no-results".into(),
-                            SharedString::from(format!("No themes match “{query}”.")),
-                        )),
+                        .w_full()
+                        .py(appearance.spacing(24.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            super::no_results(&query, cx)
+                                .debug_selector("settings-theme-gallery-no-results"),
+                        ),
                 )
             })
             .child(
@@ -370,7 +370,7 @@ impl SettingsWindow {
                 ))
                 .child(Text::new(
                     SharedString::from(format!("{selector}-in-use")).into(),
-                    SharedString::from("In Use"),
+                    SharedString::from("In use"),
                 ))
                 .into_any_element()
         } else {

@@ -216,7 +216,7 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
             let state = if status == DirectRouteStatus::Connected {
                 "Connected"
             } else {
-                "Not Connected"
+                "Not connected"
             };
             observations.push(Observation {
                 key: ServerKey::Known {

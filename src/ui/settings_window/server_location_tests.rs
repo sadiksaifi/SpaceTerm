@@ -64,7 +64,7 @@ fn an_unwritable_folder_appears_only_for_the_text_the_server_checked() {
     );
     assert_eq!(
         model.message(),
-        Some(("The server can't write here.", CaptionTone::Error))
+        Some(("The server can\u{2019}t write here.", CaptionTone::Error))
     );
     assert_eq!(model.commit(), None);
 }
@@ -285,7 +285,7 @@ mod presented {
         type_location("/Volumes/Locked/{branch}", servers.cx);
         wait(Duration::from_millis(400), servers.cx);
 
-        assert!(says("The server can't write here.", servers.cx));
+        assert!(says("The server can\u{2019}t write here.", servers.cx));
         servers.cx.simulate_keystrokes("enter");
         servers.cx.run_until_parked();
         assert!(edits.submitted().is_empty());

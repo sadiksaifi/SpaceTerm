@@ -2459,7 +2459,7 @@ impl WorkspaceManager {
         .unwrap_or_default();
         Some((
             self.chrome_identity(workspace.id(), cx),
-            Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
+            Tooltip::new("workspace-switcher-tooltip", "Choose Workspace")
                 .detail(format!(
                     "{}\n{tooltip_detail}{repository}",
                     workspace.name()
@@ -2521,7 +2521,7 @@ impl WorkspaceManager {
                 .map_or(title_bar_host, |fill| fill.source_over(title_bar_host)),
         );
         let switcher_accessibility_name = collapsed_identity.as_ref().map_or_else(
-            || "Switch Workspace".to_owned(),
+            || "Choose Workspace".to_owned(),
             |(identity, _, _)| identity.accessibility_name(),
         );
         let chooser = ComboBox::with_commands(
@@ -2530,7 +2530,7 @@ impl WorkspaceManager {
             self.workspaces
                 .active_workspace_id()
                 .map(SwitcherChoice::Presented),
-            "Switch Workspace",
+            "Choose Workspace",
             self.workspace_switcher_items(cx),
             move |_| {
                 creation_rows
@@ -2587,12 +2587,13 @@ impl WorkspaceManager {
         .input_leading(move |size| {
             Icon::custom(CustomIconName::FilterCircle, size, placeholder_color).into_any_element()
         })
-        .copy(ComboBoxCopy::new(
-            "Workspace name",
-            "Filter or create...",
-            "No Workspaces",
-            "No matching Workspaces",
-        ))
+        // The creation rows always remain, so the switcher never shows an empty state. Without a
+        // Workspace to choose it says so above them.
+        .copy(
+            ComboBoxCopy::new("Workspace name", "Filter or create\u{2026}")
+                .choices_note("No Workspaces match", "Create")
+                .no_choices("No Workspaces to attach."),
+        )
         .menu_with_filter_header()
         // The chooser takes the top chrome's icon size so its glyph keeps one size across sidebar
         // states.
@@ -2615,7 +2616,7 @@ impl WorkspaceManager {
         ))
         .debug_selector("workspace-switcher")
         .tooltip(
-            Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
+            Tooltip::new("workspace-switcher-tooltip", "Choose Workspace")
                 .debug_selector("workspace-switcher-tooltip")
                 .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
         )

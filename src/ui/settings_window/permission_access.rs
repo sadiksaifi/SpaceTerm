@@ -266,7 +266,7 @@ impl PermissionAccessRow {
             RecoveryNotice::OpenFailed => open_failed(application, pane),
             RecoveryNotice::Resetting => format!("Resetting {name}…"),
             RecoveryNotice::ResetFailed => format!(
-                "Couldn't reset {name}. Remove {application} in Privacy & Security > {pane}, then add it again."
+                "Couldn\u{2019}t reset {name}. Remove {application} in Privacy & Security > {pane}, then add it again."
             ),
         });
 
@@ -297,7 +297,7 @@ impl PermissionAccessRow {
                             PermissionSetupStatus::Failed(
                                 PermissionSetupFailure::SettingsNotShown,
                             ) => Some(
-                                "Couldn't open System Settings. Choose Set Up to try again."
+                                "Couldn\u{2019}t open System Settings. Choose Set Up to try again."
                                     .to_owned(),
                             ),
                             PermissionSetupStatus::Idle | PermissionSetupStatus::Running => None,
@@ -307,7 +307,7 @@ impl PermissionAccessRow {
                     None => (notice.unwrap_or(purpose), Action::OpenSettings),
                 };
                 (
-                    "Not Allowed",
+                    "Not allowed",
                     text.state_not_allowed,
                     explanation,
                     Some(action),
@@ -318,7 +318,7 @@ impl PermissionAccessRow {
                 text.state_unavailable,
                 match error {
                     PermissionAccessError::OffMainThread => {
-                        format!("Couldn't check {name} access.")
+                        format!("Couldn\u{2019}t check {name} access.")
                     }
                     PermissionAccessError::PlatformUnavailable => {
                         format!("{name} access unknown.")

@@ -51,11 +51,13 @@ const NEW_DIRECTORY_NOTE: &str = "New directory";
 const SYSTEM_SELECTION_ACTION: &str = "directory-picker-system-selection";
 /// Identifies the row that opens the enclosing directory.
 const ENCLOSING_ROW: &str = "directory-picker-enclosing";
-const NO_SUBDIRECTORIES: &str = "No subdirectories";
+const NO_SUBDIRECTORIES: &str = "No Subdirectories";
+/// The caption after the Go Back row of a readable directory with none beneath it.
+const NO_SUBDIRECTORIES_NOTE: &str = "No subdirectories.";
 const TRUNCATED_LISTING_NOTE: &str = "Showing the first 1024. Type a path to open others.";
 pub(super) const MAXIMUM_DIRECTORY_ROWS: usize = 1024;
 const CONNECTION_LOST_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "Server connection lost")
+    EmptyNotice::new(IconName::TriangleAlert, "Server Not Connected")
         .description("Choose again once SpaceTerm reconnects.");
 
 /// The content-unavailable view the list area presents in place of child directories.
@@ -1208,7 +1210,7 @@ impl DirectoryPicker {
         if self.listing_truncated {
             Some(TRUNCATED_LISTING_NOTE)
         } else if self.rows.is_empty() && self.status == DirectoryPickerStatus::Readable {
-            Some(NO_SUBDIRECTORIES)
+            Some(NO_SUBDIRECTORIES_NOTE)
         } else {
             None
         }
@@ -1231,42 +1233,42 @@ impl DirectoryPicker {
         if !self.source.allows_creation() {
             match self.status {
                 DirectoryPickerStatus::Missing => {
-                    return EmptyNotice::new(IconName::CircleAlert, "Directory doesn’t exist")
-                        .description("Choose an existing directory.");
+                    return EmptyNotice::new(
+                        IconName::CircleAlert,
+                        "Directory Doesn\u{2019}t Exist",
+                    )
+                    .description("Choose an existing directory.");
                 }
                 DirectoryPickerStatus::NotDirectory => {
-                    return EmptyNotice::new(IconName::File, "Directory required")
+                    return EmptyNotice::new(IconName::File, "Directory Required")
                         .description("Choose an existing directory.");
                 }
                 DirectoryPickerStatus::ConnectionLost => {
-                    return EmptyNotice::new(
-                        IconName::TriangleAlert,
-                        "Not connected to the server",
-                    )
-                    .description("Edit the path once SpaceTerm reconnects.");
+                    return EmptyNotice::new(IconName::TriangleAlert, "Server Not Connected")
+                        .description("Edit the path once SpaceTerm reconnects.");
                 }
                 _ => {}
             }
         }
         match self.status {
             DirectoryPickerStatus::NotDirectory => {
-                return EmptyNotice::new(IconName::File, "Directory required")
+                return EmptyNotice::new(IconName::File, "Directory Required")
                     .description("Choose a directory.");
             }
             DirectoryPickerStatus::PermissionDenied => {
-                return EmptyNotice::new(IconName::Lock, "Permission denied")
-                    .description("Can't open this directory.");
+                return EmptyNotice::new(IconName::Lock, "Permission Denied")
+                    .description("SpaceTerm can\u{2019}t open this directory.");
             }
             DirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
             DirectoryPickerStatus::Other => {
-                return EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t read this directory");
+                return EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t Read This Directory");
             }
             DirectoryPickerStatus::Invalid(error) => {
-                return EmptyNotice::new(IconName::CircleAlert, "Invalid path")
+                return EmptyNotice::new(IconName::CircleAlert, "Invalid Path")
                     .description(error.message());
             }
             DirectoryPickerStatus::Missing => {
-                return EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist")
+                return EmptyNotice::new(IconName::FolderPlus, "Directory Doesn\u{2019}t Exist")
                     .description("Open creates and pins this directory.");
             }
             DirectoryPickerStatus::DiscoveringAccount
@@ -1277,19 +1279,19 @@ impl DirectoryPicker {
             None => EmptyNotice::new(IconName::Folder, NO_SUBDIRECTORIES),
             Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
-                EmptyNotice::new(IconName::Lock, "Permission denied")
-                    .description("Can't list this directory.")
+                EmptyNotice::new(IconName::Lock, "Permission Denied")
+                    .description("SpaceTerm can\u{2019}t list this directory.")
             }
             Some(DirectorySourceError::Missing) => EmptyNotice::new(
                 IconName::CircleAlert,
-                "Enclosing directory doesn\u{2019}t exist",
+                "Enclosing Directory Doesn\u{2019}t Exist",
             ),
             Some(DirectorySourceError::NotDirectory) => EmptyNotice::new(
                 IconName::CircleAlert,
-                "Enclosing path isn\u{2019}t a directory",
+                "Enclosing Path Isn\u{2019}t a Directory",
             ),
             Some(DirectorySourceError::Other) => {
-                EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t list this directory")
+                EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t List This Directory")
             }
         }
     }
@@ -1931,7 +1933,7 @@ mod tests {
         assert!(cx.debug_bounds("command-palette-empty").is_some());
         assert_eq!(
             picker.read_with(cx, |picker, _| picker.empty_state().title().to_owned()),
-            "Directory doesn\u{2019}t exist"
+            "Directory Doesn\u{2019}t Exist"
         );
 
         cx.simulate_keystrokes("enter");
@@ -2240,8 +2242,8 @@ mod tests {
                 DirectoryPickerStatus::Readable,
                 true,
                 Some(DirectorySourceError::PermissionDenied),
-                "Permission denied".to_owned(),
-                Some("Can't list this directory.".to_owned()),
+                "Permission Denied".to_owned(),
+                Some("SpaceTerm can\u{2019}t list this directory.".to_owned()),
                 Vec::<String>::new(),
             )
         );

@@ -298,7 +298,7 @@ pub(super) fn access_problem(state: &AccessState, server: &str) -> Option<String
     let address = state.policy.map(|policy| policy.ip());
     match (state.listener, &state.addresses) {
         (Listener::Failed, _) if address.is_some_and(|address| address.is_unspecified()) => {
-            Some("Couldn't listen on all interfaces.".to_owned())
+            Some("Couldn\u{2019}t listen on all interfaces.".to_owned())
         }
         (Listener::AddressGone, _) => Some(match address {
             Some(address) => {
@@ -307,13 +307,15 @@ pub(super) fn access_problem(state: &AccessState, server: &str) -> Option<String
             None => format!("Address no longer on {server}. Choose another."),
         }),
         (Listener::Failed, _) => Some(match address {
-            Some(address) => format!("Couldn't listen at {address}."),
-            None => "Couldn't listen on the network.".to_owned(),
+            Some(address) => format!("Couldn\u{2019}t listen at {address}."),
+            None => "Couldn\u{2019}t listen on the network.".to_owned(),
         }),
         (Listener::Off, Some(addresses)) if addresses.available.is_empty() => {
             Some(format!("No reachable network address on {server}."))
         }
-        (_, None) => Some(format!("Couldn't read {server}'s network addresses.")),
+        (_, None) => Some(format!(
+            "Couldn\u{2019}t read {server}\u{2019}s network addresses."
+        )),
         _ => None,
     }
 }
@@ -476,13 +478,13 @@ impl SettingsWindow {
                 .and_then(|shown| shown.observed_at)
                 .map(|at| {
                     format!(
-                        "SpaceTerm can't reach {name}. Last known Network Access settings: {}.",
+                        "SpaceTerm can\u{2019}t reach {name}. Last known Network Access settings: {}.",
                         super::server_card::observed_time(at, cx)
                     )
                 });
             return Some(
                 observed
-                    .unwrap_or_else(|| "Can't reach the server.".to_owned())
+                    .unwrap_or_else(|| "Can\u{2019}t reach the server.".to_owned())
                     .into(),
             );
         }
@@ -899,6 +901,18 @@ impl SettingsWindow {
             Some(0) => SharedString::new_static("None"),
             Some(count) => SharedString::from(format!("{count} paired")),
         }
+    }
+
+    /// What the Devices row says when the server lists no paired device.
+    pub(super) fn no_paired_devices_note(&self) -> Option<SharedString> {
+        let devices = self.direct_access.shown().and_then(|shown| shown.devices)?;
+        devices.is_empty().then(|| {
+            format!(
+                "No devices are paired with {}. Invite a device to work from another computer.",
+                self.direct_access_server_name()
+            )
+            .into()
+        })
     }
 
     /// The Devices row: how many devices are paired, and Invite Device.
