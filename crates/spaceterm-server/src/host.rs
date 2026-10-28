@@ -625,20 +625,23 @@ fn tick(
     panes: &SharedPaneService,
     direct: Option<&crate::direct::host::Shared>,
 ) -> Option<Instant> {
-    let retired = direct
-        .and_then(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending_releases()
-                .ok()
+    let (retired, listen) = direct
+        .map(|state| {
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            let retired = state.pending_releases().unwrap_or_default();
+            // A listener waiting for an address binds once the previous one's last connection
+            // ended; its thread rings this loop then.
+            (retired, state.retry_listen())
         })
         .unwrap_or_default();
     let mut panes = panes.lock().unwrap_or_else(|e| e.into_inner());
     for client in retired {
         panes.revoked(client);
     }
-    panes.tick(Instant::now())
+    [panes.tick(Instant::now()), listen]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 /// How long a listener that failed to accept rests unless a connection ends first.

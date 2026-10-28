@@ -2762,14 +2762,14 @@ mod quic_connections {
             }
         });
         let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into());
-        let config = quic::presenting(&pin, certificate, key, Arc::default()).unwrap();
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(&pin, certificate, key, Arc::clone(&seen)).unwrap();
         let address = Endpoint::from_url(&endpoint)
             .unwrap()
             .resolve(Instant::now() + Duration::from_secs(5))
             .unwrap();
-        assert!(
-            QuicStream::connect(config, &address, Instant::now() + Duration::from_secs(3)).is_err()
-        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        assert!(QuicStream::connect(config, &address, deadline, &seen.verified).is_err());
         assert!(
             !server.join().unwrap(),
             "the server must refuse the handshake"
@@ -3053,13 +3053,14 @@ mod quic_connections {
             }
         });
         let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into());
-        let config = quic::presenting(&pin, certificate, key, Arc::default()).unwrap();
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(&pin, certificate, key, Arc::clone(&seen)).unwrap();
         let address = Endpoint::from_url(&endpoint)
             .unwrap()
             .resolve(Instant::now() + Duration::from_secs(5))
             .unwrap();
-        let refused =
-            QuicStream::connect(config, &address, Instant::now() + Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let refused = QuicStream::connect(config, &address, deadline, &seen.verified);
         assert_eq!(
             refused.err().map(quic::transport),
             Some(DirectError::AuthenticationRefused)
@@ -3211,6 +3212,154 @@ mod quic_connections {
         assert_eq!(ended.load(Ordering::SeqCst), 0, "the session never ended");
         drop(link);
         let _ = server.join().unwrap();
+    }
+
+    fn listener_state(fixture: &Fixture) -> ListenerState {
+        let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap()
+        else {
+            panic!()
+        };
+        status.listener
+    }
+
+    /// Moving exposure from the wildcard to one address of the same port binds at once when
+    /// no connection holds the old socket.
+    #[test]
+    fn changing_the_address_without_connections_binds_at_once() {
+        let fixture = Fixture::new();
+        let wildcard = fixture.listen_at(std::net::Ipv4Addr::UNSPECIFIED.into());
+        let specific =
+            std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), wildcard.port());
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(specific).unwrap()),
+            })
+            .unwrap();
+        assert_eq!(
+            listener_state(&fixture),
+            ListenerState::Listening { addr: specific }
+        );
+    }
+
+    /// While a connection of the old address still holds its socket, the new address waits as
+    /// `Starting`, then binds once that connection ended with its goodbye.
+    #[test]
+    fn changing_the_address_with_a_live_connection_binds_once_it_ends() {
+        let fixture = Fixture::new();
+        let specific = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next();
+        let link = connect(&fixture.endpoint(), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let wildcard =
+            std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), specific.port());
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(wildcard).unwrap()),
+            })
+            .unwrap();
+        assert!(matches!(
+            listener_state(&fixture),
+            ListenerState::Starting { .. } | ListenerState::Listening { .. }
+        ));
+        assert_eq!(
+            ended(&link),
+            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while listener_state(&fixture) != (ListenerState::Listening { addr: wildcard }) {
+            assert!(
+                Instant::now() < deadline,
+                "still {:?}",
+                listener_state(&fixture)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let server = fixture.serve_next();
+        let link = connect(&format!("quic://{specific}"), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// Another QUIC service on an address, one with another ALPN, refuses the protocol before
+    /// the pinned server could be verified. That is an incompatibility, not a refused proof,
+    /// and the client goes on to the next address.
+    #[test]
+    fn another_quic_service_is_incompatible_and_the_next_address_still_connects() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        // A QUIC service with this server's certificate and another protocol.
+        let other = {
+            let state = fixture.state.lock().unwrap();
+            let (certificate, key) = state.certificate();
+            let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certificate.to_vec().into()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_vec().into()),
+            )
+            .unwrap();
+            tls.alpn_protocols = vec![b"other/1".to_vec()];
+            let config = crate::connection::quic::server_config(tls).unwrap();
+            QuicListener::bind(free_udp(std::net::Ipv4Addr::LOCALHOST.into()), config).unwrap()
+        };
+        let other_address = other.address();
+        let elsewhere = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Some(mut stream) = other.accept() {
+                    let _ = stream.handshake(deadline);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let alone =
+            DirectConnection::connect(&format!("quic://{other_address}"), &paired, &credential);
+        assert_eq!(alone.err(), Some(DirectError::IncompatibleProtocol));
+        elsewhere.join().unwrap();
+
+        let real = Endpoint::from_url(&fixture.endpoint())
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let server = fixture.serve_next();
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(
+            &paired.pin,
+            quic::tests_certificate(credential.expose_bytes()).into(),
+            rustls::pki_types::PrivateKeyDer::Pkcs8(credential.expose_bytes().to_vec().into()),
+            Arc::clone(&seen),
+        )
+        .unwrap();
+        // The first address speaks another protocol; the second is the server.
+        let stream = QuicStream::connect(
+            config,
+            &[other_address, real],
+            Instant::now() + Duration::from_secs(5),
+            &seen.verified,
+        );
+        assert!(stream.is_ok());
+        drop(stream);
+        let _ = server.join();
     }
 
     /// Measures a paired request's round trip over QUIC on loopback. Run it with

@@ -193,7 +193,10 @@ fn access_state(status: DirectStatus) -> AccessState {
         configured,
         listener: match status.listener {
             ListenerState::Off => Listener::Off,
-            ListenerState::Listening { addr } => Listener::Listening(addr),
+            // Starting binds within seconds, once the previous address's connections end.
+            ListenerState::Listening { addr } | ListenerState::Starting { addr } => {
+                Listener::Listening(addr)
+            }
             ListenerState::Failed(DirectError::InvalidAddress) => Listener::AddressGone,
             ListenerState::Failed(_) => Listener::Failed,
         },

@@ -98,7 +98,13 @@ pub struct NetworkAddresses {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ListenerState {
     Off,
-    Listening { addr: SocketAddr },
+    Listening {
+        addr: SocketAddr,
+    },
+    /// Waits to bind `addr` until the connections of the previous address end, within seconds.
+    Starting {
+        addr: SocketAddr,
+    },
     Failed(DirectError),
 }
 

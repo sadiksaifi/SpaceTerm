@@ -5,6 +5,14 @@ use crate::connection::registry::{PairedConnections, Sever};
 use std::sync::{Arc, Mutex};
 
 const MAX_PENDING: usize = 32;
+/// Why a listener did not bind.
+enum Bind {
+    /// Another socket, such as a retired listener's, holds the address.
+    InUse,
+    Other,
+}
+/// How often a `Starting` listener tries its address again while it waits.
+const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 pub(crate) type Shared = Arc<Mutex<State>>;
 
 struct PendingInvitation {
@@ -23,6 +31,8 @@ pub(crate) struct State {
     record: storage::Record,
     pub(super) pin: ServerPin,
     listener: Option<QuicListener>,
+    /// When a `Starting` listener first found its address in use.
+    starting_since: Option<std::time::Instant>,
     /// Listeners replaced by a policy change, still routing to their connections until those
     /// end. A listener at the same address is taken back instead of binding again.
     retired: Vec<QuicListener>,
@@ -53,6 +63,7 @@ impl State {
             record,
             pin,
             listener: None,
+            starting_since: None,
             retired: Vec::new(),
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
@@ -81,40 +92,92 @@ impl State {
     fn listen(&mut self) {
         self.listener_changed();
         self.retire_listener();
+        self.starting_since = None;
         self.listener_state = match self.record.policy.as_ref().filter(|_| self.record.enabled) {
             None => ListenerState::Off,
-            Some(policy) => {
-                let address = policy.bind;
-                // Connections of the previous policy still hold its socket, so the same address
-                // takes that listener back rather than failing to bind it again.
-                let revived = self
-                    .retired
-                    .iter()
-                    .position(|listener| listener.address() == address && listener.revive())
-                    .map(|index| self.retired.remove(index));
-                match revived.map_or_else(|| self.bind(address), Ok) {
-                    Ok(listener) => {
-                        self.listener = Some(listener);
-                        ListenerState::Listening { addr: address }
-                    }
-                    Err(_) => ListenerState::Failed(DirectError::Transport),
-                }
-            }
+            Some(policy) => self.open_at(policy.bind),
         };
     }
-    /// Stops taking connections; the listener keeps routing to its own until they end.
+    /// Listens at `address`: takes back a retired listener there, or binds a new one. A bind
+    /// that a retired listener's live connections still block waits as `Starting` until they
+    /// end; [`Self::retry_listen`] then binds again.
+    fn open_at(&mut self, address: std::net::SocketAddr) -> ListenerState {
+        let revived = self
+            .retired
+            .iter()
+            .position(|listener| listener.address() == address && listener.revive())
+            .map(|index| self.retired.remove(index));
+        if let Some(listener) = revived {
+            self.listener = Some(listener);
+            return ListenerState::Listening { addr: address };
+        }
+        self.retired.retain(|listener| !listener.finished());
+        match self.bind(address) {
+            Ok(listener) => {
+                self.listener = Some(listener);
+                ListenerState::Listening { addr: address }
+            }
+            Err(Bind::InUse) if !self.retired.is_empty() => {
+                ListenerState::Starting { addr: address }
+            }
+            // A connection that just ended may still hold the socket for a moment.
+            Err(Bind::InUse)
+                if self
+                    .starting_since
+                    .is_none_or(|since| since.elapsed() < crate::protocol::limits::STALL_AFTER) =>
+            {
+                self.starting_since
+                    .get_or_insert_with(std::time::Instant::now);
+                ListenerState::Starting { addr: address }
+            }
+            Err(_) => ListenerState::Failed(DirectError::Transport),
+        }
+    }
+    /// Binds again while `Starting`, once retired listeners finished. Returns when to try
+    /// again, if still waiting.
+    pub(crate) fn retry_listen(&mut self) -> Option<std::time::Instant> {
+        let ListenerState::Starting { addr } = self.listener_state else {
+            self.starting_since = None;
+            return None;
+        };
+        if self
+            .starting_since
+            .is_some_and(|since| since.elapsed() >= crate::protocol::limits::STALL_AFTER)
+            && self.retired.iter().all(QuicListener::finished)
+        {
+            self.listener_state = ListenerState::Failed(DirectError::Transport);
+            return None;
+        }
+        self.listener_state = self.open_at(addr);
+        if matches!(self.listener_state, ListenerState::Starting { .. }) {
+            self.starting_since
+                .get_or_insert_with(std::time::Instant::now);
+            Some(std::time::Instant::now() + LISTEN_RETRY)
+        } else {
+            self.starting_since = None;
+            self.listener_changed();
+            None
+        }
+    }
+    /// Stops taking connections. A listener with live connections keeps routing to them until
+    /// they end; one without closes its socket now.
     fn retire_listener(&mut self) {
-        if let Some(listener) = self.listener.take() {
-            listener.retire();
+        if let Some(listener) = self.listener.take()
+            && listener.retire()
+        {
             self.retired.push(listener);
         }
         self.retired.retain(|listener| !listener.finished());
     }
     /// Binds QUIC on UDP under the pinned certificate. The listener rings the host's wake when a
     /// connection arrives.
-    fn bind(&self, address: std::net::SocketAddr) -> Result<QuicListener, DirectError> {
-        let config = super::quic::server_config(&self.record.certificate, &self.record.key)?;
-        let listener = QuicListener::bind(address, config).map_err(super::quic::transport)?;
+    fn bind(&self, address: std::net::SocketAddr) -> Result<QuicListener, Bind> {
+        let config = super::quic::server_config(&self.record.certificate, &self.record.key)
+            .map_err(|_| Bind::Other)?;
+        let listener = QuicListener::bind(address, config).map_err(|error| match error {
+            crate::connection::quic::QuicError::AddressInUse => Bind::InUse,
+            _ => Bind::Other,
+        })?;
         if let Some(wake) = &self.wake {
             listener.set_wake(Arc::clone(wake));
         }
@@ -307,7 +370,10 @@ impl State {
         self.recover()?;
         self.expire()?;
         let reply = match request {
-            Management::Status => ManagementReply::Status(self.status()),
+            Management::Status => {
+                let _ = self.retry_listen();
+                ManagementReply::Status(self.status())
+            }
             Management::PrepareSetup {
                 generation,
                 pin,
