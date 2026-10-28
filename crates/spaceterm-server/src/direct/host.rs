@@ -176,11 +176,20 @@ impl State {
         if policy.bind == addr {
             return true;
         }
-        // Another address's retired connections can still hold the port; then this starts over.
+        // Connections of an earlier address that still end hold its port, so the wildcard can't
+        // bind; then this starts over without closing anything first.
+        self.retired.retain(|listener| !listener.finished());
+        if self
+            .retired
+            .iter()
+            .any(|listener| listener.address().port() == addr.port())
+        {
+            return false;
+        }
         let Some(listener) = &self.listener else {
             return false;
         };
-        if listener.rebind(policy.bind).is_err() {
+        if listener.widen().is_err() {
             return false;
         }
         self.listener_state = ListenerState::Listening { addr: policy.bind };
@@ -625,6 +634,13 @@ impl State {
                 let policy = policy
                     .map(|policy| NetworkPolicy::new(policy.bind))
                     .transpose()?;
+                // One address must belong to this machine. Every interface always does.
+                if let Some(policy) = &policy
+                    && !policy.is_every_interface()
+                    && !network::snapshot(self.network.as_ref())?.contains(&policy.bind.ip())
+                {
+                    return Err(DirectError::InvalidAddress);
+                }
                 let generation = crypto::random()?;
                 let mut next = self.record.clone();
                 if let Some(policy) = policy {
@@ -648,29 +664,30 @@ impl State {
                 self.listen();
                 ManagementReply::Status(self.status())
             }
-            Management::Invite => {
+            Management::Invite { address } => {
                 let status = self.status();
                 let endpoint = match status.listener {
+                    // A listener on every interface advertises one concrete address: the one
+                    // the owner chose among the available ones, otherwise its own choice.
+                    ListenerState::Listening { addr } if addr.ip().is_unspecified() => {
+                        let snapshot = network::snapshot(self.network.as_ref())?;
+                        let advertised = match address {
+                            Some(address) => Some(address)
+                                .filter(|address| snapshot.addresses.available.contains(address)),
+                            None => snapshot.advertised(),
+                        }
+                        .ok_or(DirectError::InvalidAddress)?;
+                        std::net::SocketAddr::new(advertised, addr.port())
+                    }
                     ListenerState::Listening { addr } => {
-                        // A listener on every interface advertises one concrete address: the
-                        // one the routing table suggests, otherwise the first available.
-                        let advertised = if addr.ip().is_unspecified() {
-                            let addresses =
-                                status.network_addresses.as_ref().map_err(|error| *error)?;
-                            std::net::SocketAddr::new(
-                                addresses
-                                    .suggested
-                                    .or_else(|| addresses.available.first().copied())
-                                    .ok_or(DirectError::InvalidAddress)?,
-                                addr.port(),
-                            )
-                        } else {
-                            addr
-                        };
-                        format!("quic://{advertised}")
+                        if address.is_some_and(|address| address != addr.ip()) {
+                            return Err(DirectError::InvalidAddress);
+                        }
+                        addr
                     }
                     _ => return Err(DirectError::Disabled),
                 };
+                let endpoint = format!("quic://{endpoint}");
                 if self.invitations.len() >= MAX_PENDING {
                     return Err(DirectError::Capacity);
                 }

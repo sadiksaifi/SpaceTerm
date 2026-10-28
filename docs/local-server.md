@@ -52,14 +52,16 @@ Once added, select that server in either sidebar creation menu to create a Works
 
 ### Reach one server over the LAN and a tailnet
 
-A server listens at one of its addresses, or on all interfaces. All Interfaces binds `0.0.0.0` and `[::]` at the same UDP port and answers each client from the address it dialed. Choose it in Settings > Servers on the server's machine, or run the service command there:
+A server listens at one of its addresses, or on all interfaces. All Interfaces binds `0.0.0.0` and `[::]` at the same UDP port and answers each client from the address it dialed. It listens on every network the machine is on, including public networks and any network it joins later. Only paired devices are admitted. Choose it in Settings > Servers on the server's machine, or run the service command there:
 
 ```sh
 # Preflight on Linux
 "$HOME/.local/bin/spaceterm-preflight" service-network-access spaceterm-preflight all
 ```
 
-Run it without a value to show where the server listens. Widening from one address to all interfaces at the same port keeps connected devices. Any other change disconnects devices connected over the network; their pairings stay. With all interfaces, add the server once per route, for example once by its LAN address and once by its MagicDNS name. Each route enrolls the address that client reached or its Network Address override. An invitation advertises the address the server's routing table suggests.
+Run it without a value to show where the server listens. It also takes `off`, an IP address, `IP:PORT`, or `[IPV6]:PORT`, and refuses an address the machine doesn't have. Widening from one address to all interfaces at the same port keeps connected devices. Any other change disconnects devices connected over the network; their pairings stay.
+
+With all interfaces, add the server once per route, for example once by its LAN address and once by its MagicDNS name. SSH setup enrolls the address that client reached or its Network Address override, so it reaches the server over any route SSH reaches. An invitation link carries one address. Invite Device offers the server's addresses and starts with the one its routing table suggests; without that suggestion the server picks its first address that no container or virtual machine bridge holds. A device on a network the link's address doesn't reach can't use the link, and a saved address can't change, so add that device with SSH setup and the route's name instead.
 
 ## Cross-target artifact catalogs
 

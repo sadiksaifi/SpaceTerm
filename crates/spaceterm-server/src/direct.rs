@@ -53,12 +53,24 @@ pub struct PairedDevice {
     pub client: [u8; 32],
 }
 
-/// Where the server listens for paired connections.
+/// Where the server listens for paired connections. Reading one validates it and keeps every
+/// interface as `0.0.0.0`, as [`NetworkPolicy::new`] does.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "PolicyFields")]
 pub struct NetworkPolicy {
     /// One address of the server's machine, or `0.0.0.0` for every interface.
     pub bind: SocketAddr,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyFields {
+    bind: SocketAddr,
+}
+impl TryFrom<PolicyFields> for NetworkPolicy {
+    type Error = DirectError;
+    fn try_from(fields: PolicyFields) -> Result<Self, DirectError> {
+        Self::new(fields.bind)
+    }
 }
 impl NetworkPolicy {
     /// An unspecified address, `0.0.0.0` or `[::]`, listens on every interface for IPv4 and

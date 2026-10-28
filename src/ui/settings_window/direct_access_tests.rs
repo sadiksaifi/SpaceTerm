@@ -189,10 +189,11 @@ impl DirectAccessControl for ScriptedAccess {
         Ok(state.clone())
     }
 
-    fn invite(&self) -> Result<OpenInvitation, AccessFailure> {
+    fn invite(&self, _: Option<IpAddr>) -> Result<OpenInvitation, AccessFailure> {
         Ok(OpenInvitation {
             id: INVITATION_ID,
             text: Zeroizing::new(INVITATION.to_owned()),
+            address: None,
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
         })
     }
@@ -586,8 +587,8 @@ fn all_interfaces_listens_on_every_interface_at_the_same_port(cx: &mut TestAppCo
 
     assert_eq!(access.policies(), vec![policy("0.0.0.0:9231")]);
     assert!(reads(
-        "Listening on all interfaces, port 9231. Devices can connect over any network studio \
-         is on, including VPNs.",
+        "Listening on all interfaces, port 9231, including public networks and any network \
+         studio joins later. Only paired devices are admitted.",
         cx
     ));
 

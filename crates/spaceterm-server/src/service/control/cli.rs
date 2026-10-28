@@ -25,6 +25,8 @@ pub enum Error {
     Server(#[from] ServerError),
     #[error("Could not write service command output.")]
     Output,
+    #[error("That address isn't on this computer.")]
+    AddressNotHere,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -232,7 +234,14 @@ pub fn run(identity: &str, args: &[OsString], output: &mut impl Write) -> Result
                     };
                     let policy =
                         NetworkPolicy::new(SocketAddr::new(ip, port)).map_err(ServerError::from)?;
-                    crate::provisioning::set_network_access(identity, Some(policy), true)?
+                    crate::provisioning::set_network_access(identity, Some(policy), true).map_err(
+                        |error| match error {
+                            ServerError::Direct(DirectError::InvalidAddress) => {
+                                Error::AddressNotHere
+                            }
+                            error => error.into(),
+                        },
+                    )?
                 }
             };
             return write_network_access(output, controller.display_name(), &status);
@@ -428,9 +437,9 @@ pub fn help(identity: &str) -> String {
          service-update IDENTITY RETAINED_INSTALLATION [--confirm SNAPSHOT]\n\
          service-recover-update IDENTITY              Finish an interrupted update\n\
          service-return-update IDENTITY [--confirm SNAPSHOT]\n\
-         service-network-access IDENTITY [all|ADDRESS[:PORT]|off]\n\n\
+         service-network-access IDENTITY [all|IP|IP:PORT|[IPV6]:PORT|off]\n\n\
          IDENTITY is {identity}. Stop, Restart, Uninstall and Update end all Terminal Sessions. Without --confirm they print a preview and exit 2. Update and return previews print the SNAPSHOT to pass to --confirm.\n\n\
-         service-network-access shows or sets where paired devices connect, and needs a running server. With all, the server listens on every interface for IPv4 and IPv6, so devices can connect over the local network and over a VPN or tailnet such as Tailscale. With ADDRESS, it listens on one address of this computer. Without a port, the port saved before stays; the default is UDP {DEFAULT_PORT}. Widening to all at the same port keeps connected devices. Any other change, and off, disconnects devices connected over the network; pairings stay."
+         service-network-access shows or sets where paired devices connect, and needs a running server. With all, the server listens on every interface for IPv4 and IPv6: the local network, a VPN or tailnet such as Tailscale, public networks, and any network this computer joins later. Only paired devices are admitted. With an IP, it listens on that one address of this computer; an IPv6 address with a port takes brackets, as in [fd00::5]:9231. Without a port, the port saved before stays; the default is UDP {DEFAULT_PORT}. Widening to all at the same port keeps connected devices. Any other change, and off, disconnects devices connected over the network; pairings stay."
     )
 }
 

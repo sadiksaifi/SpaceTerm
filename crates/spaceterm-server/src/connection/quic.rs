@@ -2,9 +2,10 @@
 //! connection's own I/O thread.
 //!
 //! - **No runtime.** noq-proto does no I/O. Each connection's thread reads and writes UDP itself,
-//!   so a frame crosses no other thread on the client. On the server one UDP socket carries every
-//!   connection: a thread of the listener reads it and hands each datagram to its connection's
-//!   thread, which sends its own datagrams directly.
+//!   so a frame crosses no other thread on the client. On the server the listener's sockets, one
+//!   per address family on every interface, carry every connection: a thread of the listener
+//!   reads them and hands each datagram to its connection's thread, which sends its own
+//!   datagrams directly.
 //! - **Pinned keys.** TLS 1.3 runs inside QUIC with the same pinned server certificate as before.
 //!   The client presents a self-signed certificate of its device key, which the server compares
 //!   with the enrolled key. The callers build both rustls configurations.
@@ -414,6 +415,9 @@ fn send_from(
 struct Sockets {
     address: SocketAddr,
     udp: Vec<Udp>,
+    /// An old address a failed widening could neither replace nor bind again. The listener's
+    /// thread binds it again at each turn until it can.
+    lost: Option<SocketAddr>,
 }
 
 impl Sockets {
@@ -426,6 +430,7 @@ impl Sockets {
             return Ok(Self {
                 address: SocketAddr::new(address.ip(), port),
                 udp: vec![udp],
+                lost: None,
             });
         }
         let v4 = Udp::bind((std::net::Ipv4Addr::UNSPECIFIED, address.port()).into())?;
@@ -440,15 +445,75 @@ impl Sockets {
         Ok(Self {
             address: (std::net::Ipv4Addr::UNSPECIFIED, port).into(),
             udp,
+            lost: None,
         })
     }
 
-    /// None, after a failed rebind could not restore the previous address.
-    fn none(address: SocketAddr) -> Self {
-        Self {
-            address,
-            udp: Vec::new(),
+    /// Widens one address to every interface at its port. The family the old socket lacks binds
+    /// first, so a port taken there leaves the old socket in place. An address and the wildcard
+    /// of its port can't both be bound, so the old socket closes just before its family's
+    /// wildcard binds; a datagram arriving in between is lost and QUIC sends it again. When that
+    /// bind fails the old address binds again, and the listener keeps a socket either way.
+    fn widen(&mut self) -> Result<(), QuicError> {
+        let port = self.address.port();
+        let wildcard = |ipv4: bool| -> SocketAddr {
+            if ipv4 {
+                (std::net::Ipv4Addr::UNSPECIFIED, port).into()
+            } else {
+                (std::net::Ipv6Addr::UNSPECIFIED, port).into()
+            }
+        };
+        let [old] = std::mem::take(&mut self.udp)
+            .try_into()
+            .map_err(|udp: Vec<Udp>| {
+                self.udp = udp;
+                QuicError::Configuration
+            })?;
+        let other = match Udp::bind(wildcard(!old.ipv4)) {
+            Ok(other) => Some(other),
+            Err(QuicError::AddressInUse) => {
+                self.udp = vec![old];
+                return Err(QuicError::AddressInUse);
+            }
+            // A system without IPv6 refuses the socket or the address.
+            Err(_) if old.ipv4 => None,
+            Err(error) => {
+                self.udp = vec![old];
+                return Err(error);
+            }
+        };
+        let (previous, ipv4) = (self.address, old.ipv4);
+        drop(old);
+        match Udp::bind(wildcard(ipv4)) {
+            Ok(widened) => {
+                self.udp = std::iter::once(widened).chain(other).collect();
+                self.address = wildcard(true);
+                Ok(())
+            }
+            Err(error) => {
+                match Udp::bind(previous) {
+                    Ok(restored) => self.udp = vec![restored],
+                    Err(_) => {
+                        self.udp = other.into_iter().collect();
+                        self.lost = Some(previous);
+                    }
+                }
+                Err(error)
+            }
         }
+    }
+
+    /// Binds a lost old address again. Returns whether one is still lost.
+    fn recover(&mut self) -> bool {
+        let Some(lost) = self.lost else {
+            return false;
+        };
+        if let Ok(restored) = Udp::bind(lost) {
+            self.udp.retain(|udp| udp.ipv4 != restored.ipv4);
+            self.udp.push(restored);
+            self.lost = None;
+        }
+        self.lost.is_some()
     }
 
     fn for_destination(&self, destination: SocketAddr) -> Option<&Udp> {
@@ -457,6 +522,10 @@ impl Sockets {
             .find(|udp| udp.ipv4 == destination.is_ipv4())
     }
 }
+
+/// How long a server connection waits before it sends a datagram again that its listener's full
+/// socket refused.
+const STASH_RETRY: Duration = Duration::from_millis(2);
 
 /// Bytes read from a socket at once: one datagram, or several the kernel coalesced.
 const RECEIVE_BYTES: usize = 64 * 1024;
@@ -551,30 +620,22 @@ impl Shared {
         }
     }
 
-    /// Replaces the sockets with ones at `address`, or binds the previous address again when
-    /// that fails.
-    fn rebind(&self, address: SocketAddr) -> Result<(), QuicError> {
-        let mut sockets = self.sockets.write().unwrap_or_else(|e| e.into_inner());
-        let previous = sockets.address;
-        *sockets = Sockets::none(previous);
-        match Sockets::bind(address) {
-            Ok(bound) => {
-                *sockets = bound;
-                Ok(())
-            }
-            Err(error) => {
-                if let Ok(restored) = Sockets::bind(previous) {
-                    *sockets = restored;
-                }
-                Err(error)
-            }
-        }
+    fn widen(&self) -> Result<(), QuicError> {
+        self.sockets
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .widen()
     }
 
-    /// The descriptor that turns writable when the socket of `destination`'s family takes
-    /// datagrams again.
-    fn descriptor(&self, destination: SocketAddr) -> Option<RawFd> {
-        self.sockets().for_destination(destination).map(Udp::fd)
+    /// Binds a lost old address again. Returns whether one is still lost.
+    fn recover(&self) -> bool {
+        if self.sockets().lost.is_none() {
+            return false;
+        }
+        self.sockets
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .recover()
     }
 }
 
@@ -597,18 +658,15 @@ struct Demux {
     phase: AtomicU8,
     /// Set by `Drop`: the thread ends at once, even with live connections.
     stopping: AtomicBool,
-    rebinding: Mutex<Rebinding>,
+    widening: Mutex<Widening>,
 }
 
-/// A rebind the listener's thread performs at its next turn.
-enum Rebinding {
+/// A widening the listener's thread performs at its next turn.
+enum Widening {
     None,
-    /// To this address, answering on the sender.
-    Asked(
-        SocketAddr,
-        std::sync::mpsc::SyncSender<Result<(), QuicError>>,
-    ),
-    /// The thread ended, so nothing rebinds.
+    /// Answering on the sender.
+    Asked(std::sync::mpsc::SyncSender<Result<(), QuicError>>),
+    /// The thread ended, so nothing widens.
     Ended,
 }
 
@@ -638,7 +696,7 @@ impl QuicListener {
             wake: Mutex::default(),
             phase: AtomicU8::new(ACCEPTING),
             stopping: AtomicBool::new(false),
-            rebinding: Mutex::new(Rebinding::None),
+            widening: Mutex::new(Widening::None),
         });
         let (stopped, stop) = bell()?;
         let running = Arc::clone(&demux);
@@ -663,23 +721,21 @@ impl QuicListener {
         self.demux.shared.sockets().address
     }
 
-    /// Moves the listener to `address` and keeps its connections, as when exposure widens from
-    /// one address to every interface at the same port. An address and the wildcard of its port
-    /// can't both be bound, so the old socket closes just before the new one binds; a datagram
-    /// arriving in between is lost and QUIC sends it again. When `address` can't be bound the
-    /// listener binds its old address again.
-    pub fn rebind(&self, address: SocketAddr) -> Result<(), QuicError> {
+    /// Widens the listener from one address to every interface at the same port and keeps its
+    /// connections, as when exposure widens. When the wildcard can't be bound the listener keeps
+    /// its old address.
+    pub fn widen(&self) -> Result<(), QuicError> {
         let (done, result) = std::sync::mpsc::sync_channel(1);
         {
-            let mut rebinding = self
+            let mut widening = self
                 .demux
-                .rebinding
+                .widening
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if matches!(*rebinding, Rebinding::Ended) {
+            if matches!(*widening, Widening::Ended) {
                 return Err(QuicError::Transport);
             }
-            *rebinding = Rebinding::Asked(address, done);
+            *widening = Widening::Asked(done);
         }
         // Linux keeps a socket open while a poll waits on it, so the thread closes the old socket
         // between its waits.
@@ -763,11 +819,11 @@ impl Drop for QuicListener {
 impl Demux {
     fn run(&self, stopped: &UnixStream) {
         self.serve(stopped);
-        // Drops a rebind asked meanwhile, which then fails.
-        *self.rebinding.lock().unwrap_or_else(|e| e.into_inner()) = Rebinding::Ended;
+        // Drops a widening asked meanwhile, which then fails.
+        *self.widening.lock().unwrap_or_else(|e| e.into_inner()) = Widening::Ended;
     }
 
-    /// Waits on the sockets and the stop bell, rebinds when asked, and routes every datagram.
+    /// Waits on the sockets and the stop bell, widens when asked, and routes every datagram.
     fn serve(&self, stopped: &UnixStream) {
         let mut buffer = vec![0; RECEIVE_BYTES];
         let mut send = Vec::new();
@@ -778,12 +834,14 @@ impl Demux {
                 events: libc::POLLIN,
                 revents: 0,
             };
+            let lost = self.shared.recover();
             descriptors.clear();
             descriptors.push(poll(stopped.as_raw_fd()));
             descriptors.extend(self.shared.sockets().udp.iter().map(|udp| poll(udp.fd())));
-            // A retired listener looks for its last connection's end now and then.
+            // A retired listener looks for its last connection's end now and then, and one that
+            // lost an address binds it again.
             let retired = self.phase.load(Ordering::Acquire) == RETIRED;
-            let timeout = if retired { 100 } else { -1 };
+            let timeout = if retired || lost { 100 } else { -1 };
             // SAFETY: `descriptors` is a live, writable array of `pollfd` for the whole call.
             unsafe {
                 libc::poll(
@@ -799,11 +857,11 @@ impl Demux {
                 return;
             }
             let asked = std::mem::replace(
-                &mut *self.rebinding.lock().unwrap_or_else(|e| e.into_inner()),
-                Rebinding::None,
+                &mut *self.widening.lock().unwrap_or_else(|e| e.into_inner()),
+                Widening::None,
             );
-            if let Rebinding::Asked(address, done) = asked {
-                let _ = done.send(self.shared.rebind(address));
+            if let Widening::Asked(done) = asked {
+                let _ = done.send(self.shared.widen());
             }
             self.route(&mut buffer, &mut send);
             if self.try_finish() {
@@ -1017,6 +1075,8 @@ struct DriverState {
     finished: usize,
     /// A datagram that would have blocked, retried before any other.
     stashed: Option<(SocketAddr, Option<std::net::IpAddr>, Vec<u8>)>,
+    /// When a server connection tries its stashed datagram again.
+    retry: Option<Instant>,
     transmit: Vec<u8>,
 }
 
@@ -1028,6 +1088,7 @@ impl DriverState {
             alert: None,
             finished: 0,
             stashed: None,
+            retry: None,
             transmit: Vec::new(),
         }
     }
@@ -1064,12 +1125,22 @@ impl Driver {
         }
     }
 
-    /// The descriptor that turns writable once a stashed datagram can be sent.
+    /// The descriptor that turns writable once a client's stashed datagram can be sent.
     fn stashed_descriptor(&self) -> Option<RawFd> {
-        let (destination, ..) = self.state.stashed.as_ref()?;
+        self.state.stashed.as_ref()?;
         match &self.side {
             Side::Client { socket, .. } => Some(socket.fd()),
-            Side::Server { shared, .. } => shared.descriptor(*destination),
+            // A poll on the listener's socket keeps it open on Linux, so a widening listener
+            // couldn't bind its port while this connection waited. It tries again on a deadline.
+            Side::Server { .. } => None,
+        }
+    }
+
+    /// When a server connection tries its stashed datagram again.
+    fn stash_deadline(&self) -> Option<Instant> {
+        match &self.side {
+            Side::Server { .. } if self.state.stashed.is_some() => self.state.retry,
+            _ => None,
         }
     }
 
@@ -1226,6 +1297,7 @@ impl Driver {
             match self.send(&bytes, destination, source) {
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     self.state.stashed = Some((destination, source, bytes));
+                    self.state.retry = Some(now + STASH_RETRY);
                     return;
                 }
                 _ => {}
@@ -1245,6 +1317,7 @@ impl Driver {
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     self.state.stashed =
                         Some((transmit.destination, transmit.src_ip, bytes.to_vec()));
+                    self.state.retry = Some(now + STASH_RETRY);
                     return;
                 }
                 // The connected socket's local address left with its network: move to a socket
@@ -1307,10 +1380,10 @@ impl Driver {
         if now >= deadline {
             return Err(QuicError::TimedOut);
         }
-        let until = self
-            .connection
-            .poll_timeout()
-            .map_or(deadline, |timer| timer.min(deadline));
+        let until = [self.connection.poll_timeout(), self.stash_deadline()]
+            .into_iter()
+            .flatten()
+            .fold(deadline, Instant::min);
         let mut descriptors = vec![libc::pollfd {
             fd: self.descriptor(),
             events: libc::POLLIN,
@@ -2032,6 +2105,7 @@ impl Carrier for QuicCarrier {
             progress: Some(descriptor),
             deadline: [
                 self.driver.connection.poll_timeout(),
+                self.driver.stash_deadline(),
                 self.path.as_ref().map(PathWatch::deadline),
             ]
             .into_iter()
@@ -2125,11 +2199,17 @@ mod tests {
     }
 
     /// The address the system would send from to reach the internet, when it has a route.
-    fn routed_ipv4() -> Option<std::net::IpAddr> {
-        let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-        socket
-            .connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9))
-            .ok()?;
+    fn routed(ipv4: bool) -> Option<std::net::IpAddr> {
+        let (local, remote): (SocketAddr, SocketAddr) = if ipv4 {
+            ("0.0.0.0:0".parse().unwrap(), "192.0.2.1:9".parse().unwrap())
+        } else {
+            (
+                "[::]:0".parse().unwrap(),
+                "[2001:db8::1]:9".parse().unwrap(),
+            )
+        };
+        let socket = UdpSocket::bind(local).ok()?;
+        socket.connect(remote).ok()?;
         Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback())
     }
 
@@ -2156,10 +2236,23 @@ mod tests {
         if cfg!(target_os = "linux") {
             cases.push((loopback, std::net::Ipv4Addr::new(127, 0, 0, 2).into()));
         }
-        if let Some(routed) = routed_ipv4() {
+        // On macOS the routed IPv4 cases take `send_from`, the only source macOS honors.
+        if let Some(routed) = routed(true) {
             cases.push((loopback, routed));
             cases.push((routed, loopback));
         }
+        if let Some(routed) = routed(false) {
+            let loopback = std::net::Ipv6Addr::LOCALHOST.into();
+            cases.push((loopback, routed));
+            cases.push((routed, loopback));
+        }
+        assert!(
+            cases
+                .iter()
+                .any(|(client, dialed)| client != dialed && dialed.is_ipv4()),
+            "no IPv4 address where the system would answer from another source: Linux has \
+             127.0.0.2, other systems need a routed address"
+        );
         let mut buffer = vec![0; RECEIVE_BYTES];
         for (client, dialed) in cases {
             let client = UdpSocket::bind((client, 0)).unwrap();
@@ -2189,38 +2282,138 @@ mod tests {
         }
     }
 
-    /// A listener rebinds from one address to every interface at the same port. A port it can't
-    /// take leaves it at the address it had.
+    /// A listener widens from one address to every interface at the same port. A port taken in
+    /// the other family leaves it at the address it had, with its socket.
     #[test]
-    fn rebinding_to_every_interface_keeps_the_old_address_when_the_port_is_taken() {
+    fn widening_to_every_interface_keeps_the_old_address_when_the_port_is_taken() {
         let config = server_config_for_tests();
         // Another test can hold the port at another address, so a taken port tries another.
-        let (listener, wildcard) = (0..8)
+        let listener = (0..8)
             .find_map(|_| {
                 let listener =
                     QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config))
                         .unwrap();
-                let wildcard = SocketAddr::new(
-                    std::net::Ipv4Addr::UNSPECIFIED.into(),
-                    listener.address().port(),
-                );
-                listener
-                    .rebind(wildcard)
-                    .ok()
-                    .map(|()| (listener, wildcard))
+                listener.widen().ok().map(|()| listener)
             })
             .expect("a port free on every interface");
-        assert_eq!(listener.address(), wildcard);
+        let port = listener.address().port();
+        assert_eq!(listener.address(), SocketAddr::from(([0, 0, 0, 0], port)));
         assert_eq!(listener.demux.shared.sockets().udp.len(), 2);
-        // A taken port leaves the listener where it was.
-        let taken = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let elsewhere = SocketAddr::new(
-            std::net::Ipv4Addr::UNSPECIFIED.into(),
-            taken.local_addr().unwrap().port(),
+        assert_eq!(
+            listener.widen(),
+            Err(QuicError::Configuration),
+            "already wide"
         );
-        assert_eq!(listener.rebind(elsewhere), Err(QuicError::AddressInUse));
-        assert_eq!(listener.address(), wildcard);
+
+        let listener =
+            QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
+        let address = listener.address();
+        let taken = UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, address.port())).unwrap();
+        assert_eq!(listener.widen(), Err(QuicError::AddressInUse));
+        assert_eq!(listener.address(), address);
+        assert_eq!(listener.demux.shared.sockets().udp.len(), 1);
+        drop(taken);
+    }
+
+    /// A server connection whose datagram the listener's full socket refused waits on a deadline,
+    /// never on the listener's socket, so the listener can still widen while it waits.
+    #[test]
+    fn a_server_connection_with_a_refused_datagram_lets_its_listener_widen() {
+        let config = server_config_for_tests();
+        let listener =
+            QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
+        let address = listener.address();
+        let client_config = {
+            let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyServer))
+            .with_no_client_auth();
+            tls.alpn_protocols = vec![ALPN.to_vec()];
+            client_config(tls).unwrap()
+        };
+        let client = std::thread::spawn(move || {
+            QuicStream::connect(
+                client_config,
+                &[address],
+                Instant::now() + Duration::from_secs(5),
+                &AtomicBool::new(false),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            if let Some(stream) = listener.accept() {
+                break stream;
+            }
+            assert!(Instant::now() < deadline, "no connection arrived");
+            let mut bell = libc::pollfd {
+                fd: listener.demux.shared.sockets().udp[0].fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `bell` is a live, writable `pollfd` for the whole call.
+            unsafe { libc::poll(&mut bell, 1, 10) };
+        };
+        stream.handshake(deadline).unwrap();
+        // As when the socket's send buffer is full.
+        stream.driver.state.stashed = Some((address, None, vec![0; 16]));
+        stream.driver.state.retry = Some(Instant::now() + Duration::from_secs(60));
+        assert_eq!(stream.driver.stashed_descriptor(), None);
+        assert!(stream.driver.stash_deadline().is_some());
+        let carrier = stream.into_carrier();
+        assert_eq!(carrier.readiness().write, None);
+        let waiting = std::thread::spawn(move || {
+            let _ = carrier
+                .driver
+                .wait(Instant::now() + Duration::from_millis(500));
+            carrier
+        });
+        assert_eq!(listener.widen(), Ok(()));
         assert_eq!(listener.demux.shared.sockets().udp.len(), 2);
+        drop(waiting.join().unwrap());
+        // The client waits for bytes on L0 that never come.
+        let _ = client.join();
+    }
+
+    /// Accepts any server certificate, for tests of the transport alone.
+    #[derive(Debug)]
+    struct AnyServer;
+
+    impl rustls::client::danger::ServerCertVerifier for AnyServer {
+        fn verify_server_cert(
+            &self,
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &[rustls::pki_types::CertificateDer<'_>],
+            _: &rustls::pki_types::ServerName<'_>,
+            _: &[u8],
+            _: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &rustls::pki_types::CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
     }
 
     /// A retired listener without connections reports none, so its owner drops it and the

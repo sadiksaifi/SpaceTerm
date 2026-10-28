@@ -202,7 +202,10 @@ impl Fixture {
         panic!("no free UDP port to listen on");
     }
     pub(super) fn invite(&self) -> Invitation {
-        let ManagementReply::Invitation(text) = self.management(Management::Invite).unwrap() else {
+        let ManagementReply::Invitation(text) = self
+            .management(Management::Invite { address: None })
+            .unwrap()
+        else {
             panic!()
         };
         Invitation::parse(&text).unwrap()
@@ -339,7 +342,7 @@ fn exposure_defaults_off_and_retains_only_the_explicit_listener_across_restart()
     };
     assert_eq!((status.policy, status.listener), (None, ListenerState::Off));
     assert!(matches!(
-        fixture.management(Management::Invite),
+        fixture.management(Management::Invite { address: None }),
         Err(DirectError::Disabled)
     ));
     fixture.enable();
@@ -2228,7 +2231,7 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
     ));
     let before = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
     for request in [
-        Management::Invite,
+        Management::Invite { address: None },
         Management::Withdraw(invitation.id()),
         Management::Approve(claim.clone()),
         Management::Reject(claim.id),

@@ -570,8 +570,8 @@ impl SettingsWindow {
             if address.ip().is_unspecified() {
                 let server = self.direct_access_server_name();
                 return SharedString::from(format!(
-                    "Listening on {}. Devices can connect over any network {server} is on, \
-                     including VPNs.",
+                    "Listening on {}, including public networks and any network {server} \
+                     joins later. Only paired devices are admitted.",
                     listening_address(*address)
                 ));
             }
@@ -656,7 +656,7 @@ impl SettingsWindow {
         let chooser = (!addresses.is_empty() || every).then(|| {
             let owner = owner.clone();
             let every_interface = ComboBoxItem::new(EVERY_INTERFACE, "All Interfaces")
-                .description("Any network, including VPNs");
+                .description("Any network, including public ones");
             let items = std::iter::once(every_interface)
                 .chain(addresses.iter().map(|address| {
                     let item = ComboBoxItem::new(*address, address.to_string());
@@ -1039,9 +1039,33 @@ impl SettingsWindow {
             return;
         };
         let generation = self.direct_access.generation;
+        // A server on every interface can put any of its addresses in the link, the suggested
+        // one first.
+        let addresses = self
+            .direct_access
+            .state()
+            .filter(|state| {
+                matches!(state.listener, Listener::Listening(address) if address.ip().is_unspecified())
+            })
+            .and_then(|state| state.addresses.as_ref())
+            .map(|addresses| {
+                addresses
+                    .suggested
+                    .into_iter()
+                    .chain(
+                        addresses
+                            .available
+                            .iter()
+                            .copied()
+                            .filter(|address| Some(*address) != addresses.suggested),
+                    )
+                    .collect()
+            })
+            .unwrap_or_default();
         let presented = crate::ui::direct_pairing::InviteDevice::present(
             control,
             self.direct_access_server_name(),
+            addresses,
             move |settings: &mut SettingsWindow, cx| settings.reread_devices(generation, cx),
             window,
             cx,
