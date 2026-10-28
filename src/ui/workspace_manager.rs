@@ -288,6 +288,8 @@ pub(crate) struct WorkspaceManager {
     shared: ServerBindings,
     /// Follows the desktop's paired connections while the window lives.
     _direct_servers: Option<crate::ui::direct_servers::DirectChanges>,
+    /// Each presented paired route's Pane opener and the connection it follows.
+    direct_routes: direct_servers::DirectRoutes,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
     /// Normal launch of the account-local server this window presents.
@@ -415,6 +417,7 @@ impl WorkspaceManager {
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
             shared: ServerBindings::default(),
             _direct_servers: None,
+            direct_routes: direct_servers::DirectRoutes::default(),
             empty_focus: cx.focus_handle(),
             launch: launch::LocalLaunchState::new(local_server),
             display_order: display_order::DisplayOrder::default(),
@@ -2951,7 +2954,7 @@ impl WorkspaceManager {
         key
     }
 
-    /// Stops presenting one server's Workspaces, as when the person disconnects from it. The
+    /// Stops presenting one server's Workspaces, as when the person removes its paired route. The
     /// Workspaces and their Terminal Sessions keep running on that server, and nothing is asked
     /// of it: closing the local Panes drops their subscriptions.
     pub(crate) fn withdraw_server_workspaces(

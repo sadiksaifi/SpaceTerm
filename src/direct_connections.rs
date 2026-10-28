@@ -37,6 +37,7 @@ pub(crate) struct SetupEnrollment {
 pub(crate) type DirectRouteId = [u8; 32];
 pub(crate) type JoinId = [u8; 32];
 pub(crate) type UnpairKey = [u8; 32];
+pub(crate) type RouteCleanup = dyn Fn(&DirectRouteId) + Send + Sync;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RefusalReason {
@@ -120,6 +121,15 @@ pub(crate) struct PendingUnpair {
     pub(crate) abandoned: bool,
 }
 
+/// Refuses every connection, so a handle built on it reaches only client storage.
+struct NoConnection;
+
+impl direct::DirectConnector for NoConnection {
+    fn connect(&self) -> Result<direct::DirectConnection, DirectError> {
+        Err(DirectError::Transport)
+    }
+}
+
 /// Resolves account-local revocation authority without network or credential access.
 pub(crate) trait AccountRevocationResolver: Send + Sync {
     fn route_for(&self, server: &ServerConnection) -> Result<records::AccountRoute, DirectError>;
@@ -141,6 +151,8 @@ struct Inner {
     state: Mutex<State>,
     changes: Mutex<Vec<async_channel::Sender<()>>>,
     resolver: Mutex<Option<Arc<dyn AccountRevocationResolver>>>,
+    /// Removes what the client retained for a route once the person removes the route.
+    route_removed: Mutex<Option<Arc<RouteCleanup>>>,
     /// Wakes the worker thread. The worker holds only this and a weak owner while it waits.
     work: Arc<worker::WorkerWake>,
 }
@@ -219,7 +231,21 @@ impl DirectConnections {
         if let Ok(local) = ServerConnection::for_identity(identity) {
             registry.set_account_resolver(Arc::new(account::LocalRevocationResolver(local)));
         }
+        let owner = identity.to_owned();
+        registry.on_route_removed(Arc::new(move |route: &DirectRouteId| {
+            // A copy that stays behind names a route nothing presents again.
+            let _ = ServerConnection::discard_retained_inventory(&owner, *route);
+        }));
         registry
+    }
+
+    /// Runs `cleanup` for each route the person removes, after its removal is saved.
+    pub(crate) fn on_route_removed(&self, cleanup: Arc<RouteCleanup>) {
+        *self
+            .0
+            .route_removed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(cleanup);
     }
 
     fn new(
@@ -236,6 +262,7 @@ impl DirectConnections {
             state: Mutex::new(State::default()),
             changes: Mutex::default(),
             resolver: Mutex::default(),
+            route_removed: Mutex::default(),
             work: Arc::default(),
         }))
     }
@@ -357,6 +384,19 @@ impl DirectConnections {
             .routes
             .get(id)
             .map(|r| r.status)
+    }
+
+    /// A handle to this route's client storage, which holds its client views and the
+    /// Workspaces it retained. It never connects, so reading it needs no network or credential.
+    pub(crate) fn storage(&self, id: &DirectRouteId) -> Option<ServerConnection> {
+        let route = self.route(id)?;
+        ServerConnection::direct(
+            &self.0.identity,
+            route.id,
+            route.paired,
+            Arc::new(NoConnection),
+        )
+        .ok()
     }
 
     /// A retained handle keeps interrupted screens frozen until reconciliation succeeds.
@@ -578,7 +618,18 @@ impl DirectConnections {
     pub(crate) fn unpair(&self, id: &DirectRouteId, target: PairingId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let result = self.unpair_locked(&mut state, id, target);
+        let removed = !state.document.routes.iter().any(|r| &r.route.id == id);
         drop(state);
+        if removed
+            && let Some(cleanup) = self
+                .0
+                .route_removed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        {
+            cleanup(id);
+        }
         self.start_worker();
         self.0.notify();
         result
