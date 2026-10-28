@@ -137,6 +137,18 @@ pub(super) struct Document {
     schema: u8,
     pub(super) routes: Vec<SavedRoute>,
     pub(super) pending: Vec<PendingRecord>,
+    /// Revocations that were still pending over WSS when QUIC replaced it, kept only so the
+    /// person learns to revoke again; nothing retries them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) abandoned: Vec<Abandoned>,
+}
+
+/// A revocation dropped with its WSS route.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Abandoned {
+    pub(super) operation: UnpairKey,
+    pub(super) label: String,
 }
 
 impl Default for Document {
@@ -145,6 +157,7 @@ impl Default for Document {
             schema: 1,
             routes: Vec::new(),
             pending: Vec::new(),
+            abandoned: Vec::new(),
         }
     }
 }
@@ -161,18 +174,52 @@ impl Document {
     /// Drops routes and pending operations whose endpoint is not a QUIC endpoint. Servers paired
     /// over WSS must be paired again; the rest of the document still loads. Their native
     /// credentials stay in the store, unreferenced.
-    fn discard_obsolete(&mut self) {
+    ///
+    /// A dropped revocation or claim cancellation is kept as an [`Abandoned`] notice, so the
+    /// person knows to revoke again from the server's machine.
+    pub(super) fn discard_obsolete(&mut self) {
         let current = |endpoint: &str| endpoint.starts_with("quic://");
         self.routes.retain(|saved| current(&saved.route.endpoint));
-        self.pending.retain(|pending| match &pending.authority {
-            Authority::Direct(actor) => current(&actor.route.endpoint),
-            Authority::Enrollment { endpoint, .. } => current(endpoint),
-            Authority::Account { .. } => true,
+        let mut abandoned = Vec::new();
+        self.pending.retain(|pending| {
+            let kept = match &pending.authority {
+                Authority::Direct(actor) => current(&actor.route.endpoint),
+                Authority::Enrollment { endpoint, .. } => current(endpoint),
+                Authority::Account { .. } => true,
+            };
+            let revocation = match &pending.authority {
+                Authority::Direct(_) => true,
+                Authority::Enrollment { .. } => pending.cancel_requested,
+                Authority::Account { .. } => false,
+            };
+            if !kept && revocation && !pending.confirmed {
+                abandoned.push(Abandoned {
+                    operation: pending.operation,
+                    label: pending.label.clone(),
+                });
+            }
+            kept
         });
+        for notice in abandoned {
+            if !self
+                .abandoned
+                .iter()
+                .any(|known| known.operation == notice.operation)
+            {
+                self.abandoned.push(notice);
+            }
+        }
     }
 
     fn validate(&self) -> Result<(), ()> {
-        if self.schema != 1 || self.routes.len().saturating_add(self.pending.len()) > CAPACITY {
+        if self.schema != 1
+            || self.routes.len().saturating_add(self.pending.len()) > CAPACITY
+            || self.abandoned.len() > CAPACITY
+            || self
+                .abandoned
+                .iter()
+                .any(|notice| notice.operation == [0; 32] || notice.label.len() > 512)
+        {
             return Err(());
         }
         let mut routes = BTreeSet::new();
@@ -382,6 +429,32 @@ mod tests {
         )
         .unwrap();
         (PrivateRecords::new(Arc::new(paths)), filesystem)
+    }
+
+    /// A revocation still pending over WSS is dropped with its route, and leaves a notice so
+    /// the person revokes again; a confirmed one leaves none.
+    #[test]
+    fn a_dropped_wss_revocation_leaves_a_notice() {
+        let mut document = Document::default();
+        let mut actor = super::super::tests::saved(1, 5);
+        actor.route.endpoint = "wss://127.0.0.1:9231/spaceterm".into();
+        document
+            .pending
+            .push(PendingRecord::direct([7; 32], actor.clone(), [9; 32]));
+        let mut confirmed = PendingRecord::direct([8; 32], actor, [9; 32]);
+        confirmed.confirmed = true;
+        document.pending.push(confirmed);
+        document.discard_obsolete();
+        document.discard_obsolete();
+        assert!(document.pending.is_empty());
+        assert_eq!(
+            document.abandoned,
+            [Abandoned {
+                operation: [7; 32],
+                label: "Server 1".into(),
+            }]
+        );
+        assert_eq!(document.validate(), Ok(()));
     }
 
     /// A route saved over WSS before QUIC replaced it is dropped as the document loads; the
