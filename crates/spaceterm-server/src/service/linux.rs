@@ -369,6 +369,11 @@ impl Supervisor for UserService {
         self.systemctl(&["--no-block", "stop", &self.name])?;
         Ok(())
     }
+    /// The unit never times out its stop, so systemd's default stop timeout,
+    /// `DefaultTimeoutStopSec=90s`, bounds the wait instead.
+    fn stop_timeout(&self) -> Duration {
+        Duration::from_secs(90)
+    }
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError> {
         self.registration().remove(&self.contents(runtime)?)?;
         self.systemctl(&["daemon-reload"])?;

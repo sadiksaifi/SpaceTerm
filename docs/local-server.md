@@ -86,7 +86,7 @@ Settings > Servers owns account-local Update Server. Status controls and local i
 
 Finish Update resumes the original admitted local operation. Headless controls expose `service-update`, `service-recover-update` and `service-return-update`; their help explains exact snapshot tokens. Recovery never selects newer bytes, repeats uncertain Stop or Start dispatch or silently returns to a previous runtime. [ADR 0040](adr/0040-keep-one-server-runtime-version-active.md) owns activation.
 
-An interrupted Stop dispatch may require finishing the original run through the local service manager before Finish Update. Recovery waits for the next desktop launch or local service invocation; no permanent helper runs. Unresolved process cleanup blocks return to a previous runtime.
+Update waits for the old server to exit as long as the service manager lets a stop run: systemd's default stop timeout on Linux, because the unit never times out its stop, and the LaunchAgent's exit timeout on macOS. A slower stop leaves the update unfinished, and Finish Update or `service-recover-update` completes it without stopping the server again. An interrupted Stop dispatch may require finishing the original run through the local service manager before Finish Update. Recovery waits for the next desktop launch or local service invocation; no permanent helper runs. Unresolved process cleanup blocks return to a previous runtime.
 
 ## Measure terminal latency
 

@@ -127,6 +127,9 @@ trait Supervisor: Send + Sync {
     fn prepare_start(&self) -> Result<(), ServerError>;
     fn start(&self) -> Result<(), ServerError>;
     fn stop(&self) -> Result<(), ServerError>;
+    /// How long the service manager lets a stopping server finish its cleanup. Stop, Restart
+    /// and Update wait this long for the old server to exit before their outcome is unresolved.
+    fn stop_timeout(&self) -> Duration;
     /// Change startup activation only. Never stop, start or unregister the service.
     fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
@@ -732,7 +735,12 @@ impl Service {
         })
     }
     fn wait_running(&self, desired: bool) -> Result<(), ServerError> {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now()
+            + if desired {
+                Duration::from_secs(15)
+            } else {
+                self.supervisor.stop_timeout()
+            };
         loop {
             if self.supervisor.running()? == desired
                 && (!desired || crate::host::connect(&self.paths).is_ok())
@@ -1078,6 +1086,9 @@ mod tests {
             self.running
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             Ok(())
+        }
+        fn stop_timeout(&self) -> Duration {
+            Duration::from_secs(15)
         }
         fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
             panic!("unexpected OS call")
@@ -1750,6 +1761,9 @@ mod tests {
                     return Err(ServerError::ServiceUnavailable);
                 }
                 self.close_host()
+            }
+            fn stop_timeout(&self) -> Duration {
+                Duration::from_secs(15)
             }
             fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
                 *self.registered.lock().unwrap() = None;
