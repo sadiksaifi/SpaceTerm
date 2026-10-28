@@ -508,8 +508,9 @@ pub(in crate::platform) mod tests {
                     )
                 };
                 unsafe { host.setReleasedWhenClosed(false) };
-                let alert = quit_alert(&prompt(destructive), mtm);
-                assert_eq!(alert.informativeText().to_string().is_empty(), !destructive);
+                let prompt = prompt(destructive);
+                let alert = quit_alert(&prompt, mtm);
+                assert_eq!(alert.informativeText().to_string(), prompt.detail);
                 let responses = begin_quit_sheet(&alert, &host, destructive);
                 settle();
                 let sheet = alert.window();
