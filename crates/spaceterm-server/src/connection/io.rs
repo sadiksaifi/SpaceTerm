@@ -186,13 +186,14 @@ struct Written {
 
 /// Offers frames from `next` until the carrier is full or nothing is left, flushing as it goes.
 ///
-/// A carrier may refuse one level and accept another. While only bulk (L2) frames are refused,
-/// at most two, the thread keeps taking frames, so a bulk transfer waiting on flow control never
-/// holds back a reply or a ping. A frame never overtakes a refused frame of its own level.
+/// A carrier may refuse one level and accept another. While a bulk (L2) frame is refused, the
+/// thread holds at most that one and takes only frames above L2 from `next`, so a bulk transfer
+/// waiting on flow control never holds back a reply or a ping. `next` takes frames down to the
+/// level it is given. A frame never overtakes a refused frame of its own level.
 fn write(
     carrier: &mut dyn Carrier,
     held: &mut Held,
-    mut next: impl FnMut() -> Option<(Vec<u8>, Priority)>,
+    mut next: impl FnMut(Priority) -> Option<(Vec<u8>, Priority)>,
 ) -> Result<Written, CarrierError> {
     let mut progressed = false;
     // Whether the held frames were already offered again after a flush that freed no room.
@@ -217,10 +218,15 @@ fn write(
                 }
             }
         }
-        let bulk_only = held.iter().all(|(_, level)| *level == Priority::L2);
-        if bulk_only
-            && held.len() < 2
-            && let Some(frame) = next()
+        // Take more while nothing above bulk is refused; a refused bulk frame allows only
+        // frames above it.
+        let lowest = if held.iter().any(|(_, level)| *level == Priority::L2) {
+            Priority::L1
+        } else {
+            Priority::L2
+        };
+        if held.iter().all(|(_, level)| *level == Priority::L2)
+            && let Some(frame) = next(lowest)
         {
             held.push(frame);
             // Stable, so frames of one level keep their order.
@@ -329,7 +335,8 @@ fn turn(
             Err(error) => return Err(link_error(error)),
         }
     }
-    let written = write(carrier, held, || link.next_frame()).map_err(link_error)?;
+    // A client writes no bulk, so every frame qualifies.
+    let written = write(carrier, held, |_| link.next_frame()).map_err(link_error)?;
     link.wrote(now, written.progressed, written.pending);
     Ok(written.buffered)
 }
@@ -387,7 +394,9 @@ pub fn serve(
                 Err(None) => break,
             }
         }
-        let written = match write(carrier.as_mut(), &mut held, || outbox.next_frame()) {
+        let written = match write(carrier.as_mut(), &mut held, |lowest| {
+            outbox.next_frame_within(lowest)
+        }) {
             Ok(written) => written,
             Err(_) => break,
         };
@@ -592,7 +601,7 @@ mod tests {
         let (mut carrier, _) = Backpressured::new(false);
         let mut held = Vec::new();
         let mut frames = vec![(vec![0; 8], Priority::L1)].into_iter();
-        let written = write(&mut carrier, &mut held, || frames.next()).unwrap();
+        let written = write(&mut carrier, &mut held, |_| frames.next()).unwrap();
         assert!(held.is_empty(), "the frame must not wait for a later wake");
         assert_eq!(carrier.accepted, 1);
         assert!(!written.pending);
@@ -632,24 +641,45 @@ mod tests {
         fn close(&mut self) {}
     }
 
+    /// Queued frames by level, taken in priority order down to the level asked for, as the
+    /// outbox does.
+    fn queued(frames: &[Priority]) -> impl FnMut(Priority) -> Option<(Vec<u8>, Priority)> {
+        let mut queue: Vec<Priority> = frames.to_vec();
+        move |lowest| {
+            let (index, _) = queue
+                .iter()
+                .enumerate()
+                .filter(|(_, level)| **level <= lowest)
+                .min_by_key(|(index, level)| (**level, *index))?;
+            let level = queue.remove(index);
+            Some((vec![level as u8; 8], level))
+        }
+    }
+
     #[test]
-    fn a_refused_bulk_frame_never_holds_back_a_reply_or_a_ping() {
+    fn refused_bulk_frames_never_hold_back_replies_or_pings() {
         let (bell, _) = UnixStream::pair().unwrap();
         let mut carrier = BulkBlocked {
             accepted: Vec::new(),
             bell,
         };
         let mut held = Vec::new();
-        let mut frames = vec![
-            (vec![2; 8], Priority::L2),
-            (vec![1; 8], Priority::L1),
-            (vec![0; 8], Priority::L0),
-            (vec![1; 8], Priority::L1),
-        ]
-        .into_iter();
-        let written = write(&mut carrier, &mut held, || frames.next()).unwrap();
-        assert_eq!(carrier.accepted, [Priority::L1, Priority::L0, Priority::L1]);
-        assert_eq!(held.len(), 1);
+        // Several bulk frames queued ahead of a reply and a ping.
+        let mut next = queued(&[
+            Priority::L2,
+            Priority::L2,
+            Priority::L2,
+            Priority::L1,
+            Priority::L0,
+        ]);
+        // The first turn takes a bulk frame before the others arrive.
+        let mut first = Some((vec![2; 8], Priority::L2));
+        let written = write(&mut carrier, &mut held, |lowest| {
+            first.take().or_else(|| next(lowest))
+        })
+        .unwrap();
+        assert_eq!(carrier.accepted, [Priority::L0, Priority::L1]);
+        assert_eq!(held.len(), 1, "at most one refused bulk frame is held");
         assert_eq!(held[0].1, Priority::L2);
         assert!(written.pending);
     }
