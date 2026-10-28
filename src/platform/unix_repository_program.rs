@@ -684,6 +684,20 @@ mod tests {
         assert_eq!(run(&missing_directory).0, Err(ProgramError::Failed));
     }
 
+    #[test]
+    fn a_spawn_in_a_directory_removed_after_the_check_does_not_report_a_missing_program() {
+        let fixture = Fixture::new("vanished");
+        let spawn = |request: &ProgramRequest| ProgramGroup::spawn(request, None).err();
+        // A program that is missing while its directory remains is missing.
+        let mut absent = request(&fixture.0.join("absent").to_string_lossy(), &[]);
+        absent.directory = fixture.0.clone();
+        assert_eq!(spawn(&absent), Some(ProgramError::NotFound));
+        // The spawn fails with ENOENT once the directory `run_locked` checked is gone.
+        let mut vanished = shell("exit 0");
+        vanished.directory = fixture.0.join("removed");
+        assert_eq!(spawn(&vanished), Some(ProgramError::Failed));
+    }
+
     struct SignalMaskRestore(libc::sigset_t);
 
     impl Drop for SignalMaskRestore {
