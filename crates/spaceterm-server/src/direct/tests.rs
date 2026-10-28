@@ -2695,10 +2695,12 @@ mod quic_connections {
         );
     }
 
-    /// A switch between networks moves the client to a new socket and source port. The server
-    /// validates the new path; the session continues without a second admission.
+    /// A switch between networks, or a route that now prefers another local address, moves the
+    /// client to a new socket and source port. The server validates the new path; the session
+    /// continues without a second admission.
     #[test]
     fn a_client_on_a_new_socket_keeps_its_session_without_admission() {
+        use crate::connection::carrier::Carrier;
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct Admissions(Arc<AtomicUsize>);
         impl PaneService for Admissions {
@@ -2743,7 +2745,11 @@ mod quic_connections {
             &[crate::protocol::MAJOR],
         )
         .unwrap();
-        let carrier = stream.into_carrier();
+        let mut carrier = stream.into_carrier();
+        let before = carrier.local_address().unwrap();
+        carrier.prefer_sources(|_| Some(std::net::Ipv4Addr::new(127, 0, 0, 2).into()));
+        carrier.flush().unwrap();
+        assert_ne!(carrier.local_address().unwrap().port(), before.port());
         let rebind = carrier.rebinder();
         let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
         assert!(matches!(

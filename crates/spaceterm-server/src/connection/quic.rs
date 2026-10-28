@@ -19,8 +19,10 @@
 //!   in flight.
 //! - **Readiness.** The carrier reports its socket or bell as readable when datagrams arrive, and
 //!   QUIC's next timer as a deadline. Write progress needs incoming acknowledgements, so the same
-//!   descriptor is the progress descriptor.
+//!   descriptor is the progress descriptor. A client also reports its route-change signal and the
+//!   next check of its preferred local address, from [`super::path`].
 use super::carrier::{Carrier, CarrierError, Flush, Offer, Priority, Readiness};
+use super::path::PathWatch;
 use crate::protocol::frame::FrameReader;
 use crate::protocol::{RawFrame, limits};
 use bytes::BytesMut;
@@ -991,7 +993,7 @@ impl Driver {
                                 | ErrorKind::NetworkDown
                         ) =>
                 {
-                    self.rebind(now);
+                    let _ = self.rebind(now);
                     return;
                 }
                 // A lost datagram is QUIC's to recover.
@@ -1001,18 +1003,29 @@ impl Driver {
     }
 
     /// Moves a client to a new UDP socket, as after a switch between networks. The server
-    /// validates the new path and the connection continues without a new handshake.
-    fn rebind(&mut self, now: Instant) {
+    /// validates the new path and the connection continues without a new handshake. Returns
+    /// whether the client moved.
+    fn rebind(&mut self, now: Instant) -> bool {
         let Some(peer) = self.peer else {
-            return;
+            return false;
         };
         let Ok(socket) = Udp::client(peer) else {
-            return;
+            return false;
         };
         self.socket = Arc::new(socket);
         self.state.stashed = None;
         self.connection.handle_network_change(None, now);
         self.transmit(now);
+        true
+    }
+
+    /// The local address a client's socket uses.
+    fn local_ip(&self) -> Option<std::net::IpAddr> {
+        self.socket
+            .socket
+            .local_addr()
+            .ok()
+            .map(|address| address.ip())
     }
 
     /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
@@ -1395,6 +1408,8 @@ pub struct QuicCarrier {
     client: bool,
     /// Set to move a client to a new socket at its next call.
     rebind: Arc<std::sync::atomic::AtomicBool>,
+    /// A client's watch on the local address the system prefers for its server.
+    path: Option<PathWatch>,
     /// The server's goodbye, held until its L1 and L2 streams ended.
     goodbye: Option<RawFrame>,
     /// Packets sent, so a flush reports progress.
@@ -1432,6 +1447,7 @@ impl QuicCarrier {
         Self {
             client,
             rebind: Arc::default(),
+            path: client.then(|| PathWatch::new(Instant::now())),
             goodbye: None,
             driver,
             outgoing,
@@ -1465,10 +1481,34 @@ impl QuicCarrier {
         Arc::clone(&self.rebind)
     }
 
-    fn rebind_if_asked(&mut self) {
+    /// Moves a client to a new socket when its rebinder asked, or when the system now prefers
+    /// another local address for its server.
+    fn rebind_if_needed(&mut self) {
+        let now = Instant::now();
         if self.rebind.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            self.driver.rebind(Instant::now());
+            let _ = self.driver.rebind(now);
         }
+        if let (Some(path), Some(peer)) = (self.path.as_mut(), self.driver.peer) {
+            let current = self.driver.local_ip();
+            path.follow(now, peer, current, || self.driver.rebind(now));
+        }
+    }
+
+    /// Replaces how this client learns its preferred local address, and checks at its next call.
+    #[cfg(test)]
+    pub(crate) fn prefer_sources(
+        &mut self,
+        source: impl Fn(SocketAddr) -> Option<std::net::IpAddr> + Send + 'static,
+    ) {
+        if let Some(path) = self.path.as_mut() {
+            path.set_source(Box::new(source));
+        }
+    }
+
+    /// The local address and port of a client's socket.
+    #[cfg(test)]
+    pub(crate) fn local_address(&self) -> Option<SocketAddr> {
+        self.driver.socket.socket.local_addr().ok()
     }
 
     fn packets_sent(&mut self) -> u64 {
@@ -1636,7 +1676,7 @@ impl Carrier for QuicCarrier {
     }
 
     fn flush(&mut self) -> Result<Flush, CarrierError> {
-        self.rebind_if_asked();
+        self.rebind_if_needed();
         // Frames first, so acknowledgements of what `receive` took ride on them.
         self.write_streams()?;
         if self.closing || !self.client {
@@ -1715,7 +1755,14 @@ impl Carrier for QuicCarrier {
                 .then(|| self.driver.socket.fd()),
             // Acknowledgements arrive on the same descriptor and free QUIC's buffers.
             progress: Some(descriptor),
-            deadline: self.driver.connection.poll_timeout(),
+            deadline: [
+                self.driver.connection.poll_timeout(),
+                self.path.as_ref().map(PathWatch::deadline),
+            ]
+            .into_iter()
+            .flatten()
+            .min(),
+            signal: self.path.as_ref().and_then(PathWatch::descriptor),
         }
     }
 
@@ -1725,7 +1772,7 @@ impl Carrier for QuicCarrier {
 
     fn path_suspect(&mut self) {
         if self.client {
-            self.driver.rebind(Instant::now());
+            let _ = self.driver.rebind(Instant::now());
         }
     }
 }

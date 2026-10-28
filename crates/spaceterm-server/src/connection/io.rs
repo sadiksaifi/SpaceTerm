@@ -167,6 +167,13 @@ fn wait(
             revents: 0,
         });
     }
+    if let Some(fd) = readiness.signal {
+        descriptors.push(libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
     let deadline = [deadline, readiness.deadline].into_iter().flatten().min();
     let _ = poll(&mut descriptors, deadline);
     waker.drain();
@@ -589,6 +596,7 @@ mod tests {
                 write: None,
                 progress: None,
                 deadline: None,
+                signal: None,
             }
         }
         fn close(&mut self) {
@@ -636,6 +644,7 @@ mod tests {
                 write: None,
                 progress: None,
                 deadline: None,
+                signal: None,
             }
         }
         fn close(&mut self) {}
@@ -734,6 +743,7 @@ mod tests {
                 write: None,
                 progress: None,
                 deadline: None,
+                signal: None,
             }
         }
         fn close(&mut self) {}
