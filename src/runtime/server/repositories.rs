@@ -687,7 +687,7 @@ struct DirectoryRead {
     active: Option<ActiveRead>,
     /// Since when this directory waits to be read. `None` while nothing asked for a read.
     next_read: Option<Instant>,
-    /// Its repository's git directories, as of the last discovery.
+    /// Its repository's git directories, as of the last discovery that did not fail.
     git: Option<GitDirectories>,
     /// When its last discovery ended.
     finished: Option<Instant>,
@@ -1209,10 +1209,16 @@ impl ReadSupervisor {
                 }
                 let directory = facts.directory.clone();
                 let missing_tool = facts.failure == Some(RepositoryReadError::ToolMissing);
+                let failed = facts.failure.is_some();
                 read.facts = Some(*facts);
                 if discovered {
                     read.active = None;
-                    read.git = git;
+                    // A failed read keeps the repository it last found, as its facts do. Its
+                    // git directories stay watched, and a reread of the directory still reads
+                    // the rest of that repository, which lists a removed Worktree as missing.
+                    if git.is_some() || !failed {
+                        read.git = git;
+                    }
                     read.finished = Some(Instant::now());
                 }
                 self.prune_counts();
@@ -1365,6 +1371,15 @@ fn discover(
                 if list.worktrees.len() > MAX_WORKTREES {
                     return Err(RepositoryReadError::OutputTooLarge);
                 }
+                // Each git run finds the repository again. `rm -rf` and `git worktree remove`
+                // empty a Worktree before removing it, so a later run can find the repository
+                // that contains it. A list that names another Worktree is not this directory's.
+                if let Some(record) = list.current.and_then(|current| list.worktrees.get(current))
+                    && std::fs::canonicalize(&record.root).ok().as_ref()
+                        != facts.repository.as_ref().map(|repository| &repository.root)
+                {
+                    return Err(RepositoryReadError::Unavailable);
+                }
                 for record in &mut list.worktrees {
                     record.missing |= matches!(
                         super::local_filesystem().validate_directory(&record.root),
@@ -1378,13 +1393,13 @@ fn discover(
                     worktrees: list.worktrees,
                 });
             }
-        } else {
-            // Git also reports no repository when its working directory disappears after spawn.
-            // Only a read of the same directory can authoritatively clear saved membership.
-            super::local_filesystem()
-                .revalidate_directory(&validated)
-                .map_err(|_| RepositoryReadError::Unavailable)?;
         }
+        // Git also reports no repository, or the one that contains the directory, while the
+        // directory is being removed. Only a read of a directory that outlasts the read can
+        // change saved membership.
+        super::local_filesystem()
+            .revalidate_directory(&validated)
+            .map_err(|_| RepositoryReadError::Unavailable)?;
         Ok(())
     })();
     facts.failure = result.err();

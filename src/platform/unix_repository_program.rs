@@ -69,8 +69,8 @@ impl UnixRepositoryProgramRunner {
         {
             return Err(ProgramError::TimedOut);
         }
-        // A missing directory and a missing program both fail `exec` with ENOENT, so the directory
-        // is checked first to keep NotFound about the program.
+        // A missing directory and a missing program both fail `exec` with ENOENT. The directory
+        // is checked here and again after a failed spawn, to keep NotFound about the program.
         if !request.directory.is_dir() {
             return Err(ProgramError::Failed);
         }
@@ -155,7 +155,12 @@ impl ProgramGroup {
             }
         }
         let mut child = command.spawn().map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => ProgramError::NotFound,
+            // The directory can disappear between the check in `run_locked` and the spawn.
+            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                if request.directory.is_dir() =>
+            {
+                ProgramError::NotFound
+            }
             _ => ProgramError::Failed,
         })?;
         match libc::pid_t::try_from(child.id()) {
