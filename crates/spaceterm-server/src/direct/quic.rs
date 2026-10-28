@@ -40,7 +40,10 @@ impl client::Messages for QuicStream {
 pub(super) fn transport(error: QuicError) -> DirectError {
     match error {
         QuicError::Configuration => DirectError::StorageUnavailable,
-        QuicError::Transport | QuicError::TimedOut | QuicError::Closed => DirectError::Transport,
+        QuicError::Transport
+        | QuicError::TimedOut
+        | QuicError::Closed
+        | QuicError::AddressInUse => DirectError::Transport,
         // Either side refused the other's certificate or signature: not worth retrying.
         QuicError::Refused => DirectError::AuthenticationRefused,
     }

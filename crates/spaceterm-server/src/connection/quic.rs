@@ -35,7 +35,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -75,6 +75,8 @@ pub enum QuicError {
     Closed,
     #[error("the TLS handshake was refused")]
     Refused,
+    #[error("the address is in use")]
+    AddressInUse,
 }
 
 fn transport() -> Arc<TransportConfig> {
@@ -237,7 +239,13 @@ struct Udp {
 
 impl Udp {
     fn bind(address: SocketAddr) -> Result<Self, QuicError> {
-        let socket = UdpSocket::bind(address).map_err(|_| QuicError::Transport)?;
+        let socket = UdpSocket::bind(address).map_err(|error| {
+            if error.kind() == ErrorKind::AddrInUse {
+                QuicError::AddressInUse
+            } else {
+                QuicError::Transport
+            }
+        })?;
         socket
             .set_nonblocking(true)
             .map_err(|_| QuicError::Transport)?;
@@ -408,13 +416,19 @@ struct Demux {
     accepted: Mutex<VecDeque<QuicStream>>,
     wake: Mutex<Option<Arc<dyn super::Wake>>>,
     address: SocketAddr,
-    /// Whether new connections are taken. A retired listener refuses them.
-    accepting: AtomicBool,
-    /// A retired listener keeps routing to its connections until the last one ends.
-    retired: AtomicBool,
-    /// Set by the thread when it has ended.
-    finished: AtomicBool,
+    /// [`ACCEPTING`], [`RETIRED`] or [`FINISHED`]. One atomic, so a revive and the thread's
+    /// finish never both win.
+    phase: AtomicU8,
+    /// Set by `Drop`: the thread ends at once, even with live connections.
+    stopping: AtomicBool,
 }
+
+/// The listener takes new connections.
+const ACCEPTING: u8 = 0;
+/// The listener refuses new connections and routes to its own until the last ends.
+const RETIRED: u8 = 1;
+/// A retired listener's last connection ended; its thread no longer routes.
+const FINISHED: u8 = 2;
 
 impl QuicListener {
     pub fn bind(address: SocketAddr, config: Arc<ServerConfig>) -> Result<Self, QuicError> {
@@ -432,9 +446,8 @@ impl QuicListener {
             accepted: Mutex::default(),
             wake: Mutex::default(),
             address,
-            accepting: AtomicBool::new(true),
-            retired: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
+            phase: AtomicU8::new(ACCEPTING),
+            stopping: AtomicBool::new(false),
         });
         let (stopped, stop) = bell()?;
         let running = Arc::clone(&demux);
@@ -461,10 +474,21 @@ impl QuicListener {
 
     /// Stops taking connections but keeps routing to the live ones until the last ends, so
     /// their goodbyes still leave and their acknowledgements still arrive. Connections that
-    /// waited for the host are dropped.
-    pub fn retire(&self) {
-        self.demux.accepting.store(false, Ordering::Release);
-        self.demux.retired.store(true, Ordering::Release);
+    /// waited for the host are dropped. Returns false when no connection is live: the caller
+    /// drops the listener, which closes its socket at once.
+    pub fn retire(&self) -> bool {
+        let live = {
+            // Under the endpoint lock, so no connection starts between the phase and the check.
+            let server = self.demux.shared.lock();
+            self.demux.phase.store(RETIRED, Ordering::Release);
+            let waiting = self
+                .demux
+                .accepted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
+            server.routes.len() > waiting
+        };
         let waiting = std::mem::take(
             &mut *self
                 .demux
@@ -474,22 +498,21 @@ impl QuicListener {
         );
         drop(waiting);
         ring(&self.stop);
+        live
     }
 
-    /// Takes connections again on a retired listener whose thread still runs. Returns false
-    /// when it already ended.
+    /// Takes connections again on a retired listener whose thread still routes. Returns false
+    /// when its last connection already ended.
     pub fn revive(&self) -> bool {
-        self.demux.retired.store(false, Ordering::Release);
-        if self.demux.finished.load(Ordering::Acquire) {
-            return false;
-        }
-        self.demux.accepting.store(true, Ordering::Release);
-        true
+        self.demux
+            .phase
+            .compare_exchange(RETIRED, ACCEPTING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
-    /// Whether a retired listener's last connection ended and its socket closed.
+    /// Whether a retired listener's last connection ended. Dropping it then closes its socket.
     pub fn finished(&self) -> bool {
-        self.demux.finished.load(Ordering::Acquire)
+        self.demux.phase.load(Ordering::Acquire) == FINISHED
     }
 
     /// Connections waiting for the host to take them.
@@ -514,8 +537,7 @@ impl QuicListener {
 impl Drop for QuicListener {
     /// Ends routing at once, even to live connections.
     fn drop(&mut self) {
-        self.demux.retired.store(false, Ordering::Release);
-        self.demux.accepting.store(false, Ordering::Release);
+        self.demux.stopping.store(true, Ordering::Release);
         ring(&self.stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -542,23 +564,36 @@ impl Demux {
                 },
             ];
             // A retired listener looks for its last connection's end now and then.
-            let retired = self.retired.load(Ordering::Acquire);
+            let retired = self.phase.load(Ordering::Acquire) == RETIRED;
             let timeout = if retired { 100 } else { -1 };
             // SAFETY: `descriptors` is a live, writable array of `pollfd` for the whole call.
             unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) };
             if descriptors[1].revents != 0 {
                 drain_bell(stopped);
-                if !self.retired.load(Ordering::Acquire) && !self.accepting.load(Ordering::Acquire)
-                {
-                    break;
-                }
+            }
+            if self.stopping.load(Ordering::Acquire) {
+                return;
             }
             self.route(&mut buffer, &mut send);
-            if self.retired.load(Ordering::Acquire) && self.shared.lock().routes.is_empty() {
-                break;
+            if self.try_finish() {
+                // The host binds again once a retired socket is free.
+                if let Some(wake) = &*self.wake.lock().unwrap_or_else(|e| e.into_inner()) {
+                    wake.wake();
+                }
+                return;
             }
         }
-        self.finished.store(true, Ordering::Release);
+    }
+
+    /// Finishes a retired listener whose last connection ended. A revive that came first keeps
+    /// it running; one that comes later finds it finished.
+    fn try_finish(&self) -> bool {
+        let server = self.shared.lock();
+        server.routes.is_empty()
+            && self
+                .phase
+                .compare_exchange(RETIRED, FINISHED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 
     fn send(&self, bytes: &[u8], destination: SocketAddr, source: Option<std::net::IpAddr>) {
@@ -633,7 +668,7 @@ impl Demux {
                 }
             }
             Some(DatagramEvent::NewConnection(incoming))
-                if !self.accepting.load(Ordering::Acquire) =>
+                if self.phase.load(Ordering::Acquire) != ACCEPTING =>
             {
                 let transmit = server.endpoint.refuse(incoming, send);
                 self.send(
@@ -1701,5 +1736,66 @@ mod tests {
         assert!(bytes <= ROUTED_BYTES && bytes + DATAGRAM_BYTES * 2 > ROUTED_BYTES);
         assert!(queue.take().len() < ROUTED_DATAGRAMS);
         assert!(queue.push(0, DATAGRAM_BYTES));
+    }
+
+    fn server_config_for_tests() -> Arc<ServerConfig> {
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let certificate = rcgen::CertificateParams::new(vec![SERVER_NAME.into()])
+            .unwrap()
+            .self_signed(&pair)
+            .unwrap();
+        let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certificate.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into()),
+        )
+        .unwrap();
+        tls.alpn_protocols = vec![ALPN.to_vec()];
+        server_config(tls).unwrap()
+    }
+
+    /// A revive and the thread's finish race for a retired listener. Exactly one wins: a
+    /// revived listener never ends up finished, and a finished one is never revived.
+    #[test]
+    fn a_revive_and_a_finish_never_both_win() {
+        let config = server_config_for_tests();
+        let (mut revived, mut finished) = (0, 0);
+        for _ in 0..50 {
+            let listener =
+                QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
+            // With no connection the thread finishes at its next turn, racing this revive.
+            listener.demux.phase.store(RETIRED, Ordering::Release);
+            ring(&listener.stop);
+            let won = listener.revive();
+            let settled = Instant::now() + Duration::from_millis(150);
+            while Instant::now() < settled {
+                std::thread::park_timeout(settled - Instant::now());
+            }
+            assert_ne!(won, listener.finished());
+            if won {
+                revived += 1;
+            } else {
+                finished += 1;
+            }
+        }
+        assert_eq!(revived + finished, 50);
+    }
+
+    /// A retired listener without connections reports none, so its owner drops it and the
+    /// port is free at once.
+    #[test]
+    fn retiring_an_idle_listener_frees_its_port_when_dropped() {
+        let config = server_config_for_tests();
+        let listener =
+            QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
+        let bound = listener.demux.shared.socket.socket.local_addr().unwrap();
+        assert!(!listener.retire(), "no connection is live");
+        drop(listener);
+        assert!(QuicListener::bind(bound, config).is_ok());
     }
 }

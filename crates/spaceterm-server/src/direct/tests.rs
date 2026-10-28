@@ -3213,6 +3213,85 @@ mod quic_connections {
         let _ = server.join().unwrap();
     }
 
+    fn listener_state(fixture: &Fixture) -> ListenerState {
+        let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap()
+        else {
+            panic!()
+        };
+        status.listener
+    }
+
+    /// Moving exposure from the wildcard to one address of the same port binds at once when
+    /// no connection holds the old socket.
+    #[test]
+    fn changing_the_address_without_connections_binds_at_once() {
+        let fixture = Fixture::new();
+        let wildcard = fixture.listen_at(std::net::Ipv4Addr::UNSPECIFIED.into());
+        let specific =
+            std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), wildcard.port());
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(specific).unwrap()),
+            })
+            .unwrap();
+        assert_eq!(
+            listener_state(&fixture),
+            ListenerState::Listening { addr: specific }
+        );
+    }
+
+    /// While a connection of the old address still holds its socket, the new address waits as
+    /// `Starting`, then binds once that connection ended with its goodbye.
+    #[test]
+    fn changing_the_address_with_a_live_connection_binds_once_it_ends() {
+        let fixture = Fixture::new();
+        let specific = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next();
+        let link = connect(&fixture.endpoint(), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let wildcard =
+            std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), specific.port());
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(wildcard).unwrap()),
+            })
+            .unwrap();
+        assert!(matches!(
+            listener_state(&fixture),
+            ListenerState::Starting { .. } | ListenerState::Listening { .. }
+        ));
+        assert_eq!(
+            ended(&link),
+            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while listener_state(&fixture) != (ListenerState::Listening { addr: wildcard }) {
+            assert!(
+                Instant::now() < deadline,
+                "still {:?}",
+                listener_state(&fixture)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let server = fixture.serve_next();
+        let link = connect(&format!("quic://{specific}"), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
     /// Measures a paired request's round trip over QUIC on loopback. Run it with
     /// `mise run bench:latency:quic`.
     #[test]
