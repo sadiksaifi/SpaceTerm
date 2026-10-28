@@ -75,6 +75,8 @@ pub enum QuicError {
     Closed,
     #[error("the TLS handshake was refused")]
     Refused,
+    #[error("the peer speaks another protocol")]
+    Incompatible,
     #[error("the address is in use")]
     AddressInUse,
 }
@@ -769,8 +771,8 @@ enum Side {
 struct DriverState {
     connected: bool,
     lost: Option<CarrierError>,
-    /// Whether the connection ended with a TLS alert, a refused certificate or signature.
-    refused: bool,
+    /// The TLS alert the connection ended with, if any.
+    alert: Option<u8>,
     /// Send streams whose data the peer acknowledged after this end finished them.
     finished: usize,
     /// A datagram that would have blocked, retried before any other.
@@ -783,7 +785,7 @@ impl DriverState {
         Self {
             connected: false,
             lost: None,
-            refused: false,
+            alert: None,
             finished: 0,
             stashed: None,
             transmit: Vec::new(),
@@ -835,14 +837,18 @@ impl Driver {
                 Event::Connected => self.state.connected = true,
                 Event::ConnectionLost { reason } => {
                     // TLS alerts travel as QUIC crypto errors, 0x100 to 0x1ff.
-                    let crypto = |code: noq_proto::TransportErrorCode| {
-                        (0x100..0x200).contains(&u64::from(code))
+                    let alert = |code: noq_proto::TransportErrorCode| {
+                        let code = u64::from(code);
+                        (0x100..0x200)
+                            .contains(&code)
+                            .then_some((code & 0xff) as u8)
                     };
-                    self.state.refused |= match &reason {
-                        ConnectionError::ConnectionClosed(close) => crypto(close.error_code),
-                        ConnectionError::TransportError(error) => crypto(error.code),
-                        _ => false,
+                    let closed = match &reason {
+                        ConnectionError::ConnectionClosed(close) => alert(close.error_code),
+                        ConnectionError::TransportError(error) => alert(error.code),
+                        _ => None,
                     };
+                    self.state.alert = self.state.alert.or(closed);
                     self.state.lost.get_or_insert(match reason {
                         ConnectionError::ApplicationClosed(_)
                         | ConnectionError::ConnectionClosed(_)
@@ -1047,8 +1053,11 @@ impl Driver {
 
     fn check(&self) -> Result<(), QuicError> {
         // A client counts its handshake done before the server judged its certificate.
-        if self.state.refused {
-            return Err(QuicError::Refused);
+        match self.state.alert {
+            // no_application_protocol: another QUIC service, or another major's ALPN.
+            Some(120) => return Err(QuicError::Incompatible),
+            Some(_) => return Err(QuicError::Refused),
+            None => {}
         }
         match self.state.lost {
             Some(CarrierError::Closed) => Err(QuicError::Closed),
@@ -1112,9 +1121,11 @@ impl QuicStream {
         config: ClientConfig,
         addresses: &[SocketAddr],
         deadline: Instant,
+        server_verified: &AtomicBool,
     ) -> Result<Self, QuicError> {
         let mut last = QuicError::Transport;
         for (index, address) in addresses.iter().enumerate() {
+            server_verified.store(false, Ordering::Release);
             // Each address but the last gets at most a second, as a TCP connect would.
             let until = if index + 1 == addresses.len() {
                 deadline
@@ -1145,7 +1156,12 @@ impl QuicStream {
             let mut stream = Self::new(driver);
             match stream.open_l0(until) {
                 Ok(()) => return Ok(stream),
-                Err(QuicError::Refused) => return Err(QuicError::Refused),
+                // A refusal counts only once this end verified the server: before that, the
+                // close may come from another service or a forged packet, so try the next address.
+                Err(QuicError::Refused) if server_verified.load(Ordering::Acquire) => {
+                    return Err(QuicError::Refused);
+                }
+                Err(QuicError::Refused) => last = QuicError::Transport,
                 Err(error) => last = error,
             }
         }

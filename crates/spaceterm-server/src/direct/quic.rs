@@ -46,6 +46,7 @@ pub(super) fn transport(error: QuicError) -> DirectError {
         | QuicError::AddressInUse => DirectError::Transport,
         // Either side refused the other's certificate or signature: not worth retrying.
         QuicError::Refused => DirectError::AuthenticationRefused,
+        QuicError::Incompatible => DirectError::IncompatibleProtocol,
     }
 }
 
@@ -86,11 +87,11 @@ pub(super) fn certificate_key(certificate: &[u8]) -> Option<[u8; 32]> {
 fn client_config(
     pin: &ServerPin,
     credential: &DeviceCredential,
-    mismatch: Arc<AtomicBool>,
+    seen: Arc<Verification>,
 ) -> Result<noq_proto::ClientConfig, DirectError> {
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(credential.expose_bytes().to_vec()));
     let certificate = certificate(credential.expose_bytes())?;
-    presenting(pin, certificate, key, mismatch)
+    presenting(pin, certificate, key, seen)
 }
 
 /// A client configuration that verifies the pinned server and presents `certificate`.
@@ -98,13 +99,13 @@ pub(super) fn presenting(
     pin: &ServerPin,
     certificate: CertificateDer<'static>,
     key: PrivateKeyDer<'static>,
-    mismatch: Arc<AtomicBool>,
+    seen: Arc<Verification>,
 ) -> Result<noq_proto::ClientConfig, DirectError> {
     let mut tls = rustls::ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| DirectError::Transport)?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Pinned::new(pin.certificate, mismatch)))
+        .with_custom_certificate_verifier(Arc::new(Pinned::new(pin.certificate, seen)))
         .with_client_auth_cert(vec![certificate], key)
         .map_err(|_| DirectError::StorageUnavailable)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
@@ -188,18 +189,22 @@ pub(super) fn server_config(
     crate::connection::quic::server_config(tls).map_err(transport)
 }
 
-/// Accepts only the server certificate whose hash is pinned, and records a mismatch.
+/// What the pinned verifier saw: a mismatch, or the pinned server verified.
+#[derive(Debug, Default)]
+pub(super) struct Verification {
+    pub(super) mismatch: AtomicBool,
+    pub(super) verified: AtomicBool,
+}
+
+/// Accepts only the server certificate whose hash is pinned, and records what it saw.
 #[derive(Debug)]
 pub(super) struct Pinned {
     certificate: [u8; 32],
-    mismatch: Arc<AtomicBool>,
+    seen: Arc<Verification>,
 }
 impl Pinned {
-    pub(super) fn new(certificate: [u8; 32], mismatch: Arc<AtomicBool>) -> Self {
-        Self {
-            certificate,
-            mismatch,
-        }
+    pub(super) fn new(certificate: [u8; 32], seen: Arc<Verification>) -> Self {
+        Self { certificate, seen }
     }
 }
 impl rustls::client::danger::ServerCertVerifier for Pinned {
@@ -212,9 +217,10 @@ impl rustls::client::danger::ServerCertVerifier for Pinned {
         _now: UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         if !intermediates.is_empty() || crypto::hash(cert.as_ref()) != self.certificate {
-            self.mismatch.store(true, Ordering::Release);
+            self.seen.mismatch.store(true, Ordering::Release);
             return Err(rustls::Error::General("Pinned certificate mismatch".into()));
         }
+        self.seen.verified.store(true, Ordering::Release);
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
@@ -260,10 +266,10 @@ pub(super) fn dial(
     let address = Endpoint::from_url(endpoint)?;
     let deadline = Instant::now() + HANDSHAKE_LIMIT;
     let addresses = address.resolve(deadline)?;
-    let mismatch = Arc::new(AtomicBool::new(false));
-    let config = client_config(pin, credential, Arc::clone(&mismatch))?;
-    QuicStream::connect(config, &addresses, deadline).map_err(|error| {
-        if mismatch.load(Ordering::Acquire) {
+    let seen = Arc::new(Verification::default());
+    let config = client_config(pin, credential, Arc::clone(&seen))?;
+    QuicStream::connect(config, &addresses, deadline, &seen.verified).map_err(|error| {
+        if seen.mismatch.load(Ordering::Acquire) {
             DirectError::PinMismatch
         } else {
             transport(error)
