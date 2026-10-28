@@ -13,7 +13,7 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, ServerError> 
             return Ok(StartupOutcome::Cancelled);
         }
         let server = spaceterm_server::ServerConnection::for_identity(identity)?;
-        let status = server.refresh()?;
+        let status = server.refresh_cancellable(&cancelled)?;
         return Ok(StartupOutcome::Ready { server, status });
     }
     LocalStartup::for_identity(identity)?.run(

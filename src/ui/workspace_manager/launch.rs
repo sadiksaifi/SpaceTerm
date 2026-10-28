@@ -43,6 +43,9 @@ pub(crate) enum LaunchOutcome {
     Stopped,
     /// The host needs one administrator authorization before the service can run at boot.
     AuthorizationRequired,
+    /// Another service operation, such as Update, Restart or Stop, is running. Launch waits for
+    /// it, then runs again.
+    ServiceBusy,
     /// The window closed or SpaceTerm quit before launch finished.
     Cancelled,
 }
@@ -56,6 +59,9 @@ pub(crate) trait LocalLaunch: Send + Sync {
     fn start(&self) -> Result<(), ServerError>;
     /// The person's explicit startup authorization. Cancelling the system prompt changes nothing.
     fn authorize(&self) -> Result<(), ServerError>;
+    /// Waits for the service operation a run answered `ServiceBusy` for. It fails with
+    /// `ServiceBusy` only when the operation outlasts the server's bounded wait.
+    fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), ServerError>;
     /// Whether this SpaceTerm includes a verified server build other than the approved one.
     /// Reads only: it stages, installs, and starts nothing.
     fn update_offered(&self) -> bool;
@@ -121,8 +127,16 @@ impl LocalLaunch for AccountLaunch {
             StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
             StartupOutcome::Stopped => LaunchOutcome::Stopped,
             StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,
+            StartupOutcome::ServiceBusy => LaunchOutcome::ServiceBusy,
             StartupOutcome::Cancelled => LaunchOutcome::Cancelled,
         })
+    }
+
+    fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), ServerError> {
+        spaceterm_server::LocalStartup::for_identity(
+            crate::application_identity::ApplicationIdentity::current().directory_name(),
+        )?
+        .wait_for_service(cancelled)
     }
 
     fn start(&self) -> Result<(), ServerError> {
@@ -176,11 +190,15 @@ impl SharedServerConnector for AccountConnector {
     }
 }
 
-/// An explicit step the person chose from the launch screen.
+/// A step that runs before launch: one the person chose from the launch screen, or the wait
+/// for a service operation that another process runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LaunchStep {
     Start,
     Authorize,
+    /// Says another server operation is running, and opens the Workspaces once it ends, without
+    /// asking the person to act.
+    WaitForService,
 }
 
 /// Where launch stands. Only `Ready` hands the stage to the server's Workspaces.
@@ -284,6 +302,9 @@ pub(super) const AUTHORIZATION_TITLE: &str = "Run the Server at Startup";
 const AUTHORIZATION_DECLINED: &str = "Authorization didn\u{2019}t finish.";
 const AUTHORIZING_DETAIL: &str =
     "Enter an administrator password in the system prompt to continue.";
+pub(super) const BUSY_TITLE: &str = "Waiting for the Server";
+const BUSY_DETAIL: &str =
+    "Another server operation is running. Your Workspaces open when it finishes.";
 
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: ServerError) -> &'static str {
@@ -301,6 +322,7 @@ const fn failure_title(error: ServerError) -> &'static str {
         ServerError::StorageUnavailable => "Server Storage Unavailable",
         ServerError::NotInstalled => "Server Not Installed",
         ServerError::AuthenticationRefused => "Connection Refused",
+        ServerError::ServiceBusy => "Server Busy",
         _ => "Couldn\u{2019}t Open Workspaces",
     }
 }
@@ -380,6 +402,15 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             title: AUTHORIZATION_TITLE,
             detail: fixed(AUTHORIZING_DETAIL),
             progress: Some("Waiting for authorization\u{2026}"),
+            actions: &[],
+            icon: None,
+            waiting: false,
+        },
+        // Nothing failed and nothing asks the person to act, so the screen offers no action.
+        LaunchState::Working(LaunchStep::WaitForService) => LaunchPresentation {
+            title: BUSY_TITLE,
+            detail: fixed(BUSY_DETAIL),
+            progress: Some("Waiting for the server\u{2026}"),
             actions: &[],
             icon: None,
             waiting: false,
@@ -641,6 +672,10 @@ impl WorkspaceManager {
                     ServerError::AuthorizationRequired => StepResult::Declined,
                     error => StepResult::Failed(error),
                 }),
+                Some(LaunchStep::WaitForService) => adapter
+                    .wait_for_service(&|| cancelled.load(Ordering::Acquire))
+                    .err()
+                    .map(StepResult::Failed),
                 None => None,
             };
             if let Some(refused) = refused {
@@ -673,6 +708,11 @@ impl WorkspaceManager {
         let state = match result {
             StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_server(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
+            // The operation decides what launch finds next, so launch runs again once it ends.
+            StepResult::Outcome(LaunchOutcome::ServiceBusy) => {
+                self.run_local_launch(Some(LaunchStep::WaitForService), window, cx);
+                return;
+            }
             StepResult::Outcome(LaunchOutcome::AuthorizationRequired)
             | StepResult::Failed(ServerError::AuthorizationRequired) => {
                 LaunchState::AuthorizationRequired { declined: false }
@@ -822,6 +862,8 @@ impl WorkspaceManager {
             }
             Some(shared) => Some(present(match shared.connection_error() {
                 Some(ServerError::Stopped) => LaunchState::Stopped,
+                // The connection waits for the operation again by itself.
+                Some(ServerError::ServiceBusy) => LaunchState::Working(LaunchStep::WaitForService),
                 // An open connection's refusal offers what the Server version row offers.
                 Some(error) if ends_opening(error) => failed(
                     error,
@@ -1175,7 +1217,8 @@ pub(crate) mod testing {
         pub(crate) fn refuse_authorization(&self, error: ServerError) {
             *self.authorize.lock().unwrap() = Some(error);
         }
-        /// Every step in order: `run`, `start`, `authorize`, and `update_offered`.
+        /// Every step in order: `run`, `start`, `authorize`, `wait_for_service`, and
+        /// `update_offered`.
         pub(crate) fn steps(&self) -> Vec<&'static str> {
             self.steps.lock().unwrap().clone()
         }
@@ -1201,6 +1244,10 @@ pub(crate) mod testing {
         fn authorize(&self) -> Result<(), ServerError> {
             self.steps.lock().unwrap().push("authorize");
             self.authorize.lock().unwrap().take().map_or(Ok(()), Err)
+        }
+        fn wait_for_service(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<(), ServerError> {
+            self.steps.lock().unwrap().push("wait_for_service");
+            Ok(())
         }
         fn update_offered(&self) -> bool {
             self.steps.lock().unwrap().push("update_offered");
