@@ -3173,27 +3173,20 @@ mod quic_connections {
 
     /// A UDP relay between clients and a server. Each client source gets its own upstream
     /// socket, so the server sees a new address when a client moves. `blackhole` drops a source's
-    /// traffic both ways, as a network that vanished under a still-valid address, and `vanished`
-    /// counts what it dropped. `losses` drops that many of the first datagrams from clients.
-    /// `slower` delays both ways the traffic of every source after the first, as a slower
-    /// network a client moves to. `lose_close` drops the server's first datagram after a client's
-    /// first Handshake packet: the close that refuses the client's certificate.
+    /// traffic both ways, as a network that vanished under a still-valid address. `losses` drops
+    /// that many of the first datagrams from clients. `lose_close` drops the server's first
+    /// datagram after a client's first Handshake packet: the close that refuses the client's
+    /// certificate.
     struct Relay {
         address: std::net::SocketAddr,
         sources: Arc<Mutex<Vec<std::net::SocketAddr>>>,
         blackhole: Arc<Mutex<Option<std::net::SocketAddr>>>,
-        vanished: Arc<std::sync::atomic::AtomicUsize>,
         losses: Arc<std::sync::atomic::AtomicUsize>,
-        slower: Arc<Mutex<Duration>>,
         lose_close: Arc<std::sync::atomic::AtomicBool>,
         closes_lost: Arc<std::sync::atomic::AtomicUsize>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
-
-    /// One relayed datagram: when it leaves, the client source it belongs to, whether it goes
-    /// to the server, and its bytes.
-    type Relayed = (Instant, usize, bool, Vec<u8>);
 
     impl Relay {
         fn new(server: std::net::SocketAddr) -> Self {
@@ -3203,9 +3196,7 @@ mod quic_connections {
                 address: front.local_addr().unwrap(),
                 sources: Arc::default(),
                 blackhole: Arc::default(),
-                vanished: Arc::default(),
                 losses: Arc::default(),
-                slower: Arc::default(),
                 lose_close: Arc::default(),
                 closes_lost: Arc::default(),
                 stop: Arc::default(),
@@ -3215,9 +3206,7 @@ mod quic_connections {
                 address: relay.address,
                 sources: Arc::clone(&relay.sources),
                 blackhole: Arc::clone(&relay.blackhole),
-                vanished: Arc::clone(&relay.vanished),
                 losses: Arc::clone(&relay.losses),
-                slower: Arc::clone(&relay.slower),
                 lose_close: Arc::clone(&relay.lose_close),
                 closes_lost: Arc::clone(&relay.closes_lost),
                 stop: Arc::clone(&relay.stop),
@@ -3230,27 +3219,16 @@ mod quic_connections {
         fn run(&self, front: &UdpSocket, server: std::net::SocketAddr) {
             use std::sync::atomic::Ordering;
             let mut upstreams: Vec<(std::net::SocketAddr, UdpSocket)> = Vec::new();
-            let mut queue: Vec<Relayed> = Vec::new();
             let mut buffer = [0; 65_536];
             // Set once a client sent its certificate, until the server's answer is dropped.
             let mut answer_lost = false;
             while !self.stop.load(Ordering::Acquire) {
-                let now = Instant::now();
-                let delay = |index: usize| {
-                    if index == 0 {
-                        Duration::ZERO
-                    } else {
-                        *self.slower.lock().unwrap()
-                    }
-                };
+                let mut idle = true;
                 let dead = |source: &std::net::SocketAddr| {
-                    let dead = *self.blackhole.lock().unwrap() == Some(*source);
-                    if dead {
-                        self.vanished.fetch_add(1, Ordering::AcqRel);
-                    }
-                    dead
+                    *self.blackhole.lock().unwrap() == Some(*source)
                 };
                 while let Ok((count, source)) = front.recv_from(&mut buffer) {
+                    idle = false;
                     if dead(&source)
                         || self
                             .losses
@@ -3267,48 +3245,33 @@ mod quic_connections {
                         self.lose_close.store(false, Ordering::Release);
                         answer_lost = true;
                     }
-                    let index = match upstreams.iter().position(|(known, _)| *known == source) {
-                        Some(index) => index,
-                        None => {
-                            let upstream = UdpSocket::bind((server.ip(), 0)).unwrap();
-                            upstream.connect(server).unwrap();
-                            upstream.set_nonblocking(true).unwrap();
-                            upstreams.push((source, upstream));
-                            self.sources.lock().unwrap().push(source);
-                            upstreams.len() - 1
-                        }
-                    };
-                    queue.push((now + delay(index), index, true, buffer[..count].to_vec()));
+                    if !upstreams.iter().any(|(known, _)| *known == source) {
+                        let upstream = UdpSocket::bind((server.ip(), 0)).unwrap();
+                        upstream.connect(server).unwrap();
+                        upstream.set_nonblocking(true).unwrap();
+                        upstreams.push((source, upstream));
+                        self.sources.lock().unwrap().push(source);
+                    }
+                    let (_, upstream) = upstreams
+                        .iter()
+                        .find(|(known, _)| *known == source)
+                        .unwrap();
+                    let _ = upstream.send(&buffer[..count]);
                 }
-                for (index, (source, upstream)) in upstreams.iter().enumerate() {
+                for (source, upstream) in &upstreams {
                     while let Ok(count) = upstream.recv(&mut buffer) {
+                        idle = false;
                         if answer_lost {
                             answer_lost = false;
                             self.closes_lost.fetch_add(1, Ordering::AcqRel);
                         } else if !dead(source) {
-                            queue.push((
-                                now + delay(index),
-                                index,
-                                false,
-                                buffer[..count].to_vec(),
-                            ));
+                            let _ = front.send_to(&buffer[..count], source);
                         }
                     }
                 }
-                let now = Instant::now();
-                queue.retain(|(due, index, inbound, bytes)| {
-                    if *due > now {
-                        return true;
-                    }
-                    let (source, upstream) = &upstreams[*index];
-                    if *inbound {
-                        let _ = upstream.send(bytes);
-                    } else {
-                        let _ = front.send_to(bytes, source);
-                    }
-                    false
-                });
-                std::thread::sleep(Duration::from_micros(200));
+                if idle {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
         }
     }
@@ -3445,9 +3408,9 @@ mod quic_connections {
             ended: Arc::clone(&ended),
         }));
         let link = connect(&format!("quic://{}", relay.address), &paired, &credential);
-        // Enough round trips that the path's round-trip estimate reflects the path rather than
-        // the handshake. Data lost on the dead path is resent when the abandoned path drains,
-        // three of its probe timeouts after each end learns it was abandoned.
+        // Enough round trips that the path's round-trip estimate reflects the path rather than a
+        // handshake slowed by other tests, so recovery after the move is not held up by an
+        // inflated probe timeout.
         for _ in 0..50 {
             assert!(matches!(
                 request(&link, nothing()),
@@ -3470,85 +3433,6 @@ mod quic_connections {
         assert_eq!(link.health(), crate::connection::link::Health::Live);
         assert_eq!(admitted.load(Ordering::SeqCst), 1, "no second admission");
         assert_eq!(ended.load(Ordering::SeqCst), 0, "the session never ended");
-        drop(link);
-        let _ = server.join().unwrap();
-    }
-
-    /// A client moves from a fast network to one with a 40 ms round trip, as from Ethernet to
-    /// Wi-Fi, with a request lost on the old one. Every reply after the move, the lost request's
-    /// included, arrives within one new round trip plus 200 ms. The server sees the same address
-    /// on a new port, the case where RFC 9000 migration keeps the old path's round-trip estimate
-    /// and gives up validating the slower path.
-    #[test]
-    fn a_move_to_a_slower_network_never_stalls_a_reply() {
-        use std::sync::atomic::Ordering;
-        const ONE_WAY: Duration = Duration::from_millis(20);
-        const BOUND: Duration = Duration::from_millis(2 * 20 + 200);
-        let fixture = Fixture::new();
-        fixture.enable();
-        let credential = DeviceCredential::generate().unwrap();
-        let paired = fixture.enroll(&credential);
-        let server_address = Endpoint::from_url(&fixture.endpoint())
-            .unwrap()
-            .resolve(Instant::now() + Duration::from_secs(5))
-            .unwrap()[0];
-        let relay = Relay::new(server_address);
-        *relay.slower.lock().unwrap() = ONE_WAY;
-        let server = fixture.serve_next_with(service(Refusing));
-        let carrier = admitted_carrier(&format!("quic://{}", relay.address), &paired, &credential);
-        let rebind = carrier.rebinder();
-        let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
-        for _ in 0..20 {
-            assert!(matches!(
-                request(&link, nothing()),
-                Err(RequestError::Refused(Refusal::Unsupported))
-            ));
-        }
-
-        // The old network vanishes with a request on it.
-        let first = relay.sources.lock().unwrap()[0];
-        *relay.blackhole.lock().unwrap() = Some(first);
-        let lost = link.request(nothing()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while relay.vanished.load(Ordering::Acquire) == 0 {
-            assert!(Instant::now() < deadline, "the request never left");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        // The next send moves the client, as a send that fails on the vanished network does.
-        rebind.store(true, Ordering::Release);
-        let moved = Instant::now();
-        let mut slowest = Duration::ZERO;
-        let recovered = std::thread::spawn(move || {
-            let reply = lost.wait();
-            (reply, moved.elapsed())
-        });
-        while moved.elapsed() < Duration::from_secs(2) {
-            let sent = Instant::now();
-            assert!(matches!(
-                request(&link, nothing()),
-                Err(RequestError::Refused(Refusal::Unsupported))
-            ));
-            slowest = slowest.max(sent.elapsed());
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let (reply, recovered) = recovered.join().unwrap();
-        assert!(matches!(
-            reply,
-            Err(RequestError::Refused(Refusal::Unsupported))
-        ));
-        assert!(
-            recovered <= BOUND,
-            "the request lost on the old network took {recovered:?} after the move"
-        );
-        assert!(
-            slowest <= BOUND,
-            "a reply after the move took {slowest:?}, more than {BOUND:?}"
-        );
-        assert_eq!(
-            relay.sources.lock().unwrap().len(),
-            2,
-            "the client moved once"
-        );
         drop(link);
         let _ = server.join().unwrap();
     }

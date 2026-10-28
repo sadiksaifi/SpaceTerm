@@ -66,8 +66,6 @@ const ADMISSION_WINDOW: u32 = 64 * 1024;
 const ADMITTED_WINDOW: u32 = 2 * limits::MAX_FRAME_BYTES as u32;
 /// Connections whose handshake started and that the host has not taken yet.
 const MAX_PENDING: usize = 32;
-/// Paths one connection holds at once: the one in use and the one a moving client opens.
-const PATHS: u32 = 2;
 /// Closed server connections the listener keeps draining at once. Past it a closed connection is
 /// forgotten at once, and a peer that lost its close sees a stateless reset.
 const MAX_DRAINING: usize = 64;
@@ -118,11 +116,6 @@ fn transport() -> Arc<TransportConfig> {
         // The server opens the one L0 stream; each side opens one stream per other level.
         .max_concurrent_bidi_streams(VarInt::from_u32(1))
         .max_concurrent_uni_streams(VarInt::from_u32(2))
-        // A client that moves opens a new path and abandons the old one, so both ends start the
-        // new path's round-trip estimate and congestion window afresh. RFC 9000 migration keeps
-        // the old path's estimate when only the port changes, and the server then gives up
-        // validating a slower new path after three of the old path's probe timeouts.
-        .max_concurrent_multipath_paths(PATHS)
         .ack_frequency_config(Some(acknowledgements))
         .congestion_controller_factory(Arc::new(Floored(Arc::default())))
         // Routers forget idle UDP flows after about 30 seconds.
@@ -1494,9 +1487,9 @@ impl Driver {
         }
     }
 
-    /// Moves a client to a new UDP socket, as after a switch between networks. The client opens
-    /// a new QUIC path from it and abandons the old one; the server validates the new path, and
-    /// the connection continues without a new handshake. Returns whether the client moved.
+    /// Moves a client to a new UDP socket, as after a switch between networks. The server
+    /// validates the new path and the connection continues without a new handshake. Returns
+    /// whether the client moved.
     fn rebind(&mut self, now: Instant) -> bool {
         let Some(peer) = self.peer else {
             return false;
