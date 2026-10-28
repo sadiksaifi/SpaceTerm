@@ -470,7 +470,7 @@ fn inventory() -> hierarchy::Inventory {
 fn every_server_message_round_trips() {
     let restored = Restored {
         fresh: true,
-        session_ended: false,
+        session_ended: None,
         recovery: None,
         directory_unavailable: false,
         server: [1; 32],
@@ -479,7 +479,7 @@ fn every_server_message_round_trips() {
         pane: [4; 32],
     };
     let takeover = Takeover {
-        session_ended: false,
+        session_ended: None,
         target: PaneTarget {
             server: [1; 32],
             session: [2; 32],

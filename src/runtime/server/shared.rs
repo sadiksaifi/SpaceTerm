@@ -17,6 +17,9 @@ mod publication;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
+#[cfg(test)]
+#[path = "shared/shell_exit_tests.rs"]
+mod shell_exit_tests;
 mod worktrees;
 use journal::{Journal, Retention, Revision};
 use spaceterm_server::connection::outbox::Outbox;
@@ -460,7 +463,7 @@ impl SharedWorkspaceHost {
             ..
         } = &mut reply
         {
-            *reply_fresh = fresh && !*session_ended;
+            *reply_fresh = fresh && session_ended.is_none();
         }
         Ok(reply)
     }
@@ -728,7 +731,13 @@ impl SharedWorkspaceHost {
                                 return Err(Refusal::Stale);
                             }
                             if host.dormant.is_some() {
-                                host.take_over_ended(device, Some(attachment.generation))?
+                                host.take_over_ended(
+                                    device,
+                                    connection,
+                                    Some(attachment.generation),
+                                    size,
+                                    style,
+                                )?
                             } else {
                                 Reply::Attached {
                                     lease: host.start(device, connection, size, style)?,
@@ -839,7 +848,7 @@ impl SharedWorkspaceHost {
                     return Err(Refusal::Stale);
                 }
                 if host.dormant.is_some() {
-                    return host.take_over_ended(device, None);
+                    return host.take_over_ended(device, connection, None, size, style);
                 }
                 host.start(device, connection, size, style)
                     .map(|lease| Reply::Attached { lease })
@@ -1149,14 +1158,18 @@ impl HostCommands for SharedWorkspaceHost {
                 .as_ref()
                 .is_some_and(|pane| PaneTarget::from(pane.lease) == target)
         }) else {
-            // A Pane removed, closed or ended by End All Sessions no longer has this lease.
+            // A Pane removed, closed, ended by End All Sessions or kept after its shell exited
+            // no longer has this lease.
             let event = if self
                 .panes
                 .values()
                 .any(|host| host.failed_directory_session == Some(target))
             {
                 PaneEvent::DirectoryUnavailable
-            } else if self.state.session_ends().is_some_and(|ends| {
+            } else if self.panes.values().any(|host| {
+                host.dormant
+                    .is_some_and(|dormant| dormant.session == Some(target))
+            }) || self.state.session_ends().is_some_and(|ends| {
                 ends.boot == target.server
                     && ends
                         .sessions
@@ -1737,7 +1750,7 @@ mod tests {
             ),
             Reply::Restored {
                 fresh: true,
-                session_ended: false,
+                session_ended: None,
                 ..
             }
         ));
@@ -1793,7 +1806,7 @@ mod tests {
             host.request([1; 32], [3; 32], select(false)),
             Reply::Restored {
                 fresh: false,
-                session_ended: true,
+                session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
                 ..
             }
         ));
@@ -1992,7 +2005,7 @@ mod tests {
             restored.request([1; 32], [2; 32], claim(false)),
             Reply::Restored {
                 fresh: false,
-                session_ended: false,
+                session_ended: None,
                 ..
             }
         ));

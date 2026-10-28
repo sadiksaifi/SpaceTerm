@@ -2720,7 +2720,7 @@ impl TabView {
                 status,
                 DevelopmentPaneStatus::Connected
                     | DevelopmentPaneStatus::Restored
-                    | DevelopmentPaneStatus::SessionEnded
+                    | DevelopmentPaneStatus::SessionEnded(_)
                     | DevelopmentPaneStatus::Ended
             )
         })
@@ -2989,7 +2989,6 @@ impl TabView {
                 offered,
                 ended,
                 controller,
-                dormant,
             } => {
                 let status = if taking_over {
                     Some(server_pane::progress_status(
@@ -3013,7 +3012,7 @@ impl TabView {
                         server_pane::SESSION_ENDED_DETAIL,
                     )
                 } else if offered || taking_over {
-                    server_pane::takeover_copy(controller.as_ref(), dormant)
+                    server_pane::takeover_copy(controller.as_ref())
                 } else {
                     // SpaceTerm stopped reconnecting, so the screen claims nothing about the shell
                     // or who controls it.
@@ -3098,7 +3097,7 @@ impl TabView {
                     });
                 server_pane::render_screen(
                     selector(copy.screen),
-                    server_pane::ScreenCopy::new(copy.title.into(), copy.detail.into()),
+                    server_pane::ScreenCopy::new(copy.title.into(), copy.detail),
                     true,
                     server_pane::ScreenActions {
                         primary: Some(action),

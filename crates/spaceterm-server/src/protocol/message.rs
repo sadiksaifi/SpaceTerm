@@ -172,9 +172,11 @@ pub enum PaneEvent {
     /// Another client controls the Pane now. The channel is closed, and later input on it is
     /// discarded.
     Takeover(Takeover),
-    /// The shell exited. The channel is closed.
+    /// The shell exited with code zero, which closed its Pane. The channel is closed.
     Ended,
-    /// End All Sessions ended this Terminal Session. The channel is closed.
+    /// The Terminal Session ended and its Pane stays: End All Sessions ended it, or its shell
+    /// exited with a nonzero code or after a signal. The channel is closed, and a new claim says
+    /// why.
     SessionEnded,
     /// The Terminal Session failed. The channel is closed.
     Failed,

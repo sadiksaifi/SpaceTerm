@@ -336,7 +336,9 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
     host.shutdown().unwrap();
 }
 
-fn ended_takeover_waits_for_explicit_start(attached: bool) {
+/// An ended Session has nothing to take over, so Take Over is the other client's Start Session:
+/// it moves the grant and starts a fresh shell in one request.
+fn ended_takeover_starts_a_session(attached: bool) {
     let mut host = SharedWorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
     host.admitted([1; 32], "Studio".into());
@@ -352,12 +354,17 @@ fn ended_takeover_waits_for_explicit_start(attached: bool) {
     end_all(&mut host, 1, 1);
     let Reply::Takeover {
         target,
-        session_ended: true,
+        session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
         ..
     } = select(&mut host, 2, pane, false)
     else {
         panic!("ended Pane offers takeover");
     };
+    assert_eq!(
+        shared_inventory(&mut host).close.unwrap().sessions[0].session,
+        None,
+        "observing the ended Pane starts nothing"
+    );
     let takeover = if attached {
         Request::ClaimPane {
             attachment,
@@ -373,83 +380,30 @@ fn ended_takeover_waits_for_explicit_start(attached: bool) {
             style: None,
         }
     };
-    assert!(
-        matches!(
-            host.request([2; 32], [2; 32], takeover),
-            Reply::Restored {
-                session_ended: true,
-                ..
-            }
-        ),
-        "takeover transfers ended control without starting a Session"
-    );
-    assert_eq!(
-        shared_inventory(&mut host).close.unwrap().sessions[0].session,
-        None
-    );
-    assert!(
-        matches!(select(&mut host, 1, pane, false), Reply::Takeover {
-        session_ended: true, controller: control::Controller::Client { name, .. }, ..
-    } if name.as_str() == "Laptop")
-    );
-    let passive = if attached {
-        Request::ClaimPane {
-            attachment,
-            pane,
-            claim: AttachmentClaim::Select { explicit: false },
-            size: size(),
-            style: None,
-        }
-    } else {
-        Request::SelectPane {
-            pane,
-            explicit: false,
-            size: size(),
-            style: None,
-        }
-    };
-    assert!(matches!(
-        host.request([2; 32], [2; 32], passive),
-        Reply::Restored {
-            session_ended: true,
-            ..
-        }
-    ));
-    let start = if attached {
-        Request::ClaimPane {
-            attachment,
-            pane,
-            claim: AttachmentClaim::Start { server: old.server },
-            size: size(),
-            style: None,
-        }
-    } else {
-        Request::StartRestored {
-            server: old.server,
-            pane,
-            size: size(),
-            style: None,
-        }
-    };
-    let Reply::Attached { lease: fresh } = host.request([2; 32], [2; 32], start) else {
-        panic!("new controller explicitly starts the Session");
+    let Reply::Attached { lease: fresh } = host.request([2; 32], [2; 32], takeover) else {
+        panic!("Take Over of an ended Pane starts its Session");
     };
     assert_ne!(fresh.session, old.session);
     assert_eq!(
         shared_inventory(&mut host).close.unwrap().sessions[0].session,
         Some(fresh.session)
     );
+    assert!(
+        matches!(select(&mut host, 1, pane, false), Reply::Takeover {
+        session_ended: None, controller: control::Controller::Client { name, .. }, ..
+    } if name.as_str() == "Laptop")
+    );
     host.shutdown().unwrap();
 }
 
 #[test]
-fn end_all_sessions_direct_takeover_changes_control_without_starting() {
-    ended_takeover_waits_for_explicit_start(false);
+fn end_all_sessions_direct_takeover_starts_a_session() {
+    ended_takeover_starts_a_session(false);
 }
 
 #[test]
-fn end_all_sessions_attached_takeover_changes_control_without_starting() {
-    ended_takeover_waits_for_explicit_start(true);
+fn end_all_sessions_attached_takeover_starts_a_session() {
+    ended_takeover_starts_a_session(true);
 }
 
 #[test]
@@ -545,14 +499,14 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
         assert!(matches!(
             select(&mut selected, owner, pane, false),
             Reply::Restored {
-                session_ended: true,
+                session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
                 ..
             }
         ));
         assert!(matches!(
             select(&mut selected, 3, pane, true),
             Reply::Takeover {
-                session_ended: true,
+                session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
                 ..
             }
         ));
@@ -560,7 +514,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
     assert!(matches!(
         select(&mut selected, 3, unclaimed, false),
         Reply::Takeover {
-            session_ended: true,
+            session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
             controller: control::Controller::Nobody,
             ..
         }
@@ -591,7 +545,7 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
         assert!(matches!(
             select(&mut host, 1, pane, false),
             Reply::Restored {
-                session_ended: true,
+                session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
                 ..
             }
         ));
@@ -758,7 +712,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
     ));
     let Reply::Restored {
         recovery: Some(target),
-        session_ended: true,
+        session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
         ..
     } = select(&mut host, 2, pane, false)
     else {
@@ -772,7 +726,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
     };
     assert!(
         matches!(host.request([1; 32], [1; 32], repair.clone()), Reply::Takeover {
-        session_ended: true, controller: control::Controller::Client { name, .. }, ..
+        session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions), controller: control::Controller::Client { name, .. }, ..
     } if name.as_str() == "Laptop")
     );
     assert!(matches!(
@@ -829,7 +783,7 @@ fn end_all_sessions_retains_the_controller_if_replacement_directory_disappears_d
     assert!(matches!(
         select(&mut host, 2, pane, false),
         Reply::Restored {
-            session_ended: true,
+            session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
             directory_unavailable: true,
             ..
         }
@@ -837,7 +791,7 @@ fn end_all_sessions_retains_the_controller_if_replacement_directory_disappears_d
     assert!(matches!(
         select(&mut host, 1, pane, true),
         Reply::Takeover {
-            session_ended: true,
+            session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
             ..
         }
     ));

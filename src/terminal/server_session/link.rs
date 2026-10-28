@@ -1381,7 +1381,7 @@ pub(super) fn present(
             else {
                 return Ok(());
             };
-            state.session_dormant.store(false, Ordering::Release);
+            state.set_session_end(None);
             attached_session = true;
             // Authenticate and receive the authoritative screen before enabling input.
             let epoch = state.attach(&presenter)?;

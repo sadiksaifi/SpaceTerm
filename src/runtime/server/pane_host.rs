@@ -11,7 +11,7 @@ impl DevelopmentPaneHost {
     ) -> Reply {
         let names = self.names.lock().unwrap_or_else(|e| e.into_inner());
         Reply::Takeover {
-            session_ended: self.dormant.is_some(),
+            session_ended: self.dormant.map(|dormant| dormant.end),
             target,
             controller: names.controller(controlling, asking),
         }
@@ -54,7 +54,7 @@ impl DevelopmentPaneHost {
         let organization = self.organization.as_ref().ok_or(Refusal::Missing)?;
         Ok(Reply::Restored {
             fresh: false,
-            session_ended: self.dormant.is_some(),
+            session_ended: self.dormant.map(|dormant| dormant.end),
             recovery: Some(pane::directories::Target {
                 boot: self.boot,
                 pane: organization.pane,
@@ -160,9 +160,10 @@ impl DevelopmentPaneHost {
             graphics_transfer: None,
             presentable: true,
             ended: false,
+            end: None,
             failed: false,
             directory_failed: false,
-            ended_restart: self.dormant.is_some(),
+            ended_restart: self.dormant.map(|dormant| dormant.end),
             appearance_generation: 1,
             focus_generation: 0,
             focus: FocusTarget::Unfocused,
@@ -272,11 +273,13 @@ impl DevelopmentPaneHost {
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| Refusal::CleanupUnresolved)?;
             self.failed_directory_session = Some(pane.lease.into());
-            if pane.ended_restart {
+            if let Some(end) = pane.ended_restart {
                 self.dormant = Some(DormantPane {
                     device: pane.device,
                     attachment_generation: pane.attachment_generation,
                     control_epoch: pane.control_epoch,
+                    end,
+                    session: None,
                 });
             }
             self.pane = None;
@@ -287,8 +290,21 @@ impl DevelopmentPaneHost {
             pane.runtime
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| Refusal::CleanupUnresolved)?;
-            // Ordinary exit closes the final Pane even without a subscribed client. Keep its
-            // final screen until its channel receives it, but never retain it across a restart.
+            // A nonzero exit or a signal keeps the Pane and its control grant, so every client
+            // can say why the shell ended. Its output goes with the runtime.
+            if let Some(end) = pane.end {
+                self.dormant = Some(DormantPane {
+                    device: pane.device,
+                    attachment_generation: pane.attachment_generation,
+                    control_epoch: pane.control_epoch,
+                    end,
+                    session: Some(pane.lease.into()),
+                });
+                self.pane = None;
+                return Ok(());
+            }
+            // A zero exit closes the Pane even without a subscribed client. Keep its final
+            // screen until its channel receives it, but never retain it across a restart.
             self.retain(None)?;
         }
         Ok(())
@@ -301,33 +317,36 @@ impl DevelopmentPaneHost {
             device: pane.device,
             attachment_generation: pane.attachment_generation,
             control_epoch: pane.control_epoch,
+            end: pane::SessionEnd::EndAllSessions,
+            session: Some(pane.lease.into()),
         });
         // Use ordinary shutdown to invalidate input/effects and wait for native cleanup, but
         // retain organization and its control grant rather than retiring an ordinary exit.
         self.shutdown().map_err(|_| Refusal::CleanupUnresolved)
     }
+    /// Take Over of an ended Pane is its Start Session: every client sees the same ended Pane,
+    /// so any of them may start it. The grant moves first, so a start the directory refuses
+    /// still leaves this client in control of the ended Pane.
     pub(super) fn take_over_ended(
         &mut self,
         device: [u8; 32],
+        connection: [u8; 32],
         attachment_generation: Option<u64>,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
     ) -> Result<Reply, Refusal> {
-        if self.pane.is_some() || self.dormant.is_none() {
+        if self.pane.is_some() {
             return Err(Refusal::Stale);
         }
-        let reply = self.restored()?;
-        let control_epoch = self
-            .dormant
-            .as_ref()
-            .ok_or(Refusal::Stale)?
+        let dormant = self.dormant.as_mut().ok_or(Refusal::Stale)?;
+        dormant.control_epoch = dormant
             .control_epoch
             .checked_add(1)
             .ok_or(Refusal::Capacity)?;
-        self.dormant = Some(DormantPane {
-            device: Some(device),
-            attachment_generation,
-            control_epoch,
-        });
-        Ok(reply)
+        dormant.device = Some(device);
+        dormant.attachment_generation = attachment_generation;
+        self.start(device, connection, size, style)
+            .map(|lease| Reply::Attached { lease })
     }
     pub(super) fn reconcile_selection(&mut self) -> Result<(), Refusal> {
         self.retire_exited()?;
@@ -724,9 +743,10 @@ impl OwnedPane {
                     self.screen = Some(screen);
                 }
                 TerminalSessionEvent::ClientEffect(_) => {}
-                TerminalSessionEvent::Exited(_) => {
+                TerminalSessionEvent::Exited(exit) => {
                     self.invalidate_input();
                     self.ended = true;
+                    self.end = kept_exit(&exit);
                 }
                 TerminalSessionEvent::Failed(ref failure) => {
                     self.directory_failed = matches!(
@@ -748,6 +768,23 @@ impl OwnedPane {
         while let Ok(model) = self.subscription.accessibility.try_recv() {
             self.accessibility.update(model);
         }
+    }
+}
+/// Why a shell's exit keeps its Pane, or `None` when the exit closes it. A zero exit is the
+/// person's own `exit`, so the Pane closes as terminals conventionally do. A nonzero code or a
+/// signal keeps the Pane, so the person learns why the shell ended. A shutdown the server asked
+/// for belongs to whatever asked for it.
+fn kept_exit(exit: &crate::terminal::session::TerminalSessionExit) -> Option<pane::SessionEnd> {
+    use crate::terminal::session::TerminalSessionExit;
+    match exit {
+        TerminalSessionExit::ExitCode(code) if *code != 0 => {
+            Some(pane::SessionEnd::Exited { code: *code })
+        }
+        TerminalSessionExit::Signal(_) => Some(pane::SessionEnd::Signaled),
+        TerminalSessionExit::Success
+        | TerminalSessionExit::ExitCode(_)
+        | TerminalSessionExit::GracefulShutdown
+        | TerminalSessionExit::ForcedShutdown => None,
     }
 }
 fn runtime_reply<T>(reply: async_channel::Receiver<Result<T, String>>) -> Result<T, Refusal> {

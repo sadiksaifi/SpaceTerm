@@ -142,7 +142,7 @@ fn bookkept(
         Request::RepairDirectory { target, .. } => Some(Some(target.boot)),
         Request::SelectPane { explicit: true, .. } => Some(None),
         Request::TakeOver { target, .. }
-            if state.session_dormant() || target.session == pane_id =>
+            if state.session_end().is_some() || target.session == pane_id =>
         {
             Some(Some(target.server))
         }
@@ -239,7 +239,7 @@ impl ClaimWorker<'_> {
                 &reply,
                 Reply::Restored {
                     fresh: true,
-                    session_ended: false,
+                    session_ended: None,
                     ..
                 }
             );
@@ -275,14 +275,12 @@ impl ClaimWorker<'_> {
                 *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) =
                     recovery.clone().filter(|_| directory_recovery);
                 unavailable |= directory_unavailable;
-                state
-                    .session_dormant
-                    .store(session_ended, Ordering::Release);
+                state.set_session_end(session_ended);
                 state.admission(Admission::Waiting);
                 state.set(if unavailable {
                     DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
-                } else if session_ended {
-                    DevelopmentPaneStatus::SessionEnded
+                } else if let Some(end) = session_ended {
+                    DevelopmentPaneStatus::SessionEnded(end)
                 } else if fresh {
                     DevelopmentPaneStatus::Connecting
                 } else {
@@ -480,7 +478,7 @@ mod tests {
             tab: [4; 32],
             recovery: None,
             directory_unavailable: false,
-            session_ended: false,
+            session_ended: None,
         }
     }
 
@@ -896,7 +894,7 @@ mod tests {
                             session: [2; 32],
                         },
                         controller: pane::control::Controller::Nobody,
-                        session_ended: false,
+                        session_ended: None,
                     }
                 } else {
                     restored(1)
@@ -941,7 +939,7 @@ mod tests {
                 this_client: false,
             },
             // Restored organization has no prior ended Session, unlike End All Sessions.
-            session_ended: false,
+            session_ended: None,
         };
         let mut starts = 0;
         let result = run_claim(&state, |request| match request {
@@ -1013,12 +1011,17 @@ mod tests {
         assert!(matches!(result, Err(ServerError::Protocol)));
         assert!(state.start_unconfirmed());
         // Even an explicit action reaching the backend cannot produce another shell start.
-        state.set(DevelopmentPaneStatus::SessionEnded);
+        state.set(DevelopmentPaneStatus::SessionEnded(
+            pane::SessionEnd::EndAllSessions,
+        ));
         state.start_restored();
         state.select();
         assert!(!state.start_restored.load(Ordering::Acquire));
         assert!(!state.selected.load(Ordering::Acquire));
-        state.offered_take_over(pane::control::Controller::Nobody, true);
+        state.offered_take_over(
+            pane::control::Controller::Nobody,
+            Some(pane::SessionEnd::EndAllSessions),
+        );
         state.take_over();
         assert!(!state.take_over.load(Ordering::Acquire));
         let target = pane::directories::Target {
@@ -1362,7 +1365,7 @@ mod tests {
                                 name: "Studio".into(),
                                 this_client: false,
                             },
-                            session_ended: false,
+                            session_ended: None,
                         }
                     })
                 })
@@ -1389,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn takeover_of_an_ended_pane_retires_earlier_selection_and_preserves_later_selection() {
+    fn takeover_of_an_ended_pane_starts_it_in_one_request() {
         let state = DevelopmentPaneState::new();
         let alive = AtomicBool::new(true);
         let size = Mutex::new(PaneSize {
@@ -1424,59 +1427,58 @@ mod tests {
             attached_session: &mut attached_session,
             takeover: &mut takeover,
             paste_unconfirmed: &mut paste_unconfirmed,
-        }.run(|request| {
-            let restored = || Reply::Restored {
-                fresh: false,
-                recovery: None,
-                directory_unavailable: false,
-                session_ended: true,
-                server: target.server,
-                workspace: [6; 32],
-                tab: [7; 32],
-                pane: target.session,
-            };
-            let offered = || Reply::Takeover {
-                target,
-                controller: pane::control::Controller::Client {
-                    name: "Studio".into(),
-                    this_client: false,
-                },
-                session_ended: true,
-            };
-            let reply = match phase {
-                0 => {
-                    assert!(matches!(request, Request::SelectPane { explicit: false, .. }));
-                    offered()
-                }
-                1 => {
-                    assert!(matches!(request, Request::SelectPane { explicit: false, .. }));
-                    // Selection and Take Over arrive while this passive observation is in flight.
-                    state.select();
-                    state.take_over();
-                    offered()
-                }
-                2 => {
-                    assert!(matches!(request, Request::TakeOver { .. }));
-                    restored()
-                }
-                3 => {
-                    assert!(matches!(request, Request::SelectPane { explicit: false, .. }),
-                        "Take Over must leave the ended Pane dormant until a later selection; observed {request:?}");
-                    assert_eq!(state.status(), DevelopmentPaneStatus::SessionEnded);
-                    state.select();
-                    restored()
-                }
-                4 => {
-                    assert!(matches!(request, Request::StartRestored { .. }),
-                        "a later explicit selection must still start the shell");
-                    Reply::Attached { lease }
-                }
-                _ => panic!("claim continued after receiving its lease"),
-            };
-            phase += 1;
-            Ok(reply)
-        }, || {}).unwrap().unwrap();
+        }
+        .run(
+            |request| {
+                let offered = || Reply::Takeover {
+                    target,
+                    controller: pane::control::Controller::Client {
+                        name: "Studio".into(),
+                        this_client: false,
+                    },
+                    session_ended: Some(pane::SessionEnd::Exited { code: 1 }),
+                };
+                let reply = match phase {
+                    0 => {
+                        assert!(matches!(
+                            request,
+                            Request::SelectPane {
+                                explicit: false,
+                                ..
+                            }
+                        ));
+                        offered()
+                    }
+                    1 => {
+                        assert!(matches!(
+                            request,
+                            Request::SelectPane {
+                                explicit: false,
+                                ..
+                            }
+                        ));
+                        // Selection and Take Over arrive while this passive observation is in flight.
+                        state.select();
+                        state.take_over();
+                        offered()
+                    }
+                    2 => {
+                        assert!(
+                            matches!(request, Request::TakeOver { .. }),
+                            "Take Over supersedes the earlier selection; observed {request:?}"
+                        );
+                        Reply::Attached { lease }
+                    }
+                    _ => panic!("claim continued after receiving its lease"),
+                };
+                phase += 1;
+                Ok(reply)
+            },
+            || {},
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(granted.lease, lease);
-        assert_eq!(phase, 5);
+        assert_eq!(phase, 3);
     }
 }

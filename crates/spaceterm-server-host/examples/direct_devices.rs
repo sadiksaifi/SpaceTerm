@@ -185,7 +185,7 @@ mod exercise {
             return Err("revocation did not leave the running Pane without a controller");
         };
         require(
-            takeover.controller == Controller::Nobody && !takeover.session_ended,
+            takeover.controller == Controller::Nobody && takeover.session_ended.is_none(),
             "revocation did not leave the running Pane without a controller",
         )?;
         take_over(connection, pane, takeover.target)

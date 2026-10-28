@@ -142,7 +142,7 @@ mod exercise {
         let Claimed::Takeover(takeover) = claimed else {
             return Err("ended Pane did not retain its Takeover Screen".into());
         };
-        if !takeover.session_ended {
+        if takeover.session_ended != Some(SessionEnd::EndAllSessions) {
             return Err("ended Pane did not retain its Takeover Screen".into());
         }
         match (takeover.controller, name) {
@@ -159,7 +159,8 @@ mod exercise {
     }
 
     fn restored(claimed: Claimed) -> Result<()> {
-        if !matches!(claimed, Claimed::Restored(restored) if restored.session_ended) {
+        if !matches!(claimed, Claimed::Restored(restored) if restored.session_ended == Some(SessionEnd::EndAllSessions))
+        {
             return Err("controller did not observe an ended retained Pane".into());
         }
         Ok(())

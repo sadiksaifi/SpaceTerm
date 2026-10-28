@@ -175,11 +175,15 @@ pub struct DevelopmentPaneHost {
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
     notifier: Option<dispatch::SessionNotifiers>,
 }
+/// A Pane the running server keeps after its Session ended, with the control grant it had.
 #[derive(Clone, Copy)]
 struct DormantPane {
     device: Option<[u8; 32]>,
     attachment_generation: Option<u64>,
     control_epoch: u64,
+    end: pane::SessionEnd,
+    /// The Session that ended, so its channel learns that the Pane stays.
+    session: Option<PaneTarget>,
 }
 struct OwnedPane {
     device: Option<[u8; 32]>,
@@ -195,9 +199,12 @@ struct OwnedPane {
     /// Whether the controlling client shows this Pane, so its Terminal Session publishes frames.
     presentable: bool,
     ended: bool,
+    /// Why the shell's exit keeps the Pane. `None` with `ended` closes the Pane.
+    end: Option<pane::SessionEnd>,
     failed: bool,
     directory_failed: bool,
-    ended_restart: bool,
+    /// Why the Session this one replaced ended, so a failed start leaves the Pane ended again.
+    ended_restart: Option<pane::SessionEnd>,
     appearance_generation: u64,
     focus_generation: u64,
     focus: FocusTarget,

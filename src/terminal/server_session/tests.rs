@@ -1554,15 +1554,15 @@ fn each_take_over_offer_names_the_current_controlling_client() {
     };
     let state = DevelopmentPaneState::new();
     assert_eq!(state.controller(), None);
-    state.offered_take_over(client("Studio"), false);
+    state.offered_take_over(client("Studio"), None);
     assert_eq!(state.status(), DevelopmentPaneStatus::Takeover);
     assert_eq!(state.controller(), Some(client("Studio")));
-    state.offered_take_over(Controller::Nobody, true);
+    state.offered_take_over(Controller::Nobody, Some(pane::SessionEnd::Signaled));
     assert_eq!(state.controller(), Some(Controller::Nobody));
-    assert!(state.session_dormant());
+    assert_eq!(state.session_end(), Some(pane::SessionEnd::Signaled));
     state.take_over();
-    state.offered_take_over(client("Laptop"), false);
-    assert!(!state.session_dormant());
+    state.offered_take_over(client("Laptop"), None);
+    assert_eq!(state.session_end(), None);
     assert_eq!(
         state.status(),
         DevelopmentPaneStatus::TakingOver,
