@@ -36,6 +36,8 @@ pub(crate) mod https_transport;
 #[cfg(feature = "desktop")]
 pub(crate) mod keyboard_layout;
 #[cfg(target_os = "macos")]
+pub(crate) mod kqueue_watch;
+#[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
 mod macos_appearance;
 #[cfg(target_os = "macos")]
@@ -61,8 +63,6 @@ pub(crate) mod microphone_access;
     )
 )]
 pub(crate) mod permission_access;
-#[cfg(target_os = "macos")]
-pub(crate) mod kqueue_watch;
 /// `notify` serves the desktop, and a Linux server's Git facts watch.
 #[cfg(any(target_os = "linux", feature = "desktop"))]
 pub(crate) mod repository_watch;

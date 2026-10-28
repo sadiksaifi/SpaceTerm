@@ -7,14 +7,17 @@ fn metadata_write_failure_preserves_the_live_connection_and_its_exact_authority(
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (tcp, _) = listener.accept().unwrap();
     let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
     let mut state = fixture.state.lock().unwrap();
     let generation = state.generation;
     state
-        .register(&paired, generation, [5; 32], outbox.clone(), &tcp)
+        .register(
+            &paired,
+            generation,
+            [5; 32],
+            outbox.clone(),
+            Box::new(crate::direct::tests::Quiet),
+        )
         .unwrap();
     let record = fixture.paths.data.join("direct.json");
     let original = fixture.paths.data.join("retained-direct.json");

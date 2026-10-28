@@ -11,3 +11,7 @@ Account-local reconnect uses owning-account IPC authority. Remote reconnect, sle
 One connection owner publishes status for the Workspace Window and Settings. Saved active intent may resume with bounded retries after relaunch; saving or rendering an inactive connection starts nothing. Disconnect ends ordinary retries and preserves the Saved Connection. [Unpair Device](0038-unpair-devices-without-blocking-local-connection-removal.md) removes it; [offline edits and deferred releases](0047-keep-shared-workspace-edits-unavailable-offline.md) retain their own outcomes.
 
 [ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) judges connection health from traffic and pings on the live connection.
+
+[ADR 0051](0051-predict-typed-characters-at-the-shells-line-editor.md) drops predicted characters when the connection is lost, so the frozen screen shows only what the server confirmed.
+
+[ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

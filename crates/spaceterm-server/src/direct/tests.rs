@@ -2,13 +2,14 @@ use super::*;
 use crate::connection::io::{Waker, spawn_link};
 use crate::connection::link::{LinkError, RequestError, ServerLink};
 use crate::connection::outbox::Outbox;
+use crate::connection::quic::{QuicListener, QuicStream};
 use crate::connection::service::{Dispatch, PaneService, Peer, SharedPaneService};
 use crate::connection::sync::SyncWorker;
 use crate::connection::unix::UnixCarrier;
-use crate::connection::wss::WssCarrier;
 use crate::protocol::{EffectDone, Input, Operation, Refusal, ReplyBody, RequestId, View};
+use client::Messages;
 use std::{
-    net::TcpListener,
+    net::UdpSocket,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -34,22 +35,79 @@ pub(crate) fn service(service: impl PaneService + 'static) -> SharedPaneService 
     Arc::new(Mutex::new(Box::new(service)))
 }
 
-/// Admits an authenticated WSS connection as `client` and starts its link.
+/// A UDP port of `ip` that was free a moment ago.
+pub(crate) fn free_udp(ip: std::net::IpAddr) -> std::net::SocketAddr {
+    UdpSocket::bind((ip, 0)).unwrap().local_addr().unwrap()
+}
+
+/// Severs nothing, for registrations a test only inspects.
+pub(crate) struct Quiet;
+impl crate::connection::registry::Sever for Quiet {
+    fn sever(&self) {}
+}
+
+/// Accepts the next QUIC connection of `state`'s listener and completes its handshake, for tests
+/// that play the server's side of the pairing exchange by hand.
+pub(crate) fn accept_raw(state: &host::Shared) -> QuicStream {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        if let Some((stream, _generation)) = state.lock().unwrap().accept() {
+            break stream;
+        }
+        assert!(Instant::now() < deadline, "QUIC accept deadline");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    stream.handshake(deadline).unwrap();
+    stream
+}
+
+/// A listener of `state`'s certificate on a free loopback port, outside its policy.
+pub(crate) fn listener(state: &host::Shared) -> (QuicListener, String) {
+    let config = {
+        let state = state.lock().unwrap();
+        let (certificate, key) = state.certificate();
+        quic::server_config(certificate, key).unwrap()
+    };
+    let listener = loopback_listener(config);
+    let endpoint = format!("quic://{}", listener.address());
+    (listener, endpoint)
+}
+
+/// A listener of `config` on a free loopback port. Another test can take the port between
+/// finding it and binding it, so a failed bind tries another.
+fn loopback_listener(config: Arc<noq_proto::ServerConfig>) -> QuicListener {
+    for _ in 0..8 {
+        let address = free_udp(std::net::Ipv4Addr::LOCALHOST.into());
+        if let Ok(listener) = QuicListener::bind(address, Arc::clone(&config)) {
+            return listener;
+        }
+    }
+    panic!("no free UDP port to listen on");
+}
+
+/// Accepts the next connection of a test listener and completes its handshake.
+pub(crate) fn accept_from(listener: &QuicListener) -> QuicStream {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        if let Some(stream) = listener.accept() {
+            break stream;
+        }
+        assert!(Instant::now() < deadline, "QUIC accept deadline");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    stream.handshake(deadline).unwrap();
+    stream
+}
+
+/// Admits an authenticated connection as `client` and starts its link.
 pub(crate) fn admitted(
     connection: DirectConnection,
     client: &[u8; 32],
     name: &str,
-    paired: &PairedDevice,
+    _paired: &PairedDevice,
 ) -> Result<ServerLink, ServerError> {
-    let mut ws = connection.into_ws();
-    crate::protocol::admit_transport(
-        &mut ws,
-        (client, &name.into()),
-        &paired.pin.server,
-        &paired.pin.build,
-        &[crate::protocol::MAJOR],
-    )?;
-    Ok(spawn_link(Box::new(WssCarrier::new(ws)), Arc::new(|_| {})).unwrap())
+    let carrier = connection.admit((client, &name.into()))?;
+    Ok(spawn_link(carrier, Arc::new(|_| {})).unwrap())
 }
 
 /// Connects and admits a paired device under its own client identity.
@@ -119,14 +177,27 @@ impl Fixture {
             .map(|v| v.0)
     }
     pub(crate) fn enable(&self) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        self.management(Management::SetPolicy {
-            enabled: true,
-            policy: Some(NetworkPolicy::new(address).unwrap()),
-        })
-        .unwrap();
+        self.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+    }
+    /// Enables exposure on a free UDP port of `ip`. Another test can take the port between
+    /// finding it and binding it, so a failed bind tries another.
+    pub(crate) fn listen_at(&self, ip: std::net::IpAddr) -> std::net::SocketAddr {
+        for _ in 0..8 {
+            let address = free_udp(ip);
+            self.management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(address).unwrap()),
+            })
+            .unwrap();
+            let ManagementReply::Status(status) = self.management(Management::Status).unwrap()
+            else {
+                panic!()
+            };
+            if status.listener == (ListenerState::Listening { addr: address }) {
+                return address;
+            }
+        }
+        panic!("no free UDP port to listen on");
     }
     pub(super) fn invite(&self) -> Invitation {
         let ManagementReply::Invitation(text) = self.management(Management::Invite).unwrap() else {
@@ -208,12 +279,12 @@ impl Fixture {
         std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let tcp = state.lock().unwrap().accept();
-                if let Some((tcp, generation)) = tcp {
+                let accepted = state.lock().unwrap().accept();
+                if let Some((stream, generation)) = accepted {
                     let (waker, wake) = Waker::new().unwrap();
-                    return host::serve(tcp, generation, state, &environment, waker, wake);
+                    return host::serve(stream, generation, state, &environment, waker, wake);
                 }
-                assert!(Instant::now() < deadline, "WSS accept deadline");
+                assert!(Instant::now() < deadline, "QUIC accept deadline");
                 std::thread::sleep(Duration::from_millis(2));
             }
         })
@@ -419,7 +490,7 @@ fn invalid_device_proof_cannot_consume_an_invitation_or_substitute_an_approval()
 }
 
 #[test]
-fn an_explicit_owner_rejection_crosses_wss_as_rejected_without_enrolling_the_device() {
+fn an_explicit_owner_rejection_crosses_quic_as_rejected_without_enrolling_the_device() {
     let fixture = Fixture::new();
     fixture.enable();
     let invitation = fixture.invite();
@@ -594,25 +665,11 @@ fn a_pinned_enrollment_reply_cannot_substitute_the_invitation_identity() {
     let substituted = other.id();
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let tcp = loop {
-            if let Some((tcp, _generation)) = state.lock().unwrap().accept() {
-                break tcp;
-            }
-            assert!(Instant::now() < deadline, "WSS accept deadline");
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        let (certificate, key, challenge) = {
-            let state = state.lock().unwrap();
-            let (certificate, key) = state.certificate();
-            (
-                certificate.to_vec(),
-                zeroize::Zeroizing::new(key.to_vec()),
-                state.challenge().unwrap(),
-            )
-        };
-        let mut ws = wss::accept(tcp, &certificate, &key).unwrap();
-        wss::send(&mut ws, &challenge).unwrap();
-        let authentication: wire::Authentication = wss::receive(&mut ws).unwrap();
+        let _ = deadline;
+        let mut ws = accept_raw(&state);
+        let challenge = state.lock().unwrap().challenge().unwrap();
+        ws.send(&challenge).unwrap();
+        let authentication: wire::Authentication = ws.receive().unwrap();
         let wire::Answer::Claim(mut claim) = state
             .lock()
             .unwrap()
@@ -624,7 +681,9 @@ fn a_pinned_enrollment_reply_cannot_substitute_the_invitation_identity() {
         // Change only the response at the network boundary. The signed claim,
         // exchange hash, device identity and original deadline remain genuine.
         claim.invitation_id = substituted;
-        wss::send(&mut ws, &Ok::<_, DirectError>(wire::Answer::Claim(claim))).unwrap();
+        ws.send(&Ok::<_, DirectError>(wire::Answer::Claim(claim)))
+            .unwrap();
+        let _ = ws.finish(Instant::now() + Duration::from_secs(5));
     });
     assert_eq!(enrollment.submit(), Err(DirectError::Substituted));
     server.join().unwrap();
@@ -632,7 +691,7 @@ fn a_pinned_enrollment_reply_cannot_substitute_the_invitation_identity() {
 }
 
 #[test]
-fn losing_the_first_wss_reply_still_compares_the_original_authenticated_exchange() {
+fn losing_the_first_reply_still_compares_the_original_authenticated_exchange() {
     let fixture = Fixture::new();
     fixture.enable();
     let invitation = fixture.invite();
@@ -642,25 +701,11 @@ fn losing_the_first_wss_reply_still_compares_the_original_authenticated_exchange
     let state = Arc::clone(&fixture.state);
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let tcp = loop {
-            if let Some((tcp, _generation)) = state.lock().unwrap().accept() {
-                break tcp;
-            }
-            assert!(Instant::now() < deadline, "WSS accept deadline");
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        let (certificate, key, challenge) = {
-            let state = state.lock().unwrap();
-            let (certificate, key) = state.certificate();
-            (
-                certificate.to_vec(),
-                zeroize::Zeroizing::new(key.to_vec()),
-                state.challenge().unwrap(),
-            )
-        };
-        let mut ws = wss::accept(tcp, &certificate, &key).unwrap();
-        wss::send(&mut ws, &challenge).unwrap();
-        let authentication: wire::Authentication = wss::receive(&mut ws).unwrap();
+        let _ = deadline;
+        let mut ws = accept_raw(&state);
+        let challenge = state.lock().unwrap().challenge().unwrap();
+        ws.send(&challenge).unwrap();
+        let authentication: wire::Authentication = ws.receive().unwrap();
         let wire::Answer::Claim(claim) = state
             .lock()
             .unwrap()
@@ -1022,7 +1067,7 @@ fn only_a_fully_admitted_device_updates_its_retained_last_connection_time() {
 }
 
 #[test]
-fn wss_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity() {
+fn quic_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -1054,49 +1099,34 @@ fn wss_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity()
 }
 
 #[test]
-fn an_unadmitted_peer_cannot_send_a_message_larger_than_the_preamble_bound() {
+fn an_unadmitted_peer_cannot_send_a_message_larger_than_the_authentication_bound() {
     let fixture = Fixture::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let (certificate, key, pin) = {
-        let state = fixture.state.lock().unwrap();
-        let (certificate, key) = state.certificate();
-        (
-            certificate.to_vec(),
-            zeroize::Zeroizing::new(key.to_vec()),
-            state.pin.clone(),
-        )
-    };
+    let (listener, endpoint) = listener(&fixture.state);
+    let pin = fixture.state.lock().unwrap().pin.clone();
+    let challenge = fixture.state.lock().unwrap().challenge();
     let server = std::thread::spawn(move || {
-        let mut ws = wss::accept(listener.accept().unwrap().0, &certificate, &key).unwrap();
-        wss::receive::<serde_json::Value>(&mut ws)
+        let mut stream = accept_from(&listener);
+        // The client accepts L0 once the server first writes on it.
+        let _ = stream.send(&challenge.ok());
+        stream.receive::<serde_json::Value>()
     });
-    let mut ws = wss::connect(&format!("wss://{address}/spaceterm"), &pin).unwrap();
-    let oversized = vec![b'1'; crate::connection::wss::PREAMBLE_MESSAGE_BYTES + 1];
-    let _ = ws.write(tungstenite::Message::Binary(oversized.into()));
+    let credential = DeviceCredential::generate().unwrap();
+    let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+    let oversized = (wire::MAX_AUTH_FRAME as u32 + 1).to_be_bytes();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while ws.flush().is_err() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    stream.send_bytes(&oversized, deadline).unwrap();
+    // The server refuses on the length alone and may close before the body leaves.
+    let _ = stream.send_bytes(&vec![b'1'; wire::MAX_AUTH_FRAME + 1], deadline);
     assert_eq!(server.join().unwrap().err(), Some(DirectError::Transport));
 }
 
 #[test]
-fn the_wss_carrier_moves_frames_larger_than_its_socket_buffers_in_order() {
+fn the_quic_carrier_moves_frames_larger_than_its_buffers_in_order() {
     use crate::connection::carrier::{Carrier, Offer, Priority};
     let fixture = Fixture::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let (certificate, key, pin) = {
-        let state = fixture.state.lock().unwrap();
-        let (certificate, key) = state.certificate();
-        (
-            certificate.to_vec(),
-            zeroize::Zeroizing::new(key.to_vec()),
-            state.pin.clone(),
-        )
-    };
-    // Whole frames of the largest size, each its own WebSocket message.
+    let (listener, endpoint) = listener(&fixture.state);
+    let pin = fixture.state.lock().unwrap().pin.clone();
+    // Whole frames of the largest size.
     let frames: Vec<Vec<u8>> = (0..3u8)
         .map(|index| {
             let mut frame = vec![0; crate::protocol::limits::MAX_FRAME_BYTES];
@@ -1109,34 +1139,39 @@ fn the_wss_carrier_moves_frames_larger_than_its_socket_buffers_in_order() {
         .collect();
     let expected = frames.clone();
     let server = std::thread::spawn(move || {
-        let ws = wss::accept(listener.accept().unwrap().0, &certificate, &key).unwrap();
-        let mut carrier = WssCarrier::new(ws);
+        let mut stream = accept_from(&listener);
+        stream.send(&"open").unwrap();
+        let mut carrier = stream.into_carrier();
         let mut queue = frames.into_iter();
         let mut held = queue.next();
-        while let Some(frame) = &held {
-            match carrier.offer(frame, Priority::L1).unwrap() {
-                Offer::Accepted => held = queue.next(),
-                Offer::Full => {
-                    let fd = carrier.readiness().write.unwrap();
-                    crate::connection::io::wait_fd(
-                        fd,
-                        true,
-                        Instant::now() + Duration::from_secs(5),
-                    );
-                }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while held.is_some() || carrier.flush().unwrap().pending {
+            if let Some(frame) = &held
+                && carrier.offer(frame, Priority::L1).unwrap() == Offer::Accepted
+            {
+                held = queue.next();
+                continue;
             }
             carrier.flush().unwrap();
-        }
-        while carrier.flush().unwrap().pending {
-            let fd = carrier.readiness().write.unwrap();
-            crate::connection::io::wait_fd(fd, true, Instant::now() + Duration::from_secs(5));
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+            crate::connection::io::wait_fd(readiness.read, false, until);
+            let _ = carrier.receive();
+            assert!(Instant::now() < deadline);
         }
         carrier.close();
-        while carrier.flush().unwrap().pending {}
+        while carrier.flush().unwrap().pending && Instant::now() < deadline {
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+            crate::connection::io::wait_fd(readiness.read, false, until);
+        }
     });
-    let ws = wss::connect(&format!("wss://{address}/spaceterm"), &pin).unwrap();
-    let mut carrier = WssCarrier::new(ws);
+    let credential = DeviceCredential::generate().unwrap();
+    let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+    assert_eq!(stream.receive::<String>().unwrap(), "open");
+    let mut carrier = stream.into_carrier();
     let mut received = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
     while received.len() < expected.len() {
         match carrier.receive().unwrap() {
             Some(frame) => {
@@ -1146,12 +1181,11 @@ fn the_wss_carrier_moves_frames_larger_than_its_socket_buffers_in_order() {
                 received.push(bytes);
             }
             None => {
-                let fd = carrier.readiness().read;
-                assert!(crate::connection::io::wait_fd(
-                    fd,
-                    false,
-                    Instant::now() + Duration::from_secs(5)
-                ));
+                carrier.flush().unwrap();
+                let readiness = carrier.readiness();
+                let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+                crate::connection::io::wait_fd(readiness.read, false, until);
+                assert!(Instant::now() < deadline);
             }
         }
     }
@@ -1165,28 +1199,19 @@ fn a_valid_tls_pin_does_not_replace_validation_of_the_servers_public_claim_proof
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let (certificate, key, mut challenge) = {
-        let state = fixture.state.lock().unwrap();
-        let (certificate, key) = state.certificate();
-        (
-            certificate.to_vec(),
-            zeroize::Zeroizing::new(key.to_vec()),
-            state.challenge().unwrap(),
-        )
-    };
+    let (listener, endpoint) = listener(&fixture.state);
+    let mut challenge = fixture.state.lock().unwrap().challenge().unwrap();
     challenge.proof[0] ^= 1;
     let server = std::thread::spawn(move || {
-        let mut ws = wss::accept(listener.accept().unwrap().0, &certificate, &key).unwrap();
-        wss::send(&mut ws, &challenge).unwrap();
+        let mut stream = accept_from(&listener);
+        stream.send(&challenge).unwrap();
         assert!(
-            wss::receive::<wire::Authentication>(&mut ws).is_err(),
+            stream.receive::<wire::Authentication>().is_err(),
             "the client must refuse before supplying a device proof"
         );
     });
     assert!(matches!(
-        DirectConnection::connect(&format!("wss://{address}/spaceterm"), &paired, &credential),
+        DirectConnection::connect(&endpoint, &paired, &credential),
         Err(DirectError::AuthenticationRefused)
     ));
     server.join().unwrap();
@@ -1199,12 +1224,6 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
     let challenge = fixture.state.lock().unwrap().challenge().unwrap();
-    let socket = || {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        (listener.accept().unwrap().0, client)
-    };
-    let (registered, _registered_peer) = socket();
     let outbox = Outbox::new(Arc::new(|| {}));
     fixture
         .state
@@ -1215,7 +1234,7 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
             challenge.generation,
             [5; 32],
             outbox.clone(),
-            &registered,
+            Box::new(Quiet),
         )
         .unwrap();
     let action = wire::Action::Connect {
@@ -1250,14 +1269,13 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
         state.authenticate(&challenge, &wire::Authentication { action, proof }),
         Err(DirectError::Disabled)
     ));
-    let (late, _peer) = socket();
     assert_eq!(
         state.register(
             &paired,
             challenge.generation,
             [6; 32],
             Outbox::new(Arc::new(|| {})),
-            &late
+            Box::new(Quiet)
         ),
         Err(DirectError::Disabled)
     );
@@ -1269,7 +1287,7 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
 }
 
 #[test]
-fn a_tcp_socket_accepted_before_policy_replacement_cannot_join_the_new_listener() {
+fn a_connection_accepted_before_policy_replacement_cannot_join_the_new_listener() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -1278,7 +1296,7 @@ fn a_tcp_socket_accepted_before_policy_replacement_cannot_join_the_new_listener(
     let client =
         std::thread::spawn(move || DirectConnection::connect(&endpoint, &paired, &credential));
     let deadline = Instant::now() + Duration::from_secs(5);
-    let (tcp, generation) = loop {
+    let (stream, generation) = loop {
         if let Some(accepted) = fixture.state.lock().unwrap().accept() {
             break accepted;
         }
@@ -1304,7 +1322,7 @@ fn a_tcp_socket_accepted_before_policy_replacement_cannot_join_the_new_listener(
     let (waker, wake) = Waker::new().unwrap();
     assert_eq!(
         host::serve(
-            tcp,
+            stream,
             generation,
             Arc::clone(&fixture.state),
             &environment,
@@ -1422,10 +1440,8 @@ fn a_paired_policy_request_is_refused_without_mutation_or_retiring_its_connectio
         let paired = fixture.enroll(&credential);
         let server = fixture.serve_next();
         let connection = connect(&fixture.endpoint(), &paired, &credential);
-        let policy = change_address.then(|| {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
-        });
+        let policy = change_address
+            .then(|| NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap());
         // The admission reply precedes the retained connection timestamp. A server request
         // completes after that metadata write and fences this baseline.
         assert!(matches!(
@@ -1489,18 +1505,16 @@ fn setup(
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let policy = status
-        .policy
-        .clone()
-        .unwrap_or_else(|| NetworkPolicy::new(listener.local_addr().unwrap()).unwrap());
+    let policy = status.policy.clone().unwrap_or_else(|| {
+        NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap()
+    });
     operation[..8].copy_from_slice(&status.setup_generation.to_be_bytes());
     Management::Setup {
         generation: status.setup_generation,
         pin: status.pin,
         expected_policy: status.policy,
         expected_enabled: status.enabled,
-        endpoint: format!("wss://{}/spaceterm", policy.bind),
+        endpoint: format!("quic://{}", policy.bind),
         policy,
         operation,
         public_key: credential.public_key().unwrap(),
@@ -1539,7 +1553,7 @@ fn reserve(fixture: &Fixture, request: &Management) {
 }
 
 #[test]
-fn prepared_setup_can_be_cancelled_over_wss_before_admission_and_after_restart() {
+fn prepared_setup_can_be_cancelled_over_quic_before_admission_and_after_restart() {
     let fixture = Fixture::new();
     fixture.enable();
     let endpoint = fixture.endpoint();
@@ -1663,7 +1677,7 @@ fn setup_retries_recover_one_pairing_after_lost_reply_and_reject_substituted_ori
             3 => *name = "Another client".into(),
             4 => *expected_policy = None,
             5 => *expected_enabled = !*expected_enabled,
-            _ => *endpoint = format!("wss://another.example:{}/spaceterm", policy.bind.port()),
+            _ => *endpoint = format!("quic://another.example:{}", policy.bind.port()),
         }
         assert!(matches!(
             reopened.lock().unwrap().manage(None, changed),
@@ -1761,7 +1775,7 @@ fn admitted_setup_retry_returns_its_original_pairing_without_replacing_a_changed
 }
 
 #[test]
-fn lost_setup_reply_uses_the_original_claim_for_key_bound_wss_cleanup() {
+fn lost_setup_reply_uses_the_original_claim_for_key_bound_quic_cleanup() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -1812,7 +1826,7 @@ fn lost_setup_reply_uses_the_original_claim_for_key_bound_wss_cleanup() {
 }
 
 #[test]
-fn paired_wss_authority_cannot_prepare_enroll_or_cancel_account_setup() {
+fn paired_quic_authority_cannot_prepare_enroll_or_cancel_account_setup() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -2004,9 +2018,7 @@ fn configured_listener_survives_off_on_and_can_be_selected_before_exposure() {
         }),
         Err(DirectError::InvalidRequest)
     ));
-    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
-    let policy = NetworkPolicy::new(socket.local_addr().unwrap()).unwrap();
-    drop(socket);
+    let policy = NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap();
     fixture
         .management(Management::SetPolicy {
             policy: Some(policy.clone()),
@@ -2047,13 +2059,13 @@ fn configured_listener_survives_off_on_and_can_be_selected_before_exposure() {
 }
 
 #[test]
-fn dns_wss_connections_reconnect_with_the_saved_name_and_require_the_original_pin() {
+fn dns_connections_reconnect_with_the_saved_name_and_require_the_original_pin() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
     let port = Endpoint::from_url(&fixture.endpoint()).unwrap().port();
-    let endpoint = format!("wss://localhost:{port}/spaceterm");
+    let endpoint = format!("quic://localhost:{port}");
     for _ in 0..2 {
         let worker = fixture.serve_next();
         drop(connect(&endpoint, &paired, &credential));
@@ -2084,6 +2096,53 @@ fn client_clock_cannot_expire_or_reject_an_invitation_before_server_observation(
     }
 }
 
+/// A setup reserved over WSS, before QUIC replaced it, is dropped when the server loads its
+/// record. Everything else loads, and the unfinished setup is reported as abandoned.
+#[test]
+fn a_wss_setup_reservation_is_dropped_and_the_record_still_loads() {
+    let mut fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let reservation = DeviceCredential::generate().unwrap();
+    let request = setup(&fixture, [105; 32], &reservation);
+    reserve(&fixture, &request);
+    let Management::Setup { operation, .. } = &request else {
+        panic!()
+    };
+    let operation = *operation;
+    fixture.state.lock().unwrap().stop();
+    let path = fixture.paths.data.join("direct.json");
+    let stored = std::fs::read_to_string(&path).unwrap();
+    let (start, _) = stored
+        .match_indices("\"endpoint\":\"quic://")
+        .next()
+        .unwrap();
+    let rest = &stored[start + "\"endpoint\":\"quic://".len()..];
+    let authority = &rest[..rest.find('"').unwrap()];
+    let obsolete = stored.replacen(
+        &format!("\"endpoint\":\"quic://{authority}\""),
+        &format!("\"endpoint\":\"wss://{authority}/spaceterm\""),
+        1,
+    );
+    assert_ne!(obsolete, stored);
+    std::fs::write(&path, obsolete).unwrap();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    assert_eq!(status.abandoned_setups, [operation]);
+    assert!(matches!(status.listener, ListenerState::Listening { .. }));
+    let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap() else {
+        panic!()
+    };
+    assert!(
+        devices
+            .iter()
+            .any(|device| device.pairing == paired.pairing)
+    );
+}
+
 #[test]
 fn setup_preserves_distinct_public_and_listener_ports_across_reopen_and_exact_replay() {
     let mut fixture = Fixture::new();
@@ -2097,7 +2156,7 @@ fn setup_preserves_distinct_public_and_listener_ports_across_reopen_and_exact_re
     };
     let bind = policy.bind;
     let public_port = if bind.port() == 9443 { 9444 } else { 9443 };
-    *endpoint = format!("wss://public.example:{public_port}/spaceterm");
+    *endpoint = format!("quic://public.example:{public_port}");
     assert_ne!(public_port, bind.port());
     reserve(&fixture, &request);
 
@@ -2116,7 +2175,7 @@ fn setup_preserves_distinct_public_and_listener_ports_across_reopen_and_exact_re
         if change_bind {
             policy.bind.set_port(public_port);
         } else {
-            *endpoint = format!("wss://other.example:{public_port}/spaceterm");
+            *endpoint = format!("quic://other.example:{public_port}");
         }
         assert!(matches!(
             fixture.management(substituted),
@@ -2310,7 +2369,7 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
     impl DirectConnector for Connector {
         fn connect(&self) -> Result<DirectConnection, DirectError> {
             let result = DirectConnection::connect(&self.endpoint, &self.paired, &self.credential);
-            // Both handles finish WSS authentication before either starts admission.
+            // Both handles finish QUIC authentication before either starts admission.
             self.admitted.wait();
             result
         }
@@ -2365,108 +2424,1120 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
 }
 
 #[test]
-fn a_tcp_close_before_tls_is_a_transport_failure() {
+fn a_closed_server_port_is_a_transport_failure() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("wss://{}/spaceterm", listener.local_addr().unwrap());
-    let peer = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
-        // This peer closes before sending any TLS certificate or device admission proof.
-        drop(socket);
-    });
+    let closed = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("quic://{}", closed.local_addr().unwrap());
+    drop(closed);
     let started = Instant::now();
-    let result = DirectConnection::connect(&endpoint, &paired, &credential);
-    peer.join().unwrap();
-    if let Err(error) = &result
-        && *error != DirectError::Transport
-    {
-        eprintln!(
-            "DIAGNOSTIC direct-admission cycle=0 stage=tcp-close-before-tls elapsed_ms={} error={error:?}",
-            started.elapsed().as_millis()
-        );
-    }
-    assert!(
-        matches!(result, Err(DirectError::Transport)),
-        "a TCP close before TLS authentication must remain a transport failure"
+    assert_eq!(
+        DirectConnection::connect(&endpoint, &paired, &credential).err(),
+        Some(DirectError::Transport)
     );
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
-#[test]
-fn invalid_tls_data_is_still_an_authentication_refusal() {
-    use std::io::{Read, Write};
+mod quic_connections {
+    use super::*;
 
-    let fixture = Fixture::new();
-    fixture.enable();
-    let credential = DeviceCredential::generate().unwrap();
-    let paired = fixture.enroll(&credential);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("wss://{}/spaceterm", listener.local_addr().unwrap());
-    let peer = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut hello = [0; 4096];
-        assert!(socket.read(&mut hello).unwrap() > 0);
-        // An invalid TLS content type must not turn into a retryable socket failure.
-        socket.write_all(&[0xff, 0x03, 0x03, 0, 0]).unwrap();
-        socket.shutdown(std::net::Shutdown::Write).unwrap();
-        let _ = std::io::copy(&mut socket, &mut std::io::sink());
-    });
-    let result = DirectConnection::connect(&endpoint, &paired, &credential);
-    peer.join().unwrap();
-    assert!(matches!(result, Err(DirectError::AuthenticationRefused)));
-}
-
-/// Measures a WSS request's round trip on loopback: a paired client's request crosses TLS and
-/// the WebSocket to the server's I/O thread, is dispatched, and its reply returns. Run it with
-/// `mise run bench:latency:wss`.
-#[test]
-#[ignore = "a measurement; run with `mise run bench:latency:wss`"]
-fn wss_request_round_trip_on_loopback() {
-    const ROUNDS: usize = 2000;
-    let fixture = Fixture::new();
-    fixture.enable();
-    let credential = DeviceCredential::generate().unwrap();
-    let paired = fixture.enroll(&credential);
-    let server = fixture.serve_next();
-    let connection = connect(&fixture.endpoint(), &paired, &credential);
-    let operation = || Operation::ReleaseAttachment {
-        attachment: crate::attachments::Attachment {
-            workspace: [1; 32],
-            generation: 1,
-        },
-    };
-    // Warm the connection, the allocator and the TLS session.
-    for _ in 0..200 {
-        let _ = request(&connection, operation());
+    /// A request the refusing service answers without effect.
+    fn nothing() -> Operation {
+        Operation::ReleaseAttachment {
+            attachment: crate::attachments::Attachment {
+                workspace: [1; 32],
+                generation: 1,
+            },
+        }
     }
-    let mut samples: Vec<Duration> = (0..ROUNDS)
-        .map(|_| {
-            let started = Instant::now();
+
+    fn connect_quic(
+        endpoint: &str,
+        paired: &PairedDevice,
+        credential: &DeviceCredential,
+    ) -> ServerLink {
+        let connection = DirectConnection::connect(endpoint, paired, credential).unwrap();
+        admitted(connection, &paired.client, "Test", paired).unwrap()
+    }
+
+    #[test]
+    fn a_paired_device_is_admitted_over_quic_and_its_requests_round_trip() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next_with(service(Refusing));
+        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
+        for _ in 0..20 {
             assert!(matches!(
-                request(&connection, operation()),
+                request(&link, nothing()),
                 Err(RequestError::Refused(Refusal::Unsupported))
             ));
-            started.elapsed()
-        })
-        .collect();
-    samples.sort();
-    let percentile = |p: usize| samples[(ROUNDS * p / 100).min(ROUNDS - 1)];
-    println!(
-        "WSS request round trip on loopback over {ROUNDS} requests: p50 {:?}, p95 {:?}, p99 {:?}, max {:?}",
-        percentile(50),
-        percentile(95),
-        percentile(99),
-        samples[ROUNDS - 1]
-    );
-    assert!(
-        percentile(50) < Duration::from_millis(1),
-        "a WSS request takes under 1 ms on loopback"
-    );
-    drop(connection);
-    let _ = server.join().unwrap();
+        }
+        drop(link);
+        server.join().unwrap().unwrap();
+    }
+
+    /// The client's TLS certificate proves its key. Proofs signed by an enrolled credential do not
+    /// admit a connection whose certificate is another device's.
+    #[test]
+    fn quic_refuses_a_device_proof_from_another_certificate() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let other = DeviceCredential::generate().unwrap();
+        let server = fixture.serve_next_with(service(Refusing));
+        let mut stream = quic::dial(&fixture.endpoint(), &paired.pin, &other).unwrap();
+        let answer = client::exchange_on(
+            &mut stream,
+            &paired.pin,
+            &credential,
+            wire::Action::Connect {
+                paired: paired.clone(),
+            },
+            None,
+            None,
+        );
+        assert_eq!(answer.err(), Some(DirectError::AuthenticationRefused));
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_client_reaches_only_the_pinned_server_certificate() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let mut paired = fixture.enroll(&credential);
+        paired.pin.certificate = [7; 32];
+        let server = fixture.serve_next_with(service(Refusing));
+        assert!(matches!(
+            DirectConnection::connect(&fixture.endpoint(), &paired, &credential),
+            Err(DirectError::PinMismatch)
+        ));
+        assert!(server.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn a_device_certificate_names_the_device_key() {
+        let credential = DeviceCredential::generate().unwrap();
+        let certificate = quic::tests_certificate(credential.expose_bytes());
+        assert_eq!(
+            quic::certificate_key(&certificate),
+            Some(credential.public_key().unwrap())
+        );
+    }
+
+    #[test]
+    fn revocation_ends_a_quic_connection_with_a_typed_goodbye() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next_with(service(Refusing));
+        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        fixture
+            .management(Management::Revoke {
+                operation: crypto::random().unwrap(),
+                target: paired.pairing,
+            })
+            .unwrap();
+        assert_eq!(
+            ended(&link),
+            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// A raw frame of `kind` with `size` bytes in all, its body filled with `fill`.
+    fn raw(kind: crate::protocol::Kind, size: usize, fill: u8) -> Vec<u8> {
+        let mut frame = vec![fill; size];
+        let len = (size - 4) as u32;
+        frame[..4].copy_from_slice(&len.to_be_bytes());
+        frame[4] = kind as u8;
+        frame
+    }
+
+    /// Drives `carrier` until it has received `count` frames or `deadline` passes.
+    fn receive_frames(
+        carrier: &mut dyn crate::connection::carrier::Carrier,
+        count: usize,
+        deadline: Instant,
+    ) -> Vec<crate::protocol::RawFrame> {
+        let mut frames = Vec::new();
+        while frames.len() < count {
+            match carrier.receive() {
+                Ok(Some(frame)) => frames.push(frame),
+                Ok(None) => {
+                    carrier.flush().unwrap();
+                    let readiness = carrier.readiness();
+                    let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+                    crate::connection::io::wait_fd(readiness.read, false, until);
+                    assert!(Instant::now() < deadline, "frames did not arrive");
+                }
+                Err(_) => break,
+            }
+        }
+        frames
+    }
+
+    /// Offers `frames` in order and drives `carrier` until the peer has them, then closes.
+    fn send_frames(
+        carrier: &mut dyn crate::connection::carrier::Carrier,
+        frames: Vec<(Vec<u8>, crate::connection::carrier::Priority)>,
+        deadline: Instant,
+    ) {
+        use crate::connection::carrier::Offer;
+        let mut queue = frames.into_iter();
+        let mut held = queue.next();
+        loop {
+            while let Some((frame, priority)) = &held {
+                if carrier.offer(frame, *priority).unwrap() != Offer::Accepted {
+                    break;
+                }
+                held = queue.next();
+            }
+            let pending = carrier.flush().unwrap().pending;
+            if held.is_none() && !pending {
+                break;
+            }
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+            crate::connection::io::wait_fd(readiness.read, false, until);
+            let _ = carrier.receive();
+            assert!(Instant::now() < deadline, "frames did not leave");
+        }
+        carrier.close();
+        while carrier.flush().is_ok_and(|flush| flush.pending) && Instant::now() < deadline {
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+            crate::connection::io::wait_fd(readiness.read, false, until);
+        }
+    }
+
+    /// A client acknowledges the server's answer as it arrives, so the server may close before
+    /// the client reads it. The client still reads the answer, as the pairing exchange's final
+    /// answer must arrive.
+    #[test]
+    fn an_answer_that_arrived_before_the_servers_close_is_still_read() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            stream.send(&"answer").unwrap();
+            // Dropping the stream closes the connection.
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        server.join().unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        assert_eq!(stream.receive::<String>().unwrap(), "answer");
+        assert_eq!(
+            stream.receive::<String>().err(),
+            Some(DirectError::Transport)
+        );
+    }
+
+    /// The server writes L0 before L1, so without the client's rule a goodbye written after a
+    /// large frame would arrive first.
+    #[test]
+    fn a_goodbye_never_overtakes_a_frame_in_flight() {
+        use crate::connection::carrier::Priority;
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let large = raw(Kind::Frame, crate::protocol::limits::MAX_FRAME_BYTES, 7);
+        let goodbye = crate::protocol::frame::encode_server(
+            &crate::protocol::ServerMessage::Goodbye(crate::protocol::Fatal::Stopping),
+        )
+        .unwrap()
+        .frames
+        .remove(0);
+        let sent = (large.clone(), goodbye.clone());
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            send_frames(
+                &mut carrier,
+                vec![(sent.0, Priority::L1), (sent.1, Priority::L0)],
+                Instant::now() + Duration::from_secs(10),
+            );
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        let mut carrier = stream.into_carrier();
+        let frames = receive_frames(&mut carrier, 2, Instant::now() + Duration::from_secs(10));
+        let kinds: Vec<u8> = frames.iter().map(|frame| frame.kind).collect();
+        assert_eq!(kinds, [Kind::Frame as u8, Kind::Goodbye as u8]);
+        server.join().unwrap();
+    }
+
+    /// The client writes every level on one stream in the order it offers frames, so a
+    /// cancellation never overtakes its request and later input never overtakes an earlier
+    /// native effect completion.
+    #[test]
+    fn client_frames_arrive_in_the_order_offered() {
+        use crate::connection::carrier::Priority;
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            receive_frames(&mut carrier, 4, Instant::now() + Duration::from_secs(10))
+                .iter()
+                .map(|frame| frame.kind)
+                .collect::<Vec<_>>()
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        let mut carrier = stream.into_carrier();
+        send_frames(
+            &mut carrier,
+            vec![
+                (raw(Kind::Request, 60 * 1024, 1), Priority::L0),
+                (raw(Kind::Cancel, 64, 2), Priority::L1),
+                (raw(Kind::EffectDone, 16 * 1024, 3), Priority::L1),
+                (raw(Kind::Input, 64, 4), Priority::L0),
+            ],
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            [
+                Kind::Request as u8,
+                Kind::Cancel as u8,
+                Kind::EffectDone as u8,
+                Kind::Input as u8
+            ]
+        );
+    }
+
+    /// A switch between networks, or a route that now prefers another local address, moves the
+    /// client to a new socket and source port. The server validates the new path; the session
+    /// continues without a second admission.
+    #[test]
+    fn a_client_on_a_new_socket_keeps_its_session_without_admission() {
+        use crate::connection::carrier::Carrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Admissions(Arc<AtomicUsize>);
+        impl PaneService for Admissions {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                Dispatch::reply(Err(Refusal::Unsupported))
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let server = fixture.serve_next_with(service(Admissions(Arc::clone(&admissions))));
+        let mut stream = quic::dial(&fixture.endpoint(), &paired.pin, &credential).unwrap();
+        let answer = client::exchange_on(
+            &mut stream,
+            &paired.pin,
+            &credential,
+            wire::Action::Connect {
+                paired: paired.clone(),
+            },
+            None,
+            None,
+        );
+        assert!(matches!(answer, Ok(wire::Answer::Connected)));
+        crate::protocol::admit_transport(
+            &mut stream,
+            (&paired.client, &"Test".into()),
+            &paired.pin.server,
+            &paired.pin.build,
+            &[crate::protocol::MAJOR],
+        )
+        .unwrap();
+        let mut carrier = stream.into_carrier();
+        let before = carrier.local_address().unwrap();
+        carrier.prefer_sources(|_| Some(std::net::Ipv4Addr::new(127, 0, 0, 2).into()));
+        carrier.flush().unwrap();
+        assert_ne!(carrier.local_address().unwrap().port(), before.port());
+        let rebind = carrier.rebinder();
+        let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        for _ in 0..3 {
+            rebind.store(true, Ordering::Release);
+            for _ in 0..5 {
+                assert!(matches!(
+                    request(&link, nothing()),
+                    Err(RequestError::Refused(Refusal::Unsupported))
+                ));
+            }
+        }
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(link.health(), crate::connection::link::Health::Live);
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// A certificate whose subject key is ECDSA proves nothing about an Ed25519 key it carries
+    /// elsewhere, and a handshake signed with ECDSA does not authenticate a device.
+    #[test]
+    fn an_ecdsa_certificate_cannot_claim_an_embedded_device_key() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let victim = credential.public_key().unwrap();
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params =
+            rcgen::CertificateParams::new(vec![crate::connection::quic::SERVER_NAME.into()])
+                .unwrap();
+        let mut embedded = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        embedded.extend_from_slice(&victim);
+        params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(
+            &[1, 3, 6, 1, 4, 1, 99999, 1],
+            embedded.clone(),
+        )];
+        let certificate = params.self_signed(&pair).unwrap().der().clone();
+        assert!(
+            certificate
+                .windows(embedded.len())
+                .any(|window| window == embedded.as_slice()),
+            "the certificate carries the victim's key as Ed25519 SubjectPublicKeyInfo bytes"
+        );
+        assert_eq!(quic::certificate_key(&certificate), None);
+
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(mut stream) = listener.accept() {
+                    return stream.handshake(deadline).is_ok();
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into());
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(&pin, certificate, key, Arc::clone(&seen)).unwrap();
+        let address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        assert!(QuicStream::connect(config, &address, deadline, &seen.verified).is_err());
+        assert!(
+            !server.join().unwrap(),
+            "the server must refuse the handshake"
+        );
+    }
+
+    /// An Initial packet from an address the server has not seen answer a retry creates no
+    /// connection and takes no slot, so spoofed sources cannot hold them. A real client still
+    /// connects through the retry.
+    #[test]
+    fn an_unvalidated_initial_gets_a_retry_and_takes_no_slot() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let credential = DeviceCredential::generate().unwrap();
+        let address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        // A client's first Initial packet, sent from a socket that never answers.
+        let config = quic::presenting(
+            &pin,
+            quic::tests_certificate(credential.expose_bytes()).into(),
+            rustls::pki_types::PrivateKeyDer::Pkcs8(credential.expose_bytes().to_vec().into()),
+            Arc::default(),
+        )
+        .unwrap();
+        let mut client = noq_proto::Endpoint::new(Arc::default(), None, true);
+        let (_, mut connection) = client
+            .connect(Instant::now(), config, address, "spaceterm.invalid")
+            .unwrap();
+        let mut initial = Vec::new();
+        let transmit = connection
+            .poll_transmit(Instant::now(), std::num::NonZeroUsize::MIN, &mut initial)
+            .unwrap();
+        let spoofer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        spoofer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        for _ in 0..40 {
+            spoofer.send_to(&initial[..transmit.size], address).unwrap();
+        }
+        let mut reply = [0; 2048];
+        let (count, _) = spoofer.recv_from(&mut reply).unwrap();
+        // A long header whose type bits name Retry.
+        assert!(
+            count > 0 && reply[0] & 0xf0 == 0xf0,
+            "the answer is a retry"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            listener.accept().is_none(),
+            "no connection waits for a slot"
+        );
+
+        let server = std::thread::spawn(move || {
+            let mut accepted = accept_from(&listener);
+            accepted.send(&"open").unwrap();
+            accepted
+        });
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        drop(server.join().unwrap());
+    }
+
+    /// Turning exposure off and on at the same address while a client is connected takes the
+    /// listener back instead of binding a socket the old connection still holds, and that
+    /// connection still receives its goodbye.
+    #[test]
+    fn toggling_exposure_with_a_connected_client_keeps_the_listener() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let endpoint = fixture.endpoint();
+        let server = fixture.serve_next();
+        let link = connect(&endpoint, &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap()
+        else {
+            panic!()
+        };
+        for enabled in [false, true] {
+            fixture
+                .management(Management::SetPolicy {
+                    enabled,
+                    policy: status.policy.clone(),
+                })
+                .unwrap();
+        }
+        let ManagementReply::Status(after) = fixture.management(Management::Status).unwrap() else {
+            panic!()
+        };
+        assert_eq!(after.listener, status.listener);
+        assert_eq!(
+            ended(&link),
+            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+        let server = fixture.serve_next();
+        let link = connect(&endpoint, &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// A server that stopped receiving, as while it says goodbye, still takes the
+    /// acknowledgements and credit that let its writes finish, and does not spin meanwhile.
+    #[test]
+    fn a_server_that_stopped_receiving_still_finishes_writing() {
+        use crate::connection::carrier::{Carrier, Offer, Priority};
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let frames = 4;
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let (mut sent, mut turns) = (0, 0);
+            let frame = raw(Kind::Frame, crate::protocol::limits::MAX_FRAME_BYTES, 9);
+            // Never `receive`: only offer, flush and wait, as the I/O thread does once it
+            // stopped reading.
+            loop {
+                turns += 1;
+                if sent < frames && carrier.offer(&frame, Priority::L1).unwrap() == Offer::Accepted
+                {
+                    sent += 1;
+                    continue;
+                }
+                let pending = carrier.flush().unwrap().pending;
+                if sent == frames && !pending {
+                    // Closing waits until the client acknowledged every stream to its end.
+                    carrier.close();
+                    if !carrier.flush().unwrap().pending {
+                        break;
+                    }
+                }
+                assert!(Instant::now() < deadline, "the writes never finished");
+                let readiness = carrier.readiness();
+                let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+                crate::connection::io::wait_fd(
+                    readiness.progress.unwrap_or(readiness.read),
+                    false,
+                    until,
+                );
+            }
+            turns
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        let mut carrier = stream.into_carrier();
+        let received = receive_frames(
+            &mut carrier,
+            frames,
+            Instant::now() + Duration::from_secs(20),
+        );
+        assert_eq!(received.len(), frames);
+        // Acknowledge the server's close until it is done.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !server.is_finished() && Instant::now() < deadline {
+            let _ = carrier.receive();
+            let _ = carrier.flush();
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| {
+                at.min(Instant::now() + Duration::from_millis(50))
+            });
+            crate::connection::io::wait_fd(readiness.read, false, until);
+        }
+        let turns = server.join().unwrap();
+        assert!(turns < 20_000, "the server spun for {turns} turns");
+    }
+
+    /// A level whose stream waits on flow control is full on its own; another level is still
+    /// taken.
+    #[test]
+    fn a_blocked_bulk_stream_leaves_the_other_levels_open() {
+        use crate::connection::carrier::{Carrier, Offer, Priority};
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            let bulk = raw(Kind::BulkReply, crate::protocol::limits::MAX_FRAME_BYTES, 2);
+            let mut offers = Vec::new();
+            for _ in 0..4 {
+                offers.push(carrier.offer(&bulk, Priority::L2).unwrap());
+                carrier.flush().unwrap();
+            }
+            let ping = crate::protocol::frame::encode_server(
+                &crate::protocol::ServerMessage::Goodbye(crate::protocol::Fatal::Stopping),
+            )
+            .unwrap()
+            .frames
+            .remove(0);
+            let control = carrier.offer(&ping, Priority::L0).unwrap();
+            // The connection stays open until the client is done.
+            (offers, control, carrier)
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        // The client never reads, so L2 runs out of credit.
+        let (offers, control, carrier) = server.join().unwrap();
+        assert!(offers.contains(&Offer::Full), "L2 must fill up: {offers:?}");
+        assert_eq!(control, Offer::Accepted);
+        drop(stream);
+        drop(carrier);
+    }
+
+    /// The 33rd connection waiting for the host is refused at once.
+    #[test]
+    fn connections_past_the_pending_bound_are_refused() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let waiting: Vec<_> = (0..32)
+            .map(|_| {
+                let (endpoint, pin) = (endpoint.clone(), pin.clone());
+                std::thread::spawn(move || {
+                    let credential = DeviceCredential::generate().unwrap();
+                    let _ = quic::dial(&endpoint, &pin, &credential);
+                })
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while listener.waiting() < 32 {
+            assert!(
+                Instant::now() < deadline,
+                "only {} waited",
+                listener.waiting()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let credential = DeviceCredential::generate().unwrap();
+        let started = Instant::now();
+        assert!(quic::dial(&endpoint, &pin, &credential).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(listener.waiting(), 32);
+        drop(listener);
+        for thread in waiting {
+            thread.join().unwrap();
+        }
+    }
+
+    /// A handshake that either side refuses is an authentication refusal, not a transport
+    /// failure to retry.
+    #[test]
+    fn a_refused_tls_handshake_is_an_authentication_refusal() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let certificate =
+            rcgen::CertificateParams::new(vec![crate::connection::quic::SERVER_NAME.into()])
+                .unwrap()
+                .self_signed(&pair)
+                .unwrap()
+                .der()
+                .clone();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(mut stream) = listener.accept() {
+                    return stream.handshake(deadline).is_ok();
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into());
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(&pin, certificate, key, Arc::clone(&seen)).unwrap();
+        let address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let refused = QuicStream::connect(config, &address, deadline, &seen.verified);
+        assert_eq!(
+            refused.err().map(quic::transport),
+            Some(DirectError::AuthenticationRefused)
+        );
+        assert!(!server.join().unwrap());
+    }
+
+    /// A UDP relay between clients and a server. Each client source gets its own upstream
+    /// socket, so the server sees a new address when a client moves. `blackhole` drops a source's
+    /// traffic both ways, as a network that vanished under a still-valid address. `losses` drops
+    /// that many of the first datagrams from clients.
+    struct Relay {
+        address: std::net::SocketAddr,
+        sources: Arc<Mutex<Vec<std::net::SocketAddr>>>,
+        blackhole: Arc<Mutex<Option<std::net::SocketAddr>>>,
+        losses: Arc<std::sync::atomic::AtomicUsize>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Relay {
+        fn new(server: std::net::SocketAddr) -> Self {
+            use std::sync::atomic::Ordering;
+            let front = UdpSocket::bind("127.0.0.1:0").unwrap();
+            front.set_nonblocking(true).unwrap();
+            let address = front.local_addr().unwrap();
+            let sources: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::default();
+            let blackhole: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::default();
+            let losses: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (seen, hole, lose, stopping) = (
+                Arc::clone(&sources),
+                Arc::clone(&blackhole),
+                Arc::clone(&losses),
+                Arc::clone(&stop),
+            );
+            let thread = std::thread::spawn(move || {
+                let mut upstreams: Vec<(std::net::SocketAddr, UdpSocket)> = Vec::new();
+                let mut buffer = [0; 65_536];
+                while !stopping.load(Ordering::Acquire) {
+                    let mut idle = true;
+                    while let Ok((count, source)) = front.recv_from(&mut buffer) {
+                        idle = false;
+                        if *hole.lock().unwrap() == Some(source)
+                            || lose
+                                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                                    left.checked_sub(1)
+                                })
+                                .is_ok()
+                        {
+                            continue;
+                        }
+                        if !upstreams.iter().any(|(known, _)| *known == source) {
+                            let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+                            upstream.connect(server).unwrap();
+                            upstream.set_nonblocking(true).unwrap();
+                            upstreams.push((source, upstream));
+                            seen.lock().unwrap().push(source);
+                        }
+                        let (_, upstream) = upstreams
+                            .iter()
+                            .find(|(known, _)| *known == source)
+                            .unwrap();
+                        let _ = upstream.send(&buffer[..count]);
+                    }
+                    for (source, upstream) in &upstreams {
+                        while let Ok(count) = upstream.recv(&mut buffer) {
+                            idle = false;
+                            if *hole.lock().unwrap() != Some(*source) {
+                                let _ = front.send_to(&buffer[..count], source);
+                            }
+                        }
+                    }
+                    if idle {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            });
+            Self {
+                address,
+                sources,
+                blackhole,
+                losses,
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for Relay {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// A client sends a lost Initial packet again before it tries the next address, so one lost
+    /// packet never moves it off a server that answers.
+    #[test]
+    fn a_lost_initial_is_sent_again_before_the_next_address() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server_address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let relay = Relay::new(server_address);
+        relay.losses.store(1, std::sync::atomic::Ordering::Release);
+        // Nothing answers at the next address.
+        let silent = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            stream
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(
+            &pin,
+            quic::tests_certificate(credential.expose_bytes()).into(),
+            rustls::pki_types::PrivateKeyDer::Pkcs8(credential.expose_bytes().to_vec().into()),
+            Arc::clone(&seen),
+        )
+        .unwrap();
+        let mut stream = QuicStream::connect(
+            config,
+            &[relay.address, silent.local_addr().unwrap()],
+            Instant::now() + Duration::from_secs(5),
+            &seen.verified,
+        )
+        .unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        drop(server.join().unwrap());
+    }
+
+    /// The path under a client dies while its address stays valid. The client's unanswered ping
+    /// makes it move to a new socket; the server validates the new path, and the session goes on
+    /// with no second admission and no end, so the client keeps its Pane control.
+    #[test]
+    fn an_unanswered_ping_moves_the_client_to_a_new_path_and_keeps_its_session() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Session {
+            admitted: Arc<AtomicUsize>,
+            ended: Arc<AtomicUsize>,
+        }
+        impl PaneService for Session {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {
+                self.admitted.fetch_add(1, Ordering::SeqCst);
+            }
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                Dispatch::reply(Err(Refusal::Unsupported))
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {
+                self.ended.fetch_add(1, Ordering::SeqCst);
+            }
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server_address = Endpoint::from_url(&fixture.endpoint())
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let relay = Relay::new(server_address);
+        let (admitted, ended) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let server = fixture.serve_next_with(service(Session {
+            admitted: Arc::clone(&admitted),
+            ended: Arc::clone(&ended),
+        }));
+        let link = connect(&format!("quic://{}", relay.address), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let first = relay.sources.lock().unwrap()[0];
+        *relay.blackhole.lock().unwrap() = Some(first);
+        // The link pings after 5 s of silence and suspects its path 2.5 s later.
+        let deadline = Instant::now() + crate::protocol::limits::DEAD_AFTER;
+        while relay.sources.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < deadline, "the client never moved");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        assert_eq!(link.health(), crate::connection::link::Health::Live);
+        assert_eq!(admitted.load(Ordering::SeqCst), 1, "no second admission");
+        assert_eq!(ended.load(Ordering::SeqCst), 0, "the session never ended");
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    fn listener_state(fixture: &Fixture) -> ListenerState {
+        let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap()
+        else {
+            panic!()
+        };
+        status.listener
+    }
+
+    /// Moving exposure from the wildcard to one address of the same port binds at once when
+    /// no connection holds the old socket.
+    #[test]
+    fn changing_the_address_without_connections_binds_at_once() {
+        let fixture = Fixture::new();
+        let wildcard = fixture.listen_at(std::net::Ipv4Addr::UNSPECIFIED.into());
+        let specific =
+            std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), wildcard.port());
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(specific).unwrap()),
+            })
+            .unwrap();
+        assert_eq!(
+            listener_state(&fixture),
+            ListenerState::Listening { addr: specific }
+        );
+    }
+
+    /// While a connection of the old address still holds its socket, the new address waits as
+    /// `Starting`, then binds once that connection ended with its goodbye.
+    #[test]
+    fn changing_the_address_with_a_live_connection_binds_once_it_ends() {
+        let fixture = Fixture::new();
+        let specific = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next();
+        let link = connect(&fixture.endpoint(), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let wildcard =
+            std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), specific.port());
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new(wildcard).unwrap()),
+            })
+            .unwrap();
+        assert!(matches!(
+            listener_state(&fixture),
+            ListenerState::Starting { .. } | ListenerState::Listening { .. }
+        ));
+        assert_eq!(
+            ended(&link),
+            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while listener_state(&fixture) != (ListenerState::Listening { addr: wildcard }) {
+            assert!(
+                Instant::now() < deadline,
+                "still {:?}",
+                listener_state(&fixture)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let server = fixture.serve_next();
+        let link = connect(&format!("quic://{specific}"), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// Another QUIC service on an address, one with another ALPN, refuses the protocol before
+    /// the pinned server could be verified. That is an incompatibility, not a refused proof,
+    /// and the client goes on to the next address.
+    #[test]
+    fn another_quic_service_is_incompatible_and_the_next_address_still_connects() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        // A QUIC service with this server's certificate and another protocol.
+        let other = {
+            let state = fixture.state.lock().unwrap();
+            let (certificate, key) = state.certificate();
+            let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certificate.to_vec().into()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_vec().into()),
+            )
+            .unwrap();
+            tls.alpn_protocols = vec![b"other/1".to_vec()];
+            let config = crate::connection::quic::server_config(tls).unwrap();
+            loopback_listener(config)
+        };
+        let other_address = other.address();
+        let elsewhere = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Some(mut stream) = other.accept() {
+                    let _ = stream.handshake(deadline);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let alone =
+            DirectConnection::connect(&format!("quic://{other_address}"), &paired, &credential);
+        assert_eq!(alone.err(), Some(DirectError::IncompatibleProtocol));
+        elsewhere.join().unwrap();
+
+        let real = Endpoint::from_url(&fixture.endpoint())
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let server = fixture.serve_next();
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(
+            &paired.pin,
+            quic::tests_certificate(credential.expose_bytes()).into(),
+            rustls::pki_types::PrivateKeyDer::Pkcs8(credential.expose_bytes().to_vec().into()),
+            Arc::clone(&seen),
+        )
+        .unwrap();
+        // The first address speaks another protocol; the second is the server.
+        let stream = QuicStream::connect(
+            config,
+            &[other_address, real],
+            Instant::now() + Duration::from_secs(5),
+            &seen.verified,
+        );
+        assert!(stream.is_ok());
+        drop(stream);
+        let _ = server.join();
+    }
+
+    /// Measures a paired request's round trip over QUIC on loopback. Run it with
+    /// `mise run bench:latency:quic`.
+    #[test]
+    #[ignore = "a measurement; run with `mise run bench:latency:quic`"]
+    fn quic_request_round_trip_on_loopback() {
+        const ROUNDS: usize = 2000;
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next_with(service(Refusing));
+        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
+        let operation = nothing;
+        for _ in 0..200 {
+            let _ = request(&link, operation());
+        }
+        let mut samples: Vec<Duration> = (0..ROUNDS)
+            .map(|_| {
+                let started = Instant::now();
+                assert!(matches!(
+                    request(&link, operation()),
+                    Err(RequestError::Refused(Refusal::Unsupported))
+                ));
+                started.elapsed()
+            })
+            .collect();
+        samples.sort();
+        let percentile = |p: usize| samples[(ROUNDS * p / 100).min(ROUNDS - 1)];
+        println!(
+            "QUIC request round trip on loopback over {ROUNDS} requests: p50 {:?}, p95 {:?}, p99 {:?}, max {:?}",
+            percentile(50),
+            percentile(95),
+            percentile(99),
+            samples[ROUNDS - 1]
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+    }
 }

@@ -352,16 +352,10 @@ impl ServerConnection {
             if connection.paired() != &direct.paired {
                 return Err(ServerError::AuthenticationRefused);
             }
-            let mut ws = connection.into_ws();
-            protocol::admit_transport(
-                &mut ws,
-                (&direct.paired.client, &self.client_name()),
-                &direct.paired.pin.server,
-                &self.identity,
-                &[protocol::MAJOR],
-            )?;
+            // `with_direct` fixed the pin's build to this handle's identity.
+            let carrier = connection.admit((&direct.paired.client, &self.client_name()))?;
             return Ok((
-                Box::new(crate::connection::wss::WssCarrier::new(ws)),
+                carrier,
                 self.scope_for(direct.paired.client, direct.paired.pin.server),
             ));
         }
@@ -790,8 +784,10 @@ mod tests {
             let other =
                 direct::tests::admitted(connection, &paired.client, "Other view", &paired).unwrap();
             let policy = change_address.then(|| {
-                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                direct::NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
+                direct::NetworkPolicy::new(direct::tests::free_udp(
+                    std::net::Ipv4Addr::LOCALHOST.into(),
+                ))
+                .unwrap()
             });
             let local = ServerConnection::with_paths(fixture.paths.clone())
                 .unwrap()
@@ -851,7 +847,7 @@ mod tests {
     struct NoConnect;
     impl crate::direct::DirectConnector for NoConnect {
         fn connect(&self) -> Result<crate::direct::DirectConnection, crate::direct::DirectError> {
-            panic!("retained state must not contact WSS")
+            panic!("retained state must not contact QUIC")
         }
     }
     fn paired_identity() -> crate::direct::PairedDevice {

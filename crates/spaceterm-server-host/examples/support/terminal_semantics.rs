@@ -1,4 +1,4 @@
-//! One fixture-only terminal exercise shared by the native IPC and WSS checks.
+//! One fixture-only terminal exercise shared by the native IPC and QUIC checks.
 use super::support::{Pane, Screen, has_row, no_op, text_key};
 use spaceterm_server::{
     ServerError,
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn stage_retains_the_bounded_direct_cause_when_context_changes() {
         let failure = stage::<(), _>(
-            "wss-connect-pane",
+            "quic-connect-pane",
             Err(ServerError::Direct(
                 spaceterm_server::direct::DirectError::Transport,
             )),
@@ -99,10 +99,10 @@ mod tests {
     fn stage_never_formats_an_unclassified_native_error() {
         let error: Box<dyn std::error::Error> =
             std::io::Error::other("private native detail").into();
-        let failure = stage::<(), _>("wss-connect-pane", Err(error)).unwrap_err();
+        let failure = stage::<(), _>("quic-connect-pane", Err(error)).unwrap_err();
         assert_eq!(
             failure.to_string(),
-            "wss-connect-pane: fixture-operation-unavailable"
+            "quic-connect-pane: fixture-operation-unavailable"
         );
     }
 }
@@ -158,7 +158,7 @@ impl Timings {
         self.exchange.sort_unstable();
         let count = self.queue.len();
         let p95 = (count * 95).div_ceil(100) - 1;
-        // stderr is separate from the WSS driver's invitation and response framing.
+        // stderr is separate from the QUIC driver's invitation and response framing.
         eprintln!(
             "DIAGNOSTIC input-timing operation={operation} samples={count} elapsed_us={} queue_total_us={} exchange_total_us={} queue_max_us={} exchange_max_us={} queue_p95_us={} exchange_p95_us={}",
             elapsed.as_micros(),

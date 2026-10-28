@@ -1,8 +1,9 @@
 //! One full-duplex SpaceTerm Protocol connection between a client and a server.
 //!
-//! - [`carrier`] moves whole frames over one socket. [`unix`] carries account-local IPC, [`wss`]
-//!   paired WSS, and [`loopback`] is an in-memory carrier for tests. A later QUIC carrier replaces
-//!   TCP and WSS without changing messages.
+//! - [`carrier`] moves whole frames over one connection. [`unix`] carries account-local IPC,
+//!   [`quic`] paired connections, and [`loopback`] is an in-memory carrier for tests.
+//! - [`path`] tells a paired client when the system would reach its server from another local
+//!   address, so its QUIC socket moves there.
 //! - [`io`] runs one I/O thread per connection, waiting on carrier readiness and a wake pipe.
 //! - [`outbox`] orders a server's outgoing messages by priority and holds the latest presentation
 //!   per channel under one frame of credit.
@@ -21,6 +22,8 @@ pub mod io;
 pub mod link;
 pub mod loopback;
 pub mod outbox;
+pub mod path;
+pub mod quic;
 pub mod registry;
 pub mod server;
 pub mod service;
@@ -28,7 +31,6 @@ pub mod sync;
 #[cfg(test)]
 mod tests;
 pub mod unix;
-pub mod wss;
 
 /// Wakes a connection's I/O thread after another thread queued work for it. Implementations
 /// must not block, for example by writing one byte to a nonblocking pipe.
@@ -62,8 +64,8 @@ mod architecture_tests {
                 }
             }
         }
-        // The paired WSS handshakes and pairing messages that precede the carrier.
-        sources.push(root.join("direct/wss.rs"));
+        // The paired QUIC handshake and pairing messages that precede the carrier.
+        sources.push(root.join("direct/quic.rs"));
         assert!(sources.len() > 10);
         let sleep = ["thread", "::sleep"].concat();
         for path in sources {

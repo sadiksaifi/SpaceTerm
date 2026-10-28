@@ -1,4 +1,4 @@
-//! One bounded presentation exercise for the existing IPC and WSS fixtures.
+//! One bounded presentation exercise for the existing IPC and QUIC fixtures.
 //! The producer writes metadata without cell output while hidden and exits on request.
 use super::support::{self, Pane, Screen, has_row, text_key};
 use super::terminal_semantics::{Failure, stage};

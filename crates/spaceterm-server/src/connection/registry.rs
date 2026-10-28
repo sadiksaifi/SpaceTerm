@@ -3,16 +3,16 @@
 //! The host's direct-network state owns one registry and changes it under its own lock. Every
 //! paired connection registers after admission and unregisters when it ends. Revoking a pairing,
 //! disabling direct access and an uncertain commit each end the affected connections: the registry
-//! queues `Goodbye(Revoked)`, which also makes the connection stop dispatching, and severs the
-//! socket's read side, so no further request arrives. The I/O thread then writes the goodbye and
+//! queues `Goodbye(Revoked)`, which also makes the connection stop dispatching, and severs its
+//! receiving, so no further request arrives. The I/O thread then writes the goodbye and
 //! closes the carrier.
 use super::outbox::Outbox;
 use super::service::Pairing;
 use crate::direct::PairingId;
 use crate::protocol::Fatal;
 
-/// Stops a connection's socket from receiving and wakes its I/O thread. For TCP this is
-/// `shutdown(Shutdown::Read)` on a clone of the socket.
+/// Stops a connection from receiving and wakes its I/O thread. A QUIC carrier marks itself
+/// severed and rings its bell; writing continues, so a queued goodbye still leaves.
 pub trait Sever: Send + Sync {
     fn sever(&self);
 }

@@ -137,6 +137,18 @@ pub(super) struct Document {
     schema: u8,
     pub(super) routes: Vec<SavedRoute>,
     pub(super) pending: Vec<PendingRecord>,
+    /// Revocations that were still pending over WSS when QUIC replaced it, kept only so the
+    /// person learns to revoke again; nothing retries them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) abandoned: Vec<Abandoned>,
+}
+
+/// A revocation dropped with its WSS route.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Abandoned {
+    pub(super) operation: UnpairKey,
+    pub(super) label: String,
 }
 
 impl Default for Document {
@@ -145,6 +157,7 @@ impl Default for Document {
             schema: 1,
             routes: Vec::new(),
             pending: Vec::new(),
+            abandoned: Vec::new(),
         }
     }
 }
@@ -158,8 +171,55 @@ impl Document {
         }
     }
 
+    /// Drops routes and pending operations whose endpoint is not a QUIC endpoint. Servers paired
+    /// over WSS must be paired again; the rest of the document still loads. Their native
+    /// credentials stay in the store, unreferenced.
+    ///
+    /// A dropped revocation or claim cancellation is kept as an [`Abandoned`] notice, so the
+    /// person knows to revoke again from the server's machine.
+    pub(super) fn discard_obsolete(&mut self) {
+        let current = |endpoint: &str| endpoint.starts_with("quic://");
+        self.routes.retain(|saved| current(&saved.route.endpoint));
+        let mut abandoned = Vec::new();
+        self.pending.retain(|pending| {
+            let kept = match &pending.authority {
+                Authority::Direct(actor) => current(&actor.route.endpoint),
+                Authority::Enrollment { endpoint, .. } => current(endpoint),
+                Authority::Account { .. } => true,
+            };
+            let revocation = match &pending.authority {
+                Authority::Direct(_) => true,
+                Authority::Enrollment { .. } => pending.cancel_requested,
+                Authority::Account { .. } => false,
+            };
+            if !kept && revocation && !pending.confirmed {
+                abandoned.push(Abandoned {
+                    operation: pending.operation,
+                    label: pending.label.clone(),
+                });
+            }
+            kept
+        });
+        for notice in abandoned {
+            if !self
+                .abandoned
+                .iter()
+                .any(|known| known.operation == notice.operation)
+            {
+                self.abandoned.push(notice);
+            }
+        }
+    }
+
     fn validate(&self) -> Result<(), ()> {
-        if self.schema != 1 || self.routes.len().saturating_add(self.pending.len()) > CAPACITY {
+        if self.schema != 1
+            || self.routes.len().saturating_add(self.pending.len()) > CAPACITY
+            || self.abandoned.len() > CAPACITY
+            || self
+                .abandoned
+                .iter()
+                .any(|notice| notice.operation == [0; 32] || notice.label.len() > 512)
+        {
             return Err(());
         }
         let mut routes = BTreeSet::new();
@@ -191,7 +251,7 @@ impl Document {
                     if *claim == [0; 32]
                         || *credential == [0; 32]
                         || endpoint.len() > 512
-                        || !endpoint.starts_with("wss://")
+                        || !endpoint.starts_with("quic://")
                     {
                         return Err(());
                     }
@@ -227,7 +287,7 @@ fn validate_route(saved: &SavedRoute) -> Result<(), ()> {
         || saved.route.paired.client == [0; 32]
         || saved.route.label.len() > 512
         || saved.route.endpoint.len() > 512
-        || !saved.route.endpoint.starts_with("wss://")
+        || !saved.route.endpoint.starts_with("quic://")
         || saved.route.endpoint.chars().any(char::is_control)
     {
         return Err(());
@@ -297,7 +357,8 @@ impl Records for PrivateRecords {
             *expected = WriteAuthority::default();
             return Ok(Document::default());
         };
-        let document: Document = serde_json::from_slice(&snapshot.bytes).map_err(|_| ())?;
+        let mut document: Document = serde_json::from_slice(&snapshot.bytes).map_err(|_| ())?;
+        document.discard_obsolete();
         document.validate()?;
         *expected = WriteAuthority {
             identity: Some(snapshot.identity),
@@ -368,6 +429,48 @@ mod tests {
         )
         .unwrap();
         (PrivateRecords::new(Arc::new(paths)), filesystem)
+    }
+
+    /// A revocation still pending over WSS is dropped with its route, and leaves a notice so
+    /// the person revokes again; a confirmed one leaves none.
+    #[test]
+    fn a_dropped_wss_revocation_leaves_a_notice() {
+        let mut document = Document::default();
+        let mut actor = super::super::tests::saved(1, 5);
+        actor.route.endpoint = "wss://127.0.0.1:9231/spaceterm".into();
+        document
+            .pending
+            .push(PendingRecord::direct([7; 32], actor.clone(), [9; 32]));
+        let mut confirmed = PendingRecord::direct([8; 32], actor, [9; 32]);
+        confirmed.confirmed = true;
+        document.pending.push(confirmed);
+        document.discard_obsolete();
+        document.discard_obsolete();
+        assert!(document.pending.is_empty());
+        assert_eq!(
+            document.abandoned,
+            [Abandoned {
+                operation: [7; 32],
+                label: "Server 1".into(),
+            }]
+        );
+        assert_eq!(document.validate(), Ok(()));
+    }
+
+    /// A route saved over WSS before QUIC replaced it is dropped as the document loads; the
+    /// others still load.
+    #[test]
+    fn an_obsolete_wss_route_is_dropped_and_the_rest_still_loads() {
+        let mut document = Document::default();
+        document.routes.push(super::super::tests::saved(1, 5));
+        let mut obsolete = super::super::tests::saved(2, 6);
+        obsolete.route.endpoint = "wss://127.0.0.1:9231/spaceterm".into();
+        document.routes.push(obsolete);
+        assert!(document.validate().is_err());
+        document.discard_obsolete();
+        assert_eq!(document.validate(), Ok(()));
+        assert_eq!(document.routes.len(), 1);
+        assert_eq!(document.routes[0].route.id, [1; 32]);
     }
 
     #[test]

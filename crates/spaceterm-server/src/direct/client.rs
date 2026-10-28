@@ -1,4 +1,5 @@
 use super::*;
+use crate::connection::quic::QuicStream;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub(super) fn invitation(payload: wire::Invite) -> Result<Invitation, DirectError> {
@@ -37,7 +38,7 @@ pub(super) fn parse_invitation(text: &str) -> Result<Invitation, DirectError> {
     {
         return Err(DirectError::InvalidInvitation);
     }
-    wss::validate_endpoint(&payload.endpoint)?;
+    Endpoint::from_url(&payload.endpoint)?;
     if payload.expires == 0
         || payload.expires > storage::MAX_CONNECTION_TIME
         || payload.valid_for_seconds == 0
@@ -59,7 +60,7 @@ fn exchange(
     pin: &ServerPin,
     credential: &DeviceCredential,
     action: wire::Action,
-) -> Result<(wss::Ws, wire::Answer), DirectError> {
+) -> Result<(QuicStream, wire::Answer), DirectError> {
     exchange_checked(endpoint, pin, credential, action, None, None)
 }
 fn exchange_checked(
@@ -69,9 +70,33 @@ fn exchange_checked(
     action: wire::Action,
     expected_name: Option<&str>,
     exchanges: Option<&mut Vec<[u8; 32]>>,
-) -> Result<(wss::Ws, wire::Answer), DirectError> {
-    let mut ws = wss::connect(endpoint, pin)?;
-    let challenge: wire::Challenge = wss::receive(&mut ws)?;
+) -> Result<(QuicStream, wire::Answer), DirectError> {
+    let mut stream = quic::dial(endpoint, pin, credential)?;
+    let answer = exchange_on(
+        &mut stream,
+        pin,
+        credential,
+        action,
+        expected_name,
+        exchanges,
+    )?;
+    Ok((stream, answer))
+}
+/// The pairing messages of one authenticated connection, as length-bounded JSON.
+pub(super) trait Messages {
+    fn send(&mut self, value: &impl Serialize) -> Result<(), DirectError>;
+    fn receive<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, DirectError>;
+}
+/// Verifies the server's challenge on `stream`, proves the device and returns the server's answer.
+pub(super) fn exchange_on(
+    stream: &mut impl Messages,
+    pin: &ServerPin,
+    credential: &DeviceCredential,
+    action: wire::Action,
+    expected_name: Option<&str>,
+    exchanges: Option<&mut Vec<[u8; 32]>>,
+) -> Result<wire::Answer, DirectError> {
+    let challenge: wire::Challenge = stream.receive()?;
     if challenge.pin != *pin {
         return Err(DirectError::WrongServer);
     }
@@ -111,16 +136,16 @@ fn exchange_checked(
         // This live-only bounded set contains no invitation or device proof.
         exchanges.push(wire::exchange_hash(&challenge, &authentication)?);
     }
-    wss::send(&mut ws, &authentication)?;
-    let answer: Result<wire::Answer, DirectError> = wss::receive(&mut ws)?;
-    Ok((ws, answer?))
+    stream.send(&authentication)?;
+    let answer: Result<wire::Answer, DirectError> = stream.receive()?;
+    answer
 }
 pub(super) fn connect(
     endpoint: &str,
     paired: &PairedDevice,
     credential: &DeviceCredential,
 ) -> Result<DirectConnection, DirectError> {
-    let (ws, answer) = exchange(
+    let (stream, answer) = exchange(
         endpoint,
         &paired.pin,
         credential,
@@ -132,7 +157,7 @@ pub(super) fn connect(
         return Err(DirectError::AuthenticationRefused);
     }
     Ok(DirectConnection {
-        ws,
+        stream: Box::new(stream),
         paired: paired.clone(),
     })
 }
@@ -266,12 +291,23 @@ impl DirectConnection {
     pub(crate) fn paired(&self) -> &PairedDevice {
         &self.paired
     }
-    /// The authenticated WebSocket, for admission and then the connection's carrier.
+    /// Admits this client on the authenticated connection and returns its carrier.
     #[cfg_attr(
         not(any(feature = "client", test)),
-        allow(dead_code, reason = "the desktop admits and carries the socket")
+        allow(dead_code, reason = "the desktop admits and carries the connection")
     )]
-    pub(crate) fn into_ws(self) -> wss::Ws {
-        self.ws
+    pub(crate) fn admit(
+        self,
+        client: (&[u8; 32], &ClientName),
+    ) -> Result<Box<dyn crate::connection::carrier::Carrier>, ServerError> {
+        let mut stream = *self.stream;
+        crate::protocol::admit_transport(
+            &mut stream,
+            client,
+            &self.paired.pin.server,
+            &self.paired.pin.build,
+            &[crate::protocol::MAJOR],
+        )?;
+        Ok(Box::new(stream.into_carrier()))
     }
 }

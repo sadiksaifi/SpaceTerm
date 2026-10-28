@@ -24,7 +24,7 @@ use records::{
 };
 
 /// An exact enrollment retained before setup can change the server.
-/// Dropping an unfinished setup requests restricted WSS cancellation.
+/// Dropping an unfinished setup requests restricted QUIC cancellation.
 pub(crate) struct SetupEnrollment {
     owner: DirectConnections,
     operation: JoinId,
@@ -115,6 +115,9 @@ pub(crate) struct PendingUnpair {
     pub(crate) enrollment_cleanup: bool,
     pub(crate) self_unpair: bool,
     pub(crate) server_confirmed: bool,
+    /// The request was still pending over WSS when QUIC replaced it, and was dropped. The person
+    /// must unpair the device again from the server's machine.
+    pub(crate) abandoned: bool,
 }
 
 /// Resolves account-local revocation authority without network or credential access.
@@ -368,6 +371,8 @@ impl DirectConnections {
             .persistence_error
     }
 
+    /// Connects a saved route. On a route that is already connected this is Reconnect: the
+    /// live link is dropped and a new connection, with a new socket and admission, replaces it.
     pub(crate) fn connect(&self, id: &DirectRouteId) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(saved) = state.document.routes.iter_mut().find(|r| &r.route.id == id) else {
@@ -375,6 +380,15 @@ impl DirectConnections {
         };
         saved.active = true;
         if let Some(route) = state.routes.get_mut(id) {
+            if route.server.is_some() {
+                // The old link's connector stays disabled; the worker follows the new link.
+                route
+                    .gate
+                    .store(false, std::sync::atomic::Ordering::Release);
+                route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                route.server = None;
+                route.health = None;
+            }
             route.gate.store(true, std::sync::atomic::Ordering::Release);
             route.status = DirectRouteStatus::Connecting;
             route.retry = Retry::new(Interaction::Requested);
@@ -502,7 +516,17 @@ impl DirectConnections {
             enrollment_cleanup: matches!(pending.authority, records::Authority::Enrollment { .. }),
             self_unpair: matches!(&pending.authority, records::Authority::Direct(actor) if actor.route.paired.pairing == pending.target),
             server_confirmed: pending.confirmed,
-        }).collect()
+            abandoned: false,
+        }).chain(state.document.abandoned.iter().map(|notice| PendingUnpair {
+            key: notice.operation,
+            server_label: notice.label.clone(),
+            state: UnpairState::Unconfirmed,
+            dismissed: false,
+            enrollment_cleanup: false,
+            self_unpair: false,
+            server_confirmed: false,
+            abandoned: true,
+        })).collect()
     }
 
     pub(crate) fn resume_unpair(&self, key: UnpairKey) {
@@ -517,6 +541,14 @@ impl DirectConnections {
 
     pub(crate) fn dismiss_unpair_notice(&self, key: UnpairKey) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let abandoned = state.document.abandoned.len();
+        state
+            .document
+            .abandoned
+            .retain(|notice| notice.operation != key);
+        if state.document.abandoned.len() != abandoned {
+            self.0.save(&mut state);
+        }
         if let Some(pending) = state
             .document
             .pending

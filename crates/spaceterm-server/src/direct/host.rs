@@ -1,35 +1,20 @@
 use super::*;
 use crate::connection::Wake;
+use crate::connection::quic::{QuicListener, QuicStream};
 use crate::connection::registry::{PairedConnections, Sever};
-use std::{
-    net::{TcpListener, TcpStream},
-    os::fd::{AsRawFd, RawFd},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 const MAX_PENDING: usize = 32;
-fn bind_listener(address: std::net::SocketAddr) -> std::io::Result<TcpListener> {
-    let socket = socket2::Socket::new(
-        socket2::Domain::for_address(address),
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )?;
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&address.into())?;
-    socket.listen(32)?;
-    Ok(socket.into())
+/// Why a listener did not bind.
+enum Bind {
+    /// Another socket, such as a retired listener's, holds the address.
+    InUse,
+    Other,
 }
+/// How often a `Starting` listener tries its address again while it waits.
+const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 pub(crate) type Shared = Arc<Mutex<State>>;
 
-/// Severs a paired connection by shutting its TCP read side. Its I/O thread then writes the queued
-/// goodbye and closes.
-struct ReadSide(TcpStream);
-impl Sever for ReadSide {
-    fn sever(&self) {
-        let _ = self.0.shutdown(std::net::Shutdown::Read);
-    }
-}
 struct PendingInvitation {
     id: ClaimId,
     token: [u8; 32],
@@ -45,7 +30,12 @@ pub(crate) struct State {
     store: storage::Store,
     record: storage::Record,
     pub(super) pin: ServerPin,
-    listener: Option<TcpListener>,
+    listener: Option<QuicListener>,
+    /// When a `Starting` listener first found its address in use.
+    starting_since: Option<std::time::Instant>,
+    /// Listeners replaced by a policy change, still routing to their connections until those
+    /// end. A listener at the same address is taken back instead of binding again.
+    retired: Vec<QuicListener>,
     listener_state: ListenerState,
     invitations: Vec<PendingInvitation>,
     claims: Vec<PendingClaim>,
@@ -73,6 +63,8 @@ impl State {
             record,
             pin,
             listener: None,
+            starting_since: None,
+            retired: Vec::new(),
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
             claims: Vec::new(),
@@ -87,11 +79,10 @@ impl State {
         Ok(Arc::new(Mutex::new(state)))
     }
     pub(crate) fn set_wake(&mut self, wake: Arc<dyn Wake>) {
+        if let Some(listener) = &self.listener {
+            listener.set_wake(Arc::clone(&wake));
+        }
         self.wake = Some(wake);
-    }
-    /// The listener the host's accept loop waits on.
-    pub(crate) fn listener_fd(&self) -> Option<RawFd> {
-        self.listener.as_ref().map(AsRawFd::as_raw_fd)
     }
     fn listener_changed(&self) {
         if let Some(wake) = &self.wake {
@@ -100,17 +91,103 @@ impl State {
     }
     fn listen(&mut self) {
         self.listener_changed();
-        self.listener = None;
+        self.retire_listener();
+        self.starting_since = None;
         self.listener_state = match self.record.policy.as_ref().filter(|_| self.record.enabled) {
             None => ListenerState::Off,
-            Some(policy) => match bind_listener(policy.bind) {
-                Ok(listener) => {
-                    self.listener = Some(listener);
-                    ListenerState::Listening { addr: policy.bind }
-                }
-                Err(_) => ListenerState::Failed(DirectError::Transport),
-            },
+            Some(policy) => self.open_at(policy.bind),
         };
+    }
+    /// Listens at `address`: takes back a retired listener there, or binds a new one. A bind
+    /// that a retired listener's live connections still block waits as `Starting` until they
+    /// end; [`Self::retry_listen`] then binds again.
+    fn open_at(&mut self, address: std::net::SocketAddr) -> ListenerState {
+        let revived = self
+            .retired
+            .iter()
+            .position(|listener| listener.address() == address && listener.revive())
+            .map(|index| self.retired.remove(index));
+        if let Some(listener) = revived {
+            self.listener = Some(listener);
+            return ListenerState::Listening { addr: address };
+        }
+        self.retired.retain(|listener| !listener.finished());
+        match self.bind(address) {
+            Ok(listener) => {
+                self.listener = Some(listener);
+                ListenerState::Listening { addr: address }
+            }
+            Err(Bind::InUse) if !self.retired.is_empty() => {
+                ListenerState::Starting { addr: address }
+            }
+            // A connection that just ended may still hold the socket for a moment.
+            Err(Bind::InUse)
+                if self
+                    .starting_since
+                    .is_none_or(|since| since.elapsed() < crate::protocol::limits::STALL_AFTER) =>
+            {
+                self.starting_since
+                    .get_or_insert_with(std::time::Instant::now);
+                ListenerState::Starting { addr: address }
+            }
+            Err(_) => ListenerState::Failed(DirectError::Transport),
+        }
+    }
+    /// Binds again while `Starting`, once retired listeners finished. Returns when to try
+    /// again, if still waiting.
+    pub(crate) fn retry_listen(&mut self) -> Option<std::time::Instant> {
+        let ListenerState::Starting { addr } = self.listener_state else {
+            self.starting_since = None;
+            return None;
+        };
+        if self
+            .starting_since
+            .is_some_and(|since| since.elapsed() >= crate::protocol::limits::STALL_AFTER)
+            && self.retired.iter().all(QuicListener::finished)
+        {
+            self.listener_state = ListenerState::Failed(DirectError::Transport);
+            return None;
+        }
+        self.listener_state = self.open_at(addr);
+        if matches!(self.listener_state, ListenerState::Starting { .. }) {
+            self.starting_since
+                .get_or_insert_with(std::time::Instant::now);
+            Some(std::time::Instant::now() + LISTEN_RETRY)
+        } else {
+            self.starting_since = None;
+            self.listener_changed();
+            None
+        }
+    }
+    /// Stops taking connections. A listener with live connections keeps routing to them until
+    /// they end; one without closes its socket now.
+    fn retire_listener(&mut self) {
+        if let Some(listener) = self.listener.take()
+            && listener.retire()
+        {
+            self.retired.push(listener);
+        }
+        self.retired.retain(|listener| !listener.finished());
+    }
+    /// Binds QUIC on UDP under the pinned certificate. The listener rings the host's wake when a
+    /// connection arrives.
+    fn bind(&self, address: std::net::SocketAddr) -> Result<QuicListener, Bind> {
+        let config = super::quic::server_config(&self.record.certificate, &self.record.key)
+            .map_err(|_| Bind::Other)?;
+        let listener = QuicListener::bind(address, config).map_err(|error| match error {
+            crate::connection::quic::QuicError::AddressInUse => Bind::InUse,
+            _ => Bind::Other,
+        })?;
+        if let Some(wake) = &self.wake {
+            listener.set_wake(Arc::clone(wake));
+        }
+        Ok(listener)
+    }
+    /// The next new connection and the listener generation it belongs to. Its own thread
+    /// completes the handshake.
+    pub(crate) fn accept(&mut self) -> Option<(QuicStream, [u8; 32])> {
+        let stream = self.listener.as_ref()?.accept()?;
+        Some((stream, self.generation))
     }
     fn recover(&mut self) -> Result<(), DirectError> {
         if self.uncertain {
@@ -129,7 +206,7 @@ impl State {
             self.uncertain = true;
             // A renamed but unsynced revocation must never leave ordinary authority usable.
             self.connections.end_all();
-            self.listener = None;
+            self.retire_listener();
             self.listener_changed();
             self.listener_state = ListenerState::Failed(error);
             return Err(error);
@@ -138,24 +215,6 @@ impl State {
         Ok(())
     }
     #[cfg(test)]
-    pub(crate) fn accept(&mut self) -> Option<(TcpStream, [u8; 32])> {
-        self.accept_next().ok().flatten()
-    }
-    /// The next waiting connection and the listener generation it belongs to. `Ok(None)` means
-    /// none waits; an error is the listener's, such as running out of descriptors.
-    pub(crate) fn accept_next(&mut self) -> std::io::Result<Option<(TcpStream, [u8; 32])>> {
-        let Some(listener) = self.listener.as_ref() else {
-            return Ok(None);
-        };
-        loop {
-            match listener.accept() {
-                Ok((tcp, _)) => return Ok(Some((tcp, self.generation))),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-                Err(error) if crate::host::accept_retries(&error) => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
     pub(crate) fn certificate(&self) -> (&[u8], &[u8]) {
         (&self.record.certificate, &self.record.key)
     }
@@ -181,21 +240,21 @@ impl State {
         }
         Ok(())
     }
-    /// Registers a paired connection of listener `generation`, so revocation reaches it. The
-    /// authorization check and the registration share this lock with every revocation.
+    /// Registers a paired connection of listener `generation`, so revocation reaches it through
+    /// `sever`. The authorization check and the registration share this lock with every
+    /// revocation.
     pub(crate) fn register(
         &mut self,
         paired: &PairedDevice,
         generation: [u8; 32],
         connection: [u8; 32],
         outbox: crate::connection::outbox::Outbox,
-        tcp: &TcpStream,
+        sever: Box<dyn Sever>,
     ) -> Result<(), DirectError> {
         self.authorized(paired)?;
         if generation != self.generation {
             return Err(DirectError::Disabled);
         }
-        let read_side = tcp.try_clone().map_err(|_| DirectError::Transport)?;
         self.connections
             .register(
                 connection,
@@ -204,9 +263,17 @@ impl State {
                     generation,
                 },
                 outbox,
-                Box::new(ReadSide(read_side)),
+                sever,
             )
             .map_err(|_| DirectError::Capacity)
+    }
+    /// The enrolled public key of `paired`'s device.
+    fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
+        self.record
+            .devices
+            .iter()
+            .find(|device| device.info.pairing == paired.pairing)
+            .map(|device| device.info.public_key)
     }
     pub(crate) fn unregister(&mut self, connection: [u8; 32]) {
         self.connections.unregister(connection);
@@ -275,6 +342,7 @@ impl State {
             server_name: Self::server_name(),
             listener,
             network_addresses: network.map(|snapshot| snapshot.addresses),
+            abandoned_setups: self.record.abandoned_setups.clone(),
         }
     }
     pub(crate) fn manage(
@@ -303,7 +371,10 @@ impl State {
         self.recover()?;
         self.expire()?;
         let reply = match request {
-            Management::Status => ManagementReply::Status(self.status()),
+            Management::Status => {
+                let _ = self.retry_listen();
+                ManagementReply::Status(self.status())
+            }
             Management::PrepareSetup {
                 generation,
                 pin,
@@ -533,7 +604,7 @@ impl State {
                 next.enabled = enabled;
                 self.commit(next)?;
                 self.generation = generation;
-                // Network administration arrives only over IPC. Retire all WSS authority.
+                // Network administration arrives only over IPC. Retire all QUIC authority.
                 self.connections.retire_generation(generation);
                 self.invitations.clear();
                 for pending in &mut self.claims {
@@ -568,7 +639,7 @@ impl State {
                         } else {
                             addr
                         };
-                        format!("wss://{advertised}/spaceterm")
+                        format!("quic://{advertised}")
                     }
                     _ => return Err(DirectError::Disabled),
                 };
@@ -1073,6 +1144,7 @@ impl State {
     }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
+        self.retired.clear();
         self.listener_state = ListenerState::Off;
         self.listener_changed();
         self.connections.end_all();
@@ -1093,22 +1165,30 @@ impl State {
     }
 }
 
-/// Serves one accepted TCP connection: the pinned WSS handshake, one pairing exchange, and for a
-/// paired device admission and then the protocol connection over a [`crate::connection::wss::WssCarrier`].
+/// Serves one QUIC connection: the pinned handshake, one pairing exchange on its L0 stream, and
+/// for a paired device admission and then the protocol connection over a
+/// [`crate::connection::quic::QuicCarrier`]. Every action's device key must be the key of the
+/// certificate the client proved in the handshake.
 pub(crate) fn serve(
-    tcp: TcpStream,
+    mut stream: QuicStream,
     generation: [u8; 32],
     state: Shared,
     environment: &crate::host::Environment,
     waker: crate::connection::io::Waker,
     wake: Arc<dyn Wake>,
 ) -> Result<(), ServerError> {
-    let (certificate, key) = {
-        let state = state.lock().unwrap_or_else(|e| e.into_inner());
-        let (certificate, key) = state.certificate();
-        (certificate.to_vec(), zeroize::Zeroizing::new(key.to_vec()))
-    };
-    let mut ws = wss::accept(tcp, &certificate, &key)?;
+    use super::client::Messages;
+    // A connection the listener accepted before its policy changed never joins the new one.
+    if generation != state.lock().unwrap_or_else(|e| e.into_inner()).generation {
+        return Err(DirectError::Disabled.into());
+    }
+    stream
+        .handshake(std::time::Instant::now() + super::quic::HANDSHAKE_LIMIT)
+        .map_err(super::quic::transport)?;
+    let device = stream
+        .peer_certificates()
+        .and_then(|certificates| super::quic::certificate_key(certificates.first()?))
+        .ok_or(ServerError::AuthenticationRefused)?;
     let challenge = {
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         if generation != state.generation {
@@ -1116,8 +1196,8 @@ pub(crate) fn serve(
         }
         state.challenge()?
     };
-    wss::send(&mut ws, &challenge)?;
-    let authentication: wire::Authentication = wss::receive(&mut ws)?;
+    stream.send(&challenge)?;
+    let authentication: wire::Authentication = stream.receive()?;
     let paired = match &authentication.action {
         wire::Action::Connect { paired } => Some(paired.clone()),
         _ => None,
@@ -1125,11 +1205,21 @@ pub(crate) fn serve(
     let answer = {
         // Revocation ends registered connections inside the direct-network lock, before the
         // service learns of it. The locks are taken in the same order as everywhere else.
-        let answer = state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .authenticate_and_resolve(&challenge, &authentication);
-        let (answer, retired) = answer;
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        let key = match &authentication.action {
+            wire::Action::Connect { paired } => state.device_key(paired),
+            wire::Action::Revoke { actor, .. } => state.device_key(actor),
+            wire::Action::Claim { key, .. }
+            | wire::Action::Finish { key, .. }
+            | wire::Action::Cancel { key, .. } => Some(*key),
+        };
+        // A proof from another device's certificate is refused like a bad proof.
+        let (answer, retired) = if key == Some(device) {
+            state.authenticate_and_resolve(&challenge, &authentication)
+        } else {
+            (Err(DirectError::AuthenticationRefused), None)
+        };
+        drop(state);
         if let Some(client) = retired {
             environment
                 .panes
@@ -1140,49 +1230,43 @@ pub(crate) fn serve(
         answer
     };
     let connected = matches!(answer, Ok(wire::Answer::Connected));
-    wss::send(&mut ws, &answer)?;
+    stream.send(&answer)?;
     if !connected {
+        // The answer must reach the client before the connection closes.
+        let _ = stream.finish(std::time::Instant::now() + super::quic::HANDSHAKE_LIMIT);
         return Ok(());
     }
     let paired = paired.ok_or(ServerError::AuthenticationRefused)?;
-    let (_, client, name) = crate::protocol::admit_direct_server(&mut ws, &paired)?;
+    let (_, client, name) = crate::protocol::admit_direct_server(&mut stream, &paired)?;
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
+    let carrier = stream.into_carrier();
     state.lock().unwrap_or_else(|e| e.into_inner()).register(
         &paired,
         generation,
         connection,
         outbox.clone(),
-        ws.get_ref().tcp(),
+        Box::new(carrier.sever()),
     )?;
     // Unregisters when serving ends, also when it panics.
     let _registered = Registered {
         state: Arc::clone(&state),
         connection,
     };
-    (|| {
-        state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .note_connection(&paired)?;
-        let peer = crate::connection::service::Peer {
-            client,
-            connection,
-            pairing: Some(crate::connection::service::Pairing {
-                pairing: paired.pairing,
-                generation,
-            }),
-        };
-        crate::host::serve_admitted(
-            Box::new(crate::connection::wss::WssCarrier::new(ws)),
-            peer,
-            name,
-            outbox,
-            waker,
-            environment,
-        );
-        Ok::<_, ServerError>(())
-    })()
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .note_connection(&paired)?;
+    let peer = crate::connection::service::Peer {
+        client,
+        connection,
+        pairing: Some(crate::connection::service::Pairing {
+            pairing: paired.pairing,
+            generation,
+        }),
+    };
+    crate::host::serve_admitted(Box::new(carrier), peer, name, outbox, waker, environment);
+    Ok(())
 }
 
 /// A paired connection's place in the registry, removed when it drops.
@@ -1388,11 +1472,14 @@ mod tests {
         // A failed atomic save leaves its durable outcome uncertain. Its next authority
         // check reloads the document and rotates exposure before registering a stream.
         state.uncertain = true;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (tcp, _) = listener.accept().unwrap();
         let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
-        let registered = state.register(&paired, generation, [5; 32], outbox, &tcp);
+        let registered = state.register(
+            &paired,
+            generation,
+            [5; 32],
+            outbox,
+            Box::new(super::super::tests::Quiet),
+        );
         let empty = state.connections.is_empty();
         drop(state);
         assert_eq!(registered, Err(DirectError::Disabled));

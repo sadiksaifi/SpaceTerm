@@ -94,5 +94,8 @@ pub const MAX_L2_BYTES: usize = 2 * MAX_REPLY_BYTES;
 pub const PING_AFTER: Duration = Duration::from_secs(5);
 /// A connection is dead after receiving nothing for this long.
 pub const DEAD_AFTER: Duration = Duration::from_secs(15);
+/// A client whose ping goes unanswered this long suspects its network path and moves to a new
+/// one, long before [`DEAD_AFTER`] would end the connection.
+pub const SUSPECT_AFTER: Duration = Duration::from_millis(2500);
 /// A connection is dead after its writes or frame acknowledgements stall for this long.
 pub const STALL_AFTER: Duration = Duration::from_secs(10);

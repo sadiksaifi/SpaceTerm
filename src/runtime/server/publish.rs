@@ -1,7 +1,7 @@
 //! Pushes each claimed Pane's presentation and Pane events to the channel bound to its lease.
 //!
 //! A Terminal Session calls its subscription's notifier when it has something new: a screen,
-//! an exit, a client effect, hidden input or an accessibility model. The notifier rings the
+//! an exit, a client effect, a line state or an accessibility model. The notifier rings the
 //! host's wake, and the host's next tick lets [`super::dispatch::Served`] observe each bound
 //! channel's Pane under the `PaneService` lock. A screen is captured there as an `Arc` and
 //! encoded later on the connection's I/O thread by the channel's own [`ScreenEncoder`]. Nothing
@@ -29,7 +29,7 @@ pub struct Observation {
     pub(crate) screen: Option<ScreenCapture>,
     /// Client effects raised under the current focus generation, oldest first.
     pub(crate) effects: Vec<pane::effects::Request>,
-    pub(crate) hidden_input: bool,
+    pub(crate) line: pane::LineState,
     /// A changed accessibility revision. A presented screen carries it; otherwise it travels as
     /// a Pane event.
     pub(crate) accessibility: Option<u64>,
@@ -63,7 +63,8 @@ pub(super) struct Publication {
     encoder: Arc<Mutex<ScreenEncoder>>,
     /// The wire screen generation last handed to the outbox while visible.
     presented: Option<u64>,
-    hidden_input: Option<bool>,
+    /// The line state last sent. A new channel receives the current one first.
+    line: Option<pane::LineState>,
 }
 
 impl Publication {
@@ -78,7 +79,7 @@ impl Publication {
             visible: false,
             encoder: Arc::default(),
             presented: None,
-            hidden_input: None,
+            line: None,
         })
     }
 
@@ -111,16 +112,18 @@ impl Publication {
         let Observation {
             screen,
             effects,
-            hidden_input,
+            line,
             accessibility,
         } = observation;
         let mut open = true;
         for request in effects {
             open &= self.event(PaneEvent::Effect(request));
         }
-        if self.hidden_input != Some(hidden_input) {
-            self.hidden_input = Some(hidden_input);
-            open &= self.event(PaneEvent::HiddenInput(hidden_input));
+        // The line state goes before the screen captured with it, so a client never judges a
+        // prediction against a screen whose line state it has not received.
+        if self.line != Some(line) {
+            self.line = Some(line);
+            open &= self.event(PaneEvent::Line(line));
         }
         let carried = match &screen {
             Some(screen) => self.screen(screen),
@@ -211,7 +214,7 @@ impl OwnedPane {
         Observation {
             screen: self.capture(),
             effects,
-            hidden_input: self.subscription.hidden_input(),
+            line: self.subscription.line(),
             accessibility: self.accessibility.take_changed_revision(),
         }
     }

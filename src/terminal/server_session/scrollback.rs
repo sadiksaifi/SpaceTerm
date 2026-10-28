@@ -479,6 +479,11 @@ impl Scrollback {
         ))
     }
 
+    /// Whether the view follows the screen rather than showing history.
+    pub(crate) fn following(&self) -> bool {
+        self.view.following()
+    }
+
     fn reset_reading(&mut self) {
         self.placeholders.clear();
         self.shown.clear();

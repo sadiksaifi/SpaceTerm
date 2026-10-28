@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{OnceLock, mpsc};
 use std::time::Instant;
 
-/// A client-reachable WSS authority. DNS names remain names until each connection attempt.
+/// A client-reachable QUIC authority, an address and UDP port. DNS names remain names until each connection attempt.
 #[derive(Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Endpoint {
@@ -18,7 +18,7 @@ impl std::fmt::Debug for Endpoint {
 }
 
 impl Endpoint {
-    /// Parse DNS or IP with an optional WSS port, without resolving DNS.
+    /// Parse DNS or IP with an optional port, without resolving DNS.
     pub fn parse(authority: &str) -> Result<Self, DirectError> {
         let endpoint = Self::authority_value(authority)?;
         if endpoint
@@ -31,11 +31,10 @@ impl Endpoint {
         Ok(endpoint)
     }
 
-    /// Validate an existing WSS endpoint, including local loopback connections.
+    /// Validate an existing QUIC endpoint, including local loopback connections.
     pub fn from_url(url: &str) -> Result<Self, DirectError> {
         let authority = url
-            .strip_prefix("wss://")
-            .and_then(|rest| rest.strip_suffix("/spaceterm"))
+            .strip_prefix("quic://")
             .ok_or(DirectError::InvalidAddress)?;
         Self::authority_value(authority)
     }
@@ -115,7 +114,7 @@ impl Endpoint {
         }
     }
     pub fn url(&self) -> String {
-        format!("wss://{}/spaceterm", self.authority())
+        format!("quic://{}", self.authority())
     }
 
     pub(super) fn resolve(&self, deadline: Instant) -> Result<Vec<SocketAddr>, DirectError> {
@@ -201,7 +200,7 @@ impl Resolver {
 mod tests {
     use super::*;
     #[test]
-    fn authorities_retain_dns_names_and_apply_the_wss_port_independently_of_ssh() {
+    fn authorities_retain_dns_names_and_apply_the_quic_port_independently_of_ssh() {
         for (input, expected) in [
             ("Penguin.EXAMPLE", "penguin.example:9231"),
             ("penguin.example:9443", "penguin.example:9443"),
@@ -224,7 +223,7 @@ mod tests {
             "bad..example",
             "-bad.example",
             "host:22:9231",
-            "wss://host/spaceterm",
+            "quic://host",
         ] {
             assert!(Endpoint::parse(input).is_err());
         }

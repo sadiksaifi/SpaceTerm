@@ -9331,8 +9331,8 @@ fn reconnecting_a_remote_workspace_should_resume_its_route_alone(cx: &mut TestAp
     cx.executor().allow_parking();
     let (harness, cx) = MultiServerHarness::new(cx);
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
-        ("studio", "wss://192.168.1.2:9231"),
-        ("penguin", "wss://192.168.1.3:9231"),
+        ("studio", "quic://192.168.1.2:9231"),
+        ("penguin", "quic://192.168.1.3:9231"),
     ]);
     cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
     harness.present_direct("studio", routes[0], &[("Far", 1)], cx);
@@ -12658,8 +12658,8 @@ fn saved_servers(
     cx: &mut VisualTestContext,
 ) -> Rc<crate::ui::shared_workspaces::testing::ScriptedEdits> {
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
-        ("penguin", "wss://192.168.1.2:9231"),
-        ("studio", "wss://192.168.1.3:9231"),
+        ("penguin", "quic://192.168.1.2:9231"),
+        ("studio", "quic://192.168.1.3:9231"),
     ]);
     cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
     let (_, edits) = harness.present_direct("penguin", routes[0], &[], cx);
@@ -12773,8 +12773,8 @@ fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut
 
     let (harness, cx) = MultiServerHarness::new(cx);
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
-        ("studio", "wss://192.168.1.3:9231"),
-        ("studio", "wss://192.168.1.2:9231"),
+        ("studio", "quic://192.168.1.3:9231"),
+        ("studio", "quic://192.168.1.2:9231"),
     ]);
     cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
     // Only the route at .3 is presented, so only its rows take a Workspace.

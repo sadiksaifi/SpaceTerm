@@ -483,6 +483,12 @@ impl ServerLink {
         }
     }
 
+    /// I/O thread: whether the server left a ping unanswered long enough that the network path
+    /// may be gone. True once per ping.
+    pub fn suspect(&self, now: Instant) -> bool {
+        self.lock().liveness.suspect(now)
+    }
+
     /// I/O thread: ends the link after a carrier failure. Pending requests fail with `error`;
     /// their operations may or may not have run, and nothing is replayed.
     pub fn fail(&self, error: LinkError) {

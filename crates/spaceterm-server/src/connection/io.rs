@@ -85,7 +85,7 @@ pub(crate) fn discard_unread(fd: RawFd) {
 }
 
 /// Waits until `fd` is readable, or writable when `write` is set, or `deadline` passes. Returns
-/// `false` at the deadline. Used by blocking preambles such as TLS and WebSocket handshakes.
+/// `false` at the deadline. Used by blocking preambles such as the QUIC handshake.
 pub(crate) fn wait_fd(fd: RawFd, write: bool, deadline: Instant) -> bool {
     loop {
         let now = Instant::now();
@@ -160,12 +160,28 @@ fn wait(
             revents: 0,
         });
     }
+    if writing && let Some(fd) = readiness.progress {
+        descriptors.push(libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    if let Some(fd) = readiness.signal {
+        descriptors.push(libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    let deadline = [deadline, readiness.deadline].into_iter().flatten().min();
     let _ = poll(&mut descriptors, deadline);
     waker.drain();
 }
 
-/// The frame taken from the outbox or link but not yet accepted by the carrier.
-type Held = Option<(Vec<u8>, Priority)>;
+/// Frames taken from the outbox or link but not yet accepted by the carrier, highest priority
+/// first and in order within a level.
+type Held = Vec<(Vec<u8>, Priority)>;
 
 struct Written {
     progressed: bool,
@@ -176,51 +192,79 @@ struct Written {
 }
 
 /// Offers frames from `next` until the carrier is full or nothing is left, flushing as it goes.
+///
+/// A carrier may refuse one level and accept another. While a bulk (L2) frame is refused, the
+/// thread holds at most that one and takes only frames above L2 from `next`, so a bulk transfer
+/// waiting on flow control never holds back a reply or a ping. `next` takes frames down to the
+/// level it is given. A frame never overtakes a refused frame of its own level.
 fn write(
     carrier: &mut dyn Carrier,
     held: &mut Held,
-    mut next: impl FnMut() -> Held,
+    mut next: impl FnMut(Priority) -> Option<(Vec<u8>, Priority)>,
 ) -> Result<Written, CarrierError> {
     let mut progressed = false;
-    // Whether the held frame was already offered again after a flush that freed no room.
+    // Whether the held frames were already offered again after a flush that freed no room.
     let mut retried = false;
     loop {
-        if held.is_none() {
-            *held = next();
-        }
-        let Some((frame, priority)) = held.as_ref() else {
-            break;
-        };
-        match carrier.offer(frame, *priority)? {
-            Offer::Accepted => {
-                *held = None;
-                retried = false;
+        let mut refused = false;
+        let mut index = 0;
+        while index < held.len() {
+            let level = held[index].1;
+            if held[..index].iter().any(|(_, earlier)| *earlier == level) {
+                index += 1;
+                continue;
             }
-            Offer::Full => {
-                let flush = carrier.flush()?;
-                progressed |= flush.progressed;
-                // Bytes written outside `flush`, for example while `receive` answered the peer,
-                // can leave the carrier empty without this flush writing anything. Offer once
-                // more before waiting: an empty carrier has no write readiness to wake on.
-                if flush.progressed || (!flush.pending && !retried) {
-                    retried = !flush.progressed;
-                    continue;
+            match carrier.offer(&held[index].0, level)? {
+                Offer::Accepted => {
+                    held.remove(index);
+                    retried = false;
                 }
-                break;
+                Offer::Full => {
+                    refused = true;
+                    index += 1;
+                }
             }
         }
+        // Take more while nothing above bulk is refused; a refused bulk frame allows only
+        // frames above it.
+        let lowest = if held.iter().any(|(_, level)| *level == Priority::L2) {
+            Priority::L1
+        } else {
+            Priority::L2
+        };
+        if held.iter().all(|(_, level)| *level == Priority::L2)
+            && let Some(frame) = next(lowest)
+        {
+            held.push(frame);
+            // Stable, so frames of one level keep their order.
+            held.sort_by_key(|(_, level)| *level);
+            continue;
+        }
+        if !refused {
+            break;
+        }
+        let flush = carrier.flush()?;
+        progressed |= flush.progressed;
+        // Bytes written outside `flush`, for example while `receive` answered the peer, can
+        // leave the carrier empty without this flush writing anything. Offer once more before
+        // waiting: an empty carrier has no write readiness to wake on.
+        if flush.progressed || (!flush.pending && !retried) {
+            retried = !flush.progressed;
+            continue;
+        }
+        break;
     }
     let flush = carrier.flush()?;
     progressed |= flush.progressed;
     Ok(Written {
         progressed,
-        pending: flush.pending || held.is_some(),
+        pending: flush.pending || !held.is_empty(),
         buffered: flush.pending,
     })
 }
 
-/// After `close`, flushes until the carrier is done or stalls, so a goodbye and a WebSocket
-/// Close leave the socket.
+/// After `close`, flushes until the carrier is done or stalls, so a goodbye and the end of every
+/// stream leave the socket.
 fn drain(carrier: &mut dyn Carrier, waker: &Waker) {
     carrier.close();
     let mut stalled = Instant::now() + limits::STALL_AFTER;
@@ -258,7 +302,7 @@ pub fn spawn_link(
 }
 
 fn run_link(mut carrier: Box<dyn Carrier>, weak: &WeakLink, waker: &Waker) {
-    let mut held = None;
+    let mut held = Vec::new();
     loop {
         let Some(link) = weak.upgrade() else {
             break;
@@ -274,6 +318,10 @@ fn run_link(mut carrier: Box<dyn Carrier>, weak: &WeakLink, waker: &Waker) {
         let Some(deadline) = link.check(now) else {
             break;
         };
+        // An unanswered ping may mean the network changed under a still-valid address.
+        if link.suspect(now) {
+            carrier.path_suspect();
+        }
         drop(link);
         wait(carrier.as_ref(), (true, buffered), waker, Some(deadline));
     }
@@ -294,7 +342,8 @@ fn turn(
             Err(error) => return Err(link_error(error)),
         }
     }
-    let written = write(carrier, held, || link.next_frame()).map_err(link_error)?;
+    // A client writes no bulk, so every frame qualifies.
+    let written = write(carrier, held, |_| link.next_frame()).map_err(link_error)?;
     link.wrote(now, written.progressed, written.pending);
     Ok(written.buffered)
 }
@@ -324,7 +373,7 @@ pub fn serve(
         service: Arc::clone(service),
         peer: *connection.peer(),
     };
-    let mut held = None;
+    let mut held = Vec::new();
     let mut receiving = true;
     let mut stopped: Option<Instant> = None;
     loop {
@@ -335,7 +384,7 @@ pub fn serve(
             stopped.get_or_insert(now);
         }
         // A turn that stopped at its receive bound continues without waiting: the socket, or the
-        // plaintext TLS and the WebSocket hold, may already have more.
+        // QUIC streams hold, may already have more.
         let mut more = false;
         if receiving {
             match receive(carrier.as_mut(), &mut connection, service, now) {
@@ -352,7 +401,9 @@ pub fn serve(
                 Err(None) => break,
             }
         }
-        let written = match write(carrier.as_mut(), &mut held, || outbox.next_frame()) {
+        let written = match write(carrier.as_mut(), &mut held, |lowest| {
+            outbox.next_frame_within(lowest)
+        }) {
             Ok(written) => written,
             Err(_) => break,
         };
@@ -483,27 +534,36 @@ mod tests {
     use crate::connection::carrier::{Flush, Readiness};
     use crate::protocol::RawFrame;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// A carrier full until its next flush, which writes nothing because the backlog already left
-    /// while it received, as a WebSocket answering the peer does.
+    /// while it received, as a carrier answering the peer does.
     struct Backpressured {
         room: bool,
         accepted: usize,
-        flushes: Arc<AtomicUsize>,
         pending: bool,
+        closed: bool,
+        /// Receives one message for each flush after `close`.
+        drained: mpsc::Sender<()>,
+        /// Never readable, because this carrier never has a frame to receive. Its peer stays open:
+        /// a closed peer would keep the descriptor readable and wake the live loop at once.
         bell: UnixStream,
+        _peer: UnixStream,
     }
 
     impl Backpressured {
-        fn new(pending: bool) -> (Self, Arc<AtomicUsize>) {
-            let flushes = Arc::new(AtomicUsize::new(0));
-            let (bell, _) = UnixStream::pair().unwrap();
+        fn new(pending: bool) -> (Self, mpsc::Receiver<()>) {
+            let (drained, flushes) = mpsc::channel();
+            let (bell, peer) = UnixStream::pair().unwrap();
             let carrier = Self {
                 room: false,
                 accepted: 0,
-                flushes: Arc::clone(&flushes),
                 pending,
+                closed: false,
+                drained,
                 bell,
+                _peer: peer,
             };
             (carrier, flushes)
         }
@@ -518,7 +578,9 @@ mod tests {
             Ok(Offer::Accepted)
         }
         fn flush(&mut self) -> Result<Flush, CarrierError> {
-            self.flushes.fetch_add(1, Ordering::Relaxed);
+            if self.closed {
+                let _ = self.drained.send(());
+            }
             self.room = true;
             Ok(Flush {
                 progressed: false,
@@ -532,20 +594,103 @@ mod tests {
             Readiness {
                 read: self.bell.as_raw_fd(),
                 write: None,
+                progress: None,
+                deadline: None,
+                signal: None,
             }
         }
-        fn close(&mut self) {}
+        fn close(&mut self) {
+            self.closed = true;
+        }
     }
 
     #[test]
     fn a_frame_refused_while_the_carrier_emptied_itself_is_offered_again_at_once() {
         let (mut carrier, _) = Backpressured::new(false);
-        let mut held = None;
+        let mut held = Vec::new();
         let mut frames = vec![(vec![0; 8], Priority::L1)].into_iter();
-        let written = write(&mut carrier, &mut held, || frames.next()).unwrap();
-        assert!(held.is_none(), "the frame must not wait for a later wake");
+        let written = write(&mut carrier, &mut held, |_| frames.next()).unwrap();
+        assert!(held.is_empty(), "the frame must not wait for a later wake");
         assert_eq!(carrier.accepted, 1);
         assert!(!written.pending);
+    }
+
+    /// A carrier whose L2 stream waits on flow control: it refuses bulk and takes the rest.
+    struct BulkBlocked {
+        accepted: Vec<Priority>,
+        bell: UnixStream,
+    }
+
+    impl Carrier for BulkBlocked {
+        fn offer(&mut self, _: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
+            if priority == Priority::L2 {
+                return Ok(Offer::Full);
+            }
+            self.accepted.push(priority);
+            Ok(Offer::Accepted)
+        }
+        fn flush(&mut self) -> Result<Flush, CarrierError> {
+            Ok(Flush {
+                progressed: false,
+                pending: true,
+            })
+        }
+        fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
+            Ok(None)
+        }
+        fn readiness(&self) -> Readiness {
+            Readiness {
+                read: self.bell.as_raw_fd(),
+                write: None,
+                progress: None,
+                deadline: None,
+                signal: None,
+            }
+        }
+        fn close(&mut self) {}
+    }
+
+    /// Queued frames by level, taken in priority order down to the level asked for, as the
+    /// outbox does.
+    fn queued(frames: &[Priority]) -> impl FnMut(Priority) -> Option<(Vec<u8>, Priority)> {
+        let mut queue: Vec<Priority> = frames.to_vec();
+        move |lowest| {
+            let (index, _) = queue
+                .iter()
+                .enumerate()
+                .filter(|(_, level)| **level <= lowest)
+                .min_by_key(|(index, level)| (**level, *index))?;
+            let level = queue.remove(index);
+            Some((vec![level as u8; 8], level))
+        }
+    }
+
+    #[test]
+    fn refused_bulk_frames_never_hold_back_replies_or_pings() {
+        let (bell, _) = UnixStream::pair().unwrap();
+        let mut carrier = BulkBlocked {
+            accepted: Vec::new(),
+            bell,
+        };
+        let mut held = Vec::new();
+        // Several bulk frames queued ahead of a reply and a ping.
+        let mut next = queued(&[
+            Priority::L2,
+            Priority::L2,
+            Priority::L2,
+            Priority::L1,
+            Priority::L0,
+        ]);
+        // The first turn takes a bulk frame before the others arrive.
+        let mut first = Some((vec![2; 8], Priority::L2));
+        let written = write(&mut carrier, &mut held, |lowest| {
+            first.take().or_else(|| next(lowest))
+        })
+        .unwrap();
+        assert_eq!(carrier.accepted, [Priority::L0, Priority::L1]);
+        assert_eq!(held.len(), 1, "at most one refused bulk frame is held");
+        assert_eq!(held[0].1, Priority::L2);
+        assert!(written.pending);
     }
 
     #[test]
@@ -553,12 +698,16 @@ mod tests {
         let (carrier, flushes) = Backpressured::new(true);
         let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
         drop(link);
-        let deadline = Instant::now() + std::time::Duration::from_millis(200);
-        while Instant::now() < deadline {
-            std::thread::park_timeout(deadline - Instant::now());
-        }
-        // The drain flushes once, then waits on its wake pipe and the stall deadline.
-        assert!(flushes.load(Ordering::Relaxed) < 10);
+        flushes
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the drain flushes when it starts");
+        // Then it flushes only when woken, until the stall deadline `STALL_AFTER` away. The one
+        // wake left is the last handle's, which may arrive after the drain started. A spinning
+        // drain flushes again at once.
+        let again = std::iter::from_fn(|| flushes.recv_timeout(Duration::from_millis(200)).ok())
+            .take(2)
+            .count();
+        assert!(again <= 1, "the drain flushed without a wake");
     }
 
     /// A peer that sends without pause: acknowledgements forever, which need no reply.
@@ -592,6 +741,9 @@ mod tests {
             Readiness {
                 read: self.bell.as_raw_fd(),
                 write: None,
+                progress: None,
+                deadline: None,
+                signal: None,
             }
         }
         fn close(&mut self) {}

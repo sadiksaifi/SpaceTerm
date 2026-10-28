@@ -6,17 +6,15 @@
 //!
 //! The I/O loop follows these rules:
 //!
-//! - After any readiness event it calls [`Carrier::receive`] until `Ok(None)`. TLS and WebSocket
-//!   carriers hold decrypted frames that no descriptor reports as readable.
+//! - After any readiness event it calls [`Carrier::receive`] until `Ok(None)`. The QUIC carrier
+//!   holds decrypted frames that no descriptor reports as readable.
 //! - It offers the next frame only after the previous offer was `Accepted`, and it calls
 //!   [`Carrier::flush`] after every accepted offer and whenever the write descriptor is ready.
 //! - After [`Carrier::close`] it keeps calling `flush` until `Flush::Done` or a stall, so the final
-//!   `Goodbye` and a WebSocket Close frame leave the socket.
+//!   `Goodbye` and the end of every stream leave the socket.
 //!
-//! Implementations: `UnixCarrier` for account-local IPC and `WssCarrier` for paired WSS (rustls and
-//! tungstenite on the nonblocking TCP descriptor, `TCP_NODELAY`, `TCP_NOTSENT_LOWAT` of 16 KiB, one
-//! WebSocket binary message per frame). A later QUIC carrier maps each [`Priority`] to its own
-//! stream and exposes a wake descriptor that its runtime signals.
+//! Implementations: `UnixCarrier` for account-local IPC and `QuicCarrier` for paired connections
+//! (noq-proto on a UDP socket the I/O thread drives, one stream per [`Priority`] on the server).
 use crate::protocol::{DecodeError, RawFrame};
 use std::os::fd::RawFd;
 
@@ -34,7 +32,8 @@ pub enum Priority {
 pub trait Carrier: Send {
     /// Offers one whole frame. `Accepted` means the carrier owns the frame and finishes writing it
     /// during later `flush` calls. A carrier returns `Full`, taking nothing, while more than one
-    /// accepted frame is unflushed, so frames wait in the outbox where priority still applies.
+    /// accepted frame is unflushed, so frames wait in the outbox where priority still applies. A
+    /// carrier with a stream per level may refuse one level and accept another.
     /// Offer the frame again after `flush` makes progress or `readiness` reports it.
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError>;
     /// Writes buffered bytes without blocking.
@@ -46,6 +45,9 @@ pub trait Carrier: Send {
     /// Starts an orderly close. Later offers and receives fail with `Closed`; `flush` keeps
     /// draining what was accepted, followed by any closing frame of the transport.
     fn close(&mut self);
+    /// The peer stopped answering while this end's address may still look usable, as after a
+    /// network change. A carrier that can move to a new path does so.
+    fn path_suspect(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,11 +65,19 @@ pub struct Flush {
 }
 
 /// `read` becomes readable when `receive` may return a frame, or when a `Full` carrier has room.
-/// `write`, when present, becomes writable when buffered bytes can make progress.
+/// `write`, when present, becomes writable when buffered bytes can make progress. `progress`, when
+/// present, becomes readable when accepted frames can make progress, for a carrier whose writes
+/// wait on what it receives. `deadline`, when present, is when the carrier must be called again
+/// even without readiness, such as a retransmission timer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Readiness {
     pub read: RawFd,
     pub write: Option<RawFd>,
+    pub progress: Option<RawFd>,
+    pub deadline: Option<std::time::Instant>,
+    /// Readable when the carrier wants a turn even while the thread neither reads nor writes,
+    /// such as a client's route-change signal. The next `flush` consumes it.
+    pub signal: Option<RawFd>,
 }
 
 /// Classifications only. Native errors and peer bytes never cross this boundary.

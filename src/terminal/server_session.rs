@@ -8,6 +8,7 @@ mod inbox;
 mod push_tests;
 use super::server_graphics as graphics;
 mod link;
+mod prediction;
 mod reading;
 mod recovery;
 mod screen;

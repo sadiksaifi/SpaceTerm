@@ -19,3 +19,5 @@ Start, Stop, Restart, Uninstall and updates use the owning account's local servi
 [ADR 0048](0048-end-all-sessions-from-the-selected-servers-settings.md) defines End All Sessions while the server remains running.
 
 Source Development uses a separate foreground Server built with its client from the current source, including uncommitted edits. The development command owns both processes and ends their Terminal Sessions when the run ends, including interruption. It requires neither a signed distribution artifact, production credentials nor service registration. It retains Development Settings and Workspace organization between runs. Ownership checks prevent a run from adopting or stopping an unrelated Server; existing service state and deliberate Stop remain unchanged. This exception changes process lifetime, not server-owned Workspaces or connection authority.
+
+[ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

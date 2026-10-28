@@ -467,8 +467,14 @@ impl Outbox {
     /// It encodes presentation outside the outbox lock. A frame this server cannot encode ends
     /// its channel with `PaneEvent::Failed`; the connection continues.
     pub fn next_frame(&self) -> Option<(Vec<u8>, Priority)> {
+        self.next_frame_within(Priority::L2)
+    }
+
+    /// Like [`Self::next_frame`], taking only levels at `lowest` or above, so a refused bulk
+    /// frame never holds back a reply or a ping.
+    pub fn next_frame_within(&self, lowest: Priority) -> Option<(Vec<u8>, Priority)> {
         loop {
-            let taken = self.lock().take();
+            let taken = self.lock().take(lowest);
             let (ticket, presentation, end) = match taken? {
                 Taken::Frame(frame, priority) => return Some((frame, priority)),
                 Taken::Skip => continue,
@@ -583,7 +589,7 @@ impl State {
         }
     }
 
-    fn take(&mut self) -> Option<Taken> {
+    fn take(&mut self, lowest: Priority) -> Option<Taken> {
         if let Some(frame) = self.l0.pop_front() {
             self.l0_bytes = self.l0_bytes.saturating_sub(frame.len());
             return Some(Taken::Frame(frame, Priority::L0));
@@ -611,6 +617,9 @@ impl State {
                 Entry::Frame(channel) => return Some(self.present(channel)),
             };
             return Some(self.first(frames, reply, Priority::L1));
+        }
+        if lowest < Priority::L2 {
+            return None;
         }
         if let Some(frame) = self.l2_rest.pop_front() {
             if self.l2_rest.is_empty() {

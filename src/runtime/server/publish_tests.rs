@@ -31,7 +31,7 @@ fn live(screen: Option<ScreenCapture>) -> Observed {
     Observed::Live(Observation {
         screen,
         effects: Vec::new(),
-        hidden_input: false,
+        line: pane::LineState::default(),
         accessibility: None,
     })
 }
@@ -206,7 +206,7 @@ fn an_ended_pane_sends_its_final_screen_before_its_last_event() {
     // The final screen replaced the one not yet written.
     let sent = drain(&outbox);
     let [
-        ServerMessage::Pane(_hidden_input),
+        ServerMessage::Pane(_line),
         ServerMessage::Frame(last),
         ServerMessage::Pane(ended),
     ] = sent.as_slice()
@@ -219,7 +219,7 @@ fn an_ended_pane_sends_its_final_screen_before_its_last_event() {
 }
 
 #[test]
-fn hidden_input_and_effects_are_sent_as_they_change() {
+fn line_states_and_effects_are_sent_as_they_change() {
     let outbox = outbox();
     let mut publication = bound(&outbox);
     let effect = pane::effects::Request {
@@ -229,27 +229,37 @@ fn hidden_input_and_effects_are_sent_as_they_change() {
         effect: pane::effects::Effect::Bell,
     };
 
-    for (hidden_input, effects) in [
-        (false, vec![effect]),
-        (false, Vec::new()),
-        (true, Vec::new()),
+    let prompt = pane::LineState::default();
+    let password = pane::LineState {
+        epoch: 1,
+        mode: pane::LineMode {
+            canonical: true,
+            ..pane::LineMode::UNKNOWN
+        },
+    };
+    for (line, effects) in [
+        (prompt, vec![effect]),
+        (prompt, Vec::new()),
+        (password, Vec::new()),
     ] {
         publication.publish(Observed::Live(Observation {
             screen: None,
             effects,
-            hidden_input,
+            line,
             accessibility: None,
         }));
     }
 
-    assert!(matches!(
-        events(drain(&outbox)).as_slice(),
-        [
-            PaneEvent::Effect(_),
-            PaneEvent::HiddenInput(false),
-            PaneEvent::HiddenInput(true)
-        ]
-    ));
+    let sent = events(drain(&outbox));
+    let [
+        PaneEvent::Effect(_),
+        PaneEvent::Line(first),
+        PaneEvent::Line(second),
+    ] = sent.as_slice()
+    else {
+        panic!("expected an effect and two line states, got {sent:?}");
+    };
+    assert_eq!((*first, *second), (prompt, password));
 }
 
 #[test]
@@ -260,7 +270,7 @@ fn an_accessibility_revision_travels_as_an_event_only_without_a_new_screen() {
         Observed::Live(Observation {
             screen,
             effects: Vec::new(),
-            hidden_input: false,
+            line: pane::LineState::default(),
             accessibility: Some(revision),
         })
     };

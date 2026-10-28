@@ -31,6 +31,10 @@ pub(super) struct Reading {
     /// The grid of the latest presented screen, for autoscroll.
     grid: Option<Grid>,
     autoscroll_due: Option<std::time::Instant>,
+    /// The predictions drawn over the screen while the view follows it.
+    prediction: Option<super::prediction::Overlay>,
+    /// The view's latest screen carries predictions.
+    predicted: bool,
 }
 
 /// What one worker turn of reading asks for.
@@ -53,6 +57,45 @@ impl Reading {
         // Replies to pages of the ended connection still settle them, so they stop counting
         // toward the in-flight limit.
         self.autoscroll_due = None;
+        // A frozen screen shows only what the server confirmed.
+        self.prediction = None;
+    }
+
+    /// The screen the view shows: the Scrollback's view, with the predictions drawn over it while
+    /// the view follows the screen. A scrolled view shows history unmarked.
+    pub(super) fn presented(
+        &mut self,
+        generation: PresentationGeneration,
+    ) -> Option<Arc<ScreenSnapshot>> {
+        let mut presented = self.scrollback.present(generation)?;
+        self.predicted = false;
+        if let Some(overlay) = &self.prediction
+            && self.scrollback.following()
+        {
+            self.predicted = overlay.apply(Arc::make_mut(&mut presented));
+        }
+        Some(presented)
+    }
+
+    /// Drops the predictions. Returns the screen to present under `generation` when the view's
+    /// latest screen carries some, so it shows only what the server confirmed.
+    pub(super) fn withdraw(
+        &mut self,
+        generation: PresentationGeneration,
+    ) -> Option<Arc<ScreenSnapshot>> {
+        self.prediction = None;
+        if !self.predicted {
+            return None;
+        }
+        self.presented(generation)
+    }
+
+    /// Sets the predictions to draw. Returns whether they changed, so the view needs the screen
+    /// again.
+    pub(super) fn predict(&mut self, overlay: Option<super::prediction::Overlay>) -> bool {
+        let changed = self.prediction != overlay;
+        self.prediction = overlay;
+        changed
     }
 
     pub(super) fn page(&mut self, request: PageRequest, page: Option<Page>) {
@@ -380,7 +423,7 @@ pub(super) fn show(
         reading.grid = Some(grid(mapping));
         reading.copy_available = reading.scrollback.copy_available();
         (
-            reading.scrollback.present(generation),
+            reading.presented(generation),
             reading.scrollback.accessibility_view(),
         )
     };

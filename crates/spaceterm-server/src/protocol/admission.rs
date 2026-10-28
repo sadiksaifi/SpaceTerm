@@ -42,7 +42,7 @@ pub(crate) fn random() -> Result<[u8; 32], ServerError> {
 }
 
 /// The transport of one admission: whole length-prefixed frames, each before a deadline. Account
-/// IPC writes them back to back; paired WSS carries the same bytes in binary messages.
+/// IPC writes them back to back; a paired connection carries the same bytes on its QUIC L0 stream.
 pub(crate) trait Preamble {
     fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), ServerError>;
     /// One frame of at most `max` bytes, without its length prefix.
@@ -151,7 +151,7 @@ pub(crate) fn admit_server(
     admit_server_transport(stream, server, build, None)
 }
 
-/// Only the WSS host calls this after pinned-server and enrolled-device proof validation.
+/// Only the paired host calls this after pinned-server and enrolled-device proof validation.
 pub(crate) fn admit_direct_server(
     stream: &mut dyn Preamble,
     paired: &crate::direct::PairedDevice,

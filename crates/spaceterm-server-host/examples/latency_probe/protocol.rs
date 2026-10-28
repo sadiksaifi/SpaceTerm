@@ -9,7 +9,7 @@ use spaceterm_server::direct::{
 };
 use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
 use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize, Refusal};
-use spaceterm_server::protocol::screen::CursorPosition;
+use spaceterm_server::protocol::screen::{CursorPosition, History};
 use spaceterm_server::protocol::{
     ClaimReply, Frame, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
 };
@@ -205,7 +205,7 @@ impl DirectConnector for Paired {
     }
 }
 
-/// How the probe reaches the server: account-local IPC or a paired WSS connection.
+/// How the probe reaches the server: account-local IPC or a paired QUIC connection.
 pub enum Route {
     Local,
     Paired(Arc<Paired>),
@@ -227,6 +227,8 @@ pub struct EchoPane {
     sent: u32,
     /// The cursor as of the last frame the probe applied.
     cursor: Option<CursorPosition>,
+    /// The Scrollback as of the last frame the probe applied.
+    history: History,
 }
 
 /// What the server pushed on the probe's channel. The connection's I/O thread records it.
@@ -272,6 +274,10 @@ impl Pushed {
 }
 
 const READY: &str = "PROBE-READY";
+
+/// The probe Pane's grid. A page fills it once.
+const PAGE_COLUMNS: usize = 100;
+const PAGE_ROWS: usize = 30;
 
 /// Every claim names attachment generation 1. The probe releases no attachment, so the server
 /// never holds a newer generation for its Workspace.
@@ -330,6 +336,7 @@ impl EchoPane {
             pushed: Arc::default(),
             sent: 0,
             cursor: None,
+            history: History::default(),
         };
         // Close the Workspace if the Pane never becomes ready.
         match pane.start() {
@@ -354,8 +361,8 @@ impl EchoPane {
             return fail("probe Pane missing");
         };
         let size = PaneSize {
-            columns: 100,
-            rows: 30,
+            columns: PAGE_COLUMNS as u16,
+            rows: PAGE_ROWS as u16,
             cell_width: 8,
             cell_height: 18,
         };
@@ -455,19 +462,13 @@ impl EchoPane {
         };
         at(stage, self.channel()?.acknowledge(frame.frame))?;
         self.cursor = frame.update.cursor.position;
+        self.history = frame.update.history;
         Ok(Some(frame))
     }
 
-    /// One request that changes nothing. It releases an attachment of a Workspace that never
-    /// existed, which the server answers before it reads any attachment state.
+    /// One request that changes nothing.
     pub fn round_trip(&mut self) -> Result<()> {
-        let nothing = Operation::ReleaseAttachment {
-            attachment: Attachment {
-                workspace: [0; 32],
-                generation: 0,
-            },
-        };
-        match request(&self.link, "round trip", nothing)? {
+        match request(&self.link, "round trip", nothing())? {
             ReplyBody::Done => Ok(()),
             _ => fail("round trip"),
         }
@@ -490,6 +491,64 @@ impl EchoPane {
                 return Ok(());
             }
         }
+    }
+
+    /// Types one screenful of text, which the raw `cat` echoes and the terminal wraps, so the
+    /// screen scrolls by a page. Returns once a pushed frame shows the page's last row.
+    pub fn page(&mut self, index: usize, deadline: Instant) -> Result<()> {
+        let end = format!("END{index:06}");
+        let mut text = String::with_capacity(PAGE_COLUMNS * PAGE_ROWS);
+        for row in 0..PAGE_ROWS {
+            let label = format!("P{index:06}R{row:02} ");
+            text.push_str(&label);
+            let fill = char::from(b'a' + ((index + row) % 26) as u8);
+            let width = if row + 1 == PAGE_ROWS {
+                PAGE_COLUMNS - label.len() - end.len()
+            } else {
+                PAGE_COLUMNS - label.len()
+            };
+            text.extend(std::iter::repeat_n(fill, width));
+        }
+        text.push_str(&end);
+        self.input(vec![InputEvent::Key(text_key(&text))])?;
+        loop {
+            let Some(frame) = self.next_frame("page", deadline)? else {
+                return fail("page timed out");
+            };
+            // Rows join in order, so a marker that wrapped across two rows still matches.
+            let shown = frame
+                .update
+                .rows
+                .iter()
+                .flat_map(|row| row.runs.iter().map(|run| run.text.as_str()))
+                .collect::<String>()
+                .contains(&end);
+            if frame.input >= self.sent && shown {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Reads one Scrollback page of `rows` rows, `back` rows above the newest history row.
+    pub fn fetch(&mut self, back: u64, rows: u16) -> Result<()> {
+        let history = self.history;
+        let channel = self.channel()?.channel();
+        let start = history.total.saturating_sub(back).max(history.oldest);
+        let operation = Operation::ScrollbackPage {
+            channel,
+            epoch: history.epoch,
+            start,
+            rows,
+        };
+        match request(&self.link, "scrollback page", operation)? {
+            ReplyBody::Page(_) => Ok(()),
+            _ => fail("scrollback page"),
+        }
+    }
+
+    /// Rows of history the probe's frames reported.
+    pub fn history_rows(&self) -> u64 {
+        self.history.total - self.history.oldest
     }
 
     /// Sends Return, which moves the raw cursor back to the first column of the same line.
@@ -545,11 +604,31 @@ fn discarded(received: &Received) -> Result<()> {
     }
 }
 
+/// A request that changes nothing. It releases an attachment of a Workspace that never existed,
+/// which the server answers before it reads any attachment state.
+fn nothing() -> Operation {
+    Operation::ReleaseAttachment {
+        attachment: Attachment {
+            workspace: [0; 32],
+            generation: 0,
+        },
+    }
+}
+
+/// Applies one Workspace edit and retires its outcome. The server keeps every client's
+/// unretired outcomes and refuses edits from all of them with `Capacity` once 32 wait. A paired
+/// run is a new client each time, so a retirement lost with its link is never repeated.
 fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
     let reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
     let ReplyBody::Outcome(result) = reply else {
         return fail("mutation outcome");
     };
+    if result.outcome != Outcome::Pending {
+        at("mutate", link.acknowledge(sequence))?;
+        // The link writes everything queued in one pass, so the retirement queued before this
+        // request has left once its reply arrives, and ending the link cannot drop it.
+        request(link, "mutate", nothing())?;
+    }
     Ok(result.outcome)
 }
 

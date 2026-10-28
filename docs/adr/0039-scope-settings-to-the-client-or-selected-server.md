@@ -11,3 +11,5 @@ Interface, Font, Themes, Keybindings, clipboard, Git presentation and client upd
 Git discovery and writes use the owning server's tools and filesystem. "Git on <server>" owns New Worktree Location; validation checks that server's filesystem and effective directory permissions. Concurrent edits reload the authoritative value and explain the change. Offline server edits remain unavailable. [System Permissions](0014-guide-permission-setup-on-system-settings.md) belong to the machine using the protected resource.
 
 The account-local server offers no removal. Remote removal and revocation follow [ADR 0038](0038-unpair-devices-without-blocking-local-connection-removal.md). Import, export and reset affect Client Settings and installed Terminal Themes only. Connections, authorization, operations, attachments, views, server organization, Server Settings and deliberate Stop remain outside the Settings Document.
+
+[ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

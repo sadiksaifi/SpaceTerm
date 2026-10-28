@@ -573,7 +573,15 @@ fn every_server_message_round_trips() {
             )),
         },
         PaneEvent::Accessibility { revision: 3 },
-        PaneEvent::HiddenInput(true),
+        PaneEvent::Line(pane::LineState {
+            epoch: 7,
+            mode: pane::LineMode {
+                canonical: true,
+                echo: false,
+                signals: true,
+                shell_foreground: false,
+            },
+        }),
     ];
     for event in events {
         server_round_trip(ServerMessage::Pane(PaneMessage {

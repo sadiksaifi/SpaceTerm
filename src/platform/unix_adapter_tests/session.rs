@@ -123,7 +123,7 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
             }
             Ok(TerminalSessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
             Ok(
-                TerminalSessionEvent::HiddenInputChanged(_)
+                TerminalSessionEvent::Line(_)
                 | TerminalSessionEvent::PasteUnconfirmed
                 | TerminalSessionEvent::PermissionRequested(_)
                 | TerminalSessionEvent::MetadataChanged(_)
@@ -179,7 +179,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
                 panic!("terminal session failed: {failure}")
             }
             Ok(
-                TerminalSessionEvent::HiddenInputChanged(_)
+                TerminalSessionEvent::Line(_)
                 | TerminalSessionEvent::PasteUnconfirmed
                 | TerminalSessionEvent::PermissionRequested(_)
                 | TerminalSessionEvent::MetadataChanged(_)

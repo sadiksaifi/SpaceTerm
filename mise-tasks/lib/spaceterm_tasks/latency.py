@@ -25,7 +25,7 @@ APPS = {
     "terminal": "Terminal",
 }
 PIXEL_SOURCE = Path(__file__).with_name("latency_pixels.swift")
-# Cargo arguments for the protocol probe example. Release crypto keeps WSS timings realistic.
+# Cargo arguments for the protocol probe example. Release crypto keeps QUIC timings realistic.
 PROTOCOL_PROBE = (
     "--package",
     "spaceterm-server-host",
@@ -111,12 +111,20 @@ def resolve(host):
         raise TaskError("the route guard could not resolve its host") from None
 
 
+def connected_sources(selector):
+    """Return the local address of each connection that lsof's `selector` picks."""
+    listing = subprocess.run(
+        ["lsof", "-nP", *selector, "-F", "n"], capture_output=True, text=True, check=False
+    )
+    return parse_local_addresses(listing.stdout)
+
+
 def guard_route(host, interface):
     """Refuse to continue unless `host` routes through `interface`.
 
-    Established TCP connections to `host`, such as a paired desktop's WSS connection, must also
-    use a local address on `interface`; a connection opened before the route changed keeps its
-    old interface.
+    Established TCP connections to `host`, such as an SSH session, and connected UDP sockets to
+    it, such as an app's paired QUIC connection, must also use a local address on `interface`.
+    A connection opened before the route changed can keep its old interface.
     """
     address = resolve(host)
     family = "-inet6" if ":" in address else "-inet"
@@ -130,22 +138,23 @@ def guard_route(host, interface):
         ["ifconfig", interface], capture_output=True, text=True, check=False
     )
     local = parse_interface_addresses(configured.stdout)
-    connections = subprocess.run(
-        ["lsof", "-nP", f"-iTCP@{address}", "-sTCP:ESTABLISHED", "-F", "n"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    established = parse_local_addresses(connections.stdout)
+    established = connected_sources([f"-iTCP@{address}", "-sTCP:ESTABLISHED"])
+    flows = connected_sources([f"-iUDP@{address}"])
     elsewhere = [source for source in established if source not in local]
     if elsewhere:
         raise TaskError(
             f"{len(elsewhere)} established connections to {address} use another interface; "
             "reconnect them before measuring"
         )
+    elsewhere = [source for source in flows if source not in local]
+    if elsewhere:
+        raise TaskError(
+            f"{len(elsewhere)} UDP flows to {address} use another interface; "
+            "wait for the app to move them or reconnect before measuring"
+        )
     print(
         f"route guard: {address} uses {interface}; "
-        f"{len(established)} established connections use it too"
+        f"{len(established)} established connections and {len(flows)} UDP flows use it too"
     )
 
 
@@ -237,3 +246,51 @@ def shell_directory(directory=None):
     if directory.startswith("~/"):
         return "~/" + shlex.quote(directory[2:])
     return shlex.quote(directory)
+
+
+def netem_commands(device, client, loss, delay):
+    """Shell commands that delay and drop only `device`'s traffic to `client`.
+
+    A `prio` qdisc with a fourth band carries netem. Its priomap keeps all other traffic in the
+    three usual bands, and a `u32` filter sends only IPv4 traffic to `client` into the fourth.
+    """
+    priomap = "1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1"
+    return [
+        f"sudo -n tc qdisc add dev {device} root handle 1: prio bands 4 priomap {priomap}",
+        f"sudo -n tc qdisc add dev {device} parent 1:4 handle 40: "
+        f"netem loss {loss:g}% delay {delay:g}ms",
+        f"sudo -n tc filter add dev {device} parent 1: protocol ip prio 1 u32 "
+        f"match ip dst {client}/32 flowid 1:4",
+    ]
+
+
+def netem_active(qdiscs):
+    """Whether `tc qdisc show` output has a netem or prio qdisc that a run would replace."""
+    return any(
+        line.split()[1:2] in (["netem"], ["prio"]) for line in qdiscs.splitlines() if line.strip()
+    )
+
+
+def cells(results):
+    """Group probe results by measurement and condition, joining their samples across rounds."""
+    grouped = {}
+    for result in results:
+        grouped.setdefault((result["measurement"], result["condition"]), []).extend(
+            result["samples"]
+        )
+    return grouped
+
+
+def table(results):
+    """A Markdown table of p50, p90, p99 and max for every measurement and condition."""
+    lines = [
+        "| Measurement | Condition | n | p50 | p90 | p99 | max |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for (measurement, condition), values in sorted(cells(results).items()):
+        lines.append(
+            f"| {measurement} | {condition} | {len(values)} | "
+            f"{percentile(values, 50):.2f} | {percentile(values, 90):.2f} | "
+            f"{percentile(values, 99):.2f} | {max(values):.2f} |"
+        )
+    return "\n".join(lines)

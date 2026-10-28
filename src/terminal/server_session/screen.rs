@@ -1,8 +1,8 @@
 //! Applies pushed screen frames to desktop snapshots and encodes the presentation style.
 use super::screen_decoder::{ScreenDecoder, UpdateError};
 use super::*;
-use spaceterm_server::protocol::Frame;
 use spaceterm_server::protocol::screen::{Cursor, History, ScreenUpdate};
+use spaceterm_server::protocol::{Frame, PaneEvent};
 
 /// Receives one lease's server screens for the desktop presentation.
 pub(super) struct ScreenReceiver<'a> {
@@ -98,6 +98,8 @@ pub(super) struct Frames<'a, 'b> {
     pub(super) semantic: &'a mut super::accessibility::Fetcher,
     /// What the view shows of the last visible frame.
     pub(super) shown: &'a mut Option<Shown>,
+    /// Judges predictions against each frame and follows the line state in channel order.
+    pub(super) predictor: &'a mut super::prediction::Predictor,
 }
 
 /// The parts of a frame the view shows besides its rows, modes and graphics.
@@ -136,6 +138,7 @@ impl super::inbox::Apply for Frames<'_, '_> {
     fn apply(&mut self, frame: Frame) -> Result<Option<Self::Screen>, ServerError> {
         let invisible = frame.base.is_some() && invisible(&frame.update, *self.shown);
         let shown = Shown::of(&frame.update);
+        let input = frame.input;
         let previous = *self.generation;
         let (screen, mapping, revision) = self.screens.receive(
             frame,
@@ -146,6 +149,8 @@ impl super::inbox::Apply for Frames<'_, '_> {
             self.appearance,
         )?;
         self.semantic.note_revision(revision);
+        self.predictor
+            .frame(&screen, input, std::time::Instant::now());
         if invisible {
             // The view keeps its screen, so pointer coordinates keep its generation.
             *self.generation = previous;
@@ -153,6 +158,12 @@ impl super::inbox::Apply for Frames<'_, '_> {
         }
         *self.shown = Some(shown);
         Ok(Some((screen, mapping)))
+    }
+
+    fn event(&mut self, event: &PaneEvent) {
+        if let PaneEvent::Line(line) = event {
+            self.predictor.line(*line);
+        }
     }
 }
 

@@ -10,7 +10,7 @@ SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-
 
 **Local Workspace**: A Workspace whose Terminal Sessions run on this machine.
 
-**Remote Workspace**: A Workspace whose Terminal Sessions run on another machine, reached through a paired WSS connection.
+**Remote Workspace**: A Workspace whose Terminal Sessions run on another machine, reached through a paired QUIC connection.
 
 **Current Directory**: A Terminal Session's current working directory on its machine.
 
@@ -41,7 +41,7 @@ _Avoid_: Window, Terminal Session
 
 ## Server architecture vocabulary
 
-Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients present that work over account-local IPC or paired WSS connections.
+Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients present that work over account-local IPC or paired QUIC connections.
 
 **SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
 
@@ -61,7 +61,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **SpaceTerm Protocol**: The versioned exchange of server state, terminal presentation, and client operations between a SpaceTerm Client and a SpaceTerm Server over one multiplexed connection, on which the server pushes changes as they happen.
 
-**SSH Setup**: Temporary OpenSSH provisioning inside Add Server that prepares a SpaceTerm Server and enrolls the client for paired WSS access.
+**SSH Setup**: Temporary OpenSSH provisioning inside Add Server that prepares a SpaceTerm Server and enrolls the client for paired QUIC access.
 
 **Start Server**: The explicit action that starts a SpaceTerm Server.
 
@@ -101,7 +101,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Unpair Pending**: An Unpair Device request whose server-side revocation is awaiting confirmation, independently of completed local connection removal.
 
-**Saved Connection**: A paired WSS connection a SpaceTerm Client keeps in its Servers Settings Section, together with whether it should stay connected.
+**Saved Connection**: A paired QUIC connection a SpaceTerm Client keeps in its Servers Settings Section, together with whether it should stay connected.
 
 **Client Settings**: Preferences used by a SpaceTerm Client on its own device.
 
@@ -218,6 +218,11 @@ _Avoid_: session, terminal
 **Scrollback**: The rows of a Terminal Session's history above its screen, owned by the SpaceTerm Server.
 
 **Scrollback Cache**: The Scrollback rows a SpaceTerm Client holds for one Pane, over which it scrolls, selects, and runs Terminal Find.
+
+**Line Mode**: Whether a Terminal Session's PTY collects lines, echoes input and turns signal keys into signals, and whether the shell owns its foreground, as the SpaceTerm Server last read them.
+
+**Predictive Echo**: A SpaceTerm Client drawing printable keys typed at the shell's line editor before the SpaceTerm Server's echo arrives, marked until a frame confirms them.
+_Avoid_: local echo, speculative echo
 
 ## Terminal interaction and safety
 

@@ -158,16 +158,8 @@ impl Drop for KqueueWatchSet {
 
 fn register(queue: RawFd, event: &libc::kevent) -> Result<(), RepositoryWatchError> {
     // SAFETY: `event` is one valid change, and no events are read back.
-    let result = unsafe {
-        libc::kevent(
-            queue,
-            event,
-            1,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null(),
-        )
-    };
+    let result =
+        unsafe { libc::kevent(queue, event, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
     if result < 0 {
         Err(RepositoryWatchError)
     } else {

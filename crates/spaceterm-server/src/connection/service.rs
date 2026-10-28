@@ -22,7 +22,7 @@ pub struct Peer {
     pub client: [u8; 32],
     /// Unique per connection. Leases bind to it.
     pub connection: [u8; 32],
-    /// Present for a paired WSS device, which cannot administer the owning account.
+    /// Present for a paired QUIC device, which cannot administer the owning account.
     pub pairing: Option<Pairing>,
 }
 

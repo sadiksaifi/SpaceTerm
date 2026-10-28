@@ -53,8 +53,8 @@ os = ["linux"]
 hint = "Run mise run setup:packages, then install the Vulkan driver for your GPU"
 
 [doctor.checks.linux-tools]
-description = "Desktop entry, D-Bus, SSH, and zsh tools that Linux tests run"
-run = "python -m spaceterm_tasks.doctor tools desktop-file-validate dbus-daemon dbus-run-session ssh zsh"
+description = "Desktop entry, D-Bus, SSH, zsh, and vim tools that Linux tests run"
+run = "python -m spaceterm_tasks.doctor tools desktop-file-validate dbus-daemon dbus-run-session ssh zsh vim"
 os = ["linux"]
 hint = "Run mise run setup:packages"
 
@@ -82,6 +82,7 @@ hint = "Run mise run setup:packages"
 "apt:dbus" = { os = "linux" }
 "apt:desktop-file-utils" = { os = "linux" }
 "apt:zsh" = { os = "linux" }
+"apt:vim" = { os = "linux" }
 "apt:python3-gi" = { os = "linux" }
 "apt:gir1.2-glib-2.0" = { os = "linux" }
 "apt:python3-pyatspi" = { os = "linux" }
@@ -179,6 +180,11 @@ arg "[scenario]" help="Simulated updater state" default="available" {
 }
 '''
 run = [{ task = "development:{{ os() }}", env = { SPACETERM_UPDATE_PREVIEW = "{{usage.scenario}}" } }]
+
+[tasks."development:latency"]
+description = "Run SpaceTerm Development with each Pane's pushed events held back, to show Predictive Echo on a local Pane"
+usage = 'arg "[milliseconds]" help="How long each pushed event waits" default="80"'
+run = [{ task = "development:{{ os() }}", env = { SPACETERM_DEVELOPER_PUSH_DELAY_MS = "{{usage.milliseconds}}" } }]
 
 [tasks."fmt:check"]
 description = "Check Rust and Python formatting"
@@ -515,12 +521,12 @@ description = "Test shared Workspace integration and server Pane presentation in
 run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
 
 [tasks."server:setup:test"]
-description = "Test temporary SSH provisioning and paired WSS setup admission"
+description = "Test temporary SSH provisioning and paired QUIC setup admission"
 usage = 'arg "[filter]" help="Run one setup regression by its full name"'
 run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}ssh::provisioning direct_connections::setup{% endif %}"
 
 [tasks."server:setup:native:test"]
-description = "Verify temporary provisioning and WSS admission in an owner-confirmed native account"
+description = "Verify temporary provisioning and QUIC admission in an owner-confirmed native account"
 usage = 'arg "[test]" default="native_server_setup_acceptance" help="Exact function name in the native setup fixture; see docs/local-server.md for scope and opt-ins"'
 run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::provisioning::unix_adapter_tests::{{usage.test | quote}} --ignored --exact --nocapture"
 
@@ -625,9 +631,9 @@ flag "--cleanup-exercise" help="Remove only the retained directory-recovery test
 '''
 run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
 
-[tasks."bench:latency:wss"]
-description = "Measure a paired WSS request's round trip on loopback, in a release build"
-run = "cargo test --release --package spaceterm-server --lib --all-features --locked -- direct::tests::wss_request_round_trip_on_loopback --ignored --exact --nocapture"
+[tasks."bench:latency:quic"]
+description = "Measure a paired QUIC request's round trip on loopback, in a release build"
+run = "cargo test --release --package spaceterm-server --lib --all-features --locked -- direct::tests::quic_connections::quic_request_round_trip_on_loopback --ignored --exact --nocapture"
 
 [tasks."server:direct:test"]
 description = "Test direct-network proof, exposure, enrollment and revocation boundaries"
@@ -642,9 +648,9 @@ description = "Build the two-host direct-device verification helper before nativ
 run = "cargo build --package spaceterm-server-host --features client --example direct_devices --locked"
 
 [tasks."server:direct:smoke"]
-description = "Verify WSS against Penguin using only explicitly confirmed idle Development work"
+description = "Verify QUIC against Penguin using only explicitly confirmed idle Development work"
 usage = '''
-arg "<bind>" help="Concrete owner IP address and TCP port"
+arg "<bind>" help="Concrete owner IP address and UDP port"
 arg "<server>" help="Exact idle Development server identity in hexadecimal"
 flag "--confirm-idle-development" help="Authorize only test-created pairings and Workspaces on the idle Development server"
 flag "--restart-idle-service" help="Also verify exposure policy through an explicit idle service restart"
@@ -664,7 +670,7 @@ description = "Test server-owned clear operations and exact Pane leases"
 run = "cargo test --package spaceterm --no-default-features --locked --lib runtime::server::clear_tests"
 
 [tasks."server:presentation:test"]
-description = "Test presentation fixture scope guards and WSS driver framing without native access"
+description = "Test presentation fixture scope guards and QUIC driver framing without native access"
 run = "cargo test --package spaceterm-server-host --features client --locked --example terminal_presentation --example direct_devices"
 
 [tasks."server:presentation:check"]

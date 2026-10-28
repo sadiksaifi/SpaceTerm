@@ -74,6 +74,31 @@ class RouteGuardPlatformTests(unittest.TestCase):
         guard.assert_not_called()
 
 
+class RouteGuardTests(unittest.TestCase):
+    def guard(self, udp):
+        outputs = {
+            "route": ROUTE,
+            "ifconfig": IFCONFIG,
+            "-iTCP@192.168.1.206": "",
+            "-iUDP@192.168.1.206": udp,
+        }
+
+        def run(command, **_):
+            key = command[2] if command[0] == "lsof" else command[0]
+            return mock.Mock(stdout=outputs[key])
+
+        with mock.patch.object(latency.subprocess, "run", side_effect=run):
+            latency.guard_route("192.168.1.206", "en8")
+
+    def test_accepts_a_udp_flow_on_the_interface(self):
+        with mock.patch("builtins.print"):
+            self.guard("p1876\nf3\nn192.168.1.36:51051->192.168.1.206:9231\n")
+
+    def test_refuses_a_udp_flow_left_on_another_interface(self):
+        with self.assertRaisesRegex(TaskError, "1 UDP flows to 192.168.1.206 use another"):
+            self.guard("p1876\nf3\nn192.168.1.42:51051->192.168.1.206:9231\n")
+
+
 class ScreenLockTests(unittest.TestCase):
     def test_excludes_other_holders_until_released(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -103,3 +128,35 @@ class ShellDirectoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NetemTests(unittest.TestCase):
+    def test_impairs_only_traffic_to_the_client(self):
+        commands = latency.netem_commands("eno1", "192.168.1.36", 2, 25)
+        self.assertEqual(
+            commands[0],
+            "sudo -n tc qdisc add dev eno1 root handle 1: prio bands 4 "
+            "priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1",
+        )
+        self.assertIn("parent 1:4 handle 40: netem loss 2% delay 25ms", commands[1])
+        self.assertTrue(commands[2].endswith("match ip dst 192.168.1.36/32 flowid 1:4"))
+
+    def test_sees_a_qdisc_a_run_would_replace(self):
+        clean = "qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024\n"
+        impaired = (
+            "qdisc prio 1: root refcnt 2 bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1\n"
+            "qdisc netem 40: parent 1:4 limit 1000 delay 25ms loss 2%\n"
+        )
+        self.assertFalse(latency.netem_active(clean))
+        self.assertTrue(latency.netem_active(impaired))
+
+    def test_tables_each_cell_across_rounds(self):
+        results = [
+            {"measurement": "key to echo", "condition": "clean", "samples": [1.0, 2.0]},
+            {"measurement": "key to echo", "condition": "clean", "samples": [3.0]},
+            {"measurement": "key to echo", "condition": "impaired", "samples": [30.0]},
+        ]
+        rows = latency.table(results).splitlines()
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[2], "| key to echo | clean | 3 | 2.00 | 2.80 | 2.98 | 3.00 |")
+        self.assertIn("| impaired | 1 |", rows[3])

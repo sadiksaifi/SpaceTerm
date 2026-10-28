@@ -7,3 +7,5 @@ Every remote client uses WSS with pinned server trust and a deliberately enrolle
 Client Identity distinguishes views, attachments, Pane control and operations; Client Name labels control for other clients. Neither grants authority. Connection, Terminal Session, control and attachment generations independently fence operations.
 
 Native service administration requires owning-account operating-system authority on the server's machine. WSS grants neither that authority nor client-local file access. Signed-artifact verification, deliberate Stop, bounded process ownership and reconciliation of started Git writes remain required.
+
+[ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.
