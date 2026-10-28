@@ -65,9 +65,13 @@ pub struct ServerConnection {
 struct SharedLink {
     link: Mutex<Option<ServerLink>>,
     subscribers: Mutex<Vec<Weak<dyn LinkSink>>>,
-    /// How many links were connected. Each new link may reach a restarted server.
-    connected: std::sync::atomic::AtomicU64,
+    /// The generation of the latest link connected, or 0 before the first.
+    generation: std::sync::atomic::AtomicU64,
 }
+
+/// Numbers every link this process connects, across all handles. A paired route's reconnect
+/// creates a new handle, so a count per handle would repeat a generation an earlier link had.
+static LINK_GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Delivers a shared link's events to every live subscriber. It holds the shared state weakly, so
 /// the link it belongs to never keeps that state alive.
@@ -395,9 +399,10 @@ impl ServerConnection {
         *saved = None;
         let link = self.connect(Arc::new(Fanout(Arc::downgrade(&self.shared))))?;
         *saved = Some(link.clone());
+        let generation = LINK_GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.shared
-            .connected
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            .generation
+            .store(generation, std::sync::atomic::Ordering::Release);
         Ok(link)
     }
     /// Makes `link`, already admitted, this handle's shared connection while it stays live. Tests
@@ -406,11 +411,12 @@ impl ServerConnection {
     pub fn adopt(&self, link: ServerLink) {
         *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
     }
-    /// Identifies the shared link: it changes each time [`Self::link`] connects a new one. Facts
-    /// read over an older link may describe a server that has since restarted.
+    /// Identifies the shared link: it changes each time [`Self::link`] connects a new one, and no
+    /// other handle's link in this process has the same generation. Facts read over an older link
+    /// may describe a server that has since restarted or updated.
     pub fn link_generation(&self) -> u64 {
         self.shared
-            .connected
+            .generation
             .load(std::sync::atomic::Ordering::Acquire)
     }
     /// Delivers the shared link's pushed inventory and health to `sink` while it lives, across
@@ -728,7 +734,9 @@ mod tests {
             1,
             "clones share one connection"
         );
-        assert_eq!(server.link_generation(), 1);
+        let generation = server.link_generation();
+        assert_ne!(generation, 0);
+        assert_eq!(server.clone().link_generation(), generation);
         // The server's end of that connection closes: every holder sees the same failure.
         served
             .recv()
@@ -748,14 +756,23 @@ mod tests {
             2,
             "an ended link reconnects once"
         );
-        assert_eq!(
-            server.clone().link_generation(),
-            2,
+        let reconnected = server.clone().link_generation();
+        assert!(
+            ![0, generation].contains(&reconnected),
             "a new link has a new identity"
         );
         assert!(answers(&server.clone().link().unwrap()));
         assert_eq!(accepted.load(Ordering::SeqCst), 2);
-        drop((first, second, third, server));
+        // A paired route's Reconnect creates a new handle. Its first link must not share a
+        // generation with an earlier handle's first link, or facts read over that link stay.
+        let other = ServerConnection::with_paths(paths.clone()).unwrap();
+        assert!(!other.same_handle(&server));
+        assert!(answers(&other.link().unwrap()));
+        assert!(
+            ![0, generation, reconnected].contains(&other.link_generation()),
+            "a separately created handle's link has a new identity"
+        );
+        drop((first, second, third, server, other));
         std::fs::remove_dir_all(root).unwrap();
     }
 

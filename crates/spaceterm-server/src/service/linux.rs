@@ -369,6 +369,12 @@ impl Supervisor for UserService {
         self.systemctl(&["--no-block", "stop", &self.name])?;
         Ok(())
     }
+    /// systemd never limits this unit's stop: it sets `TimeoutStopSec=infinity` and
+    /// `SendSIGKILL=no`. This is SpaceTerm's own cap, equal to systemd's stock default
+    /// `DefaultTimeoutStopSec=90s`. The server keeps stopping after the cap.
+    fn stop_timeout(&self) -> Duration {
+        Duration::from_secs(90)
+    }
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError> {
         self.registration().remove(&self.contents(runtime)?)?;
         self.systemctl(&["daemon-reload"])?;
