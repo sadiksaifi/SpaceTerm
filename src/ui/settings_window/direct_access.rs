@@ -281,10 +281,25 @@ pub(super) fn address_to_use(state: &AccessState, chosen: Option<IpAddr>) -> Opt
         .or_else(|| addresses.available.first().copied())
 }
 
+/// The address the chooser offers for listening on every interface, for IPv4 and IPv6.
+const EVERY_INTERFACE: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+
+/// `address` as the rows say it: an address of the server, or every interface at its port.
+fn listening_address(address: SocketAddr) -> String {
+    if address.ip().is_unspecified() {
+        format!("all interfaces, port {}", address.port())
+    } else {
+        address.to_string()
+    }
+}
+
 /// What the Allow row says under its control, if anything is wrong.
 pub(super) fn access_problem(state: &AccessState, server: &str) -> Option<String> {
     let address = state.policy.map(|policy| policy.ip());
     match (state.listener, &state.addresses) {
+        (Listener::Failed, _) if address.is_some_and(|address| address.is_unspecified()) => {
+            Some("Couldn't listen on all interfaces.".to_owned())
+        }
         (Listener::AddressGone, _) => Some(match address {
             Some(address) => {
                 format!("{address} is no longer on {server}. Choose another.")
@@ -552,6 +567,14 @@ impl SettingsWindow {
             ..
         }) = self.direct_access.state()
         {
+            if address.ip().is_unspecified() {
+                let server = self.direct_access_server_name();
+                return SharedString::from(format!(
+                    "Listening on {}, including public networks and any network {server} \
+                     joins later. Only paired devices are admitted.",
+                    listening_address(*address)
+                ));
+            }
             return SharedString::from(format!("Listening on {address}."));
         }
         // A server SpaceTerm can't reach may have stopped listening since, so its address reads
@@ -561,7 +584,10 @@ impl SettingsWindow {
                 policy: Some(address),
                 observed_at: Some(_),
                 ..
-            }) => SharedString::from(format!("Last known address: {address}.")),
+            }) => SharedString::from(format!(
+                "Last known address: {}.",
+                listening_address(address)
+            )),
             _ => SharedString::new_static("Invited devices can connect over the network."),
         }
     }
@@ -580,8 +606,8 @@ impl SettingsWindow {
         }
     }
 
-    /// The Allow switch, and the address chooser beside it when the server has more than one
-    /// address or its chosen address is gone.
+    /// The Allow switch, and the address chooser beside it: All Interfaces and each address of
+    /// the server.
     pub(super) fn render_network_access(
         &mut self,
         appearance: &ChromeAppearance,
@@ -607,9 +633,6 @@ impl SettingsWindow {
         let change = self.direct_access.change;
         // What the server last reported while SpaceTerm can't reach it, dimmed by its row.
         let on = self.network_access_on();
-        let gone = state
-            .as_ref()
-            .is_some_and(|state| state.listener == Listener::AddressGone);
         let addresses: Vec<IpAddr> = state
             .as_ref()
             .and_then(|state| state.addresses.as_ref())
@@ -629,23 +652,33 @@ impl SettingsWindow {
             .and_then(|state| address_to_use(state, None))
             .is_some();
         let owner = cx.weak_entity();
-        let chooser = (addresses.len() > 1 || (gone && !addresses.is_empty())).then(|| {
+        let every = chosen.is_some_and(|address| address.is_unspecified());
+        let chooser = (!addresses.is_empty() || every).then(|| {
             let owner = owner.clone();
-            let items = addresses
-                .iter()
-                .map(|address| {
+            let every_interface = ComboBoxItem::new(EVERY_INTERFACE, "All Interfaces")
+                .description("Any network, including public ones");
+            let items = std::iter::once(every_interface)
+                .chain(addresses.iter().map(|address| {
                     let item = ComboBoxItem::new(*address, address.to_string());
                     if Some(*address) == suggested {
                         item.description("Suggested")
                     } else {
                         item
                     }
-                })
+                }))
                 .collect();
             super::settings_selector(
                 ADDRESS_SELECTOR.to_owned(),
                 SharedString::from(format!("Address on {server}")),
-                chosen.filter(|address| addresses.contains(address)),
+                chosen
+                    .map(|address| {
+                        if address.is_unspecified() {
+                            EVERY_INTERFACE
+                        } else {
+                            address
+                        }
+                    })
+                    .filter(|address| address.is_unspecified() || addresses.contains(address)),
                 "Choose an address",
                 items,
                 appearance,
@@ -1006,9 +1039,33 @@ impl SettingsWindow {
             return;
         };
         let generation = self.direct_access.generation;
+        // A server on every interface can put any of its addresses in the link, the suggested
+        // one first.
+        let addresses = self
+            .direct_access
+            .state()
+            .filter(|state| {
+                matches!(state.listener, Listener::Listening(address) if address.ip().is_unspecified())
+            })
+            .and_then(|state| state.addresses.as_ref())
+            .map(|addresses| {
+                addresses
+                    .suggested
+                    .into_iter()
+                    .chain(
+                        addresses
+                            .available
+                            .iter()
+                            .copied()
+                            .filter(|address| Some(*address) != addresses.suggested),
+                    )
+                    .collect()
+            })
+            .unwrap_or_default();
         let presented = crate::ui::direct_pairing::InviteDevice::present(
             control,
             self.direct_access_server_name(),
+            addresses,
             move |settings: &mut SettingsWindow, cx| settings.reread_devices(generation, cx),
             window,
             cx,

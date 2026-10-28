@@ -78,8 +78,9 @@ impl Owner {
         })
     }
 
-    /// Enables exposure at `bind`. A policy change disconnects every paired client, so an
-    /// exposure already enabled at `bind` stays untouched.
+    /// Enables exposure at `bind`. A policy change other than widening to every interface at the
+    /// same port disconnects every paired client, so an exposure already enabled at `bind` stays
+    /// untouched.
     pub fn expose(&self, bind: SocketAddr) -> Result<Exposure> {
         let status = at("exposure status", self.server.direct_status())?;
         if status.enabled && status.policy.as_ref().map(|policy| policy.bind) == Some(bind) {
@@ -106,7 +107,7 @@ impl Owner {
     }
 
     pub fn invite(&self) -> Result<String> {
-        let invitation = at("invite", self.server.invite_device())?;
+        let invitation = at("invite", self.server.invite_device(None))?;
         self.issued.borrow_mut().push(invitation.id());
         Ok(invitation.display_text().as_str().to_owned())
     }
