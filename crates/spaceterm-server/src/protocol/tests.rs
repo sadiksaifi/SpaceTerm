@@ -328,7 +328,7 @@ fn every_operation_round_trips() {
             location: "../wt".into(),
         }),
         Operation::Direct(crate::direct::Management::Status),
-        Operation::Direct(crate::direct::Management::Invite),
+        Operation::Direct(crate::direct::Management::Invite { address: None }),
         Operation::Shutdown,
     ]);
     for operation in operations {

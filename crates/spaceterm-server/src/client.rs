@@ -533,8 +533,12 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
-    pub fn invite_device(&self) -> Result<crate::direct::Invitation, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::Invite)? {
+    /// Opens an invitation that advertises `address`, or the server's own choice.
+    pub fn invite_device(
+        &self,
+        address: Option<std::net::IpAddr>,
+    ) -> Result<crate::direct::Invitation, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Invite { address })? {
             crate::direct::ManagementReply::Invitation(text) => {
                 crate::direct::Invitation::parse(&text)
             }

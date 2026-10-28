@@ -540,7 +540,7 @@ mod exercise {
         }
 
         fn enroll(&mut self, peer: &mut Peer) -> Result<PairedDevice> {
-            let invitation = api(self.owner.invite_device())?;
+            let invitation = api(self.owner.invite_device(None))?;
             require(
                 invitation.server_pin().server == self.server,
                 "invitation belongs to another server",

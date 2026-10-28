@@ -8,14 +8,33 @@ const MAX_ADDRESSES: usize = 256;
 
 /// Server-local OS observations. Construction and observation grant no host authority.
 pub(super) trait Adapter: Send + Sync {
-    fn interface_addresses(&self) -> Result<Vec<IpAddr>, DirectError>;
+    fn interface_addresses(&self) -> Result<Vec<Interface>, DirectError>;
     fn route_source(&self, destination: IpAddr) -> Option<IpAddr>;
+}
+
+/// One address of an active interface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(super) struct Interface {
+    pub address: IpAddr,
+    /// The interface bridges containers or virtual machines to this one, such as Docker's
+    /// `docker0`, so devices elsewhere can't reach its address.
+    pub bridge: bool,
+}
+
+/// Name prefixes of container and virtual machine bridges on Linux and macOS.
+const BRIDGES: &[&[u8]] = &[
+    b"docker", b"br-", b"veth", b"virbr", b"vnet", b"lxcbr", b"lxdbr", b"cni", b"flannel",
+    b"podman", b"vmnet", b"vboxnet", b"bridge", b"vmenet",
+];
+
+fn bridge(name: &[u8]) -> bool {
+    BRIDGES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 pub(super) struct Native;
 
 impl Adapter for Native {
-    fn interface_addresses(&self) -> Result<Vec<IpAddr>, DirectError> {
+    fn interface_addresses(&self) -> Result<Vec<Interface>, DirectError> {
         let mut head = std::ptr::null_mut();
         // SAFETY: getifaddrs initializes this pointer and owns the resulting list.
         if unsafe { libc::getifaddrs(&mut head) } != 0 {
@@ -47,7 +66,14 @@ impl Adapter for Native {
                     _ => None,
                 };
                 if let Some(ip) = ip {
-                    addresses.insert(ip);
+                    // SAFETY: ifa_name is null or a NUL-terminated name in the retained list.
+                    let name = unsafe { interface.ifa_name.as_ref() }
+                        .map(|name| unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes())
+                        .unwrap_or_default();
+                    addresses.insert(Interface {
+                        address: ip,
+                        bridge: bridge(name),
+                    });
                     if addresses.len() > MAX_ADDRESSES {
                         return Err(DirectError::Capacity);
                     }
@@ -85,19 +111,48 @@ impl Drop for Interfaces {
 pub(super) struct Snapshot {
     pub addresses: NetworkAddresses,
     assigned: BTreeSet<IpAddr>,
+    bridges: BTreeSet<IpAddr>,
 }
 
 impl Snapshot {
     pub fn contains(&self, address: &IpAddr) -> bool {
         self.assigned.contains(address)
     }
+
+    /// The address an invitation from every interface advertises unless the owner chose one:
+    /// the suggested address, otherwise the first available one that no container or virtual
+    /// machine bridge holds.
+    pub fn advertised(&self) -> Option<IpAddr> {
+        self.addresses.suggested.or_else(|| {
+            self.addresses
+                .available
+                .iter()
+                .copied()
+                .find(|address| !self.bridges.contains(address))
+        })
+    }
 }
 
 pub(super) fn snapshot(adapter: &dyn Adapter) -> Result<Snapshot, DirectError> {
-    let assigned: BTreeSet<_> = adapter.interface_addresses()?.into_iter().collect();
-    if assigned.len() > MAX_ADDRESSES {
+    let interfaces = adapter.interface_addresses()?;
+    if interfaces.len() > MAX_ADDRESSES {
         return Err(DirectError::Capacity);
     }
+    let assigned: BTreeSet<_> = interfaces
+        .iter()
+        .map(|interface| interface.address)
+        .collect();
+    // An address on a bridge and on another interface too stays eligible.
+    let bridges: BTreeSet<_> = assigned
+        .iter()
+        .copied()
+        .filter(|address| {
+            interfaces
+                .iter()
+                .filter(|interface| interface.address == *address)
+                .all(|interface| interface.bridge)
+        })
+        .collect();
     let available: Vec<_> = assigned.iter().copied().filter(usable).collect();
     let suggested = if available.is_empty() {
         None
@@ -110,7 +165,7 @@ pub(super) fn snapshot(adapter: &dyn Adapter) -> Result<Snapshot, DirectError> {
         ]
         .into_iter()
         .filter_map(|destination| adapter.route_source(destination))
-        .find(|source| available.contains(source))
+        .find(|source| available.contains(source) && !bridges.contains(source))
     };
     Ok(Snapshot {
         addresses: NetworkAddresses {
@@ -118,6 +173,7 @@ pub(super) fn snapshot(adapter: &dyn Adapter) -> Result<Snapshot, DirectError> {
             suggested,
         },
         assigned,
+        bridges,
     })
 }
 

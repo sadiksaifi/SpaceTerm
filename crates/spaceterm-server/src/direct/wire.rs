@@ -148,7 +148,11 @@ pub enum Management {
         policy: Option<NetworkPolicy>,
         enabled: bool,
     },
-    Invite,
+    /// Opens an invitation. A server on every interface advertises `address` when given, which
+    /// must be one of its available addresses; one at a single address takes only that one.
+    Invite {
+        address: Option<std::net::IpAddr>,
+    },
     Withdraw(ClaimId),
     Claims,
     Approve(PairingClaim),
