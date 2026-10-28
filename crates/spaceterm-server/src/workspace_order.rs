@@ -121,13 +121,10 @@ struct Record {
 #[cfg(feature = "client")]
 pub struct WorkspaceOrderStore {
     directory: crate::storage::Directory,
-    _lock: OrderLock,
+    _lock: crate::storage::Lock,
     record: Record,
     blocked: bool,
 }
-
-#[cfg(feature = "client")]
-struct OrderLock(std::fs::File);
 
 #[cfg(feature = "client")]
 impl WorkspaceOrderStore {
@@ -135,7 +132,7 @@ impl WorkspaceOrderStore {
         directory: crate::storage::Directory,
         client: Id,
     ) -> Result<Self, ServerError> {
-        let lock = OrderLock(directory.lock("workspace-order.lock", true)?);
+        let lock = directory.lock("workspace-order.lock", true)?;
         let record = directory
             .read_json::<Record>("workspace-order.json")?
             .unwrap_or(Record {
@@ -176,17 +173,6 @@ impl WorkspaceOrderStore {
             return Err(error);
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "client")]
-impl Drop for OrderLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: this guard owns the live descriptor, including on a rejected record.
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
     }
 }
 

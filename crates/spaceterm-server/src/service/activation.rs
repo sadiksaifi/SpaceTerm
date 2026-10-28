@@ -242,7 +242,7 @@ impl Service {
         }
         let status = self.snapshot(&state)?;
         let installations = owned_directory(&self.paths.data.join("installations"))?;
-        lock_directory(&installations)?;
+        let _installations = lock_directory(&installations)?;
         self.verify_choice(candidate)?;
         runtime::verify_candidate_installation(
             &candidate.directory,
@@ -286,7 +286,7 @@ impl Service {
                 return Err(ServerError::Changed);
             }
             let installations = owned_directory(&self.paths.data.join("installations"))?;
-            lock_directory(&installations)?;
+            let _installations = lock_directory(&installations)?;
             self.verify_choice(&approval.previous)?;
             self.verify_choice(&approval.candidate)?;
             runtime::verify_candidate_installation(

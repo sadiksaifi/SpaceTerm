@@ -3,6 +3,9 @@ use crate::{ServerError, storage::Directory};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// The Worktree write lock. It ends when dropped unless a Git child must inherit it.
+pub use crate::storage::Lock as WorktreeLock;
+
 /// First-Workspace seed and retained shared hierarchy. The seed's sole Tab and Pane are its Roots.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,9 +85,10 @@ impl Organization {
 /// first confirm the record it replaces. Two syncs remain per publication.
 pub struct OrganizationStore(pub(crate) Directory);
 impl OrganizationStore {
-    /// A Git child retains this lock across exec, fencing recovery after a server crash until
-    /// the original write exits. Never infer process authority from a saved PID.
-    pub fn worktree_lock(&self) -> Result<std::fs::File, ServerError> {
+    /// A Git child retains this lock across exec through [`WorktreeLock::into_inheritable`],
+    /// fencing recovery after a server crash until the original write exits. Never infer
+    /// process authority from a saved PID.
+    pub fn worktree_lock(&self) -> Result<WorktreeLock, ServerError> {
         self.0.lock("worktree.lock", true)
     }
     pub fn read(&self) -> Result<Option<Organization>, ServerError> {

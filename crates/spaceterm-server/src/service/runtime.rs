@@ -749,7 +749,7 @@ fn retain(
     let commit = &info.commit;
     // The account-private store is the lock used by both the Python installer and service controls.
     let directory = files::store(parent)?;
-    lock_directory(&directory)?;
+    let _directory = lock_directory(&directory)?;
     verify_directory_path(&directory, parent)?;
     let digest = digest(bytes);
     let destination = parent.join(&digest);

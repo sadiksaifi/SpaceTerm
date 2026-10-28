@@ -10,7 +10,7 @@
 //! not yet written is lost.
 use spaceterm_server::{
     ServerError,
-    organization::{Organization, OrganizationStore},
+    organization::{Organization, OrganizationStore, WorktreeLock},
 };
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -21,8 +21,8 @@ pub(in crate::runtime::server) trait Retention: Send + Sync {
     fn write(&self, organization: &Organization) -> Result<(), ServerError>;
     /// Reads the retained organization and confirms that it is durable.
     fn read(&self) -> Result<Option<Organization>, ServerError>;
-    /// Fences Worktree recovery while a Git write runs.
-    fn worktree_lock(&self) -> Result<std::fs::File, ServerError>;
+    /// Fences Worktree recovery while a Git write runs. `None` means this store has no fence.
+    fn worktree_lock(&self) -> Result<Option<WorktreeLock>, ServerError>;
 }
 
 impl Retention for OrganizationStore {
@@ -32,8 +32,8 @@ impl Retention for OrganizationStore {
     fn read(&self) -> Result<Option<Organization>, ServerError> {
         OrganizationStore::read(self)
     }
-    fn worktree_lock(&self) -> Result<std::fs::File, ServerError> {
-        OrganizationStore::worktree_lock(self)
+    fn worktree_lock(&self) -> Result<Option<WorktreeLock>, ServerError> {
+        OrganizationStore::worktree_lock(self).map(Some)
     }
 }
 
@@ -103,7 +103,9 @@ impl Journal {
         }
     }
 
-    pub(in crate::runtime::server) fn worktree_lock(&self) -> Result<std::fs::File, ServerError> {
+    pub(in crate::runtime::server) fn worktree_lock(
+        &self,
+    ) -> Result<Option<WorktreeLock>, ServerError> {
         self.store.worktree_lock()
     }
 
@@ -262,8 +264,8 @@ pub(in crate::runtime::server) mod memory {
             }
             Ok(self.0.retained())
         }
-        fn worktree_lock(&self) -> Result<std::fs::File, ServerError> {
-            std::fs::File::open("/dev/null").map_err(|_| ServerError::StorageUnavailable)
+        fn worktree_lock(&self) -> Result<Option<WorktreeLock>, ServerError> {
+            Ok(None)
         }
     }
 }

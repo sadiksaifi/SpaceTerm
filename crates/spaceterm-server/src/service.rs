@@ -251,7 +251,7 @@ impl Service {
             Err(error) => return Err(error),
         }
         let directory = owned_directory(&parent)?;
-        lock_directory(&directory)?;
+        let _directory = lock_directory(&directory)?;
         let mut choices = Vec::new();
         for entry in std::fs::read_dir(&parent).map_err(|_| ServerError::StorageUnavailable)? {
             let entry = entry.map_err(|_| ServerError::StorageUnavailable)?;
@@ -317,7 +317,7 @@ impl Service {
         }
         let installations = owned_directory(&self.paths.data.join("installations"))?;
         // This directory lock is shared with the signed-package retention task.
-        lock_directory(&installations)?;
+        let _installations = lock_directory(&installations)?;
         runtime::verify(installation, &self.identity)?;
         let previous = Self::state(data)?;
         let mut state = previous.unwrap_or(State {
@@ -995,12 +995,8 @@ fn verify_directory_path(directory: &File, path: &Path) -> Result<(), ServerErro
     }
     Ok(())
 }
-fn lock_directory(directory: &File) -> Result<(), ServerError> {
-    // SAFETY: flock operates on a retained directory descriptor.
-    if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(ServerError::StorageUnavailable);
-    }
-    Ok(())
+fn lock_directory(directory: &File) -> Result<crate::storage::Lock, ServerError> {
+    crate::storage::Lock::directory(directory)
 }
 fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
     let mut prepared = Command::new(program);
@@ -1639,6 +1635,40 @@ mod tests {
             entered: std::sync::mpsc::SyncSender<()>,
             proceed: std::sync::mpsc::Receiver<()>,
         }
+        /// A child that another thread forked and that has not reached exec yet. It holds a copy
+        /// of every descriptor open at the fork until it is released.
+        struct UnexecutedChild {
+            release: std::os::unix::net::UnixStream,
+            process: libc::pid_t,
+        }
+        impl UnexecutedChild {
+            fn fork() -> Self {
+                use std::os::fd::AsRawFd;
+                let (release, gate) = std::os::unix::net::UnixStream::pair().unwrap();
+                // SAFETY: the child uses only read and _exit before terminating, with no Rust cleanup.
+                let process = unsafe { libc::fork() };
+                assert!(process >= 0);
+                if process == 0 {
+                    let mut byte = 0_u8;
+                    // SAFETY: the inherited descriptor and one-byte writable buffer are live.
+                    unsafe {
+                        libc::read(gate.as_raw_fd(), (&raw mut byte).cast(), 1);
+                        libc::_exit(0);
+                    }
+                }
+                Self { release, process }
+            }
+        }
+        impl Drop for UnexecutedChild {
+            fn drop(&mut self) {
+                use std::io::Write;
+                let _ = self.release.write_all(&[1]);
+                // SAFETY: this reaps only the child created above; no other process is signalled.
+                unsafe {
+                    libc::waitpid(self.process, std::ptr::null_mut(), 0);
+                }
+            }
+        }
         struct AccountSupervisor {
             paths: Paths,
             registered: Mutex<Option<PathBuf>>,
@@ -1651,6 +1681,8 @@ mod tests {
             observed_running: AtomicBool,
             disable_gate: Mutex<Option<DisableGate>>,
             disable_fails: AtomicBool,
+            fork_children: AtomicBool,
+            children: Mutex<Vec<UnexecutedChild>>,
         }
         impl AccountSupervisor {
             fn new(paths: Paths) -> Arc<Self> {
@@ -1666,6 +1698,8 @@ mod tests {
                     observed_running: AtomicBool::new(false),
                     disable_gate: Mutex::new(None),
                     disable_fails: AtomicBool::new(false),
+                    fork_children: AtomicBool::new(false),
+                    children: Mutex::default(),
                 })
             }
             fn service(self: &Arc<Self>) -> Service {
@@ -1674,6 +1708,12 @@ mod tests {
                     self.paths.identity.clone(),
                     self.clone(),
                 )
+            }
+            /// Stand in for another thread spawning a process during this native operation.
+            fn fork_child(&self) {
+                if self.fork_children.load(Ordering::Relaxed) {
+                    self.children.lock().unwrap().push(UnexecutedChild::fork());
+                }
             }
             fn spawn_host(&self, delay: Duration) {
                 let paths = self.paths.clone();
@@ -1731,6 +1771,7 @@ mod tests {
                 }
             }
             fn install(&self, runtime: &Path) -> Result<(), ServerError> {
+                self.fork_child();
                 self.installs.fetch_add(1, Ordering::Relaxed);
                 *self.registered.lock().unwrap() = Some(runtime.to_owned());
                 Ok(())
@@ -1760,6 +1801,7 @@ mod tests {
                 if self.disable_fails.load(Ordering::Relaxed) {
                     return Err(ServerError::ServiceUnavailable);
                 }
+                self.fork_child();
                 self.close_host()
             }
             fn stop_timeout(&self) -> Duration {
@@ -2189,6 +2231,33 @@ mod tests {
                     );
                 },
             );
+        }
+
+        #[test]
+        fn locks_end_with_their_owner_while_an_unexecuted_child_holds_inherited_copies() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            // Registration runs under the launch's instance lock, and Stop runs under the
+            // server's instance lock. Each forked child keeps a copy of those descriptors.
+            supervisor.fork_children.store(true, Ordering::Relaxed);
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    ready(
+                        LocalStartup::with_service(service.clone())
+                            .unwrap()
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    assert!(service.stop().unwrap().stopped);
+                    assert!(service.start().unwrap().running);
+                    assert_eq!(supervisor.children.lock().unwrap().len(), 2);
+                },
+            );
+            supervisor.children.lock().unwrap().clear();
         }
 
         #[test]
