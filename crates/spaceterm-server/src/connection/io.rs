@@ -403,7 +403,8 @@ pub fn serve(
         }
         // A Terminal Session bound to this connection has something new. Publishing here, under
         // the `PaneService` lock, puts its frame in this turn's writes without the host's tick.
-        if receiving && outbox.take_publication() && !outbox.is_closing() {
+        // A closing connection still hands the request over, so the service can pass it on.
+        if outbox.take_publication() {
             service
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

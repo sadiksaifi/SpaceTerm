@@ -1202,13 +1202,17 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         }));
         self.host.ticker(wake);
     }
-    /// Pushes what changed for each channel of this connection, on its I/O thread.
+    /// Pushes what changed for each channel of this connection, on its I/O thread. A closing
+    /// connection rings the bell instead, so the host's tick handles what the session changed.
     fn publish(&mut self, peer: &Peer) {
-        let channels: Vec<_> = self
-            .connections
-            .get(&peer.connection)
-            .map(|connection| connection.channels.keys().copied().collect())
-            .unwrap_or_default();
+        let Some(connection) = self.connections.get(&peer.connection) else {
+            return;
+        };
+        if connection.outbox.is_closing() {
+            self.bell.ring();
+            return;
+        }
+        let channels: Vec<_> = connection.channels.keys().copied().collect();
         for channel in channels {
             self.publish_channel(peer.connection, channel);
         }
@@ -1390,5 +1394,55 @@ impl<H: HostCommands> Served<H> {
             Ok(()) => Dispatch::Deferred,
             Err(refusal) => Dispatch::reply(Err(refusal)),
         }
+    }
+}
+
+#[cfg(test)]
+mod routes_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn routes() -> (Routes, Arc<AtomicUsize>) {
+        let rings = Arc::new(AtomicUsize::new(0));
+        let bell = Arc::<Bell>::default();
+        let _ = bell.wake.set(Arc::new({
+            let rings = Arc::clone(&rings);
+            move || {
+                rings.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let routes = Routes {
+            sessions: std::sync::Mutex::default(),
+            bell,
+        };
+        (routes, rings)
+    }
+
+    /// A session that loses its last route rings the host, so a notification that went to the
+    /// connection before it stopped presenting the session is still handled. Moving or adding
+    /// routes rings nothing.
+    #[test]
+    fn only_a_session_that_loses_its_last_route_rings_the_host() {
+        let (routes, rings) = routes();
+        let (first, second) = (Outbox::new(Arc::new(|| {})), Outbox::new(Arc::new(|| {})));
+        routes.replace(BTreeMap::from([([1; 32], vec![first.clone()])]));
+        routes.replace(BTreeMap::from([([1; 32], vec![second.clone()])]));
+        assert_eq!(
+            rings.load(Ordering::SeqCst),
+            0,
+            "a moved route rings nothing"
+        );
+
+        routes.replace(BTreeMap::new());
+        assert_eq!(rings.load(Ordering::SeqCst), 1, "the orphaned session rang");
+        assert!(!first.take_publication() && !second.take_publication());
+
+        routes.notify([1; 32]);
+        assert_eq!(
+            rings.load(Ordering::SeqCst),
+            2,
+            "an unrouted session rings the host"
+        );
+        assert!(!second.take_publication());
     }
 }

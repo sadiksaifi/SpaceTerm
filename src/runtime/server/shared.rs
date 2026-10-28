@@ -1611,6 +1611,9 @@ mod tests {
             ),
             "the second channel still receives its final screen"
         );
+        // A connection's I/O thread may have observed the exits, so the host asks to tick.
+        assert!(HostCommands::take_observed_change(&mut host));
+        assert!(!HostCommands::take_observed_change(&mut host));
         host.tick(Instant::now());
         assert!(host.panes.is_empty(), "observed hosts retire");
         host.shutdown().unwrap();

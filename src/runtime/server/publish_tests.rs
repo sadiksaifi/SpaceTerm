@@ -455,6 +455,12 @@ mod wakes {
         host_rang: bool,
         /// When the host's last tick asked to tick again.
         host_due: Option<Instant>,
+        /// How often the connection published, and after which of those publications the host's
+        /// wake had rung, so a test knows which publication rang it.
+        publications: usize,
+        rung_by_publication: Vec<usize>,
+        /// The publication that delivered the message `await_message` last returned.
+        found_in: usize,
         workspace: [u8; 32],
         pane: [u8; 32],
     }
@@ -464,6 +470,9 @@ mod wakes {
             let mut fixture = Self::hidden();
             fixture.input(1, vec![InputEvent::Focus(FocusTarget::Terminal)]);
             fixture.show();
+            // The claim rang the host. Tests count only rings that follow the setup.
+            fixture.rings.rang.lock().unwrap().host = false;
+            fixture.host_rang = false;
             fixture
         }
 
@@ -500,6 +509,9 @@ mod wakes {
                 accessibility: 0,
                 host_rang: false,
                 host_due: None,
+                publications: 0,
+                rung_by_publication: Vec::new(),
+                found_in: 0,
                 workspace,
                 pane,
             };
@@ -592,7 +604,16 @@ mod wakes {
                 }
             };
             if rang.connection && self.outbox.take_publication() {
+                // The host's wake also serves its own timed work, so only a ring during this
+                // publication counts as this publication's.
+                let earlier = std::mem::take(&mut self.rings.rang.lock().unwrap().host);
                 self.served.publish(&FIRST);
+                self.publications += 1;
+                let mut rang = self.rings.rang.lock().unwrap();
+                if rang.host {
+                    self.rung_by_publication.push(self.publications);
+                }
+                rang.host |= earlier;
             }
             if both && (rang.host || due) {
                 self.host_due = self.served.tick(Instant::now());
@@ -622,6 +643,7 @@ mod wakes {
                     }
                 }
                 if let Some(message) = first {
+                    self.found_in = self.publications;
                     return message;
                 }
             }
@@ -701,7 +723,9 @@ mod wakes {
     }
 
     /// An exit reaches the connection after its final screen, and wakes the host, whose tick
-    /// pushes the inventory without the Pane.
+    /// pushes the inventory without the Pane. Two things ring it in that publication: the
+    /// observed exit, and the session losing its last route. The shared host's tests pin the
+    /// first.
     #[test]
     fn an_exit_reaches_the_connection_without_the_host_and_then_wakes_it() {
         let mut fixture = Fixture::new();
@@ -712,7 +736,10 @@ mod wakes {
             assert!(!ended || rows.shows_output("BYE"), "the final screen comes first");
             ended
         });
-        fixture.await_host();
+        assert!(
+            fixture.rung_by_publication.contains(&fixture.found_in),
+            "the publication that delivered the final screen rang the host"
+        );
     }
 
     /// A presented Terminal Session carries a new title with its screen, which only the
@@ -721,6 +748,12 @@ mod wakes {
     fn a_title_observed_by_the_connection_reaches_the_inventory_through_the_host() {
         let mut fixture = Fixture::new();
         fixture.command(2, "printf '\\033]0;RETITLED\\007'");
+        // Only the connection runs, so nothing but its observation can ring the host.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.rung_by_publication.is_empty() {
+            fixture.serve(Serve::Connection, deadline);
+            drain(&fixture.outbox);
+        }
         let pane = fixture.pane;
         let titled = move |message: &ServerMessage| {
             matches!(message, ServerMessage::Inventory(revision) if revision
@@ -805,6 +838,75 @@ mod wakes {
             Serve::Connection,
             |message, _| matches!(message, ServerMessage::Reply(reply) if reply.id == id),
         );
+    }
+
+    /// Whether `outbox` was asked to publish within 10 seconds. Clears the request.
+    fn asked_to_publish(outbox: &Outbox) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if outbox.take_publication() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// After a takeover, the former controller's channel stays bound until its connection
+    /// publishes, so the session's next output wakes both connections.
+    #[test]
+    fn a_session_bound_on_two_connections_wakes_both() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "sleep 1; printf 'BO%s\\n' TH");
+        let second = super::outbox();
+        fixture
+            .served
+            .admitted(&SECOND, "Second".into(), second.clone());
+        let ClaimReply::Takeover(offer) =
+            fixture.claim(&SECOND, AttachmentClaim::Select { explicit: true })
+        else {
+            panic!("the second client is offered Take Over");
+        };
+        let taken = fixture.claim(
+            &SECOND,
+            AttachmentClaim::TakeOver {
+                target: offer.target,
+            },
+        );
+        assert!(matches!(taken, ClaimReply::Attached { .. }));
+        assert!(
+            asked_to_publish(&fixture.outbox),
+            "the first connection woke"
+        );
+        assert!(asked_to_publish(&second), "the second connection woke");
+    }
+
+    /// A connection that ends takes its routes with it. The session it presented rings the host
+    /// at once, and its later output wakes the host instead of the ended connection.
+    #[test]
+    fn a_disconnected_connection_routes_its_sessions_to_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "sleep 1; printf 'GO%s\\n' NE");
+        fixture.served.disconnected(&FIRST);
+        assert!(
+            std::mem::take(&mut fixture.rings.rang.lock().unwrap().host),
+            "losing its last route rang the host"
+        );
+        fixture.await_host();
+        assert!(
+            !fixture.outbox.take_publication(),
+            "nothing asks the ended connection to publish"
+        );
+    }
+
+    /// A notification taken while the connection closes cannot reach the peer, so it rings the
+    /// host instead of being dropped.
+    #[test]
+    fn a_closing_connection_hands_its_publication_to_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.outbox.goodbye(protocol::Fatal::Stopping).unwrap();
+        fixture.served.publish(&FIRST);
+        assert!(fixture.rings.rang.lock().unwrap().host, "the host rang");
     }
 
     /// A Pane claimed while hidden receives no screen until its client shows it.
