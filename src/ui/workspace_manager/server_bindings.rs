@@ -1,6 +1,6 @@
 //! The SpaceTerm Servers whose Workspaces one Workspace Window presents.
 //!
-//! The account-local server and each connected paired server publish their own inventory,
+//! The account-local server and each saved paired server publish their own inventory,
 //! answers, and attachments. Each one keeps its own binding, so a shared Workspace's edits, closes, and
 //! Pane connections always reach the server that owns it, and losing one server leaves the
 //! others' Workspaces untouched.

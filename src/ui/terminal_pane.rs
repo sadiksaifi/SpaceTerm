@@ -1528,6 +1528,24 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Presents this Pane through `factory` from now on, as when its paired route connects or
+    /// disconnects. The previous subscription ends, and the last screen stays until the new one
+    /// supplies a screen.
+    pub(crate) fn rebind_server(
+        &mut self,
+        factory: WorkspaceTerminalSessionFactory,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal_session.close();
+        self.fallback_title = normalized_pane_title("", &factory.fallback_title()).into();
+        self.terminal_session = PaneTerminalSessionLifecycle::new(factory);
+        self.last_geometry = None;
+        self.readiness_requested = true;
+        self.readiness.dirty(cx.entity_id());
+        cx.emit(TerminalPaneEvent::CaptionChanged);
+        cx.notify();
+    }
+
     /// Whether the shell runs in a SpaceTerm Server.
     fn server_backed(&self) -> bool {
         self.terminal_session.session_factory.is_server_backed()

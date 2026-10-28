@@ -2397,6 +2397,7 @@ impl TabView {
                     continue;
                 };
                 if shared.needs_binding(pane_id, pane.id) {
+                    let reopened = shared.reopened(pane_id);
                     let Some((factory, state)) = shared.sessions().open(pane.id) else {
                         continue;
                     };
@@ -2404,8 +2405,13 @@ impl TabView {
                         self.shared_pane_holds_focus(pane_id, terminal, window, cx)
                     });
                     if let Some(terminal) = self.tab.pane(pane_id) {
-                        terminal
-                            .update(cx, |terminal, cx| terminal.bind_pending_server(factory, cx));
+                        terminal.update(cx, |terminal, cx| {
+                            if reopened {
+                                terminal.rebind_server(factory, cx);
+                            } else {
+                                terminal.bind_pending_server(factory, cx);
+                            }
+                        });
                     }
                     if let Some(shared) = self.shared.as_mut() {
                         let focus = shared

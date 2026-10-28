@@ -1,5 +1,5 @@
 //! Background persistence for this client's arrangements of shared Workspaces, outside Settings.
-use spaceterm_server::client_view::ClientView;
+use spaceterm_server::client_view::{ClientView, RetainedInventory};
 use spaceterm_server::{ServerConnection, ServerError};
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +10,12 @@ struct State {
     pending: Option<ClientView>,
     error: Option<ServerError>,
     closed: bool,
+    /// The Workspaces and Tabs this client last presented from the server, as read.
+    retained: Option<RetainedInventory>,
+    /// The next retained inventory to write. Losing one only leaves an older copy.
+    pending_inventory: Option<RetainedInventory>,
+    /// Once set, the retained inventory is removed and never written again.
+    discarded: bool,
 }
 
 /// One worker owns the storage lock. Dropping the window flushes its latest snapshot.
@@ -40,17 +46,38 @@ impl RetainedClientViews {
                             .map(|store| store.view().clone())
                             .map_err(|error| *error),
                     );
+                    state.retained = opened
+                        .as_ref()
+                        .ok()
+                        .and_then(|store| store.retained_inventory().cloned());
                 }
                 // The window waits on this before its first inventory, so it hears at once.
                 drop(read_done);
                 let Ok(mut store) = opened else {
                     return;
                 };
+                let mut discarded = false;
                 loop {
-                    let (pending, closed) = {
+                    let (pending, inventory, discard, closed) = {
                         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
-                        (state.pending.take(), state.closed)
+                        (
+                            state.pending.take(),
+                            state.pending_inventory.take(),
+                            state.discarded,
+                            state.closed,
+                        )
                     };
+                    if discard && !discarded {
+                        // Nothing reads a retained copy that can't be removed, and the route's
+                        // removal goes on without it.
+                        let _ = store.discard_inventory();
+                        discarded = true;
+                    }
+                    if let Some(inventory) = inventory.filter(|_| !discard) {
+                        // The copy only stands in for the server until it connects, so a failed
+                        // write leaves the previous copy and blocks nothing.
+                        let _ = store.save_inventory(inventory);
+                    }
                     if let Some(view) = pending
                         && let Err(error) = store.save(view)
                     {
@@ -110,6 +137,34 @@ impl RetainedClientViews {
             return;
         }
         state.pending = Some(view);
+        let _ = self.wake.try_send(());
+    }
+    /// The Workspaces and Tabs this client last presented from the server, once read.
+    pub(super) fn retained_inventory(&self) -> Option<RetainedInventory> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retained
+            .clone()
+    }
+    /// Retains `inventory` as the Workspaces and Tabs this client presents from the server.
+    pub(super) fn save_inventory(&self, inventory: RetainedInventory) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.discarded || state.retained.as_ref() == Some(&inventory) {
+            return;
+        }
+        state.retained = Some(inventory.clone());
+        state.pending_inventory = Some(inventory);
+        drop(state);
+        let _ = self.wake.try_send(());
+    }
+    /// Removes the retained inventory for good, as when its route is removed.
+    pub(super) fn discard_inventory(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.discarded = true;
+        state.retained = None;
+        state.pending_inventory = None;
+        drop(state);
         let _ = self.wake.try_send(());
     }
     pub(super) fn read_error(&self) -> Option<ServerError> {
