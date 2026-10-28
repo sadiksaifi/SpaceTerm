@@ -603,23 +603,25 @@ impl SharedWorkspaceHost {
         Ok(())
     }
     /// Forgets a revoked device's edit outcomes and record in a journaled commit. Nothing waits
-    /// for the write. Every boot delivers each revoked device again, so a write lost to a crash
-    /// or an unreadable journal is repeated then.
+    /// for the write. A device whose Worktree work is still in progress, or whose commit failed,
+    /// is tried again each time the server settles Worktree outcomes. Every boot also delivers
+    /// each revoked device again, so a write lost to a crash is repeated then.
     fn forget(&mut self, device: Id) {
+        self.forgetting.insert(device);
         if self.recover().is_err() {
             return;
         }
         let mut next = self.state.clone();
         if !next.forget(device) {
-            self.forgetting.insert(device);
             return;
         }
-        self.forgetting.remove(&device);
-        if next != self.state
-            && let Ok(revision) = self.commit(next)
-        {
+        if next != self.state {
+            let Ok(revision) = self.commit(next) else {
+                return;
+            };
             self.retain_later(revision);
         }
+        self.forgetting.remove(&device);
     }
     /// An in-process edit waits for its revision under the lock.
     fn reply(&self, answer: Answer) -> Result<Reply, Refusal> {
