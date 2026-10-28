@@ -447,12 +447,16 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
     };
     let mut actions = Vec::with_capacity(2);
     if retry {
-        actions.push(action(
-            PromptAction::TryAgain,
-            "Try Again",
-            ModalActionRole::Affirmative,
-            "update-failure-try-again",
-        ));
+        actions.push(
+            action(
+                PromptAction::TryAgain,
+                "Try Again",
+                ModalActionRole::Affirmative,
+                "update-failure-try-again",
+            )
+            .with_emphasis(ModalActionEmphasis::Prominent)
+            .default_action(true),
+        );
     }
     actions.push(action(
         PromptAction::Acknowledge,

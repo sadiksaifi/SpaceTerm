@@ -169,13 +169,17 @@ pub enum ComboBoxAccessory {
 /// Application-owned copy used by the searchable popup.
 ///
 /// Keeping these strings outside the Module lets products localize status and editor text without
-/// replacing any ComboBox behavior.
+/// replacing any ComboBox behavior. Every message is one secondary line, as every floating list
+/// says it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComboBoxCopy {
     filter_name: SharedString,
     filter_placeholder: SharedString,
     busy_status: SharedString,
     empty_status: SharedString,
+    /// The subject of a query that matches nothing, which the popup completes with the quoted
+    /// query, such as "No branches match".
+    no_match: SharedString,
     choices_note: Option<ChoicesNote>,
 }
 
@@ -185,15 +189,12 @@ struct ChoicesNote {
     /// The note without a query, such as "No Workspaces to attach.", for a popup whose choices
     /// can run out.
     none: Option<SharedString>,
-    /// The note's subject with a query, such as "No Workspaces match", which the popup completes
-    /// with the quoted query.
-    no_match: SharedString,
     commands_heading: SharedString,
 }
 
 impl ComboBoxCopy {
-    /// Creates the editor's copy. The popup's busy and empty messages keep their defaults until
-    /// the caller supplies the ones its popup can show.
+    /// Creates the editor's copy. The popup's messages keep their defaults until the caller
+    /// supplies the ones its popup can show.
     pub fn new(
         filter_name: impl Into<SharedString>,
         filter_placeholder: impl Into<SharedString>,
@@ -211,42 +212,43 @@ impl ComboBoxCopy {
         self
     }
 
-    /// The title-case title the popup shows when nothing matches and no command remains.
+    /// What the popup says when it lists nothing and there is no query.
     pub fn empty_status(mut self, status: impl Into<SharedString>) -> Self {
         self.empty_status = status.into();
         self
     }
 
-    /// Says why a query lists no choice while commands remain, above a heading that names the
-    /// commands. The note reads `no_match` followed by the quoted query.
-    pub fn choices_note(
-        mut self,
-        no_match: impl Into<SharedString>,
-        commands_heading: impl Into<SharedString>,
-    ) -> Self {
+    /// The subject of a query that matches nothing. The popup completes it with the quoted query.
+    pub fn no_match(mut self, subject: impl Into<SharedString>) -> Self {
+        self.no_match = subject.into();
+        self
+    }
+
+    /// Names the commands under a heading while no choice is listed, with the no-match line, or
+    /// the [`Self::no_choices`] line without a query, above it.
+    pub fn commands_heading(mut self, heading: impl Into<SharedString>) -> Self {
+        let none = self.choices_note.take().and_then(|note| note.none);
         self.choices_note = Some(ChoicesNote {
-            none: None,
-            no_match: no_match.into(),
-            commands_heading: commands_heading.into(),
+            none,
+            commands_heading: heading.into(),
         });
         self
     }
 
-    /// What the note says when there is no query and still no choice, for a popup whose
-    /// choices can run out. Applies to the note [`Self::choices_note`] set.
+    /// What the note above the commands says when there is no query and still no choice, for a
+    /// popup whose choices can run out. Applies with [`Self::commands_heading`].
     pub fn no_choices(mut self, note: impl Into<SharedString>) -> Self {
         if let Some(choices) = &mut self.choices_note {
             choices.none = Some(note.into());
         }
         self
     }
-}
 
-impl ChoicesNote {
-    fn text(&self, query: &str) -> Option<SharedString> {
+    /// The line for `query` when nothing matches it, or for no query when nothing is listed.
+    fn no_results(&self, query: &str, none: Option<&SharedString>) -> Option<SharedString> {
         let query = query.trim();
         if query.is_empty() {
-            self.none.clone()
+            none.cloned()
         } else {
             Some(format!("{} \u{201C}{query}\u{201D}.", self.no_match).into())
         }
@@ -259,7 +261,8 @@ impl Default for ComboBoxCopy {
             filter_name: "Filter options".into(),
             filter_placeholder: "Search".into(),
             busy_status: "Loading\u{2026}".into(),
-            empty_status: "No Matching Options".into(),
+            empty_status: "No options.".into(),
+            no_match: "No options match".into(),
             choices_note: None,
         }
     }
@@ -2923,6 +2926,7 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     let menu_with_filter_header = state.read(cx).menu_with_filter_header;
     let busy = state.read(cx).busy;
     let copy = state.read(cx).copy.clone();
+    let query = state.read(cx).query.clone();
     let list_state = state.read(cx).list.clone();
     let choices_note = presented_choices_note(state.read(cx));
     let rows_height = (bounds.size.height
@@ -2966,7 +2970,10 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     let content = if busy {
         status_row(copy.busy_status, "combo-box-loading", theme).into_any_element()
     } else if matches.is_empty() {
-        empty_state(copy.empty_status, theme, &typography).into_any_element()
+        let line = copy
+            .no_results(&query, Some(&copy.empty_status))
+            .unwrap_or_else(|| copy.empty_status.clone());
+        status_row(line, "combo-box-empty", theme).into_any_element()
     } else {
         let note_heading_font = typography.section_font().clone();
         let options = list(list_state, move |position, _, _| {
@@ -3152,7 +3159,8 @@ fn presented_choices_note<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     if state.busy || state.choice_match_count > 0 || state.matches.is_empty() {
         return None;
     }
-    Some((note.text(&state.query)?, note.commands_heading.clone()))
+    let line = state.copy.no_results(&state.query, note.none.as_ref())?;
+    Some((line, note.commands_heading.clone()))
 }
 
 /// The note's line, the heading's line, and a gap above, between, and below them.
@@ -3196,39 +3204,6 @@ fn render_choices_note(
                 .truncate()
                 .child(heading),
         )
-}
-
-/// What the popup shows when nothing matches: one title, through the shared empty state.
-fn empty_state(
-    title: SharedString,
-    theme: ComboBoxTheme,
-    typography: &crate::ControlTypography,
-) -> impl IntoElement {
-    let metrics = theme.metrics;
-    let style = crate::EmptyStateStyle::new(
-        crate::EmptyStateText::new(
-            typography.section_font().clone(),
-            metrics.label_size,
-            metrics.label_line_height,
-            theme.paint.foreground,
-        ),
-        crate::EmptyStateText::new(
-            typography.regular().clone(),
-            metrics.secondary_size,
-            metrics.secondary_line_height,
-            theme.paint.muted,
-        ),
-        metrics.label_line_height,
-        theme.paint.muted,
-        1.0,
-    );
-    div()
-        .h(metrics.row_height)
-        .px(metrics.horizontal_padding)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(crate::EmptyState::new(style, title).debug_selector("combo-box-empty"))
 }
 
 fn status_row(

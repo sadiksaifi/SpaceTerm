@@ -1184,6 +1184,24 @@ impl SettingsWindow {
         .render(settings, window, cx)
     }
 
+    /// The heading band without a section: window movement and Window Controls only.
+    fn render_bare_detail_heading(
+        &mut self,
+        settings: &SettingsAppearance,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = close_owner.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
+        DetailHeading::new("settings", div(), &self.window_movement, close)
+            .render(settings, window, cx)
+    }
+
     fn render_sidebar(
         &mut self,
         settings: &SettingsAppearance,
@@ -1249,9 +1267,20 @@ impl SettingsWindow {
         // nothing from a neighbouring section can scroll into this one.
         let section = self.render_section(self.active_section, settings, window, cx);
         let empty = self.rows_for(self.active_section).is_empty();
+        // A search that matches nothing names no section: its result is the canvas's only
+        // content, under a heading band that keeps only window movement and Window Controls.
+        let (heading, bare_heading) = if empty {
+            (
+                None,
+                Some(self.render_bare_detail_heading(settings, window, cx)),
+            )
+        } else {
+            (Some(self.render_detail_heading(settings, window, cx)), None)
+        };
         let revealing = cx.weak_entity();
         div()
             .debug_selector(|| "settings-canvas".to_owned())
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -1260,7 +1289,7 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
-            .child(self.render_detail_heading(settings, window, cx))
+            .children(heading)
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1300,6 +1329,10 @@ impl SettingsWindow {
                             }),
                     )
                     .child(self.scrollbar.clone()),
+            )
+            .children(
+                bare_heading
+                    .map(|heading| div().absolute().top_0().left_0().right_0().child(heading)),
             )
             .into_any_element()
     }
