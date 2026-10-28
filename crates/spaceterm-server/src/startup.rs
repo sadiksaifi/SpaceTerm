@@ -11,6 +11,9 @@ pub enum StartupOutcome {
     },
     Stopped,
     AuthorizationRequired,
+    /// An Update or Restart that another process runs holds the service. Present it, call
+    /// [`LocalStartup::wait_for_update`], then run launch again.
+    Updating,
     Cancelled,
 }
 
@@ -71,7 +74,15 @@ impl LocalStartup {
         match result {
             Err(ServerError::Stopped) => Ok(StartupOutcome::Stopped),
             Err(ServerError::AuthorizationRequired) => Ok(StartupOutcome::AuthorizationRequired),
+            Err(ServerError::UpdateInProgress) => Ok(StartupOutcome::Updating),
             other => other,
         }
+    }
+
+    /// Wait for the Update or Restart that made launch report [`StartupOutcome::Updating`].
+    /// The wait wakes when the operation ends, never on a polling interval. A stuck operation
+    /// fails with UpdateInProgress after a bounded wait. Cancellation returns at once.
+    pub fn wait_for_update(&self, cancelled: impl Fn() -> bool) -> Result<(), ServerError> {
+        self.service.wait_for_operation(cancelled)
     }
 }

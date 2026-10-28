@@ -523,6 +523,38 @@ fn stop_past_the_service_managers_timeout_stays_recoverable_without_another_stop
     });
 }
 
+/// A client that connects while an update stops the old server waits for the update's outcome.
+/// It never reports the update unfinished while the update still runs.
+#[test]
+fn admission_during_an_update_waits_for_its_outcome() {
+    with_service(|service, _, candidate, supervisor| {
+        set_running(&service, &supervisor);
+        *supervisor.stop_takes.lock().unwrap() = Some(STOP_TIMEOUT / 2);
+        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        let paths = service.paths.clone();
+        let client = std::thread::spawn(move || {
+            let data = Directory::open(&paths.data, false).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Service::state(&data).unwrap().unwrap().activation.is_none() {
+                assert!(Instant::now() < deadline, "the update never began");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let admission = crate::service::check_admission(&paths);
+            (admission, Instant::now())
+        });
+        // The fixture's Start always fails after the update dispatched it.
+        assert_eq!(service.activate(approval), Err(ServerError::StartupFailed));
+        let finished = Instant::now();
+        let (admission, answered) = client.join().unwrap();
+        assert!(
+            answered >= finished,
+            "admission answered before the update ended"
+        );
+        // A dispatched candidate start admits clients, which then find whether it runs.
+        assert_eq!(admission, Ok(()));
+    });
+}
+
 /// The approved server runs, as it does before an ordinary update.
 fn set_running(service: &Service, supervisor: &SupervisorFixture) {
     let data = Directory::open(&service.paths.data, false).unwrap();

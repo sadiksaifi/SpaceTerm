@@ -383,6 +383,10 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 ServerError::ActivationUnresolved => {
                     guidance("Choose Finish Update to complete the server update and reconnect.")
                 }
+                // An Update or Restart is still running. It is not a fault.
+                ServerError::UpdateInProgress => guidance(
+                    "The server is updating or restarting. Choose Check Now when it finishes.",
+                ),
                 // A deliberate Stop is a state the person chose, not a fault.
                 ServerError::Stopped => guidance(STOPPED_GUIDANCE),
                 ServerError::NotInstalled => {
@@ -434,6 +438,12 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         ServerError::StorageUnavailable | ServerError::ServiceUnavailable => (
             "Unavailable",
             "settings-local-server-state-unavailable",
+            true,
+        ),
+        // An Update or Restart outlasted the admission wait. A check waits for it again.
+        ServerError::UpdateInProgress => (
+            "Updating",
+            "settings-local-server-state-updating",
             true,
         ),
         ServerError::UnsafeStorage => (

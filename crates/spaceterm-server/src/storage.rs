@@ -59,6 +59,15 @@ impl Lock {
         unsafe { std::ptr::read(&lock.0) }
     }
 }
+/// How often [`Directory::wait_lock`] observes cancellation. The lock itself wakes it at once.
+const CANCEL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+/// How a bounded wait for a lock ended.
+pub enum LockWait {
+    Locked(Lock),
+    /// The holder kept the lock past the limit.
+    Held,
+    Cancelled,
+}
 impl Drop for Lock {
     fn drop(&mut self) {
         // SAFETY: this guard owns the live descriptor.
@@ -286,6 +295,57 @@ impl Directory {
             Ok(None)
         } else {
             Err(ServerError::StorageUnavailable)
+        }
+    }
+    /// Wait at most `limit` for an exclusive lock that another holder may keep for a long time.
+    ///
+    /// A helper thread blocks in flock, so the waiter wakes as soon as the holder releases the
+    /// lock, never on a polling interval. `cancelled` is observed every [`CANCEL_INTERVAL`]. A
+    /// waiter that returns before the helper acquires leaves it blocked until the holder
+    /// releases; the helper then releases the lock at once.
+    pub fn wait_lock(
+        &self,
+        name: &str,
+        limit: std::time::Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<LockWait, ServerError> {
+        if let Some(lock) = self.try_lock(name)? {
+            return Ok(LockWait::Locked(lock));
+        }
+        let file = self.file(name, true)?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("spaceterm-lock-wait".to_owned())
+            .spawn(move || {
+                let result = loop {
+                    // SAFETY: flock acts only on the supplied live descriptor.
+                    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                        break Ok(Lock(file));
+                    }
+                    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                        break Err(ServerError::StorageUnavailable);
+                    }
+                };
+                // A waiter that already returned dropped its receiver. The lock then drops here.
+                let _ = sender.send(result);
+            })
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if cancelled() {
+                return Ok(LockWait::Cancelled);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(LockWait::Held);
+            }
+            match receiver.recv_timeout(remaining.min(CANCEL_INTERVAL)) {
+                Ok(result) => return result.map(LockWait::Locked),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(ServerError::StorageUnavailable);
+                }
+            }
         }
     }
     /// Validate and synchronize retained state before setup or authentication accepts it.

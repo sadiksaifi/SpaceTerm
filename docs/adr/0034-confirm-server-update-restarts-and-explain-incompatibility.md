@@ -8,4 +8,6 @@ Confirmation names the server and exact candidate and states that every client's
 
 Admitted local operations belong to the application independently of the Settings Window. Recovery resolves the original exact-target operation without repeating destructive dispatch or choosing another candidate. Uncertain outcomes refuse terminal admission. Return to the previous verified runtime requires separate confirmation and proof that the candidate never became ready and saved state is unchanged. Ended Terminal Sessions never return. [ADR 0040](0040-keep-one-server-runtime-version-active.md) owns runtime activation.
 
+An Update or Restart holds the account's service operation while the server stops and starts again. A launch or client admission that arrives meanwhile waits for the operation to end instead of failing. The wait wakes when the operation ends. After one second, the launch screen says the server is updating. That screen offers no action and opens the Workspaces once the server is ready. Panes reconnect on their own. The wait gives up after three minutes, which exceeds a slow Linux stop with its cleanup and startup. A launch that reaches that limit says the update is still running and offers Try Again.
+
 [ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

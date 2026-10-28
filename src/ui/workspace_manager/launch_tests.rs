@@ -322,6 +322,55 @@ fn a_launch_that_needs_the_person_explains_itself_at_once(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_launch_during_a_server_update_says_so_without_asking_the_person_to_act(
+    cx: &mut TestAppContext,
+) {
+    // The update has not finished when the window looks again.
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Updating)], cx);
+    cx.run_until_parked();
+
+    assert_eq!(harness.launch.steps(), ["run", "wait_for_update", "run"]);
+    let presentation = harness
+        .manager
+        .read_with(cx, |manager, _| manager.launch_presentation())
+        .expect("the launch screen stays until the server answers");
+    assert_eq!(presentation.title, launch::UPDATING_TITLE);
+    assert_eq!(
+        presentation.detail.as_ref(),
+        "Your Workspaces open when the update finishes."
+    );
+    assert!(presentation.progress.is_some());
+    assert!(presentation.actions.is_empty(), "nothing to dismiss or retry");
+    assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_some());
+    assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_none());
+}
+
+#[gpui::test]
+fn a_launch_during_a_server_update_opens_the_workspaces_once_it_finishes(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Updating), ready()], cx);
+    cx.run_until_parked();
+
+    assert_eq!(harness.launch.steps(), ["run", "wait_for_update", "run"]);
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.shared_rows(cx), 1);
+}
+
+/// An update that outlasts the server's bounded wait is the one failure the update reports.
+#[gpui::test]
+fn an_update_that_outlasts_the_wait_offers_try_again(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::UpdateInProgress), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some("Server Still Updating"));
+
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    sync(&harness, cx);
+    assert_eq!(harness.launch.steps(), ["run", "run"]);
+    assert_eq!(harness.shared_rows(cx), 1);
+}
+
+#[gpui::test]
 fn a_stopped_server_stays_stopped_until_start_server(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
     cx.run_until_parked();

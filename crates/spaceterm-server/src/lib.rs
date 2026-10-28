@@ -41,6 +41,11 @@ pub enum ServerError {
     NotSetUp,
     #[error("Server service unavailable. Sign in and try again.")]
     ServiceUnavailable,
+    /// An Update or Restart that another process runs holds the service while the server stops
+    /// and starts again. Launch and admission wait for it, and report this when it outlasts
+    /// their limit.
+    #[error("The server is updating or restarting. Try again when it finishes.")]
+    UpdateInProgress,
     #[error("Install the server service first.")]
     NotInstalled,
     #[error("The local server was stopped. Use Start Server to start it again.")]
