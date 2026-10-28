@@ -61,6 +61,10 @@ const ADMISSION_WINDOW: u32 = 64 * 1024;
 const ADMITTED_WINDOW: u32 = 2 * limits::MAX_FRAME_BYTES as u32;
 /// Connections whose handshake started and that the host has not taken yet.
 const MAX_PENDING: usize = 32;
+/// How long a client tries each address but the last. QUIC's first probe timeout is about one
+/// second at its initial 333 ms round-trip estimate, so one lost Initial packet or Retry is sent
+/// again, and its answer has another second to arrive, before the client moves on.
+const ADDRESS_LIMIT: Duration = Duration::from_secs(2);
 /// The server name every client sends. The pinned certificate, not a name, authenticates.
 pub const SERVER_NAME: &str = "spaceterm.invalid";
 
@@ -1139,11 +1143,10 @@ impl QuicStream {
         let mut last = QuicError::Transport;
         for (index, address) in addresses.iter().enumerate() {
             server_verified.store(false, Ordering::Release);
-            // Each address but the last gets at most a second, as a TCP connect would.
             let until = if index + 1 == addresses.len() {
                 deadline
             } else {
-                deadline.min(Instant::now() + Duration::from_secs(1))
+                deadline.min(Instant::now() + ADDRESS_LIMIT)
             };
             let Ok(socket) = Udp::client(*address) else {
                 continue;

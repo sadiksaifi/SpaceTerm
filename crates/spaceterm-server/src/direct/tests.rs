@@ -3148,11 +3148,13 @@ mod quic_connections {
 
     /// A UDP relay between clients and a server. Each client source gets its own upstream
     /// socket, so the server sees a new address when a client moves. `blackhole` drops a source's
-    /// traffic both ways, as a network that vanished under a still-valid address.
+    /// traffic both ways, as a network that vanished under a still-valid address. `losses` drops
+    /// that many of the first datagrams from clients.
     struct Relay {
         address: std::net::SocketAddr,
         sources: Arc<Mutex<Vec<std::net::SocketAddr>>>,
         blackhole: Arc<Mutex<Option<std::net::SocketAddr>>>,
+        losses: Arc<std::sync::atomic::AtomicUsize>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -3165,10 +3167,12 @@ mod quic_connections {
             let address = front.local_addr().unwrap();
             let sources: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::default();
             let blackhole: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::default();
+            let losses: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (seen, hole, stopping) = (
+            let (seen, hole, lose, stopping) = (
                 Arc::clone(&sources),
                 Arc::clone(&blackhole),
+                Arc::clone(&losses),
                 Arc::clone(&stop),
             );
             let thread = std::thread::spawn(move || {
@@ -3178,7 +3182,13 @@ mod quic_connections {
                     let mut idle = true;
                     while let Ok((count, source)) = front.recv_from(&mut buffer) {
                         idle = false;
-                        if *hole.lock().unwrap() == Some(source) {
+                        if *hole.lock().unwrap() == Some(source)
+                            || lose
+                                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                                    left.checked_sub(1)
+                                })
+                                .is_ok()
+                        {
                             continue;
                         }
                         if !upstreams.iter().any(|(known, _)| *known == source) {
@@ -3211,6 +3221,7 @@ mod quic_connections {
                 address,
                 sources,
                 blackhole,
+                losses,
                 stop,
                 thread: Some(thread),
             }
@@ -3224,6 +3235,46 @@ mod quic_connections {
                 let _ = thread.join();
             }
         }
+    }
+
+    /// A client sends a lost Initial packet again before it tries the next address, so one lost
+    /// packet never moves it off a server that answers.
+    #[test]
+    fn a_lost_initial_is_sent_again_before_the_next_address() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server_address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let relay = Relay::new(server_address);
+        relay.losses.store(1, std::sync::atomic::Ordering::Release);
+        // Nothing answers at the next address.
+        let silent = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            stream
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(
+            &pin,
+            quic::tests_certificate(credential.expose_bytes()).into(),
+            rustls::pki_types::PrivateKeyDer::Pkcs8(credential.expose_bytes().to_vec().into()),
+            Arc::clone(&seen),
+        )
+        .unwrap();
+        let mut stream = QuicStream::connect(
+            config,
+            &[relay.address, silent.local_addr().unwrap()],
+            Instant::now() + Duration::from_secs(5),
+            &seen.verified,
+        )
+        .unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        drop(server.join().unwrap());
     }
 
     /// The path under a client dies while its address stays valid. The client's unanswered ping
