@@ -502,12 +502,13 @@ impl SettingsWindow {
         .hug(true)
         .flush(flush)
         .accessibility_description(hint)
-        .copy(ComboBoxCopy::new(
-            "Search servers",
-            "Search",
-            "Loading\u{2026}",
-            "No servers match",
-        ))
+        // This computer is always listed and Add Server always remains, so the picker never
+        // shows an empty state. A search that finds no server says so above Add Server.
+        .copy(
+            ComboBoxCopy::new("Search servers", "Search")
+                .no_match("No servers match")
+                .commands_heading("Add"),
+        )
         .debug_selector(PICKER_SELECTOR)
         .on_accept(move |acceptance, _, cx| {
             let choice = acceptance.item_id().clone();

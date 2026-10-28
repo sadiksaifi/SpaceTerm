@@ -280,7 +280,9 @@ impl AccessFailure {
     /// change failed.
     pub(crate) fn read_explanation(self, server: &str) -> String {
         match self {
-            Self::Storage => format!("\"{server}\" couldn't read its network settings. Try again."),
+            Self::Storage => format!(
+                "\u{201C}{server}\u{201D} couldn\u{2019}t read its network settings. Try again."
+            ),
             other => other.explanation(server),
         }
     }
@@ -288,29 +290,39 @@ impl AccessFailure {
     /// Why the person's change didn't take effect.
     pub(crate) fn explanation(self, server: &str) -> String {
         match self {
-            Self::Unreachable => format!("SpaceTerm can't reach \"{server}\". Try again."),
+            Self::Unreachable => {
+                format!("SpaceTerm can\u{2019}t reach \u{201C}{server}\u{201D}. Try again.")
+            }
             Self::Unsupported => {
-                format!("Update the server on \"{server}\" to use direct network connections.")
+                format!(
+                    "Update the server on \u{201C}{server}\u{201D} to use direct network connections."
+                )
             }
             Self::InvalidAddress => {
-                format!("Enter an IP address of \"{server}\", optionally followed by a port.")
+                format!(
+                    "Enter an IP address of \u{201C}{server}\u{201D}, optionally followed by a port."
+                )
             }
             Self::Disabled => {
-                format!("Allow devices to connect to \"{server}\" before inviting one.")
+                format!("Allow devices to connect to \u{201C}{server}\u{201D} before inviting one.")
             }
-            Self::Capacity => format!("\"{server}\" has reached its device or connection limit."),
-            Self::Storage => format!("\"{server}\" couldn't save the change. Try again."),
+            Self::Capacity => {
+                format!("\u{201C}{server}\u{201D} has reached its device or connection limit.")
+            }
+            Self::Storage => {
+                format!("\u{201C}{server}\u{201D} couldn\u{2019}t save the change. Try again.")
+            }
             Self::InvitationEnded => "Create a new invitation to invite this device.".to_owned(),
             Self::ClaimExpired => {
                 "The invitation expired. Create a new one to invite this device.".to_owned()
             }
             Self::ClaimDecided => {
-                "Another SpaceTerm already answered this device's request.".to_owned()
+                "Another SpaceTerm already answered this device\u{2019}s request.".to_owned()
             }
             Self::ClaimChanged => {
                 "SpaceTerm refused the changed request. Invite the device again.".to_owned()
             }
-            Self::Refused => format!("\"{server}\" refused the request."),
+            Self::Refused => format!("\u{201C}{server}\u{201D} refused the request."),
         }
     }
 }

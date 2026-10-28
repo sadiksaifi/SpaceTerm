@@ -487,6 +487,21 @@ impl SidebarOwner for SettingsWindow {
     }
 }
 
+/// What a Settings search that matches nothing says, in the shared empty state. The
+/// Keybindings and installed-themes searches use it too.
+pub(super) fn no_results(query: &str, cx: &App) -> spaceterm_ui::EmptyState {
+    crate::ui::empty_state::empty_state(
+        format!("No Results for \u{201C}{}\u{201D}", query.trim()),
+        cx,
+    )
+    .icon(IconName::Search)
+    .detail(SEARCH_DETAIL)
+    .debug_selector("settings-no-results")
+}
+
+/// What every search that finds nothing suggests.
+pub(super) const SEARCH_DETAIL: &str = "Check the spelling or try a different term.";
+
 fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
     (section == SettingsSectionId::Updates).then_some(HostFeature::Updates)
 }
@@ -1169,6 +1184,24 @@ impl SettingsWindow {
         .render(settings, window, cx)
     }
 
+    /// The heading band without a section: window movement and Window Controls only.
+    fn render_bare_detail_heading(
+        &mut self,
+        settings: &SettingsAppearance,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let close_owner = cx.weak_entity();
+        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
+            let handle = window.window_handle();
+            let _ = close_owner.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(handle), cx)
+            });
+        });
+        DetailHeading::new("settings", div(), &self.window_movement, close)
+            .render(settings, window, cx)
+    }
+
     fn render_sidebar(
         &mut self,
         settings: &SettingsAppearance,
@@ -1234,9 +1267,20 @@ impl SettingsWindow {
         // nothing from a neighbouring section can scroll into this one.
         let section = self.render_section(self.active_section, settings, window, cx);
         let empty = self.rows_for(self.active_section).is_empty();
+        // A search that matches nothing names no section: its result is the canvas's only
+        // content, under a heading band that keeps only window movement and Window Controls.
+        let (heading, bare_heading) = if empty {
+            (
+                None,
+                Some(self.render_bare_detail_heading(settings, window, cx)),
+            )
+        } else {
+            (Some(self.render_detail_heading(settings, window, cx)), None)
+        };
         let revealing = cx.weak_entity();
         div()
             .debug_selector(|| "settings-canvas".to_owned())
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -1245,7 +1289,7 @@ impl SettingsWindow {
             .bg(gpui_color(
                 settings.surface(SettingsSurfaceRole::Canvas).paint,
             ))
-            .child(self.render_detail_heading(settings, window, cx))
+            .children(heading)
             .children(self.render_banner(appearance, cx))
             .child(
                 div()
@@ -1272,22 +1316,23 @@ impl SettingsWindow {
                             })
                             .child(section)
                             .when(empty, |detail| {
-                                detail.child(
+                                detail.size_full().child(
                                     div()
-                                        .debug_selector(|| "settings-no-results".to_owned())
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
                                         .px(row_horizontal_inset(appearance))
-                                        .text_color(gpui_color(appearance.colors.text_muted))
-                                        .child(gpui::Text::new(
-                                            "settings-no-results".into(),
-                                            SharedString::from(format!(
-                                                "No settings match “{}”.",
-                                                self.query
-                                            )),
-                                        )),
+                                        .child(no_results(&self.query, cx)),
                                 )
                             }),
                     )
                     .child(self.scrollbar.clone()),
+            )
+            .children(
+                bare_heading
+                    .map(|heading| div().absolute().top_0().left_0().right_0().child(heading)),
             )
             .into_any_element()
     }
@@ -2006,7 +2051,7 @@ impl SettingsWindow {
         let (label, action_selector) = if critical {
             ("Reload", "settings-banner-reload")
         } else {
-            ("Retry", "settings-banner-retry")
+            ("Try Again", "settings-banner-retry")
         };
         let pair = if critical {
             appearance.semantic_text_pairs.warning_status
@@ -2148,7 +2193,8 @@ impl SettingsWindow {
     }
 
     fn reset_all_detail(&self) -> String {
-        "This cannot be undone.".to_owned()
+        "This can\u{2019}t be undone. Server connections and system permissions are kept."
+            .to_owned()
     }
 
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2156,8 +2202,8 @@ impl SettingsWindow {
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
             "Reset all settings",
-            "Reset All Settings",
-            "Reset settings and keyboard shortcuts, and remove installed terminal themes.",
+            "Reset All Settings?",
+            "Settings and keyboard shortcuts return to their defaults, and installed terminal themes are removed.",
             vec![
                 ModalAction::new(
                     true,
@@ -2390,8 +2436,7 @@ impl SettingsWindow {
             ),
             SettingsRowId::EndAllSessions => (
                 SharedString::new_static("Ending them keeps Workspaces."),
-                self.end_all_sessions_error()
-                    .map(|text| (text, self.end_all_sessions_caption().1)),
+                self.end_all_sessions_caption(),
             ),
             SettingsRowId::NetworkAccess => (
                 self.network_access_description(),
@@ -2401,7 +2446,8 @@ impl SettingsWindow {
                 SharedString::new_static(
                     "A paired device can do anything this computer can on this server.",
                 ),
-                None,
+                self.no_paired_devices_note()
+                    .map(|text| (text, CaptionTone::Guidance)),
             ),
             SettingsRowId::ServerWorktreeLocation => (self.server_location_caption(cx).0, None),
             _ => return None,

@@ -82,6 +82,8 @@ enum Event {
     Link,
     /// A detached Workspace left a release to send.
     Released,
+    /// The person asked to reconnect now instead of after the reconnect delay.
+    Retry,
     /// The client is gone.
     Stop,
 }
@@ -120,6 +122,9 @@ pub(crate) struct SharedWorkspaceSnapshot {
     pub rejected: Option<Mutation>,
     pub outcome: Option<RetainedOutcome>,
     pub error: Option<ServerError>,
+    /// How many connection attempts have failed, so a reader can tell that an attempt it asked
+    /// for has finished.
+    pub failed_attempts: u64,
 }
 pub(crate) struct SharedWorkspaceClient {
     snapshot: Arc<PublishedSnapshot>,
@@ -186,6 +191,7 @@ impl SharedWorkspaceClient {
             rejected: None,
             outcome: None,
             error: None,
+            failed_attempts: 0,
         }));
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) = mpsc::channel();
@@ -230,6 +236,10 @@ impl SharedWorkspaceClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+    /// Reconnects now when the connection is down. A connected client ignores it.
+    pub(crate) fn retry(&self) {
+        let _ = self.commands.send(Event::Retry);
     }
     /// Coalesced change hints, including an initial hint. Read `snapshot` after each wake.
     /// Dropping the receiver unsubscribes; closed senders are pruned on publication or subscription.
@@ -436,6 +446,7 @@ fn run(
                         }
                     }
                     Ok(Event::Released) => attachments.release_pending(&link)?,
+                    Ok(Event::Retry) => {}
                     Ok(Event::Stop) | Err(_) => return Ok(()),
                 }
             }
@@ -446,6 +457,7 @@ fn run(
         state.publish(|s| {
             s.connected = false;
             s.error = Some(error);
+            s.failed_attempts = s.failed_attempts.wrapping_add(1);
         });
         // A command accepted just before loss is either in the durable journal or is rejected.
         // Never carry an unsubmitted edit across a reconnect as a new operation.
@@ -455,6 +467,7 @@ fn run(
                 Ok(Event::Edit(mutation)) => reject(&state, mutation),
                 Ok(Event::Link) => wakes.link.store(false, Ordering::Release),
                 Ok(Event::Released) => {}
+                Ok(Event::Retry) => break,
                 Ok(Event::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
@@ -486,6 +499,7 @@ mod tests {
             rejected: None,
             outcome: None,
             error: None,
+            failed_attempts: 0,
         }));
         let client = SharedWorkspaceClient {
             snapshot: Arc::clone(&state),
@@ -526,6 +540,7 @@ mod tests {
             rejected: None,
             outcome: None,
             error: None,
+            failed_attempts: 0,
         }));
         let client = SharedWorkspaceClient {
             snapshot: state.clone(),

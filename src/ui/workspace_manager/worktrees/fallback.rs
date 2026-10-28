@@ -147,7 +147,7 @@ impl WorkspaceManager {
                     .remove(&workspace_id);
                 let Ok(Ok(outcome)) = result else {
                     Self::worktree_fallback_failed(
-                        "SpaceTerm couldn't open a Tab outside this Worktree.",
+                        "SpaceTerm couldn\u{2019}t open a Tab outside this Worktree.",
                         window,
                         cx,
                     );
@@ -155,7 +155,7 @@ impl WorkspaceManager {
                 };
                 let Outcome::Accepted { target: accepted } = outcome.outcome else {
                     Self::worktree_fallback_failed(
-                        "SpaceTerm couldn't open a Tab outside this Worktree.",
+                        "SpaceTerm couldn\u{2019}t open a Tab outside this Worktree.",
                         window,
                         cx,
                     );

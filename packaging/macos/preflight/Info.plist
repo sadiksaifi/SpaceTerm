@@ -35,6 +35,8 @@
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
+	<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
+	<true/>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on your Desktop.</string>
 	<key>NSDocumentsFolderUsageDescription</key>

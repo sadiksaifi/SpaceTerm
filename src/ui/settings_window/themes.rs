@@ -72,7 +72,7 @@ impl SettingsWindow {
     /// confirmation, so only a failure speaks.
     pub(super) fn begin_document_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(contents) = self.editor.export_document() else {
-            present_export_failure("Couldn't export settings.", window, cx);
+            present_export_failure("Couldn\u{2019}t export settings.", window, cx);
             return;
         };
         let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -87,7 +87,7 @@ impl SettingsWindow {
                 .await;
             if written.is_err() {
                 let _ = owner.update_in(cx, |_, window, cx| {
-                    present_export_failure("Couldn't write file.", window, cx);
+                    present_export_failure("Couldn\u{2019}t write file.", window, cx);
                 });
             }
         })
@@ -120,13 +120,13 @@ fn present_export_failure(
 fn diagnostic_message(diagnostic: AppearanceDiagnostic) -> &'static str {
     match diagnostic {
         AppearanceDiagnostic::SystemAppearanceUnavailable => {
-            "SpaceTerm can't read the system appearance. Auto is using the Dark Terminal Theme."
+            "SpaceTerm can\u{2019}t read the system appearance. Auto is using the Dark Terminal Theme."
         }
         AppearanceDiagnostic::TerminalThemeUnavailable { .. } => {
-            "SpaceTerm is using a built-in Terminal Theme because your selected theme isn't installed."
+            "SpaceTerm is using a built-in Terminal Theme because your selected theme isn\u{2019}t installed."
         }
         AppearanceDiagnostic::TerminalFontUnavailable => {
-            "SpaceTerm is using a substitute monospace font because your selected font isn't available."
+            "SpaceTerm is using a substitute monospace font because your selected font isn\u{2019}t available."
         }
         AppearanceDiagnostic::TerminalFontNotMonospace => {
             "Choose a monospace font. SpaceTerm is using a substitute until then."

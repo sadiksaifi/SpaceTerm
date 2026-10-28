@@ -15,7 +15,10 @@ pub(crate) struct MacosApplicationMenuAdapter {
 }
 
 impl MacosApplicationMenuAdapter {
-    pub(crate) const fn new(identity: ApplicationIdentity) -> Self {
+    /// Construct the adapter before `NSApplication` exists. AppKit reads the Edit menu
+    /// defaults this registers once, when it first customizes a main menu.
+    pub(crate) fn new(identity: ApplicationIdentity) -> Self {
+        native::register_edit_menu_defaults();
         Self { identity }
     }
 }
@@ -56,7 +59,7 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "Switch Workspace",
+        item: "Choose Workspace…",
         symbol: "magnifyingglass",
     },
     MenuItemIcon {
@@ -454,7 +457,9 @@ mod native {
         NSEventModifierFlags, NSHelpManager, NSImage, NSMenu, NSMenuItem, NSTextAlignment,
         NSWorkspace,
     };
-    use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange, NSString, NSURL};
+    use objc2_foundation::{
+        NSDictionary, NSMutableAttributedString, NSNumber, NSRange, NSString, NSURL, NSUserDefaults,
+    };
 
     use super::{
         ApplicationMenuCommand, ApplicationMenuError, DEVELOP_MENU_ITEM_ICONS, MENU_ITEM_ICONS,
@@ -462,6 +467,18 @@ mod native {
     };
 
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
+
+    /// AppKit appends AutoFill, Start Dictation, and Emoji & Symbols to the menu titled "Edit".
+    /// SpaceTerm has no field that AutoFill can fill, so this undocumented AppKit default omits
+    /// AutoFill and keeps the other two. Registered defaults last for this process only.
+    pub(super) fn register_edit_menu_defaults() {
+        let key = NSString::from_str("NSAutoFillSystemInsertMenuEnabled");
+        let omitted = NSNumber::numberWithBool(false);
+        let values: [&AnyObject; 1] = [&omitted];
+        let defaults = NSDictionary::from_slices(&[&*key], &values);
+        // SAFETY: The dictionary maps a string key to a property list value.
+        unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+    }
 
     pub(super) fn decorate(
         application_name: &str,
@@ -652,6 +669,8 @@ mod native {
 #[cfg(test)]
 mod native {
     use super::{ApplicationMenuCommand, ApplicationMenuError};
+
+    pub(super) const fn register_edit_menu_defaults() {}
 
     pub(super) fn decorate(
         _: &str,
@@ -917,7 +936,7 @@ mod tests {
                 "New Workspace",
                 "Add Server…",
                 "Open Local Directory…",
-                "Switch Workspace",
+                "Choose Workspace…",
                 "|",
                 "New Tab",
                 "New Worktree…",

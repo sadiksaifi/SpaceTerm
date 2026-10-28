@@ -397,7 +397,7 @@ fn restricted_access_explains_the_policy_without_prompting(cx: &mut TestAppConte
     assert_no_action_rendered(cx);
     assert_eq!(
         explanation(&window, cx),
-        "Your device's administrator has blocked microphone access."
+        "Your device\u{2019}s administrator has blocked microphone access."
     );
 
     // Nothing outside the row can prompt from a restricted state either.
@@ -473,7 +473,7 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     for (error, expected) in [
         (
             MicrophoneAccessError::OffMainThread,
-            "Couldn't check microphone access.",
+            "Couldn\u{2019}t check microphone access.",
         ),
         (
             MicrophoneAccessError::PlatformUnavailable,

@@ -208,7 +208,7 @@ impl ThemeStore {
                         count => format!("Installed {count} themes from {}.", extension.name),
                     }),
                     Ok(Err(error)) => SharedString::from(import_failure_message(error)),
-                    Err(_) => SharedString::from("Couldn't install themes."),
+                    Err(_) => SharedString::from("Couldn\u{2019}t install themes."),
                 }
             }
         };
@@ -243,7 +243,7 @@ impl ThemeStore {
         self.status = Some(match removed {
             Ok(Some(1)) => format!("Removed 1 theme from {}.", extension.name).into(),
             Ok(Some(count)) => format!("Removed {count} themes from {}.", extension.name).into(),
-            _ => SharedString::from("Couldn't remove themes."),
+            _ => SharedString::from("Couldn\u{2019}t remove themes."),
         });
         cx.notify();
     }
@@ -293,7 +293,7 @@ impl ThemeStore {
                 .update(cx, |settings, cx| {
                     import_family(&bytes, |source| settings.editor.import(source, cx))
                 })
-                .unwrap_or_else(|_| SharedString::from("Couldn't install themes.")),
+                .unwrap_or_else(|_| SharedString::from("Couldn\u{2019}t install themes.")),
             Err(error) => SharedString::from(error.message()),
         };
         self.status = Some(message);
@@ -721,7 +721,7 @@ fn import_failure_message(error: SettingsError) -> &'static str {
             "That file has no usable themes, or too many."
         }
         SettingsError::Import(_) => "Unreadable Zed theme file.",
-        _ => "Couldn't install themes.",
+        _ => "Couldn\u{2019}t install themes.",
     }
 }
 

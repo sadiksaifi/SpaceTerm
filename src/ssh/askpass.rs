@@ -1228,7 +1228,7 @@ mod tests {
         };
         let request = helper_request(&invocation).expect("the helper reads its prompt");
         let presentation = request
-            .secret_presentation()
+            .secret_presentation("this Mac")
             .expect("the request asks for a secret");
         assert_eq!(presentation.title(), "Allow the Server to Keep Running");
         assert_eq!(presentation.field_label(), "Remote sudo password");

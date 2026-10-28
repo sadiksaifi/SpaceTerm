@@ -226,7 +226,7 @@ fn a_restored_pane_that_stopped_reconnecting_names_the_failure() {
         notice(&view),
         Some((
             "Connection Failed".to_owned(),
-            "Choose Retry to reconnect, then Start Session to open a shell.".to_owned()
+            "Choose Try Again to reconnect, then Start Session to open a shell.".to_owned()
         ))
     );
     assert!(view.notice_offers_retry());

@@ -4356,7 +4356,8 @@ impl TerminalPane {
             if let Some(session) = &self.terminal_session.session {
                 let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
             }
-            self.status = Some("Couldn't open paste confirmation. Nothing was sent.".to_owned());
+            self.status =
+                Some("Couldn\u{2019}t open paste confirmation. Nothing was sent.".to_owned());
             self.status_intent = StatusIntent::Error;
         }
         cx.notify();
@@ -5367,7 +5368,8 @@ impl Render for TerminalPane {
             super::server_pane::render_notice(
                 "terminal-input-unavailable".into(),
                 "Typing Unavailable".into(),
-                "This version of SpaceTerm can't send input to this SpaceTerm Server.".into(),
+                "This version of SpaceTerm can\u{2019}t send input to this SpaceTerm Server."
+                    .into(),
                 StatusIntent::Warning,
                 None,
                 false,
@@ -5526,7 +5528,7 @@ impl Render for TerminalPane {
                     } else if recovery_available {
                         appearance
                             .typography
-                            .measure(TextRole::Body, "Retry", window)
+                            .measure(TextRole::Body, "Try Again", window)
                     } else {
                         px(0.0)
                     };
@@ -5603,7 +5605,7 @@ impl Render for TerminalPane {
                                     )
                                     .when(recovery_available, |status| {
                                         status.child(
-                                            Button::new("retry-terminal-recovery", "Retry")
+                                            Button::new("retry-terminal-recovery", "Try Again")
                                                 .variant(ButtonVariant::Link)
                                                 .size(ButtonSize::Compact)
                                                 .debug_selector("retry-terminal-recovery")

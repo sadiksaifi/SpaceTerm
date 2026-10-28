@@ -25,7 +25,7 @@ pub(super) fn worktree_location_problem(problem: WorktreePathTemplateError) -> &
         WorktreePathTemplateError::Empty => "Enter a location.",
         WorktreePathTemplateError::TooLong => "At most 1,024 characters.",
         WorktreePathTemplateError::NotAbsolute => "Start the location with ~/ or /.",
-        WorktreePathTemplateError::ParentSegment => "Remove \"..\" from the location.",
+        WorktreePathTemplateError::ParentSegment => "Remove \u{201C}..\u{201D} from the location.",
         WorktreePathTemplateError::UnclosedBrace => "Close each placeholder with }.",
         WorktreePathTemplateError::UnknownPlaceholder => {
             "Use only {repository} and {branch} placeholders."
@@ -34,7 +34,7 @@ pub(super) fn worktree_location_problem(problem: WorktreePathTemplateError) -> &
             "Include {branch} for separate Worktree directories."
         }
         WorktreePathTemplateError::InvalidCharacter => "Remove control characters.",
-        WorktreePathTemplateError::NotWritable => "The server can't write here.",
+        WorktreePathTemplateError::NotWritable => "The server can\u{2019}t write here.",
     }
 }
 
@@ -101,7 +101,7 @@ pub(super) fn github_cli_presentation(status: GitHubCliStatus) -> ToolPresentati
         GitHubCliStatus::SignedOut => (
             "Not signed in",
             "settings-github-cli-state-signed-out",
-            "Run \"gh auth login\".",
+            "Run \u{201C}gh auth login\u{201D}.",
         ),
         GitHubCliStatus::NotFound => (
             "Not found",
@@ -285,7 +285,7 @@ mod tests {
 
         assert_eq!(
             (presentation.state, presentation.explanation),
-            ("Not signed in", "Run \"gh auth login\".")
+            ("Not signed in", "Run \u{201C}gh auth login\u{201D}.")
         );
     }
 
