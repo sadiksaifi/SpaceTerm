@@ -803,7 +803,7 @@ impl SettingsWindow {
             ModalId::new("settings-network-access-turn-off"),
             title,
             title,
-            "Paired devices connected over the network disconnect.",
+            "Paired devices connected over the network disconnect. They stay paired and reconnect when you turn this back on.",
             vec![
                 ModalAction::new(
                     true,
@@ -1119,12 +1119,16 @@ impl SettingsWindow {
         };
         let generation = self.direct_access.generation;
         let owner = cx.weak_entity();
-        let title = format!("Unpair \"{}\"?", device.name);
+        let title = format!("Unpair \u{201C}{}\u{201D}?", device.name);
+        let message = format!(
+            "\u{201C}{}\u{201D} disconnects and gives up control of its Panes. Terminal Sessions keep running. It needs a new invitation to reconnect.",
+            device.name
+        );
         let result = Alert::new(
             ModalId::new("settings-paired-device-remove"),
             title.clone(),
             title,
-            "It needs a new invitation to reconnect.",
+            message,
             vec![
                 ModalAction::new(
                     true,

@@ -667,7 +667,7 @@ impl AddServerSheet {
                     | DirectError::Capacity
                     | DirectError::Transport
             ) {
-                format!("Couldn't Pair With {server}").into()
+                format!("Couldn\u{2019}t Pair With {server}").into()
             } else {
                 join_title(server)
             }
@@ -1613,7 +1613,9 @@ impl Render for AddServerSheet {
         };
         let deferred = self.deferred.as_ref().map(|request| {
             let note: SharedString = match request {
-                AddServerRequest::Ssh(Some(host)) => format!("\"{host}\" is next.").into(),
+                AddServerRequest::Ssh(Some(host)) => {
+                    format!("\u{201C}{host}\u{201D} is next.").into()
+                }
                 _ => "Another invitation is next.".into(),
             };
             let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
@@ -1650,14 +1652,14 @@ impl AddServerSheet {
                     "SSH",
                     "ssh",
                     self.ssh.is_some(),
-                    "SSH setup isn't available in this build.",
+                    "SSH setup isn\u{2019}t available in this build.",
                 ),
                 method_option(
                     Method::Invitation,
                     "Invitation",
                     "invitation",
                     self.direct.is_some(),
-                    "Invitations aren't available in this build.",
+                    "Invitations aren\u{2019}t available in this build.",
                 ),
             ],
         )
@@ -2146,7 +2148,7 @@ impl AddServerSheet {
                     text.line(
                         "unconfirmed",
                         format!(
-                            "{server} approved this device, but SpaceTerm couldn't save the connection."
+                            "{server} approved this device, but SpaceTerm couldn\u{2019}t save the connection."
                         )
                         .into(),
                         colors.warning,

@@ -2296,9 +2296,12 @@ fn command_q_without_a_status_area_confirms_actual_exit(cx: &mut TestAppContext)
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
     let (title, detail) = cx.pending_prompt().expect("actual exit always asks");
     assert_eq!(title, format!("Quit {name}?"));
-    assert!(
-        detail.is_empty(),
-        "the installed-build quit prompt is title-only"
+    assert_eq!(
+        detail,
+        format!(
+            "{name} leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it."
+        ),
+        "the installed-build quit prompt says what keeps running"
     );
     cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();

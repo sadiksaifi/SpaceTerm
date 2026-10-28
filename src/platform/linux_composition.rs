@@ -168,6 +168,7 @@ fn desktop_profile(
             DesktopWording {
                 file_preview: "Preview",
                 this_computer: "This Computer",
+                this_computer_phrase: "this computer",
                 system_directory_selection: "Choose Directory…",
                 read_only_update: (
                     "Reinstall SpaceTerm to Update",

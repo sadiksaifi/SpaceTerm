@@ -117,9 +117,9 @@ impl SettingsWindow {
         // only removes what remains here.
         let revoked = status == DirectRouteStatus::Refused(RefusalReason::Revoked);
         let title = if revoked {
-            format!("Remove Connection to \"{name}\"?")
+            format!("Remove Connection to \u{201C}{name}\u{201D}?")
         } else {
-            format!("Unpair This Device From \"{name}\"?")
+            format!("Unpair This Device From \u{201C}{name}\u{201D}?")
         };
         let message = if revoked {
             format!(
@@ -127,7 +127,7 @@ impl SettingsWindow {
             )
         } else {
             format!(
-                "SpaceTerm removes this connection and its Workspaces from this window, then requests that {name} revoke access. Terminal Sessions keep running; reconnecting requires a new invitation."
+                "SpaceTerm removes this connection and its Workspaces from this window and asks {name} to revoke access. Terminal Sessions keep running. To reconnect, you need a new invitation."
             )
         };
         let confirm = if revoked { "Remove" } else { "Unpair" };

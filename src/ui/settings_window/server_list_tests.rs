@@ -924,7 +924,10 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
     let detail = servers
         .window
         .read_with(servers.cx, |settings, _| settings.reset_all_detail());
-    assert_eq!(detail, "This cannot be undone.");
+    assert_eq!(
+        detail,
+        "This can\u{2019}t be undone. Server connections and system permissions are kept."
+    );
 
     click("settings-reset-all", servers.cx);
     answer_alert("settings-reset-all-confirm", servers.cx);
@@ -1054,6 +1057,11 @@ fn end_all_sessions_confirms_and_reaches_only_this_computers_server(cx: &mut Tes
     assert!(
         tree.find(&format!("End All Sessions on {name}?")).is_some(),
         "the confirmation names the server"
+    );
+    assert_eq!(
+        tree.node(&format!("End All Sessions on {name}?"))["aria"]["description"],
+        "This ends 2 Terminal Sessions for every client and clears their output.",
+        "the confirmation counts the Sessions it ends"
     );
     answer_alert(END_CANCEL_SELECTOR, servers.cx);
     assert!(local.submitted().is_empty(), "Cancel asks nothing");

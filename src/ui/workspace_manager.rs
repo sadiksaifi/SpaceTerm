@@ -956,7 +956,7 @@ impl WorkspaceManager {
         let _ = Alert::new(
             ModalId::new("workspace-pin-directory-unavailable"),
             "Directory unavailable",
-            "Couldn't Pin Directory",
+            "Couldn\u{2019}t Pin Directory",
             "Check that the directory exists.",
             vec![ModalAction::new(
                 (),
@@ -1292,9 +1292,9 @@ impl WorkspaceManager {
                 Some(Err(())) => {
                     self.finish_server_directory();
                     Self::show_shared_unavailable_with_title(
-                        "Couldn't Open Workspace",
+                        "Couldn\u{2019}t Open Workspace",
                         &format!(
-                            "Couldn't check for an existing Workspace on \"{server_name}\". Try again."
+                            "Couldn\u{2019}t check for an existing Workspace on \u{201C}{server_name}\u{201D}. Try again."
                         ),
                         window,
                         cx,
@@ -1707,11 +1707,10 @@ impl WorkspaceManager {
         let noun = if count == 1 { "Pane" } else { "Panes" };
         let message = match scope {
             CloseScope::Workspace => format!("Running commands in its {count} {noun} stop."),
-            CloseScope::Pane | CloseScope::Window => {
-                format!("Running commands in {count} {noun} will stop.")
+            CloseScope::Pane | CloseScope::Window | CloseScope::Tab => {
+                format!("Running commands in {count} {noun} stop.")
             }
-            CloseScope::Tab => format!("Running commands in {count} {noun} stop."),
-            _ => format!("Close {count} {noun}? Running commands in these Panes will stop."),
+            _ => format!("Close {count} {noun}? Running commands in these Panes stop."),
         };
         let result = Alert::new(
             ModalId::new("close-confirmation"),
@@ -3727,7 +3726,7 @@ impl WorkspaceManager {
             }
             Err(SharedCloseUnavailable::Unreported) => {
                 Self::show_shared_unavailable_with_title(
-                    "Couldn't Close Yet",
+                    "Couldn\u{2019}t Close Yet",
                     "Wait for SpaceTerm to check the affected Terminal Sessions, then try again.",
                     window,
                     cx,
@@ -4350,7 +4349,7 @@ impl WorkspaceManager {
                 "Enter a shorter name or directory, then try again."
             }
         };
-        Self::show_shared_unavailable_with_title("Couldn't Make Change", detail, window, cx);
+        Self::show_shared_unavailable_with_title("Couldn\u{2019}t Make Change", detail, window, cx);
     }
 
     /// Returns whether the alert was presented over the active Settings Window.
@@ -4891,22 +4890,22 @@ impl AttachmentChange {
         match (self, failure) {
             (Self::Attach, Unchanged) => (
                 "Workspace not attached",
-                "Couldn't Attach Workspace",
+                "Couldn\u{2019}t Attach Workspace",
                 "The Workspace keeps running.",
             ),
             (Self::Attach, Uncertain) => (
                 "Attachment not confirmed",
-                "Couldn't Confirm Attachment",
+                "Couldn\u{2019}t Confirm Attachment",
                 "Quit and reopen SpaceTerm before you attach or detach more Workspaces. This Workspace keeps running.",
             ),
             (Self::Detach, Unchanged) => (
                 "Workspace not detached",
-                "Couldn't Detach Workspace",
+                "Couldn\u{2019}t Detach Workspace",
                 "The Workspace stays here.",
             ),
             (Self::Detach, Uncertain) => (
                 "Detach not confirmed",
-                "Couldn't Confirm Detach",
+                "Couldn\u{2019}t Confirm Detach",
                 "This Workspace might return when SpaceTerm reopens. Quit and reopen SpaceTerm before you attach or detach more Workspaces.",
             ),
         }

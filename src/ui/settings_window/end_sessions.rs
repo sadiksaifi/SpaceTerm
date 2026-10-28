@@ -226,11 +226,17 @@ fn sessions(count: usize) -> String {
 }
 
 /// The confirmation's title, message, and detail. Each names the selected server.
-pub(super) fn confirmation(server: &str, _live: usize) -> (String, String, String) {
+pub(super) fn confirmation(server: &str, live: usize) -> (String, String, String) {
+    let message = match live {
+        1 => "This ends 1 Terminal Session for every client and clears its output.".to_owned(),
+        count => {
+            format!("This ends {count} Terminal Sessions for every client and clears their output.")
+        }
+    };
     (
         format!("End All Sessions on {server}?"),
-        "Running programs stop and terminal output is cleared for every client.".to_owned(),
-        String::new(),
+        message,
+        "The server keeps running, and Workspaces, Tabs and Panes stay.".to_owned(),
     )
 }
 
@@ -343,7 +349,7 @@ impl SettingsWindow {
         };
         let generation = state.generation;
         let server = self.selected_server_name();
-        let (title, message, _) = confirmation(&server, live_sessions(&confirmed).len());
+        let (title, message, detail) = confirmation(&server, live_sessions(&confirmed).len());
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-server-end-all-sessions"),
@@ -368,6 +374,7 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
+        .detail(detail)
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

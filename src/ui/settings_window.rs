@@ -2148,7 +2148,8 @@ impl SettingsWindow {
     }
 
     fn reset_all_detail(&self) -> String {
-        "This cannot be undone.".to_owned()
+        "This can\u{2019}t be undone. Server connections and system permissions are kept."
+            .to_owned()
     }
 
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2156,8 +2157,8 @@ impl SettingsWindow {
         let result = Alert::new(
             ModalId::new("settings-reset-all"),
             "Reset all settings",
-            "Reset All Settings",
-            "Reset settings and keyboard shortcuts, and remove installed terminal themes.",
+            "Reset All Settings?",
+            "Settings and keyboard shortcuts return to their defaults, and installed terminal themes are removed.",
             vec![
                 ModalAction::new(
                     true,

@@ -1011,11 +1011,10 @@ impl DirectoryPicker {
             "Create Directory?",
             // Another computer's directory is created there, so the question names it.
             match self.source.machine_name() {
-                Some(machine) => format!("Create {} on \"{machine}\"?", parsed.display()),
-                None => format!(
-                    "Create {}? Missing parent directories will be created.",
-                    parsed.display()
-                ),
+                Some(machine) => {
+                    format!("Create {} on \u{201C}{machine}\u{201D}?", parsed.display())
+                }
+                None => format!("Create {}?", parsed.display()),
             },
             vec![
                 ModalAction::new(
@@ -1033,6 +1032,7 @@ impl DirectoryPicker {
                 ),
             ],
         )
+        .detail("Missing parent directories are also created.")
         .present(window, cx, move |outcome, cx| {
             let _ = window_handle.update(cx, |_, window, cx| {
                 let _ = picker.update(cx, |picker, cx| {

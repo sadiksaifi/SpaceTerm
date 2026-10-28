@@ -259,7 +259,7 @@ const STOPPED_DETAIL: &str = "Start the server to open your Workspaces.";
 pub(super) const AUTHORIZATION_TITLE: &str = "Run the Server at Startup";
 const AUTHORIZATION_DETAIL: &str =
     "Enter an administrator password so your Terminal Sessions keep running after you log out.";
-const AUTHORIZATION_DECLINED: &str = "Authorization didn't finish.";
+const AUTHORIZATION_DECLINED: &str = "Authorization didn\u{2019}t finish.";
 const AUTHORIZING_DETAIL: &str =
     "Enter an administrator password in the system prompt to continue.";
 
@@ -274,7 +274,7 @@ const fn failure_title(error: ServerError) -> &'static str {
         }
         ServerError::CandidateChanged => "Restart SpaceTerm",
         ServerError::CandidateMissing => "Server Not Included",
-        ServerError::RuntimeUnavailable => "Couldn't Verify Server",
+        ServerError::RuntimeUnavailable => "Couldn\u{2019}t Verify Server",
         ServerError::UnsafeStorage => "Unsafe Server Storage",
         ServerError::StorageUnavailable => "Server Storage Unavailable",
         ServerError::NotInstalled => "Server Not Installed",
@@ -287,7 +287,9 @@ const fn failure_title(error: ServerError) -> &'static str {
 /// whether this build lacks one or holds one that failed verification.
 fn failure_detail(error: ServerError) -> SharedString {
     match error {
-        ServerError::CandidateMissing => "".into(),
+        ServerError::CandidateMissing => "This SpaceTerm build has no server to set up, so \
+                                          reinstall SpaceTerm and try again."
+            .into(),
         ServerError::RuntimeUnavailable => "Reinstall SpaceTerm, then try again.".into(),
         error => error.to_string().into(),
     }

@@ -75,6 +75,7 @@ fn desktop_profile(
             DesktopWording {
                 file_preview: "Quick Look",
                 this_computer: "This Mac",
+                this_computer_phrase: "this Mac",
                 system_directory_selection: "Choose in Finder…",
                 read_only_update: (
                     "Move SpaceTerm to Applications",

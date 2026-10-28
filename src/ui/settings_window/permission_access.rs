@@ -524,7 +524,9 @@ impl SettingsWindow {
         let reopen = "Quit and reopen the program that needs access.";
         let (message, primary) = if row.can_reset() {
             (
-                format!("{reopen} If that doesn't help, reset {name}."),
+                format!(
+                    "{reopen} If that doesn\u{2019}t help, reset {name} and allow {application} again."
+                ),
                 ModalAction::new(
                     TroubleshootDecision::Reset,
                     "Reset",
@@ -537,7 +539,7 @@ impl SettingsWindow {
         } else {
             (
                 format!(
-                    "{reopen} If that doesn't help, remove {application} from Privacy & Security > {pane} and add it again."
+                    "{reopen} If that doesn\u{2019}t help, remove {application} from Privacy & Security > {pane} and add it again."
                 ),
                 ModalAction::new(
                     TroubleshootDecision::OpenSettings,
@@ -564,6 +566,7 @@ impl SettingsWindow {
                 ),
             ],
         )
+        .detail("Some programs use a helper app that needs its own permission.")
         .present(window, cx, move |outcome, cx| {
             let AlertOutcome::Activated { action_id, .. } = outcome else {
                 return;

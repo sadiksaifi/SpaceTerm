@@ -2833,7 +2833,7 @@ impl TabView {
         let _ = Alert::new(
             ModalId::new("shared-pane-edit-unavailable"),
             "Shared change unavailable",
-            "Couldn't Create Pane",
+            "Couldn\u{2019}t Create Pane",
             detail,
             vec![ModalAction::new(
                 (),

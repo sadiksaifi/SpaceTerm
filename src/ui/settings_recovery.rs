@@ -83,8 +83,8 @@ fn reset(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) {
 fn launch_alert() -> Alert<RecoveryAction> {
     Alert::new(
         ModalId::new("settings-recovery"),
-        "Couldn't read settings",
-        "Couldn't Read Settings",
+        "Couldn\u{2019}t read settings",
+        "Couldn\u{2019}t Read Settings",
         "SpaceTerm is using default settings.",
         vec![
             ModalAction::new(
@@ -108,8 +108,8 @@ fn launch_alert() -> Alert<RecoveryAction> {
 fn failure_alert() -> Alert<RecoveryAction> {
     Alert::new(
         ModalId::new("settings-recovery-failed"),
-        "Couldn't reset settings",
-        "SpaceTerm Couldn't Reset Your Settings",
+        "Couldn\u{2019}t reset settings",
+        "SpaceTerm Couldn\u{2019}t Reset Your Settings",
         "Open Settings to see what went wrong.",
         vec![
             ModalAction::new(
@@ -199,7 +199,7 @@ mod tests {
         });
 
         let tree = A11yTree::read(cx);
-        let alert = tree.node("Couldn't read settings");
+        let alert = tree.node("Couldn\u{2019}t read settings");
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(alert["aria"]["modal"], true);
         assert_eq!(tree.node("Reset Settings")["aria"]["role"], "Button");

@@ -486,7 +486,10 @@ fn a_change_the_server_couldnt_save_leaves_access_off_and_says_why(cx: &mut Test
         !access_on(&window, cx),
         "the row reports the server as it is"
     );
-    assert!(reads("\"studio\" couldn't save the change. Try again.", cx));
+    assert!(reads(
+        "\u{201C}studio\u{201D} couldn\u{2019}t save the change. Try again.",
+        cx
+    ));
 }
 
 #[gpui::test]
@@ -1078,7 +1081,10 @@ fn a_removal_spaceterm_cant_record_keeps_the_device_and_says_why(cx: &mut TestAp
         open(&format!("{DEVICE_SELECTOR}-0-remove"), cx),
         "the device stays removable rather than waiting on a removal nobody records"
     );
-    assert!(reads("SpaceTerm can't reach \"studio\". Try again.", cx));
+    assert!(reads(
+        "SpaceTerm can\u{2019}t reach \u{201C}studio\u{201D}. Try again.",
+        cx
+    ));
 }
 
 #[gpui::test]

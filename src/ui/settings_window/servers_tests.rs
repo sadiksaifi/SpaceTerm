@@ -830,9 +830,18 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
             _ => unreachable!(),
         };
         assert_eq!(confirmation.message.as_ref(), question);
+        let kept = match action {
+            ServiceAction::Stop => {
+                "Workspaces are kept, and the server stays stopped until you start it again."
+            }
+            ServiceAction::Restart => {
+                "Workspaces are kept, and each Pane starts a new shell when you use it."
+            }
+            _ => unreachable!(),
+        };
         assert_eq!(
             confirmation.detail.as_ref(),
-            "All Terminal Sessions on it end for every client."
+            format!("All Terminal Sessions on it end for every client. {kept}")
         );
         assert_eq!(confirmation.confirm, action.label());
     }
@@ -842,10 +851,15 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     let live =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, true, login).expect("live");
     assert!(!idle.message.contains("Terminal Sessions"));
-    assert!(idle.detail.is_empty());
+    assert_eq!(
+        idle.detail.as_ref(),
+        "It no longer starts when you log in. Workspaces are kept, so you can install it again \
+         later."
+    );
     assert_eq!(
         live.detail.as_ref(),
-        "All Terminal Sessions on it end for every client."
+        "All Terminal Sessions on it end for every client. Workspaces are kept, so you can \
+         install it again later."
     );
 }
 
@@ -1453,13 +1467,15 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
     let stop = ServiceConfirmation::for_action(ServiceAction::Stop, true, boot).expect("stop");
     assert_eq!(
         stop.detail.as_ref(),
-        "All Terminal Sessions on it end for every client."
+        "All Terminal Sessions on it end for every client. Workspaces are kept, and the server \
+         stays stopped until you start it again."
     );
     let uninstall =
-        ServiceConfirmation::for_action(ServiceAction::Uninstall, true, boot).expect("uninstall");
+        ServiceConfirmation::for_action(ServiceAction::Uninstall, false, boot).expect("uninstall");
     assert_eq!(
         uninstall.detail.as_ref(),
-        "All Terminal Sessions on it end for every client."
+        "It no longer starts when the computer starts. Workspaces are kept, so you can install it \
+         again later."
     );
 }
 
@@ -1472,13 +1488,16 @@ fn the_authorization_prompt_names_the_required_permission_and_matching_action() 
     assert_eq!(install.confirm, "Authorize and Install");
     assert_eq!(
         install.message,
-        "Enter an administrator password so your account's services keep running after you log out."
+        "Enter an administrator password so your account\u{2019}s services keep running after you log out."
     );
-    assert!(install.detail.is_empty());
+    assert_eq!(
+        install.detail,
+        "This applies to every service your account runs and stays on if you uninstall the server."
+    );
     let start = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
     assert_eq!(start.confirm, "Authorize and Start");
     assert_eq!(start.message, install.message);
-    assert!(start.detail.is_empty());
+    assert_eq!(start.detail, install.detail);
 }
 
 #[gpui::test]
@@ -1697,7 +1716,7 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
     assert_eq!(prompt["aria"]["role"], "AlertDialog");
     assert_eq!(
         prompt["aria"]["description"],
-        "Enter an administrator password so your account's services keep running after you log out."
+        "Enter an administrator password so your account\u{2019}s services keep running after you log out."
     );
     assert_eq!(
         tree.focused().map(|node| node["aria"]["label"].clone()),

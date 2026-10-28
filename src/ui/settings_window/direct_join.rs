@@ -23,14 +23,14 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         DirectError::AuthenticationRefused
         | DirectError::PinMismatch
         | DirectError::ChangedClaim
-        | DirectError::Substituted => "SpaceTerm couldn't verify this server.",
+        | DirectError::Substituted => "SpaceTerm couldn\u{2019}t verify this server.",
         DirectError::CredentialUnavailable | DirectError::InteractionRequired => {
-            "SpaceTerm couldn't save this device's key."
+            "SpaceTerm couldn\u{2019}t save this device\u{2019}s key."
         }
-        DirectError::StorageUnavailable => "SpaceTerm couldn't save the connection.",
+        DirectError::StorageUnavailable => "SpaceTerm couldn\u{2019}t save the connection.",
         DirectError::Capacity => "SpaceTerm is finishing other pairings. Try again shortly.",
         DirectError::Transport => {
-            "SpaceTerm couldn't reach the server. Check your network connection."
+            "SpaceTerm couldn\u{2019}t reach the server. Check your network connection."
         }
         DirectError::Disabled
         | DirectError::Revoked
@@ -47,7 +47,7 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
 pub(super) fn join_paused(stage: EnrollmentStage) -> String {
     match stage {
         EnrollmentStage::Claim => {
-            "SpaceTerm couldn't reach the server. Check your network, then try again."
+            "SpaceTerm couldn\u{2019}t reach the server. Check your network, then try again."
         }
         EnrollmentStage::Approval => {
             "SpaceTerm lost contact with the server. Check your network, then try again."
@@ -57,4 +57,4 @@ pub(super) fn join_paused(stage: EnrollmentStage) -> String {
 }
 
 /// What a request the server's owner declined says.
-const DECLINED: &str = "The server's owner declined pairing.";
+const DECLINED: &str = "The server\u{2019}s owner declined pairing.";

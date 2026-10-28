@@ -1988,7 +1988,10 @@ mod close {
         let approval = shared
             .close_approval(ROOT_PANE_TARGET)
             .expect("the published Pane can be reviewed");
-        assert_eq!(approval.message(), "");
+        assert_eq!(
+            approval.message(),
+            "The Pane closes for every client. No Terminal Session is running in it."
+        );
         let local_pane = LocalCloseTarget::Pane {
             workspace_id: first_workspace_id(),
             tab_id: TabId::new(1),
@@ -2027,7 +2030,11 @@ mod close {
         let fresh = shared
             .close_approval(ROOT_PANE_TARGET)
             .expect("the Pane can be reviewed again");
-        assert_eq!(fresh.message(), "");
+        assert_eq!(
+            fresh.message(),
+            "This is the only Pane in its Tab, so the Tab closes for every client. No Terminal \
+             Session is running in it."
+        );
         assert_eq!(fresh.detail(), None, "the Workspace keeps its second Tab");
         assert!(edits.submitted().is_empty());
         assert_eq!(shared.close(fresh, local_pane), SharedSubmission::Submitted);
@@ -2143,7 +2150,7 @@ mod close {
             .expect("the published Tab can be reviewed");
         assert_eq!(
             tab.message(),
-            "This ends 2 Terminal Sessions for every client."
+            "The Tab and its 2 Panes close for every client. This ends 2 Terminal Sessions and stops their running commands."
         );
         assert_eq!(tab.detail(), None, "the Workspace keeps its second Tab");
 
@@ -2156,8 +2163,21 @@ mod close {
             .expect("the published Pane can be reviewed");
         assert_eq!(
             unstarted.message(),
-            "",
+            "This is the only Pane in its Tab, so the Tab closes for every client. No Terminal \
+             Session is running in it.",
             "a retained Pane without a shell ends no Session"
+        );
+
+        let running = shared
+            .close_approval(CloseTarget::Pane {
+                workspace: WORKSPACE,
+                tab: ROOT_TAB,
+                pane: SPLIT_PANE,
+            })
+            .expect("the published Pane can be reviewed");
+        assert_eq!(
+            running.message(),
+            "This ends 1 Terminal Session and stops its running commands for every client."
         );
 
         let kill = shared
@@ -2165,16 +2185,16 @@ mod close {
                 workspace: WORKSPACE,
             })
             .expect("the published Workspace can be reviewed");
-        assert_eq!(kill.title(), "Kill Workspace \"Build\"?");
+        assert_eq!(kill.title(), "Kill Workspace \u{201C}Build\u{201D}?");
         assert_eq!(kill.confirm_label(), "Kill Workspace");
         assert_eq!(
             kill.message(),
-            "This ends 2 Terminal Sessions for every client. This can't be undone.",
+            "Its 2 Tabs and 2 Terminal Sessions end for every client. This can\u{2019}t be undone.",
             "Kill counts live Sessions, not Panes"
         );
-        assert!(
-            kill.detail()
-                .is_some_and(|detail| detail.contains("Worktree directories stay on disk"))
+        assert_eq!(
+            kill.detail(),
+            Some("Repository files and Worktrees stay on disk.")
         );
     }
 
@@ -2191,15 +2211,18 @@ mod close {
 
         assert_eq!(
             only.title(),
-            "Kill Workspace \"Build\"?",
+            "Kill Workspace \u{201C}Build\u{201D}?",
             "the final Pane requires Workspace-level review"
         );
         assert_eq!(only.confirm_label(), "Kill Workspace");
         assert_eq!(
             only.message(),
-            "This ends 1 Terminal Session for every client. This can't be undone."
+            "This is the only Pane in \u{201C}Build\u{201D}, so the Workspace is removed for every client. This ends 1 Terminal Session."
         );
-        assert!(only.detail().is_some());
+        assert_eq!(
+            only.detail(),
+            Some("Repository files and Worktrees stay on disk. This can\u{2019}t be undone.")
+        );
     }
 }
 

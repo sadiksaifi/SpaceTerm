@@ -778,7 +778,7 @@ impl ServiceConfirmation {
 pub(crate) struct AuthorizationPrompt {
     pub(crate) title: &'static str,
     pub(crate) message: &'static str,
-    pub(crate) detail: SharedString,
+    pub(crate) detail: &'static str,
     pub(crate) confirm: &'static str,
 }
 
@@ -791,8 +791,8 @@ impl AuthorizationPrompt {
         };
         Self {
             title: "Run the Server at Startup?",
-            message: "Enter an administrator password so your account's services keep running after you log out.",
-            detail: SharedString::default(),
+            message: "Enter an administrator password so your account\u{2019}s services keep running after you log out.",
+            detail: "This applies to every service your account runs and stays on if you uninstall the server.",
             confirm,
         }
     }
@@ -1692,11 +1692,11 @@ impl SettingsWindow {
                         ModalId::new("settings-server-auto-start-authorize"),
                         "Start the Server at Boot?",
                         "Start the Server at Boot?",
-                        "Enter an administrator password so your account's services start at boot.",
+                        "Enter an administrator password so your account\u{2019}s services start at boot.",
                         vec![
                             ModalAction::new(
                                 true,
-                                "Authorize\u{2026}",
+                                "Authorize",
                                 ModalActionRole::Affirmative,
                                 AUTHORIZE_CONFIRM_SELECTOR,
                             )
@@ -1710,6 +1710,7 @@ impl SettingsWindow {
                         ],
                     )
                     .intent(AlertIntent::Warning)
+                    .detail("This applies to every service your account runs.")
                     .present(window, cx, move |outcome, cx| {
                         if !matches!(
                             outcome,
@@ -1864,6 +1865,7 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Warning)
+        .detail(prompt.detail)
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

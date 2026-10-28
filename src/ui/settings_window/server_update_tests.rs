@@ -264,7 +264,8 @@ fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
     );
     assert_eq!(
         live.detail.as_ref(),
-        "All Terminal Sessions on it end for every client."
+        "It changes from 1.4.0 (commit aaaaaaa) to 1.5.0 (commit bbbbbbb). All Terminal Sessions \
+         on it end for every client, and Workspaces are kept."
     );
     assert_eq!(live.confirm, "Update Server");
 
@@ -273,7 +274,11 @@ fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
         parked.message.as_ref(),
         format!("Update the stopped {server} server to 1.5.0 (commit bbbbbbb)?")
     );
-    assert!(parked.detail.is_empty());
+    assert_eq!(
+        parked.detail.as_ref(),
+        "It changes from 1.4.0 (commit aaaaaaa) to 1.5.0 (commit bbbbbbb) and stays stopped \
+         until you start it."
+    );
 }
 
 #[test]
