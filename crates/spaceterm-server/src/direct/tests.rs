@@ -63,17 +63,26 @@ pub(crate) fn accept_raw(state: &host::Shared) -> QuicStream {
 
 /// A listener of `state`'s certificate on a free loopback port, outside its policy.
 pub(crate) fn listener(state: &host::Shared) -> (QuicListener, String) {
-    let address = UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let state = state.lock().unwrap();
-    let (certificate, key) = state.certificate();
-    let config = quic::server_config(certificate, key).unwrap();
-    (
-        QuicListener::bind(address, config).unwrap(),
-        format!("quic://{address}"),
-    )
+    let config = {
+        let state = state.lock().unwrap();
+        let (certificate, key) = state.certificate();
+        quic::server_config(certificate, key).unwrap()
+    };
+    let listener = loopback_listener(config);
+    let endpoint = format!("quic://{}", listener.address());
+    (listener, endpoint)
+}
+
+/// A listener of `config` on a free loopback port. Another test can take the port between
+/// finding it and binding it, so a failed bind tries another.
+fn loopback_listener(config: Arc<noq_proto::ServerConfig>) -> QuicListener {
+    for _ in 0..8 {
+        let address = free_udp(std::net::Ipv4Addr::LOCALHOST.into());
+        if let Ok(listener) = QuicListener::bind(address, Arc::clone(&config)) {
+            return listener;
+        }
+    }
+    panic!("no free UDP port to listen on");
 }
 
 /// Accepts the next connection of a test listener and completes its handshake.
@@ -1106,9 +1115,8 @@ fn an_unadmitted_peer_cannot_send_a_message_larger_than_the_authentication_bound
     let oversized = (wire::MAX_AUTH_FRAME as u32 + 1).to_be_bytes();
     let deadline = Instant::now() + Duration::from_secs(5);
     stream.send_bytes(&oversized, deadline).unwrap();
-    stream
-        .send_bytes(&vec![b'1'; wire::MAX_AUTH_FRAME + 1], deadline)
-        .unwrap();
+    // The server refuses on the length alone and may close before the body leaves.
+    let _ = stream.send_bytes(&vec![b'1'; wire::MAX_AUTH_FRAME + 1], deadline);
     assert_eq!(server.join().unwrap().err(), Some(DirectError::Transport));
 }
 
@@ -3056,16 +3064,19 @@ mod quic_connections {
             .unwrap()
             .frames
             .remove(0);
-            (offers, carrier.offer(&ping, Priority::L0).unwrap())
+            let control = carrier.offer(&ping, Priority::L0).unwrap();
+            // The connection stays open until the client is done.
+            (offers, control, carrier)
         });
         let credential = DeviceCredential::generate().unwrap();
         let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         // The client never reads, so L2 runs out of credit.
-        let (offers, control) = server.join().unwrap();
+        let (offers, control, carrier) = server.join().unwrap();
         assert!(offers.contains(&Offer::Full), "L2 must fill up: {offers:?}");
         assert_eq!(control, Offer::Accepted);
         drop(stream);
+        drop(carrier);
     }
 
     /// The 33rd connection waiting for the host is refused at once.
@@ -3448,7 +3459,7 @@ mod quic_connections {
             .unwrap();
             tls.alpn_protocols = vec![b"other/1".to_vec()];
             let config = crate::connection::quic::server_config(tls).unwrap();
-            QuicListener::bind(free_udp(std::net::Ipv4Addr::LOCALHOST.into()), config).unwrap()
+            loopback_listener(config)
         };
         let other_address = other.address();
         let elsewhere = std::thread::spawn(move || {
