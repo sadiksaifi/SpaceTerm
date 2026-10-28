@@ -2614,6 +2614,31 @@ mod quic_connections {
         }
     }
 
+    /// A client acknowledges the server's answer as it arrives, so the server may close before
+    /// the client reads it. The client still reads the answer, as the pairing exchange's final
+    /// answer must arrive.
+    #[test]
+    fn an_answer_that_arrived_before_the_servers_close_is_still_read() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            stream.send(&"answer").unwrap();
+            // Dropping the stream closes the connection.
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        server.join().unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        assert_eq!(stream.receive::<String>().unwrap(), "answer");
+        assert_eq!(
+            stream.receive::<String>().err(),
+            Some(DirectError::Transport)
+        );
+    }
+
     /// The server writes L0 before L1, so without the client's rule a goodbye written after a
     /// large frame would arrive first.
     #[test]

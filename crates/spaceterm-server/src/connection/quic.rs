@@ -1182,11 +1182,11 @@ impl QuicStream {
     }
 
     /// The server opens L0 once the handshake completes; the client accepts it when its first
-    /// bytes arrive.
+    /// bytes arrive. Those bytes can arrive in the same read as the server's close, so L0 is
+    /// taken before the close is reported, and the bytes are still read.
     fn open_l0(&mut self, deadline: Instant) -> Result<(), QuicError> {
         loop {
             self.driver.pump();
-            self.driver.check()?;
             if self.driver.state.connected {
                 let opened = match self.driver.connection.side() {
                     noq_proto::Side::Server => self.driver.connection.streams().open(Dir::Bi),
@@ -1202,6 +1202,7 @@ impl QuicStream {
                     return Ok(());
                 }
             }
+            self.driver.check()?;
             self.driver.wait(deadline)?;
         }
     }
@@ -1253,7 +1254,9 @@ impl QuicStream {
         }
     }
 
-    /// Reads exactly `count` L0 bytes before `deadline`.
+    /// Reads exactly `count` L0 bytes before `deadline`. Bytes that arrived before the peer
+    /// closed are still read: a peer's final answer is acknowledged as it arrives, so the peer
+    /// may close before this end reads it.
     fn receive_exact(&mut self, count: usize, deadline: Instant) -> Result<Vec<u8>, QuicError> {
         let id = self.l0()?;
         loop {
@@ -1262,11 +1265,17 @@ impl QuicStream {
                 return Ok(std::mem::replace(&mut self.read, rest));
             }
             self.driver.pump();
-            self.driver.check()?;
-            let ended = read_stream(&mut self.driver.connection, id, &mut self.read, count)?;
+            let ended = match read_stream(&mut self.driver.connection, id, &mut self.read, count) {
+                Ok(ended) => ended,
+                Err(error) => {
+                    self.driver.check()?;
+                    return Err(error);
+                }
+            };
             if self.read.len() >= count {
                 continue;
             }
+            self.driver.check()?;
             if ended {
                 return Err(QuicError::Closed);
             }
