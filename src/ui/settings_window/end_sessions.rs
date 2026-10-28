@@ -161,7 +161,7 @@ pub(super) fn caption(
         Some(Ended::Accepted) => {
             return guidance(format!(
                 "Every Terminal Session on {server} ended. Its Panes show Session Ended until \
-                 someone selects one or chooses Start Session."
+                 someone chooses Start Session."
             ));
         }
         Some(Ended::Restarted) => {

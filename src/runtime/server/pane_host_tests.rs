@@ -1132,7 +1132,7 @@ fn a_missing_confirmed_directory_refuses_startup_without_falling_back() {
 fn ordinary_exit_retires_organization_without_a_connected_client() {
     let mut host = host();
     let lease = attach(&mut host, 1, true);
-    command(&mut host, 1, lease, "exit");
+    command(&mut host, 1, lease, "exit 0");
     host.disconnected([1; 32]);
     let until = Instant::now() + Duration::from_secs(3);
     while host.organization.is_some() && Instant::now() < until {
@@ -1658,7 +1658,7 @@ fn a_waiting_client_observes_exit_without_the_controller_polling() {
 fn ordinary_exit_allows_a_later_explicit_launch_but_never_a_reconnect() {
     let mut host = host();
     let old = attach(&mut host, 2, true);
-    command(&mut host, 2, old, "exit\n");
+    command(&mut host, 2, old, "exit 0\n");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if matches!(screen(&mut host, [1; 32], old), Err(PaneEvent::Ended)) {

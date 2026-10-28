@@ -34,7 +34,7 @@ class ServerArchiveTests(unittest.TestCase):
         self.commit = "a" * 40
         self.info = {
             "schema": 1,
-            "protocol_major": 2,
+            "protocol_major": 3,
             "capabilities": ["workspace_policy"],
             "identity": "spaceterm-preflight",
             "target": "x86_64-unknown-linux-gnu",

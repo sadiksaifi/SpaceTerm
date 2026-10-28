@@ -183,11 +183,11 @@ mod exercise {
         }
         let server = stage(
             "ipc-client",
-            ServerConnection::for_development_client(&name, 2),
+            ServerConnection::for_development_client(&name, 3),
         )?;
         let observer = stage(
             "ipc-observer",
-            ServerConnection::for_development_client(&format!("{name}-observer"), 2),
+            ServerConnection::for_development_client(&format!("{name}-observer"), 3),
         )?;
         // Client credentials are created by admission, without service registration or setup/reset.
         let connection = stage("presentation-connect", support::connect(&server))?;

@@ -113,7 +113,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Take Over**: The action that replaces a Pane's Controlling Client.
 
-**Takeover Screen**: The Pane presentation shown to a SpaceTerm Client that is not a Pane's Controlling Client. It names the Controlling Client, or says that no client controls the Pane.
+**Takeover Screen**: The Pane presentation shown to a SpaceTerm Client that is not a Pane's Controlling Client, unless the Pane's Terminal Session ended. It names the Controlling Client, or says that no client controls the Pane.
 
 ## Settings
 

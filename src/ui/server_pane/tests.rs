@@ -4,11 +4,12 @@ use std::sync::{Arc, Mutex};
 use super::{ServerPaneConnection, ServerPaneScreen, ServerPaneView};
 use crate::server_connection::ServerError;
 use crate::terminal::server_session::DevelopmentPaneStatus;
-use spaceterm_server::pane::control::Controller;
+use spaceterm_server::pane::{SessionEnd, control::Controller};
 
 /// A Pane connection whose answers a test sets and whose explicit requests it counts.
 struct Connection {
     status: Mutex<DevelopmentPaneStatus>,
+    session_end: Mutex<Option<SessionEnd>>,
     start_unconfirmed: AtomicBool,
     generation: AtomicU64,
     starts: AtomicUsize,
@@ -20,6 +21,7 @@ impl Connection {
     fn new(status: DevelopmentPaneStatus) -> Arc<Self> {
         Arc::new(Self {
             status: Mutex::new(status),
+            session_end: Mutex::default(),
             start_unconfirmed: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             starts: AtomicUsize::new(0),
@@ -50,6 +52,10 @@ impl ServerPaneConnection for Connection {
 
     fn controller(&self) -> Option<Controller> {
         None
+    }
+
+    fn session_end(&self) -> Option<SessionEnd> {
+        *self.session_end.lock().expect("session end")
     }
 
     fn connection_generation(&self) -> u64 {
@@ -291,7 +297,7 @@ fn a_restored_pane_whose_start_is_in_flight_shows_it_starting() {
             starting: true,
             unconfirmed: false,
             offered: false,
-            ended: false,
+            ended: None,
         })
     );
 }
@@ -311,4 +317,80 @@ fn the_unconfirmed_start_stays_through_a_check_that_reconnects() {
         })
     );
     assert!(!view.can_start_shell());
+}
+
+#[test]
+fn the_session_ended_screen_says_why_the_shell_ended() {
+    for (end, detail) in [
+        (
+            SessionEnd::Exited { code: 1 },
+            "The shell exited with code 1.",
+        ),
+        (SessionEnd::Signaled, "A signal ended the shell."),
+        (SessionEnd::EndAllSessions, super::ENDED_DETAIL),
+    ] {
+        let copy = super::DormantCopy::of(Some(end));
+        assert_eq!(copy.title, "Session Ended");
+        assert_eq!(copy.detail.as_ref(), detail);
+        assert_eq!(copy.label, "Start Session");
+    }
+}
+
+#[test]
+fn an_exited_shell_offers_start_session_without_starting_one() {
+    let end = SessionEnd::Exited { code: 127 };
+    let connection = Connection::new(DevelopmentPaneStatus::SessionEnded(end));
+    let mut view = ServerPaneView::new(connection.clone());
+
+    assert_eq!(
+        view.screen(),
+        Some(ServerPaneScreen::Restored {
+            starting: false,
+            unconfirmed: false,
+            offered: true,
+            ended: Some(end),
+        })
+    );
+    assert_eq!(connection.starts.load(Ordering::SeqCst), 0);
+
+    view.start_shell();
+
+    assert_eq!(connection.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(connection.take_overs.load(Ordering::SeqCst), 0);
+}
+
+/// The Pane's control grant belongs to another client, but nothing runs to take over, so this
+/// client sees the same Session Ended screen and its Start Session takes the Pane over.
+#[test]
+fn another_clients_exited_shell_offers_start_session_through_take_over() {
+    let end = SessionEnd::Exited { code: 1 };
+    let connection = Connection::new(DevelopmentPaneStatus::Takeover);
+    *connection.session_end.lock().unwrap() = Some(end);
+    let mut view = ServerPaneView::new(connection.clone());
+
+    assert_eq!(
+        view.screen(),
+        Some(ServerPaneScreen::Restored {
+            starting: false,
+            unconfirmed: false,
+            offered: true,
+            ended: Some(end),
+        })
+    );
+    assert!(view.can_start_shell());
+
+    view.start_shell();
+
+    assert_eq!(connection.take_overs.load(Ordering::SeqCst), 1);
+    assert_eq!(connection.starts.load(Ordering::SeqCst), 0);
+    connection.set(DevelopmentPaneStatus::TakingOver);
+    view.sync();
+    assert!(matches!(
+        view.screen(),
+        Some(ServerPaneScreen::Restored {
+            starting: true,
+            offered: false,
+            ..
+        })
+    ));
 }

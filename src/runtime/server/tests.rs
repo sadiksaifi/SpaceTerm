@@ -413,7 +413,7 @@ fn shared_session_reset_retains_membership_but_ordinary_final_shell_exit_removes
         panic!()
     };
     assert_ne!(lease.session, old.session);
-    let reply = command(&mut host, 1, lease, "exit\n");
+    let reply = command(&mut host, 1, lease, "exit 0\n");
     assert!(matches!(reply, Reply::Unchanged));
     let until = Instant::now() + Duration::from_secs(3);
     while !shared_inventory(&mut host).workspaces.is_empty() && Instant::now() < until {

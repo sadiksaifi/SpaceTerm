@@ -1842,7 +1842,7 @@ mod startup_tests {
                         Operation::Claim(claim) => {
                             ReplyBody::Claim(ClaimReply::Restored(Box::new(Restored {
                                 fresh: false,
-                                session_ended: false,
+                                session_ended: None,
                                 recovery: None,
                                 directory_unavailable: false,
                                 server: [1; 32],

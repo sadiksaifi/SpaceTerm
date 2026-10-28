@@ -485,7 +485,7 @@ run = "cargo run --package spaceterm-server-host --features client --example per
 [tasks."server:pane:takeover:smoke"]
 description = "Verify two account-local clients transfer control on the approved Development service"
 run = [
-  "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 2",
+  "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 3",
 ]
 
 [tasks."server:sessions:smoke"]
@@ -496,24 +496,24 @@ flag "--confirm-disposable-preflight" help="Authorize only disposable Preflight 
 run = "cargo run --package spaceterm-server-host --features client --example end_all_sessions --locked -- spaceterm-preflight {% if usage.confirm_disposable_preflight %}--confirm-disposable-preflight{% endif %}"
 
 [tasks."server:input:smoke"]
-description = "Verify account-local terminal input and native effects with protocol major 2 on an idle server"
+description = "Verify account-local terminal input and native effects with protocol major 3 on an idle server"
 run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
-  "cargo run --package spaceterm-server-host --features client --example terminal_input --locked -- 2",
+  "cargo run --package spaceterm-server-host --features client --example terminal_input --locked -- 3",
 ]
 
 [tasks."server:workspace:smoke"]
-description = "Exercise retained Development work through server kill and shutdown with protocol major 2"
+description = "Exercise retained Development work through server kill and shutdown with protocol major 3"
 run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
-  "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 2",
+  "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 3",
 ]
 
 [tasks."server:shared:smoke"]
-description = "Exercise shared edits, independent Pane control, lost outcomes and restart with protocol major 2"
+description = "Exercise shared edits, independent Pane control, lost outcomes and restart with protocol major 3"
 run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
-  "cargo run --package spaceterm-server-host --features client --example shared_workspaces --locked -- 2",
+  "cargo run --package spaceterm-server-host --features client --example shared_workspaces --locked -- 3",
 ]
 
 [tasks."server:shared:desktop:test"]
@@ -531,17 +531,17 @@ usage = 'arg "[test]" default="native_server_setup_acceptance" help="Exact funct
 run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::provisioning::unix_adapter_tests::{{usage.test | quote}} --ignored --exact --nocapture"
 
 [tasks."server:worktree:smoke"]
-description = "Exercise owning-server Worktree writes and interrupted originals with protocol major 2"
+description = "Exercise owning-server Worktree writes and interrupted originals with protocol major 3"
 run = [
   "cargo build --package spaceterm-server-host --features client --example worktree_writes --bins --locked",
-  "cargo run --package spaceterm-server-host --features client --example worktree_writes --locked -- 2",
+  "cargo run --package spaceterm-server-host --features client --example worktree_writes --locked -- 3",
 ]
 
 [tasks."server:repository:smoke"]
-description = "Read owning-server Git facts and external Worktrees through two clients with protocol major 2"
+description = "Read owning-server Git facts and external Worktrees through two clients with protocol major 3"
 run = [
   "cargo build --package spaceterm-server-host --features client --example repository_reads --bins --locked",
-  "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 2",
+  "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 3",
 ]
 
 [tasks."server:repository:desktop:test"]
@@ -605,7 +605,7 @@ run = [
 ]
 
 [tasks."server:graphics:transport:test"]
-description = "Test authenticated graphics transfers and slow readers with protocol major 2 and fixture identities"
+description = "Test authenticated graphics transfers and slow readers with protocol major 3 and fixture identities"
 run = "cargo test --package spaceterm-server --lib --features client --locked"
 
 [tasks."server:directory:build"]
@@ -615,7 +615,7 @@ run = "cargo build --package spaceterm-server-host --features client --example d
 [tasks."server:directory:smoke"]
 description = "Exercise directory recovery on an idle Development server without native credential adapters"
 usage = '''
-arg "[major]" default="2" help="Protocol major (2)"
+arg "[major]" default="3" help="Protocol major (3)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = [
@@ -626,7 +626,7 @@ run = [
 [tasks."server:directory:run"]
 description = "Run a built directory-recovery check without replacing its code signature"
 usage = '''
-arg "[major]" default="2" help="Protocol major (2)"
+arg "[major]" default="3" help="Protocol major (3)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
