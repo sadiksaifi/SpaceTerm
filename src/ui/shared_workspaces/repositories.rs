@@ -679,7 +679,7 @@ mod tests {
     fn workspace_in_removed_worktree() -> Workspace {
         let tab = |id: u8, worktree: &str, repository: &str| Tab {
             worktree: Some(worktree.into()),
-            worktree_membership_fixed: false,
+            worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
             worktree_repository: Some(repository.into()),
             id: [id; 32],
             root_pane: [id; 32],
