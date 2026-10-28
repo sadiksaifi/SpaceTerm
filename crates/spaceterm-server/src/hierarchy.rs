@@ -182,7 +182,9 @@ pub struct Workspace {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
-    /// Directory repair must not move this Tab to a different Worktree, including its Root Pane.
+    /// Directory changes never move this Tab to a different Worktree, including its Root Pane.
+    /// Opening a Tab in a Worktree and directory repair set it. Promotion to Root Tab clears it,
+    /// and so does an unpinned Root Tab's Root Pane reading outside any repository.
     #[serde(default)]
     pub worktree_membership_fixed: bool,
     /// Saved membership, retained even when Git no longer lists the directory.
@@ -1008,7 +1010,11 @@ impl State {
                 }
             }
             w.tabs.retain(|t| !t.panes.is_empty());
-            if let Some(t) = w.tabs.first() {
+            if let Some(t) = w.tabs.first_mut()
+                && t.id != w.root_tab
+            {
+                // A promoted Root Tab follows its Root Pane, not the Worktree it opened in.
+                t.worktree_membership_fixed = false;
                 w.root_tab = t.id;
             }
         }
@@ -2049,6 +2055,8 @@ mod tests {
             )
             .unwrap();
         let survivor = state.inventory.workspaces[0].tabs[1].id;
+        // As when the Tab opened in a Worktree; the promoted Root Tab follows its Root Pane.
+        state.inventory.workspaces[0].tabs[1].worktree_membership_fixed = true;
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         state.inventory.close = Some(CloseInventory {
             controls: Vec::new(),
@@ -2079,6 +2087,7 @@ mod tests {
         );
         assert_eq!(state.inventory.workspaces[0].root_tab, survivor);
         assert_eq!(state.inventory.workspaces[0].tabs.len(), 1);
+        assert!(!state.inventory.workspaces[0].tabs[0].worktree_membership_fixed);
         assert_eq!(
             state
                 .apply([2; 32], 1, close, "/tmp".as_ref(), |_| true)

@@ -855,6 +855,147 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
 }
 
 #[test]
+fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_restart() {
+    use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome, State};
+    use spaceterm_server::worktree::Operation;
+    let git = GitFixture::new();
+    let outside = GitFixture::new();
+    std::fs::remove_dir_all(outside.0.join(".git")).unwrap();
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    let workspace = create_shared(&mut host, 1);
+    let first = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let root_id = first.workspaces[0].root_tab;
+    let Outcome::Accepted { target: opened } = finish_write(
+        &mut host,
+        2,
+        Operation::OpenTab {
+            workspace,
+            root: git.0.clone(),
+            path: git.0.clone(),
+            source: None,
+        },
+    ) else {
+        panic!("open a Tab in the Worktree")
+    };
+    let before = shared_inventory(&mut host);
+    let tab = before.workspaces[0]
+        .tabs
+        .iter()
+        .find(|tab| tab.id == opened)
+        .unwrap();
+    assert!(tab.worktree_membership_fixed);
+    assert_eq!(tab.worktree.as_ref(), Some(&git.0));
+    let target = CloseTarget::Tab {
+        workspace,
+        tab: root_id,
+    };
+    let confirmation = before.close_confirmation(target).unwrap();
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 3,
+                mutation: Mutation::Close {
+                    target,
+                    confirmation,
+                },
+            }
+        ),
+        Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })
+    ));
+    let promoted = shared_inventory(&mut host);
+    assert!(promoted.workspaces[0].pinned_directory.is_none());
+    assert_eq!(promoted.workspaces[0].root_tab, opened);
+    let tab = &promoted.workspaces[0].tabs[0];
+    assert!(!tab.worktree_membership_fixed);
+    assert_eq!(tab.worktree.as_ref(), Some(&git.0));
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane: tab.root_pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("Root Pane did not start")
+    };
+    command(
+        &mut host,
+        1,
+        lease,
+        &format!(
+            "stty -echo; cd '{}'; printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HLEFT-REPOSITORY\\n'",
+            outside.0.display()
+        ),
+    );
+    await_text(&mut host, lease, "LEFT-REPOSITORY");
+    git_facts(&mut host, &outside.0, |facts| {
+        facts.failure.is_none() && facts.repository.is_none()
+    });
+    // The former repository's facts leave once no Tab retains membership in it.
+    let until = Instant::now() + Duration::from_secs(12);
+    let left = loop {
+        let inventory = shared_inventory(&mut host);
+        if inventory
+            .repositories
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.directories.iter().all(|f| f.directory != git.0))
+        {
+            break inventory;
+        }
+        assert!(Instant::now() < until, "former repository facts remained");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let current = &left.workspaces[0];
+    assert_eq!(
+        super::repositories::workspace_directory(current),
+        Some(outside.0.as_path())
+    );
+    assert_eq!(current.tabs.len(), 1);
+    assert_eq!(current.tabs[0].worktree, None);
+    assert_eq!(current.tabs[0].worktree_repository, None);
+    assert!(!current.tabs[0].worktree_membership_fixed);
+    let saved = current.clone();
+    let mut state = State::empty();
+    state.inventory = left;
+    let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
+    host.shutdown().unwrap();
+    let mut restored = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
+    restored.begin_boot([9; 32]);
+    let mut reads = super::repositories::ServerRepositories::new([9; 32]);
+    reads.subscribe([1; 32]);
+    let until = Instant::now() + Duration::from_secs(12);
+    while !reads.snapshot().directories.iter().any(|facts| {
+        facts.directory == outside.0 && facts.failure.is_none() && facts.repository.is_none()
+    }) {
+        reads.update(&mut restored);
+        assert!(Instant::now() < until, "restored directory was not read");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    reads.update(&mut restored);
+    let current = &restored.inventory.workspaces[0];
+    assert_eq!(current.root_tab, opened);
+    assert_eq!(current.tabs.len(), 1);
+    assert_eq!(current.tabs[0].id, saved.tabs[0].id);
+    assert_eq!(current.tabs[0].worktree, None);
+    assert_eq!(current.tabs[0].worktree_repository, None);
+    assert!(!current.tabs[0].worktree_membership_fixed);
+    assert!(
+        reads
+            .snapshot()
+            .directories
+            .iter()
+            .all(|facts| facts.directory != git.0)
+    );
+    reads.shutdown();
+}
+
+#[test]
 fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_and_restore() {
     use spaceterm_server::hierarchy::State;
     let git = GitFixture::new();

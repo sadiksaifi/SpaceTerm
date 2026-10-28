@@ -399,11 +399,31 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
             .and_then(|directory| current_worktree(snapshot, directory));
         let follows_root = workspace.pinned_directory.is_none();
         for tab in &mut workspace.tabs {
+            let follows = follows_root && tab.id == workspace.root_tab;
+            // Outside is authoritative only after a successful read. Pending reads and
+            // unavailable directories preserve the saved membership for recovery. Leaving the
+            // repository also ends fixed membership, so the Root Tab follows its next repository.
+            if follows
+                && tab
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == tab.root_pane)
+                    .is_some_and(|pane| {
+                        snapshot.directories.iter().any(|facts| {
+                            facts.directory == pane_directory(pane)
+                                && facts.failure.is_none()
+                                && facts.repository.is_none()
+                        })
+                    })
+            {
+                changed |= tab.worktree.take().is_some();
+                changed |= tab.worktree_repository.take().is_some();
+                changed |= std::mem::take(&mut tab.worktree_membership_fixed);
+                continue;
+            }
             // Membership belongs to the saved Tab, not its focused Pane or a later cd in any
             // non-Root Tab. Only the unpinned Root Tab follows the Workspace's directory.
-            if tab.worktree_membership_fixed
-                || (tab.worktree.is_some() && !(follows_root && tab.id == workspace.root_tab))
-            {
+            if tab.worktree_membership_fixed || (tab.worktree.is_some() && !follows) {
                 // Older Development records gain a locator without changing saved membership.
                 if let Some(main) = snapshot.directories.iter().find_map(|facts| {
                     let list = facts
@@ -419,26 +439,6 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
                     tab.worktree_repository = Some(main.clone());
                     changed = true;
                 }
-                continue;
-            }
-            // Outside is authoritative only after a successful read. Pending reads and
-            // unavailable directories preserve the saved membership for recovery.
-            if follows_root
-                && tab.id == workspace.root_tab
-                && tab
-                    .panes
-                    .iter()
-                    .find(|pane| pane.id == tab.root_pane)
-                    .is_some_and(|pane| {
-                        snapshot.directories.iter().any(|facts| {
-                            facts.directory == pane_directory(pane)
-                                && facts.failure.is_none()
-                                && facts.repository.is_none()
-                        })
-                    })
-            {
-                changed |= tab.worktree.take().is_some();
-                changed |= tab.worktree_repository.take().is_some();
                 continue;
             }
             let current = tab

@@ -257,6 +257,50 @@ fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
 }
 
 #[test]
+fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repository() {
+    let git = GitFixture::new();
+    let outside = GitFixture::new();
+    std::fs::remove_dir_all(outside.0.join(".git")).unwrap();
+    let missing = outside.0.join("missing");
+    let mut reading = Reading::start(
+        [outside.0.clone(), missing.clone()].into(),
+        Arc::new(DeadlineRunner),
+        git.0.join("unused-home"),
+    );
+    // Each Workspace's only Tab is its unpinned Root Tab, as after directory repair.
+    for workspace in &mut reading.state.inventory.workspaces {
+        let tab = &mut workspace.tabs[0];
+        tab.worktree = Some(git.0.clone());
+        tab.worktree_repository = Some(git.0.clone());
+        tab.worktree_membership_fixed = true;
+    }
+    let until = Instant::now() + Duration::from_secs(4);
+    while reading.poll().directories.len() < 2 {
+        assert!(Instant::now() < until, "directory reads did not finish");
+        std::thread::sleep(PAUSE);
+    }
+    let snapshot = reading.poll();
+    assert!(
+        snapshot
+            .directories
+            .iter()
+            .any(|facts| facts.directory == missing && facts.failure.is_some())
+    );
+    for workspace in &reading.state.inventory.workspaces {
+        let tab = &workspace.tabs[0];
+        if tab.panes[0].repository_directory() == outside.0 {
+            assert_eq!(tab.worktree, None);
+            assert_eq!(tab.worktree_repository, None);
+            assert!(!tab.worktree_membership_fixed);
+        } else {
+            assert_eq!(tab.worktree.as_ref(), Some(&git.0));
+            assert_eq!(tab.worktree_repository.as_ref(), Some(&git.0));
+            assert!(tab.worktree_membership_fixed);
+        }
+    }
+}
+
+#[test]
 fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_completion() {
     let git = GitFixture::new();
     let other = GitFixture::new();
