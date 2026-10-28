@@ -3180,9 +3180,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             wrapped_line_count(description, font, size, wrap_width, window)
         });
         let actions = (!self.empty.actions.is_empty()).then(|| {
-            crate::ControlHost::Floating
-                .button_theme(cx)
-                .control_height(EMPTY_STATE_ACTION_SIZE)
+            (
+                self.empty.actions.len(),
+                crate::ControlHost::Floating
+                    .button_theme(cx)
+                    .control_height(EMPTY_STATE_ACTION_SIZE),
+            )
         });
         metrics.empty_padding * 2.0 + style.height(self.empty.icon.is_some(), detail_lines, actions)
     }

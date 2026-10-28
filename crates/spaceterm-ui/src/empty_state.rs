@@ -1,7 +1,7 @@
 //! The one presentation of an empty, unavailable, or no-results state.
 //!
 //! A surface with nothing to show, or that can't show what it holds, says why with an icon, a
-//! title, and a detail, and offers at most two actions: the first Primary, the second a link.
+//! title, and a detail, and offers at most two stacked actions: a Primary button above a link.
 //! The surface owns the placement and its own edge; this element owns the order, type, spacing,
 //! and width, so every such state reads the same.
 
@@ -120,8 +120,13 @@ impl EmptyStateStyle {
     }
 
     /// The height of a state with a one-line title, `detail_lines` lines of detail, and, when
-    /// it has actions, actions `action_height` tall.
-    pub fn height(&self, icon: bool, detail_lines: usize, action_height: Option<Pixels>) -> Pixels {
+    /// it has actions, `count` stacked actions each `height` tall.
+    pub fn height(
+        &self,
+        icon: bool,
+        detail_lines: usize,
+        actions: Option<(usize, Pixels)>,
+    ) -> Pixels {
         let mut height = self.title.line_height;
         if icon {
             height += self.icon_size + self.space(ICON_GAP);
@@ -129,8 +134,10 @@ impl EmptyStateStyle {
         if detail_lines > 0 {
             height += self.space(DETAIL_GAP) + self.detail.line_height * detail_lines as f32;
         }
-        if let Some(action_height) = action_height {
-            height += self.space(ACTIONS_GAP) + action_height;
+        if let Some((count, action_height)) = actions.filter(|(count, _)| *count > 0) {
+            height += self.space(ACTIONS_GAP)
+                + action_height * count as f32
+                + self.space(ACTION_GAP) * (count - 1) as f32;
         }
         height
     }
@@ -326,10 +333,8 @@ impl RenderOnce for EmptyState {
                     div()
                         .mt(style.space(ACTIONS_GAP))
                         .flex()
-                        .flex_row()
-                        .flex_wrap()
+                        .flex_col()
                         .items_center()
-                        .justify_center()
                         .gap(style.space(ACTION_GAP))
                         .children(primary.map(|button| {
                             button
