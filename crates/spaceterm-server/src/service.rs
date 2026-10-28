@@ -251,7 +251,7 @@ impl Service {
             Err(error) => return Err(error),
         }
         let directory = owned_directory(&parent)?;
-        lock_directory(&directory)?;
+        let _directory = lock_directory(&directory)?;
         let mut choices = Vec::new();
         for entry in std::fs::read_dir(&parent).map_err(|_| ServerError::StorageUnavailable)? {
             let entry = entry.map_err(|_| ServerError::StorageUnavailable)?;
@@ -317,7 +317,7 @@ impl Service {
         }
         let installations = owned_directory(&self.paths.data.join("installations"))?;
         // This directory lock is shared with the signed-package retention task.
-        lock_directory(&installations)?;
+        let _installations = lock_directory(&installations)?;
         runtime::verify(installation, &self.identity)?;
         let previous = Self::state(data)?;
         let mut state = previous.unwrap_or(State {
@@ -995,12 +995,8 @@ fn verify_directory_path(directory: &File, path: &Path) -> Result<(), ServerErro
     }
     Ok(())
 }
-fn lock_directory(directory: &File) -> Result<(), ServerError> {
-    // SAFETY: flock operates on a retained directory descriptor.
-    if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(ServerError::StorageUnavailable);
-    }
-    Ok(())
+fn lock_directory(directory: &File) -> Result<crate::storage::Lock, ServerError> {
+    crate::storage::Lock::directory(directory)
 }
 fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
     let mut prepared = Command::new(program);

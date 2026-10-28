@@ -37,7 +37,28 @@ pub(crate) struct Directory(File);
 /// flock belongs to the open file description, not the descriptor. A child that another thread
 /// forked holds a copy of the descriptor until it reaches exec, so closing alone would keep the
 /// lock held and make a later nonblocking attempt report contention.
-pub(crate) struct Lock(File);
+pub struct Lock(File);
+impl Lock {
+    /// Take an exclusive lock on an open directory, waiting for any other holder.
+    pub(crate) fn directory(directory: &File) -> Result<Self, ServerError> {
+        // The copy shares the directory's open file description, so it holds the same lock.
+        let file = directory
+            .try_clone()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        // SAFETY: flock acts only on the supplied live descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(ServerError::StorageUnavailable);
+        }
+        Ok(Self(file))
+    }
+    /// Give up unlock-on-drop. The lock then lasts until every copy of its descriptor closes,
+    /// including a copy that a child process inherits across exec.
+    pub fn into_inheritable(self) -> File {
+        let lock = std::mem::ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop never runs this guard's Drop, so the descriptor moves out once.
+        unsafe { std::ptr::read(&lock.0) }
+    }
+}
 impl Drop for Lock {
     fn drop(&mut self) {
         // SAFETY: this guard owns the live descriptor.
@@ -240,11 +261,6 @@ impl Directory {
     }
     /// Take an exclusive lock that ends when the returned guard drops.
     pub fn lock(&self, name: &str, nonblocking: bool) -> Result<Lock, ServerError> {
-        self.inheritable_lock(name, nonblocking).map(Lock)
-    }
-    /// Take an exclusive lock that lasts until every copy of its descriptor closes, including a
-    /// copy that a child process inherits. Use [`Self::lock`] unless a child must hold the lock.
-    pub fn inheritable_lock(&self, name: &str, nonblocking: bool) -> Result<File, ServerError> {
         let file = self.file(name, true)?;
         // SAFETY: flock acts only on the supplied live descriptor.
         if unsafe {
@@ -256,7 +272,7 @@ impl Directory {
         {
             return Err(ServerError::StorageUnavailable);
         }
-        Ok(file)
+        Ok(Lock(file))
     }
     /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
     pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, ServerError> {

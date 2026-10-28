@@ -209,11 +209,14 @@ pub(in crate::runtime::server) fn pinned_in_worktree<'a>(
     Ok(false)
 }
 impl SharedWorkspaceHost {
-    fn worktree_lock(&self) -> Result<Option<std::fs::File>, Refusal> {
+    fn worktree_lock(
+        &self,
+    ) -> Result<Option<spaceterm_server::organization::WorktreeLock>, Refusal> {
         self.journal
             .as_ref()
             .map(|journal| journal.worktree_lock())
             .transpose()
+            .map(Option::flatten)
             .map_err(|_| Refusal::StorageUnavailable)
     }
     /// Commits a Worktree step and waits until it is retained. Git starts only after its record
@@ -360,6 +363,9 @@ impl SharedWorkspaceHost {
             std::thread::Builder::new()
                 .name("spaceterm-worktree-preflight".into())
                 .spawn(move || {
+                    // From here Git children inherit the lock, so it fences recovery until they exit.
+                    let lock =
+                        lock.map(spaceterm_server::organization::WorktreeLock::into_inheritable);
                     JobResult::Prepared(preparing::prepare(operation, approval, inventory, lock))
                 })
                 .map_err(|_| Refusal::Capacity)?,
