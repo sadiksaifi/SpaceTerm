@@ -342,6 +342,7 @@ impl State {
             server_name: Self::server_name(),
             listener,
             network_addresses: network.map(|snapshot| snapshot.addresses),
+            abandoned_setups: self.record.abandoned_setups.clone(),
         }
     }
     pub(crate) fn manage(

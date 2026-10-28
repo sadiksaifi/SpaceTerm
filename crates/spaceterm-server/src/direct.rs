@@ -85,6 +85,9 @@ pub struct DirectStatus {
     pub listener: ListenerState,
     /// Fresh observations from the machine that owns this server.
     pub network_addresses: Result<NetworkAddresses, DirectError>,
+    /// SSH setups that were reserved over WSS and dropped unfinished when QUIC replaced it.
+    /// Each must start again.
+    pub abandoned_setups: Vec<OperationId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
