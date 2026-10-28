@@ -3440,10 +3440,15 @@ mod quic_connections {
             ended: Arc::clone(&ended),
         }));
         let link = connect(&format!("quic://{}", relay.address), &paired, &credential);
-        assert!(matches!(
-            request(&link, nothing()),
-            Err(RequestError::Refused(Refusal::Unsupported))
-        ));
+        // Enough round trips that the path's round-trip estimate reflects the path rather than
+        // the handshake. Data lost on the dead path is resent when the abandoned path drains,
+        // three of its probe timeouts after each end learns it was abandoned.
+        for _ in 0..50 {
+            assert!(matches!(
+                request(&link, nothing()),
+                Err(RequestError::Refused(Refusal::Unsupported))
+            ));
+        }
         let first = relay.sources.lock().unwrap()[0];
         *relay.blackhole.lock().unwrap() = Some(first);
         // The link pings after 5 s of silence and suspects its path 2.5 s later.
