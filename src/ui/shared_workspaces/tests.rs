@@ -62,7 +62,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
 fn tab(id: Id, panes: Vec<Pane>) -> Tab {
     Tab {
         worktree: None,
-        worktree_membership_fixed: false,
+        worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
         worktree_repository: None,
         id,
         root_pane: panes[0].id,
