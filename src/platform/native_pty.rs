@@ -156,16 +156,35 @@ pub enum NativePtyAdapterConstructionFailure {
     /// The account environment lookup failed before PTY or process construction began.
     #[error("Account service environment is unavailable")]
     EnvironmentUnavailable,
+    /// The PTY could not be opened, so no process was started.
     #[error("Native PTY resources could not be created")]
     ResourceCreationFailed,
+    /// The PTY could not be configured before the shell was spawned, so no process was started.
     #[error("Native PTY resources could not be configured")]
     ResourceConfigurationFailed,
+    /// The shell could not be spawned, for example because its directory disappeared after
+    /// validation. A spawn that fails before `exec` reaps its child, so no process remains.
     #[error("Shell Process could not be started")]
     ProcessStartFailed,
+    /// The shell was spawned before the failure, so its cleanup stays unconfirmed.
     #[error("Shell Process ownership could not be established")]
     ProcessOwnershipFailed,
+    /// The shell was spawned before the failure, so its cleanup stays unconfirmed.
     #[error("Native PTY input/output could not be acquired")]
     InputOutputUnavailable,
+}
+
+impl NativePtyAdapterConstructionFailure {
+    /// Whether construction ended before any process existed, so none needs cleanup.
+    const fn started_no_process(self) -> bool {
+        matches!(
+            self,
+            Self::EnvironmentUnavailable
+                | Self::ResourceCreationFailed
+                | Self::ResourceConfigurationFailed
+                | Self::ProcessStartFailed
+        )
+    }
 }
 
 pub trait NativePtyTermination: Send + Sync {
@@ -193,7 +212,7 @@ struct NativePtyCloseState {
 }
 
 impl NativePtyCloseHandle {
-    /// Preparation or environment lookup ended before any process could need cleanup.
+    /// Preparation or adapter construction ended before any process could need cleanup.
     pub(crate) fn confirm_unstarted(&self) {
         let mut state = self.lock_state();
         debug_assert!(state.supervisor.is_none());
@@ -328,7 +347,7 @@ impl NativePtyOwner {
         let parts = adapter_factory
             .create(launch, size)
             .inspect_err(|failure| {
-                if *failure == NativePtyAdapterConstructionFailure::EnvironmentUnavailable {
+                if failure.started_no_process() {
                     close_handle.confirm_unstarted();
                 }
             })

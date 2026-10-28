@@ -5,43 +5,49 @@ use spaceterm_server::protocol::screen::ScreenUpdate;
 use std::time::{Duration, Instant};
 
 #[test]
-fn unavailable_account_environment_allows_pane_close_and_server_shutdown() {
-    struct UnavailableEnvironment;
-    impl NativePtyAdapterFactory for UnavailableEnvironment {
+fn a_shell_that_never_started_allows_pane_close_and_server_shutdown() {
+    use crate::platform::native_pty::NativePtyAdapterConstructionFailure as Failure;
+    struct Unstarted(Failure);
+    impl NativePtyAdapterFactory for Unstarted {
         fn create(
             &self,
             _: crate::platform::shell_launch::PreparedShellLaunch,
             _: crate::platform::native_pty::NativePtySize,
-        ) -> Result<
-            crate::platform::native_pty::NativePtyAdapterParts,
-            crate::platform::native_pty::NativePtyAdapterConstructionFailure,
-        > {
-            Err(crate::platform::native_pty::NativePtyAdapterConstructionFailure::EnvironmentUnavailable)
+        ) -> Result<crate::platform::native_pty::NativePtyAdapterParts, Failure> {
+            Err(self.0)
         }
     }
-    for close_pane in [true, false] {
-        let mut host =
-            DevelopmentPaneHost::local_with_pty_factory(Arc::new(UnavailableEnvironment)).unwrap();
-        let lease = attach(&mut host, 1, true);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let pane = host.pane.as_mut().unwrap();
-            pane.drain();
-            if pane.failed {
-                break;
+    // A spawn fails this way when the Pane's directory disappears after validation.
+    for failure in [
+        Failure::EnvironmentUnavailable,
+        Failure::ResourceCreationFailed,
+        Failure::ResourceConfigurationFailed,
+        Failure::ProcessStartFailed,
+    ] {
+        for close_pane in [true, false] {
+            let mut host =
+                DevelopmentPaneHost::local_with_pty_factory(Arc::new(Unstarted(failure))).unwrap();
+            let lease = attach(&mut host, 1, true);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let pane = host.pane.as_mut().unwrap();
+                pane.drain();
+                if pane.failed {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "startup failure was not reported"
+                );
+                std::thread::sleep(Duration::from_millis(10));
             }
-            assert!(
-                Instant::now() < deadline,
-                "startup failure was not reported"
-            );
-            std::thread::sleep(Duration::from_millis(10));
+            if close_pane {
+                let reply = host.request([1; 32], [1; 32], Request::Close { lease });
+                assert!(matches!(reply, Reply::Closed), "{failure:?}: {reply:?}");
+            }
+            let reply = host.request([1; 32], [1; 32], Request::Shutdown);
+            assert!(matches!(reply, Reply::Closed), "{failure:?}: {reply:?}");
         }
-        if close_pane {
-            let reply = host.request([1; 32], [1; 32], Request::Close { lease });
-            assert!(matches!(reply, Reply::Closed), "{reply:?}");
-        }
-        let reply = host.request([1; 32], [1; 32], Request::Shutdown);
-        assert!(matches!(reply, Reply::Closed), "{reply:?}");
     }
 }
 
