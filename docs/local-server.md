@@ -50,6 +50,19 @@ Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies
 
 Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Retry and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). Manage network exposure, invitations, other devices, End All Sessions, the native service and server updates on the server's own machine. Saved addresses are read-only; add the server again to use a different address.
 
+### Reach one server over the LAN and a tailnet
+
+A server listens at one of its addresses, or on all interfaces. All Interfaces binds `0.0.0.0` and `[::]` at the same UDP port and answers each client from the address it dialed. It listens on every network the machine is on, including public networks and any network it joins later. Only paired devices are admitted. Choose it in Settings > Servers on the server's machine, or run the service command there:
+
+```sh
+# Preflight on Linux
+"$HOME/.local/bin/spaceterm-preflight" service-network-access spaceterm-preflight all
+```
+
+Run it without a value to show where the server listens. It also takes `off`, an IP address, `IP:PORT`, or `[IPV6]:PORT`, and refuses an address the machine doesn't have. Widening from one address to all interfaces at the same port keeps connected devices. Any other change disconnects devices connected over the network; their pairings stay.
+
+With all interfaces, add the server once per route, for example once by its LAN address and once by its MagicDNS name. SSH setup enrolls the address that client reached or its Network Address override, so it reaches the server over any route SSH reaches. An invitation link carries one address. Invite Device offers the server's addresses and starts with the one its routing table suggests; without that suggestion the server picks its first address that no container or virtual machine bridge holds. A device on a network the link's address doesn't reach can't use the link, and a saved address can't change, so add that device with SSH setup and the route's name instead.
+
 ## Cross-target artifact catalogs
 
 Standard Development and Preflight commands build signed headless packages for both supported targets from the current working tree, including uncommitted edits. Cargo and Zig build the foreign server locally; they require neither a foreign desktop build nor an SSH builder. The pinned tools and Rust targets live in [.mise.toml](../.mise.toml) and [rust-toolchain.toml](../rust-toolchain.toml).
@@ -102,7 +115,7 @@ The pixel tasks type commands into the focused Pane and force a steady cursor th
 
 The workload task reports keystroke-to-pixels p99 with the other Pane idle, then while `bench:workload` draws in it, and the difference. Each miss, an echo not seen within 1 second, counts as 1000 ms in that p99. #670 requires a difference of at most 10 ms. In `scroll` and `partial` modes, the task fails if the workload Pane stops drawing during the measurement.
 
-`bench:latency:protocol` creates a probe Workspace with its own client identity and closes it afterwards. A paired run enrolls a fresh pairing and revokes it afterwards, including after an interrupt; it also withdraws an invitation that no approved claim used. `--owner-host` runs the owner side through SSH on the server's machine, which needs this repository at the same commit. Without it, the server must run on this machine. `--expose ADDRESS` enables that server's network exposure for the run and then restores the previous address and enabled state. When no address was configured before, the probe's address stays configured, disabled. Each exposure change disconnects every paired client, so the task changes nothing when exposure is already enabled at that address. The probe's protocol calls live in [one module](../crates/spaceterm-server-host/examples/latency_probe/protocol.rs).
+`bench:latency:protocol` creates a probe Workspace with its own client identity and closes it afterwards. A paired run enrolls a fresh pairing and revokes it afterwards, including after an interrupt; it also withdraws an invitation that no approved claim used. `--owner-host` runs the owner side through SSH on the server's machine, which needs this repository at the same commit. Without it, the server must run on this machine. `--expose ADDRESS` enables that server's network exposure for the run and then restores the previous address and enabled state. When no address was configured before, the probe's address stays configured, disabled. An exposure change other than widening to all interfaces disconnects every paired client, so the task changes nothing when exposure is already enabled at that address. The probe's protocol calls live in [one module](../crates/spaceterm-server-host/examples/latency_probe/protocol.rs).
 
 `bench:latency:quic` measures a paired request's round trip over QUIC on loopback, in a release build, without a desktop or installed server.
 

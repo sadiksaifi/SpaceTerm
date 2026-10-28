@@ -48,7 +48,7 @@ pub struct SetupReply {
 
 /// Observe the running server's pin before retaining a pending enrollment on the client.
 pub fn direct_status(identity: &str) -> Result<DirectStatus, ServerError> {
-    match manage(identity, Management::Status)? {
+    match manage(identity, SETUP, Management::Status)? {
         ManagementReply::Status(status) => Ok(status),
         _ => Err(ServerError::Protocol),
     }
@@ -62,6 +62,7 @@ pub fn prepare_direct(
 ) -> Result<(), ServerError> {
     match manage(
         identity,
+        SETUP,
         Management::PrepareSetup {
             generation: request.generation,
             pin: request.pin,
@@ -89,6 +90,7 @@ pub fn setup_direct(
     let endpoint = crate::direct::Endpoint::from_url(&request.endpoint)?.url();
     let paired = match manage(
         identity,
+        SETUP,
         Management::Setup {
             generation: request.generation,
             pin: request.pin,
@@ -123,6 +125,7 @@ pub fn cancel_direct(
 ) -> Result<SetupCancellationReply, ServerError> {
     match manage(
         identity,
+        SETUP,
         Management::CancelSetup {
             pin: request.pin.clone(),
             operation: request.operation,
@@ -141,7 +144,27 @@ pub fn cancel_direct(
     }
 }
 
-fn manage(identity: &str, request: Management) -> Result<ManagementReply, ServerError> {
+/// The client name setup connects under.
+const SETUP: &str = "Server setup";
+
+/// Saves where the running server listens and whether it does, through owning-account IPC, and
+/// returns its status once applied. `None` keeps the address saved before.
+pub fn set_network_access(
+    identity: &str,
+    policy: Option<NetworkPolicy>,
+    enabled: bool,
+) -> Result<DirectStatus, ServerError> {
+    match manage(
+        identity,
+        "Service command",
+        Management::SetPolicy { policy, enabled },
+    )? {
+        ManagementReply::Status(status) => Ok(status),
+        _ => Err(ServerError::Protocol),
+    }
+}
+
+fn manage(identity: &str, name: &str, request: Management) -> Result<ManagementReply, ServerError> {
     let paths = host::Paths::for_identity(identity)?;
     crate::service::check_admission(&paths)?;
     let server = Directory::open(&paths.data, false)?.read()?.server;
@@ -149,7 +172,7 @@ fn manage(identity: &str, request: Management) -> Result<ManagementReply, Server
     let mut stream = host::connect(&paths)?;
     protocol::admit_client(
         &mut stream,
-        (&client, &"Server setup".into()),
+        (&client, &name.into()),
         &server,
         identity,
         &[protocol::MAJOR],
