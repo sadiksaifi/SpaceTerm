@@ -36,7 +36,7 @@ struct State {
     /// Called after a detach leaves a release to send.
     watchers: Vec<std::sync::Weak<dyn Fn() + Send + Sync>>,
     #[cfg(feature = "client")]
-    storage: Option<(crate::storage::Directory, std::fs::File, Id, Id)>,
+    storage: Option<(crate::storage::Directory, crate::storage::Lock, Id, Id)>,
 }
 /// Clones share one attachment writer and invalidate old subscriptions on detach.
 #[derive(Clone)]
@@ -385,18 +385,6 @@ impl State {
         }
         self.choices = next;
         Ok(())
-    }
-}
-#[cfg(feature = "client")]
-impl Drop for State {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        if let Some((_, lock, _, _)) = &self.storage {
-            // SAFETY: this guard owns the live descriptor.
-            unsafe {
-                libc::flock(lock.as_raw_fd(), libc::LOCK_UN);
-            }
-        }
     }
 }
 

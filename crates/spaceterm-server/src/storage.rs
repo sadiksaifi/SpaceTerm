@@ -32,6 +32,20 @@ pub(crate) struct SocketIdentity {
 }
 
 pub(crate) struct Directory(File);
+/// An exclusive lock that ends when this guard drops.
+///
+/// flock belongs to the open file description, not the descriptor. A child that another thread
+/// forked holds a copy of the descriptor until it reaches exec, so closing alone would keep the
+/// lock held and make a later nonblocking attempt report contention.
+pub(crate) struct Lock(File);
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the live descriptor.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
 impl Directory {
     pub fn open(path: &Path, create: bool) -> Result<Self, ServerError> {
         if !path.is_absolute() {
@@ -212,7 +226,13 @@ impl Directory {
         private(&file, false)?;
         Ok(file)
     }
-    pub fn lock(&self, name: &str, nonblocking: bool) -> Result<File, ServerError> {
+    /// Take an exclusive lock that ends when the returned guard drops.
+    pub fn lock(&self, name: &str, nonblocking: bool) -> Result<Lock, ServerError> {
+        self.inheritable_lock(name, nonblocking).map(Lock)
+    }
+    /// Take an exclusive lock that lasts until every copy of its descriptor closes, including a
+    /// copy that a child process inherits. Use [`Self::lock`] unless a child must hold the lock.
+    pub fn inheritable_lock(&self, name: &str, nonblocking: bool) -> Result<File, ServerError> {
         let file = self.file(name, true)?;
         // SAFETY: flock acts only on the supplied live descriptor.
         if unsafe {
@@ -227,11 +247,11 @@ impl Directory {
         Ok(file)
     }
     /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
-    pub fn try_lock(&self, name: &str) -> Result<Option<File>, ServerError> {
+    pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, ServerError> {
         let file = self.file(name, true)?;
         // SAFETY: flock acts only on the supplied live descriptor.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(Some(file));
+            return Ok(Some(Lock(file)));
         }
         if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
             Ok(None)
