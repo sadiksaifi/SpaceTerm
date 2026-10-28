@@ -102,56 +102,7 @@ mod native_tests {
         refuses_replacement_and_preserves_other_pairings(native("spaceterm-development").as_ref())
     }
 
-    /// Uses a throwaway Keychain, so no prompt appears and no user Keychain changes.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_preflight_store_refuses_replacement_and_never_asks_quietly()
-    -> Result<(), CredentialError> {
-        use std::process::Command;
-
-        let security = |arguments: &[&str]| {
-            Command::new("/usr/bin/security")
-                .args(arguments)
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        let mut scope = [0; 8];
-        getrandom::fill(&mut scope).map_err(|_| CredentialError::Unavailable)?;
-        let mut name = String::from("spaceterm-credentials-");
-        super::hex(&scope, &mut name);
-        let directory = std::env::temp_dir().join(name);
-        std::fs::create_dir(&directory).map_err(|_| CredentialError::Unavailable)?;
-        let keychain = directory.join("test.keychain-db");
-        let path = keychain.to_str().ok_or(CredentialError::Unavailable)?;
-        let mut password = String::new();
-        super::hex(&scope, &mut password);
-        let result = if security(&["create-keychain", "-p", &password, path]) {
-            let store = super::macos::SecurityTool::at("spaceterm-preflight", keychain.clone());
-            refuses_replacement_and_preserves_other_pairings(&store).and_then(|()| {
-                let key = [7; 32];
-                store.insert(&key, b"locked verification secret")?;
-                if !security(&["lock-keychain", path]) {
-                    return Err(CredentialError::Unavailable);
-                }
-                // A locked Keychain would make `security` ask; a quiet read refuses first.
-                match store.read(&key, Interaction::Quiet) {
-                    Err(CredentialError::InteractionRequired) => Ok(()),
-                    _ => Err(CredentialError::Unavailable),
-                }
-            })
-        } else {
-            Err(CredentialError::Unavailable)
-        };
-        let deleted = security(&["delete-keychain", path]);
-        let _ = std::fs::remove_dir_all(&directory);
-        result.and(if deleted {
-            Ok(())
-        } else {
-            Err(CredentialError::Unavailable)
-        })
-    }
-
-    fn refuses_replacement_and_preserves_other_pairings(
+    pub(super) fn refuses_replacement_and_preserves_other_pairings(
         store: &dyn CredentialStore,
     ) -> Result<(), CredentialError> {
         let mut first = [0; 32];
