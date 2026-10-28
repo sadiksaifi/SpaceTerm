@@ -320,6 +320,9 @@ impl PaneService for HostService {
     fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
         self.inner.acknowledge(peer, sequence)
     }
+    fn publish(&mut self, peer: &Peer) {
+        self.inner.publish(peer)
+    }
     fn cancel(&mut self, peer: &Peer, id: RequestId) {
         self.inner.cancel(peer, id)
     }

@@ -84,6 +84,11 @@ pub trait PaneService: Send {
     fn view(&mut self, peer: &Peer, view: View);
     fn effect_done(&mut self, peer: &Peer, done: EffectDone);
     fn acknowledge(&mut self, peer: &Peer, sequence: u64);
+    /// Pushes what changed for the connection's channels. Its I/O thread calls this after
+    /// [`Outbox::request_publication`], so a Terminal Session's presentation reaches the
+    /// connection without the host's tick. It also calls this while the connection is closing,
+    /// when nothing more reaches the peer, so the service can hand the change to the host.
+    fn publish(&mut self, _peer: &Peer) {}
     /// The client abandoned a cancellable read. The reply is still owed.
     fn cancel(&mut self, _peer: &Peer, _id: RequestId) {}
     /// The host is stopping. Refuse every deferred reply still owed, so each connection drains

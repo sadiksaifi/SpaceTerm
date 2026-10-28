@@ -322,7 +322,7 @@ impl HostCommands for DevelopmentPaneHost {
             pane.connected = false;
         }
     }
-    fn set_notifier(&mut self, notifier: SubscriptionNotifier) {
+    fn set_notifier(&mut self, notifier: SessionNotifiers) {
         self.notifier = Some(notifier);
     }
     fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed {
@@ -405,9 +405,15 @@ pub trait HostCommands: Send {
     }
     /// The host's wake, which makes it tick again; see `PaneService::ticker`.
     fn ticker(&mut self, _wake: Arc<dyn spaceterm_server::connection::Wake>) {}
-    /// A Terminal Session rang the bell, so the next tick carries what it changed. A host may
-    /// pace what such ticks push.
+    /// A Terminal Session that no channel presents, a request, or an observed change rang the
+    /// bell, so the next tick carries what it changed. A host may pace what such ticks push.
     fn rung(&mut self) {}
+    /// Whether an [`Self::observe`] since the last call drained a change that only the host's
+    /// timed work pushes, such as an exit or new Terminal Metadata. [`Served`] then rings the
+    /// bell.
+    fn take_observed_change(&mut self) -> bool {
+        false
+    }
     /// The host is stopping; refuse every deferred reply still owed. See `PaneService::stopping`.
     fn stopping(&mut self) {}
     /// Records the Client Name an admitted client supplied, before any of its requests.
@@ -459,10 +465,11 @@ pub trait HostCommands: Send {
     /// The connection's channel bound to `lease` is gone, as if the connection had ended for that
     /// Pane: its input state resets and the next claim starts afresh.
     fn unbound(&mut self, _connection: [u8; 32], _lease: &Lease) {}
-    /// Every Terminal Session started from now on calls `notifier` when it has something to
-    /// publish.
-    fn set_notifier(&mut self, _notifier: SubscriptionNotifier) {}
-    /// Drains the Pane `lease` controls for the channel bound to it, which `device` claimed.
+    /// Every Terminal Session started from now on calls the notifier `notifier` makes from its
+    /// session id when it has something to publish.
+    fn set_notifier(&mut self, _notifier: SessionNotifiers) {}
+    /// Drains the Pane `lease` controls for the channel bound to it, which `device` claimed. It
+    /// may run on a connection's I/O thread; see [`Self::take_observed_change`].
     fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed;
     /// Applies a client `View` to the Pane `lease` controls.
     fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8);
@@ -491,18 +498,67 @@ pub trait HostCommands: Send {
 /// write. A live terminal, and a read that settles, wake the host instead.
 pub(super) const TICK: Duration = Duration::from_millis(10);
 
+/// Makes the notifier of a Terminal Session a host starts, from its session id.
+pub(crate) type SessionNotifiers = Arc<dyn Fn([u8; 32]) -> SubscriptionNotifier + Send + Sync>;
+
 /// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
 /// opens and closes the channel in the connection's outbox, turns input into host commands, and
-/// pushes each bound Pane's presentation when the host's wake or a client `View` calls for it.
-/// Scrollback pages are read on the Pane's terminal worker and replied from there.
+/// pushes each bound Pane's presentation when a client `View`, its connection or the host's wake
+/// calls for it. Scrollback pages are read on the Pane's terminal worker and replied from there.
+///
+/// A Terminal Session's notifier asks each connection with a channel bound to that session to
+/// publish, and that connection's I/O thread publishes it, so a frame never waits for the host's
+/// thread. A session no channel is bound to rings the host's bell instead.
 pub struct Served<H> {
     host: H,
     connections: BTreeMap<[u8; 32], Connection>,
-    /// Rung when a Terminal Session has something to publish, or a request may have ended
-    /// another channel's binding. Only a tick after a ring publishes.
+    /// Rung when a Terminal Session that no channel presents has something to publish, or a
+    /// request may have ended another channel's binding. Only a tick after a ring publishes.
     bell: Arc<Bell>,
+    /// The connections each Terminal Session's notifier wakes.
+    routes: Arc<Routes>,
     /// Reads whose replies wait for the host to settle them.
     reads: Vec<PendingRead>,
+}
+
+/// Which connections present each Terminal Session. [`Served`] rebuilds it under the
+/// `PaneService` lock whenever a binding changes; notifiers read it from the session's worker.
+/// Its lock is the last one taken: it calls only [`Outbox::request_publication`] and the bell.
+struct Routes {
+    sessions: std::sync::Mutex<BTreeMap<[u8; 32], Vec<Outbox>>>,
+    bell: Arc<Bell>,
+}
+
+impl Routes {
+    /// Wakes each connection presenting `session`, or the host when none does.
+    fn notify(&self, session: [u8; 32]) {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        match sessions.get(&session) {
+            Some(outboxes) => {
+                for outbox in outboxes {
+                    outbox.request_publication();
+                }
+            }
+            None => {
+                drop(sessions);
+                self.bell.ring();
+            }
+        }
+    }
+
+    /// Replaces the routes. A session that loses its last route rings the host, so a notification
+    /// that went to a connection which no longer presents it is still handled.
+    fn replace(&self, routes: BTreeMap<[u8; 32], Vec<Outbox>>) {
+        let orphaned = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let orphaned = sessions.keys().any(|session| !routes.contains_key(session));
+            *sessions = routes;
+            orphaned
+        };
+        if orphaned {
+            self.bell.ring();
+        }
+    }
 }
 
 /// Records a ring for the next tick and wakes the host to run it.
@@ -572,16 +628,43 @@ struct PendingPaste {
 
 impl<H: HostCommands> Served<H> {
     pub fn new(host: H) -> Self {
+        let bell = Arc::<Bell>::default();
         Self {
             host,
             connections: BTreeMap::new(),
             reads: Vec::new(),
-            bell: Arc::default(),
+            routes: Arc::new(Routes {
+                sessions: std::sync::Mutex::default(),
+                bell: Arc::clone(&bell),
+            }),
+            bell,
         }
     }
 
+    /// Rings the bell when an observation drained a change that only the host's timed work
+    /// pushes, so the host's next tick carries it.
+    fn ring_for_observed_change(&mut self) {
+        if self.host.take_observed_change() {
+            self.bell.ring();
+        }
+    }
+
+    /// Rebuilds the routes from the current bindings. Call it after every change to them.
+    fn reroute(&self) {
+        let mut routes: BTreeMap<[u8; 32], Vec<Outbox>> = BTreeMap::new();
+        for connection in self.connections.values() {
+            for bound in connection.channels.values() {
+                routes
+                    .entry(bound.lease.session)
+                    .or_default()
+                    .push(connection.outbox.clone());
+            }
+        }
+        self.routes.replace(routes);
+    }
+
     /// Pushes what changed for one bound channel, and forgets the binding once it ended.
-    fn publish(&mut self, connection: [u8; 32], channel: Channel) {
+    fn publish_channel(&mut self, connection: [u8; 32], channel: Channel) {
         let Some(bound) = self.connections.get(&connection) else {
             return;
         };
@@ -597,6 +680,7 @@ impl<H: HostCommands> Served<H> {
             && !bound.publication.publish(observed)
         {
             connection.channels.remove(&channel);
+            self.reroute();
         }
     }
 
@@ -608,7 +692,7 @@ impl<H: HostCommands> Served<H> {
             .flat_map(|(id, connection)| connection.channels.keys().map(|channel| (*id, *channel)))
             .collect();
         for (connection, channel) in bound {
-            self.publish(connection, channel);
+            self.publish_channel(connection, channel);
         }
     }
 
@@ -691,12 +775,13 @@ impl<H: HostCommands> Served<H> {
             })
             .collect();
         for (connection, channel) in dead {
-            self.publish(connection, channel);
+            self.publish_channel(connection, channel);
             // A host that still answers `Live` for a lease it no longer knows is not trusted.
             if let Some(connection) = self.connections.get_mut(&connection)
                 && connection.channels.remove(&channel).is_some()
             {
                 connection.outbox.close(channel);
+                self.reroute();
             }
         }
     }
@@ -706,6 +791,7 @@ impl<H: HostCommands> Served<H> {
         if let Some(connection) = self.connections.get_mut(&peer.connection) {
             connection.channels.remove(&channel);
             connection.outbox.close(channel);
+            self.reroute();
         }
     }
 
@@ -727,6 +813,7 @@ impl<H: HostCommands> Served<H> {
                 connection.outbox.close(old);
                 self.host.unbound(peer.connection, &lease);
             }
+            self.reroute();
         }
         let reply = self.command(
             peer,
@@ -787,6 +874,7 @@ impl<H: HostCommands> Served<H> {
                 publication,
             },
         );
+        self.reroute();
         // The new channel numbers its Input from 1, before any Input of it reaches the session.
         self.host.restart_input(&lease);
         // The Terminal Session publishes nothing until the client's first `View` shows it.
@@ -1083,7 +1171,8 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         let lease = bound.lease;
         self.host.view(&lease, view.visible, view.max_hz);
         if view.visible {
-            self.publish(peer.connection, view.channel);
+            self.publish_channel(peer.connection, view.channel);
+            self.ring_for_observed_change();
         }
     }
     fn effect_done(&mut self, peer: &Peer, done: protocol::EffectDone) {
@@ -1102,12 +1191,32 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
         self.host.acknowledge(peer.client, sequence);
     }
-    /// Terminal Sessions ring the bell, which wakes the host to tick and publish.
+    /// Terminal Sessions wake the connections presenting them, or ring the bell, which wakes the
+    /// host to tick and publish.
     fn ticker(&mut self, wake: Arc<dyn Wake>) {
         let _ = self.bell.wake.set(Arc::clone(&wake));
-        let bell = Arc::clone(&self.bell);
-        self.host.set_notifier(Arc::new(move || bell.ring()));
+        let routes = Arc::clone(&self.routes);
+        self.host.set_notifier(Arc::new(move |session| {
+            let routes = Arc::clone(&routes);
+            Arc::new(move || routes.notify(session))
+        }));
         self.host.ticker(wake);
+    }
+    /// Pushes what changed for each channel of this connection, on its I/O thread. A closing
+    /// connection rings the bell instead, so the host's tick handles what the session changed.
+    fn publish(&mut self, peer: &Peer) {
+        let Some(connection) = self.connections.get(&peer.connection) else {
+            return;
+        };
+        if connection.outbox.is_closing() {
+            self.bell.ring();
+            return;
+        }
+        let channels: Vec<_> = connection.channels.keys().copied().collect();
+        for channel in channels {
+            self.publish_channel(peer.connection, channel);
+        }
+        self.ring_for_observed_change();
     }
     /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
     /// work when it is due. A host deadline alone publishes nothing.
@@ -1116,10 +1225,13 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         // ended shell's final screen over before the host's timed work retires its Pane.
         if self.bell.take() {
             self.publish_all();
+            // This tick already carries what the observations drained.
+            self.host.take_observed_change();
             self.host.rung();
         }
         let host = self.host.tick(now);
         self.sweep();
+        self.ring_for_observed_change();
         self.answer_reads();
         host
     }
@@ -1149,6 +1261,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     fn disconnected(&mut self, peer: &Peer) {
         self.reads.retain(|read| read.connection != peer.connection);
         self.connections.remove(&peer.connection);
+        self.reroute();
         self.host.disconnected(peer.connection);
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
@@ -1281,5 +1394,55 @@ impl<H: HostCommands> Served<H> {
             Ok(()) => Dispatch::Deferred,
             Err(refusal) => Dispatch::reply(Err(refusal)),
         }
+    }
+}
+
+#[cfg(test)]
+mod routes_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn routes() -> (Routes, Arc<AtomicUsize>) {
+        let rings = Arc::new(AtomicUsize::new(0));
+        let bell = Arc::<Bell>::default();
+        let _ = bell.wake.set(Arc::new({
+            let rings = Arc::clone(&rings);
+            move || {
+                rings.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let routes = Routes {
+            sessions: std::sync::Mutex::default(),
+            bell,
+        };
+        (routes, rings)
+    }
+
+    /// A session that loses its last route rings the host, so a notification that went to the
+    /// connection before it stopped presenting the session is still handled. Moving or adding
+    /// routes rings nothing.
+    #[test]
+    fn only_a_session_that_loses_its_last_route_rings_the_host() {
+        let (routes, rings) = routes();
+        let (first, second) = (Outbox::new(Arc::new(|| {})), Outbox::new(Arc::new(|| {})));
+        routes.replace(BTreeMap::from([([1; 32], vec![first.clone()])]));
+        routes.replace(BTreeMap::from([([1; 32], vec![second.clone()])]));
+        assert_eq!(
+            rings.load(Ordering::SeqCst),
+            0,
+            "a moved route rings nothing"
+        );
+
+        routes.replace(BTreeMap::new());
+        assert_eq!(rings.load(Ordering::SeqCst), 1, "the orphaned session rang");
+        assert!(!first.take_publication() && !second.take_publication());
+
+        routes.notify([1; 32]);
+        assert_eq!(
+            rings.load(Ordering::SeqCst),
+            2,
+            "an unrouted session rings the host"
+        );
+        assert!(!second.take_publication());
     }
 }

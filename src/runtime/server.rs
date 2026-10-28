@@ -172,8 +172,8 @@ pub struct DevelopmentPaneHost {
     directories: directories::DirectoryOperations,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
-    /// Rings the host's wake when a Terminal Session has something to publish.
-    notifier: Option<crate::terminal::session::SubscriptionNotifier>,
+    /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
+    notifier: Option<dispatch::SessionNotifiers>,
 }
 #[derive(Clone, Copy)]
 struct DormantPane {
@@ -206,6 +206,8 @@ struct OwnedPane {
     size: PaneSize,
     effects: NativeEffects,
     accessibility: accessibility::Accessibility,
+    /// The Terminal Metadata revision last reported by [`DevelopmentPaneHost::metadata_changed`].
+    metadata_revision: u64,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];

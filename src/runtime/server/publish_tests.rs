@@ -337,9 +337,12 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
     let wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     host.set_notifier({
         let wake = Arc::clone(&wake);
-        Arc::new(move || {
-            *wake.0.lock().unwrap() = true;
-            wake.1.notify_all();
+        Arc::new(move |_| {
+            let wake = Arc::clone(&wake);
+            Arc::new(move || {
+                *wake.0.lock().unwrap() = true;
+                wake.1.notify_all();
+            })
         })
     });
     let lease = super::super::tests::attach(&mut host, 1, true);
@@ -386,8 +389,9 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
     host.shutdown().unwrap();
 }
 
-/// What rings a `Served` host's wake. A test ticks only after a ring, so a lost ring stalls it.
-mod bell {
+/// What wakes the first client's connection and what wakes the host. A test publishes or ticks
+/// only after the matching wake, so a lost wake stalls it.
+mod wakes {
     use super::super::super::dispatch::Served;
     use super::super::super::tests::{create_shared, host, shared_inventory, size};
     use super::*;
@@ -409,16 +413,54 @@ mod bell {
         pairing: None,
     };
 
+    /// Which wakes rang since they were last served.
+    #[derive(Default)]
+    struct Rang {
+        connection: bool,
+        host: bool,
+    }
+
     #[derive(Default)]
     struct Rings {
-        rung: Mutex<bool>,
+        rang: Mutex<Rang>,
         ready: Condvar,
+    }
+
+    impl Rings {
+        fn ring(&self, ring: impl FnOnce(&mut Rang)) {
+            ring(&mut self.rang.lock().unwrap());
+            self.ready.notify_all();
+        }
+    }
+
+    /// Which threads a test plays.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Serve {
+        /// Only the first connection's I/O thread, which publishes when its outbox asks.
+        Connection,
+        /// That thread and the host's, which ticks when its wake rings.
+        Both,
     }
 
     struct Fixture {
         served: Served<SharedWorkspaceHost>,
         rings: Arc<Rings>,
         outbox: Outbox,
+        rows: Rows,
+        /// The latest frame's grid generation, history epoch and accessibility revision.
+        generation: u64,
+        epoch: u64,
+        accessibility: u64,
+        /// Whether the host's wake rang since the fixture started.
+        host_rang: bool,
+        /// When the host's last tick asked to tick again.
+        host_due: Option<Instant>,
+        /// How often the connection published, and after which of those publications the host's
+        /// wake had rung, so a test knows which publication rang it.
+        publications: usize,
+        rung_by_publication: Vec<usize>,
+        /// The publication that delivered the message `await_message` last returned.
+        found_in: usize,
         workspace: [u8; 32],
         pane: [u8; 32],
     }
@@ -428,6 +470,9 @@ mod bell {
             let mut fixture = Self::hidden();
             fixture.input(1, vec![InputEvent::Focus(FocusTarget::Terminal)]);
             fixture.show();
+            // The claim rang the host. Tests count only rings that follow the setup.
+            fixture.rings.rang.lock().unwrap().host = false;
+            fixture.host_rang = false;
             fixture
         }
 
@@ -447,17 +492,26 @@ mod bell {
             let rings = Arc::new(Rings::default());
             served.ticker(Arc::new({
                 let rings = Arc::clone(&rings);
-                move || {
-                    *rings.rung.lock().unwrap() = true;
-                    rings.ready.notify_all();
-                }
+                move || rings.ring(|rang| rang.host = true)
             }));
-            let outbox = super::outbox();
+            let outbox = Outbox::new(Arc::new({
+                let rings = Arc::clone(&rings);
+                move || rings.ring(|rang| rang.connection = true)
+            }));
             served.admitted(&FIRST, "First".into(), outbox.clone());
             let mut fixture = Self {
                 served,
                 rings,
                 outbox,
+                rows: Rows::default(),
+                generation: 0,
+                epoch: 0,
+                accessibility: 0,
+                host_rang: false,
+                host_due: None,
+                publications: 0,
+                rung_by_publication: Vec::new(),
+                found_in: 0,
                 workspace,
                 pane,
             };
@@ -525,40 +579,105 @@ mod bell {
             self.input(serial, vec![InputEvent::Key(key), InputEvent::Key(enter)]);
         }
 
-        /// Waits until the wake rings or `deadline` passes, and returns whether it rang.
-        fn rang_by(&self, deadline: Instant) -> bool {
-            let mut rung = self.rings.rung.lock().unwrap();
-            while !*rung {
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    return false;
-                };
-                rung = self.rings.ready.wait_timeout(rung, remaining).unwrap().0;
+        /// Waits until a wake `serve` plays rings, and serves it as its thread would: the
+        /// connection publishes, the host ticks, also at the deadline its last tick returned.
+        /// Fails if nothing rings by `deadline`.
+        fn serve(&mut self, serve: Serve, deadline: Instant) {
+            let both = serve == Serve::Both;
+            let (rang, due) = {
+                let mut rang = self.rings.rang.lock().unwrap();
+                loop {
+                    self.host_rang |= rang.host;
+                    let due = both && self.host_due.is_some_and(|due| Instant::now() >= due);
+                    if rang.connection || (both && rang.host) || due {
+                        break (std::mem::take(&mut *rang), due);
+                    }
+                    let until = [Some(deadline), self.host_due.filter(|_| both)]
+                        .into_iter()
+                        .flatten()
+                        .min()
+                        .unwrap_or(deadline);
+                    let Some(remaining) = until.checked_duration_since(Instant::now()) else {
+                        panic!("nothing woke the connection");
+                    };
+                    rang = self.rings.ready.wait_timeout(rang, remaining).unwrap().0;
+                }
+            };
+            if rang.connection && self.outbox.take_publication() {
+                // The host's wake also serves its own timed work, so only a ring during this
+                // publication counts as this publication's.
+                let earlier = std::mem::take(&mut self.rings.rang.lock().unwrap().host);
+                self.served.publish(&FIRST);
+                self.publications += 1;
+                let mut rang = self.rings.rang.lock().unwrap();
+                if rang.host {
+                    self.rung_by_publication.push(self.publications);
+                }
+                rang.host |= earlier;
             }
-            *rung = false;
-            true
+            if both && (rang.host || due) {
+                self.host_due = self.served.tick(Instant::now());
+            }
         }
 
-        /// Ticks after each ring until a message satisfies `found`. Fails if nothing rings for
-        /// 10 seconds.
-        fn await_message(&mut self, found: impl Fn(&ServerMessage) -> bool) -> ServerMessage {
+        /// Serves wakes until the connection writes a message that satisfies `found`, applying
+        /// each frame to the client's rows first. Fails after 10 seconds.
+        fn await_message(
+            &mut self,
+            serve: Serve,
+            found: impl Fn(&ServerMessage, &Rows) -> bool,
+        ) -> ServerMessage {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                assert!(self.rang_by(deadline), "nothing rang the host's wake");
-                self.served.tick(Instant::now());
-                if let Some(message) = drain(&self.outbox).into_iter().find(&found) {
+                self.serve(serve, deadline);
+                let mut first = None;
+                for message in drain(&self.outbox) {
+                    if let ServerMessage::Frame(frame) = &message {
+                        self.rows.apply(frame);
+                        self.generation = frame.update.generation;
+                        self.epoch = frame.update.history.epoch;
+                        self.accessibility = frame.update.accessibility_revision;
+                    }
+                    if first.is_none() && found(&message, &self.rows) {
+                        first = Some(message);
+                    }
+                }
+                if let Some(message) = first {
+                    self.found_in = self.publications;
                     return message;
                 }
             }
         }
 
-        fn await_event(&mut self, found: impl Fn(&PaneEvent) -> bool) -> PaneEvent {
+        /// Waits until the host's wake has rung since the fixture started, without ticking.
+        fn await_host(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut rang = self.rings.rang.lock().unwrap();
+            while !self.host_rang && !rang.host {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("nothing woke the host");
+                rang = self.rings.ready.wait_timeout(rang, remaining).unwrap().0;
+            }
+            self.host_rang = true;
+        }
+
+        fn await_event(&mut self, serve: Serve, found: impl Fn(&PaneEvent) -> bool) -> PaneEvent {
             let message = self.await_message(
-                |message| matches!(message, ServerMessage::Pane(pane) if found(&pane.event)),
+                serve,
+                |message, _| matches!(message, ServerMessage::Pane(pane) if found(&pane.event)),
             );
             let ServerMessage::Pane(pane) = message else {
                 unreachable!()
             };
             pane.event
+        }
+
+        /// Serves only the connection until a frame shows a row that ends with `output`.
+        fn await_output(&mut self, output: &str) {
+            self.await_message(Serve::Connection, |message, rows| {
+                matches!(message, ServerMessage::Frame(_)) && rows.shows_output(output)
+            });
         }
     }
 
@@ -568,11 +687,21 @@ mod bell {
         }
     }
 
+    /// A shell's echo reaches its connection while the host's thread sleeps.
     #[test]
-    fn a_bell_and_a_clipboard_request_ring_the_wake() {
+    fn an_echo_reaches_the_connection_without_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "printf 'ECH%s\\n' OED");
+        fixture.await_output("ECHOED");
+    }
+
+    #[test]
+    fn a_bell_and_a_clipboard_request_reach_the_connection_without_the_host() {
         let mut fixture = Fixture::new();
         fixture.command(2, "printf '\\007'");
-        let bell = fixture.await_event(|event| matches!(event, PaneEvent::Effect(_)));
+        let bell = fixture.await_event(Serve::Connection, |event| {
+            matches!(event, PaneEvent::Effect(_))
+        });
         assert!(matches!(
             bell,
             PaneEvent::Effect(pane::effects::Request {
@@ -582,7 +711,7 @@ mod bell {
         ));
 
         fixture.command(3, "printf '\\033]52;c;?\\007'; sleep 5");
-        let read = fixture.await_event(|event| {
+        fixture.await_event(Serve::Connection, |event| {
             matches!(
                 event,
                 PaneEvent::Effect(pane::effects::Request {
@@ -591,18 +720,59 @@ mod bell {
                 })
             )
         });
-        assert!(matches!(read, PaneEvent::Effect(_)));
     }
 
+    /// An exit reaches the connection after its final screen, and wakes the host, whose tick
+    /// pushes the inventory without the Pane. Two things ring it in that publication: the
+    /// observed exit, and the session losing its last route. The shared host's tests pin the
+    /// first.
     #[test]
-    fn an_exit_rings_the_wake_and_ends_the_channel() {
+    fn an_exit_reaches_the_connection_without_the_host_and_then_wakes_it() {
         let mut fixture = Fixture::new();
-        fixture.command(2, "exit");
-        fixture.await_event(|event| matches!(event, PaneEvent::Ended));
+        fixture.command(2, "printf 'BY%s\\n' E; exit");
+        fixture.await_message(Serve::Connection, |message, rows| {
+            let ended =
+                matches!(message, ServerMessage::Pane(pane) if matches!(pane.event, PaneEvent::Ended));
+            assert!(!ended || rows.shows_output("BYE"), "the final screen comes first");
+            ended
+        });
+        assert!(
+            fixture.rung_by_publication.contains(&fixture.found_in),
+            "the publication that delivered the final screen rang the host"
+        );
+    }
+
+    /// A presented Terminal Session carries a new title with its screen, which only the
+    /// connection observes. The observation rings the host, whose tick pushes the inventory.
+    #[test]
+    fn a_title_observed_by_the_connection_reaches_the_inventory_through_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "printf '\\033]0;RETITLED\\007'");
+        // Only the connection runs, so nothing but its observation can ring the host.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.rung_by_publication.is_empty() {
+            fixture.serve(Serve::Connection, deadline);
+            drain(&fixture.outbox);
+        }
+        let pane = fixture.pane;
+        let titled = move |message: &ServerMessage| {
+            matches!(message, ServerMessage::Inventory(revision) if revision
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .any(|candidate| candidate.id == pane
+                    && candidate
+                        .presentation
+                        .as_ref()
+                        .is_some_and(|presentation| presentation.title == "RETITLED")))
+        };
+        fixture.await_message(Serve::Both, |message, _| titled(message));
     }
 
     #[test]
-    fn a_takeover_rings_the_wake_and_ends_the_former_channel() {
+    fn a_takeover_ends_the_former_channel() {
         let mut fixture = Fixture::new();
         let second = super::outbox();
         fixture
@@ -620,7 +790,123 @@ mod bell {
             },
         );
         assert!(matches!(taken, ClaimReply::Attached { .. }));
-        fixture.await_event(|event| matches!(event, PaneEvent::Takeover(_)));
+        fixture.await_event(Serve::Both, |event| matches!(event, PaneEvent::Takeover(_)));
+    }
+
+    /// The Terminal Session publishes an accessibility model behind its presentation barrier,
+    /// after the pending screen. The model reaches the connection without the host.
+    #[test]
+    fn an_accessibility_model_reaches_the_connection_without_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "printf 'READ%s\\n' ABLE");
+        fixture.await_output("READABLE");
+        let presented = fixture.accessibility;
+        let operation = Operation::Accessibility {
+            channel: CHANNEL,
+            revision: None,
+            offset: 0,
+            base: None,
+        };
+        let _ = fixture.served.request(&FIRST, RequestId(2), operation);
+        fixture.await_message(Serve::Connection, |message, _| match message {
+            ServerMessage::Pane(pane) => matches!(pane.event, PaneEvent::Accessibility { .. }),
+            ServerMessage::Frame(frame) => frame.update.accessibility_revision > presented,
+            _ => false,
+        });
+    }
+
+    /// A Scrollback page is read behind the commands before it on the Pane's terminal worker,
+    /// which replies to the connection itself.
+    #[test]
+    fn a_scrollback_read_replies_without_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "seq 1 200");
+        fixture.await_output("200");
+        let id = RequestId(2);
+        fixture.outbox.begin(id).unwrap();
+        let operation = Operation::ScrollbackPage {
+            channel: CHANNEL,
+            epoch: fixture.epoch,
+            start: 0,
+            rows: 20,
+        };
+        assert!(matches!(
+            fixture.served.request(&FIRST, id, operation),
+            Dispatch::Deferred
+        ));
+        fixture.await_message(
+            Serve::Connection,
+            |message, _| matches!(message, ServerMessage::Reply(reply) if reply.id == id),
+        );
+    }
+
+    /// Whether `outbox` was asked to publish within 10 seconds. Clears the request.
+    fn asked_to_publish(outbox: &Outbox) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if outbox.take_publication() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// After a takeover, the former controller's channel stays bound until its connection
+    /// publishes, so the session's next output wakes both connections.
+    #[test]
+    fn a_session_bound_on_two_connections_wakes_both() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "sleep 1; printf 'BO%s\\n' TH");
+        let second = super::outbox();
+        fixture
+            .served
+            .admitted(&SECOND, "Second".into(), second.clone());
+        let ClaimReply::Takeover(offer) =
+            fixture.claim(&SECOND, AttachmentClaim::Select { explicit: true })
+        else {
+            panic!("the second client is offered Take Over");
+        };
+        let taken = fixture.claim(
+            &SECOND,
+            AttachmentClaim::TakeOver {
+                target: offer.target,
+            },
+        );
+        assert!(matches!(taken, ClaimReply::Attached { .. }));
+        assert!(
+            asked_to_publish(&fixture.outbox),
+            "the first connection woke"
+        );
+        assert!(asked_to_publish(&second), "the second connection woke");
+    }
+
+    /// A connection that ends takes its routes with it. The session it presented rings the host
+    /// at once, and its later output wakes the host instead of the ended connection.
+    #[test]
+    fn a_disconnected_connection_routes_its_sessions_to_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "sleep 1; printf 'GO%s\\n' NE");
+        fixture.served.disconnected(&FIRST);
+        assert!(
+            std::mem::take(&mut fixture.rings.rang.lock().unwrap().host),
+            "losing its last route rang the host"
+        );
+        fixture.await_host();
+        assert!(
+            !fixture.outbox.take_publication(),
+            "nothing asks the ended connection to publish"
+        );
+    }
+
+    /// A notification taken while the connection closes cannot reach the peer, so it rings the
+    /// host instead of being dropped.
+    #[test]
+    fn a_closing_connection_hands_its_publication_to_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.outbox.goodbye(protocol::Fatal::Stopping).unwrap();
+        fixture.served.publish(&FIRST);
+        assert!(fixture.rings.rang.lock().unwrap().host, "the host rang");
     }
 
     /// A Pane claimed while hidden receives no screen until its client shows it.
@@ -628,6 +914,9 @@ mod bell {
     fn a_claimed_pane_receives_no_screen_until_it_is_shown() {
         let mut fixture = Fixture::hidden();
         std::thread::sleep(Duration::from_millis(200));
+        if fixture.outbox.take_publication() {
+            fixture.served.publish(&FIRST);
+        }
         fixture.served.tick(Instant::now());
         assert!(frames(&drain(&fixture.outbox)).is_empty());
 
