@@ -19,10 +19,10 @@ use gpui::{
 };
 use qrcodegen::{QrCode, QrCodeEcc};
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, Dialog, DialogActionRequest, DialogCloseDecision,
-    DialogInitialFocus, DialogOutcome, DialogPendingCompletion, DialogSize, Icon, IconName,
-    ModalAction, ModalActionEmphasis, ModalActionRole, ModalCloseReason, ModalId, ProgressRing,
-    ProgressSize, ProgressState,
+    Button, ButtonSize, ButtonVariant, ComboBox, ComboBoxItem, Dialog, DialogActionRequest,
+    DialogCloseDecision, DialogInitialFocus, DialogOutcome, DialogPendingCompletion, DialogSize,
+    Icon, IconName, ModalAction, ModalActionEmphasis, ModalActionRole, ModalCloseReason, ModalId,
+    ProgressRing, ProgressSize, ProgressState,
 };
 
 use crate::server_connection::direct::ClaimId;
@@ -45,6 +45,7 @@ pub(crate) const LINK_SELECTOR: &str = "invite-device-link";
 pub(crate) const COPY_SELECTOR: &str = "invite-device-copy";
 pub(crate) const STATUS_SELECTOR: &str = "invite-device-status";
 pub(crate) const CODE_SELECTOR: &str = "invite-device-code";
+pub(crate) const ADDRESS_SELECTOR: &str = "invite-device-address";
 /// How often an open invitation looks for claims and its countdown repaints.
 const POLL: Duration = Duration::from_secs(1);
 /// How long Copy reads "Copied" after the person copies the link.
@@ -153,6 +154,11 @@ impl Stage {
 pub(crate) struct InviteDevice {
     control: Arc<dyn DirectAccessControl>,
     server: SharedString,
+    /// The addresses a link can carry while the server listens on every interface, the
+    /// suggested one first. Empty when it listens at one address.
+    addresses: Vec<std::net::IpAddr>,
+    /// The address the person chose for the link. `None` lets the server choose.
+    address: Option<std::net::IpAddr>,
     window: AnyWindowHandle,
     /// Tells the presenting view about a device the person allowed, even after Invite Device
     /// closes, so its device list stays current.
@@ -176,6 +182,7 @@ impl InviteDevice {
     pub(crate) fn present<T: 'static>(
         control: Arc<dyn DirectAccessControl>,
         server: SharedString,
+        addresses: Vec<std::net::IpAddr>,
         on_paired: impl Fn(&mut T, &mut Context<T>) + 'static,
         window: &mut Window,
         cx: &mut Context<T>,
@@ -191,6 +198,8 @@ impl InviteDevice {
             Self {
                 control,
                 server,
+                addresses,
+                address: None,
                 window: window.window_handle(),
                 on_paired,
                 stage: Stage::Opening,
@@ -405,11 +414,12 @@ impl InviteDevice {
             return;
         }
         let control = Arc::clone(&self.control);
+        let address = self.address;
         self._poll = Some(cx.spawn_in(window, async move |body, cx| {
             let reading = Arc::clone(&control);
             let opened = cx
                 .background_executor()
-                .spawn(async move { reading.invite() })
+                .spawn(async move { reading.invite(address) })
                 .await;
             let opened = body.update_in(cx, |body, window, cx| {
                 if body.generation != generation {
@@ -459,6 +469,22 @@ impl InviteDevice {
                 cx.background_executor().timer(POLL).await;
             }
         }));
+    }
+
+    /// Opens a new invitation whose link carries `address`, ending the one shown.
+    fn choose_address(
+        &mut self,
+        address: std::net::IpAddr,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Stage::Waiting { invitation, .. } = &self.stage
+            && invitation.address == Some(address)
+        {
+            return;
+        }
+        self.address = Some(address);
+        self.open_invitation(window, cx);
     }
 
     /// Ends an invitation whose time ran out and repaints the countdown otherwise. Answers whether
@@ -791,6 +817,31 @@ impl Render for InviteDevice {
                     .text_color(gpui_color(colors.input_text))
                     .truncate()
                     .child(SharedString::from(invitation.text.to_string()));
+                // While the server listens on every interface, the person picks the address of
+                // the network the other device is on.
+                let chooser = (self.addresses.len() > 1).then(|| {
+                    let owner = cx.weak_entity();
+                    let items = self
+                        .addresses
+                        .iter()
+                        .map(|address| ComboBoxItem::new(*address, address.to_string()))
+                        .collect();
+                    ComboBox::new(
+                        SharedString::new_static(ADDRESS_SELECTOR),
+                        "Address in link",
+                        invitation.address,
+                        "Choose an address",
+                        items,
+                    )
+                    .hug(true)
+                    .debug_selector(ADDRESS_SELECTOR)
+                    .on_accept(move |acceptance, window, cx| {
+                        let address = *acceptance.item_id();
+                        let _ = owner.update(cx, |body, cx| {
+                            body.choose_address(address, window, cx);
+                        });
+                    })
+                });
                 // The sheet's width bounds the column and its link row. A centered column
                 // otherwise takes its content's width, and the link has no place to break, so it
                 // would push Copy out of the sheet.
@@ -801,6 +852,18 @@ impl Render for InviteDevice {
                     .flex_col()
                     .items_center()
                     .gap(appearance.spacing(12.0))
+                    .children(chooser.map(|chooser| {
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(appearance.spacing(8.0))
+                            .child(secondary(
+                                "invite-device-address-label",
+                                "Address in link".into(),
+                            ))
+                            .child(chooser)
+                    }))
                     .child(qr)
                     .child(
                         div()
@@ -971,6 +1034,10 @@ mod tests {
         approved: Mutex<Vec<ClaimId>>,
         rejected: Mutex<Vec<ClaimId>>,
         withdrawn: Mutex<Vec<ClaimId>>,
+        /// The address each invitation was asked for, `None` for the server's choice.
+        addresses: Mutex<Vec<Option<std::net::IpAddr>>>,
+        /// The address the server chooses when asked for none.
+        chosen: Mutex<Option<std::net::IpAddr>>,
     }
 
     impl ScriptedServer {
@@ -985,6 +1052,8 @@ mod tests {
                 approved: Mutex::default(),
                 rejected: Mutex::default(),
                 withdrawn: Mutex::default(),
+                addresses: Mutex::default(),
+                chosen: Mutex::default(),
             })
         }
 
@@ -999,7 +1068,7 @@ mod tests {
 
         /// Opens an invitation the way another client's Invite Device does.
         fn invite_elsewhere(&self) -> ClaimId {
-            self.invite().expect("an invitation").id
+            self.invite(None).expect("an invitation").id
         }
 
         fn expiry(&self, invitation: ClaimId) -> u64 {
@@ -1048,7 +1117,11 @@ mod tests {
             Err(AccessFailure::Refused)
         }
 
-        fn invite(&self) -> Result<OpenInvitation, AccessFailure> {
+        fn invite(
+            &self,
+            address: Option<std::net::IpAddr>,
+        ) -> Result<OpenInvitation, AccessFailure> {
+            self.addresses.lock().expect("addresses").push(address);
             let mut invitations = self.invitations.lock().expect("invitations");
             let id = [u8::try_from(invitations.len() + 1).expect("few invitations"); 32];
             let lifetime = *self.lifetime.lock().expect("lifetime");
@@ -1056,6 +1129,7 @@ mod tests {
             Ok(OpenInvitation {
                 id,
                 text: Zeroizing::new(self.link.lock().expect("link").clone()),
+                address: address.or(*self.chosen.lock().expect("chosen")),
                 deadline: Instant::now() + std::time::Duration::from_secs(lifetime),
             })
         }
@@ -1104,6 +1178,14 @@ mod tests {
         server: &Arc<ScriptedServer>,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Host>, &'a mut VisualTestContext) {
+        invite_with_addresses(server, Vec::new(), cx)
+    }
+
+    fn invite_with_addresses<'a>(
+        server: &Arc<ScriptedServer>,
+        addresses: Vec<std::net::IpAddr>,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Host>, &'a mut VisualTestContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let (host, cx) = cx.add_window_view(|_, _| Host { paired: 0 });
@@ -1114,6 +1196,7 @@ mod tests {
                 assert!(InviteDevice::present(
                     control,
                     SERVER.into(),
+                    addresses,
                     |host: &mut Host, _| host.paired += 1,
                     window,
                     cx,
@@ -1309,6 +1392,37 @@ mod tests {
 
         assert!(!shown(&action(ALLOW_SELECTOR), cx));
         assert!(shown(COPY_SELECTOR, cx), "the invitation stays open");
+    }
+
+    /// A server on every interface lets the person pick the address in the link: a new
+    /// invitation carries it and the one shown before ends. A server at one address offers no
+    /// choice.
+    #[gpui::test]
+    fn choosing_the_address_in_the_link_opens_an_invitation_there(cx: &mut TestAppContext) {
+        let lan: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+        let tailnet: std::net::IpAddr = "100.64.0.9".parse().unwrap();
+        let server = ScriptedServer::new(300);
+        *server.chosen.lock().expect("chosen") = Some(lan);
+        let (_, cx) = invite_with_addresses(&server, vec![lan, tailnet], cx);
+        let (first, _) = server.invitation();
+
+        click(ADDRESS_SELECTOR, cx);
+        click("100.64.0.9", cx);
+
+        assert_eq!(
+            *server.addresses.lock().expect("addresses"),
+            vec![None, Some(tailnet)]
+        );
+        assert_eq!(*server.withdrawn.lock().expect("withdrawn"), vec![first]);
+        assert!(shown(COPY_SELECTOR, cx));
+    }
+
+    #[gpui::test]
+    fn a_server_at_one_address_offers_no_address_choice(cx: &mut TestAppContext) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+        assert!(shown(COPY_SELECTOR, cx));
+        assert!(!shown(ADDRESS_SELECTOR, cx));
     }
 
     #[gpui::test]

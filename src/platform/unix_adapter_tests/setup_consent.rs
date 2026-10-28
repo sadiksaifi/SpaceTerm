@@ -882,6 +882,34 @@ fn default_hostname_preserves_a_configured_wildcard_bind_when_enabling_exposure(
     assert_eq!(fixture.backend.process_counts().active(), 0);
 }
 
+/// A server on every interface keeps listening there when a client adds it over another of its
+/// addresses, such as a tailnet name next to an earlier LAN route. Setup asks no network approval
+/// and goes on to enroll the address this client reached; the fixture's storage stops it there.
+#[test]
+fn enabled_every_interface_exposure_enrolls_another_route_without_a_network_offer() {
+    let mut remote = discovery(true);
+    remote.ssh_local_address = Some("100.64.0.9".parse().unwrap());
+    let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+    let mut current = status();
+    current.policy = Some(NetworkPolicy::every_interface(9231).unwrap());
+    current.enabled = true;
+    *fixture.adapter.status.lock().unwrap() = Some(current);
+    *fixture.adapter.resolved.lock().unwrap() =
+        b"hostname penguin.tail.example\nport 22\n".to_vec();
+
+    let result = fixture.setup(Arc::new(Approvals(|offer, _: &CancellationToken| {
+        panic!("unexpected offer {offer:?}");
+    })));
+
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unavailable(UnavailableKind::Storage))
+    );
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
 #[test]
 fn setup_reoffers_changed_policy_while_holding_the_same_authentication() {
     let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());

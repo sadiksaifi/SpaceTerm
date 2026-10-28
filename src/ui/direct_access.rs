@@ -79,6 +79,8 @@ pub(crate) struct Claim {
 pub(crate) struct OpenInvitation {
     pub(crate) id: ClaimId,
     pub(crate) text: Zeroizing<String>,
+    /// The server address the link carries, when it is an IP address.
+    pub(crate) address: Option<std::net::IpAddr>,
     /// When the countdown reaches zero, on this computer's monotonic clock. It only presents the
     /// lifetime the server gave the invitation: the server alone decides when it expires.
     pub(crate) deadline: std::time::Instant,
@@ -129,8 +131,9 @@ pub(crate) trait DirectAccessControl: Send + Sync {
         policy: Option<NetworkPolicy>,
         enabled: bool,
     ) -> Result<AccessState, AccessFailure>;
-    /// Opens one single-use expiring invitation.
-    fn invite(&self) -> Result<OpenInvitation, AccessFailure>;
+    /// Opens one single-use expiring invitation whose link carries `address`, which must be
+    /// one the server listens at, or the server's own choice.
+    fn invite(&self, address: Option<std::net::IpAddr>) -> Result<OpenInvitation, AccessFailure>;
     /// Ends an invitation nobody needs any more, so no device can use it.
     fn withdraw(&self, invitation: ClaimId) -> Result<(), AccessFailure>;
     /// The validated claims waiting for an answer.
@@ -156,8 +159,10 @@ impl DirectAccessControl for ServerConnection {
             .map_err(classify)
     }
 
-    fn invite(&self) -> Result<OpenInvitation, AccessFailure> {
-        self.invite_device().map(open_invitation).map_err(classify)
+    fn invite(&self, address: Option<std::net::IpAddr>) -> Result<OpenInvitation, AccessFailure> {
+        self.invite_device(address)
+            .map(open_invitation)
+            .map_err(classify)
     }
 
     fn withdraw(&self, invitation: ClaimId) -> Result<(), AccessFailure> {
@@ -207,6 +212,11 @@ fn access_state(status: DirectStatus) -> AccessState {
 fn open_invitation(invitation: Invitation) -> OpenInvitation {
     OpenInvitation {
         id: invitation.id(),
+        address: invitation
+            .endpoint()
+            .strip_prefix("quic://")
+            .and_then(|authority| authority.parse::<SocketAddr>().ok())
+            .map(|address| address.ip()),
         text: invitation.display_text(),
         deadline: std::time::Instant::now() + invitation.lifetime(),
     }
@@ -424,6 +434,7 @@ mod tests {
         let invitation = OpenInvitation {
             id: [7; 32],
             text: Zeroizing::new("spaceterm://pair/test".to_owned()),
+            address: None,
             deadline: std::time::Instant::now(),
         };
 
@@ -435,6 +446,7 @@ mod tests {
         let invitation = OpenInvitation {
             id: [7; 32],
             text: Zeroizing::new("spaceterm://pair/test".to_owned()),
+            address: None,
             deadline: std::time::Instant::now(),
         };
         let mut other = claim_with_exchange([0; 4]);

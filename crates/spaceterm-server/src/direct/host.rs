@@ -159,6 +159,43 @@ impl State {
             None
         }
     }
+    /// Keeps the listener, its connections and its generation when the saved exposure covers the
+    /// address it listens at, as when exposure widens from one address to every interface at the
+    /// same port. Nothing that was reachable becomes unreachable, so nothing is retired. Returns
+    /// false when the listener must start over instead.
+    fn widen(&mut self) -> bool {
+        let ListenerState::Listening { addr } = self.listener_state else {
+            return false;
+        };
+        let Some(policy) = self.record.policy.clone().filter(|_| self.record.enabled) else {
+            return false;
+        };
+        if !policy.covers(addr) {
+            return false;
+        }
+        if policy.bind == addr {
+            return true;
+        }
+        // Connections of an earlier address that still end hold its port, so the wildcard can't
+        // bind; then this starts over without closing anything first.
+        self.retired.retain(|listener| !listener.finished());
+        if self
+            .retired
+            .iter()
+            .any(|listener| listener.address().port() == addr.port())
+        {
+            return false;
+        }
+        let Some(listener) = &self.listener else {
+            return false;
+        };
+        if listener.widen().is_err() {
+            return false;
+        }
+        self.listener_state = ListenerState::Listening { addr: policy.bind };
+        self.listener_changed();
+        true
+    }
     /// Stops taking connections. A listener with live connections keeps routing to them until
     /// they end; one without closes its socket now.
     fn retire_listener(&mut self) {
@@ -485,6 +522,7 @@ impl State {
                     public_key,
                     name,
                 } = binding;
+                let policy = NetworkPolicy::new(policy.bind)?;
                 if self
                     .record
                     .devices
@@ -540,7 +578,7 @@ impl State {
                         revoked: false,
                     });
                     self.commit(next)?;
-                    if changed_policy {
+                    if changed_policy && !self.widen() {
                         self.generation = generation;
                         self.connections.retire_generation(generation);
                         self.invitations.clear();
@@ -593,8 +631,15 @@ impl State {
                 if enabled && policy.is_none() && self.record.policy.is_none() {
                     return Err(DirectError::InvalidRequest);
                 }
-                if let Some(policy) = &policy {
-                    NetworkPolicy::new(policy.bind)?;
+                let policy = policy
+                    .map(|policy| NetworkPolicy::new(policy.bind))
+                    .transpose()?;
+                // One address must belong to this machine. Every interface always does.
+                if let Some(policy) = &policy
+                    && !policy.is_every_interface()
+                    && !network::snapshot(self.network.as_ref())?.contains(&policy.bind.ip())
+                {
+                    return Err(DirectError::InvalidAddress);
                 }
                 let generation = crypto::random()?;
                 let mut next = self.record.clone();
@@ -603,8 +648,12 @@ impl State {
                 }
                 next.enabled = enabled;
                 self.commit(next)?;
+                if self.widen() {
+                    return Ok((ManagementReply::Status(self.status()), None));
+                }
                 self.generation = generation;
-                // Network administration arrives only over IPC. Retire all QUIC authority.
+                // Network administration arrives only over IPC. Any other change retires all
+                // QUIC authority.
                 self.connections.retire_generation(generation);
                 self.invitations.clear();
                 for pending in &mut self.claims {
@@ -615,34 +664,30 @@ impl State {
                 self.listen();
                 ManagementReply::Status(self.status())
             }
-            Management::Invite => {
+            Management::Invite { address } => {
                 let status = self.status();
                 let endpoint = match status.listener {
+                    // A listener on every interface advertises one concrete address: the one
+                    // the owner chose among the available ones, otherwise its own choice.
+                    ListenerState::Listening { addr } if addr.ip().is_unspecified() => {
+                        let snapshot = network::snapshot(self.network.as_ref())?;
+                        let advertised = match address {
+                            Some(address) => Some(address)
+                                .filter(|address| snapshot.addresses.available.contains(address)),
+                            None => snapshot.advertised(),
+                        }
+                        .ok_or(DirectError::InvalidAddress)?;
+                        std::net::SocketAddr::new(advertised, addr.port())
+                    }
                     ListenerState::Listening { addr } => {
-                        let advertised = if addr.ip().is_unspecified() {
-                            let addresses =
-                                status.network_addresses.as_ref().map_err(|error| *error)?;
-                            std::net::SocketAddr::new(
-                                addresses
-                                    .suggested
-                                    .filter(|ip| ip.is_ipv4() == addr.is_ipv4())
-                                    .or_else(|| {
-                                        addresses
-                                            .available
-                                            .iter()
-                                            .copied()
-                                            .find(|ip| ip.is_ipv4() == addr.is_ipv4())
-                                    })
-                                    .ok_or(DirectError::InvalidAddress)?,
-                                addr.port(),
-                            )
-                        } else {
-                            addr
-                        };
-                        format!("quic://{advertised}")
+                        if address.is_some_and(|address| address != addr.ip()) {
+                            return Err(DirectError::InvalidAddress);
+                        }
+                        addr
                     }
                     _ => return Err(DirectError::Disabled),
                 };
+                let endpoint = format!("quic://{endpoint}");
                 if self.invitations.len() >= MAX_PENDING {
                     return Err(DirectError::Capacity);
                 }

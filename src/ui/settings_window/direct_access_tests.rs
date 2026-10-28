@@ -189,10 +189,11 @@ impl DirectAccessControl for ScriptedAccess {
         Ok(state.clone())
     }
 
-    fn invite(&self) -> Result<OpenInvitation, AccessFailure> {
+    fn invite(&self, _: Option<IpAddr>) -> Result<OpenInvitation, AccessFailure> {
         Ok(OpenInvitation {
             id: INVITATION_ID,
             text: Zeroizing::new(INVITATION.to_owned()),
+            address: None,
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
         })
     }
@@ -572,6 +573,30 @@ fn an_address_chosen_while_off_keeps_its_port_for_turning_on(cx: &mut TestAppCon
         Some(&(policy("192.168.1.21:9300"), true))
     );
     assert!(reads("Listening on 192.168.1.21:9300.", cx));
+}
+
+/// All Interfaces, chosen while access listens at the server's one address, listens on every
+/// interface at the same port and says what that reaches. Choosing the address again narrows it.
+#[gpui::test]
+fn all_interfaces_listens_on_every_interface_at_the_same_port(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let (_, cx) = open_servers(&access, cx);
+
+    click(ADDRESS_SELECTOR, cx);
+    click("All Interfaces", cx);
+
+    assert_eq!(access.policies(), vec![policy("0.0.0.0:9231")]);
+    assert!(reads(
+        "Listening on all interfaces, port 9231, including public networks and any network \
+         studio joins later. Only paired devices are admitted.",
+        cx
+    ));
+
+    click(ADDRESS_SELECTOR, cx);
+    click("192.168.1.20", cx);
+
+    assert_eq!(access.policies().last(), Some(&policy("192.168.1.20:9231")));
+    assert!(reads("Listening on 192.168.1.20:9231.", cx));
 }
 
 /// Access off with every interface kept, as `0.0.0.0:9300` or `[::]:9300`: turning it on again
