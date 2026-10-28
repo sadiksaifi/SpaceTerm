@@ -11229,6 +11229,42 @@ fn the_empty_view_should_draw_a_panes_rim_and_offer_local_creation(cx: &mut Test
     );
 }
 
+#[gpui::test]
+fn the_empty_stage_should_reach_the_window_top_when_no_tab_strip_holds_the_band(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    let frame = workspace_frame(cx);
+    let area = cx
+        .debug_bounds("empty-workspace-stage-area")
+        .expect("the stage renders");
+    let stage = cx
+        .debug_bounds("empty-workspace-stage")
+        .expect("the stage renders");
+    let pane = cx
+        .debug_bounds("empty-workspace-pane")
+        .expect("the stage draws an empty Pane");
+
+    assert_eq!(
+        area.top() - stage.top(),
+        frame.window_edge_inset(),
+        "the stage keeps the window edge inset at the top, as at the right and bottom"
+    );
+    assert_eq!(
+        stage.right() - pane.right(),
+        frame.window_edge_inset(),
+        "the right edge keeps the same inset"
+    );
+    assert!(
+        cx.debug_bounds("empty-workspace-drag-region").is_some(),
+        "the band stays the window's drag region"
+    );
+}
+
 /// One shared Workspace with a Tab in each of two Worktrees, its Git facts published by the
 /// server, beside the local Workspace the window keeps active.
 mod shared_repositories {

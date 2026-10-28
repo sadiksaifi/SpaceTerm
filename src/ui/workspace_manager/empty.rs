@@ -87,6 +87,20 @@ impl WorkspaceManager {
         let edge_margin = px(spaceterm_ui::DesktopWindowStyle::current(cx)
             .control_metrics()
             .edge_margin);
+        // The band above the stage holds nothing unless window controls or the update pill sit
+        // there. Without a sidebar the stage runs under the leading controls, and while the
+        // sidebar hides the top-left chrome slides over the stage, so only a shown sidebar frees
+        // the band.
+        let band_occupied = recovery
+            || self.update_control.read(cx).shows_pill(cx)
+            || (client_controls
+                && spaceterm_ui::ClientWindowControls::width(
+                    spaceterm_ui::WindowControlSide::Right,
+                    window,
+                    cx,
+                ) > px(0.0));
+        let band_free = if band_occupied { 0.0 } else { sidebar.reveal };
+        let stage_top = frame.stage_top_inset(appearance.top_height(), band_free);
         let band = WindowDragRegion::new(
             "empty-workspace-drag-region",
             "Move Window",
@@ -160,6 +174,32 @@ impl WorkspaceManager {
             Some(launch) => self.render_launch_message(launch, &self.empty_focus, cx),
             None => self.render_empty_message(message_manager, cx),
         };
+        let stage = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .relative()
+            .ml(sidebar.width * sidebar.reveal)
+            .border_color(stage_color)
+            .border_b(frame.window_edge_inset())
+            .border_r(frame.window_edge_inset())
+            .border_l(leading_inset)
+            .bg(stage_color)
+            .child(
+                // An empty Pane: its surface, rim, and corner radius, with no content.
+                div()
+                    .id("empty-workspace-pane")
+                    .debug_selector(|| "empty-workspace-pane".to_owned())
+                    .size_full()
+                    .overflow_hidden()
+                    .rounded(frame.pane_radius())
+                    .bg(gpui_color(appearance.pane_surface(terminal_background)))
+                    .border(frame.pane_rim_width())
+                    .border_color(gpui_color(appearance.pane_rim_on(terminal_background)))
+                    .child(with_tab_traversal(message)),
+            );
+        // The stage lies beneath the band, which stays the window's drag region and paints its
+        // title-bar surface only while it covers nothing of the stage.
         div()
             .id("empty-workspace-stage")
             .debug_selector(|| "empty-workspace-stage".to_owned())
@@ -167,13 +207,25 @@ impl WorkspaceManager {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .flex()
-            .flex_col()
             .child(
                 div()
+                    .debug_selector(|| "empty-workspace-stage-area".to_owned())
+                    .absolute()
+                    .top(stage_top)
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .flex()
+                    .flex_col()
+                    .child(stage),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
                     .h(top_height)
-                    .w_full()
-                    .flex_shrink_0()
                     .flex()
                     .flex_row()
                     .child(div().w(sidebar.top_chrome_width).h_full().flex_shrink_0())
@@ -182,41 +234,20 @@ impl WorkspaceManager {
                             .h_full()
                             .min_w_0()
                             .flex_1()
-                            .bg(gpui_color(
-                                appearance.surface(crate::appearance::SurfaceRole::Base, title_bar),
-                            ))
+                            .when(band_free == 0.0, |band| {
+                                band.bg(gpui_color(
+                                    appearance
+                                        .surface(crate::appearance::SurfaceRole::Base, title_bar),
+                                ))
+                            })
                             .child(band),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .relative()
-                    .ml(sidebar.width * sidebar.reveal)
-                    .border_color(stage_color)
-                    .border_b(frame.window_edge_inset())
-                    .border_r(frame.window_edge_inset())
-                    .border_l(leading_inset)
-                    .bg(stage_color)
-                    .child(
-                        // An empty Pane: its surface, rim, and corner radius, with no content.
-                        div()
-                            .id("empty-workspace-pane")
-                            .debug_selector(|| "empty-workspace-pane".to_owned())
-                            .size_full()
-                            .overflow_hidden()
-                            .rounded(frame.pane_radius())
-                            .bg(gpui_color(appearance.pane_surface(terminal_background)))
-                            .border(frame.pane_rim_width())
-                            .border_color(gpui_color(appearance.pane_rim_on(terminal_background)))
-                            .child(with_tab_traversal(message)),
                     ),
             )
             .into_any_element()
     }
+}
 
+impl WorkspaceManager {
     /// The deliberately empty view: what it presents and how to attach or create a Workspace,
     /// or, while this computer's server is unreachable, how to reach it again.
     fn render_empty_message(
