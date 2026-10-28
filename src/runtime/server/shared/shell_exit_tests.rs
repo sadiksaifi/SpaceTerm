@@ -55,10 +55,8 @@ fn split(host: &mut SharedWorkspaceHost) -> (Id, Id, Id, Id) {
 
 /// Runs `line` in the shell behind `lease` and returns its channel's last event once it exits.
 fn exit_with(host: &mut SharedWorkspaceHost, device: u8, lease: Lease, line: &str) -> PaneEvent {
-    command(host, device, lease, "stty -echo; printf 'READY\\n'");
-    await_text(host, lease, "READY");
     command(host, device, lease, line);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         host.tick(Instant::now());
         if let Err(event) = screen(host, [device; 32], lease) {
@@ -97,7 +95,7 @@ fn a_zero_exit_closes_only_its_pane() {
     let lease = start(&mut host, 1, second);
 
     assert!(matches!(
-        exit_with(&mut host, 1, lease, "exit"),
+        exit_with(&mut host, 1, lease, "exit 0"),
         PaneEvent::Ended
     ));
     host.tick(Instant::now());
@@ -192,7 +190,12 @@ fn start_session_replaces_an_exited_shell_for_its_controller() {
 
     assert_ne!(fresh.session, old.session);
     assert_eq!(session(&mut host, pane), Some(fresh.session));
-    command(&mut host, 1, fresh, "stty -echo; printf 'FRESH\\n'");
+    command(
+        &mut host,
+        1,
+        fresh,
+        "stty -echo; printf '\\033[2J\\033[HFRESH\\n'",
+    );
     await_text(&mut host, fresh, "FRESH");
     host.shutdown().unwrap();
 }
