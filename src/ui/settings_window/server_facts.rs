@@ -395,6 +395,34 @@ mod tests {
         assert_eq!(next.observed_at, 20);
     }
 
+    /// After a paired server updates, the facts read over the new connection name its new
+    /// version, so Settings stops showing the version retained before the update.
+    #[test]
+    fn facts_read_after_an_update_replace_the_retained_version() {
+        let before = merged(
+            None,
+            10,
+            Observation {
+                status: Some(ObservedServerStatus::Running),
+                server: Some(facts("penguin", "dev.2d46a3800e77")),
+                ..Observation::default()
+            },
+        );
+
+        let after = merged(
+            Some(before.clone()),
+            20,
+            Observation {
+                status: Some(ObservedServerStatus::Running),
+                server: Some(facts("penguin", "dev.804405c0df0e")),
+                ..Observation::default()
+            },
+        );
+
+        assert!(changed(Some(&before), &after, true));
+        assert_eq!(after.version.as_deref(), Some("dev.804405c0df0e"));
+    }
+
     /// A Stop read from the service while SpaceTerm isn't connected is still what was observed
     /// last, so relaunch shows Stopped rather than the Running seen earlier.
     #[test]
