@@ -2733,6 +2733,35 @@ mod quic_connections {
         );
     }
 
+    /// An admitted client carrier, before its link starts, so a test can move it.
+    fn admitted_carrier(
+        endpoint: &str,
+        paired: &PairedDevice,
+        credential: &DeviceCredential,
+    ) -> crate::connection::quic::QuicCarrier {
+        let mut stream = quic::dial(endpoint, &paired.pin, credential).unwrap();
+        let answer = client::exchange_on(
+            &mut stream,
+            &paired.pin,
+            credential,
+            wire::Action::Connect {
+                paired: paired.clone(),
+            },
+            None,
+            None,
+        );
+        assert!(matches!(answer, Ok(wire::Answer::Connected)));
+        crate::protocol::admit_transport(
+            &mut stream,
+            (&paired.client, &"Test".into()),
+            &paired.pin.server,
+            &paired.pin.build,
+            &[crate::protocol::MAJOR],
+        )
+        .unwrap();
+        stream.into_carrier()
+    }
+
     /// A switch between networks, or a route that now prefers another local address, moves the
     /// client to a new socket and source port. The server validates the new path; the session
     /// continues without a second admission.
@@ -2763,27 +2792,7 @@ mod quic_connections {
         let paired = fixture.enroll(&credential);
         let admissions = Arc::new(AtomicUsize::new(0));
         let server = fixture.serve_next_with(service(Admissions(Arc::clone(&admissions))));
-        let mut stream = quic::dial(&fixture.endpoint(), &paired.pin, &credential).unwrap();
-        let answer = client::exchange_on(
-            &mut stream,
-            &paired.pin,
-            &credential,
-            wire::Action::Connect {
-                paired: paired.clone(),
-            },
-            None,
-            None,
-        );
-        assert!(matches!(answer, Ok(wire::Answer::Connected)));
-        crate::protocol::admit_transport(
-            &mut stream,
-            (&paired.client, &"Test".into()),
-            &paired.pin.server,
-            &paired.pin.build,
-            &[crate::protocol::MAJOR],
-        )
-        .unwrap();
-        let mut carrier = stream.into_carrier();
+        let mut carrier = admitted_carrier(&fixture.endpoint(), &paired, &credential);
         let before = carrier.local_address().unwrap();
         carrier.prefer_sources(|_| Some(std::net::Ipv4Addr::new(127, 0, 0, 2).into()));
         carrier.flush().unwrap();
@@ -3165,81 +3174,104 @@ mod quic_connections {
     /// A UDP relay between clients and a server. Each client source gets its own upstream
     /// socket, so the server sees a new address when a client moves. `blackhole` drops a source's
     /// traffic both ways, as a network that vanished under a still-valid address. `losses` drops
-    /// that many of the first datagrams from clients.
+    /// that many of the first datagrams from clients. `lose_close` drops the server's first
+    /// datagram after a client's first Handshake packet: the close that refuses the client's
+    /// certificate.
     struct Relay {
         address: std::net::SocketAddr,
         sources: Arc<Mutex<Vec<std::net::SocketAddr>>>,
         blackhole: Arc<Mutex<Option<std::net::SocketAddr>>>,
         losses: Arc<std::sync::atomic::AtomicUsize>,
+        lose_close: Arc<std::sync::atomic::AtomicBool>,
+        closes_lost: Arc<std::sync::atomic::AtomicUsize>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
     impl Relay {
         fn new(server: std::net::SocketAddr) -> Self {
-            use std::sync::atomic::Ordering;
             let front = UdpSocket::bind("127.0.0.1:0").unwrap();
             front.set_nonblocking(true).unwrap();
-            let address = front.local_addr().unwrap();
-            let sources: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::default();
-            let blackhole: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::default();
-            let losses: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
-            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (seen, hole, lose, stopping) = (
-                Arc::clone(&sources),
-                Arc::clone(&blackhole),
-                Arc::clone(&losses),
-                Arc::clone(&stop),
-            );
-            let thread = std::thread::spawn(move || {
-                let mut upstreams: Vec<(std::net::SocketAddr, UdpSocket)> = Vec::new();
-                let mut buffer = [0; 65_536];
-                while !stopping.load(Ordering::Acquire) {
-                    let mut idle = true;
-                    while let Ok((count, source)) = front.recv_from(&mut buffer) {
+            let mut relay = Self {
+                address: front.local_addr().unwrap(),
+                sources: Arc::default(),
+                blackhole: Arc::default(),
+                losses: Arc::default(),
+                lose_close: Arc::default(),
+                closes_lost: Arc::default(),
+                stop: Arc::default(),
+                thread: None,
+            };
+            let running = Self {
+                address: relay.address,
+                sources: Arc::clone(&relay.sources),
+                blackhole: Arc::clone(&relay.blackhole),
+                losses: Arc::clone(&relay.losses),
+                lose_close: Arc::clone(&relay.lose_close),
+                closes_lost: Arc::clone(&relay.closes_lost),
+                stop: Arc::clone(&relay.stop),
+                thread: None,
+            };
+            relay.thread = Some(std::thread::spawn(move || running.run(&front, server)));
+            relay
+        }
+
+        fn run(&self, front: &UdpSocket, server: std::net::SocketAddr) {
+            use std::sync::atomic::Ordering;
+            let mut upstreams: Vec<(std::net::SocketAddr, UdpSocket)> = Vec::new();
+            let mut buffer = [0; 65_536];
+            // Set once a client sent its certificate, until the server's answer is dropped.
+            let mut answer_lost = false;
+            while !self.stop.load(Ordering::Acquire) {
+                let mut idle = true;
+                let dead = |source: &std::net::SocketAddr| {
+                    *self.blackhole.lock().unwrap() == Some(*source)
+                };
+                while let Ok((count, source)) = front.recv_from(&mut buffer) {
+                    idle = false;
+                    if dead(&source)
+                        || self
+                            .losses
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                                left.checked_sub(1)
+                            })
+                            .is_ok()
+                    {
+                        continue;
+                    }
+                    if self.lose_close.load(Ordering::Acquire)
+                        && carries_handshake(&buffer[..count])
+                    {
+                        self.lose_close.store(false, Ordering::Release);
+                        answer_lost = true;
+                    }
+                    if !upstreams.iter().any(|(known, _)| *known == source) {
+                        let upstream = UdpSocket::bind((server.ip(), 0)).unwrap();
+                        upstream.connect(server).unwrap();
+                        upstream.set_nonblocking(true).unwrap();
+                        upstreams.push((source, upstream));
+                        self.sources.lock().unwrap().push(source);
+                    }
+                    let (_, upstream) = upstreams
+                        .iter()
+                        .find(|(known, _)| *known == source)
+                        .unwrap();
+                    let _ = upstream.send(&buffer[..count]);
+                }
+                for (source, upstream) in &upstreams {
+                    while let Ok(count) = upstream.recv(&mut buffer) {
                         idle = false;
-                        if *hole.lock().unwrap() == Some(source)
-                            || lose
-                                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
-                                    left.checked_sub(1)
-                                })
-                                .is_ok()
-                        {
-                            continue;
+                        if answer_lost {
+                            answer_lost = false;
+                            self.closes_lost.fetch_add(1, Ordering::AcqRel);
+                        } else if !dead(source) {
+                            let _ = front.send_to(&buffer[..count], source);
                         }
-                        if !upstreams.iter().any(|(known, _)| *known == source) {
-                            let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
-                            upstream.connect(server).unwrap();
-                            upstream.set_nonblocking(true).unwrap();
-                            upstreams.push((source, upstream));
-                            seen.lock().unwrap().push(source);
-                        }
-                        let (_, upstream) = upstreams
-                            .iter()
-                            .find(|(known, _)| *known == source)
-                            .unwrap();
-                        let _ = upstream.send(&buffer[..count]);
-                    }
-                    for (source, upstream) in &upstreams {
-                        while let Ok(count) = upstream.recv(&mut buffer) {
-                            idle = false;
-                            if *hole.lock().unwrap() != Some(*source) {
-                                let _ = front.send_to(&buffer[..count], source);
-                            }
-                        }
-                    }
-                    if idle {
-                        std::thread::sleep(Duration::from_millis(1));
                     }
                 }
-            });
-            Self {
-                address,
-                sources,
-                blackhole,
-                losses,
-                stop,
-                thread: Some(thread),
+                if idle {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
         }
     }
@@ -3251,6 +3283,46 @@ mod quic_connections {
                 let _ = thread.join();
             }
         }
+    }
+
+    /// Whether a datagram holds a QUIC version 1 Handshake packet, alone or after an Initial.
+    fn carries_handshake(datagram: &[u8]) -> bool {
+        fn varint(bytes: &[u8]) -> Option<(usize, usize)> {
+            let first = *bytes.first()?;
+            let size = 1usize << (first >> 6);
+            let value = bytes
+                .get(1..size)?
+                .iter()
+                .fold(u64::from(first & 0x3f), |value, byte| {
+                    value << 8 | u64::from(*byte)
+                });
+            Some((usize::try_from(value).ok()?, size))
+        }
+        fn walk(mut datagram: &[u8]) -> Option<bool> {
+            while let Some(&first) = datagram.first() {
+                // A short header packet is the last in its datagram.
+                if first & 0x80 == 0 {
+                    return Some(false);
+                }
+                let kind = (first >> 4) & 0x3;
+                if kind == 2 {
+                    return Some(true);
+                }
+                // Type and version, then each connection ID after its length.
+                let mut at = 5;
+                for _ in 0..2 {
+                    at += 1 + usize::from(*datagram.get(at)?);
+                }
+                if kind == 0 {
+                    let (token, size) = varint(datagram.get(at..)?)?;
+                    at += size + token;
+                }
+                let (length, size) = varint(datagram.get(at..)?)?;
+                datagram = datagram.get(at + size + length..)?;
+            }
+            Some(false)
+        }
+        walk(datagram).unwrap_or(false)
     }
 
     /// A client sends a lost Initial packet again before it tries the next address, so one lost
@@ -3336,10 +3408,15 @@ mod quic_connections {
             ended: Arc::clone(&ended),
         }));
         let link = connect(&format!("quic://{}", relay.address), &paired, &credential);
-        assert!(matches!(
-            request(&link, nothing()),
-            Err(RequestError::Refused(Refusal::Unsupported))
-        ));
+        // Enough round trips that the path's round-trip estimate reflects the path rather than a
+        // handshake slowed by other tests, so recovery after the move is not held up by an
+        // inflated probe timeout.
+        for _ in 0..50 {
+            assert!(matches!(
+                request(&link, nothing()),
+                Err(RequestError::Refused(Refusal::Unsupported))
+            ));
+        }
         let first = relay.sources.lock().unwrap()[0];
         *relay.blackhole.lock().unwrap() = Some(first);
         // The link pings after 5 s of silence and suspects its path 2.5 s later.
@@ -3348,15 +3425,75 @@ mod quic_connections {
             assert!(Instant::now() < deadline, "the client never moved");
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(matches!(
-            request(&link, nothing()),
-            Err(RequestError::Refused(Refusal::Unsupported))
-        ));
+        let reply = request(&link, nothing());
+        assert!(
+            matches!(reply, Err(RequestError::Refused(Refusal::Unsupported))),
+            "{reply:?}"
+        );
         assert_eq!(link.health(), crate::connection::link::Health::Live);
         assert_eq!(admitted.load(Ordering::SeqCst), 1, "no second admission");
         assert_eq!(ended.load(Ordering::SeqCst), 0, "the session never ended");
         drop(link);
         let _ = server.join().unwrap();
+    }
+
+    /// A refusal's close is lost on the way. The server keeps the closed connection draining and
+    /// sends the close again when the client's next packet arrives, so the client still reports a
+    /// refusal rather than a transport failure to retry.
+    #[test]
+    fn a_refusal_whose_close_is_lost_is_still_a_refusal() {
+        use std::sync::atomic::Ordering;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server_address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let relay = Relay::new(server_address);
+        relay.lose_close.store(true, Ordering::Release);
+        // An ECDSA certificate, which the server refuses in the handshake.
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let certificate =
+            rcgen::CertificateParams::new(vec![crate::connection::quic::SERVER_NAME.into()])
+                .unwrap()
+                .self_signed(&pair)
+                .unwrap()
+                .der()
+                .clone();
+        // The listener outlives the refused connection, which drains on its thread.
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(mut stream) = listener.accept() {
+                    let refused = stream.handshake(deadline).is_err();
+                    return (refused, listener);
+                }
+                assert!(Instant::now() < deadline, "QUIC accept deadline");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into());
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(&pin, certificate, key, Arc::clone(&seen)).unwrap();
+        let refused = QuicStream::connect(
+            config,
+            &[relay.address],
+            Instant::now() + Duration::from_secs(5),
+            &seen.verified,
+        );
+        assert_eq!(
+            relay.closes_lost.load(Ordering::Acquire),
+            1,
+            "the close was lost"
+        );
+        assert_eq!(
+            refused.err().map(quic::transport),
+            Some(DirectError::AuthenticationRefused)
+        );
+        let (server_refused, listener) = server.join().unwrap();
+        assert!(server_refused);
+        drop(listener);
     }
 
     fn listener_state(fixture: &Fixture) -> ListenerState {
