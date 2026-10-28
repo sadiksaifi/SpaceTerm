@@ -135,6 +135,23 @@ impl Client {
         cx.try_global::<DirectClients>()
             .and_then(|clients| clients.0.get(route).cloned())
     }
+    /// The connection's own transport, which a Workspace Window's presentation submits through.
+    pub(crate) fn transport(&self) -> Rc<dyn SharedWorkspaceEdits> {
+        Rc::clone(&self.edits)
+    }
+    /// Makes `source`, the Workspace Window's interactions for `route`, the writer's source, so
+    /// the window and Settings queue their edits to this connection in one order.
+    pub(crate) fn adopt_source(
+        route: &crate::direct_connections::DirectRouteId,
+        source: SharedEditSource,
+        cx: &mut App,
+    ) {
+        if cx.has_global::<DirectClients>()
+            && let Some(client) = cx.global_mut::<DirectClients>().0.get_mut(route)
+        {
+            client.source = source;
+        }
+    }
     /// Drops a withdrawn paired server's writer.
     pub(crate) fn forget_direct(route: &crate::direct_connections::DirectRouteId, cx: &mut App) {
         if cx.has_global::<DirectClients>() {

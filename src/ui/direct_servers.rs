@@ -1,7 +1,7 @@
 //! The desktop's direct network connections and how each state reads.
 //!
 //! One app-wide registry owns every saved direct route, its continuation and the unpair requests
-//! awaiting a server's confirmation. The Workspace Window presents a connected route's
+//! awaiting a server's confirmation. The Workspace Window presents each saved route's
 //! Workspaces, and the Servers Settings Section reports each route and offers its steps. Reading
 //! a status performs no network work and asks for no credential, so rendering stays quiet; only
 //! a step the person chooses may ask the system for this device's key.
@@ -157,7 +157,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
         DirectRouteStatus::Disconnected => (
             "Disconnected",
             "settings-direct-server-state-disconnected",
-            format!("Connect to show \"{server}\"'s Workspaces."),
+            format!("Connect to work in \"{server}\"'s Workspaces."),
             CaptionTone::Guidance,
             false,
             &[Connect],

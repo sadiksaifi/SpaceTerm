@@ -22,10 +22,11 @@ pub(crate) use development::ArrangementUnavailable;
 pub(crate) use development::{
     DirectServer, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseIntent, SharedCloseReview, SharedCloseState, SharedCloseUnavailable,
-    SharedEditSource, SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason,
-    SharedRemoval, SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
-    SharedWorkspaceEdits, SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan,
-    SharedWorkspaces, presenting_window, shared_close_changed_title,
+    SharedEditSource, SharedPaneOpener, SharedPaneSessions, SharedPaneSubscription, SharedPanes,
+    SharedRefusal, SharedRefusalReason, SharedRemoval, SharedRowStatus, SharedSubmission,
+    SharedTabs, SharedWorkspaceConflict, SharedWorkspaceEdits, SharedWorkspaceFacts,
+    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
+    shared_close_changed_title,
 };
 #[cfg(test)]
 pub(crate) use development::{WorkspaceOwner, testing};
@@ -43,6 +44,10 @@ mod tests;
 #[path = "shared_workspaces/pending.rs"]
 mod pending;
 
+#[path = "shared_workspaces/direct_route.rs"]
+mod direct_route;
+pub(crate) use direct_route::{DirectRoutePanes, UnavailableEdits};
+
 mod development {
     use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
@@ -56,6 +61,7 @@ mod development {
         Workspace as ServerWorkspace,
     };
 
+    use spaceterm_server::client_view::RetainedInventory;
     use spaceterm_server::workspace_order::OwnerId;
 
     use crate::close_confirmation::CloseTarget;
@@ -145,28 +151,52 @@ mod development {
 
     /// Connected interaction intent is bounded and ordered here. The transport journals only
     /// the operation currently dispatched; a disconnected client retains no undispatched work.
+    ///
+    /// A paired route's transport changes as its connections come and go. Every clone follows
+    /// the replacement, and the interactions already queued keep their order.
     #[derive(Clone)]
     pub(crate) struct SharedEditSource {
-        edits: Rc<dyn SharedWorkspaceEdits>,
+        edits: Rc<std::cell::RefCell<Rc<dyn SharedWorkspaceEdits>>>,
+        /// Counts transport replacements, so a subscription knows to follow the new one.
+        generation: Rc<std::cell::Cell<u64>>,
+        /// The inventory a paired route last confirmed, presented while its transport has none.
+        stand_in: Rc<std::cell::RefCell<Option<Inventory>>>,
         pending: Rc<std::cell::RefCell<super::pending::PendingEdits>>,
         subscribers: Rc<std::cell::RefCell<Vec<async_channel::Sender<()>>>>,
     }
 
     pub(crate) struct SharedEditNotifications {
+        source: SharedEditSource,
         local: async_channel::Receiver<()>,
-        remote: async_channel::Receiver<()>,
+        remote: std::cell::RefCell<(u64, async_channel::Receiver<()>)>,
     }
 
     impl SharedEditNotifications {
         pub(crate) async fn recv(&self) -> Result<(), async_channel::RecvError> {
-            futures_lite::future::race(self.local.recv(), self.remote.recv()).await
+            loop {
+                let (generation, remote) = {
+                    let mut remote = self.remote.borrow_mut();
+                    let current = self.source.generation.get();
+                    if remote.0 != current {
+                        *remote = (current, self.source.transport().subscribe());
+                    }
+                    (remote.0, remote.1.clone())
+                };
+                match futures_lite::future::race(self.local.recv(), remote.recv()).await {
+                    // A replaced transport's hints end; the replacement's follow.
+                    Err(_) if self.source.generation.get() != generation => {}
+                    result => return result,
+                }
+            }
         }
     }
 
     impl SharedEditSource {
         pub(crate) fn new(edits: Rc<dyn SharedWorkspaceEdits>) -> Self {
             Self {
-                edits,
+                edits: Rc::new(std::cell::RefCell::new(edits)),
+                generation: Rc::default(),
+                stand_in: Rc::default(),
                 pending: Rc::new(std::cell::RefCell::new(
                     super::pending::PendingEdits::default(),
                 )),
@@ -174,8 +204,39 @@ mod development {
             }
         }
 
+        /// The transport this source submits to now.
+        pub(crate) fn transport(&self) -> Rc<dyn SharedWorkspaceEdits> {
+            Rc::clone(&self.edits.borrow())
+        }
+
+        /// Submits through `edits` from now on, as when a paired route connects or disconnects.
+        /// An operation already dispatched resolves through the journal the new transport
+        /// reads, and every follower hears of the change.
+        pub(crate) fn replace_transport(&self, edits: Rc<dyn SharedWorkspaceEdits>) {
+            self.generation.set(self.generation.get().wrapping_add(1));
+            *self.edits.borrow_mut() = edits;
+            self.snapshot();
+            self.hint();
+        }
+
+        /// Presents `inventory` whenever the transport has published none, as for a paired
+        /// route that has not connected since launch or that the person disconnected.
+        pub(crate) fn stand_in(&self, inventory: Option<Inventory>) {
+            *self.stand_in.borrow_mut() = inventory;
+            self.hint();
+        }
+
+        fn hint(&self) {
+            self.subscribers.borrow_mut().retain(|sender| {
+                !matches!(
+                    sender.try_send(()),
+                    Err(async_channel::TrySendError::Closed(()))
+                )
+            });
+        }
+
         fn editability(&self) -> SharedEditability {
-            if !self.edits.availability().0 {
+            if !self.transport().availability().0 {
                 SharedEditability::Offline
             } else if self.pending.borrow().full() {
                 SharedEditability::Pending
@@ -229,13 +290,14 @@ mod development {
         }
 
         fn dispatch(&self) {
-            let (connected, busy) = self.edits.availability();
+            let edits = self.transport();
+            let (connected, busy) = edits.availability();
             if connected && !busy {
                 let mut pending = self.pending.borrow_mut();
                 if let Some(mutation) = pending.next_dispatch() {
-                    if self.edits.submit(mutation.clone()) {
+                    if edits.submit(mutation.clone()) {
                         pending.dispatched(mutation);
-                    } else if !self.edits.availability().0 {
+                    } else if !edits.availability().0 {
                         pending.disconnect();
                     }
                 }
@@ -243,10 +305,20 @@ mod development {
         }
 
         pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
-            let snapshot = self.edits.snapshot();
+            self.read().0
+        }
+
+        /// The transport's snapshot, and whether its inventory is the stand-in because the
+        /// transport has published none.
+        fn read(&self) -> (SharedWorkspaceSnapshot, bool) {
+            let mut snapshot = self.transport().snapshot();
+            let standing_in = snapshot.inventory.is_none() && self.stand_in.borrow().is_some();
+            if standing_in {
+                snapshot.inventory.clone_from(&self.stand_in.borrow());
+            }
             self.pending.borrow_mut().observe(&snapshot);
             self.dispatch();
-            snapshot
+            (snapshot, standing_in)
         }
 
         pub(crate) fn presentation_inventory(&self) -> Option<Inventory> {
@@ -274,7 +346,7 @@ mod development {
         /// Keep the original transport alive independently until its durable operation retires.
         pub(crate) fn retain_until_settled(&self, cx: &mut App) {
             let source = self.clone();
-            let changes = self.edits.subscribe();
+            let changes = self.transport().subscribe();
             // Each answer the server publishes hints here, and reading the snapshot dispatches
             // the next queued edit.
             cx.spawn(async move |_| {
@@ -638,6 +710,12 @@ mod development {
         fn direct_route(&self) -> Option<&DirectServer> {
             None
         }
+
+        /// Changes whenever what [`Self::open`] returns for a Pane changes, as when a paired
+        /// route connects or disconnects. Each Pane opened earlier opens again.
+        fn generation(&self) -> u64 {
+            0
+        }
     }
 
     /// Another computer's server as a direct network route reaches it.
@@ -763,24 +841,20 @@ mod development {
             )
         }
 
-        /// Panes of another computer's server reached over a paired route. They take no local
-        /// file authority.
-        pub(crate) fn direct(
+        /// Opens Panes of another computer's server through one connection of a paired route.
+        /// They take no local file authority.
+        pub(crate) fn remote_opener(
             server: ServerConnection,
             controls: Arc<PaneControls>,
             direct: DirectServer,
             client_home: ValidatedLocalDirectory,
-            panes: &PaneConstruction,
-        ) -> Self {
-            Self::with_opener(
-                Rc::new(RemoteServerPanes {
-                    server,
-                    controls,
-                    direct,
-                    client_home,
-                }),
-                panes,
-            )
+        ) -> Rc<dyn SharedPaneOpener> {
+            Rc::new(RemoteServerPanes {
+                server,
+                controls,
+                direct,
+                client_home,
+            })
         }
 
         pub(crate) fn with_opener(
@@ -798,6 +872,12 @@ mod development {
             &self,
         ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
             self.opener.local_filesystem()
+        }
+
+        /// Changes whenever each Pane must open again, as when a paired route connects or
+        /// disconnects.
+        pub(crate) fn generation(&self) -> u64 {
+            self.opener.generation()
         }
 
         /// The paired route reaching another computer's server, if any.
@@ -884,6 +964,8 @@ mod development {
         workspace: Id,
         tab: Id,
         panes: BTreeMap<PaneId, Id>,
+        /// The opener generation each Pane's subscription came from.
+        opened: BTreeMap<PaneId, u64>,
         views: BTreeMap<PaneId, ServerPaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
         pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
@@ -912,6 +994,7 @@ mod development {
                 workspace,
                 tab,
                 panes: BTreeMap::new(),
+                opened: BTreeMap::new(),
                 views: BTreeMap::new(),
                 screen_focus: BTreeMap::new(),
                 pending_starts: Default::default(),
@@ -941,6 +1024,7 @@ mod development {
                 state.start_created();
             }
             state.observe(self.changes.0.clone());
+            self.opened.insert(pane_id, self.sessions.generation());
             self.views.insert(pane_id, ServerPaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
         }
@@ -955,6 +1039,7 @@ mod development {
                 self.edits.retire_alias(previous);
             }
             self.pending_starts.borrow_mut().remove(&pane_id);
+            self.opened.remove(&pane_id);
             self.views.remove(&pane_id);
             self.screen_focus.remove(&pane_id);
         }
@@ -983,8 +1068,17 @@ mod development {
                 .is_some_and(|id| self.edits.closing(id))
         }
 
+        /// Whether the Pane's route connected or disconnected since the Pane opened.
+        pub(crate) fn reopened(&self, pane_id: PaneId) -> bool {
+            self.opened
+                .get(&pane_id)
+                .is_some_and(|generation| *generation != self.sessions.generation())
+        }
+
+        /// Whether the Pane must open again: the server confirmed its provisional identity, or
+        /// its route connected or disconnected since it opened.
         pub(crate) fn needs_binding(&self, pane_id: PaneId, server: Id) -> bool {
-            self.panes.get(&pane_id).is_some_and(|id| *id != server)
+            self.panes.get(&pane_id).is_some_and(|id| *id != server) || self.reopened(pane_id)
         }
 
         pub(crate) fn edits(&self) -> SharedEditSource {
@@ -1121,7 +1215,7 @@ mod development {
                 return false;
             };
             self.edits
-                .edits
+                .transport()
                 .snapshot()
                 .inventory
                 .as_ref()
@@ -1281,6 +1375,12 @@ mod development {
         last_saved_view: Option<spaceterm_server::client_view::ClientView>,
         view_error_reported: bool,
         attachment_error: Option<spaceterm_server::ServerError>,
+        /// Whether this binding keeps a copy of the inventory it presents, for a paired route.
+        retains_copies: bool,
+        /// The Workspaces and Tabs the server last confirmed to this client, as retained.
+        confirmed: Option<RetainedInventory>,
+        /// Whether the presented inventory is the retained copy rather than the server's.
+        standing_in: bool,
     }
 
     /// A refused same-field edit whose draft is kept until this client can name the Workspace it
@@ -1333,7 +1433,76 @@ mod development {
                 last_saved_view: None,
                 view_error_reported: false,
                 attachment_error: None,
+                retains_copies: false,
+                confirmed: None,
+                standing_in: false,
             }
+        }
+
+        /// Keeps a copy of each inventory the server confirms, so this client can present its
+        /// Workspaces and Tabs while the paired route is not connected.
+        pub(crate) fn retain_inventory_copies(&mut self) {
+            self.retains_copies = true;
+        }
+
+        /// The Workspaces and Tabs the server last confirmed, as this client retains them.
+        pub(crate) fn retained_copy(&self) -> Option<RetainedInventory> {
+            self.confirmed.clone().or_else(|| {
+                self.retained_views
+                    .as_ref()?
+                    .retained_inventory()
+                    .filter(|_| self.retains_copies)
+            })
+        }
+
+        /// Presents the retained copy until the server publishes an inventory. Call once the
+        /// client views are read.
+        pub(crate) fn present_retained_copy(&mut self) {
+            if self.confirmed.is_none() {
+                self.confirmed = self.retained_copy();
+            }
+            self.edits
+                .stand_in(self.confirmed.as_ref().map(RetainedInventory::inventory));
+        }
+
+        /// Follows a paired route's new transport. The presented Workspaces, Tabs and this
+        /// client's views of them stay; the next inventory reconciles them, and until the
+        /// transport publishes one the retained copy stands in.
+        pub(crate) fn replace_transport(&mut self, edits: Rc<dyn SharedWorkspaceEdits>) {
+            self.edits
+                .stand_in(self.confirmed.as_ref().map(RetainedInventory::inventory));
+            // The next inventory is read afresh: it initializes attachments and rebinds Panes.
+            self.revision = None;
+            self.presentation = None;
+            self.edits.replace_transport(edits);
+        }
+
+        /// Removes the retained copy for good, as when the person removes the paired route.
+        pub(crate) fn discard_retained_copy(&mut self) {
+            self.retains_copies = false;
+            self.confirmed = None;
+            self.edits.stand_in(None);
+            if let Some(views) = &self.retained_views {
+                views.discard_inventory();
+            }
+        }
+
+        /// Retains `copy` and attaches its Workspaces, as a relaunched client reads them from
+        /// its storage.
+        #[cfg(test)]
+        pub(crate) fn retain_copy_for_test(&mut self, copy: RetainedInventory) {
+            let _ = self.attachments.initialize(&copy.inventory(), None);
+            for workspace in &copy.workspaces {
+                let _ = self.attachments.attach(workspace.id);
+            }
+            self.retains_copies = true;
+            self.confirmed = Some(copy);
+        }
+
+        /// Whether this binding presents the retained copy rather than the server's inventory.
+        #[cfg(test)]
+        pub(crate) const fn presents_retained_copy(&self) -> bool {
+            self.standing_in
         }
 
         pub(crate) fn available_workspaces(&self) -> Vec<SharedAvailableWorkspace> {
@@ -1367,7 +1536,7 @@ mod development {
             }
             // A validated committed close can precede acknowledgement. Its transport stays
             // owned even when published deletion has retired the view or the route disconnects.
-            let transport = self.edits.edits.snapshot();
+            let transport = self.edits.transport().snapshot();
             transport.pending
                 && transport
                     .pending_operation
@@ -1627,7 +1796,9 @@ mod development {
                 return Some(SharedRowStatus::progress(text));
             }
             match self.edits.editability() {
-                SharedEditability::Offline if self.connection_error.is_some() => {
+                SharedEditability::Offline
+                    if self.connection_error.is_some() || self.standing_in =>
+                {
                     Some(SharedRowStatus {
                         text: "Not connected",
                         warning: true,
@@ -1666,7 +1837,7 @@ mod development {
             &self,
             intent: SharedCloseIntent,
         ) -> Result<bool, SharedRefusalReason> {
-            if !self.edits.edits.availability().0 {
+            if !self.edits.transport().availability().0 {
                 return Err(SharedRefusalReason::Offline);
             }
             self.edits.pending.borrow_mut().defer_close(intent)
@@ -1855,8 +2026,12 @@ mod development {
             let (sender, local) = async_channel::bounded(1);
             self.edits.subscribers.borrow_mut().push(sender);
             SharedEditNotifications {
+                source: self.edits.clone(),
                 local,
-                remote: self.edits.edits.subscribe(),
+                remote: std::cell::RefCell::new((
+                    self.edits.generation.get(),
+                    self.edits.transport().subscribe(),
+                )),
             }
         }
 
@@ -1867,9 +2042,23 @@ mod development {
         /// for reports an acceptance the window may act on, so a publication from another client
         /// never moves the Active Workspace, Tab, or Pane.
         pub(crate) fn poll(&mut self) -> SharedPoll {
-            let snapshot = self.edits.snapshot();
+            let (snapshot, standing_in) = self.edits.read();
             let mut poll = SharedPoll::default();
+            if self.standing_in != standing_in {
+                self.standing_in = standing_in;
+                poll.changed = true;
+            }
             if let Some(inventory) = snapshot
+                .inventory
+                .as_ref()
+                .filter(|inventory| self.revision != Some(inventory.revision))
+                .filter(|_| standing_in)
+            {
+                // The retained copy names only what the server last confirmed, so it never
+                // initializes or reconciles attachments.
+                self.revision = Some(inventory.revision);
+                poll.changed = true;
+            } else if let Some(inventory) = snapshot
                 .inventory
                 .as_ref()
                 .filter(|inventory| self.revision != Some(inventory.revision))
@@ -1941,6 +2130,18 @@ mod development {
             if snapshot.inventory.is_some() && self.latest != snapshot.inventory {
                 self.latest.clone_from(&snapshot.inventory);
                 poll.changed = true;
+            }
+            if self.retains_copies
+                && !standing_in
+                && let Some(inventory) = &snapshot.inventory
+            {
+                let copy = RetainedInventory::retain(inventory);
+                if self.confirmed.as_ref() != Some(&copy) {
+                    if let Some(views) = &self.retained_views {
+                        views.save_inventory(copy.clone());
+                    }
+                    self.confirmed = Some(copy);
+                }
             }
             if let Some(inventory) = &snapshot.inventory {
                 // A batch can contain an older conflict for a Workspace removed by its latest
