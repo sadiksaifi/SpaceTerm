@@ -323,7 +323,7 @@ pub(super) fn present_update(state: &UpdateState) -> UpdatePresentation {
     let (badge, state_selector, explanation, tone, actions) = match &state.facts {
         None => match state.failure {
             None => (
-                "Not Checked",
+                "Not checked",
                 "settings-server-update-state-not-checked",
                 "SpaceTerm reads the server version when you open this section.".into(),
                 CaptionTone::Guidance,
@@ -412,7 +412,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
     };
     if !status.installed {
         return (
-            "Not Installed",
+            "Not installed",
             "settings-server-update-state-not-installed",
             "Install the background service above to see the server version.".into(),
             CaptionTone::Guidance,
@@ -423,7 +423,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         return (
             "Unknown",
             "settings-server-update-state-unknown",
-            "Couldn't read installed server version.".into(),
+            "Couldn\u{2019}t read installed server version.".into(),
             CaptionTone::Error,
             vec![UpdateAction::Check],
         );
@@ -455,14 +455,14 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         });
     match &facts.included {
         Ok(included) if included.approved => (
-            "Up to Date",
+            "Up to date",
             "settings-server-update-state-current",
             format!("{now}{returned} It\u{2019}s the server version included with SpaceTerm."),
             CaptionTone::Guidance,
             Vec::new(),
         ),
         Ok(included) if included.earlier => (
-            "No Update",
+            "No update",
             "settings-server-update-state-earlier",
             format!(
                 "{now}{returned} SpaceTerm includes server version {included_label}, an earlier \
@@ -482,7 +482,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
                 "The server isn\u{2019}t running, so updating ends no Terminal Sessions."
             };
             (
-                "Update Available",
+                "Update available",
                 "settings-server-update-state-available",
                 format!("{now}{returned} SpaceTerm includes server version {included}. {effect}"),
                 CaptionTone::Guidance,
@@ -490,7 +490,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
             )
         }
         Err(CandidateError::Unavailable) => (
-            "No Update",
+            "No update",
             "settings-server-update-state-unavailable",
             format!(
                 "{now}{returned} This SpaceTerm doesn\u{2019}t include a server package, so it \
@@ -507,9 +507,9 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
             Vec::new(),
         ),
         Err(CandidateError::Verification(error)) => (
-            "Not Verified",
+            "Not verified",
             "settings-server-update-state-not-verified",
-            format!("Couldn't verify the server package. {error}"),
+            format!("Couldn\u{2019}t verify the server package. {error}"),
             CaptionTone::Error,
             vec![UpdateAction::Check],
         ),
@@ -522,31 +522,31 @@ fn present_activation(activation: &ActivationStatus) -> Option<Facts> {
     Some(match activation.phase {
         ActivationPhase::Completed { .. } => return None,
         ActivationPhase::Activating => (
-            "Update Unfinished",
+            "Update unfinished",
             "settings-server-update-state-unfinished",
             "Choose Finish Update to complete the update.".to_owned(),
             CaptionTone::Warning,
             vec![UpdateAction::Finish],
         ),
         ActivationPhase::Uncertain => (
-            "Update Uncertain",
+            "Update uncertain",
             "settings-server-update-state-uncertain",
-            format!("Couldn't confirm the update to {candidate}. Choose Finish Update."),
+            format!("Couldn\u{2019}t confirm the update to {candidate}. Choose Finish Update."),
             CaptionTone::Error,
             vec![UpdateAction::Finish],
         ),
         ActivationPhase::Failed { can_return: true } => (
-            "Update Failed",
+            "Update failed",
             "settings-server-update-state-failed",
-            format!("Version {candidate} didn't start, and Terminal Sessions ended."),
+            format!("Version {candidate} didn\u{2019}t start, and Terminal Sessions ended."),
             CaptionTone::Error,
             vec![UpdateAction::Return, UpdateAction::Check],
         ),
         ActivationPhase::Failed { can_return: false } => (
-            "Update Failed",
+            "Update failed",
             "settings-server-update-state-failed",
             format!(
-                "Version {candidate} didn't start, and Terminal Sessions ended. SpaceTerm can't safely restore {previous}."
+                "Version {candidate} didn\u{2019}t start, and Terminal Sessions ended. SpaceTerm can\u{2019}t safely restore {previous}."
             ),
             CaptionTone::Error,
             vec![UpdateAction::Check],

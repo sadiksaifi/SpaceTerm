@@ -362,7 +362,10 @@ impl InviteDevice {
             ],
             DialogInitialFocus::Action(Answer::Allow),
         )
-        .description(format!("It gets full access to \"{}\".", self.server))
+        .description(format!(
+            "It gets full access to \u{201C}{}\u{201D}, including its Workspaces and Terminal Sessions.",
+            self.server
+        ))
         .size(DialogSize::Compact)
         .body(cx.entity());
         let answering = cx.entity();
@@ -941,7 +944,11 @@ impl Render for InviteDevice {
                     ))
                     .child(emphasized(
                         "invite-device-allowed",
-                        format!("\"{}\" can connect to \"{}\".", device.name, self.server).into(),
+                        format!(
+                            "\u{201C}{}\u{201D} can connect to \u{201C}{}\u{201D}.",
+                            device.name, self.server
+                        )
+                        .into(),
                     ))
                     .into_any_element(),
             )
@@ -1353,7 +1360,10 @@ mod tests {
 
         assert_eq!(*server.approved.lock().expect("approved"), vec![[3; 32]]);
         assert_eq!(host.read_with(cx, |host, _| host.paired), 1);
-        assert!(says("\"MacBook\" can connect to \"studio\".", cx));
+        assert!(says(
+            "\u{201C}MacBook\u{201D} can connect to \u{201C}studio\u{201D}.",
+            cx
+        ));
     }
 
     #[gpui::test]

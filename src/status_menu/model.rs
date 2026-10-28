@@ -155,15 +155,15 @@ impl Phase {
                 "Stopped",
                 Some("The server stays stopped until you start it.".to_owned()),
             ),
-            Self::NotRunning => ("Not Running", Some("Installed but not running.".to_owned())),
+            Self::NotRunning => ("Not running", Some("Installed but not running.".to_owned())),
             Self::NotInstalled => (
-                "Not Installed",
+                "Not installed",
                 Some(format!("Open {name} to set up the server.")),
             ),
             Self::Unavailable(ServerError::CleanupUnresolved) => (
                 badge(ServerError::CleanupUnresolved),
                 Some(
-                    "SpaceTerm couldn't confirm that the server's Terminal Sessions ended. \
+                    "SpaceTerm couldn\u{2019}t confirm that the server\u{2019}s Terminal Sessions ended. \
                      Choose Stop Server to try again."
                         .to_owned(),
                 ),
@@ -180,10 +180,10 @@ impl Phase {
 /// The short state for a status read that failed, matching Settings > Servers.
 fn badge(error: ServerError) -> &'static str {
     match error {
-        ServerError::UnsafeStorage => "Unsafe Storage",
-        ServerError::CleanupUnresolved => "Stop Unconfirmed",
-        ServerError::IncompatibleState => "Incompatible State",
-        ServerError::RuntimeUnavailable => "Server Unavailable",
+        ServerError::UnsafeStorage => "Unsafe storage",
+        ServerError::CleanupUnresolved => "Cleanup unresolved",
+        ServerError::IncompatibleState => "Incompatible state",
+        ServerError::RuntimeUnavailable => "Runtime unavailable",
         ServerError::Unsupported => "Unsupported",
         _ => "Unavailable",
     }

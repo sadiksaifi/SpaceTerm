@@ -338,7 +338,7 @@ impl WorkspaceManager {
                                 cx,
                             );
                         } else if error == Error::Unavailable {
-                            let title = "Couldn't Check Worktree Changes".to_owned();
+                            let title = "Couldn\u{2019}t Check Worktree Changes".to_owned();
                             let _ = Alert::new(
                                 ModalId::new("server-worktree-removal-check"),
                                 title.clone(),
@@ -381,7 +381,7 @@ impl WorkspaceManager {
             return;
         };
         let name = sanitize_for_display(&directory_name(&review.path), MAXIMUM_NAME_CHARS);
-        let title = format!("Remove Worktree \"{name}\"?");
+        let title = format!("Remove Worktree \u{201C}{name}\u{201D}?");
         let machine = self.owning_machine(workspace);
         let branch = self
             .shared_inventory(workspace)
@@ -413,17 +413,17 @@ impl WorkspaceManager {
         let message = if let Some(branch) = branch.as_ref().filter(|_| specific) {
             match &machine {
                 Some(machine) => format!(
-                    "This deletes its uncommitted changes and untracked files on \"{}\", closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \"{branch}\" is kept.",
+                    "This deletes its uncommitted changes and untracked files on \u{201C}{}\u{201D}, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept.",
                     sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
                 ),
                 None => format!(
-                    "This deletes its uncommitted changes and untracked files, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \"{branch}\" is kept."
+                    "This deletes its uncommitted changes and untracked files, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept."
                 ),
             }
         } else {
             let directory = match &machine {
                 Some(machine) => format!(
-                    "Deletes its directory on \"{}\"",
+                    "Deletes its directory on \u{201C}{}\u{201D}",
                     sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
                 ),
                 None => "Deletes its directory with Git".to_owned(),
@@ -591,7 +591,7 @@ impl WorkspaceManager {
             ("Check Worktree Removal", "Remove Worktree")
         };
         let message = format!(
-            "The server stopped before SpaceTerm could confirm the result. Check \"{name}\" in the sidebar before choosing {action} again."
+            "The server stopped before SpaceTerm could confirm the result. Check \u{201C}{name}\u{201D} in the sidebar before choosing {action} again."
         );
         let _ = Alert::new(
             ModalId::new("server-worktree-interrupted"),
@@ -655,15 +655,15 @@ impl WorkspaceManager {
                         .to_owned()
                 }
                 Error::Branch => format!(
-                    "Git could not finish creating the Worktree. Check \"{name}\" for incomplete files and review the sidebar before trying again."
+                    "Git could not finish creating the Worktree. Check \u{201C}{name}\u{201D} for incomplete files and review the sidebar before trying again."
                 ),
                 _ => format!(
-                    "SpaceTerm could not confirm whether the Worktree was created. Check \"{name}\" and the sidebar before trying again."
+                    "SpaceTerm could not confirm whether the Worktree was created. Check \u{201C}{name}\u{201D} and the sidebar before trying again."
                 ),
             };
             let title = match error {
                 Error::Location | Error::Missing | Error::Branch => {
-                    format!("Couldn't Create Worktree \"{name}\"")
+                    format!("Couldn\u{2019}t Create Worktree \u{201C}{name}\u{201D}")
                 }
                 _ => "Check Worktree Creation".to_owned(),
             };
@@ -671,8 +671,8 @@ impl WorkspaceManager {
         } else {
             let reason = match error {
                 Error::Missing => "Git no longer lists it.",
-                Error::Location => "Its directory isn't available.",
-                _ => "Couldn't open a Tab in it.",
+                Error::Location => "Its directory isn\u{2019}t available.",
+                _ => "Couldn\u{2019}t open a Tab in it.",
             };
             (
                 format!("Couldn\u{2019}t Open \u{201c}{name}\u{201d}"),

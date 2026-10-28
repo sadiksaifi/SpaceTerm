@@ -2833,7 +2833,7 @@ impl TabView {
         let _ = Alert::new(
             ModalId::new("shared-pane-edit-unavailable"),
             "Shared change unavailable",
-            "Couldn't Create Pane",
+            "Couldn\u{2019}t Create Pane",
             detail,
             vec![ModalAction::new(
                 (),
@@ -3026,8 +3026,6 @@ impl TabView {
                 let action = (!ended).then(|| {
                     let owner = view.clone();
                     Button::new(selector("take-over"), "Take Over")
-                        .variant(ButtonVariant::Primary)
-                        .size(ButtonSize::Regular)
                         .disabled(!offered)
                         .tab_stop(true)
                         .accessibility_description("Type and resize this Pane here.")
@@ -3044,7 +3042,10 @@ impl TabView {
                     // Losing control, a new Controlling Client, and the end of a Session all happen
                     // without any action here, so assistive technology announces them.
                     true,
-                    action,
+                    server_pane::ScreenActions {
+                        primary: action,
+                        link: None,
+                    },
                     status,
                     pane.announcements(),
                     cx,
@@ -3075,8 +3076,6 @@ impl TabView {
                 };
                 let owner = view.clone();
                 let action = Button::new(selector(copy.action), copy.label)
-                    .variant(ButtonVariant::Primary)
-                    .size(ButtonSize::Regular)
                     .disabled(!offered)
                     .tab_stop(true)
                     .accessibility_description(copy.description)
@@ -3086,11 +3085,26 @@ impl TabView {
                             view.start_shared_shell(pane_id, window, cx);
                         });
                     });
+                // A Pane without a shell can also go: Close Pane asks as the Close Pane command
+                // does.
+                let close_owner = view.clone();
+                let close = Button::new(selector("close-pane"), server_pane::CLOSE_PANE)
+                    .tab_stop(true)
+                    .debug_selector(selector("close-pane"))
+                    .on_activate(move |_, _, cx| {
+                        let _ = close_owner.update(cx, |view, cx| {
+                            view.request_close_pane(pane_id, cx);
+                        });
+                    });
                 server_pane::render_screen(
                     selector(copy.screen),
-                    server_pane::ScreenCopy::new(copy.title.into(), copy.detail.into()),
+                    server_pane::ScreenCopy::new(copy.title.into(), copy.detail.into())
+                        .glyph(server_pane::DORMANT_GLYPH),
                     true,
-                    Some(action),
+                    server_pane::ScreenActions {
+                        primary: Some(action),
+                        link: Some(close),
+                    },
                     status,
                     pane.announcements(),
                     cx,
@@ -3198,7 +3212,7 @@ impl TabView {
         let notice = pane.notice().map(|(title, detail, intent)| {
             let detail = match &remote {
                 Some(name) if pane.server_stopped() => gpui::SharedString::from(format!(
-                    "Start the server on \"{name}\" to use this Pane again."
+                    "Start the server on \u{201C}{name}\u{201D} to use this Pane again."
                 )),
                 _ => detail,
             };

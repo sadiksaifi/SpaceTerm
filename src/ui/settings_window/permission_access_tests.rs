@@ -518,7 +518,7 @@ fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut Test
         Some(RecoveryNotice::ResetFailed)
     );
     let failure = explanation(&window, ScreenRecording, cx);
-    assert!(failure.contains("Couldn't reset"));
+    assert!(failure.contains("Couldn\u{2019}t reset"));
     assert!(failure.contains("Privacy & Security > Screen & System Audio Recording"));
     assert!(!failure.contains("PlatformRejected"));
     // A failed reset starts no setup.
@@ -665,7 +665,7 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
 fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_settings(Some(access.clone()), None, cx);
-    let check_failure = "Couldn't check Screen Recording access.";
+    let check_failure = "Couldn\u{2019}t check Screen Recording access.";
     for (error, expected) in [
         (PermissionAccessError::OffMainThread, check_failure),
         (

@@ -269,7 +269,6 @@ impl SettingsWindow {
                 self.render_theme_row(summary, slot, summary.id == selected, appearance, cx)
             })
             .collect::<Vec<_>>();
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let separator = gpui_color(appearance.separator(spaceterm_ui::ControlHost::Card));
         let empty = rows.is_empty();
         let rows = rows.into_iter().enumerate().flat_map(|(index, row)| {
@@ -318,13 +317,14 @@ impl SettingsWindow {
             .when(empty, |list| {
                 list.child(
                     div()
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(colors.text_secondary))
-                        .whitespace_normal()
-                        .child(Text::new(
-                            "settings-theme-gallery-no-results".into(),
-                            SharedString::from(format!("No themes match “{query}”.")),
-                        )),
+                        .w_full()
+                        .py(appearance.spacing(24.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            super::no_results(&query, cx)
+                                .debug_selector("settings-theme-gallery-no-results"),
+                        ),
                 )
             })
             .child(
@@ -370,7 +370,7 @@ impl SettingsWindow {
                 ))
                 .child(Text::new(
                     SharedString::from(format!("{selector}-in-use")).into(),
-                    SharedString::from("In Use"),
+                    SharedString::from("In use"),
                 ))
                 .into_any_element()
         } else {
@@ -504,22 +504,6 @@ impl SettingsWindow {
             .filter(|slot| ids.contains(slots.get(*slot)))
             .collect::<Vec<_>>();
         let one = ids.len() == 1;
-        let family = removed
-            .iter()
-            .all(|summary| summary.family == theme.family)
-            .then_some(theme.family.as_ref())
-            .flatten();
-        let (title, message) = match (one, family) {
-            (true, _) => ("Remove Theme", format!("Remove \"{}\"?", theme.name)),
-            (false, Some(family)) => (
-                "Remove Themes",
-                format!("Remove {} {family} themes?", ids.len()),
-            ),
-            (false, None) => (
-                "Remove Themes",
-                format!("Remove {} themes from this extension?", ids.len()),
-            ),
-        };
         // The list shows one appearance, so name the themes of the other that go with it.
         let hidden = removed
             .iter()
@@ -532,21 +516,37 @@ impl SettingsWindow {
             (count, Appearance::Light) => Some(format!("This includes {count} dark themes.")),
             (count, Appearance::Dark) => Some(format!("This includes {count} light themes.")),
         };
-        let consequence = match (one, in_use.is_empty(), &theme.package) {
-            (false, _, _) => "",
-            (true, false, _) => "Terminal panes using it will switch to the built-in theme.",
-            (true, true, Some(_)) => "You can get it again from Get More Themes.",
-            (true, true, None) => "You can import it again from its file.",
-        };
-        let detail = match hidden {
-            Some(hidden) if consequence.is_empty() => hidden,
-            Some(hidden) => format!("{hidden} {consequence}"),
-            None => consequence.to_owned(),
+        let (title, message, detail) = if one {
+            let consequence = match (in_use.is_empty(), &theme.package) {
+                (false, _) => "Terminal panes using it will switch to the built-in theme.",
+                (true, Some(_)) => "You can get it again from Get More Themes.",
+                (true, None) => "You can import it again from its file.",
+            };
+            let detail = match hidden {
+                Some(hidden) => format!("{hidden} {consequence}"),
+                None => consequence.to_owned(),
+            };
+            (
+                "Remove Theme".to_owned(),
+                format!("Remove \u{201C}{}\u{201D}?", theme.name),
+                detail,
+            )
+        } else {
+            let again = if theme.package.is_some() {
+                "You can get them again from Get More Themes."
+            } else {
+                "You can import them again from their files."
+            };
+            (
+                format!("Remove {} Themes?", ids.len()),
+                format!("Panes using them switch to the built-in theme. {again}"),
+                hidden.unwrap_or_default(),
+            )
         };
         let owner = cx.weak_entity();
         let alert = Alert::new(
             ModalId::new("settings-remove-theme"),
-            title,
+            title.clone(),
             title,
             message,
             vec![

@@ -2,7 +2,7 @@ use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 #[cfg(test)]
 use gpui::px;
-use gpui::{App, Context, Entity, Render, Window, accesskit, div};
+use gpui::{App, Context, Entity, Render, SharedString, Window, accesskit, div};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Dialog, DialogCloseDecision, DialogCompletion,
     DialogInitialFocus, DialogOutcome, DialogSize, ModalAction, ModalActionRole, ModalId,
@@ -118,7 +118,10 @@ impl GpuiAskPassPresenter {
         }
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
-        if let Some(presentation) = request.secret_presentation() {
+        let this_computer = crate::desktop_profile::DesktopPresentation::get(cx)
+            .wording()
+            .this_computer_phrase;
+        if let Some(presentation) = request.secret_presentation(this_computer) {
             self.present_secret(owner, generation, presentation, completion, window, cx)
         } else if let Some(presentation) = request.confirmation_presentation() {
             self.present_confirmation(owner, generation, presentation, completion, window, cx)
@@ -150,8 +153,8 @@ impl GpuiAskPassPresenter {
         let lifecycle_presenter = presenter;
         let alert = Alert::new(
             ModalId::new(CONFIRMATION_MODAL_ID),
-            presentation.title(),
-            presentation.title(),
+            presentation.title().to_owned(),
+            presentation.title().to_owned(),
             presentation.message(),
             vec![
                 ModalAction::new(
@@ -362,8 +365,9 @@ enum SecretSubmissionError {
 }
 
 struct AskPassSecretBody {
-    title: &'static str,
+    title: SharedString,
     detail: String,
+    note: Option<&'static str>,
     affirmative: &'static str,
     negative: &'static str,
     field_label: &'static str,
@@ -394,8 +398,9 @@ impl AskPassSecretBody {
             .debug_selector("ssh-askpass-secret-input")
         });
         Self {
-            title: presentation.title(),
+            title: presentation.title().to_owned().into(),
             detail: presentation.detail().to_owned(),
+            note: presentation.note(),
             affirmative: presentation.affirmative(),
             negative: presentation.negative(),
             field_label: presentation.field_label(),
@@ -405,8 +410,8 @@ impl AskPassSecretBody {
         }
     }
 
-    const fn title(&self) -> &'static str {
-        self.title
+    fn title(&self) -> SharedString {
+        self.title.clone()
     }
 
     const fn affirmative(&self) -> &'static str {
@@ -508,6 +513,19 @@ impl Render for AskPassSecretBody {
                         )
                     }),
             )
+            .when_some(self.note, |body, note| {
+                body.child(
+                    div()
+                        .id("ssh-askpass-note")
+                        .role(accesskit::Role::Label)
+                        .aria_value(note)
+                        .debug_selector(|| "ssh-askpass-note".to_owned())
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(colors.text_muted))
+                        .whitespace_normal()
+                        .child(note),
+                )
+            })
     }
 }
 

@@ -21,6 +21,10 @@ use crate::ui::sidebar_window::SidebarOwner as _;
 
 use crate::settings::storage::testing::MemoryStorage;
 
+/// What Reset All Settings says it can't give back and what it keeps.
+const RESET_ALL_DETAIL: &str =
+    "This can\u{2019}t be undone. Server connections and system permissions are kept.";
+
 pub(super) struct Harness {
     storage: Arc<MemoryStorage>,
     settings: crate::settings::Settings,
@@ -1005,7 +1009,7 @@ fn installed_themes_publish_a_list_of_named_themes_with_their_actions(cx: &mut T
             .unwrap_or_else(|| panic!("no theme item is named {name:?}"))
     };
     let in_use = tree.children(item("SpaceTerm Dark"));
-    assert!(in_use.iter().any(|node| node["aria"]["value"] == "In Use"));
+    assert!(in_use.iter().any(|node| node["aria"]["value"] == "In use"));
     let sample = item("Sample Dark");
     assert!(!sample["aria"]["description"].as_str().unwrap().is_empty());
     let actions = tree
@@ -2742,7 +2746,8 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
             SettingsRowId::ServerStatus => "settings-server-status",
-            SettingsRowId::ServerAutoStart => "settings-server-auto-start",
+            // The fixture has no service observation, so the row says Unknown.
+            SettingsRowId::ServerAutoStart => "settings-server-auto-start-unknown",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
             // The fixture has no network observation, so the row says Unknown. Devices waits
             // for access to be on.
@@ -4359,7 +4364,7 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
     cx.run_until_parked();
 
     window.read_with(cx, |settings, _| {
-        assert_eq!(settings.reset_all_detail(), "This cannot be undone.");
+        assert_eq!(settings.reset_all_detail(), RESET_ALL_DETAIL);
         assert!(
             settings
                 .navigable_sections()
@@ -4410,7 +4415,7 @@ fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut Test
     let (window, _harness, cx) = open_settings(cx);
 
     window.read_with(cx, |settings, _| {
-        assert_eq!(settings.reset_all_detail(), "This cannot be undone.");
+        assert_eq!(settings.reset_all_detail(), RESET_ALL_DETAIL);
     });
 
     assert!(
@@ -4814,9 +4819,12 @@ fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAp
     set_query(&window, "zzzz", cx);
     let tree = A11yTree::read(cx);
     assert!(
-        tree.with_role("Label")
-            .iter()
-            .any(|label| label["aria"]["value"] == "No settings match “zzzz”.")
+        tree.find_text("No Results for \u{201C}zzzz\u{201D}")
+            .is_some()
+    );
+    assert!(
+        tree.find_text("Check the spelling or try a different term.")
+            .is_some()
     );
 }
 

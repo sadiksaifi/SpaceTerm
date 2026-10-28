@@ -435,9 +435,9 @@ pub(in crate::platform) mod tests {
         let prompt = |destructive| QuitPrompt {
             title: "Quit SpaceTerm?".to_owned(),
             detail: if destructive {
-                "This ends 3 Terminal Sessions.".to_owned()
+                "This development build runs its own server. Quitting ends its 3 Terminal Sessions and stops their running commands.".to_owned()
             } else {
-                String::new()
+                "SpaceTerm leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it.".to_owned()
             },
             destructive,
         };
@@ -508,8 +508,9 @@ pub(in crate::platform) mod tests {
                     )
                 };
                 unsafe { host.setReleasedWhenClosed(false) };
-                let alert = quit_alert(&prompt(destructive), mtm);
-                assert_eq!(alert.informativeText().to_string().is_empty(), !destructive);
+                let prompt = prompt(destructive);
+                let alert = quit_alert(&prompt, mtm);
+                assert_eq!(alert.informativeText().to_string(), prompt.detail);
                 let responses = begin_quit_sheet(&alert, &host, destructive);
                 settle();
                 let sheet = alert.window();

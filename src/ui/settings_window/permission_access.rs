@@ -266,7 +266,7 @@ impl PermissionAccessRow {
             RecoveryNotice::OpenFailed => open_failed(application, pane),
             RecoveryNotice::Resetting => format!("Resetting {name}…"),
             RecoveryNotice::ResetFailed => format!(
-                "Couldn't reset {name}. Remove {application} in Privacy & Security > {pane}, then add it again."
+                "Couldn\u{2019}t reset {name}. Remove {application} in Privacy & Security > {pane}, then add it again."
             ),
         });
 
@@ -297,7 +297,7 @@ impl PermissionAccessRow {
                             PermissionSetupStatus::Failed(
                                 PermissionSetupFailure::SettingsNotShown,
                             ) => Some(
-                                "Couldn't open System Settings. Choose Set Up to try again."
+                                "Couldn\u{2019}t open System Settings. Choose Set Up to try again."
                                     .to_owned(),
                             ),
                             PermissionSetupStatus::Idle | PermissionSetupStatus::Running => None,
@@ -307,7 +307,7 @@ impl PermissionAccessRow {
                     None => (notice.unwrap_or(purpose), Action::OpenSettings),
                 };
                 (
-                    "Not Allowed",
+                    "Not allowed",
                     text.state_not_allowed,
                     explanation,
                     Some(action),
@@ -318,7 +318,7 @@ impl PermissionAccessRow {
                 text.state_unavailable,
                 match error {
                     PermissionAccessError::OffMainThread => {
-                        format!("Couldn't check {name} access.")
+                        format!("Couldn\u{2019}t check {name} access.")
                     }
                     PermissionAccessError::PlatformUnavailable => {
                         format!("{name} access unknown.")
@@ -524,7 +524,9 @@ impl SettingsWindow {
         let reopen = "Quit and reopen the program that needs access.";
         let (message, primary) = if row.can_reset() {
             (
-                format!("{reopen} If that doesn't help, reset {name}."),
+                format!(
+                    "{reopen} If that doesn\u{2019}t help, reset {name} and allow {application} again."
+                ),
                 ModalAction::new(
                     TroubleshootDecision::Reset,
                     "Reset",
@@ -537,7 +539,7 @@ impl SettingsWindow {
         } else {
             (
                 format!(
-                    "{reopen} If that doesn't help, remove {application} from Privacy & Security > {pane} and add it again."
+                    "{reopen} If that doesn\u{2019}t help, remove {application} from Privacy & Security > {pane} and add it again."
                 ),
                 ModalAction::new(
                     TroubleshootDecision::OpenSettings,
@@ -564,6 +566,7 @@ impl SettingsWindow {
                 ),
             ],
         )
+        .detail("Some programs use a helper app that needs its own permission.")
         .present(window, cx, move |outcome, cx| {
             let AlertOutcome::Activated { action_id, .. } = outcome else {
                 return;

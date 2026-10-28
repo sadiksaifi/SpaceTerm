@@ -136,6 +136,15 @@ impl WorkspaceFrame {
         }
     }
 
+    /// The stage's top edge. Wherever nothing occupies the title band above it, the stage reaches
+    /// the window's top as it reaches the other edges, and the band stays only a drag region.
+    /// `band_free` is how much of the band above the stage is free of chrome, from 0, below the
+    /// top chrome, to 1, at the window edge inset, so the edge eases as chrome slides away.
+    pub(crate) fn stage_top_inset(self, base_height: Pixels, band_free: f32) -> Pixels {
+        let below = self.top_chrome_height(base_height);
+        below + (self.window_edge_inset() - below) * band_free.clamp(0.0, 1.0)
+    }
+
     /// The height of the top chrome, which absorbs the frame's top space.
     pub(crate) fn top_chrome_height(self, base_height: Pixels) -> Pixels {
         self.window_edge + self.top_band_height(base_height)

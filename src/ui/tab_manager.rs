@@ -3073,7 +3073,7 @@ impl TabManager {
             let _ = Alert::new(
                 ModalId::new("shared-tab-unavailable"),
                 "Shared change unavailable",
-                "Couldn't Create Tab",
+                "Couldn\u{2019}t Create Tab",
                 detail,
                 vec![ModalAction::new(
                     (),

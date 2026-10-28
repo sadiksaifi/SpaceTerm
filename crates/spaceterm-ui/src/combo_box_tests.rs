@@ -3867,3 +3867,38 @@ fn combo_boxes_publish_a_pop_up_button_with_a_list_of_options(cx: &mut TestAppCo
         })
     );
 }
+
+#[gpui::test]
+fn a_query_matching_no_choice_should_say_so_above_the_commands_heading(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (root, _, _, cx) = command_combo_box_window(cx, |_| vec![ComboBoxCommand::new(9, "New")]);
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.copy = ComboBoxCopy::new("Filter workspaces", "Search")
+                .no_match("No workspaces match")
+                .commands_heading("Create")
+                .no_choices("No workspaces to attach.");
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    open_by_pointer(cx);
+    let listed = cx.debug_bounds("combo-box-choices-note").is_some();
+
+    cx.simulate_input("zzz");
+    cx.run_until_parked();
+    let tree = A11yTree::read(cx);
+    let note = tree
+        .find("No workspaces match \u{201C}zzz\u{201D}.")
+        .is_some();
+    let heading = tree.node("Create")["aria"]["role"].clone();
+
+    assert!(!listed, "a popup listing choices adds no note");
+    assert!(note, "the note quotes the query that matched no choice");
+    assert_eq!(heading, "Heading");
+    assert!(
+        cx.debug_bounds("combo-box-empty").is_none(),
+        "the commands remain, so no empty state replaces them"
+    );
+}

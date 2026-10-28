@@ -60,7 +60,8 @@ impl AskPassRequest {
     }
 
     pub(crate) fn confirmation_presentation(&self) -> Option<AskPassConfirmationPresentation> {
-        let presentation = self.presentation();
+        // A confirmation never asks for the remote sudo password, so it names no computer.
+        let presentation = self.presentation("");
         if presentation.kind.uses_secret_entry() {
             return None;
         }
@@ -69,7 +70,7 @@ impl AskPassRequest {
             first_contact,
             title: presentation.title,
             message: if first_contact {
-                "Verify the host key fingerprint."
+                "SSH doesn\u{2019}t recognize this host\u{2019}s key. Verify the fingerprint with the host owner before connecting."
             } else {
                 "SSH requires confirmation."
             },
@@ -79,14 +80,20 @@ impl AskPassRequest {
         })
     }
 
-    pub(crate) fn secret_presentation(&self) -> Option<AskPassSecretPresentation> {
-        let presentation = self.presentation();
+    /// `this_computer` names this computer inside a sentence, such as "this Mac", so the remote
+    /// sudo prompt can tell it apart from the remote one.
+    pub(crate) fn secret_presentation(
+        &self,
+        this_computer: &str,
+    ) -> Option<AskPassSecretPresentation> {
+        let presentation = self.presentation(this_computer);
         if !presentation.kind.uses_secret_entry() {
             return None;
         }
         Some(AskPassSecretPresentation {
             title: presentation.title,
             detail: presentation.detail,
+            note: presentation.note,
             affirmative: presentation.affirmative,
             negative: presentation.negative,
             field_label: presentation.field_label?,
@@ -98,7 +105,7 @@ impl AskPassRequest {
         classify_prompt(&self.prompt, self.kind)
     }
 
-    fn presentation(&self) -> AskPassPresentation {
+    fn presentation(&self, this_computer: &str) -> AskPassPresentation {
         match self.classification() {
             AskPassPromptClassification::FirstContact(first_contact) => {
                 AskPassPresentation::first_contact(first_contact)
@@ -111,7 +118,7 @@ impl AskPassRequest {
                 AskPassPresentation::key_passphrase(self, key_passphrase)
             }
             AskPassPromptClassification::RemoteAdministrator => {
-                AskPassPresentation::remote_administrator()
+                AskPassPresentation::remote_administrator(this_computer)
             }
             AskPassPromptClassification::Secret => AskPassPresentation::secret(self),
         }
@@ -121,7 +128,7 @@ impl AskPassRequest {
 /// Owned, non-secret content rendered by SpaceTerm's shared GPUI Alert surface.
 pub(crate) struct AskPassConfirmationPresentation {
     first_contact: bool,
-    title: &'static str,
+    title: String,
     message: &'static str,
     detail: String,
     affirmative: &'static str,
@@ -133,8 +140,8 @@ impl AskPassConfirmationPresentation {
         self.first_contact
     }
 
-    pub(crate) const fn title(&self) -> &'static str {
-        self.title
+    pub(crate) fn title(&self) -> &str {
+        &self.title
     }
 
     pub(crate) const fn message(&self) -> &'static str {
@@ -156,8 +163,10 @@ impl AskPassConfirmationPresentation {
 
 /// Owned secret-entry content rendered by SpaceTerm's shared GPUI Dialog surface.
 pub(crate) struct AskPassSecretPresentation {
-    title: &'static str,
+    title: String,
     detail: String,
+    /// What SpaceTerm does with the response, shown after the field.
+    note: Option<&'static str>,
     affirmative: &'static str,
     negative: &'static str,
     field_label: &'static str,
@@ -165,12 +174,16 @@ pub(crate) struct AskPassSecretPresentation {
 }
 
 impl AskPassSecretPresentation {
-    pub(crate) const fn title(&self) -> &'static str {
-        self.title
+    pub(crate) fn title(&self) -> &str {
+        &self.title
     }
 
     pub(crate) fn detail(&self) -> &str {
         &self.detail
+    }
+
+    pub(crate) const fn note(&self) -> Option<&'static str> {
+        self.note
     }
 
     pub(crate) const fn affirmative(&self) -> &'static str {
@@ -245,43 +258,50 @@ impl AskPassPresentationKind {
 
 struct AskPassPresentation {
     kind: AskPassPresentationKind,
-    title: &'static str,
+    title: String,
     detail: String,
+    note: Option<&'static str>,
     affirmative: &'static str,
     negative: &'static str,
     field_label: Option<&'static str>,
 }
 
 impl AskPassPresentation {
-    fn remote_administrator() -> Self {
+    fn remote_administrator(this_computer: &str) -> Self {
         Self {
             kind: AskPassPresentationKind::RemoteAdministrator,
-            title: "Allow the Server to Keep Running",
-            detail: "Enter your sudo password for the remote computer to let its SpaceTerm Server keep running after you log out.".into(),
+            title: "Allow the Server to Keep Running".into(),
+            detail: format!(
+                "Enter your sudo password for the remote computer, not for {this_computer}, so its SpaceTerm Server keeps running after you log out."
+            ),
+            note: Some("SpaceTerm sends it once and doesn\u{2019}t store it."),
             affirmative: "Allow",
-            negative: "Don't Allow",
+            negative: "Don\u{2019}t Allow",
             field_label: Some("Remote sudo password"),
         }
     }
 
     fn first_contact(prompt: FirstContactPrompt<'_>) -> Self {
-        let detail = match prompt.address {
-            Some(address) if !prompt.additional_details.is_empty() => format!(
-                "Verify this fingerprint with the host owner before connecting. Host: {}\nAddress: {address}\n\n{} fingerprint:\n{}\n\n{}",
-                prompt.host,
-                prompt.key_type,
-                prompt.fingerprint,
-                prompt.additional_details.join("\n")
+        let mut detail = match prompt.address {
+            Some(address) => format!(
+                "Host: {}\nAddress: {address}\n\n{} fingerprint:\n{}",
+                prompt.host, prompt.key_type, prompt.fingerprint
             ),
-            _ => format!(
-                "Verify the fingerprint with the host owner.\n\nHost: {}\n\n{} fingerprint:\n{}",
+            None => format!(
+                "Host: {}\n\n{} fingerprint:\n{}",
                 prompt.host, prompt.key_type, prompt.fingerprint
             ),
         };
+        if !prompt.additional_details.is_empty() {
+            detail.push_str("\n\n");
+            detail.push_str(&prompt.additional_details.join("\n"));
+        }
+        detail.push_str("\n\nIf you continue, SSH remembers this key for future connections.");
         Self {
             kind: AskPassPresentationKind::FirstContact,
-            title: "Verify SSH Host",
+            title: "Verify SSH Host".into(),
             detail,
+            note: None,
             affirmative: "Trust & Connect",
             negative: "Cancel",
             field_label: None,
@@ -291,8 +311,9 @@ impl AskPassPresentation {
     fn confirmation(request: &AskPassRequest) -> Self {
         Self {
             kind: AskPassPresentationKind::Confirmation,
-            title: "SSH Authentication",
+            title: "SSH Authentication".into(),
             detail: request.prompt().to_owned(),
+            note: None,
             affirmative: "Yes",
             negative: "No",
             field_label: None,
@@ -300,16 +321,21 @@ impl AskPassPresentation {
     }
 
     fn password(request: &AskPassRequest, prompt: PasswordPrompt<'_>) -> Self {
-        let detail = match (prompt.account, prompt.host) {
-            (Some(account), Some(host)) => {
-                format!("Enter the SSH password for {account} on {host}.")
-            }
-            _ => format!("SSH requested:\n{}", request.prompt()),
+        let (title, detail) = match (prompt.account, prompt.host) {
+            (Some(account), Some(host)) => (
+                format!("Sign In to {host}"),
+                format!("Enter the SSH password for {account} on {host}."),
+            ),
+            _ => (
+                "Sign In".to_owned(),
+                format!("SSH requested:\n{}", request.prompt()),
+            ),
         };
         Self {
             kind: AskPassPresentationKind::Password,
-            title: "Sign In",
+            title,
             detail,
+            note: Some(SENT_TO_SSH),
             affirmative: "Sign In",
             negative: "Cancel",
             field_label: Some("Password"),
@@ -334,8 +360,9 @@ impl AskPassPresentation {
         };
         Self {
             kind: AskPassPresentationKind::KeyPassphrase,
-            title,
+            title: title.into(),
             detail,
+            note: Some(SENT_TO_SSH),
             affirmative: "Connect",
             negative: "Cancel",
             field_label: Some("Key passphrase"),
@@ -345,14 +372,18 @@ impl AskPassPresentation {
     fn secret(request: &AskPassRequest) -> Self {
         Self {
             kind: AskPassPresentationKind::Secret,
-            title: "SSH Authentication",
+            title: "SSH Authentication".into(),
             detail: request.prompt().to_owned(),
+            note: None,
             affirmative: "Continue",
             negative: "Cancel",
             field_label: Some("SSH authentication response"),
         }
     }
 }
+
+/// What SpaceTerm does with a password or passphrase SSH asked for.
+const SENT_TO_SSH: &str = "SpaceTerm sends it to SSH and doesn\u{2019}t store it.";
 
 enum AskPassPromptClassification<'a> {
     RemoteAdministrator,
@@ -617,8 +648,16 @@ mod tests {
             super::AskPassPromptKind::Secret,
         )
         .unwrap();
-        let presentation = request.secret_presentation().unwrap();
+        let presentation = request.secret_presentation("this Mac").unwrap();
         assert_eq!(presentation.field_label(), "Remote sudo password");
+        assert_eq!(
+            presentation.detail(),
+            "Enter your sudo password for the remote computer, not for this Mac, so its SpaceTerm Server keeps running after you log out."
+        );
+        assert_eq!(
+            presentation.note(),
+            Some("SpaceTerm sends it once and doesn\u{2019}t store it.")
+        );
         assert!(presentation.requires_nonempty());
         let similar = super::AskPassRequest::new(
             format!("{} extra", super::REMOTE_LINGER_PROMPT),
@@ -626,7 +665,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            similar.secret_presentation().unwrap().field_label(),
+            similar
+                .secret_presentation("this Mac")
+                .unwrap()
+                .field_label(),
             "SSH authentication response"
         );
     }
@@ -662,7 +704,7 @@ mod tests {
     #[test]
     fn password_should_require_nonempty_response() {
         let presentation = request("root@example.test's password:", AskPassPromptKind::Secret)
-            .secret_presentation()
+            .secret_presentation("this Mac")
             .unwrap();
 
         assert!(presentation.requires_nonempty());
@@ -671,12 +713,17 @@ mod tests {
     #[test]
     fn password_should_present_account_and_host_details() {
         let presentation = request("root@example.test's password:", AskPassPromptKind::Secret)
-            .secret_presentation()
+            .secret_presentation("this Mac")
             .unwrap();
 
+        assert_eq!(presentation.title(), "Sign In to example.test");
         assert_eq!(
             presentation.detail(),
             "Enter the SSH password for root on example.test."
+        );
+        assert_eq!(
+            presentation.note(),
+            Some("SpaceTerm sends it to SSH and doesn\u{2019}t store it.")
         );
     }
 
@@ -686,7 +733,7 @@ mod tests {
             "Enter passphrase for key '/Users/dev/.ssh/id_ed25519':",
             AskPassPromptKind::Secret,
         )
-        .secret_presentation()
+        .secret_presentation("this Mac")
         .unwrap();
 
         assert!(presentation.requires_nonempty());
@@ -713,7 +760,7 @@ mod tests {
         ] {
             let prompt = format!("Enter passphrase for key '{key}':");
             let presentation = request(&prompt, AskPassPromptKind::Secret)
-                .secret_presentation()
+                .secret_presentation("this Mac")
                 .unwrap();
 
             assert_eq!(presentation.title(), title, "{key}");
@@ -721,6 +768,11 @@ mod tests {
             assert_eq!(presentation.affirmative(), "Connect", "{key}");
             assert_eq!(presentation.negative(), "Cancel", "{key}");
             assert_eq!(presentation.field_label(), "Key passphrase", "{key}");
+            assert_eq!(
+                presentation.note(),
+                Some("SpaceTerm sends it to SSH and doesn\u{2019}t store it."),
+                "{key}"
+            );
             assert!(presentation.requires_nonempty(), "{key}");
         }
     }
@@ -728,7 +780,7 @@ mod tests {
     #[test]
     fn generic_secret_should_allow_empty_response() {
         let presentation = request("Verification code:", AskPassPromptKind::Secret)
-            .secret_presentation()
+            .secret_presentation("this Mac")
             .unwrap();
 
         assert!(!presentation.requires_nonempty());
@@ -738,7 +790,7 @@ mod tests {
     fn generic_confirmation_should_not_build_secret_entry() {
         let request = request("Continue?", AskPassPromptKind::Confirmation);
 
-        assert!(request.secret_presentation().is_none());
+        assert!(request.secret_presentation("this Mac").is_none());
     }
 
     #[test]
@@ -747,22 +799,22 @@ mod tests {
             (
                 "example.test",
                 "",
-                "Verify the fingerprint with the host owner.\n\nHost: example.test\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=",
+                "Host: example.test\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=\n\nIf you continue, SSH remembers this key for future connections.",
             ),
             (
                 "example.test",
                 "This key is not known by any other names.\n",
-                "Verify the fingerprint with the host owner.\n\nHost: example.test\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=",
+                "Host: example.test\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=\n\nThis key is not known by any other names.\n\nIf you continue, SSH remembers this key for future connections.",
             ),
             (
                 "example.test (192.0.2.1)",
                 "",
-                "Verify the fingerprint with the host owner.\n\nHost: example.test\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=",
+                "Host: example.test\nAddress: 192.0.2.1\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=\n\nIf you continue, SSH remembers this key for future connections.",
             ),
             (
                 "example.test (192.0.2.1)",
                 "This key is not known by any other names.\nAdditional host proof.\n",
-                "Verify this fingerprint with the host owner before connecting. Host: example.test\nAddress: 192.0.2.1\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=\n\nThis key is not known by any other names.\nAdditional host proof.",
+                "Host: example.test\nAddress: 192.0.2.1\n\nED25519 fingerprint:\nSHA256:abcDEF0123+/=\n\nThis key is not known by any other names.\nAdditional host proof.\n\nIf you continue, SSH remembers this key for future connections.",
             ),
         ] {
             let prompt = format!(
@@ -780,7 +832,10 @@ mod tests {
                 "{host}, {additional_details:?}"
             );
             assert_eq!(presentation.title(), "Verify SSH Host");
-            assert_eq!(presentation.message(), "Verify the host key fingerprint.");
+            assert_eq!(
+                presentation.message(),
+                "SSH doesn\u{2019}t recognize this host\u{2019}s key. Verify the fingerprint with the host owner before connecting."
+            );
             assert_eq!(
                 presentation.detail(),
                 expected,

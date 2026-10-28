@@ -291,7 +291,7 @@ fn remote_connection_phases_have_expected_status_labels() {
     );
     assert_eq!(
         remote_connection_status(RemoteConnectionPhase::Disconnected),
-        Some("Disconnected")
+        Some("Not connected")
     );
     assert_eq!(
         remote_connection_status(RemoteConnectionPhase::Failed),
@@ -2296,9 +2296,12 @@ fn command_q_without_a_status_area_confirms_actual_exit(cx: &mut TestAppContext)
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
     let (title, detail) = cx.pending_prompt().expect("actual exit always asks");
     assert_eq!(title, format!("Quit {name}?"));
-    assert!(
-        detail.is_empty(),
-        "the installed-build quit prompt is title-only"
+    assert_eq!(
+        detail,
+        format!(
+            "{name} leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it."
+        ),
+        "the installed-build quit prompt says what keeps running"
     );
     cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
@@ -7472,7 +7475,7 @@ fn main_window_reading_order(cx: &mut VisualTestContext) -> Vec<String> {
     const CONTROLS: [&str; 11] = [
         "Hide Sidebar",
         "Show Sidebar",
-        "Switch Workspace",
+        "Choose Workspace",
         "Workspaces",
         "Settings",
         "New Workspace",
@@ -7547,7 +7550,7 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
         main_window_reading_order(cx),
         [
             "Hide Sidebar",
-            "Switch Workspace",
+            "Choose Workspace",
             "Workspaces",
             "Settings",
             "New Workspace",
@@ -7564,7 +7567,7 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
         main_window_reading_order(cx),
         [
             "Show Sidebar",
-            "Switch Workspace",
+            "Choose Workspace",
             "Resize Workspace sidebar",
             "Tabs",
             "New Tab",
@@ -11107,7 +11110,7 @@ fn offline_detach_should_still_stop_presenting_while_shared_edits_stay_unavailab
 }
 
 #[gpui::test]
-fn the_offline_empty_view_should_say_detached_workspaces_return_on_reconnect(
+fn the_offline_empty_view_should_name_the_unreachable_server_and_offer_a_way_back(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
@@ -11120,13 +11123,146 @@ fn the_offline_empty_view_should_say_detached_workspaces_return_on_reconnect(
     harness.detach(3, cx);
 
     let tree = A11yTree::read(cx);
-    let description = tree.node(super::empty::EMPTY_TITLE)["aria"]["description"].clone();
+    let empty = tree.node(super::empty::OFFLINE_TITLE).clone();
     let count = harness
         .manager
         .read_with(cx, |manager, _| manager.workspace_count());
 
     assert_eq!(count, 0);
-    assert_eq!(description, super::empty::EMPTY_OFFLINE_DETAIL);
+    assert_eq!(
+        empty["aria"]["description"],
+        super::empty::offline_detail("this computer").as_ref()
+    );
+    assert!(
+        tree.find(super::empty::EMPTY_TITLE).is_none(),
+        "an unreachable server says so instead of listing nothing to choose"
+    );
+    assert!(
+        cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_some(),
+        "Try Again"
+    );
+    assert!(
+        cx.debug_bounds("server-launch-settings").is_some(),
+        "Server Settings"
+    );
+    assert!(
+        cx.debug_bounds("empty-workspace-choose").is_none(),
+        "the switcher lists nothing to attach while the server is unreachable"
+    );
+}
+
+#[gpui::test]
+fn try_again_on_the_offline_empty_view_should_reconnect_now_and_say_when_it_fails(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.edits.set_connected(false);
+    harness.sync(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    click(super::empty::RECONNECT_SELECTOR, cx);
+    let retries = harness.edits.retries();
+    let trying = A11yTree::read(cx)
+        .find_text("Reconnecting\u{2026}")
+        .is_some();
+    harness
+        .edits
+        .fail_attempt(spaceterm_server::ServerError::NotRunning);
+    harness.sync(cx);
+    let failed = A11yTree::read(cx)
+        .find_text("Still not connected. The server is not running.")
+        .is_some();
+
+    assert_eq!(retries, 1, "Try Again asks the connection to reconnect now");
+    assert!(trying, "the view says it is reconnecting");
+    assert!(failed, "an attempt that fails says so");
+}
+
+#[gpui::test]
+fn a_stopped_server_offers_start_server_on_the_empty_view(cx: &mut TestAppContext) {
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.edits.set_connected(false);
+    harness
+        .edits
+        .set_error(spaceterm_server::ServerError::Stopped);
+    harness.sync(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    assert!(
+        cx.debug_bounds("server-launch-start").is_some(),
+        "Start Server"
+    );
+    assert!(
+        cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_none(),
+        "a stopped server answers no reconnect"
+    );
+}
+
+#[gpui::test]
+fn the_empty_view_should_draw_a_panes_rim_and_offer_local_creation(cx: &mut TestAppContext) {
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    let stage = cx.debug_bounds("empty-workspace-stage");
+    let pane = cx.debug_bounds("empty-workspace-pane");
+    let create = cx.debug_bounds("empty-workspace-create");
+
+    assert!(
+        stage.is_some() && pane.is_some(),
+        "the stage draws an empty Pane"
+    );
+    assert!(
+        create.is_some(),
+        "the empty view offers New Local Workspace beside Choose Workspace"
+    );
+    assert!(
+        cx.debug_bounds("workspace-list-empty").is_some(),
+        "the sidebar says its list is empty where the first row would be"
+    );
+}
+
+#[gpui::test]
+fn the_empty_stage_should_reach_the_window_top_when_no_tab_strip_holds_the_band(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    let frame = workspace_frame(cx);
+    let area = cx
+        .debug_bounds("empty-workspace-stage-area")
+        .expect("the stage renders");
+    let stage = cx
+        .debug_bounds("empty-workspace-stage")
+        .expect("the stage renders");
+    let pane = cx
+        .debug_bounds("empty-workspace-pane")
+        .expect("the stage draws an empty Pane");
+
+    assert_eq!(
+        area.top() - stage.top(),
+        frame.window_edge_inset(),
+        "the stage keeps the window edge inset at the top, as at the right and bottom"
+    );
+    assert_eq!(
+        stage.right() - pane.right(),
+        frame.window_edge_inset(),
+        "the right edge keeps the same inset"
+    );
+    assert!(
+        cx.debug_bounds("empty-workspace-drag-region").is_some(),
+        "the band stays the window's drag region"
+    );
 }
 
 /// One shared Workspace with a Tab in each of two Worktrees, its Git facts published by the

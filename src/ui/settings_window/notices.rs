@@ -59,7 +59,7 @@ pub(super) fn unpair_message(pending: &PendingUnpair) -> String {
             let next = match state {
                 UnpairState::NeedsInteraction => "Choose Resume to continue cancelling.",
                 UnpairState::Retrying => "It will retry automatically.",
-                UnpairState::Unconfirmed => "Choose Retry to continue cancelling.",
+                UnpairState::Unconfirmed => "Choose Try Again to continue cancelling.",
             };
             format!("SpaceTerm is cancelling the unfinished pairing with {server}. {next}")
         }
@@ -68,16 +68,16 @@ pub(super) fn unpair_message(pending: &PendingUnpair) -> String {
         }
         (false, true, UnpairState::Retrying) => format!("Finishing unpairing from {server}…"),
         (false, true, UnpairState::Unconfirmed) => {
-            format!("Choose Retry to finish unpairing from {server}.")
+            format!("Choose Try Again to finish unpairing from {server}.")
         }
         (false, false, UnpairState::NeedsInteraction) => {
-            format!("Unpair from {server} isn't confirmed. Choose Resume.")
+            format!("Unpair from {server} isn\u{2019}t confirmed. Choose Resume.")
         }
         (false, false, UnpairState::Retrying) => {
-            format!("Unpair from {server} isn't confirmed yet.")
+            format!("Unpair from {server} isn\u{2019}t confirmed yet.")
         }
         (false, false, UnpairState::Unconfirmed) => {
-            format!("Unpair from {server} isn't confirmed. Choose Retry.")
+            format!("Unpair from {server} isn\u{2019}t confirmed. Choose Try Again.")
         }
     }
 }
@@ -97,7 +97,7 @@ impl SettingsWindow {
                 .filter(|action| **action == UnpairAction::Resume)
                 .map(|action| {
                     let label = match pending.state {
-                        UnpairState::Unconfirmed => "Retry",
+                        UnpairState::Unconfirmed => "Try Again",
                         _ => action.label(),
                     };
                     (label, NoticeStep::Unpair(pending.clone(), *action))
@@ -283,7 +283,7 @@ mod tests {
     fn an_unconfirmed_unpair_names_the_server_and_keeps_trying() {
         assert_eq!(
             unpair_message(&pending(UnpairState::Retrying)),
-            "Unpair from Studio isn't confirmed yet."
+            "Unpair from Studio isn\u{2019}t confirmed yet."
         );
     }
 
@@ -295,6 +295,6 @@ mod tests {
         let message = unpair_message(&confirmed);
 
         assert_eq!(message, "Finishing unpairing from Studio…");
-        assert!(!message.contains("isn't confirmed"), "{message}");
+        assert!(!message.contains("isn\u{2019}t confirmed"), "{message}");
     }
 }

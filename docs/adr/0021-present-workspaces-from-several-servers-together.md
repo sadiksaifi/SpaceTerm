@@ -2,7 +2,7 @@
 
 One SpaceTerm Client connects to several SpaceTerm Servers and presents its [Workspace Attachments](0032-keep-workspace-attachments-specific-to-each-client.md) in one continuous list in its Workspace Window. Each server exposes only its own Workspaces.
 
-The client owns one persistent Workspace display order across all servers. People can interleave local and remote Workspaces freely. The sidebar, Workspace Switcher and position shortcuts follow that order. Each remote Workspace carries its machine's reported name inline; the list has no machine headings or empty-server placeholders. Server ownership determines where work runs without constraining how the person arranges it.
+The client owns one persistent Workspace display order across all servers. People can interleave local and remote Workspaces freely. The sidebar, Workspace Switcher and position shortcuts follow that order. Each remote Workspace carries its machine's reported name inline; the list has no machine headings or empty-server placeholders. An empty list shows one caption for the whole list, never one for a server. Server ownership determines where work runs without constraining how the person arranges it.
 
 Separately paired Client Identities retain independent attachments and views, including when their Saved Connections reach the same server. Workspace ordering preserves those scopes; it transfers no connection, operation or Pane-control authority between them.
 

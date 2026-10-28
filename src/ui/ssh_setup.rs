@@ -194,20 +194,20 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
     match failure {
         // The kept build is changed only on that computer, after which trying again can help.
         SetupFailure::Incompatible(IncompatibilityKind::Installation) => fixed(
-            "Different Build",
+            "Different build",
             incompatibility_detail(IncompatibilityKind::Installation),
             true,
         ),
         SetupFailure::Incompatible(kind) => fixed("Incompatible", incompatibility_detail(*kind), false),
         SetupFailure::Refused(RefusalKind::MissingArtifact) => {
-            fixed("Not Included", refusal_detail(RefusalKind::MissingArtifact), false)
+            fixed("Not included", refusal_detail(RefusalKind::MissingArtifact), false)
         }
         SetupFailure::Refused(RefusalKind::InvalidEndpoint) => {
-            fixed("Address Not Accepted", refusal_detail(RefusalKind::InvalidEndpoint), false)
+            fixed("Address not accepted", refusal_detail(RefusalKind::InvalidEndpoint), false)
         }
         SetupFailure::Refused(kind) => fixed("Refused", refusal_detail(*kind), true),
         SetupFailure::Unreachable { address } => SetupProblem {
-            state: "Not Reachable",
+            state: "Not reachable",
             explanation: format!(
                 "SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {}. Check the address and that any firewall allows UDP, or enter the address this computer uses to reach it.",
                 address.authority()
@@ -227,7 +227,7 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
         // The sheet ends or returns to its form on a cancellation; these words only cover a
         // stray one.
         SetupFailure::Cancelled => {
-            fixed("Not Added", "Setup stopped before the server was added.", true)
+            fixed("Not added", "Setup stopped before the server was added.", true)
         }
     }
 }

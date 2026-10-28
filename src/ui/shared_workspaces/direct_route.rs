@@ -122,6 +122,7 @@ impl SharedWorkspaceEdits for UnavailableEdits {
             error: Some(spaceterm_server::ServerError::Direct(
                 spaceterm_server::direct::DirectError::Transport,
             )),
+            failed_attempts: 0,
         }
     }
 

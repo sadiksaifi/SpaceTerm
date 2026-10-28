@@ -33,6 +33,8 @@
 	<string>APPL</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
+	<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
+	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
