@@ -127,8 +127,8 @@ trait Supervisor: Send + Sync {
     fn prepare_start(&self) -> Result<(), ServerError>;
     fn start(&self) -> Result<(), ServerError>;
     fn stop(&self) -> Result<(), ServerError>;
-    /// How long the service manager lets a stopping server finish its cleanup. Stop, Restart
-    /// and Update wait this long for the old server to exit before their outcome is unresolved.
+    /// How long Stop waits for the server to exit. Restart and Update stop through the same wait.
+    /// A server still running afterwards leaves the operation unresolved.
     fn stop_timeout(&self) -> Duration;
     /// Change startup activation only. Never stop, start or unregister the service.
     fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError>;

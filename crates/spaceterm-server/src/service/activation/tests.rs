@@ -481,21 +481,31 @@ fn update_waits_for_a_slow_stop_within_the_service_managers_timeout() {
     });
 }
 
-/// A stop that outlasts the service manager's timeout leaves the update unresolved. Recovery
-/// finishes it once the old server exits, without dispatching Stop again.
+/// A stop that outlasts the service manager's timeout leaves the update unresolved at that
+/// timeout. Recovery refuses until the old server exits, then finishes without another Stop.
 #[test]
 fn stop_past_the_service_managers_timeout_stays_recoverable_without_another_stop() {
     with_service(|service, previous, candidate, supervisor| {
         set_running(&service, &supervisor);
         *supervisor.stop_takes.lock().unwrap() = Some(Duration::from_secs(3600));
         let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        let started = Instant::now();
         assert_eq!(
             service.activate(approval),
             Err(ServerError::CleanupUnresolved)
         );
+        let waited = started.elapsed();
+        assert!(
+            waited >= STOP_TIMEOUT && waited < STOP_TIMEOUT + Duration::from_secs(5),
+            "the service manager's stop timeout is the deadline, waited {waited:?}"
+        );
         let status = service.activation_status().unwrap().unwrap();
         assert_eq!(status.phase, ActivationPhase::Uncertain);
         assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        assert_eq!(
+            service.recover_activation(),
+            Err(ServerError::ActivationUnresolved)
+        );
 
         *supervisor.exits_at.lock().unwrap() = Some(Instant::now());
         assert_eq!(
