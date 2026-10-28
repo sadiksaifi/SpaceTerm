@@ -276,8 +276,8 @@ fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
     );
     assert_eq!(
         parked.detail.as_ref(),
-        "It changes from 1.4.0 (commit aaaaaaa) to 1.5.0 (commit bbbbbbb) and stays stopped \
-         until you start it."
+        "It changes from 1.4.0 (commit aaaaaaa) to 1.5.0 (commit bbbbbbb). It isn\u{2019}t \
+         running, so no Terminal Sessions end, and it stays stopped until you start it."
     );
 }
 

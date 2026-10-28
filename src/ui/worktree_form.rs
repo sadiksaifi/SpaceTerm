@@ -621,7 +621,7 @@ impl WorktreeForm {
             Err(WorktreeCreateError::Server(_)) => (None,"SpaceTerm could not confirm whether the Worktree was created. Review the sidebar before trying again.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
-                "Git doesn't accept this name.".into(),
+                "Git doesn\u{2019}t accept this name.".into(),
             ),
             Err(WorktreeCreateError::BranchExists) => (
                 Some(FormField::Name),

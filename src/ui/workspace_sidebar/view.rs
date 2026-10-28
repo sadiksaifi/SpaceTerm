@@ -1631,8 +1631,8 @@ fn remove_worktree_entry<A: Clone>(
     let reason = match removal {
         WorktreeRemoval::Allowed => None,
         WorktreeRemoval::NeedsServer => Some("Remove Worktree…"),
-        WorktreeRemoval::Main => Some("Can't Remove Main Worktree"),
-        WorktreeRemoval::Locked => Some("Can't Remove Locked Worktree"),
+        WorktreeRemoval::Main => Some("Can\u{2019}t Remove Main Worktree"),
+        WorktreeRemoval::Locked => Some("Can\u{2019}t Remove Locked Worktree"),
         WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin Directory to Remove"),
         WorktreeRemoval::CheckingPinnedDirectories => {
             Some("Checking for Pinned Directories\u{2026}")

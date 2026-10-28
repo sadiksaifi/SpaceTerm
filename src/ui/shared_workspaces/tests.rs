@@ -2198,6 +2198,38 @@ mod close {
         );
     }
 
+    /// The Tab outside the Worktree holds no Pane, so closing the Worktree's Tabs empties the
+    /// Workspace and the server removes it.
+    #[test]
+    fn closing_a_worktrees_tabs_that_empty_the_workspace_should_say_it_is_removed() {
+        let mut worktree_tab = tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)]);
+        worktree_tab.worktree = Some(PathBuf::from("/server/work-feature"));
+        let empty_tab = Tab {
+            root_pane: SECOND_TAB_PANE,
+            panes: Vec::new(),
+            ..tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)])
+        };
+        let (shared, _) = shared(inventory(1, vec![worktree_tab, empty_tab]));
+        let close = shared
+            .close_approval(CloseTarget::Worktree {
+                workspace: WORKSPACE,
+                tab: ROOT_TAB,
+            })
+            .expect("the published Worktree can be reviewed");
+
+        assert_eq!(close.title(), "Kill Workspace \u{201C}Build\u{201D}?");
+        assert_eq!(
+            close.message(),
+            "This is the only Tab in \u{201C}Build\u{201D}, so the Workspace is removed for every \
+             client.",
+            "no shell runs, so no Session ends"
+        );
+        assert_eq!(
+            close.detail(),
+            Some("Repository files and Worktrees stay on disk. This can\u{2019}t be undone.")
+        );
+    }
+
     #[test]
     fn closing_a_workspaces_only_pane_should_say_the_workspace_is_removed() {
         let (shared, _) = shared(with_session(root_only(), ROOT_PANE, [42; 32]));

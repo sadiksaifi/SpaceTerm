@@ -582,8 +582,8 @@ mod development {
 
         pub(crate) const fn title(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Couldn't Restore Workspaces",
-                Self::Write => "Couldn't Confirm Saved Changes",
+                Self::Read | Self::UnsafeStorage => "Couldn\u{2019}t Restore Workspaces",
+                Self::Write => "Couldn\u{2019}t Confirm Saved Changes",
             }
         }
 
@@ -597,10 +597,10 @@ mod development {
         pub(crate) const fn detail(self) -> &'static str {
             match self {
                 Self::Read => {
-                    "SpaceTerm couldn't read your saved Workspace arrangement. Quit and reopen SpaceTerm to try again."
+                    "SpaceTerm couldn\u{2019}t read your saved Workspace arrangement. Quit and reopen SpaceTerm to try again."
                 }
                 Self::UnsafeStorage => {
-                    "SpaceTerm couldn't open your saved Workspace arrangement safely. Your saved arrangement is unchanged."
+                    "SpaceTerm couldn\u{2019}t open your saved Workspace arrangement safely. Your saved arrangement is unchanged."
                 }
                 Self::Write => {
                     "Quit and reopen SpaceTerm before you rearrange Workspaces again. Your Workspaces keep running."
@@ -2635,16 +2635,20 @@ mod development {
                         ),
                     }
                 }
-                ServerCloseTarget::Pane { .. } | ServerCloseTarget::Tab { .. }
+                ServerCloseTarget::Pane { .. }
+                | ServerCloseTarget::Tab { .. }
+                | ServerCloseTarget::Worktree { .. }
                     if self.confirmation.removes_workspace =>
                 {
-                    let only = if matches!(self.target, ServerCloseTarget::Pane { .. }) {
-                        "Pane"
-                    } else {
-                        "Tab"
+                    let only = match self.target {
+                        ServerCloseTarget::Pane { .. } => "This is the only Pane",
+                        ServerCloseTarget::Worktree { .. } if self.tabs != 1 => {
+                            "These are the only Tabs"
+                        }
+                        _ => "This is the only Tab",
                     };
                     let removal = format!(
-                        "This is the only {only} in \u{201C}{}\u{201D}, so the Workspace is removed for every client.",
+                        "{only} in \u{201C}{}\u{201D}, so the Workspace is removed for every client.",
                         self.workspace
                     );
                     match ends {

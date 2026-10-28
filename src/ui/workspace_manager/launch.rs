@@ -19,6 +19,7 @@ use crate::domain::ValidatedLocalDirectory;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::server_connection::{ServerConnection, ServerError};
 use crate::ui::pane_lifecycle::PaneConstruction;
+use crate::ui::settings_window::{AuthorizationPrompt, AuthorizedRequest};
 use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
 pub(super) const LAUNCH_SELECTOR: &str = "server-launch";
@@ -280,8 +281,6 @@ const OPENING_DETAIL: &str = "Waiting for the server…";
 pub(super) const STOPPED_TITLE: &str = "Server Stopped";
 const STOPPED_DETAIL: &str = "Start the server to open your Workspaces.";
 pub(super) const AUTHORIZATION_TITLE: &str = "Run the Server at Startup";
-const AUTHORIZATION_DETAIL: &str =
-    "Enter an administrator password so your Terminal Sessions keep running after you log out.";
 const AUTHORIZATION_DECLINED: &str = "Authorization didn\u{2019}t finish.";
 const AUTHORIZING_DETAIL: &str =
     "Enter an administrator password in the system prompt to continue.";
@@ -310,9 +309,11 @@ const fn failure_title(error: ServerError) -> &'static str {
 /// whether this build lacks one or holds one that failed verification.
 fn failure_detail(error: ServerError) -> SharedString {
     match error {
-        ServerError::CandidateMissing => "This SpaceTerm build has no server to set up, so \
-                                          reinstall SpaceTerm and try again."
-            .into(),
+        ServerError::CandidateMissing => {
+            "This SpaceTerm build doesn\u{2019}t include a server. Reinstall SpaceTerm, then try \
+             again."
+                .into()
+        }
         ServerError::RuntimeUnavailable => "Reinstall SpaceTerm, then try again.".into(),
         error => error.to_string().into(),
     }
@@ -400,7 +401,9 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             detail: if declined {
                 fixed(AUTHORIZATION_DECLINED)
             } else {
-                fixed(AUTHORIZATION_DETAIL)
+                // The same explanation every other authorization surface gives.
+                let prompt = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
+                format!("{} {}", prompt.message, prompt.detail).into()
             },
             progress: None,
             actions: &[Authorize, Settings],
@@ -430,7 +433,13 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             title: failure_title(error),
             detail: failure_detail(error),
             progress: None,
-            actions: &[Retry, Settings],
+            // Only another SpaceTerm build includes a server package, so trying again from this
+            // one changes nothing, as Settings also treats it.
+            actions: if matches!(error, ServerError::CandidateMissing) {
+                &[Settings]
+            } else {
+                &[Retry, Settings]
+            },
             icon: failure,
             waiting: false,
         },

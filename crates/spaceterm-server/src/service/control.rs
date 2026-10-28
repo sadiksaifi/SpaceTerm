@@ -232,7 +232,8 @@ impl UpdateWording {
                  every client, and Workspaces are kept."
             ),
             UpdateChange::Update if self.stopped => format!(
-                "It changes from {previous} to {candidate} and stays stopped until you start it."
+                "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
+                 Terminal Sessions end, and it stays stopped until you start it."
             ),
             UpdateChange::Update => format!(
                 "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
@@ -467,8 +468,8 @@ mod tests {
         };
         assert_eq!(
             observed(false, true),
-            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456) and stays stopped \
-             until you start it."
+            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). It isn\u{2019}t \
+             running, so no Terminal Sessions end, and it stays stopped until you start it."
         );
         assert_eq!(
             observed(false, false),

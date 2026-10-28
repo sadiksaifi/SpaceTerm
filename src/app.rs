@@ -925,7 +925,7 @@ fn quit_prompt(
     QuitPrompt {
         title: format!("Quit {name}?"),
         detail,
-        destructive: sessions.is_some(),
+        destructive: count > 0,
     }
 }
 
@@ -1668,6 +1668,7 @@ mod tests {
                 "{name} leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it."
             )
         );
+        assert!(!idle.destructive, "quitting ends no Terminal Session");
         let one = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[Some(1)])));
         assert_eq!(
             one.detail,

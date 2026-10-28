@@ -450,15 +450,16 @@ fn startup_without_usable_server_state_presents_recovery_across_the_window(
 }
 
 /// A build without a server package and a package that failed verification need different
-/// remedies, so each names its own cause.
+/// remedies, so each names its own cause. Trying again can't add a missing package, so only a
+/// failed verification offers Try Again.
 #[gpui::test]
 fn a_missing_server_package_and_a_failed_verification_explain_themselves_differently(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = launch_harness(
         vec![
-            Err(ServerError::CandidateMissing),
             Err(ServerError::RuntimeUnavailable),
+            Err(ServerError::CandidateMissing),
         ],
         cx,
     );
@@ -469,15 +470,6 @@ fn a_missing_server_package_and_a_failed_verification_explain_themselves_differe
             .read_with(cx, |manager, _| manager.launch_presentation())
             .expect("the failure is presented")
     };
-    let missing = presentation(cx);
-    assert_eq!(missing.title, "Server Not Included");
-    assert_eq!(
-        missing.detail,
-        "This SpaceTerm build has no server to set up, so reinstall SpaceTerm and try again."
-    );
-    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
-
-    harness.click(LAUNCH_RETRY_SELECTOR, cx);
     let unverified = presentation(cx);
     assert_eq!(unverified.title, "Couldn\u{2019}t Verify Server");
     assert_eq!(unverified.detail, "Reinstall SpaceTerm, then try again.");
@@ -486,6 +478,16 @@ fn a_missing_server_package_and_a_failed_verification_explain_themselves_differe
         "{}",
         unverified.detail
     );
+    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
+
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    let missing = presentation(cx);
+    assert_eq!(missing.title, "Server Not Included");
+    assert_eq!(
+        missing.detail,
+        "This SpaceTerm build doesn\u{2019}t include a server. Reinstall SpaceTerm, then try again."
+    );
+    assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_none());
     assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
     assert_eq!(
         harness.launch.steps(),
@@ -561,6 +563,17 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::AuthorizationRequired), ready()], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::AUTHORIZATION_TITLE));
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.launch_presentation())
+            .expect("the authorization step is presented")
+            .detail,
+        "Enter an administrator password so your account\u{2019}s services keep running after you \
+         log out. This applies to every service your account runs and stays on if you uninstall the \
+         server.",
+        "launch explains authorization as Settings does"
+    );
     assert_eq!(harness.launch.steps(), ["run"]);
 
     harness

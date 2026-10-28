@@ -204,9 +204,9 @@ impl Content {
             Step::Authorize => {
                 let prompt = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
                 Self {
-                    title: prompt.title.into(),
-                    heading: "Run Services After Logout?".into(),
-                    body: Some("Your computer asks for an administrator password.".into()),
+                    title: format!("{name} Server").into(),
+                    heading: prompt.title.into(),
+                    body: Some(format!("{} {}", prompt.message, prompt.detail).into()),
                     buttons: vec![
                         cancel,
                         Choice {
