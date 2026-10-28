@@ -895,6 +895,13 @@ impl Driver {
                 }
                 arrived = !datagrams.is_empty();
                 for (remote, local, data) in datagrams {
+                    // noq-proto reads a close's reason only when its events are polled, and a
+                    // later stateless reset replaces it. A server forgets a connection as soon
+                    // as it closes, so its reset to this end's next packet can arrive in the same
+                    // batch as its close, and the TLS alert of a refusal would be lost.
+                    if self.connection.is_closed() {
+                        break;
+                    }
                     self.state.transmit.clear();
                     match endpoint.handle(
                         now,
