@@ -453,6 +453,8 @@ mod wakes {
         accessibility: u64,
         /// Whether the host's wake rang since the fixture started.
         host_rang: bool,
+        /// When the host's last tick asked to tick again.
+        host_due: Option<Instant>,
         workspace: [u8; 32],
         pane: [u8; 32],
     }
@@ -497,6 +499,7 @@ mod wakes {
                 epoch: 0,
                 accessibility: 0,
                 host_rang: false,
+                host_due: None,
                 workspace,
                 pane,
             };
@@ -565,16 +568,24 @@ mod wakes {
         }
 
         /// Waits until a wake `serve` plays rings, and serves it as its thread would: the
-        /// connection publishes, the host ticks. Fails if neither rings by `deadline`.
+        /// connection publishes, the host ticks, also at the deadline its last tick returned.
+        /// Fails if nothing rings by `deadline`.
         fn serve(&mut self, serve: Serve, deadline: Instant) {
-            let rang = {
+            let both = serve == Serve::Both;
+            let (rang, due) = {
                 let mut rang = self.rings.rang.lock().unwrap();
                 loop {
                     self.host_rang |= rang.host;
-                    if rang.connection || (serve == Serve::Both && rang.host) {
-                        break std::mem::take(&mut *rang);
+                    let due = both && self.host_due.is_some_and(|due| Instant::now() >= due);
+                    if rang.connection || (both && rang.host) || due {
+                        break (std::mem::take(&mut *rang), due);
                     }
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    let until = [Some(deadline), self.host_due.filter(|_| both)]
+                        .into_iter()
+                        .flatten()
+                        .min()
+                        .unwrap_or(deadline);
+                    let Some(remaining) = until.checked_duration_since(Instant::now()) else {
                         panic!("nothing woke the connection");
                     };
                     rang = self.rings.ready.wait_timeout(rang, remaining).unwrap().0;
@@ -583,8 +594,8 @@ mod wakes {
             if rang.connection && self.outbox.take_publication() {
                 self.served.publish(&FIRST);
             }
-            if serve == Serve::Both && rang.host {
-                self.served.tick(Instant::now());
+            if both && (rang.host || due) {
+                self.host_due = self.served.tick(Instant::now());
             }
         }
 
@@ -702,6 +713,29 @@ mod wakes {
             ended
         });
         fixture.await_host();
+    }
+
+    /// A presented Terminal Session carries a new title with its screen, which only the
+    /// connection observes. The observation rings the host, whose tick pushes the inventory.
+    #[test]
+    fn a_title_observed_by_the_connection_reaches_the_inventory_through_the_host() {
+        let mut fixture = Fixture::new();
+        fixture.command(2, "printf '\\033]0;RETITLED\\007'");
+        let pane = fixture.pane;
+        let titled = move |message: &ServerMessage| {
+            matches!(message, ServerMessage::Inventory(revision) if revision
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .any(|candidate| candidate.id == pane
+                    && candidate
+                        .presentation
+                        .as_ref()
+                        .is_some_and(|presentation| presentation.title == "RETITLED")))
+        };
+        fixture.await_message(Serve::Both, |message, _| titled(message));
     }
 
     #[test]
