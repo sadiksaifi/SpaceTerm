@@ -178,6 +178,7 @@ impl Directory {
             .map_err(|_| ServerError::StorageUnavailable)
     }
     /// Removes one private record. A record that is already absent is removed.
+    #[cfg(feature = "client")]
     pub(crate) fn remove(&self, name: &std::ffi::CStr) -> Result<(), ServerError> {
         // SAFETY: descriptor and terminated single-component name remain live for this call.
         if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0
