@@ -12,7 +12,13 @@ struct SupervisorFixture {
     automatic_start: AtomicBool,
     fail_stop: AtomicBool,
     fail_replace: AtomicBool,
+    /// How long a dispatched Stop takes before the server exits. `None` exits at once.
+    stop_takes: Mutex<Option<Duration>>,
+    /// When the server dispatched to stop exits.
+    exits_at: Mutex<Option<Instant>>,
 }
+/// How long this fixture's service manager lets a stopping server finish.
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 impl Supervisor for SupervisorFixture {
     fn startup(&self) -> ServiceStartup {
         ServiceStartup::AtLogin
@@ -44,13 +50,24 @@ impl Supervisor for SupervisorFixture {
         if self.fail_stop.load(Ordering::SeqCst) {
             return Err(ServerError::ServiceUnavailable);
         }
-        self.running.store(false, Ordering::SeqCst);
+        match *self.stop_takes.lock().unwrap() {
+            Some(takes) => *self.exits_at.lock().unwrap() = Some(Instant::now() + takes),
+            None => self.running.store(false, Ordering::SeqCst),
+        }
         Ok(())
+    }
+    fn stop_timeout(&self) -> Duration {
+        STOP_TIMEOUT
     }
     fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
         panic!("activation does not uninstall")
     }
     fn running(&self) -> Result<bool, ServerError> {
+        let mut exits_at = self.exits_at.lock().unwrap();
+        if exits_at.is_some_and(|at| Instant::now() >= at) {
+            *exits_at = None;
+            self.running.store(false, Ordering::SeqCst);
+        }
         Ok(self.running.load(Ordering::SeqCst))
     }
     fn replace(&self, previous: &Path, candidate: &Path) -> Result<(), ServerError> {
@@ -97,6 +114,8 @@ fn with_service_identity(
                 automatic_start: AtomicBool::new(false),
                 fail_stop: AtomicBool::new(false),
                 fail_replace: AtomicBool::new(false),
+                stop_takes: Mutex::new(None),
+                exits_at: Mutex::new(None),
             });
             let service = Service::new(
                 fixture.paths.clone(),
@@ -437,6 +456,80 @@ fn admitted_running_operation_stops_once_and_failed_start_is_never_redispatched(
         );
         assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
     });
+}
+
+/// The service manager takes most of its stop timeout to stop the old server, as systemd took
+/// 18 s on a loaded machine. The update waits for it and goes on to start the candidate.
+#[test]
+fn update_waits_for_a_slow_stop_within_the_service_managers_timeout() {
+    with_service(|service, _, candidate, supervisor| {
+        set_running(&service, &supervisor);
+        *supervisor.stop_takes.lock().unwrap() = Some(STOP_TIMEOUT * 3 / 4);
+        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        // The fixture's Start always fails, so reaching it proves the stop was confirmed.
+        assert_eq!(service.activate(approval), Err(ServerError::StartupFailed));
+        let status = service.activation_status().unwrap().unwrap();
+        assert_eq!(status.phase, ActivationPhase::Failed { can_return: true });
+        assert_eq!(
+            (
+                supervisor.stops.load(Ordering::SeqCst),
+                supervisor.starts.load(Ordering::SeqCst)
+            ),
+            (1, 1)
+        );
+        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+    });
+}
+
+/// A stop that outlasts the service manager's timeout leaves the update unresolved at that
+/// timeout. Recovery refuses until the old server exits, then finishes without another Stop.
+#[test]
+fn stop_past_the_service_managers_timeout_stays_recoverable_without_another_stop() {
+    with_service(|service, previous, candidate, supervisor| {
+        set_running(&service, &supervisor);
+        *supervisor.stop_takes.lock().unwrap() = Some(Duration::from_secs(3600));
+        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            service.activate(approval),
+            Err(ServerError::CleanupUnresolved)
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= STOP_TIMEOUT && waited < STOP_TIMEOUT + Duration::from_secs(5),
+            "the service manager's stop timeout is the deadline, waited {waited:?}"
+        );
+        let status = service.activation_status().unwrap().unwrap();
+        assert_eq!(status.phase, ActivationPhase::Uncertain);
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        assert_eq!(
+            service.recover_activation(),
+            Err(ServerError::ActivationUnresolved)
+        );
+
+        *supervisor.exits_at.lock().unwrap() = Some(Instant::now());
+        assert_eq!(
+            service.recover_activation(),
+            Err(ServerError::StartupFailed)
+        );
+        assert_eq!(
+            (
+                supervisor.stops.load(Ordering::SeqCst),
+                supervisor.starts.load(Ordering::SeqCst)
+            ),
+            (1, 1)
+        );
+        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+    });
+}
+
+/// The approved server runs, as it does before an ordinary update.
+fn set_running(service: &Service, supervisor: &SupervisorFixture) {
+    let data = Directory::open(&service.paths.data, false).unwrap();
+    let mut state = Service::state(&data).unwrap().unwrap();
+    state.stopped = false;
+    data.write_json(c"service.json", &state).unwrap();
+    supervisor.running.store(true, Ordering::SeqCst);
 }
 
 #[test]

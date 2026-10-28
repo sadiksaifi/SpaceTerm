@@ -1,5 +1,8 @@
 use super::*;
 
+/// Seconds launchd lets a job exit after SIGTERM when it unloads the job, before SIGKILL.
+const EXIT_TIMEOUT: u64 = 20;
+
 pub(super) struct LaunchAgent {
     directory: PathBuf,
     name: String,
@@ -45,7 +48,7 @@ impl LaunchAgent {
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ProcessType</key><string>Interactive</string>
 <key>LimitLoadToSessionType</key><string>Aqua</string>
-<key>ExitTimeOut</key><integer>20</integer>
+<key>ExitTimeOut</key><integer>{EXIT_TIMEOUT}</integer>
 <key>Umask</key><integer>63</integer>
 </dict></plist>
 "#, self.label, self.identity).into_bytes())
@@ -197,7 +200,7 @@ impl Supervisor for LaunchAgent {
                 "/bin/launchctl",
                 &["kill".into(), "SIGTERM".into(), self.target.clone().into()],
             )?;
-            let deadline = Instant::now() + Duration::from_secs(20);
+            let deadline = Instant::now() + self.stop_timeout();
             while self.running()? {
                 if Instant::now() >= deadline {
                     return Err(ServerError::CleanupUnresolved);
@@ -217,6 +220,10 @@ impl Supervisor for LaunchAgent {
             )?;
         }
         Ok(())
+    }
+    /// Stop waits as long as launchd would before it kills the job at logout.
+    fn stop_timeout(&self) -> Duration {
+        Duration::from_secs(EXIT_TIMEOUT)
     }
     fn running(&self) -> Result<bool, ServerError> {
         let result = command(
