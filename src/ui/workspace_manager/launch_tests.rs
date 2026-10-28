@@ -322,22 +322,22 @@ fn a_launch_that_needs_the_person_explains_itself_at_once(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn a_launch_during_a_server_update_says_so_without_asking_the_person_to_act(
+fn a_launch_during_a_server_operation_says_so_without_asking_the_person_to_act(
     cx: &mut TestAppContext,
 ) {
-    // The update has not finished when the window looks again.
-    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Updating)], cx);
+    // The operation, such as an update, has not finished when the window looks again.
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::ServiceBusy)], cx);
     cx.run_until_parked();
 
-    assert_eq!(harness.launch.steps(), ["run", "wait_for_update", "run"]);
+    assert_eq!(harness.launch.steps(), ["run", "wait_for_service", "run"]);
     let presentation = harness
         .manager
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the launch screen stays until the server answers");
-    assert_eq!(presentation.title, launch::UPDATING_TITLE);
+    assert_eq!(presentation.title, launch::BUSY_TITLE);
     assert_eq!(
         presentation.detail.as_ref(),
-        "Your Workspaces open when the update finishes."
+        "Another server operation is running. Your Workspaces open when it finishes."
     );
     assert!(presentation.progress.is_some());
     assert!(presentation.actions.is_empty(), "nothing to dismiss or retry");
@@ -346,23 +346,23 @@ fn a_launch_during_a_server_update_says_so_without_asking_the_person_to_act(
 }
 
 #[gpui::test]
-fn a_launch_during_a_server_update_opens_the_workspaces_once_it_finishes(
+fn a_launch_during_a_server_operation_opens_the_workspaces_once_it_ends(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Updating), ready()], cx);
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::ServiceBusy), ready()], cx);
     cx.run_until_parked();
 
-    assert_eq!(harness.launch.steps(), ["run", "wait_for_update", "run"]);
+    assert_eq!(harness.launch.steps(), ["run", "wait_for_service", "run"]);
     assert_eq!(harness.launch_title(cx), None);
     assert_eq!(harness.shared_rows(cx), 1);
 }
 
-/// An update that outlasts the server's bounded wait is the one failure the update reports.
+/// An operation that outlasts the server's bounded wait is the one failure the wait reports.
 #[gpui::test]
-fn an_update_that_outlasts_the_wait_offers_try_again(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Err(ServerError::UpdateInProgress), ready()], cx);
+fn an_operation_that_outlasts_the_wait_offers_try_again(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::ServiceBusy), ready()], cx);
     cx.run_until_parked();
-    assert_eq!(harness.launch_title(cx), Some("Server Still Updating"));
+    assert_eq!(harness.launch_title(cx), Some("Server Busy"));
 
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     sync(&harness, cx);

@@ -300,14 +300,15 @@ impl Directory {
     /// Wait at most `limit` for an exclusive lock that another holder may keep for a long time.
     ///
     /// A helper thread blocks in flock, so the waiter wakes as soon as the holder releases the
-    /// lock, never on a polling interval. `cancelled` is observed every [`CANCEL_INTERVAL`]. A
-    /// waiter that returns before the helper acquires leaves it blocked until the holder
-    /// releases; the helper then releases the lock at once.
+    /// lock, never on a polling interval. `cancelled`, when given, is observed every
+    /// [`CANCEL_INTERVAL`]; without it the waiter blocks until the lock or the limit. A waiter
+    /// that returns before the helper acquires leaves it blocked until the holder releases; the
+    /// helper then releases the lock at once.
     pub fn wait_lock(
         &self,
         name: &str,
         limit: std::time::Duration,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<LockWait, ServerError> {
         if let Some(lock) = self.try_lock(name)? {
             return Ok(LockWait::Locked(lock));
@@ -332,14 +333,18 @@ impl Directory {
             .map_err(|_| ServerError::StorageUnavailable)?;
         let deadline = std::time::Instant::now() + limit;
         loop {
-            if cancelled() {
+            if cancelled.is_some_and(|cancelled| cancelled()) {
                 return Ok(LockWait::Cancelled);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Ok(LockWait::Held);
             }
-            match receiver.recv_timeout(remaining.min(CANCEL_INTERVAL)) {
+            let slice = match cancelled {
+                Some(_) => remaining.min(CANCEL_INTERVAL),
+                None => remaining,
+            };
+            match receiver.recv_timeout(slice) {
                 Ok(result) => return result.map(LockWait::Locked),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

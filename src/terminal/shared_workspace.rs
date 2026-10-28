@@ -25,8 +25,9 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// [`ServerConnection`].
 trait EditServer: Send + 'static {
     type Journal: EditJournal;
-    /// The shared link, connecting when none is live.
-    fn link(&self) -> Result<ServerLink, ServerError>;
+    /// The shared link, connecting when none is live. `cancelled` ends a wait for a server
+    /// operation early.
+    fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<ServerLink, ServerError>;
     fn attachments(&self) -> Result<Attachments, ServerError>;
     /// This client's durable journal of Original Operations.
     fn journal(&self) -> Result<Self::Journal, ServerError>;
@@ -44,8 +45,8 @@ trait EditJournal {
 
 impl EditServer for ServerConnection {
     type Journal = ClientJournal;
-    fn link(&self) -> Result<ServerLink, ServerError> {
-        ServerConnection::link(self)
+    fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<ServerLink, ServerError> {
+        ServerConnection::link_cancellable(self, cancelled)
     }
     fn attachments(&self) -> Result<Attachments, ServerError> {
         ServerConnection::attachments(self)
@@ -354,7 +355,7 @@ fn run(
             // below. Clearing the hint lets the next event wake the loop again.
             wakes.link.store(false, Ordering::Release);
             // Validate the transport before opening this client's retained writers.
-            let link = server.link()?;
+            let link = server.link(&|| !alive.load(Ordering::Acquire))?;
             let attachments = server.attachments()?;
             if !watched {
                 attachments.watch(Arc::downgrade(&released));
@@ -691,7 +692,7 @@ mod tests {
 
         impl EditServer for Server {
             type Journal = MemoryJournal;
-            fn link(&self) -> Result<ServerLink, ServerError> {
+            fn link(&self, _: &dyn Fn() -> bool) -> Result<ServerLink, ServerError> {
                 let mut shared = self.shared.lock().unwrap();
                 if let Some((link, _)) = shared.as_ref()
                     && link.health() == Health::Live
@@ -807,7 +808,7 @@ mod tests {
         });
         // A Pane reconnects the shared link while the edit loop waits to reconnect, so its
         // admission revision arrives during that wait.
-        server.link().unwrap();
+        server.link(&|| false).unwrap();
         eventually("the client reconnects", || edits.snapshot().connected);
         let (other, _) = server.connect([8; 32], Arc::clone(&ignore));
         create(&other, "Another client's");

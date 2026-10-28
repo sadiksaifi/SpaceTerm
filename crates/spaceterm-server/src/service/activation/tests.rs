@@ -16,6 +16,8 @@ struct SupervisorFixture {
     stop_takes: Mutex<Option<Duration>>,
     /// When the server dispatched to stop exits.
     exits_at: Mutex<Option<Instant>>,
+    /// When the last Start was dispatched. Activation holds the service lock meanwhile.
+    started_at: Mutex<Option<Instant>>,
 }
 /// How long this fixture's service manager lets a stopping server finish.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -38,6 +40,7 @@ impl Supervisor for SupervisorFixture {
     }
     fn start(&self) -> Result<(), ServerError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
+        *self.started_at.lock().unwrap() = Some(Instant::now());
         Err(ServerError::StartupFailed)
     }
     fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
@@ -116,6 +119,7 @@ fn with_service_identity(
                 fail_replace: AtomicBool::new(false),
                 stop_takes: Mutex::new(None),
                 exits_at: Mutex::new(None),
+                started_at: Mutex::new(None),
             });
             let service = Service::new(
                 fixture.paths.clone(),
@@ -539,15 +543,16 @@ fn admission_during_an_update_waits_for_its_outcome() {
                 assert!(Instant::now() < deadline, "the update never began");
                 std::thread::sleep(Duration::from_millis(5));
             }
-            let admission = crate::service::check_admission(&paths);
+            let admission = crate::service::check_admission(&paths, Duration::from_secs(10), None);
             (admission, Instant::now())
         });
         // The fixture's Start always fails after the update dispatched it.
         assert_eq!(service.activate(approval), Err(ServerError::StartupFailed));
-        let finished = Instant::now();
         let (admission, answered) = client.join().unwrap();
+        // The update dispatched Start while it held the service lock, near its end.
+        let started = supervisor.started_at.lock().unwrap().unwrap();
         assert!(
-            answered >= finished,
+            answered > started,
             "admission answered before the update ended"
         );
         // A dispatched candidate start admits clients, which then find whether it runs.

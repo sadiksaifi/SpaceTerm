@@ -1340,7 +1340,8 @@ pub(super) fn present(
         }
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
-            let mut connection = PaneLink::new(server.link()?, attachment.clone(), {
+            let link = server.link_cancellable(&|| !alive.load(Ordering::Acquire))?;
+            let mut connection = PaneLink::new(link, attachment.clone(), {
                 let state = Arc::clone(&state);
                 Arc::new(move || state.wake.notify())
             });

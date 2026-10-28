@@ -166,7 +166,8 @@ pub fn set_network_access(
 
 fn manage(identity: &str, name: &str, request: Management) -> Result<ManagementReply, ServerError> {
     let paths = host::Paths::for_identity(identity)?;
-    crate::service::check_admission(&paths)?;
+    // Remote setup observes this reply for 15 s, so it never waits out a long operation.
+    crate::service::check_admission(&paths, crate::service::OPERATION_GRACE, None)?;
     let server = Directory::open(&paths.data, false)?.read()?.server;
     let client = protocol::random()?;
     let mut stream = host::connect(&paths)?;

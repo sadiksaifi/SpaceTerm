@@ -377,7 +377,7 @@ impl DevelopmentPaneState {
                 | ServerError::StaleControl
                 | ServerError::Controlled
                 | ServerError::ActivationUnresolved
-                | ServerError::UpdateInProgress
+                | ServerError::ServiceBusy
         );
         let error = if retryable
             && (error != ServerError::DirectoryUnavailable || self.start_unconfirmed())
@@ -419,7 +419,7 @@ impl DevelopmentPaneState {
                 ServerError::Protocol
                     | ServerError::NotRunning
                     | ServerError::ActivationUnresolved
-                    | ServerError::UpdateInProgress
+                    | ServerError::ServiceBusy
             )
         {
             self.admission(Admission::Waiting);

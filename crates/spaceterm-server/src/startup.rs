@@ -11,9 +11,9 @@ pub enum StartupOutcome {
     },
     Stopped,
     AuthorizationRequired,
-    /// An Update or Restart that another process runs holds the service. Present it, call
-    /// [`LocalStartup::wait_for_update`], then run launch again.
-    Updating,
+    /// Another service operation, such as Update, Restart or Stop, holds the service. Present
+    /// it, call [`LocalStartup::wait_for_service`], then run launch again.
+    ServiceBusy,
     Cancelled,
 }
 
@@ -51,7 +51,7 @@ impl LocalStartup {
         cancelled: impl Fn() -> bool,
     ) -> Result<StartupOutcome, ServerError> {
         let result = (|| {
-            let Some(status) = self.service.launch(provision, cancelled)? else {
+            let Some(status) = self.service.launch(provision, &cancelled)? else {
                 return Ok(StartupOutcome::Cancelled);
             };
             if status.stopped {
@@ -59,7 +59,7 @@ impl LocalStartup {
             }
             let deadline = Instant::now() + Duration::from_secs(5);
             let status = loop {
-                match self.server.refresh() {
+                match self.server.refresh_cancellable(&cancelled) {
                     Err(ServerError::NotRunning) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(20));
                     }
@@ -74,15 +74,15 @@ impl LocalStartup {
         match result {
             Err(ServerError::Stopped) => Ok(StartupOutcome::Stopped),
             Err(ServerError::AuthorizationRequired) => Ok(StartupOutcome::AuthorizationRequired),
-            Err(ServerError::UpdateInProgress) => Ok(StartupOutcome::Updating),
+            Err(ServerError::ServiceBusy) => Ok(StartupOutcome::ServiceBusy),
             other => other,
         }
     }
 
-    /// Wait for the Update or Restart that made launch report [`StartupOutcome::Updating`].
+    /// Wait for the service operation that made launch report [`StartupOutcome::ServiceBusy`].
     /// The wait wakes when the operation ends, never on a polling interval. A stuck operation
-    /// fails with UpdateInProgress after a bounded wait. Cancellation returns at once.
-    pub fn wait_for_update(&self, cancelled: impl Fn() -> bool) -> Result<(), ServerError> {
+    /// fails with ServiceBusy after a bounded wait. Cancellation returns at once.
+    pub fn wait_for_service(&self, cancelled: impl Fn() -> bool) -> Result<(), ServerError> {
         self.service.wait_for_operation(cancelled)
     }
 }
