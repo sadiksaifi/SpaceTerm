@@ -80,7 +80,9 @@ Saved QUIC routes and restricted unpair recovery live in `direct-device-connecti
 
 On macOS, Release and Development keep each credential in the login Keychain through the Security framework. The Keychain binds an item to the build that created it, because neither identity is signed by an Apple team. After an update or rebuild, the Keychain may ask for its password. The first connection attempt after launch shows that request; later automatic retries never ask, and Resume asks again.
 
-`mise run server:direct:build` prepares the two-host verification helper. Its help defines the exact idle Development scope for `server:direct:smoke`; executing the built helper preserves its signature. `server:direct:credentials:native:test` separately verifies and removes two randomly scoped native-store items.
+Preflight is ad hoc signed, so every build would ask. Preflight instead creates and reads its items by running `/usr/bin/security`, which every build can run without a prompt. The credentials stay in the login Keychain, but they lose per-application protection: any process running as your account can read them without a prompt. Pair Preflight only with servers whose terminal access you would grant to every program in your account. [The Preflight store](../src/direct_connections/credentials/macos/security_tool.rs) explains the mechanism.
+
+`mise run server:direct:build` prepares the two-host verification helper. Its help defines the exact idle Development scope for `server:direct:smoke`; executing the built helper preserves its signature. `server:direct:credentials:native:test` separately verifies and removes two randomly scoped native-store items. `mise run test:native:macos` verifies the Preflight store in a throwaway Keychain.
 
 ## Update the local server
 
