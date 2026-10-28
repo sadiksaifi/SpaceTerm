@@ -180,11 +180,22 @@ pub struct Workspace {
     pub root_tab: Id,
     pub tabs: Vec<Tab>,
 }
+/// Whether directory changes may move a Tab to a different Worktree, and why not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeMembership {
+    /// Directory reads assign membership under the Root Tab rule.
+    #[default]
+    Following,
+    /// The Tab opened in its Worktree. Promotion to Root Tab ends this.
+    Opened,
+    /// Directory repair kept the Tab's Worktree. Promotion to Root Tab keeps this.
+    Repaired,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
-    /// Directory repair must not move this Tab to a different Worktree, including its Root Pane.
+    /// An unpinned Root Tab whose Root Pane reads outside any repository returns to Following.
     #[serde(default)]
-    pub worktree_membership_fixed: bool,
+    pub worktree_membership: WorktreeMembership,
     /// Saved membership, retained even when Git no longer lists the directory.
     #[serde(default)]
     pub worktree: Option<PathBuf>,
@@ -416,7 +427,7 @@ impl State {
                     root_tab: org.tab,
                     tabs: vec![Tab {
                         worktree: None,
-                        worktree_membership_fixed: false,
+                        worktree_membership: WorktreeMembership::Following,
                         worktree_repository: None,
                         id: org.tab,
                         root_pane: org.pane,
@@ -572,7 +583,7 @@ impl State {
             root_pane: pane,
             worktree: Some(path.clone()),
             worktree_repository: Some(root),
-            worktree_membership_fixed: true,
+            worktree_membership: WorktreeMembership::Opened,
             panes: vec![Pane {
                 id: pane,
                 source: None,
@@ -786,7 +797,7 @@ impl State {
                     root_tab: tab,
                     tabs: vec![Tab {
                         worktree: None,
-                        worktree_membership_fixed: false,
+                        worktree_membership: WorktreeMembership::Following,
                         worktree_repository: None,
                         id: tab,
                         root_pane: pane,
@@ -842,7 +853,7 @@ impl State {
                 let pane = new_id()?;
                 w.tabs.push(Tab {
                     worktree: None,
-                    worktree_membership_fixed: false,
+                    worktree_membership: WorktreeMembership::Following,
                     worktree_repository: None,
                     id,
                     root_pane: pane,
@@ -1008,7 +1019,13 @@ impl State {
                 }
             }
             w.tabs.retain(|t| !t.panes.is_empty());
-            if let Some(t) = w.tabs.first() {
+            if let Some(t) = w.tabs.first_mut()
+                && t.id != w.root_tab
+            {
+                // A promoted Root Tab follows its Root Pane, not the Worktree it opened in.
+                if t.worktree_membership == WorktreeMembership::Opened {
+                    t.worktree_membership = WorktreeMembership::Following;
+                }
                 w.root_tab = t.id;
             }
         }
@@ -1027,7 +1044,7 @@ impl State {
             for tab in &mut workspace.tabs {
                 if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == id) {
                     pane.confirmed_directory = Some(path);
-                    tab.worktree_membership_fixed = true;
+                    tab.worktree_membership = WorktreeMembership::Repaired;
                     self.recalculate_names();
                     self.inventory.revision = self
                         .inventory
@@ -2049,6 +2066,8 @@ mod tests {
             )
             .unwrap();
         let survivor = state.inventory.workspaces[0].tabs[1].id;
+        // As when the Tab opened in a Worktree; the promoted Root Tab follows its Root Pane.
+        state.inventory.workspaces[0].tabs[1].worktree_membership = WorktreeMembership::Opened;
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         state.inventory.close = Some(CloseInventory {
             controls: Vec::new(),
@@ -2079,6 +2098,10 @@ mod tests {
         );
         assert_eq!(state.inventory.workspaces[0].root_tab, survivor);
         assert_eq!(state.inventory.workspaces[0].tabs.len(), 1);
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[0].worktree_membership,
+            WorktreeMembership::Following
+        );
         assert_eq!(
             state
                 .apply([2; 32], 1, close, "/tmp".as_ref(), |_| true)

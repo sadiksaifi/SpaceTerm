@@ -447,7 +447,7 @@ fn inventory() -> hierarchy::Inventory {
             pinned_directory: None,
             root_tab: [2; 32],
             tabs: vec![hierarchy::Tab {
-                worktree_membership_fixed: false,
+                worktree_membership: hierarchy::WorktreeMembership::Following,
                 worktree: Some(PathBuf::from("/repo")),
                 worktree_repository: None,
                 id: [2; 32],
