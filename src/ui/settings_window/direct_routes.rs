@@ -1,8 +1,8 @@
 //! Direct network servers this device is paired with, in the Servers Settings Section.
 //!
 //! A paired server's Status row offers Connect, Resume, Cancel and Disconnect. Resume is the only
-//! step that lets the system ask before it releases this device's key; everything SpaceTerm does
-//! in the background stays quiet. Unpair removes the connection here at once and asks the server
+//! step here that lets the system ask before it releases this device's key. In the background,
+//! only a connected route's first attempt after launch may ask; retries stay quiet. Unpair removes the connection here at once and asks the server
 //! to revoke this device, and an unpair the server hasn't confirmed stays in a notice until it
 //! settles. Everything here reads the registry's snapshot, so rendering reaches no computer.
 
