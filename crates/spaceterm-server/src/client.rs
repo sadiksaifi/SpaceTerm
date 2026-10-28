@@ -38,6 +38,18 @@ enum ClientAuthority {
     },
 }
 
+/// The attachment writers open in this process, by client directory.
+static OPEN_ATTACHMENTS: Mutex<Vec<(std::path::PathBuf, crate::attachments::WeakAttachments)>> =
+    Mutex::new(Vec::new());
+
+/// The client account a paired route's presentation state belongs to.
+fn direct_account(account: &str, route: &[u8; 32]) -> String {
+    format!(
+        "{account}-direct-{}",
+        route.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    )
+}
+
 /// Clones retain the same client identity binding and its attachment writer.
 #[derive(Default)]
 struct ClientCache {
@@ -209,13 +221,15 @@ impl ServerConnection {
         }
         Ok(Directory::open(&self.paths.data, false)?.read()?.server)
     }
-    /// One durable attachment writer shared by the inventory and all Pane subscriptions.
     /// Whether `other` is a clone of this handle rather than a separately created one, such as
     /// the handle a later connection to the same account creates.
     pub fn same_handle(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.shared, &other.shared)
     }
 
+    /// One durable attachment writer shared by the inventory and all Pane subscriptions.
+    /// Every handle to one client directory in this process shares it, so a route's
+    /// presentation keeps its attachments while one connection replaces another.
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
         if let Some(attachments) = self.client_cache.attachments.get() {
             return attachments.clone();
@@ -224,11 +238,24 @@ impl ServerConnection {
         self.client_cache
             .attachments
             .get_or_init(|| {
-                crate::attachments::Attachments::open(
+                let client = self.client_id()?;
+                let path = self.paths.data.join("clients").join(&self.account);
+                let mut open = OPEN_ATTACHMENTS.lock().unwrap_or_else(|e| e.into_inner());
+                open.retain(|(_, writer)| writer.alive());
+                if let Some(attachments) = open
+                    .iter()
+                    .filter(|(retained, _)| *retained == path)
+                    .find_map(|(_, writer)| writer.upgrade(server, client))
+                {
+                    return Ok(attachments);
+                }
+                let attachments = crate::attachments::Attachments::open(
                     self.client_directory()?,
                     server,
-                    self.client_id()?,
-                )
+                    client,
+                )?;
+                open.push((path, attachments.downgrade()));
+                Ok(attachments)
             })
             .clone()
     }
@@ -464,6 +491,33 @@ impl ServerConnection {
     ) -> Result<Self, ServerError> {
         Self::for_identity(identity)?.with_direct(route, paired, connector)
     }
+    /// The revision of the Workspace Inventory this paired route retained, read without network,
+    /// credential or lock access. `None` when it retained none it can read.
+    pub fn retained_inventory_revision(&self) -> Option<u64> {
+        let direct = self.direct.as_ref()?;
+        let directory =
+            Directory::open(&self.paths.data.join("clients").join(&self.account), false).ok()?;
+        crate::client_view::retained_revision(
+            &directory,
+            direct.paired.pin.server,
+            direct.paired.client,
+        )
+    }
+    /// Removes the Workspace Inventory copy the paired route `route` retained, without network
+    /// or credential access. A route that retained none is unchanged.
+    pub fn discard_retained_inventory(identity: &str, route: [u8; 32]) -> Result<(), ServerError> {
+        let handle = Self::for_identity(identity)?;
+        let path = handle
+            .paths
+            .data
+            .join("clients")
+            .join(direct_account(&handle.account, &route));
+        match Directory::open(&path, false) {
+            Ok(directory) => crate::client_view::discard_inventory(&directory),
+            Err(ServerError::NotSetUp) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
     fn with_direct(
         mut self,
         route: [u8; 32],
@@ -480,11 +534,7 @@ impl ServerConnection {
         {
             return Err(ServerError::AuthenticationRefused);
         }
-        self.account = format!(
-            "{}-direct-{}",
-            self.account,
-            route.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        );
+        self.account = direct_account(&self.account, &route);
         self.direct = Some(std::sync::Arc::new(DirectRoute {
             id: route,
             paired,
@@ -1152,6 +1202,51 @@ mod tests {
             mutation
         );
         drop(restored);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handles_to_one_route_share_its_attachment_writer() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-shared-writer-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let inventory = crate::hierarchy::Inventory {
+            revision: 0,
+            workspaces: Vec::new(),
+            close: None,
+            repositories: None,
+        };
+        // A storage handle reads the route's views while a connection's handle reaches the
+        // server, and both write one set of attachments.
+        let storage = direct_fixture(&root, paired_identity());
+        let connection = direct_fixture(&root, paired_identity());
+        assert!(
+            storage
+                .attachments()
+                .unwrap()
+                .initialize(&inventory, None)
+                .unwrap()
+        );
+        assert!(
+            !connection
+                .attachments()
+                .unwrap()
+                .initialize(&inventory, None)
+                .unwrap(),
+            "the second handle reads the first handle's choices"
+        );
+        drop((storage, connection));
+        let relaunched = direct_fixture(&root, paired_identity());
+        assert!(
+            !relaunched
+                .attachments()
+                .unwrap()
+                .initialize(&inventory, None)
+                .unwrap(),
+            "the writer closes with its last handle and the next one reopens it"
+        );
+        drop(relaunched);
         std::fs::remove_dir_all(root).unwrap();
     }
 

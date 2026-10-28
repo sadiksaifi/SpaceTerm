@@ -1002,3 +1002,23 @@ fn full_recovery_capacity_refuses_new_operations_but_still_removes_its_own_route
     await_condition(|| connections.pending_unpairs().len() < 128);
     assert!(!connections.persistence_error());
 }
+
+/// Removing a route runs its cleanup once the removal is saved, so what the client retained for
+/// it goes with it. Disconnect keeps the route and what it retained.
+#[test]
+fn removing_a_route_should_discard_what_it_retained() {
+    let (connections, routes) = connected_routes_to_one_server(&["penguin"], [0x5E; 32]);
+    let removed = Arc::new(Mutex::new(Vec::new()));
+    connections.on_route_removed(Arc::new({
+        let removed = Arc::clone(&removed);
+        move |route: &DirectRouteId| removed.lock().unwrap().push(*route)
+    }));
+
+    connections.disconnect(&routes[0]);
+    let after_disconnect = removed.lock().unwrap().clone();
+    connections.unpair_self(&routes[0]).unwrap();
+
+    assert_eq!(after_disconnect, Vec::<DirectRouteId>::new());
+    assert_eq!(*removed.lock().unwrap(), vec![routes[0]]);
+    assert!(connections.route(&routes[0]).is_none());
+}

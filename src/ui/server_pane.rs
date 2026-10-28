@@ -75,6 +75,10 @@ pub(crate) fn takeover_copy(
         ),
     }
 }
+/// The notice a Pane of a server this client is not connected to shows. Only connecting the
+/// server's Saved Connection reaches the Pane again.
+pub(crate) const OFFLINE_TITLE: &str = "Not Connected";
+pub(crate) const OFFLINE_DETAIL: &str = "Connect to this server in Settings to use this Pane.";
 pub(crate) const SESSION_ENDED_TITLE: &str = "Session Ended";
 pub(crate) const SESSION_ENDED_DETAIL: &str = "This Terminal Session is no longer available.";
 pub(crate) const TAKING_OVER: &str = "Taking Over…";
@@ -1334,6 +1338,11 @@ mod connection {
                     } else {
                         "Typing is paused."
                     }),
+                    super::StatusIntent::Warning,
+                )),
+                DevelopmentPaneStatus::Offline => Some((
+                    SharedString::new_static(super::OFFLINE_TITLE),
+                    SharedString::new_static(super::OFFLINE_DETAIL),
                     super::StatusIntent::Warning,
                 )),
                 // The screen replacing the Pane says what happened, and nothing here repairs it.
