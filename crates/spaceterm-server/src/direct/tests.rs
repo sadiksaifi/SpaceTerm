@@ -179,14 +179,16 @@ impl Fixture {
     pub(crate) fn enable(&self) {
         self.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
     }
-    /// Enables exposure on a free UDP port of `ip`. Another test can take the port between
-    /// finding it and binding it, so a failed bind tries another.
+    /// Enables exposure on a free UDP port of `ip`, and returns the address the server listens
+    /// at. Another test can take the port between finding it and binding it, so a failed bind
+    /// tries another.
     pub(crate) fn listen_at(&self, ip: std::net::IpAddr) -> std::net::SocketAddr {
         for _ in 0..8 {
-            let address = free_udp(ip);
+            let policy = NetworkPolicy::new(free_udp(ip)).unwrap();
+            let address = policy.bind;
             self.management(Management::SetPolicy {
                 enabled: true,
-                policy: Some(NetworkPolicy::new(address).unwrap()),
+                policy: Some(policy),
             })
             .unwrap();
             let ManagementReply::Status(status) = self.management(Management::Status).unwrap()
@@ -3383,25 +3385,26 @@ mod quic_connections {
     }
 
     /// While a connection of the old address still holds its socket, the new address waits as
-    /// `Starting`, then binds once that connection ended with its goodbye.
+    /// `Starting`, then binds once that connection ended with its goodbye. Narrowing from every
+    /// interface to one address of the same port is such a move.
     #[test]
     fn changing_the_address_with_a_live_connection_binds_once_it_ends() {
         let fixture = Fixture::new();
-        let specific = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        let wildcard = fixture.listen_at(std::net::Ipv4Addr::UNSPECIFIED.into());
+        let specific =
+            std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), wildcard.port());
         let credential = DeviceCredential::generate().unwrap();
         let paired = fixture.enroll(&credential);
         let server = fixture.serve_next();
-        let link = connect(&fixture.endpoint(), &paired, &credential);
+        let link = connect(&format!("quic://{specific}"), &paired, &credential);
         assert!(matches!(
             request(&link, nothing()),
             Err(RequestError::Refused(Refusal::Unsupported))
         ));
-        let wildcard =
-            std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), specific.port());
         fixture
             .management(Management::SetPolicy {
                 enabled: true,
-                policy: Some(NetworkPolicy::new(wildcard).unwrap()),
+                policy: Some(NetworkPolicy::new(specific).unwrap()),
             })
             .unwrap();
         assert!(matches!(
@@ -3415,7 +3418,7 @@ mod quic_connections {
         drop(link);
         let _ = server.join().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while listener_state(&fixture) != (ListenerState::Listening { addr: wildcard }) {
+        while listener_state(&fixture) != (ListenerState::Listening { addr: specific }) {
             assert!(
                 Instant::now() < deadline,
                 "still {:?}",
@@ -3430,6 +3433,76 @@ mod quic_connections {
             Err(RequestError::Refused(Refusal::Unsupported))
         ));
         drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// The address the system would send from to reach the internet, when it has a route.
+    fn routed_ipv4() -> Option<std::net::IpAddr> {
+        let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        socket
+            .connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9))
+            .ok()?;
+        Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback())
+    }
+
+    /// Widening exposure from one address to every interface at the same port keeps the paired
+    /// connection of that address and its invitations. Clients of the
+    /// server's other addresses then connect too, each answered from the address it dialed.
+    #[test]
+    fn widening_to_every_interface_keeps_paired_connections_and_answers_every_address() {
+        let fixture = Fixture::new();
+        let specific = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next();
+        let kept = connect(&format!("quic://{specific}"), &paired, &credential);
+        assert!(matches!(
+            request(&kept, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let pending = fixture.invite();
+        let wildcard = NetworkPolicy::every_interface(specific.port()).unwrap();
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(wildcard.clone()),
+            })
+            .unwrap();
+        assert_eq!(
+            listener_state(&fixture),
+            ListenerState::Listening {
+                addr: wildcard.bind
+            }
+        );
+        assert!(matches!(
+            request(&kept, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        assert_eq!(kept.health(), crate::connection::link::Health::Live);
+        // The invitation issued before the change still admits a claim.
+        fixture.claim(&pending, &DeviceCredential::generate().unwrap());
+        let mut addresses = vec![
+            std::net::SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), specific.port()),
+            specific,
+        ];
+        if let Some(routed) = routed_ipv4() {
+            addresses.push(std::net::SocketAddr::new(routed, specific.port()));
+        }
+        for address in addresses {
+            let server = fixture.serve_next();
+            let link = connect(&format!("quic://{address}"), &paired, &credential);
+            assert!(
+                matches!(
+                    request(&link, nothing()),
+                    Err(RequestError::Refused(Refusal::Unsupported))
+                ),
+                "{address}"
+            );
+            drop(link);
+            let _ = server.join().unwrap();
+        }
+        assert_eq!(kept.health(), crate::connection::link::Health::Live);
+        drop(kept);
         let _ = server.join().unwrap();
     }
 

@@ -574,6 +574,30 @@ fn an_address_chosen_while_off_keeps_its_port_for_turning_on(cx: &mut TestAppCon
     assert!(reads("Listening on 192.168.1.21:9300.", cx));
 }
 
+/// All Interfaces, chosen while access listens at the server's one address, listens on every
+/// interface at the same port and says what that reaches. Choosing the address again narrows it.
+#[gpui::test]
+fn all_interfaces_listens_on_every_interface_at_the_same_port(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let (_, cx) = open_servers(&access, cx);
+
+    click(ADDRESS_SELECTOR, cx);
+    click("All Interfaces", cx);
+
+    assert_eq!(access.policies(), vec![policy("0.0.0.0:9231")]);
+    assert!(reads(
+        "Listening on all interfaces, port 9231. Devices can connect over any network studio \
+         is on, including VPNs.",
+        cx
+    ));
+
+    click(ADDRESS_SELECTOR, cx);
+    click("192.168.1.20", cx);
+
+    assert_eq!(access.policies().last(), Some(&policy("192.168.1.20:9231")));
+    assert!(reads("Listening on 192.168.1.20:9231.", cx));
+}
+
 /// Access off with every interface kept, as `0.0.0.0:9300` or `[::]:9300`: turning it on again
 /// without choosing an address listens on every interface again, at the same port.
 fn turning_on_keeps_a_wildcard_listener(kept: &str, cx: &mut TestAppContext) {

@@ -53,17 +53,41 @@ pub struct PairedDevice {
     pub client: [u8; 32],
 }
 
+/// Where the server listens for paired connections.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkPolicy {
+    /// One address of the server's machine, or `0.0.0.0` for every interface.
     pub bind: SocketAddr,
 }
 impl NetworkPolicy {
+    /// An unspecified address, `0.0.0.0` or `[::]`, listens on every interface for IPv4 and
+    /// IPv6, and is kept as `0.0.0.0`.
     pub fn new(bind: SocketAddr) -> Result<Self, DirectError> {
         if bind.port() == 0 || bind.ip().is_multicast() {
             return Err(DirectError::InvalidAddress);
         }
+        if bind.ip().is_unspecified() {
+            return Self::every_interface(bind.port());
+        }
         Ok(Self { bind })
+    }
+    /// Every interface at `port`, for IPv4 and IPv6.
+    pub fn every_interface(port: u16) -> Result<Self, DirectError> {
+        if port == 0 {
+            return Err(DirectError::InvalidAddress);
+        }
+        Ok(Self {
+            bind: SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), port),
+        })
+    }
+    pub fn is_every_interface(&self) -> bool {
+        self.bind.ip().is_unspecified()
+    }
+    /// Whether a listener at this policy also takes what one at `address` takes: the same
+    /// address, or every interface at the same port.
+    pub fn covers(&self, address: SocketAddr) -> bool {
+        self.bind.port() == address.port() && (self.is_every_interface() || self.bind == address)
     }
     pub fn parse(address: &str) -> Result<Self, DirectError> {
         if let Ok(bind) = address.parse() {

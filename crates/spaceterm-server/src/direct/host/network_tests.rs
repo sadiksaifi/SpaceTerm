@@ -146,10 +146,10 @@ fn address_loss_reports_a_failed_listener_without_changing_the_retained_policy_o
 }
 
 #[test]
-fn wildcard_invitations_advertise_only_the_bound_socket_family() {
+fn every_interface_invitations_advertise_the_suggested_address_of_either_family() {
     for (bind_ip, preferred, expected) in [
-        ("0.0.0.0", "fd00::9", "10.0.0.5"),
-        ("::", "10.0.0.9", "fd00::5"),
+        ("0.0.0.0", "fd00::9", "fd00::9"),
+        ("::", "10.0.0.9", "10.0.0.9"),
         ("0.0.0.0", "10.0.0.9", "10.0.0.9"),
         ("::", "fd00::9", "fd00::9"),
     ] {
@@ -158,6 +158,10 @@ fn wildcard_invitations_advertise_only_the_bound_socket_family() {
             &[preferred],
         ));
         let bind = fixture.listen_at(bind_ip.parse().unwrap());
+        assert!(
+            bind.ip().is_unspecified() && bind.is_ipv4(),
+            "kept as 0.0.0.0"
+        );
         assert_eq!(
             status(&fixture).listener,
             ListenerState::Listening { addr: bind }
@@ -169,27 +173,33 @@ fn wildcard_invitations_advertise_only_the_bound_socket_family() {
 }
 
 #[test]
-fn wildcard_invitation_without_an_eligible_bound_family_refuses_before_allocation() {
-    for (bind_ip, other_family) in [("0.0.0.0", "fd00::9"), ("::", "10.0.0.9")] {
-        let fixture = fixture(network(&[other_family], &[other_family]));
-        let bind = fixture.listen_at(bind_ip.parse().unwrap());
-        let before = status(&fixture);
-        assert_eq!(before.listener, ListenerState::Listening { addr: bind });
-        let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
-        assert!(matches!(
-            fixture.management(Management::Invite),
-            Err(DirectError::InvalidAddress)
-        ));
-        assert!(fixture.state.lock().unwrap().invitations.is_empty());
-        assert!(fixture.state.lock().unwrap().claims.is_empty());
-        assert!(
-            retained == std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
-            "an unadvertisable listener must not change the retained record"
-        );
-        let after = status(&fixture);
-        assert_eq!(after.pin, before.pin);
-        assert_eq!(after.policy, before.policy);
-        assert_eq!(after.enabled, before.enabled);
-        assert_eq!(after.listener, before.listener);
-    }
+fn every_interface_invitations_without_a_suggestion_advertise_the_first_available_address() {
+    let fixture = fixture(network(&["fd00::5", "10.0.0.5"], &[]));
+    let bind = fixture.listen_at("0.0.0.0".parse().unwrap());
+    let advertised = std::net::SocketAddr::new("10.0.0.5".parse().unwrap(), bind.port());
+    assert_eq!(fixture.invite().endpoint(), format!("quic://{advertised}"));
+}
+
+#[test]
+fn every_interface_invitation_without_an_available_address_refuses_before_allocation() {
+    let fixture = fixture(network(&["127.0.0.1", "fe80::1"], &[]));
+    let bind = fixture.listen_at("0.0.0.0".parse().unwrap());
+    let before = status(&fixture);
+    assert_eq!(before.listener, ListenerState::Listening { addr: bind });
+    let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+    assert!(matches!(
+        fixture.management(Management::Invite),
+        Err(DirectError::InvalidAddress)
+    ));
+    assert!(fixture.state.lock().unwrap().invitations.is_empty());
+    assert!(fixture.state.lock().unwrap().claims.is_empty());
+    assert!(
+        retained == std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+        "an unadvertisable listener must not change the retained record"
+    );
+    let after = status(&fixture);
+    assert_eq!(after.pin, before.pin);
+    assert_eq!(after.policy, before.policy);
+    assert_eq!(after.enabled, before.enabled);
+    assert_eq!(after.listener, before.listener);
 }

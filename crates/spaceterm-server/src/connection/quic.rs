@@ -38,7 +38,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 /// The protocol's own ALPN.
@@ -241,19 +241,29 @@ impl Controller for Floor {
 struct Udp {
     socket: UdpSocket,
     state: noq_udp::UdpSocketState,
+    ipv4: bool,
     /// The server a client's socket is connected to.
     connected: Option<SocketAddr>,
 }
 
 impl Udp {
+    /// Binds `address`. An IPv6 socket takes only IPv6, so the IPv4 wildcard of the same port
+    /// stays free for a socket of its own.
     fn bind(address: SocketAddr) -> Result<Self, QuicError> {
-        let socket = UdpSocket::bind(address).map_err(|error| {
+        let domain = socket2::Domain::for_address(address);
+        let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, None)
+            .map_err(|_| QuicError::Transport)?;
+        if address.is_ipv6() {
+            socket.set_only_v6(true).map_err(|_| QuicError::Transport)?;
+        }
+        socket.bind(&address.into()).map_err(|error| {
             if error.kind() == ErrorKind::AddrInUse {
                 QuicError::AddressInUse
             } else {
                 QuicError::Transport
             }
         })?;
+        let socket = UdpSocket::from(socket);
         socket
             .set_nonblocking(true)
             .map_err(|_| QuicError::Transport)?;
@@ -262,6 +272,7 @@ impl Udp {
         Ok(Self {
             socket,
             state,
+            ipv4: address.is_ipv4(),
             connected: None,
         })
     }
@@ -290,6 +301,12 @@ impl Udp {
     ) -> std::io::Result<()> {
         if self.connected == Some(destination) {
             return self.socket.send(bytes).map(drop);
+        }
+        #[cfg(target_vendor = "apple")]
+        if let (Some(std::net::IpAddr::V4(source)), SocketAddr::V4(destination)) =
+            (source, destination)
+        {
+            return send_from(&self.socket, bytes, destination, source);
         }
         self.state.try_send(
             (&self.socket).into(),
@@ -330,6 +347,114 @@ impl Udp {
 
     fn fd(&self) -> RawFd {
         self.socket.as_raw_fd()
+    }
+
+    fn port(&self) -> Option<u16> {
+        self.socket.local_addr().ok().map(|address| address.port())
+    }
+}
+
+/// Sends one IPv4 datagram from `source`. macOS ignores the `IP_RECVDSTADDR` source that noq-udp
+/// encodes and honors only `IP_PKTINFO`, so without this a socket on every interface would answer
+/// from whichever address the system routes from, and the client would drop the answer.
+#[cfg(target_vendor = "apple")]
+fn send_from(
+    socket: &UdpSocket,
+    bytes: &[u8],
+    destination: std::net::SocketAddrV4,
+    source: std::net::Ipv4Addr,
+) -> std::io::Result<()> {
+    let address = socket2::SockAddr::from(destination);
+    let mut iovec = libc::iovec {
+        iov_base: bytes.as_ptr().cast_mut().cast(),
+        iov_len: bytes.len(),
+    };
+    let info = libc::in_pktinfo {
+        ipi_ifindex: 0,
+        ipi_spec_dst: libc::in_addr {
+            s_addr: u32::from_ne_bytes(source.octets()),
+        },
+        ipi_addr: libc::in_addr { s_addr: 0 },
+    };
+    let info_bytes = std::mem::size_of::<libc::in_pktinfo>() as libc::c_uint;
+    // Aligned for `cmsghdr`, and larger than one header with its `in_pktinfo`.
+    let mut control = [0_u64; 8];
+    // SAFETY: an all-zero `msghdr` is valid; every pointer set below outlives the call.
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_name = address.as_ptr().cast_mut().cast();
+    message.msg_namelen = address.len();
+    message.msg_iov = &mut iovec;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    // SAFETY: CMSG_SPACE only computes a length.
+    message.msg_controllen = unsafe { libc::CMSG_SPACE(info_bytes) } as _;
+    // SAFETY: the control buffer holds one header and its data, so CMSG_FIRSTHDR points inside
+    // it and CMSG_DATA has room for `in_pktinfo`, written unaligned.
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::IPPROTO_IP;
+        (*header).cmsg_type = libc::IP_PKTINFO;
+        (*header).cmsg_len = libc::CMSG_LEN(info_bytes) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::in_pktinfo>(), info);
+    }
+    loop {
+        // SAFETY: `message` describes live buffers for the whole call.
+        if unsafe { libc::sendmsg(socket.as_raw_fd(), &message, 0) } >= 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// A listener's sockets: one at its address, or one per family for every interface. Each reply
+/// leaves from the address its client dialed, which packet info reports on receipt.
+struct Sockets {
+    address: SocketAddr,
+    udp: Vec<Udp>,
+}
+
+impl Sockets {
+    /// Binds `address`. The unspecified address of either family binds `0.0.0.0` and `[::]` at
+    /// the same port, the IPv6 one only where the system offers IPv6.
+    fn bind(address: SocketAddr) -> Result<Self, QuicError> {
+        if !address.ip().is_unspecified() {
+            let udp = Udp::bind(address)?;
+            let port = udp.port().ok_or(QuicError::Transport)?;
+            return Ok(Self {
+                address: SocketAddr::new(address.ip(), port),
+                udp: vec![udp],
+            });
+        }
+        let v4 = Udp::bind((std::net::Ipv4Addr::UNSPECIFIED, address.port()).into())?;
+        let port = v4.port().ok_or(QuicError::Transport)?;
+        let mut udp = vec![v4];
+        match Udp::bind((std::net::Ipv6Addr::UNSPECIFIED, port).into()) {
+            Ok(v6) => udp.push(v6),
+            Err(QuicError::AddressInUse) => return Err(QuicError::AddressInUse),
+            // A system without IPv6 refuses the socket or the address.
+            Err(_) => {}
+        }
+        Ok(Self {
+            address: (std::net::Ipv4Addr::UNSPECIFIED, port).into(),
+            udp,
+        })
+    }
+
+    /// None, after a failed rebind could not restore the previous address.
+    fn none(address: SocketAddr) -> Self {
+        Self {
+            address,
+            udp: Vec::new(),
+        }
+    }
+
+    fn for_destination(&self, destination: SocketAddr) -> Option<&Udp> {
+        self.udp
+            .iter()
+            .find(|udp| udp.ipv4 == destination.is_ipv4())
     }
 }
 
@@ -400,16 +525,60 @@ impl<T> Bounded<T> {
 
 struct Shared {
     server: Mutex<Server>,
-    socket: Arc<Udp>,
+    /// Replaced only when the listener widens to every interface.
+    sockets: RwLock<Sockets>,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Server> {
         self.server.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    fn sockets(&self) -> RwLockReadGuard<'_, Sockets> {
+        self.sockets.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sends one datagram from the socket of `destination`'s family.
+    fn send(
+        &self,
+        bytes: &[u8],
+        destination: SocketAddr,
+        source: Option<std::net::IpAddr>,
+    ) -> std::io::Result<()> {
+        match self.sockets().for_destination(destination) {
+            Some(udp) => udp.send(bytes, destination, source),
+            None => Err(ErrorKind::AddrNotAvailable.into()),
+        }
+    }
+
+    /// Replaces the sockets with ones at `address`, or binds the previous address again when
+    /// that fails.
+    fn rebind(&self, address: SocketAddr) -> Result<(), QuicError> {
+        let mut sockets = self.sockets.write().unwrap_or_else(|e| e.into_inner());
+        let previous = sockets.address;
+        *sockets = Sockets::none(previous);
+        match Sockets::bind(address) {
+            Ok(bound) => {
+                *sockets = bound;
+                Ok(())
+            }
+            Err(error) => {
+                if let Ok(restored) = Sockets::bind(previous) {
+                    *sockets = restored;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// The descriptor that turns writable when the socket of `destination`'s family takes
+    /// datagrams again.
+    fn descriptor(&self, destination: SocketAddr) -> Option<RawFd> {
+        self.sockets().for_destination(destination).map(Udp::fd)
+    }
 }
 
-/// The server's UDP socket and endpoint. A thread of its own reads every datagram and routes it
+/// The server's UDP sockets and endpoint. A thread of its own reads every datagram and routes it
 /// to its connection's thread. New connections wait in a queue; the host takes them with
 /// [`QuicListener::accept`] after the wake it set rings.
 pub struct QuicListener {
@@ -423,12 +592,24 @@ struct Demux {
     config: Arc<ServerConfig>,
     accepted: Mutex<VecDeque<QuicStream>>,
     wake: Mutex<Option<Arc<dyn super::Wake>>>,
-    address: SocketAddr,
     /// [`ACCEPTING`], [`RETIRED`] or [`FINISHED`]. One atomic, so a revive and the thread's
     /// finish never both win.
     phase: AtomicU8,
     /// Set by `Drop`: the thread ends at once, even with live connections.
     stopping: AtomicBool,
+    rebinding: Mutex<Rebinding>,
+}
+
+/// A rebind the listener's thread performs at its next turn.
+enum Rebinding {
+    None,
+    /// To this address, answering on the sender.
+    Asked(
+        SocketAddr,
+        std::sync::mpsc::SyncSender<Result<(), QuicError>>,
+    ),
+    /// The thread ended, so nothing rebinds.
+    Ended,
 }
 
 /// The listener takes new connections.
@@ -439,8 +620,10 @@ const RETIRED: u8 = 1;
 const FINISHED: u8 = 2;
 
 impl QuicListener {
+    /// Listens at `address`. The unspecified address of either family listens on every
+    /// interface, for IPv4 and IPv6.
     pub fn bind(address: SocketAddr, config: Arc<ServerConfig>) -> Result<Self, QuicError> {
-        let socket = Arc::new(Udp::bind(address)?);
+        let sockets = Sockets::bind(address)?;
         let endpoint = Endpoint::new(endpoint_config(), Some(Arc::clone(&config)), true);
         let demux = Arc::new(Demux {
             shared: Arc::new(Shared {
@@ -448,14 +631,14 @@ impl QuicListener {
                     endpoint,
                     routes: HashMap::new(),
                 }),
-                socket,
+                sockets: RwLock::new(sockets),
             }),
             config,
             accepted: Mutex::default(),
             wake: Mutex::default(),
-            address,
             phase: AtomicU8::new(ACCEPTING),
             stopping: AtomicBool::new(false),
+            rebinding: Mutex::new(Rebinding::None),
         });
         let (stopped, stop) = bell()?;
         let running = Arc::clone(&demux);
@@ -475,9 +658,33 @@ impl QuicListener {
         *self.demux.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
     }
 
-    /// The address the socket is bound to.
+    /// The address and port the listener is bound to. Every interface reads as `0.0.0.0`.
     pub fn address(&self) -> SocketAddr {
-        self.demux.address
+        self.demux.shared.sockets().address
+    }
+
+    /// Moves the listener to `address` and keeps its connections, as when exposure widens from
+    /// one address to every interface at the same port. An address and the wildcard of its port
+    /// can't both be bound, so the old socket closes just before the new one binds; a datagram
+    /// arriving in between is lost and QUIC sends it again. When `address` can't be bound the
+    /// listener binds its old address again.
+    pub fn rebind(&self, address: SocketAddr) -> Result<(), QuicError> {
+        let (done, result) = std::sync::mpsc::sync_channel(1);
+        {
+            let mut rebinding = self
+                .demux
+                .rebinding
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if matches!(*rebinding, Rebinding::Ended) {
+                return Err(QuicError::Transport);
+            }
+            *rebinding = Rebinding::Asked(address, done);
+        }
+        // Linux keeps a socket open while a poll waits on it, so the thread closes the old socket
+        // between its waits.
+        ring(&self.stop);
+        result.recv().unwrap_or(Err(QuicError::Transport))
     }
 
     /// Stops taking connections but keeps routing to the live ones until the last ends, so
@@ -554,33 +761,49 @@ impl Drop for QuicListener {
 }
 
 impl Demux {
-    /// Waits on the socket and the stop bell, and routes every datagram.
     fn run(&self, stopped: &UnixStream) {
+        self.serve(stopped);
+        // Drops a rebind asked meanwhile, which then fails.
+        *self.rebinding.lock().unwrap_or_else(|e| e.into_inner()) = Rebinding::Ended;
+    }
+
+    /// Waits on the sockets and the stop bell, rebinds when asked, and routes every datagram.
+    fn serve(&self, stopped: &UnixStream) {
         let mut buffer = vec![0; RECEIVE_BYTES];
         let mut send = Vec::new();
+        let mut descriptors = Vec::with_capacity(3);
         loop {
-            let mut descriptors = [
-                libc::pollfd {
-                    fd: self.shared.socket.fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: stopped.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
+            let poll = |fd| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            descriptors.clear();
+            descriptors.push(poll(stopped.as_raw_fd()));
+            descriptors.extend(self.shared.sockets().udp.iter().map(|udp| poll(udp.fd())));
             // A retired listener looks for its last connection's end now and then.
             let retired = self.phase.load(Ordering::Acquire) == RETIRED;
             let timeout = if retired { 100 } else { -1 };
             // SAFETY: `descriptors` is a live, writable array of `pollfd` for the whole call.
-            unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) };
-            if descriptors[1].revents != 0 {
+            unsafe {
+                libc::poll(
+                    descriptors.as_mut_ptr(),
+                    descriptors.len() as libc::nfds_t,
+                    timeout,
+                )
+            };
+            if descriptors[0].revents != 0 {
                 drain_bell(stopped);
             }
             if self.stopping.load(Ordering::Acquire) {
                 return;
+            }
+            let asked = std::mem::replace(
+                &mut *self.rebinding.lock().unwrap_or_else(|e| e.into_inner()),
+                Rebinding::None,
+            );
+            if let Rebinding::Asked(address, done) = asked {
+                let _ = done.send(self.shared.rebind(address));
             }
             self.route(&mut buffer, &mut send);
             if self.try_finish() {
@@ -605,23 +828,33 @@ impl Demux {
     }
 
     fn send(&self, bytes: &[u8], destination: SocketAddr, source: Option<std::net::IpAddr>) {
-        let _ = self.shared.socket.send(bytes, destination, source);
+        let _ = self.shared.send(bytes, destination, source);
     }
 
-    /// Reads every waiting datagram and hands it to its connection, or starts a new one.
+    /// Reads every waiting datagram of each socket and hands it to its connection, or starts a
+    /// new one.
     fn route(&self, buffer: &mut [u8], send: &mut Vec<u8>) {
         let mut arrived = false;
         let mut datagrams = Vec::new();
+        let mut socket = 0;
         loop {
             datagrams.clear();
-            let received = self.shared.socket.receive(buffer, |remote, local, bytes| {
-                datagrams.push((remote, local, BytesMut::from(bytes)));
-            });
+            // Handling a datagram sends, so the sockets are read under a lock of their own.
+            let received = match self.shared.sockets().udp.get(socket) {
+                Some(udp) => udp.receive(buffer, |remote, local, bytes| {
+                    datagrams.push((remote, local, BytesMut::from(bytes)));
+                }),
+                None => break,
+            };
             match received {
                 Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                // WouldBlock, or a transient error such as an ICMP report: try again later.
-                Err(_) => break,
+                // WouldBlock, or a transient error such as an ICMP report: try the next socket,
+                // and this one again later.
+                Err(_) => {
+                    socket += 1;
+                    continue;
+                }
             }
             for (remote, local, data) in datagrams.drain(..) {
                 arrived |= self.handle(remote, local, data, send);
@@ -723,7 +956,6 @@ impl Demux {
                             .push_back(QuicStream::new(Driver {
                                 connection,
                                 handle,
-                                socket: Arc::clone(&self.shared.socket),
                                 peer: None,
                                 side: Side::Server {
                                     shared: Arc::clone(&self.shared),
@@ -762,10 +994,12 @@ impl Demux {
 enum Side {
     /// A client owns its socket and endpoint.
     Client {
+        socket: Udp,
         endpoint: Box<Endpoint>,
         buffer: Vec<u8>,
     },
-    /// A server connection receives what the listener routes to it, and rings its bell.
+    /// A server connection receives what the listener routes to it, and rings its bell. It sends
+    /// on the listener's sockets.
     Server {
         shared: Arc<Shared>,
         route: Arc<Route>,
@@ -803,7 +1037,6 @@ impl DriverState {
 struct Driver {
     connection: Connection,
     handle: ConnectionHandle,
-    socket: Arc<Udp>,
     /// The server a client's socket is connected to.
     peer: Option<SocketAddr>,
     side: Side,
@@ -814,8 +1047,29 @@ impl Driver {
     /// The descriptor that becomes readable when datagrams arrive for this connection.
     fn descriptor(&self) -> RawFd {
         match &self.side {
-            Side::Client { .. } => self.socket.fd(),
+            Side::Client { socket, .. } => socket.fd(),
             Side::Server { bell, .. } => bell.as_raw_fd(),
+        }
+    }
+
+    fn send(
+        &self,
+        bytes: &[u8],
+        destination: SocketAddr,
+        source: Option<std::net::IpAddr>,
+    ) -> std::io::Result<()> {
+        match &self.side {
+            Side::Client { socket, .. } => socket.send(bytes, destination, source),
+            Side::Server { shared, .. } => shared.send(bytes, destination, source),
+        }
+    }
+
+    /// The descriptor that turns writable once a stashed datagram can be sent.
+    fn stashed_descriptor(&self) -> Option<RawFd> {
+        let (destination, ..) = self.state.stashed.as_ref()?;
+        match &self.side {
+            Side::Client { socket, .. } => Some(socket.fd()),
+            Side::Server { shared, .. } => shared.descriptor(*destination),
         }
     }
 
@@ -873,10 +1127,14 @@ impl Driver {
     fn ingest(&mut self, now: Instant) -> bool {
         let arrived;
         match &mut self.side {
-            Side::Client { endpoint, buffer } => {
+            Side::Client {
+                socket,
+                endpoint,
+                buffer,
+            } => {
                 let mut datagrams = Vec::new();
                 loop {
-                    let received = self.socket.receive(buffer, |remote, local, bytes| {
+                    let received = socket.receive(buffer, |remote, local, bytes| {
                         datagrams.push((remote, local, BytesMut::from(bytes)));
                     });
                     match received {
@@ -916,7 +1174,7 @@ impl Driver {
                             self.connection.handle_event(event);
                         }
                         Some(DatagramEvent::Response(transmit)) => {
-                            let _ = self.socket.send(
+                            let _ = socket.send(
                                 &self.state.transmit[..transmit.size],
                                 transmit.destination,
                                 transmit.src_ip,
@@ -965,7 +1223,7 @@ impl Driver {
     /// Sends datagrams until QUIC has none or the socket would block.
     fn transmit(&mut self, now: Instant) {
         if let Some((destination, source, bytes)) = self.state.stashed.take() {
-            match self.socket.send(&bytes, destination, source) {
+            match self.send(&bytes, destination, source) {
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     self.state.stashed = Some((destination, source, bytes));
                     return;
@@ -983,10 +1241,7 @@ impl Driver {
                 return;
             };
             let bytes = &self.state.transmit[..transmit.size];
-            match self
-                .socket
-                .send(bytes, transmit.destination, transmit.src_ip)
-            {
+            match self.send(bytes, transmit.destination, transmit.src_ip) {
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     self.state.stashed =
                         Some((transmit.destination, transmit.src_ip, bytes.to_vec()));
@@ -1020,10 +1275,13 @@ impl Driver {
         let Some(peer) = self.peer else {
             return false;
         };
-        let Ok(socket) = Udp::client(peer) else {
+        let Side::Client { socket, .. } = &mut self.side else {
             return false;
         };
-        self.socket = Arc::new(socket);
+        let Ok(moved) = Udp::client(peer) else {
+            return false;
+        };
+        *socket = moved;
         self.state.stashed = None;
         self.connection.handle_network_change(None, now);
         self.transmit(now);
@@ -1032,11 +1290,15 @@ impl Driver {
 
     /// The local address a client's socket uses.
     fn local_ip(&self) -> Option<std::net::IpAddr> {
-        self.socket
-            .socket
-            .local_addr()
-            .ok()
-            .map(|address| address.ip())
+        self.local_address().map(|address| address.ip())
+    }
+
+    /// The local address and port of a client's socket.
+    fn local_address(&self) -> Option<SocketAddr> {
+        match &self.side {
+            Side::Client { socket, .. } => socket.socket.local_addr().ok(),
+            Side::Server { .. } => None,
+        }
     }
 
     /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
@@ -1055,9 +1317,9 @@ impl Driver {
             revents: 0,
         }];
         // A stashed datagram waits for the socket to take it, not for the bell.
-        if self.state.stashed.is_some() {
+        if let Some(fd) = self.stashed_descriptor() {
             descriptors.push(libc::pollfd {
-                fd: self.socket.fd(),
+                fd,
                 events: libc::POLLOUT,
                 revents: 0,
             });
@@ -1158,7 +1420,6 @@ impl QuicStream {
             let Ok(socket) = Udp::client(*address) else {
                 continue;
             };
-            let socket = Arc::new(socket);
             let mut endpoint = Box::new(Endpoint::new(endpoint_config(), None, true));
             let Ok((handle, connection)) =
                 endpoint.connect(Instant::now(), config.clone(), *address, SERVER_NAME)
@@ -1168,9 +1429,9 @@ impl QuicStream {
             let driver = Driver {
                 connection,
                 handle,
-                socket,
                 peer: Some(*address),
                 side: Side::Client {
+                    socket,
                     endpoint,
                     buffer: vec![0; RECEIVE_BYTES],
                 },
@@ -1527,7 +1788,7 @@ impl QuicCarrier {
     /// The local address and port of a client's socket.
     #[cfg(test)]
     pub(crate) fn local_address(&self) -> Option<SocketAddr> {
-        self.driver.socket.socket.local_addr().ok()
+        self.driver.local_address()
     }
 
     fn packets_sent(&mut self) -> u64 {
@@ -1766,12 +2027,7 @@ impl Carrier for QuicCarrier {
         let descriptor = self.driver.descriptor();
         Readiness {
             read: descriptor,
-            write: self
-                .driver
-                .state
-                .stashed
-                .is_some()
-                .then(|| self.driver.socket.fd()),
+            write: self.driver.stashed_descriptor(),
             // Acknowledgements arrive on the same descriptor and free QUIC's buffers.
             progress: Some(descriptor),
             deadline: [
@@ -1868,6 +2124,105 @@ mod tests {
         assert_eq!(revived + finished, 50);
     }
 
+    /// The address the system would send from to reach the internet, when it has a route.
+    fn routed_ipv4() -> Option<std::net::IpAddr> {
+        let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        socket
+            .connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9))
+            .ok()?;
+        Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback())
+    }
+
+    /// Sockets on every interface answer each datagram from the address it reached, also when
+    /// the system would pick another source to reach the client. A client that dialed one of the
+    /// server's addresses never sees a reply from another, and a connected client drops one.
+    #[test]
+    fn every_interface_replies_from_the_address_each_client_dialed() {
+        let sockets = Sockets::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let port = sockets.udp[0].port().unwrap();
+        assert_eq!(sockets.udp.len(), 2, "one socket per family");
+        assert_eq!(sockets.udp[1].port(), Some(port));
+        let loopback: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
+        // Each client is bound to one address and dials another of the same machine, so the
+        // system's own choice of source for the reply is the client's address, not the dialed
+        // one. Linux routes all of 127.0.0.0/8 to itself; other systems use the routed address.
+        let mut cases = vec![
+            (loopback, loopback),
+            (
+                std::net::Ipv6Addr::LOCALHOST.into(),
+                std::net::Ipv6Addr::LOCALHOST.into(),
+            ),
+        ];
+        if cfg!(target_os = "linux") {
+            cases.push((loopback, std::net::Ipv4Addr::new(127, 0, 0, 2).into()));
+        }
+        if let Some(routed) = routed_ipv4() {
+            cases.push((loopback, routed));
+            cases.push((routed, loopback));
+        }
+        let mut buffer = vec![0; RECEIVE_BYTES];
+        for (client, dialed) in cases {
+            let client = UdpSocket::bind((client, 0)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client.send_to(b"ping", (dialed, port)).unwrap();
+            let udp = sockets
+                .for_destination(SocketAddr::new(dialed, port))
+                .unwrap();
+            let mut descriptor = libc::pollfd {
+                fd: udp.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `descriptor` is a live, writable `pollfd` for the whole call.
+            unsafe { libc::poll(&mut descriptor, 1, 5000) };
+            let mut arrived = None;
+            let _ = udp.receive(&mut buffer, |remote, local, _| {
+                arrived = Some((remote, local));
+            });
+            let (remote, local) = arrived.unwrap_or_else(|| panic!("nothing reached {dialed}"));
+            assert_eq!(local, Some(dialed));
+            udp.send(b"pong", remote, local).unwrap();
+            let (_, from) = client.recv_from(&mut buffer).unwrap();
+            assert_eq!(from, SocketAddr::new(dialed, port), "the reply's source");
+        }
+    }
+
+    /// A listener rebinds from one address to every interface at the same port. A port it can't
+    /// take leaves it at the address it had.
+    #[test]
+    fn rebinding_to_every_interface_keeps_the_old_address_when_the_port_is_taken() {
+        let config = server_config_for_tests();
+        // Another test can hold the port at another address, so a taken port tries another.
+        let (listener, wildcard) = (0..8)
+            .find_map(|_| {
+                let listener =
+                    QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config))
+                        .unwrap();
+                let wildcard = SocketAddr::new(
+                    std::net::Ipv4Addr::UNSPECIFIED.into(),
+                    listener.address().port(),
+                );
+                listener
+                    .rebind(wildcard)
+                    .ok()
+                    .map(|()| (listener, wildcard))
+            })
+            .expect("a port free on every interface");
+        assert_eq!(listener.address(), wildcard);
+        assert_eq!(listener.demux.shared.sockets().udp.len(), 2);
+        // A taken port leaves the listener where it was.
+        let taken = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let elsewhere = SocketAddr::new(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            taken.local_addr().unwrap().port(),
+        );
+        assert_eq!(listener.rebind(elsewhere), Err(QuicError::AddressInUse));
+        assert_eq!(listener.address(), wildcard);
+        assert_eq!(listener.demux.shared.sockets().udp.len(), 2);
+    }
+
     /// A retired listener without connections reports none, so its owner drops it and the
     /// port is free at once.
     #[test]
@@ -1875,7 +2230,10 @@ mod tests {
         let config = server_config_for_tests();
         let listener =
             QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
-        let bound = listener.demux.shared.socket.socket.local_addr().unwrap();
+        let bound = listener.demux.shared.sockets().udp[0]
+            .socket
+            .local_addr()
+            .unwrap();
         assert!(!listener.retire(), "no connection is live");
         drop(listener);
         assert!(QuicListener::bind(bound, config).is_ok());
