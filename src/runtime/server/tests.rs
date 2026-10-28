@@ -628,8 +628,40 @@ fn shared_membership_preserves_independent_pane_grants_and_lazy_startup() {
 #[cfg(feature = "native-tests")]
 #[test]
 fn repeated_real_zsh_shutdown_confirms_owned_process_cleanup() {
+    /// Starts zsh with an empty ZDOTDIR, so it reads only the system's startup files. The
+    /// account's own files run programs of their own, and how long they take depends on the
+    /// account and the host, not on the cleanup this test checks.
+    struct SystemStartupFiles {
+        pty: Arc<dyn NativePtyAdapterFactory>,
+        zdotdir: String,
+    }
+    impl NativePtyAdapterFactory for SystemStartupFiles {
+        fn create(
+            &self,
+            launch: crate::platform::shell_launch::PreparedShellLaunch,
+            size: crate::platform::native_pty::NativePtySize,
+        ) -> Result<
+            crate::platform::native_pty::NativePtyAdapterParts,
+            crate::platform::native_pty::NativePtyAdapterConstructionFailure,
+        > {
+            self.pty.create(
+                launch.with_environment_value("ZDOTDIR", &self.zdotdir),
+                size,
+            )
+        }
+    }
+    let zdotdir = std::env::temp_dir().join(format!(
+        "spaceterm-zdotdir-{}-{:x}",
+        std::process::id(),
+        u64::from_ne_bytes(nonce().unwrap()[..8].try_into().unwrap())
+    ));
+    std::fs::create_dir(&zdotdir).unwrap();
+    let pty: Arc<dyn NativePtyAdapterFactory> = Arc::new(SystemStartupFiles {
+        pty: native_pty_factory(),
+        zdotdir: zdotdir.to_str().unwrap().into(),
+    });
     for attempt in 0..64 {
-        let mut host = host_with_shell("/bin/zsh");
+        let mut host = host_with_shell("/bin/zsh", pty.clone());
         let lease = attach(&mut host, 1, true);
         command(
             &mut host,
@@ -644,19 +676,20 @@ fn repeated_real_zsh_shutdown_confirms_owned_process_cleanup() {
             "native zsh cleanup attempt {attempt}"
         );
     }
+    std::fs::remove_dir_all(zdotdir).unwrap();
 }
 
 pub(super) fn host() -> DevelopmentPaneHost {
-    host_with_shell("/bin/sh")
+    host_with_shell("/bin/sh", native_pty_factory())
 }
 
-fn host_with_shell(shell: &str) -> DevelopmentPaneHost {
+fn host_with_shell(shell: &str, pty: Arc<dyn NativePtyAdapterFactory>) -> DevelopmentPaneHost {
     let filesystem = local_filesystem();
     let directory = filesystem
         .validate_directory(&std::env::temp_dir())
         .unwrap();
     let factory = NativeTerminalSessionFactory::new(
-        native_pty_factory(),
+        pty,
         ShellLaunchPlanner::new(
             shell.into(),
             std::path::PathBuf::new(),
