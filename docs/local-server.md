@@ -78,6 +78,8 @@ Each client holds one SpaceTerm Protocol connection per server: the account-loca
 
 Saved QUIC routes and restricted unpair recovery live in `direct-device-connections.json` in private client data, outside the Settings Document. Routes saved over WSS, before QUIC, are dropped when the client loads that file; add those servers again. An unpair request still pending over WSS is dropped with its route and leaves a Servers notice; unpair that device again on the server's machine. Each pairing has a separate native credential. The account server keeps listener policy, trust and pairing grants in `direct.json`. Invitations are never retained. [ADR 0028](adr/0028-use-spaceterm-protocol-over-every-client-connection.md) owns enrollment and [ADR 0052](adr/0052-carry-paired-connections-over-quic.md) the transport; [ADR 0038](adr/0038-unpair-devices-without-blocking-local-connection-removal.md) owns removal and recovery.
 
+On macOS, Release and Development keep each credential in the login Keychain through the Security framework. The Keychain binds an item to the build that created it, because neither identity is signed by an Apple team. After an update or rebuild, the Keychain may ask for its password. The first connection attempt after launch shows that request; later automatic retries never ask, and Resume asks again.
+
 `mise run server:direct:build` prepares the two-host verification helper. Its help defines the exact idle Development scope for `server:direct:smoke`; executing the built helper preserves its signature. `server:direct:credentials:native:test` separately verifies and removes two randomly scoped native-store items.
 
 ## Update the local server

@@ -3,8 +3,9 @@
 //! One app-wide registry owns every saved direct route, its continuation and the unpair requests
 //! awaiting a server's confirmation. The Workspace Window presents a connected route's
 //! Workspaces, and the Servers Settings Section reports each route and offers its steps. Reading
-//! a status performs no network work and asks for no credential, so rendering stays quiet; only
-//! a step the person chooses may ask the system for this device's key.
+//! a status performs no network work and asks for no credential, so rendering stays quiet. A step
+//! the person chooses, or a connected route's first attempt after launch, may ask the system for
+//! this device's key.
 
 use gpui::{App, Global, Task};
 

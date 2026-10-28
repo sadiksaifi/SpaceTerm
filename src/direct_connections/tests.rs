@@ -617,6 +617,18 @@ fn await_condition(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+fn relaunch_lets_only_the_first_attempt_of_an_active_route_ask_for_its_key() {
+    let (_connections, _, lock, _) = offline_fixture_reached(&[("Studio", None)], true);
+    let reads = || lock.0.reads.lock().unwrap().clone();
+    await_condition(|| reads().len() >= 2);
+    assert_eq!(
+        reads()[..2],
+        [Interaction::Requested, Interaction::Quiet],
+        "a store that no longer trusts this build asks at launch; the offline retry stays quiet"
+    );
+}
+
+#[test]
 fn offline_self_unpair_removes_only_its_route_and_keeps_exact_recovery_after_relaunch() {
     let (connections, records, credentials, network) =
         fixture(vec![saved(1, 5), saved(2, 6)], Answer::Lost);
