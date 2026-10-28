@@ -12642,6 +12642,9 @@ mod shared_repositories {
 #[path = "launch_tests.rs"]
 mod launch_tests;
 
+#[path = "retained_tests.rs"]
+mod retained_tests;
+
 /// A stable route for the paired server a test names.
 fn named_route(name: &str) -> crate::direct_connections::DirectRouteId {
     let mut route = [0xEE; 32];

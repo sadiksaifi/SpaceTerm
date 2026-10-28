@@ -52,6 +52,9 @@ pub(crate) enum DevelopmentPaneStatus {
     SessionEnded,
     Ended,
     Failed(ServerError),
+    /// The client is not connected to the Pane's server, so it presents the Pane from what it
+    /// retained and reaches no Terminal Session.
+    Offline,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Admission {

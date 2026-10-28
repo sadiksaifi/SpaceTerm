@@ -41,6 +41,27 @@ struct State {
 /// Clones share one attachment writer and invalidate old subscriptions on detach.
 #[derive(Clone)]
 pub struct Attachments(Arc<Mutex<State>>);
+/// An attachment writer that another handle to the same client directory may share while it
+/// stays open.
+#[cfg(feature = "client")]
+pub(crate) struct WeakAttachments(std::sync::Weak<Mutex<State>>);
+#[cfg(feature = "client")]
+impl WeakAttachments {
+    pub(crate) fn alive(&self) -> bool {
+        self.0.strong_count() > 0
+    }
+    /// The open writer, when it writes for exactly this server and client.
+    pub(crate) fn upgrade(&self, server: Id, client: Id) -> Option<Attachments> {
+        let state = self.0.upgrade()?;
+        let binds = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .storage
+            .as_ref()
+            .is_some_and(|(_, _, s, c)| *s == server && *c == client);
+        binds.then_some(Attachments(state))
+    }
+}
 /// One presentation's authority to resume control. Reattachment issues a new authority.
 #[derive(Clone)]
 pub struct AttachmentPermit {
@@ -59,6 +80,24 @@ impl Attachments {
             #[cfg(feature = "client")]
             storage: None,
         })))
+    }
+    /// A writer as a relaunched client opens it: its saved choices attach `workspaces`, and it
+    /// has reconciled no inventory yet, so it permits no Pane.
+    #[cfg(feature = "test-support")]
+    pub fn relaunched(workspaces: &[Id]) -> Result<Self, ServerError> {
+        let attachments = Self::memory();
+        {
+            let mut state = attachments.0.lock().unwrap_or_else(|e| e.into_inner());
+            for workspace in workspaces {
+                state.choices.attach(*workspace)?;
+            }
+            state.choices.initialized = true;
+        }
+        Ok(attachments)
+    }
+    #[cfg(feature = "client")]
+    pub(crate) fn downgrade(&self) -> WeakAttachments {
+        WeakAttachments(Arc::downgrade(&self.0))
     }
     #[cfg(feature = "client")]
     pub(crate) fn open(
