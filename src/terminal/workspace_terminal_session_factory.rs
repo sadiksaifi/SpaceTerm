@@ -54,8 +54,8 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
-    /// A Pane of a server this client is not connected to. It reads `title`, the title this
-    /// client retained for it, and owns no Terminal Session.
+    /// A Pane of a server this client is not connected to. It reads `title`, the last title
+    /// this client knows for it, and owns no Terminal Session.
     pub(crate) fn unavailable(
         home_directory: ValidatedLocalDirectory,
         title: Option<String>,

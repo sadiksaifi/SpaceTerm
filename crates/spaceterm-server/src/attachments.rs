@@ -81,6 +81,20 @@ impl Attachments {
             storage: None,
         })))
     }
+    /// A writer as a relaunched client opens it: its saved choices attach `workspaces`, and it
+    /// has reconciled no inventory yet, so it permits no Pane.
+    #[cfg(feature = "test-support")]
+    pub fn relaunched(workspaces: &[Id]) -> Result<Self, ServerError> {
+        let attachments = Self::memory();
+        {
+            let mut state = attachments.0.lock().unwrap_or_else(|e| e.into_inner());
+            for workspace in workspaces {
+                state.choices.attach(*workspace)?;
+            }
+            state.choices.initialized = true;
+        }
+        Ok(attachments)
+    }
     #[cfg(feature = "client")]
     pub(crate) fn downgrade(&self) -> WeakAttachments {
         WeakAttachments(Arc::downgrade(&self.0))

@@ -29,9 +29,21 @@ pub(super) struct DirectRoute {
     server: Option<spaceterm_server::ServerConnection>,
 }
 
-/// The paired routes one Workspace Window presents, by route.
+/// The paired routes one Workspace Window presents, by route, and the revision of what each
+/// other saved route retained.
 #[derive(Default)]
-pub(super) struct DirectRoutes(std::collections::BTreeMap<DirectRouteId, DirectRoute>);
+pub(super) struct DirectRoutes(
+    std::collections::BTreeMap<DirectRouteId, DirectRoute>,
+    RetainedRevisions,
+);
+
+/// The revision of the copy each saved route this window doesn't present retained, once read.
+/// `None` means the route retained none.
+#[derive(Default)]
+struct RetainedRevisions {
+    read: std::collections::BTreeMap<DirectRouteId, Option<u64>>,
+    reading: std::collections::BTreeSet<DirectRouteId>,
+}
 
 impl WorkspaceManager {
     /// Follows the desktop's direct registry for this window's life. A build without one follows
@@ -74,7 +86,12 @@ impl WorkspaceManager {
         {
             return;
         }
-        let presented = presented_routes(&connections, |route| self.direct_route_presented(route));
+        self.read_retained_revisions(&connections, window, cx);
+        let presented = presented_routes(
+            &connections,
+            |route| self.direct_route_presented(route),
+            |route| self.retained_revision(route),
+        );
         for key in self.shared.keys() {
             let Some(ServerOrigin::Direct(direct)) = self.shared.origin(key) else {
                 continue;
@@ -89,8 +106,12 @@ impl WorkspaceManager {
                     None => true,
                     Some(status) => status == DirectRouteStatus::Refused(RefusalReason::Revoked),
                 };
-            if removed && let Some(shared) = self.shared.get_mut(key) {
-                shared.discard_retained_copy();
+            if let Some(shared) = self.shared.get_mut(key) {
+                if removed {
+                    shared.discard_retained_copy();
+                }
+                let revision = shared.retained_copy().map(|copy| copy.revision);
+                self.direct_routes.1.read.insert(route, revision);
             }
             self.withdraw_server_workspaces(key, window, cx);
             self.direct_routes.0.remove(&route);
@@ -105,6 +126,51 @@ impl WorkspaceManager {
         }
         // The creation menus show each saved route, which changes without a new binding.
         cx.notify();
+    }
+
+    /// Reads, off the main thread, the revision of the copy each saved route this window doesn't
+    /// present retained, then follows the registry again.
+    fn read_retained_revisions(
+        &mut self,
+        connections: &DirectConnections,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (route, _) in connections.routes() {
+            if self.direct_route_presented(&route)
+                || self.direct_routes.1.read.contains_key(&route)
+                || !self.direct_routes.1.reading.insert(route)
+            {
+                continue;
+            }
+            let storage = connections.storage(&route);
+            let read = cx.background_executor().spawn(async move {
+                storage.and_then(|storage| storage.retained_inventory_revision())
+            });
+            cx.spawn_in(window, async move |manager, cx| {
+                let revision = read.await;
+                let _ = manager.update_in(cx, |manager, window, cx| {
+                    manager.direct_routes.1.reading.remove(&route);
+                    manager.direct_routes.1.read.insert(route, revision);
+                    manager.sync_direct_servers(window, cx);
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// The revision of the copy `route` retained: `None` until it is known, and `Some(None)`
+    /// when the route retained none.
+    fn retained_revision(&self, route: &DirectRouteId) -> Option<Option<u64>> {
+        if let Some(followed) = self.direct_routes.0.get(route) {
+            return Some(
+                self.shared
+                    .get(followed.key)
+                    .and_then(|shared| shared.retained_copy())
+                    .map(|copy| copy.revision),
+            );
+        }
+        self.direct_routes.1.read.get(route).copied()
     }
 
     /// Presents one paired route's Workspaces: the server's own through `server`, or those this
@@ -182,7 +248,7 @@ impl WorkspaceManager {
         };
         if let Some(shared) = self.shared.get_mut(followed.key) {
             shared.present_retained_copy();
-            followed.panes.retain_titles(shared.retained_copy());
+            followed.panes.retain_titles(shared.unavailable_titles());
         }
     }
 
@@ -258,7 +324,7 @@ impl WorkspaceManager {
                 shared.replace_transport(edits);
             }
             None => {
-                followed.panes.retain_titles(shared.retained_copy());
+                followed.panes.retain_titles(shared.unavailable_titles());
                 followed.panes.follow(None);
                 shared.replace_transport(Rc::new(UnavailableEdits::default()));
             }
@@ -383,10 +449,13 @@ fn by_name(a: &str, b: &str) -> Ordering {
 /// server, such as one over the local network and one over Tailscale, and each connected one
 /// presents that server through its own pairing. A route without a connection presents what it
 /// retained only while no route to its server is connected, and only one such route per server
-/// does: the one already presented, then one the person keeps connecting, then the first.
+/// does: the one whose copy has the newest revision, then the one already presented, then one
+/// the person keeps connecting, then the first. `revision` is `None` while a route's copy is
+/// unread; until every copy is read, only a copy already presented stays.
 fn presented_routes(
     connections: &DirectConnections,
     presented: impl Fn(&DirectRouteId) -> bool,
+    revision: impl Fn(&DirectRouteId) -> Option<Option<u64>>,
 ) -> Vec<(DirectServer, Option<spaceterm_server::ServerConnection>)> {
     let saved: Vec<_> = connections
         .routes()
@@ -397,7 +466,6 @@ fn presented_routes(
         })
         .collect();
     let mut chosen: Vec<(DirectServer, Option<spaceterm_server::ServerConnection>)> = Vec::new();
-    let mut retained_servers = Vec::new();
     for (route, _, server) in &saved {
         if let Some(server) = server {
             chosen.push((direct_server(route), Some(server.clone())));
@@ -408,7 +476,7 @@ fn presented_routes(
             .iter()
             .any(|(route, _, server)| server.is_some() && route.paired.pin.server == *pin)
     };
-    let mut offline: Vec<_> = saved
+    let offline: Vec<_> = saved
         .iter()
         .filter(|(route, status, server)| {
             server.is_none()
@@ -416,16 +484,32 @@ fn presented_routes(
                 && !connected(&route.paired.pin.server)
         })
         .collect();
-    offline.sort_by_key(|(route, status, _)| {
-        (
-            !presented(&route.id),
-            *status == DirectRouteStatus::Disconnected,
-            route.id,
-        )
-    });
-    for (route, _, _) in offline {
-        if !retained_servers.contains(&route.paired.pin.server) {
-            retained_servers.push(route.paired.pin.server);
+    let mut servers: Vec<[u8; 32]> = offline
+        .iter()
+        .map(|(route, _, _)| route.paired.pin.server)
+        .collect();
+    servers.sort_unstable();
+    servers.dedup();
+    for server in servers {
+        let mut candidates: Vec<_> = offline
+            .iter()
+            .filter(|(route, _, _)| route.paired.pin.server == server)
+            .collect();
+        let unread = candidates
+            .iter()
+            .any(|(route, _, _)| revision(&route.id).is_none());
+        if unread {
+            candidates.retain(|(route, _, _)| presented(&route.id));
+        }
+        candidates.sort_by_key(|(route, status, _)| {
+            (
+                std::cmp::Reverse(revision(&route.id).flatten()),
+                !presented(&route.id),
+                *status == DirectRouteStatus::Disconnected,
+                route.id,
+            )
+        });
+        if let Some((route, _, _)) = candidates.first() {
             chosen.push((direct_server(route), None));
         }
     }
@@ -445,30 +529,40 @@ mod tests {
     use crate::direct_connections::tests::connected_routes_to_one_server;
 
     /// Two saved routes reach one server, as one over the local network and one over Tailscale
-    /// do. Retained copies never present that server twice where its connected routes don't.
+    /// do. Retained copies never present that server twice where its connected routes don't,
+    /// and the newer copy wins.
     #[test]
     fn a_server_reached_by_two_routes_should_present_at_most_one_retained_copy() {
         let (direct, routes) = connected_routes_to_one_server(&["lan", "tailscale"], [0x5E; 32]);
-        let presented = |presented: &[usize]| {
+        let presented = |presented: &[usize], revisions: [Option<Option<u64>>; 2]| {
             let kept: Vec<_> = presented.iter().map(|index| routes[*index]).collect();
-            presented_routes(&direct, |route| kept.contains(route))
-                .into_iter()
-                .map(|(server, connection)| {
-                    (
-                        routes.iter().position(|route| *route == server.route),
-                        connection.is_some(),
-                    )
-                })
-                .collect::<Vec<_>>()
+            presented_routes(
+                &direct,
+                |route| kept.contains(route),
+                |route| revisions[routes.iter().position(|id| id == route).unwrap()],
+            )
+            .into_iter()
+            .map(|(server, connection)| {
+                (
+                    routes.iter().position(|route| *route == server.route),
+                    connection.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
         };
+        let read = [Some(Some(4)), Some(Some(4))];
 
-        let both = presented(&[0, 1]);
+        let both = presented(&[0, 1], read);
         direct.disconnect(&routes[1]);
-        let one_connected = presented(&[0, 1]);
+        let one_connected = presented(&[0, 1], read);
         direct.disconnect(&routes[0]);
-        let none_connected = presented(&[0, 1]);
-        let tailscale_kept = presented(&[1]);
-        let nothing_presented = presented(&[]);
+        let none_connected = presented(&[0, 1], read);
+        let tailscale_kept = presented(&[1], read);
+        let nothing_presented = presented(&[], read);
+        let newer_tailscale = presented(&[0], [Some(Some(3)), Some(Some(7))]);
+        let only_tailscale_retained = presented(&[], [Some(None), Some(Some(1))]);
+        let unread = presented(&[], [Some(Some(9)), None]);
+        let unread_kept = presented(&[1], [Some(Some(9)), None]);
 
         assert_eq!(both, [(Some(0), true), (Some(1), true)]);
         assert_eq!(
@@ -480,8 +574,20 @@ mod tests {
         assert_eq!(
             tailscale_kept,
             [(Some(1), false)],
-            "the copy already presented stays"
+            "of equal copies, the one already presented stays"
         );
         assert_eq!(nothing_presented, [(Some(0), false)]);
+        assert_eq!(
+            newer_tailscale,
+            [(Some(1), false)],
+            "the newer copy wins over the presented one"
+        );
+        assert_eq!(only_tailscale_retained, [(Some(1), false)]);
+        assert_eq!(
+            unread,
+            [],
+            "nothing new is presented until each copy is read"
+        );
+        assert_eq!(unread_kept, [(Some(1), false)]);
     }
 }

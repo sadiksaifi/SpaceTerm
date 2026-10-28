@@ -161,6 +161,9 @@ mod development {
         generation: Rc<std::cell::Cell<u64>>,
         /// The inventory a paired route last confirmed, presented while its transport has none.
         stand_in: Rc<std::cell::RefCell<Option<Inventory>>>,
+        /// Whether the last reading presented the stand-in. Shared edits wait for the server's
+        /// own inventory, even on a connected transport.
+        standing_in: Rc<std::cell::Cell<bool>>,
         pending: Rc<std::cell::RefCell<super::pending::PendingEdits>>,
         subscribers: Rc<std::cell::RefCell<Vec<async_channel::Sender<()>>>>,
     }
@@ -197,6 +200,7 @@ mod development {
                 edits: Rc::new(std::cell::RefCell::new(edits)),
                 generation: Rc::default(),
                 stand_in: Rc::default(),
+                standing_in: Rc::default(),
                 pending: Rc::new(std::cell::RefCell::new(
                     super::pending::PendingEdits::default(),
                 )),
@@ -236,7 +240,7 @@ mod development {
         }
 
         fn editability(&self) -> SharedEditability {
-            if !self.transport().availability().0 {
+            if !self.transport().availability().0 || self.standing_in.get() {
                 SharedEditability::Offline
             } else if self.pending.borrow().full() {
                 SharedEditability::Pending
@@ -316,6 +320,7 @@ mod development {
             if standing_in {
                 snapshot.inventory.clone_from(&self.stand_in.borrow());
             }
+            self.standing_in.set(standing_in);
             self.pending.borrow_mut().observe(&snapshot);
             self.dispatch();
             (snapshot, standing_in)
@@ -1377,8 +1382,10 @@ mod development {
         attachment_error: Option<spaceterm_server::ServerError>,
         /// Whether this binding keeps a copy of the inventory it presents, for a paired route.
         retains_copies: bool,
-        /// The Workspaces and Tabs the server last confirmed to this client, as retained.
+        /// The Workspaces and Tabs the server last confirmed to this client.
         confirmed: Option<RetainedInventory>,
+        /// The copy last written to this client's storage.
+        saved: Option<RetainedInventory>,
         /// Whether the presented inventory is the retained copy rather than the server's.
         standing_in: bool,
     }
@@ -1435,6 +1442,7 @@ mod development {
                 attachment_error: None,
                 retains_copies: false,
                 confirmed: None,
+                saved: None,
                 standing_in: false,
             }
         }
@@ -1458,8 +1466,11 @@ mod development {
         /// Presents the retained copy until the server publishes an inventory. Call once the
         /// client views are read.
         pub(crate) fn present_retained_copy(&mut self) {
+            if self.saved.is_none() {
+                self.saved = self.retained_copy();
+            }
             if self.confirmed.is_none() {
-                self.confirmed = self.retained_copy();
+                self.confirmed.clone_from(&self.saved);
             }
             self.edits
                 .stand_in(self.confirmed.as_ref().map(RetainedInventory::inventory));
@@ -1477,10 +1488,51 @@ mod development {
             self.edits.replace_transport(edits);
         }
 
+        /// The title each Pane presents while its route has no connection: the title a program
+        /// set, while this process still holds the server's inventory, and otherwise the shell
+        /// name this client retained. Program-set titles are never written to storage.
+        pub(crate) fn unavailable_titles(&self) -> BTreeMap<Id, String> {
+            use spaceterm_server::pane::metadata::{MAX_TITLE_CHARS, TitleProvenance};
+            let mut titles: BTreeMap<Id, String> = self
+                .confirmed
+                .iter()
+                .flat_map(|copy| &copy.workspaces)
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .filter_map(|pane| Some((pane.id, pane.shell.clone()?)))
+                .collect();
+            let published = self.latest.iter().filter(|_| !self.standing_in);
+            for pane in published
+                .flat_map(|inventory| &inventory.workspaces)
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+            {
+                let Some(presentation) = pane.presentation.as_deref() else {
+                    continue;
+                };
+                let title = match presentation.title_provenance {
+                    TitleProvenance::TerminalControl => &presentation.title,
+                    TitleProvenance::Fallback | TitleProvenance::WorkingDirectory => {
+                        &presentation.shell_name
+                    }
+                };
+                let title: String = title
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_TITLE_CHARS)
+                    .collect();
+                if !title.trim().is_empty() {
+                    titles.insert(pane.id, title.trim().to_owned());
+                }
+            }
+            titles
+        }
+
         /// Removes the retained copy for good, as when the person removes the paired route.
         pub(crate) fn discard_retained_copy(&mut self) {
             self.retains_copies = false;
             self.confirmed = None;
+            self.saved = None;
             self.edits.stand_in(None);
             if let Some(views) = &self.retained_views {
                 views.discard_inventory();
@@ -1491,12 +1543,31 @@ mod development {
         /// its storage.
         #[cfg(test)]
         pub(crate) fn retain_copy_for_test(&mut self, copy: RetainedInventory) {
-            let _ = self.attachments.initialize(&copy.inventory(), None);
-            for workspace in &copy.workspaces {
-                let _ = self.attachments.attach(workspace.id);
+            let attached: Vec<_> = copy
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id)
+                .collect();
+            if let Ok(attachments) =
+                spaceterm_server::attachments::Attachments::relaunched(&attached)
+            {
+                self.attachments = attachments;
             }
             self.retains_copies = true;
+            self.saved = Some(copy.clone());
             self.confirmed = Some(copy);
+        }
+
+        /// The copy last written to this client's storage.
+        #[cfg(test)]
+        pub(crate) const fn saved_copy(&self) -> Option<&RetainedInventory> {
+            self.saved.as_ref()
+        }
+
+        /// Whether this client's attachments let it open the server Pane `pane`.
+        #[cfg(test)]
+        pub(crate) fn permits(&self, pane: Id) -> bool {
+            self.attachments.permit(pane).is_some()
         }
 
         /// Whether this binding presents the retained copy rather than the server's inventory.
@@ -2045,6 +2116,11 @@ mod development {
             let (snapshot, standing_in) = self.edits.read();
             let mut poll = SharedPoll::default();
             if self.standing_in != standing_in {
+                // The server's first inventory after the retained copy initializes attachments
+                // and opens Panes even when its revision is the copy's.
+                if !standing_in {
+                    self.revision = None;
+                }
                 self.standing_in = standing_in;
                 poll.changed = true;
             }
@@ -2136,10 +2212,18 @@ mod development {
                 && let Some(inventory) = &snapshot.inventory
             {
                 let copy = RetainedInventory::retain(inventory);
-                if self.confirmed.as_ref() != Some(&copy) {
+                // Only a change of Workspaces, Tabs, Panes, Splits or names is written.
+                if self
+                    .saved
+                    .as_ref()
+                    .is_none_or(|saved| !saved.same_structure(&copy))
+                {
                     if let Some(views) = &self.retained_views {
                         views.save_inventory(copy.clone());
                     }
+                    self.saved = Some(copy.clone());
+                }
+                if self.confirmed.as_ref() != Some(&copy) {
                     self.confirmed = Some(copy);
                 }
             }

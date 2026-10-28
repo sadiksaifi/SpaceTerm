@@ -5,10 +5,10 @@
 //! what this client retained, reach no Terminal Session, and shared edits stay unavailable.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use spaceterm_server::client_view::RetainedInventory;
 use spaceterm_server::hierarchy::{Id, Mutation};
 
 use super::{DirectServer, SharedPaneOpener, SharedPaneSubscription, SharedWorkspaceEdits};
@@ -24,8 +24,8 @@ pub(crate) struct DirectRoutePanes {
     /// Completes the launch plan a Pane's factory ignores. It is never a server directory.
     client_home: ValidatedLocalDirectory,
     connected: RefCell<Option<Rc<dyn SharedPaneOpener>>>,
-    /// The titles this client retained for the route's Panes.
-    titles: RefCell<Option<RetainedInventory>>,
+    /// The title each of the route's Panes presents without a connection.
+    titles: RefCell<BTreeMap<Id, String>>,
     generation: Cell<u64>,
 }
 
@@ -35,7 +35,7 @@ impl DirectRoutePanes {
             direct,
             client_home,
             connected: RefCell::new(None),
-            titles: RefCell::new(None),
+            titles: RefCell::default(),
             generation: Cell::new(0),
         }
     }
@@ -47,9 +47,9 @@ impl DirectRoutePanes {
         self.generation.set(self.generation.get().wrapping_add(1));
     }
 
-    /// Names unavailable Panes by the titles `retained` holds.
-    pub(crate) fn retain_titles(&self, retained: Option<RetainedInventory>) {
-        *self.titles.borrow_mut() = retained;
+    /// Names each unavailable Pane by its title in `titles`.
+    pub(crate) fn retain_titles(&self, titles: BTreeMap<Id, String>) {
+        *self.titles.borrow_mut() = titles;
     }
 }
 
@@ -58,12 +58,7 @@ impl SharedPaneOpener for DirectRoutePanes {
         if let Some(connected) = self.connected.borrow().as_ref() {
             return connected.open(pane);
         }
-        let title = self
-            .titles
-            .borrow()
-            .as_ref()
-            .and_then(|retained| retained.title(pane))
-            .map(str::to_owned);
+        let title = self.titles.borrow().get(&pane).cloned();
         Some((
             WorkspaceTerminalSessionFactory::unavailable(self.client_home.clone(), title),
             Arc::new(UnavailablePane),

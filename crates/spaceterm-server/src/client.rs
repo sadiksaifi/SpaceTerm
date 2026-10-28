@@ -491,6 +491,18 @@ impl ServerConnection {
     ) -> Result<Self, ServerError> {
         Self::for_identity(identity)?.with_direct(route, paired, connector)
     }
+    /// The revision of the Workspace Inventory this paired route retained, read without network,
+    /// credential or lock access. `None` when it retained none it can read.
+    pub fn retained_inventory_revision(&self) -> Option<u64> {
+        let direct = self.direct.as_ref()?;
+        let directory =
+            Directory::open(&self.paths.data.join("clients").join(&self.account), false).ok()?;
+        crate::client_view::retained_revision(
+            &directory,
+            direct.paired.pin.server,
+            direct.paired.client,
+        )
+    }
     /// Removes the Workspace Inventory copy the paired route `route` retained, without network
     /// or credential access. A route that retained none is unchanged.
     pub fn discard_retained_inventory(identity: &str, route: [u8; 32]) -> Result<(), ServerError> {

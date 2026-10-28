@@ -149,6 +149,33 @@ impl MultiServerHarness {
         })
     }
 
+    /// Whether this client's attachments let the route at `key` open the server Pane `pane`.
+    fn permits(&self, key: ServerKey, pane: u8, cx: &mut VisualTestContext) -> bool {
+        self.manager.read_with(cx, |manager, _| {
+            manager
+                .shared
+                .get(key)
+                .is_some_and(|shared| shared.permits([pane; 32]))
+        })
+    }
+
+    /// Republishes `edits`' inventory as `inventory` and reads it.
+    fn republish(
+        &self,
+        key: ServerKey,
+        edits: &ScriptedEdits,
+        inventory: Inventory,
+        cx: &mut VisualTestContext,
+    ) {
+        edits.set_inventory(inventory);
+        cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                manager.sync_shared_workspaces(key, window, cx);
+            });
+        });
+        settle_shared_panes(cx);
+    }
+
     /// The Active Workspace's Active Tab title and how many Tabs it has.
     fn active_tabs(&self, cx: &mut VisualTestContext) -> (String, usize) {
         self.manager.read_with(cx, |manager, cx| {
@@ -212,7 +239,8 @@ fn a_saved_route_should_present_what_it_retained_before_it_connects(cx: &mut Tes
 
     assert_eq!(harness.names(cx), ["Default", "Here", "Far", "Farther"]);
     assert_eq!(harness.active_name(cx), "Farther");
-    assert_eq!(harness.active_tabs(cx), ("vim Farther".to_owned(), 1));
+    // Storage keeps the shell's name, never the title a program set.
+    assert_eq!(harness.active_tabs(cx), ("zsh".to_owned(), 1));
     assert_eq!(harness.row_status(key, 2, cx), Some("Not connected"));
     assert!(offline_notice_shown(cx), "the Pane says it isn't connected");
     assert_eq!(
@@ -322,4 +350,140 @@ fn discarding_a_routes_copy_should_leave_nothing_to_present(cx: &mut TestAppCont
     });
 
     assert_eq!(copy, None);
+}
+
+/// The most common relaunch: the server's inventory is unchanged since this client retained it,
+/// so it arrives at the copy's revision. It still reads the attachments and opens each Pane.
+#[gpui::test]
+fn a_server_publishing_the_retained_revision_should_open_the_routes_panes(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let route = named_route("penguin");
+    let published = titled_inventory(9, &[("Far", 1), ("Farther", 2)]);
+    let key = harness.present_saved_route(
+        "penguin",
+        route,
+        Some(RetainedInventory::retain(&published)),
+        cx,
+    );
+    harness.activate(harness.local(key, 1, cx).expect("Far is presented"), cx);
+    let before = (harness.permits(key, 101, cx), offline_notice_shown(cx));
+
+    // A connection publishes its inventory once the server admits it, after the route follows it.
+    let edits = Rc::new(ScriptedEdits::new(None));
+    let panes = harness.connect_route(route, &edits, &[], cx);
+    harness.republish(key, &edits, published, cx);
+
+    assert_eq!(
+        before,
+        (false, true),
+        "a relaunched client permits no Pane yet"
+    );
+    assert_eq!(harness.names(cx), ["Default", "Far", "Farther"]);
+    assert!(harness.permits(key, 101, cx) && harness.permits(key, 102, cx));
+    assert!(
+        !panes.opened().is_empty(),
+        "the Panes open through the connection"
+    );
+    assert!(!offline_notice_shown(cx));
+    assert_eq!(harness.row_status(key, 1, cx), None);
+    assert_eq!(harness.create_tab(key, 1, cx), SharedSubmission::Submitted);
+}
+
+/// Reconnecting to a server that changed nothing while this client was disconnected opens the
+/// Panes again at the same revision.
+#[gpui::test]
+fn reconnecting_at_the_same_revision_should_open_the_routes_panes_again(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let route = named_route("penguin");
+    let key = harness.present_saved_route("penguin", route, None, cx);
+    let published = titled_inventory(harness.next_revision(), &[("Far", 1)]);
+    let edits = Rc::new(ScriptedEdits::new(Some(published.clone())));
+    harness.connect_route(route, &edits, &[("Far", 1)], cx);
+    harness.disconnect_route(route, cx);
+    let disconnected = offline_notice_shown(cx);
+
+    let returned = Rc::new(ScriptedEdits::new(None));
+    let panes = harness.connect_route(route, &returned, &[], cx);
+    harness.republish(key, &returned, published, cx);
+
+    assert!(disconnected);
+    assert_eq!(harness.names(cx), ["Default", "Far"]);
+    assert!(harness.permits(key, 101, cx));
+    assert!(!panes.opened().is_empty());
+    assert!(!offline_notice_shown(cx));
+    assert_eq!(harness.create_tab(key, 1, cx), SharedSubmission::Submitted);
+}
+
+/// A connection that has not published its inventory yet leaves the retained copy presented and
+/// shared edits unavailable, so no edit is asked against what the server may have changed.
+#[gpui::test]
+fn a_connection_should_take_edits_only_once_the_server_publishes(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let route = named_route("penguin");
+    let published = titled_inventory(9, &[("Far", 1)]);
+    let key = harness.present_saved_route(
+        "penguin",
+        route,
+        Some(RetainedInventory::retain(&published)),
+        cx,
+    );
+
+    let edits = Rc::new(ScriptedEdits::new(None));
+    harness.connect_route(route, &edits, &[], cx);
+    let waiting = (
+        harness.names(cx),
+        harness.row_status(key, 1, cx),
+        harness.create_tab(key, 1, cx),
+    );
+    harness.republish(key, &edits, published, cx);
+
+    assert_eq!(
+        waiting,
+        (
+            vec!["Default".to_owned(), "Far".to_owned()],
+            Some("Not connected"),
+            SharedSubmission::Refused(SharedRefusalReason::Offline),
+        )
+    );
+    assert_eq!(harness.row_status(key, 1, cx), None);
+    assert!(harness.permits(key, 101, cx));
+    assert_eq!(harness.create_tab(key, 1, cx), SharedSubmission::Submitted);
+    assert_eq!(edits.submitted().len(), 1);
+}
+
+/// A title a program sets changes the server's inventory often. The copy in storage changes only
+/// when the Workspaces, Tabs, Panes, Splits or names do.
+#[gpui::test]
+fn only_a_structural_change_should_write_the_routes_copy(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let route = named_route("penguin");
+    let key = harness.present_saved_route("penguin", route, None, cx);
+    let first = titled_inventory(harness.next_revision(), &[("Far", 1)]);
+    let edits = Rc::new(ScriptedEdits::new(Some(first.clone())));
+    harness.connect_route(route, &edits, &[("Far", 1)], cx);
+    let saved = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, _| {
+            manager
+                .shared
+                .get(key)
+                .and_then(|shared| shared.saved_copy().cloned())
+        })
+    };
+    let written = saved(cx);
+
+    let mut retitled = titled_inventory(harness.next_revision(), &[("Far", 1)]);
+    if let Some(presentation) = retitled.workspaces[0].tabs[0].panes[0]
+        .presentation
+        .as_mut()
+    {
+        presentation.title = "ssh tester@server".to_owned();
+    }
+    harness.republish(key, &edits, retitled, cx);
+    let after_title = saved(cx);
+    let renamed = titled_inventory(harness.next_revision(), &[("Further", 1)]);
+    harness.republish(key, &edits, renamed.clone(), cx);
+
+    assert_eq!(written, Some(RetainedInventory::retain(&first)));
+    assert_eq!(after_title, written, "a new title writes nothing");
+    assert_eq!(saved(cx), Some(RetainedInventory::retain(&renamed)));
 }

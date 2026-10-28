@@ -534,7 +534,7 @@ mod tests {
                     id: [id.wrapping_add(200); 32],
                     source: None,
                     axis: Axis::Right,
-                    title: Some("vim".into()),
+                    shell: Some("zsh".into()),
                 }],
             }],
         };

@@ -246,9 +246,9 @@ const MAX_NAME_BYTES: usize = 256;
 /// The Workspaces and Tabs a client last presented from one server, kept so it can present them
 /// while that server is not connected.
 ///
-/// It holds identities, Workspace names, Split structure and Pane titles only. Directories,
-/// Worktrees, terminal contents, commands and live Session facts never enter it, and it never
-/// supplies authority: the server's next inventory replaces it.
+/// It holds identities, Workspace names, Split structure and each Pane's shell name only.
+/// Program-set titles, directories, Worktrees, terminal contents, commands and live Session facts
+/// never enter it, and it never supplies authority: the server's next inventory replaces it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedInventory {
@@ -279,30 +279,25 @@ pub struct RetainedPane {
     pub id: Id,
     pub source: Option<Id>,
     pub axis: Axis,
-    /// The title a program set for the Pane, or its shell's name.
-    pub title: Option<String>,
+    /// The name of the Pane's shell, such as `zsh`. A title a program sets can name hosts,
+    /// paths and commands, so it is never kept.
+    pub shell: Option<String>,
 }
 
 impl RetainedInventory {
-    /// The structure and titles of `inventory`'s Workspaces. A title is one a program set, or
-    /// else the shell's name; a running command line is never kept.
+    /// The structure, Workspace names and shell names of `inventory`'s Workspaces.
     pub fn retain(inventory: &Inventory) -> Self {
-        let title = |pane: &crate::hierarchy::Pane| {
-            use crate::pane::metadata::{MAX_TITLE_CHARS, TitleProvenance};
-            let presentation = pane.presentation.as_deref()?;
-            let title = match presentation.title_provenance {
-                TitleProvenance::TerminalControl => &presentation.title,
-                TitleProvenance::Fallback | TitleProvenance::WorkingDirectory => {
-                    &presentation.shell_name
-                }
-            };
-            let title: String = title
+        let shell = |pane: &crate::hierarchy::Pane| {
+            let shell: String = pane
+                .presentation
+                .as_deref()?
+                .shell_name
                 .chars()
                 .filter(|c| !c.is_control())
-                .take(MAX_TITLE_CHARS)
+                .take(crate::pane::metadata::MAX_TITLE_CHARS)
                 .collect();
-            let title = title.trim();
-            (!title.is_empty()).then(|| title.to_owned())
+            let shell = shell.trim();
+            (!shell.is_empty()).then(|| shell.to_owned())
         };
         Self {
             revision: inventory.revision,
@@ -326,7 +321,7 @@ impl RetainedInventory {
                                     id: pane.id,
                                     source: pane.source,
                                     axis: pane.axis,
-                                    title: title(pane),
+                                    shell: shell(pane),
                                 })
                                 .collect(),
                         })
@@ -337,7 +332,7 @@ impl RetainedInventory {
     }
 
     /// Holds the copy to the server's own bounds on Workspaces, Tabs, Panes and names, and the
-    /// bound on Terminal Metadata titles.
+    /// Terminal Metadata bound on shell names.
     pub fn validate(&self) -> Result<(), ServerError> {
         let invalid = || ServerError::UnsafeStorage;
         let text = |value: &str, bound: usize| {
@@ -366,9 +361,9 @@ impl RetainedInventory {
                 panes += tab.panes.len();
                 for pane in &tab.panes {
                     if !ids.insert(pane.id)
-                        || pane.title.as_deref().is_some_and(|title| {
-                            !text(title, 4 * crate::pane::metadata::MAX_TITLE_CHARS)
-                                || title.chars().count() > crate::pane::metadata::MAX_TITLE_CHARS
+                        || pane.shell.as_deref().is_some_and(|shell| {
+                            !text(shell, 4 * crate::pane::metadata::MAX_TITLE_CHARS)
+                                || shell.chars().count() > crate::pane::metadata::MAX_TITLE_CHARS
                         })
                     {
                         return Err(invalid());
@@ -431,15 +426,34 @@ impl RetainedInventory {
         }
     }
 
-    /// The title retained for one Pane.
-    pub fn title(&self, pane: Id) -> Option<&str> {
+    /// The shell name retained for one Pane.
+    pub fn shell(&self, pane: Id) -> Option<&str> {
         self.workspaces
             .iter()
             .flat_map(|workspace| &workspace.tabs)
             .flat_map(|tab| &tab.panes)
             .find(|retained| retained.id == pane)?
-            .title
+            .shell
             .as_deref()
+    }
+
+    /// Whether `other` has the same Workspaces, Tabs, Panes, Splits and names. Shell names and
+    /// the revision are not structure.
+    pub fn same_structure(&self, other: &Self) -> bool {
+        let structure = |copy: &Self| {
+            let mut copy = copy.clone();
+            copy.revision = 0;
+            for pane in copy
+                .workspaces
+                .iter_mut()
+                .flat_map(|workspace| &mut workspace.tabs)
+                .flat_map(|tab| &mut tab.panes)
+            {
+                pane.shell = None;
+            }
+            copy
+        };
+        structure(self) == structure(other)
     }
 }
 
@@ -465,6 +479,27 @@ struct InventoryRecord {
 
 #[cfg(feature = "client")]
 const INVENTORY: &std::ffi::CStr = c"inventory.json";
+
+/// The revision of the inventory retained in one client directory for `server` and `client`,
+/// read without the client views' lock. A copy that can't be read has none.
+#[cfg(feature = "client")]
+pub(crate) fn retained_revision(
+    directory: &crate::storage::Directory,
+    server: Id,
+    client: Id,
+) -> Option<u64> {
+    directory
+        .read_json::<InventoryRecord>("inventory.json")
+        .ok()
+        .flatten()
+        .filter(|retained| {
+            retained.version == 1
+                && retained.server == server
+                && retained.client == client
+                && retained.inventory.validate().is_ok()
+        })
+        .map(|retained| retained.inventory.revision)
+}
 
 /// Removes the retained inventory in one client directory.
 #[cfg(feature = "client")]
@@ -873,7 +908,7 @@ mod retained_inventory_tests {
     }
 
     #[test]
-    fn a_retained_copy_keeps_structure_and_titles_and_drops_directories_and_commands() {
+    fn a_retained_copy_keeps_structure_and_shell_names_and_drops_titles_paths_and_commands() {
         let published = inventory(vec![
             pane(
                 3,
@@ -893,13 +928,13 @@ mod retained_inventory_tests {
         assert_eq!(retained.validate(), Ok(()));
         assert_eq!(
             (
-                retained.title([3; 32]),
-                retained.title([4; 32]),
-                retained.title([5; 32])
+                retained.shell([3; 32]),
+                retained.shell([4; 32]),
+                retained.shell([5; 32])
             ),
-            (Some("vim notes"), Some("zsh"), None)
+            (Some("zsh"), Some("zsh"), None)
         );
-        for secret in ["/home/tester", "TOKEN", "tester", "server"] {
+        for secret in ["vim notes", "/home/tester", "TOKEN", "tester", "server"] {
             assert!(!stored.contains(secret), "the copy holds {secret:?}");
         }
         let workspace = &presented.workspaces[0];
@@ -921,20 +956,19 @@ mod retained_inventory_tests {
 
     #[test]
     fn a_retained_copy_stays_within_the_server_bounds() {
-        let long = "t".repeat(MAX_TITLE_CHARS * 2);
-        let retained = RetainedInventory::retain(&inventory(vec![pane(
-            3,
-            Some(presentation(&long, TitleProvenance::TerminalControl)),
-        )]));
+        let long = "z".repeat(MAX_TITLE_CHARS * 2);
+        let mut published = presentation("vim", TitleProvenance::TerminalControl);
+        published.shell_name.clone_from(&long);
+        let retained = RetainedInventory::retain(&inventory(vec![pane(3, Some(published))]));
         assert_eq!(
-            retained.title([3; 32]).map(|title| title.chars().count()),
+            retained.shell([3; 32]).map(|shell| shell.chars().count()),
             Some(MAX_TITLE_CHARS),
-            "a long title is cut to the Terminal Metadata bound"
+            "a long shell name is cut to the Terminal Metadata bound"
         );
         assert_eq!(retained.validate(), Ok(()));
 
         let mut oversized = retained.clone();
-        oversized.workspaces[0].tabs[0].panes[0].title = Some(long);
+        oversized.workspaces[0].tabs[0].panes[0].shell = Some(long);
         let mut unnamed = retained.clone();
         unnamed.workspaces[0].name = " ".into();
         let mut too_many_panes = retained.clone();
@@ -948,7 +982,7 @@ mod retained_inventory_tests {
                     .unwrap(),
                 source: None,
                 axis: Axis::Right,
-                title: None,
+                shell: None,
             })
             .collect();
         too_many_panes.workspaces[0].tabs[0].root_pane =
@@ -959,5 +993,22 @@ mod retained_inventory_tests {
         for invalid in [oversized, unnamed, too_many_panes, duplicate] {
             assert_eq!(invalid.validate(), Err(ServerError::UnsafeStorage));
         }
+    }
+
+    #[test]
+    fn a_shell_name_or_revision_alone_is_no_structural_change() {
+        let published = inventory(vec![pane(3, None), pane(4, None)]);
+        let retained = RetainedInventory::retain(&published);
+        let mut named = retained.clone();
+        named.revision += 1;
+        named.workspaces[0].tabs[0].panes[0].shell = Some("zsh".into());
+        let mut renamed = retained.clone();
+        renamed.workspaces[0].name = "Play".into();
+        let mut split = retained.clone();
+        split.workspaces[0].tabs[0].panes[1].axis = Axis::Right;
+
+        assert!(retained.same_structure(&named));
+        assert!(!retained.same_structure(&renamed));
+        assert!(!retained.same_structure(&split));
     }
 }
