@@ -52,6 +52,7 @@ pub struct Wording {
     server: String,
     action: Action,
     running: bool,
+    startup: ServiceStartup,
 }
 
 impl Wording {
@@ -66,12 +67,13 @@ impl Wording {
         server: &str,
         action: Action,
         running: bool,
-        _startup: ServiceStartup,
+        startup: ServiceStartup,
     ) -> Self {
         Self {
             server: server.into(),
             action,
             running,
+            startup,
         }
     }
 
@@ -99,11 +101,26 @@ impl Wording {
         }
     }
 
+    /// What ends and what is kept.
     pub fn detail(&self) -> String {
-        if self.action == Action::Uninstall && !self.running {
-            String::new()
-        } else {
-            "All Terminal Sessions on it end for every client.".into()
+        const ENDS: &str = "All Terminal Sessions on it end for every client.";
+        match self.action {
+            Action::Stop => format!(
+                "{ENDS} Workspaces are kept, and the server stays stopped until you start it again."
+            ),
+            Action::Restart => format!(
+                "{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it."
+            ),
+            Action::Uninstall if self.running => {
+                format!("{ENDS} Workspaces are kept, so you can install it again later.")
+            }
+            Action::Uninstall => {
+                let startup = match self.startup {
+                    ServiceStartup::AtLogin => "It no longer starts when you log in.",
+                    ServiceStartup::AtBoot => "It no longer starts when the computer starts.",
+                };
+                format!("{startup} Workspaces are kept, so you can install it again later.")
+            }
         }
     }
 }
@@ -202,11 +219,30 @@ impl UpdateWording {
         }
     }
 
+    /// What changes, what ends, and what is kept.
     pub fn detail(&self) -> String {
-        if self.change == UpdateChange::Update && self.running {
-            "All Terminal Sessions on it end for every client.".into()
-        } else {
-            String::new()
+        let Self {
+            previous,
+            candidate,
+            ..
+        } = self;
+        match self.change {
+            UpdateChange::Update if self.running => format!(
+                "It changes from {previous} to {candidate}. All Terminal Sessions on it end for \
+                 every client, and Workspaces are kept."
+            ),
+            UpdateChange::Update if self.stopped => format!(
+                "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
+                 Terminal Sessions end, and it stays stopped until you start it."
+            ),
+            UpdateChange::Update => format!(
+                "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
+                 Terminal Sessions end."
+            ),
+            UpdateChange::Return => format!(
+                "Version {candidate} never started. Version {previous} and your Workspaces are \
+                 unchanged, and the server stays stopped until you start it."
+            ),
         }
     }
 }
@@ -366,6 +402,33 @@ mod tests {
         assert_eq!(remote.message(), "Stop the penguin server?");
         assert_eq!(local.title(), remote.title());
         assert_eq!(local.detail(), remote.detail());
+        assert_eq!(
+            local.detail(),
+            "All Terminal Sessions on it end for every client. Workspaces are kept, and the \
+             server stays stopped until you start it again."
+        );
+    }
+
+    #[test]
+    fn an_uninstall_confirmation_says_what_is_kept_whether_or_not_the_server_runs() {
+        let uninstall = |running, startup| {
+            Wording::for_server("penguin", Action::Uninstall, running, startup).detail()
+        };
+        assert_eq!(
+            uninstall(true, ServiceStartup::AtLogin),
+            "All Terminal Sessions on it end for every client. Workspaces are kept, so you can \
+             install it again later."
+        );
+        assert_eq!(
+            uninstall(false, ServiceStartup::AtLogin),
+            "It no longer starts when you log in. Workspaces are kept, so you can install it \
+             again later."
+        );
+        assert_eq!(
+            uninstall(false, ServiceStartup::AtBoot),
+            "It no longer starts when the computer starts. Workspaces are kept, so you can \
+             install it again later."
+        );
     }
 
     #[test]
@@ -387,7 +450,44 @@ mod tests {
             wording.message(),
             "Update the penguin server to 0.7.0 (commit 0123456)?"
         );
-        let detail = wording.detail();
-        assert_eq!(detail, "All Terminal Sessions on it end for every client.");
+        assert_eq!(
+            wording.detail(),
+            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). All Terminal \
+             Sessions on it end for every client, and Workspaces are kept."
+        );
+        let observed = |running, stopped| {
+            UpdateWording::for_server(
+                "penguin",
+                UpdateChange::Update,
+                build("0.6.8"),
+                build("0.7.0"),
+                running,
+                stopped,
+            )
+            .detail()
+        };
+        assert_eq!(
+            observed(false, true),
+            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). It isn\u{2019}t \
+             running, so no Terminal Sessions end, and it stays stopped until you start it."
+        );
+        assert_eq!(
+            observed(false, false),
+            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). It isn\u{2019}t \
+             running, so no Terminal Sessions end."
+        );
+        let returning = UpdateWording::for_server(
+            "penguin",
+            UpdateChange::Return,
+            build("0.6.8"),
+            build("0.7.0"),
+            false,
+            true,
+        );
+        assert_eq!(
+            returning.detail(),
+            "Version 0.7.0 (commit 0123456) never started. Version 0.6.8 (commit 0123456) and \
+             your Workspaces are unchanged, and the server stays stopped until you start it."
+        );
     }
 }

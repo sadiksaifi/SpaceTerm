@@ -68,7 +68,7 @@ pub(crate) fn file_menu() -> Menu {
             MenuItem::action("New Workspace", NewWorkspace),
             MenuItem::action("Add Server…", crate::ui::settings_window::AddServer),
             MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
-            MenuItem::action("Switch Workspace", SwitchWorkspace),
+            MenuItem::action("Choose Workspace…", SwitchWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Tab", CreateTab),
             MenuItem::action("New Worktree…", crate::ui::NewWorktree),

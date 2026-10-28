@@ -244,8 +244,16 @@ fn refresh_on_open(
     }
 }
 
-impl Render for UpdateControl {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl UpdateControl {
+    /// The client's update state and presentation, and the server rows behind the pill.
+    fn read(
+        &self,
+        cx: &App,
+    ) -> (
+        UpdateState,
+        Option<ControlPresentation>,
+        Vec<ServerUpdateRow>,
+    ) {
         let wording = DesktopPresentation::get(cx).wording();
         let (state, presentation) = match service(cx) {
             Some(updates) => {
@@ -261,7 +269,21 @@ impl Render for UpdateControl {
             }
             None => (UpdateState::Unavailable, None),
         };
-        let rows = self.servers.read(cx).rows();
+        (state, presentation, self.servers.read(cx).rows())
+    }
+
+    /// Whether the pill shows: something asks for action. The title bar that holds it is then
+    /// occupied.
+    pub(crate) fn shows_pill(&self, cx: &App) -> bool {
+        let (_, presentation, rows) = self.read(cx);
+        UpdatePill::resolve(presentation, &rows).is_some()
+    }
+}
+
+impl Render for UpdateControl {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let wording = DesktopPresentation::get(cx).wording();
+        let (state, presentation, rows) = self.read(cx);
         // Nothing asks for action, so the pill stays hidden. Check for Updates stays in the
         // application menu.
         let Some(pill) = UpdatePill::resolve(presentation.clone(), &rows) else {

@@ -379,7 +379,7 @@ impl SaveStatus {
             Self::Unavailable(SettingsError::Storage(StorageError::TooLarge)) => {
                 "Settings file too large"
             }
-            Self::Unavailable(SettingsError::Invalid) => "Couldn't read settings",
+            Self::Unavailable(SettingsError::Invalid) => "Couldn\u{2019}t read settings",
             Self::Unavailable(SettingsError::Unsupported) => "Newer settings",
             Self::Unavailable(_) => "Settings unavailable",
         }

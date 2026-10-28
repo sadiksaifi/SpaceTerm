@@ -338,7 +338,7 @@ impl StatusItem {
             Command::Stop => "stop",
             _ => "restart",
         };
-        let message = format!("The {} server couldn't {operation}.", self.name);
+        let message = format!("The {} server couldn\u{2019}t {operation}.", self.name);
         let detail = error.to_string();
         let windowless = cx.windows().is_empty();
         DispatchQueue::main().exec_async(move || {

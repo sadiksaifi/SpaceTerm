@@ -62,7 +62,7 @@ impl WorkspaceCreation {
     /// Open rows end in an ellipsis because a chooser opens before creation.
     pub(crate) fn label(self, server: Option<&str>) -> SharedString {
         match (self, server) {
-            (Self::Local, _) => "Local Workspace".into(),
+            (Self::Local, _) => "New Local Workspace".into(),
             (Self::OpenLocalDirectory, _) => "Open Local Directory\u{2026}".into(),
             (Self::Remote(_), Some(server)) => format!("New Workspace on {server}").into(),
             (Self::OpenRemoteDirectory(_), Some(server)) => {

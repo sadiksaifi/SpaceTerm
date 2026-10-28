@@ -215,7 +215,7 @@ impl SettingsWindow {
                 return present_import_failure("Settings file too large.", window, cx);
             }
             Err(ImportError::Unreadable) => {
-                return present_import_failure("Couldn't read file.", window, cx);
+                return present_import_failure("Couldn\u{2019}t read file.", window, cx);
             }
         };
         self.confirm_settings_import(imported, window, cx);
@@ -232,7 +232,7 @@ impl SettingsWindow {
             ModalId::new("settings-import"),
             "Import settings",
             "Replace All Settings?",
-            "This replaces your settings, shortcuts, and installed themes.",
+            "This replaces your settings, shortcuts, and installed themes with the ones in this file.",
             vec![
                 ModalAction::new(
                     true,
@@ -251,6 +251,7 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
+        .detail("This can\u{2019}t be undone. Export your settings first to keep a copy.")
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

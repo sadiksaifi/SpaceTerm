@@ -16,6 +16,8 @@ pub(crate) struct DesktopWording {
     pub(crate) file_preview: &'static str,
     /// This computer's name beside other machines, as the sidebar heads its Workspaces.
     pub(crate) this_computer: &'static str,
+    /// This computer inside a sentence, such as "this Mac".
+    pub(crate) this_computer_phrase: &'static str,
     /// The command that opens System Directory Selection.
     pub(crate) system_directory_selection: &'static str,
     /// The remedy for an installation the updater cannot replace, as an alert title and message.
@@ -419,6 +421,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         DesktopWording {
             file_preview: "Preview File",
             this_computer: "This Computer",
+            this_computer_phrase: "this computer",
             system_directory_selection: "Choose Directory…",
             read_only_update: ("Move SpaceTerm", "Move SpaceTerm before updating it."),
             overdue_read_only_update: "Update overdue. Reinstall with the install script.",

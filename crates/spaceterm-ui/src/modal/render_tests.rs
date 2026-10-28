@@ -1114,6 +1114,8 @@ fn open_action_geometry_window(
 
 struct AlertIntentFixture {
     intent: super::super::AlertIntent,
+    /// The Alert asks a destructive decision instead of acknowledging.
+    destructive: bool,
     presentation: Option<super::super::ModalPresentationHandle>,
 }
 
@@ -1125,10 +1127,28 @@ impl AlertIntentFixture {
                 "Intent treatment",
                 "Notice",
                 "The semantic intent is presented without a caller accessory.",
-                vec![
-                    ModalAction::new("ok", "OK", ModalActionRole::Affirmative, "intent-ok")
-                        .default_action(true),
-                ],
+                if self.destructive {
+                    vec![
+                        ModalAction::new(
+                            "delete",
+                            "Delete",
+                            ModalActionRole::Affirmative,
+                            "intent-delete",
+                        )
+                        .with_intent(ModalActionIntent::Destructive),
+                        ModalAction::new(
+                            "cancel",
+                            "Cancel",
+                            ModalActionRole::Cancel,
+                            "intent-cancel",
+                        ),
+                    ]
+                } else {
+                    vec![
+                        ModalAction::new("ok", "OK", ModalActionRole::Affirmative, "intent-ok")
+                            .default_action(true),
+                    ]
+                },
             )
             .intent(self.intent)
             .present(window, cx, |_, _| {})
@@ -1184,6 +1204,14 @@ fn open_alert_intent_window(
     cx: &mut TestAppContext,
     intent: super::super::AlertIntent,
 ) -> WindowHandle<AlertIntentFixture> {
+    open_alert_intent_window_with(cx, intent, false)
+}
+
+fn open_alert_intent_window_with(
+    cx: &mut TestAppContext,
+    intent: super::super::AlertIntent,
+    destructive: bool,
+) -> WindowHandle<AlertIntentFixture> {
     install_test_catalogs(cx);
     cx.update(|cx| {
         cx.open_window(
@@ -1197,6 +1225,7 @@ fn open_alert_intent_window(
             |_, cx| {
                 cx.new(|_| AlertIntentFixture {
                     intent,
+                    destructive,
                     presentation: None,
                 })
             },
@@ -1556,6 +1585,15 @@ fn title_only_alert_presents_its_heading_and_decisions_without_a_message(cx: &mu
     );
     assert_eq!(labels, ["Quit SpaceTerm?"]);
     assert!(cx.debug_bounds("modal-alert-message").is_none());
+    assert!(
+        cx.debug_bounds("modal-body-viewport").is_none(),
+        "a title-only Alert draws no empty body row"
+    );
+    assert!(
+        cx.debug_bounds("modal-alert-intent-mark-informational")
+            .is_none(),
+        "a title-only Alert draws no intent mark"
+    );
     assert!(tree.exposed(tree.node("Quit")) && tree.exposed(tree.node("Cancel")));
     assert!(
         cx.debug_bounds("modal-action-quit-keyboard-focus")
@@ -1591,6 +1629,23 @@ fn critical_alert_renders_bounded_semantic_treatment_without_accessory(cx: &mut 
         .expect("critical marker should render");
 
     assert!(bounds_contains(treatment, marker) && marker.size.width > px(0.0));
+}
+
+/// A destructive decision already signals danger, so the Alert draws no intent mark beside its
+/// message. A failure without a destructive decision keeps its mark.
+#[gpui::test]
+fn destructive_alert_relies_on_its_decision_instead_of_an_intent_mark(cx: &mut TestAppContext) {
+    let window = open_alert_intent_window_with(cx, super::super::AlertIntent::Critical, true);
+    let root = window.root(cx).expect("intent Alert root should exist");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("modal-alert-message").is_some());
+    assert!(
+        cx.debug_bounds("modal-alert-intent-mark-critical")
+            .is_none()
+    );
 }
 
 #[test]
@@ -7224,13 +7279,13 @@ fn dialog_tab_order_includes_all_body_and_decision_stops_in_both_directions(
         vec![
             DialogFocusTarget::First,
             DialogFocusTarget::Second,
-            DialogFocusTarget::Cancel,
             DialogFocusTarget::Options,
+            DialogFocusTarget::Cancel,
             DialogFocusTarget::Save,
             DialogFocusTarget::First,
             DialogFocusTarget::Save,
-            DialogFocusTarget::Options,
             DialogFocusTarget::Cancel,
+            DialogFocusTarget::Options,
             DialogFocusTarget::Second,
             DialogFocusTarget::First,
         ]
@@ -7265,13 +7320,13 @@ fn right_to_left_dialog_tab_order_follows_logical_policy_not_button_geometry(
         vec![
             DialogFocusTarget::First,
             DialogFocusTarget::Second,
-            DialogFocusTarget::Cancel,
             DialogFocusTarget::Options,
+            DialogFocusTarget::Cancel,
             DialogFocusTarget::Save,
             DialogFocusTarget::First,
             DialogFocusTarget::Save,
-            DialogFocusTarget::Options,
             DialogFocusTarget::Cancel,
+            DialogFocusTarget::Options,
             DialogFocusTarget::Second,
             DialogFocusTarget::First,
         ]
@@ -7424,7 +7479,7 @@ fn dialog_repairs_disabled_and_removed_body_focus_to_the_first_live_tab_stop(
 
     assert_eq!(
         (after_disable, after_remove),
-        (DialogFocusTarget::Second, DialogFocusTarget::Cancel)
+        (DialogFocusTarget::Second, DialogFocusTarget::Options)
     );
 }
 
@@ -7577,11 +7632,11 @@ fn alert_tab_order_includes_suppression_and_decisions_without_underlay_escape(
         vec![
             AlertFocusTarget::Save,
             AlertFocusTarget::Suppression,
-            AlertFocusTarget::Cancel,
             AlertFocusTarget::Options,
+            AlertFocusTarget::Cancel,
             AlertFocusTarget::Save,
-            AlertFocusTarget::Options,
             AlertFocusTarget::Cancel,
+            AlertFocusTarget::Options,
             AlertFocusTarget::Suppression,
             AlertFocusTarget::Save,
         ]
@@ -7625,11 +7680,11 @@ fn right_to_left_alert_tab_order_keeps_suppression_and_logical_decisions_contain
         vec![
             AlertFocusTarget::Save,
             AlertFocusTarget::Suppression,
-            AlertFocusTarget::Cancel,
             AlertFocusTarget::Options,
+            AlertFocusTarget::Cancel,
             AlertFocusTarget::Save,
-            AlertFocusTarget::Options,
             AlertFocusTarget::Cancel,
+            AlertFocusTarget::Options,
             AlertFocusTarget::Suppression,
             AlertFocusTarget::Save,
         ]

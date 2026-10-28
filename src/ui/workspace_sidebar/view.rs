@@ -156,6 +156,36 @@ fn worktree_text_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx
     worktree_indent(appearance, cx) + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
 }
 
+/// The one muted line an empty Workspace list shows where its first row would be. It speaks for
+/// the whole list, never for one server, so the list keeps no per-server placeholder. The stage
+/// beside it already says no Workspace is attached, so the line only says where they appear.
+fn empty_list_caption(
+    appearance: &crate::ui::appearance::ChromeAppearance,
+    cx: &App,
+) -> AnyElement {
+    let (leading, trailing) = row_padding(appearance, cx);
+    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
+    div()
+        .id("workspace-list-empty")
+        .debug_selector(|| "workspace-list-empty".to_owned())
+        .w_full()
+        .flex_shrink_0()
+        .pl(leading)
+        .pr(trailing)
+        .py(appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y + 4.0))
+        .whitespace_normal()
+        .chrome_text(appearance.typography.style(TextRole::Secondary))
+        .text_color(gpui_color(colors.text_muted))
+        .child(gpui::Text::new(
+            "workspace-list-empty-text".into(),
+            EMPTY_LIST_DETAIL.into(),
+        ))
+        .into_any_element()
+}
+
+const NO_TABS: &str = "No Tabs";
+pub(super) const EMPTY_LIST_DETAIL: &str = "Workspaces you attach appear here.";
+
 /// The height of a row that holds one line: an expanded Workspace's.
 fn single_line_row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
     appearance.spacing(SINGLE_LINE_ROW_HEIGHT).max(
@@ -1010,6 +1040,9 @@ impl WorkspaceSidebar {
                 crate::ui::workspace_frame::base_surface(&appearance.colors),
             )))
             .occlude()
+            .when(self.rows.is_empty(), |sidebar| {
+                sidebar.child(empty_list_caption(appearance, cx))
+            })
             .child(list)
             .child(release_observer)
             .child(
@@ -1311,7 +1344,7 @@ impl WorkspaceSidebar {
             states.push("Locked");
         }
         if !worktree.has_tabs {
-            states.push("No Tabs");
+            states.push(NO_TABS);
         }
         // A Pane that left the Worktree is named apart, so its directory never reads as the
         // Worktree's.
@@ -1352,6 +1385,14 @@ impl WorkspaceSidebar {
                     &row_colors,
                 )),
                 format!("{selector}-missing"),
+            )
+        } else if !worktree.has_tabs {
+            // A Worktree with no Tabs says so where its directory would be; its tooltip keeps
+            // the directory.
+            (
+                SharedString::from(NO_TABS),
+                None,
+                format!("{selector}-no-tabs"),
             )
         } else {
             (worktree.directory.clone(), None, format!("{selector}-path"))
@@ -1578,8 +1619,8 @@ fn remove_worktree_entry<A: Clone>(
     let reason = match removal {
         WorktreeRemoval::Allowed => None,
         WorktreeRemoval::NeedsServer => Some("Remove Worktree…"),
-        WorktreeRemoval::Main => Some("Can't Remove Main Worktree"),
-        WorktreeRemoval::Locked => Some("Can't Remove Locked Worktree"),
+        WorktreeRemoval::Main => Some("Can\u{2019}t Remove Main Worktree"),
+        WorktreeRemoval::Locked => Some("Can\u{2019}t Remove Locked Worktree"),
         WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin Directory to Remove"),
         WorktreeRemoval::CheckingPinnedDirectories => {
             Some("Checking for Pinned Directories\u{2026}")

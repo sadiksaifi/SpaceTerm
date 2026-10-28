@@ -761,7 +761,7 @@ pub(super) fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&
     match phase {
         RemoteConnectionPhase::Connected => None,
         RemoteConnectionPhase::Reconnecting => Some("Reconnecting…"),
-        RemoteConnectionPhase::Disconnected => Some("Disconnected"),
+        RemoteConnectionPhase::Disconnected => Some("Not connected"),
         RemoteConnectionPhase::Failed => Some("Connection failed"),
     }
 }

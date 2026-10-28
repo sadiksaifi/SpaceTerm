@@ -298,11 +298,11 @@ fn server_offer_behind_client_progress_retry_and_checking_paints_primary(cx: &mu
     let visual = open_control(cx);
     for (label, disabled, progress) in [
         ("Downloading 0.4.2", false, true),
-        ("Retry 0.4.2", false, false),
+        ("Try Again 0.4.2", false, false),
         ("Checking 0.4.2", true, true),
     ] {
         match label {
-            "Retry 0.4.2" => {
+            "Try Again 0.4.2" => {
                 adapter.emit(UpdateEvent::Failed(UpdateError::Download));
                 adapter.emit(UpdateEvent::Finished);
             }

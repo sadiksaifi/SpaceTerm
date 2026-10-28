@@ -134,7 +134,7 @@ impl MicrophoneAccessRow {
                 None,
             ),
             MicrophoneAccessStatus::Authorization(Authorization::NotDetermined) => (
-                "Not Requested",
+                "Not requested",
                 "settings-microphone-access-state-not-requested",
                 "Lets terminal programs use the microphone.",
                 Some(Action::Request),
@@ -159,14 +159,16 @@ impl MicrophoneAccessRow {
             MicrophoneAccessStatus::Authorization(Authorization::Restricted) => (
                 "Restricted",
                 "settings-microphone-access-state-restricted",
-                "Your device's administrator has blocked microphone access.",
+                "Your device\u{2019}s administrator has blocked microphone access.",
                 None,
             ),
             MicrophoneAccessStatus::Failed(error) => (
                 "Unavailable",
                 "settings-microphone-access-state-unavailable",
                 match error {
-                    MicrophoneAccessError::OffMainThread => "Couldn't check microphone access.",
+                    MicrophoneAccessError::OffMainThread => {
+                        "Couldn\u{2019}t check microphone access."
+                    }
                     MicrophoneAccessError::PlatformUnavailable => "Microphone access unknown.",
                     MicrophoneAccessError::PlatformRejected => "Microphone access request failed.",
                 },

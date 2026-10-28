@@ -25,7 +25,7 @@ pub(super) const UNPAIR_SELF_CANCEL_SELECTOR: &str = "settings-direct-server-unp
 /// What a direct route says while SpaceTerm can't confirm its latest changes to direct
 /// connections are saved. The record covers every connection, so this speaks of recent changes
 /// rather than of any one connection.
-pub(super) const UNSAVED_CHANGES: &str = "SpaceTerm couldn't confirm it saved recent connection changes. They could be missing after you reopen SpaceTerm.";
+pub(super) const UNSAVED_CHANGES: &str = "SpaceTerm couldn\u{2019}t confirm it saved recent connection changes. They could be missing after you reopen SpaceTerm.";
 
 /// The direct network rows: the registry they present. Add Server owns joining a new server.
 pub(super) struct DirectRouteRows {
@@ -117,9 +117,9 @@ impl SettingsWindow {
         // only removes what remains here.
         let revoked = status == DirectRouteStatus::Refused(RefusalReason::Revoked);
         let title = if revoked {
-            format!("Remove Connection to \"{name}\"?")
+            format!("Remove Connection to \u{201C}{name}\u{201D}?")
         } else {
-            format!("Unpair This Device From \"{name}\"?")
+            format!("Unpair This Device From \u{201C}{name}\u{201D}?")
         };
         let message = if revoked {
             format!(
@@ -127,7 +127,7 @@ impl SettingsWindow {
             )
         } else {
             format!(
-                "SpaceTerm removes this connection and its Workspaces from this window, then requests that {name} revoke access. Terminal Sessions keep running; reconnecting requires a new invitation."
+                "SpaceTerm removes this connection and its Workspaces from this window and asks {name} to revoke access. Terminal Sessions keep running. To reconnect, you need a new invitation."
             )
         };
         let confirm = if revoked { "Remove" } else { "Unpair" };

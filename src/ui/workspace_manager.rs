@@ -292,6 +292,9 @@ pub(crate) struct WorkspaceManager {
     direct_routes: direct_servers::DirectRoutes,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
+    /// Eases the empty stage's top edge as the band above it fills or empties, on the sidebar's
+    /// curve. Created at the first frame, so a window opens at rest.
+    empty_band: std::cell::RefCell<Option<super::sidebar_motion::SidebarMotion>>,
     /// Normal launch of the account-local server this window presents.
     launch: launch::LocalLaunchState,
     /// This client's one Workspace order across every server, kept across launches.
@@ -419,6 +422,7 @@ impl WorkspaceManager {
             _direct_servers: None,
             direct_routes: direct_servers::DirectRoutes::default(),
             empty_focus: cx.focus_handle(),
+            empty_band: std::cell::RefCell::default(),
             launch: launch::LocalLaunchState::new(local_server),
             display_order: display_order::DisplayOrder::default(),
         };
@@ -956,7 +960,7 @@ impl WorkspaceManager {
         let _ = Alert::new(
             ModalId::new("workspace-pin-directory-unavailable"),
             "Directory unavailable",
-            "Couldn't Pin Directory",
+            "Couldn\u{2019}t Pin Directory",
             "Check that the directory exists.",
             vec![ModalAction::new(
                 (),
@@ -1292,9 +1296,9 @@ impl WorkspaceManager {
                 Some(Err(())) => {
                     self.finish_server_directory();
                     Self::show_shared_unavailable_with_title(
-                        "Couldn't Open Workspace",
+                        "Couldn\u{2019}t Open Workspace",
                         &format!(
-                            "Couldn't check for an existing Workspace on \"{server_name}\". Try again."
+                            "Couldn\u{2019}t check for an existing Workspace on \u{201C}{server_name}\u{201D}. Try again."
                         ),
                         window,
                         cx,
@@ -1707,11 +1711,10 @@ impl WorkspaceManager {
         let noun = if count == 1 { "Pane" } else { "Panes" };
         let message = match scope {
             CloseScope::Workspace => format!("Running commands in its {count} {noun} stop."),
-            CloseScope::Pane | CloseScope::Window => {
-                format!("Running commands in {count} {noun} will stop.")
+            CloseScope::Pane | CloseScope::Window | CloseScope::Tab => {
+                format!("Running commands in {count} {noun} stop.")
             }
-            CloseScope::Tab => format!("Running commands in {count} {noun} stop."),
-            _ => format!("Close {count} {noun}? Running commands in these Panes will stop."),
+            _ => format!("Close {count} {noun}? Running commands in these Panes stop."),
         };
         let result = Alert::new(
             ModalId::new("close-confirmation"),
@@ -2460,7 +2463,7 @@ impl WorkspaceManager {
         .unwrap_or_default();
         Some((
             self.chrome_identity(workspace.id(), cx),
-            Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
+            Tooltip::new("workspace-switcher-tooltip", "Choose Workspace")
                 .detail(format!(
                     "{}\n{tooltip_detail}{repository}",
                     workspace.name()
@@ -2522,7 +2525,7 @@ impl WorkspaceManager {
                 .map_or(title_bar_host, |fill| fill.source_over(title_bar_host)),
         );
         let switcher_accessibility_name = collapsed_identity.as_ref().map_or_else(
-            || "Switch Workspace".to_owned(),
+            || "Choose Workspace".to_owned(),
             |(identity, _, _)| identity.accessibility_name(),
         );
         let chooser = ComboBox::with_commands(
@@ -2531,7 +2534,7 @@ impl WorkspaceManager {
             self.workspaces
                 .active_workspace_id()
                 .map(SwitcherChoice::Presented),
-            "Switch Workspace",
+            "Choose Workspace",
             self.workspace_switcher_items(cx),
             move |_| {
                 creation_rows
@@ -2588,12 +2591,14 @@ impl WorkspaceManager {
         .input_leading(move |size| {
             Icon::custom(CustomIconName::FilterCircle, size, placeholder_color).into_any_element()
         })
-        .copy(ComboBoxCopy::new(
-            "Workspace name",
-            "Filter or create...",
-            "No Workspaces",
-            "No matching Workspaces",
-        ))
+        // The creation rows always remain, so the switcher never shows an empty state. Without a
+        // Workspace to choose it says so above them.
+        .copy(
+            ComboBoxCopy::new("Workspace name", "Filter or create\u{2026}")
+                .no_match("No Workspaces match")
+                .commands_heading("Create")
+                .no_choices("No Workspaces to attach."),
+        )
         .menu_with_filter_header()
         // The chooser takes the top chrome's icon size so its glyph keeps one size across sidebar
         // states.
@@ -2616,7 +2621,7 @@ impl WorkspaceManager {
         ))
         .debug_selector("workspace-switcher")
         .tooltip(
-            Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
+            Tooltip::new("workspace-switcher-tooltip", "Choose Workspace")
                 .debug_selector("workspace-switcher-tooltip")
                 .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
         )
@@ -3727,7 +3732,7 @@ impl WorkspaceManager {
             }
             Err(SharedCloseUnavailable::Unreported) => {
                 Self::show_shared_unavailable_with_title(
-                    "Couldn't Close Yet",
+                    "Couldn\u{2019}t Close Yet",
                     "Wait for SpaceTerm to check the affected Terminal Sessions, then try again.",
                     window,
                     cx,
@@ -4350,7 +4355,7 @@ impl WorkspaceManager {
                 "Enter a shorter name or directory, then try again."
             }
         };
-        Self::show_shared_unavailable_with_title("Couldn't Make Change", detail, window, cx);
+        Self::show_shared_unavailable_with_title("Couldn\u{2019}t Make Change", detail, window, cx);
     }
 
     /// Returns whether the alert was presented over the active Settings Window.
@@ -4891,22 +4896,22 @@ impl AttachmentChange {
         match (self, failure) {
             (Self::Attach, Unchanged) => (
                 "Workspace not attached",
-                "Couldn't Attach Workspace",
+                "Couldn\u{2019}t Attach Workspace",
                 "The Workspace keeps running.",
             ),
             (Self::Attach, Uncertain) => (
                 "Attachment not confirmed",
-                "Couldn't Confirm Attachment",
+                "Couldn\u{2019}t Confirm Attachment",
                 "Quit and reopen SpaceTerm before you attach or detach more Workspaces. This Workspace keeps running.",
             ),
             (Self::Detach, Unchanged) => (
                 "Workspace not detached",
-                "Couldn't Detach Workspace",
+                "Couldn\u{2019}t Detach Workspace",
                 "The Workspace stays here.",
             ),
             (Self::Detach, Uncertain) => (
                 "Detach not confirmed",
-                "Couldn't Confirm Detach",
+                "Couldn\u{2019}t Confirm Detach",
                 "This Workspace might return when SpaceTerm reopens. Quit and reopen SpaceTerm before you attach or detach more Workspaces.",
             ),
         }

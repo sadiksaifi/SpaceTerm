@@ -100,7 +100,14 @@ pub(crate) struct ApplicationPalette {
 
 impl ApplicationPalette {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let palette = cx.new(|cx| CommandPalette::new("Search commands", Vec::new(), window, cx));
+        let palette = cx.new(|cx| {
+            let mut palette = CommandPalette::new("Search commands", Vec::new(), window, cx);
+            palette.set_empty(
+                spaceterm_ui::CommandPaletteEmpty::no_match("No commands match"),
+                cx,
+            );
+            palette
+        });
         cx.subscribe_in(
             &palette,
             window,
