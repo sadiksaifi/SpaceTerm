@@ -211,14 +211,31 @@ impl ModalDesktopPolicy {
             .iter()
             .copied()
             .find(|index| actions[*index].arrangement_role() == ModalActionRole::Cancel);
+        let leading_auxiliary = |index: &usize| {
+            Some(*index) != cancel
+                && Some(*index) != default
+                && actions[*index].arrangement_role() == ModalActionRole::Auxiliary
+        };
+        let leading = match axis {
+            ActionAxis::Horizontal => row.iter().filter(|index| leading_auxiliary(index)).count(),
+            ActionAxis::Vertical => 0,
+        };
         let traversal = match axis {
-            ActionAxis::Horizontal => ordered_indices(
-                cancel,
-                row.iter()
-                    .copied()
-                    .filter(|index| Some(*index) != cancel && Some(*index) != default),
-                default,
-            ),
+            // Auxiliary decisions sit apart on the leading edge, as macOS alerts place them.
+            ActionAxis::Horizontal => row
+                .iter()
+                .copied()
+                .filter(leading_auxiliary)
+                .chain(ordered_indices(
+                    cancel,
+                    row.iter().copied().filter(|index| {
+                        Some(*index) != cancel
+                            && Some(*index) != default
+                            && !leading_auxiliary(index)
+                    }),
+                    default,
+                ))
+                .collect(),
             ActionAxis::Vertical => ordered_indices(
                 default,
                 row.iter()
@@ -234,6 +251,7 @@ impl ModalDesktopPolicy {
         ActionArrangement {
             physical,
             traversal,
+            leading,
         }
     }
 
@@ -330,6 +348,8 @@ pub fn install_modal_policy(cx: &mut App, policy: ModalDesktopPolicy) {
 pub(super) struct ActionArrangement {
     pub(super) physical: Vec<usize>,
     pub(super) traversal: Vec<usize>,
+    /// How many decisions at the start of `traversal` sit apart on the leading edge.
+    pub(super) leading: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -823,11 +843,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            (physical_ids, arrangement.physical, arrangement.traversal),
             (
-                vec!["cancel", "options", "replace"],
-                vec![2, 1, 0],
-                vec![2, 1, 0],
+                physical_ids,
+                arrangement.physical,
+                arrangement.traversal,
+                arrangement.leading
+            ),
+            (
+                vec!["options", "cancel", "replace"],
+                vec![1, 2, 0],
+                vec![1, 2, 0],
+                1,
             )
         );
     }
@@ -849,11 +875,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            (physical_ids, arrangement.physical, arrangement.traversal),
             (
-                vec!["replace", "options", "cancel"],
-                vec![0, 1, 2],
-                vec![2, 1, 0],
+                physical_ids,
+                arrangement.physical,
+                arrangement.traversal,
+                arrangement.leading
+            ),
+            (
+                vec!["replace", "cancel", "options"],
+                vec![0, 2, 1],
+                vec![1, 2, 0],
+                1,
             )
         );
     }

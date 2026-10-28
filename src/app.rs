@@ -912,13 +912,16 @@ fn quit_prompt(
             .filter(|pane| pane.session.is_some())
             .count()
     });
-    let detail = match count {
-        0 => format!(
-            "{name} leaves the {}. Your Terminal Sessions keep running, so everything is where you left it.",
-            status_area.phrase()
+    let place = status_area.phrase();
+    let detail = match (sessions, count) {
+        (None, _) => format!(
+            "{name} leaves the {place}. Your Terminal Sessions keep running, so everything is where you left it."
         ),
-        1 => "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
-        count => format!(
+        (Some(_), 0) => format!(
+            "{name} leaves the {place} and stops its development server. No Terminal Sessions are running."
+        ),
+        (Some(_), 1) => "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
+        (Some(_), count) => format!(
             "This development build runs its own server. Quitting ends its {count} Terminal Sessions and stops their running commands."
         ),
     };
@@ -1665,10 +1668,17 @@ mod tests {
         assert_eq!(
             idle.detail,
             format!(
-                "{name} leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it."
+                "{name} leaves the menu bar and stops its development server. No Terminal Sessions are running."
             )
         );
         assert!(!idle.destructive, "quitting ends no Terminal Session");
+        let status_area_idle = quit_prompt(StatusAreaName::StatusArea, Some(&quit_sessions(1, &[None])));
+        assert_eq!(
+            status_area_idle.detail,
+            format!(
+                "{name} leaves the status area and stops its development server. No Terminal Sessions are running."
+            )
+        );
         let one = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[Some(1)])));
         assert_eq!(
             one.detail,
