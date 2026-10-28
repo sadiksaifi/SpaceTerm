@@ -721,6 +721,8 @@ pub struct CommandPaletteEmpty {
     title: SharedString,
     description: Option<SharedString>,
     actions: Vec<CommandPaletteEmptyAction>,
+    /// The subject of a query that matched nothing, said in one secondary line.
+    no_match: Option<SharedString>,
 }
 
 impl CommandPaletteEmpty {
@@ -731,6 +733,16 @@ impl CommandPaletteEmpty {
             title: title.into(),
             description: None,
             actions: Vec::new(),
+            no_match: None,
+        }
+    }
+
+    /// A query that matches nothing, said in one secondary line with no icon, as every floating
+    /// list says it: `subject` followed by the quoted query, such as "No commands match “q”."
+    pub fn no_match(subject: impl Into<SharedString>) -> Self {
+        Self {
+            no_match: Some(subject.into()),
+            ..Self::new("")
         }
     }
 
@@ -2371,6 +2383,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         {
             return None;
         }
+        if let Some(line) = self.no_match_line() {
+            return Some(line);
+        }
         Some(match &self.empty.description {
             Some(description) => {
                 let separator = if self.empty.title.ends_with(['.', '!', '?', '…']) {
@@ -3163,6 +3178,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         &self.empty.actions
     }
 
+    /// The no-match line for the current query, when the caller asked for one.
+    fn no_match_line(&self) -> Option<SharedString> {
+        let subject = self.empty.no_match.as_ref()?;
+        Some(format!("{subject} \u{201C}{}\u{201D}.", self.query.trim()).into())
+    }
+
     /// Measures the empty state so the panel fits it exactly, including a wrapped description.
     fn empty_state_height(
         &self,
@@ -3172,6 +3193,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         window: &Window,
         cx: &App,
     ) -> Pixels {
+        if self.empty.no_match.is_some() {
+            return metrics.single_line_row_height + metrics.panel_padding * 2.0;
+        }
         let detail_lines = self.empty.description.as_ref().map_or(0, |description| {
             let wrap_width = (panel_width - metrics.content_leading_inset() * 2.0)
                 .min(style.maximum_width())
@@ -3306,6 +3330,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             div().into_any_element()
         } else if matches!(self.loading_presentation, LoadingPresentation::Shown { .. }) {
             loading_state(list_height, metrics, paint).into_any_element()
+        } else if let Some(line) = self
+            .matches
+            .is_empty()
+            .then(|| self.no_match_line())
+            .flatten()
+        {
+            render_no_match(line, theme).into_any_element()
         } else if self.matches.is_empty() {
             self.render_empty_state(empty_state_style(metrics, paint, &typography), metrics, cx)
         } else {
@@ -3735,6 +3766,32 @@ fn render_section(
 }
 
 /// Sets the note in caption type on the row grid, aligned with row labels.
+/// A query that matched nothing, in one secondary line where the first result would be.
+fn render_no_match(line: SharedString, theme: CommandPaletteTheme) -> impl IntoElement {
+    let metrics = theme.metrics;
+    div()
+        .debug_selector(|| "command-palette-empty".to_owned())
+        .w_full()
+        .py(metrics.panel_padding)
+        .child(
+            div()
+                .h(metrics.single_line_row_height)
+                .pl(metrics.content_leading_inset())
+                .pr(metrics.panel_padding)
+                .flex()
+                .items_center()
+                .text_size(metrics.secondary_size)
+                .line_height(metrics.secondary_line_height)
+                .text_color(theme.paint.muted)
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(gpui::Text::new("command-palette-no-match".into(), line)),
+                ),
+        )
+}
+
 fn render_results_note(
     note: SharedString,
     height: Pixels,

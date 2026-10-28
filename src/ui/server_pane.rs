@@ -10,7 +10,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, SharedString, Stateful, div};
 use spaceterm_server::pane::control::Controller;
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, FloatingRole, Icon, ProgressRing, ProgressSize,
+    Button, ButtonSize, ButtonVariant, FloatingRole, Icon, IconName, ProgressRing, ProgressSize,
     ProgressState,
 };
 use std::{cell::RefCell, rc::Rc};
@@ -83,7 +83,11 @@ pub(crate) const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
 pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 /// End All Sessions ended this Pane's shell and cleared its output. The Pane, its Tab, and its
 /// control stay, so only an explicit start brings a shell back.
-pub(crate) const ENDED_DETAIL: &str = "End All Sessions cleared this Pane.";
+pub(crate) const ENDED_DETAIL: &str =
+    "End All Sessions ended this Pane\u{2019}s Terminal Session and cleared its output.";
+/// The glyph of a Pane waiting for an explicit start: a Terminal Session that isn't running.
+/// It stays muted, because nothing went wrong.
+pub(crate) const DORMANT_GLYPH: IconName = IconName::Terminal;
 
 /// The copy and selectors of a Pane waiting for an explicit start. End All Sessions and a server
 /// restart both leave a Pane there, and each screen names its own cause and action.
@@ -130,7 +134,7 @@ impl DormantCopy {
 }
 const START_DESCRIPTION: &str =
     "Start a new Terminal Session in this Pane\u{2019}s last directory.";
-pub(crate) const RESTORED_DETAIL: &str = "Programs in this Pane ended.";
+pub(crate) const RESTORED_DETAIL: &str = "This Pane\u{2019}s Terminal Session ended.";
 pub(crate) const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
 pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str =
     "Restore access and choose Try Again, or choose another directory.";
@@ -267,6 +271,7 @@ pub(crate) fn render_directory_screen(
             detail: detail.into(),
             path,
             intent: StatusIntent::Warning,
+            glyph: None,
         },
         true,
         actions,
@@ -284,6 +289,7 @@ pub(crate) struct ScreenCopy {
     detail: SharedString,
     path: Option<SharedString>,
     intent: StatusIntent,
+    glyph: Option<IconName>,
 }
 impl ScreenCopy {
     pub(crate) fn new(title: SharedString, detail: SharedString) -> Self {
@@ -292,11 +298,18 @@ impl ScreenCopy {
             detail,
             path: None,
             intent: StatusIntent::Information,
+            glyph: None,
         }
     }
 
     pub(crate) fn intent(mut self, intent: StatusIntent) -> Self {
         self.intent = intent;
+        self
+    }
+
+    /// A glyph that names what the screen is about, in place of the intent's.
+    pub(crate) fn glyph(mut self, glyph: IconName) -> Self {
+        self.glyph = Some(glyph);
         self
     }
 }
@@ -321,6 +334,7 @@ fn render_screen_content(
         detail,
         path,
         intent,
+        glyph,
     } = copy;
     let appearance = super::appearance::shared_chrome(cx);
     // The configured terminal background, never one the shell chose.
@@ -340,7 +354,7 @@ fn render_screen_content(
     let element_selector = selector.clone();
     let differentiate = appearance.capabilities.differentiate_without_color;
     let mut state = super::empty_state::empty_state(title.clone(), cx)
-        .icon(intent.glyph(differentiate))
+        .icon(glyph.unwrap_or_else(|| intent.glyph(differentiate)))
         .tone(match intent {
             StatusIntent::Warning => spaceterm_ui::EmptyStateTone::Warning,
             StatusIntent::Error => spaceterm_ui::EmptyStateTone::Error,

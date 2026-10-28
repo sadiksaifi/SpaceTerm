@@ -17,6 +17,7 @@ use gpui::{AnyElement, AnyView, Context, Edges, Pixels, SharedString, Window, di
 use spaceterm_ui::{Button, CustomIconName, EmptyStateTone, IconName, Tooltip};
 
 use super::super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::super::sidebar_motion::SidebarMotion;
 use super::super::workspace_creation::WorkspaceCreation;
 use super::super::workspace_frame::WorkspaceFrame;
 use super::launch::LaunchAction;
@@ -99,7 +100,18 @@ impl WorkspaceManager {
                     window,
                     cx,
                 ) > px(0.0));
-        let band_free = if band_occupied { 0.0 } else { sidebar.reveal };
+        // The band empties and fills on the sidebar's curve, and at once under Reduce Motion, so
+        // the stage never jumps when the update pill or the Window Controls come or go.
+        let band = {
+            let mut motion = self.empty_band.borrow_mut();
+            let motion = motion.get_or_insert_with(|| SidebarMotion::new(!band_occupied));
+            motion.expect_change();
+            motion.present(!band_occupied, cx)
+        };
+        if band.moving {
+            window.request_animation_frame();
+        }
+        let band_free = band.reveal * sidebar.reveal;
         let stage_top = frame.stage_top_inset(appearance.top_height(), band_free);
         let band = WindowDragRegion::new(
             "empty-workspace-drag-region",
@@ -273,7 +285,9 @@ impl WorkspaceManager {
         let reconnect = self.reconnect_status(cx);
         let state = if reachable {
             let choose_manager = manager.clone();
-            let mut choose = Button::new("empty-workspace-choose", EMPTY_ACTION)
+            // A push button names its command only; the help tag shows the Shortcut, as a menu
+            // does.
+            let choose = Button::new("empty-workspace-choose", EMPTY_ACTION)
                 .tab_stop(true)
                 .debug_selector("empty-workspace-choose")
                 .tooltip(
@@ -285,9 +299,6 @@ impl WorkspaceManager {
                         manager.open_workspace_switcher(window, cx);
                     });
                 });
-            if let Some(shortcut) = presentation.shortcut(&SwitchWorkspace) {
-                choose = choose.shortcut(shortcut);
-            }
             let create = Button::new("empty-workspace-create", EMPTY_CREATE)
                 .tab_stop(true)
                 .debug_selector("empty-workspace-create")

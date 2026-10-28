@@ -292,6 +292,9 @@ pub(crate) struct WorkspaceManager {
     direct_routes: direct_servers::DirectRoutes,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
+    /// Eases the empty stage's top edge as the band above it fills or empties, on the sidebar's
+    /// curve. Created at the first frame, so a window opens at rest.
+    empty_band: std::cell::RefCell<Option<super::sidebar_motion::SidebarMotion>>,
     /// Normal launch of the account-local server this window presents.
     launch: launch::LocalLaunchState,
     /// This client's one Workspace order across every server, kept across launches.
@@ -419,6 +422,7 @@ impl WorkspaceManager {
             _direct_servers: None,
             direct_routes: direct_servers::DirectRoutes::default(),
             empty_focus: cx.focus_handle(),
+            empty_band: std::cell::RefCell::default(),
             launch: launch::LocalLaunchState::new(local_server),
             display_order: display_order::DisplayOrder::default(),
         };
@@ -2591,7 +2595,8 @@ impl WorkspaceManager {
         // Workspace to choose it says so above them.
         .copy(
             ComboBoxCopy::new("Workspace name", "Filter or create\u{2026}")
-                .choices_note("No Workspaces match", "Create")
+                .no_match("No Workspaces match")
+                .commands_heading("Create")
                 .no_choices("No Workspaces to attach."),
         )
         .menu_with_filter_header()

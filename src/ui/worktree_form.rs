@@ -976,7 +976,8 @@ impl WorktreeForm {
                     .copy(
                         ComboBoxCopy::new("Filter branches", "Search")
                             .busy_status("Loading Branches\u{2026}")
-                            .empty_status("No Matching Branches"),
+                            .empty_status("No branches.")
+                            .no_match("No branches match"),
                     )
                     .disabled(self.pending)
                     .debug_selector("new-worktree-branch")

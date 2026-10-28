@@ -2,6 +2,8 @@
 //!
 //! Every empty, unavailable, and no-results state outside a floating list presents through
 //! [`spaceterm_ui::EmptyState`] with this style, so they share one type, icon paint, and width.
+//! A floating list, such as a palette or a combo box, says that a query matched nothing in one
+//! secondary line with no icon instead.
 
 use spaceterm_ui::{EmptyState, EmptyStateStyle, EmptyStateText};
 

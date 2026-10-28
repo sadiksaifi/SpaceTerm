@@ -4250,3 +4250,26 @@ fn open_palettes_hide_the_modal_layer_underlay(cx: &mut TestAppContext) {
     assert!(tree.exposed(tree.node("Invoker")));
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Invoker");
 }
+
+#[gpui::test]
+fn a_query_matching_no_command_should_say_so_in_one_line_without_an_icon(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (root, palette, _, _, cx) = palette_window(cx);
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::no_match("No commands match"),
+        cx,
+    );
+
+    let line = A11yTree::read(cx)
+        .find_text("No commands match \u{201C}zzz\u{201D}.")
+        .is_some();
+
+    assert!(line, "the line quotes the query");
+    assert!(
+        cx.debug_bounds("command-palette-empty-title").is_none(),
+        "a floating list's no-results state has no title or icon"
+    );
+}
