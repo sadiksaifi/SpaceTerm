@@ -19,6 +19,10 @@ use zeroize::Zeroizing;
 
 use super::{CredentialError, CredentialStore, Interaction, account};
 
+mod security_tool;
+mod tool_access;
+pub(super) use security_tool::SecurityTool;
+
 unsafe extern "C" {
     // This public Security constant is absent from security-framework-sys 2.17.
     static kSecUseAuthenticationUIFail: CFStringRef;
@@ -35,7 +39,7 @@ pub(super) struct Keychain {
 impl Keychain {
     pub(super) fn new(identity: &str) -> Self {
         Self {
-            service: format!("io.github.sadiksaifi.{identity}.direct-network"),
+            service: service(identity),
         }
     }
 
@@ -167,6 +171,10 @@ impl Drop for QuietGuard {
             let _ = unsafe { SecKeychainSetUserInteractionAllowed(previous) };
         }
     }
+}
+
+fn service(identity: &str) -> String {
+    format!("io.github.sadiksaifi.{identity}.direct-network")
 }
 
 fn classify(status: i32) -> Result<(), CredentialError> {
