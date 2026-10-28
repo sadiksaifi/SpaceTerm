@@ -335,7 +335,8 @@ pub struct State {
     /// Ordered from the least to the most recently editing device.
     devices: Vec<DeviceOutcomes>,
     /// The highest sequence of any device record the server replaced. A device without a record
-    /// continues above it, so a replaced device that returns never reuses a sequence.
+    /// continues above it, so a replaced device's new edits never reuse a sequence. Its
+    /// unresolved Original Operation keeps its own sequence, which [`State::apply`] accepts.
     #[serde(default)]
     sequence_floor: u64,
     #[serde(default)]
@@ -605,7 +606,15 @@ impl State {
                 Err(Refusal::Stale)
             };
         }
-        if sequence != self.next_sequence(device) || sequence == u64::MAX {
+        // A device without a record has nothing applied that it has not acknowledged, and its
+        // client retires an outcome before acknowledging it. So the device has never applied any
+        // sequence it may still send, such as a replaced device's unresolved Original Operation.
+        let expected = if self.devices.iter().any(|d| d.device == device) {
+            sequence == self.next_sequence(device)
+        } else {
+            (1..=self.next_sequence(device)).contains(&sequence)
+        };
+        if !expected || sequence == u64::MAX {
             return Err(Refusal::Stale);
         }
         if self.devices.iter().map(|d| d.pending.len()).sum::<usize>() >= MAX_OUTCOMES {
@@ -627,7 +636,6 @@ impl State {
                     let replaced = self.devices.remove(idle);
                     self.sequence_floor = self.sequence_floor.max(replaced.retired);
                 }
-                // The floor the device's sequence was checked against, before any replacement.
                 DeviceOutcomes {
                     device,
                     retired: sequence - 1,
@@ -2295,14 +2303,70 @@ mod tests {
         );
         assert_eq!(state.next_sequence(device(1)), 3);
         assert!(state.devices.iter().all(|d| d.device != device(2)));
-        // The replaced device returns above every sequence it used, so its old edit is stale
-        // and its repeated acknowledgement retires nothing.
-        assert_eq!(state.next_sequence(device(2)), 2);
+        // The replaced device's repeated acknowledgement retires nothing.
+        assert_eq!(state.acknowledge(device(2), 1), Ok(()));
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn a_replaced_device_still_submits_its_unresolved_operation_under_its_original_sequence() {
+        let mut state = State::empty();
+        let create = Mutation::RenameWorkspace {
+            workspace: [9; 32],
+            version: 0,
+            name: "Build".into(),
+        };
+        let device = |n: usize| [u8::try_from(n).unwrap(); 32];
+        // Device 0 settles edit 1. Its edit 2 is journaled but never reaches the server.
+        state
+            .apply(device(0), 1, create.clone(), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        state.acknowledge(device(0), 1).unwrap();
+        // Device 1 settles more edits, and both are replaced, which raises the floor to 4.
+        for sequence in 1..=4 {
+            state
+                .apply(device(1), sequence, create.clone(), "/tmp".as_ref(), |_| {
+                    true
+                })
+                .unwrap();
+            state.acknowledge(device(1), sequence).unwrap();
+        }
+        for n in 2..=MAX_DEVICES + 1 {
+            state
+                .apply(device(n), 1, create.clone(), "/tmp".as_ref(), |_| true)
+                .unwrap();
+            state.acknowledge(device(n), 1).unwrap();
+        }
+        assert!(state.devices.iter().all(|d| d.device != device(0)));
+        assert!(state.devices.iter().all(|d| d.device != device(1)));
+        assert_eq!(state.next_sequence(device(0)), 5);
+        // The retry of edit 2 applies once, and its outcome follows ADR 0037.
+        let rename = Mutation::RenameWorkspace {
+            workspace: [9; 32],
+            version: 0,
+            name: "Retried".into(),
+        };
+        assert_eq!(
+            state.apply(device(0), 2, rename.clone(), "/tmp".as_ref(), |_| true),
+            Ok(Outcome::Missing)
+        );
+        assert_eq!(
+            state.apply(device(0), 2, rename, "/tmp".as_ref(), |_| true),
+            Ok(Outcome::Missing),
+            "a repeated retry replays the recorded outcome"
+        );
+        assert_eq!(state.next_sequence(device(0)), 3);
         assert!(matches!(
-            state.apply(device(2), 1, create.clone(), "/tmp".as_ref(), |_| true),
+            state.apply(device(0), 5, create.clone(), "/tmp".as_ref(), |_| true),
             Err(Refusal::Stale)
         ));
-        assert_eq!(state.acknowledge(device(2), 1), Ok(()));
+        // The repeated acknowledgement of edit 1 retires nothing.
+        state.acknowledge(device(0), 1).unwrap();
+        assert!(state.outcome(device(0), 2).is_some());
+        assert!(matches!(
+            state.apply(device(0), 0, create, "/tmp".as_ref(), |_| true),
+            Err(Refusal::Stale)
+        ));
         assert!(state.validate().is_ok());
     }
 
