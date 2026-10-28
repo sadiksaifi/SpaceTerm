@@ -231,7 +231,7 @@ impl Content {
             },
             Step::Failed(error) => Self {
                 title: format!("{name} Server").into(),
-                heading: format!("The {name} server couldn't {}.", operation.verb()).into(),
+                heading: format!("The {name} server couldn\u{2019}t {}.", operation.verb()).into(),
                 body: Some(error.to_string().into()),
                 buttons: vec![Choice {
                     label: "OK".into(),

@@ -1005,7 +1005,7 @@ fn installed_themes_publish_a_list_of_named_themes_with_their_actions(cx: &mut T
             .unwrap_or_else(|| panic!("no theme item is named {name:?}"))
     };
     let in_use = tree.children(item("SpaceTerm Dark"));
-    assert!(in_use.iter().any(|node| node["aria"]["value"] == "In Use"));
+    assert!(in_use.iter().any(|node| node["aria"]["value"] == "In use"));
     let sample = item("Sample Dark");
     assert!(!sample["aria"]["description"].as_str().unwrap().is_empty());
     let actions = tree
@@ -2742,7 +2742,8 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
             SettingsRowId::ServerStatus => "settings-server-status",
-            SettingsRowId::ServerAutoStart => "settings-server-auto-start",
+            // The fixture has no service observation, so the row says Unknown.
+            SettingsRowId::ServerAutoStart => "settings-server-auto-start-unknown",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
             // The fixture has no network observation, so the row says Unknown. Devices waits
             // for access to be on.
@@ -4812,12 +4813,7 @@ fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAp
     assert_eq!(text, ["SpaceTerm Light", "Built into SpaceTerm"]);
 
     set_query(&window, "zzzz", cx);
-    let tree = A11yTree::read(cx);
-    assert!(
-        tree.with_role("Label")
-            .iter()
-            .any(|label| label["aria"]["value"] == "No settings match “zzzz”.")
-    );
+    assert!(cx.debug_bounds("settings-no-results").is_some());
 }
 
 #[gpui::test]

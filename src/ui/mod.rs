@@ -20,6 +20,7 @@ mod direct_pairing;
 pub(crate) mod direct_servers;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
+pub(crate) mod empty_state;
 pub(crate) mod pane_lifecycle;
 mod pane_motion;
 pub(crate) mod permission_setup;

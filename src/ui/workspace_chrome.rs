@@ -355,8 +355,8 @@ impl WorkspaceChromeStatus {
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Connected => "Connected remote",
-            Self::Reconnecting => "Reconnecting",
-            Self::Disconnected => "Disconnected",
+            Self::Reconnecting => "Reconnecting\u{2026}",
+            Self::Disconnected => "Not connected",
             Self::Failed => "Connection failed",
         }
     }
@@ -570,7 +570,7 @@ impl WorkspaceChromeIdentity {
     }
 
     pub(super) fn accessibility_name(&self) -> String {
-        let mut name = format!("Switch Workspace, {}", self.name);
+        let mut name = format!("Choose Workspace, {}", self.name);
         if let Some(worktree) = &self.worktree {
             name.push_str(&format!(", Worktree {worktree}"));
         }
@@ -616,7 +616,7 @@ mod tests {
                 div()
                     .id("switcher-probe")
                     .role(gpui::accesskit::Role::ComboBox)
-                    .aria_label("Switch Workspace, work, Disconnected")
+                    .aria_label("Choose Workspace, work, Not connected")
                     .child(WorkspaceChromeStatus::Disconnected.mark(
                         &appearance,
                         WorkspaceChromeStatusHosts::new(host, host),
@@ -627,7 +627,7 @@ mod tests {
         cx.update(crate::ui::init).unwrap();
         let (_, cx) = cx.add_window_view(|_, _| Probe);
         let tree = A11yTree::read(cx);
-        let switcher = tree.node("Switch Workspace, work, Disconnected");
+        let switcher = tree.node("Choose Workspace, work, Not connected");
         assert_eq!(switcher["aria"]["role"], "ComboBox");
         assert!(tree.children(switcher).is_empty());
     }
@@ -749,17 +749,17 @@ mod tests {
         };
         assert_eq!(
             identity(None).accessibility_name(),
-            "Switch Workspace, Workspace"
+            "Choose Workspace, Workspace"
         );
         for (status, label) in [
             (WorkspaceChromeStatus::Connected, "Connected remote"),
-            (WorkspaceChromeStatus::Reconnecting, "Reconnecting"),
-            (WorkspaceChromeStatus::Disconnected, "Disconnected"),
+            (WorkspaceChromeStatus::Reconnecting, "Reconnecting\u{2026}"),
+            (WorkspaceChromeStatus::Disconnected, "Not connected"),
             (WorkspaceChromeStatus::Failed, "Connection failed"),
         ] {
             assert_eq!(
                 identity(Some(status)).accessibility_name(),
-                format!("Switch Workspace, Workspace, {label}")
+                format!("Choose Workspace, Workspace, {label}")
             );
         }
     }

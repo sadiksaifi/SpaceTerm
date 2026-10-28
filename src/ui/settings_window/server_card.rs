@@ -422,12 +422,18 @@ impl SettingsWindow {
                 .filter(|at| *at > 0)
                 .map(|at| observed_time(at, cx));
             return Some(observed.map_or_else(
-                || "SpaceTerm can't reach the server right now.".into(),
-                |at| format!("SpaceTerm can't reach {name}. Last known settings: {at}.").into(),
+                || "SpaceTerm can\u{2019}t reach the server right now.".into(),
+                |at| {
+                    format!("SpaceTerm can\u{2019}t reach {name}. Last known settings: {at}.")
+                        .into()
+                },
             ));
         }
         Some(
             match choice {
+                ServerChoice::Local if self.local_server_not_installed() => {
+                    format!("Install the server on {name} to change these settings.")
+                }
                 ServerChoice::Local => {
                     format!("Start the server on {name} to change these settings.")
                 }
@@ -435,6 +441,22 @@ impl SettingsWindow {
             }
             .into(),
         )
+    }
+
+    /// Whether this computer has no installed server service, so only Install, not Start,
+    /// brings its settings back.
+    fn local_server_not_installed(&self) -> bool {
+        let service = self
+            .server_service
+            .as_ref()
+            .and_then(|row| row.state.status)
+            .map(ServicePhase::of);
+        let connection = self.local_server.as_ref().map(|row| row.current_status());
+        service == Some(ServicePhase::NotInstalled)
+            || matches!(
+                connection,
+                Some(LocalServerStatus::Failed(ServerError::NotInstalled))
+            )
     }
 
     /// Whether the last attempt to reach `choice` failed, rather than finding it stopped, not
@@ -489,23 +511,16 @@ impl SettingsWindow {
     /// that waits for the person. Work underway names itself in the Server row instead, and a
     /// plain state needs no words.
     fn status_message(&self) -> Option<(SharedString, CaptionTone)> {
-        let attention = |text: SharedString, tone: CaptionTone, attention: bool| {
-            (attention || tone != CaptionTone::Guidance).then_some((text, tone))
-        };
         match self.selected_server()? {
-            ServerChoice::Local => {
-                let service = self.server_service_presentation().and_then(|service| {
-                    if service.working.is_some() {
-                        return None;
-                    }
-                    let waiting = service.authorization.is_some();
-                    attention(service.explanation, service.tone, waiting)
-                });
-                service.or_else(|| {
+            // The service explains the server whenever there is one; without it, as in a
+            // Development run, the connection does.
+            ServerChoice::Local => match &self.server_service {
+                Some(service) => service.settled_explanation(),
+                None => {
                     let local = self.local_server_presentation()?;
-                    attention(local.explanation, local.tone, false)
-                })
-            }
+                    Some((local.explanation, local.tone))
+                }
+            },
             ServerChoice::Direct(route) => self
                 .direct_problem()
                 .map(|problem| (problem, CaptionTone::Error))
@@ -515,11 +530,10 @@ impl SettingsWindow {
                         .into_iter()
                         .find(|(saved, _, _)| *saved == route)?;
                     let presentation = crate::ui::direct_servers::present(status, &name);
-                    attention(
+                    Some((
                         SharedString::from(presentation.explanation),
                         presentation.tone,
-                        false,
-                    )
+                    ))
                 }),
         }
     }
@@ -1492,28 +1506,38 @@ impl SettingsWindow {
     /// Status menu.
     pub(super) fn render_auto_start(
         &mut self,
-        _: &ChromeAppearance,
+        appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let value = self.automatic_start();
+        let Some(value) = self.automatic_start() else {
+            // Nothing says whether the server starts by itself, so no switch claims it's off, as
+            // Network Access reads while unknown.
+            let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+            return div()
+                .id(SharedString::from(format!("{AUTO_START_SELECTOR}-unknown")))
+                .debug_selector(|| format!("{AUTO_START_SELECTOR}-unknown"))
+                .role(gpui::accesskit::Role::Label)
+                .aria_label("Start automatically")
+                .aria_value("Unknown")
+                .chrome_text(appearance.typography.style(TextRole::Body))
+                .text_color(gpui_color(colors.text_secondary))
+                .child("Unknown")
+                .into_any_element();
+        };
         let changeable = self.automatic_start_changeable();
         let owner = cx.weak_entity();
-        Switch::new(
-            AUTO_START_SELECTOR,
-            "Start automatically",
-            value.unwrap_or(false),
-        )
-        .size(ToggleSize::Regular)
-        .label_hidden(true)
-        .disabled(!changeable)
-        .debug_selector(AUTO_START_SELECTOR)
-        .on_change(move |change, window, cx| {
-            let enabled = change.requested();
-            let _ = owner.update(cx, |settings, cx| {
-                settings.set_automatic_start(enabled, window, cx);
-            });
-        })
-        .into_any_element()
+        Switch::new(AUTO_START_SELECTOR, "Start automatically", value)
+            .size(ToggleSize::Regular)
+            .label_hidden(true)
+            .disabled(!changeable)
+            .debug_selector(AUTO_START_SELECTOR)
+            .on_change(move |change, window, cx| {
+                let enabled = change.requested();
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.set_automatic_start(enabled, window, cx);
+                });
+            })
+            .into_any_element()
     }
 }
 
@@ -1593,8 +1617,8 @@ fn unfinished_subtitle(version: &str, candidate: Option<&str>) -> String {
 
 fn failed_subtitle(candidate: Option<&str>, previous: &str) -> String {
     let attempted = candidate.map_or_else(
-        || "Couldn't update".to_owned(),
-        |candidate| format!("Couldn't update to {candidate}"),
+        || "Couldn\u{2019}t update".to_owned(),
+        |candidate| format!("Couldn\u{2019}t update to {candidate}"),
     );
     if previous.is_empty() {
         attempted

@@ -324,7 +324,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
         |explanation: &'static str| (SharedString::new_static(explanation), CaptionTone::Guidance);
     let (state, state_selector, (explanation, tone), check, working) = match status {
         LocalServerStatus::NotChecked => (
-            "Not Checked",
+            "Not checked",
             "settings-local-server-state-not-checked",
             guidance("SpaceTerm checks the server when you open this section."),
             true,
@@ -386,7 +386,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 // A deliberate Stop is a state the person chose, not a fault.
                 ServerError::Stopped => guidance(STOPPED_GUIDANCE),
                 ServerError::NotInstalled => {
-                    guidance("Install the server's service below to start it.")
+                    guidance("Install the server\u{2019}s service below to start it.")
                 }
                 // Only the service's explicit Start can ask for this authorization.
                 ServerError::AuthorizationRequired => guidance(
@@ -410,14 +410,14 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
 /// The badge, its selector, and whether checking again can tell anything new.
 fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
     match error {
-        ServerError::NotSetUp => ("Not Set Up", "settings-local-server-state-not-set-up", true),
+        ServerError::NotSetUp => ("Not set up", "settings-local-server-state-not-set-up", true),
         ServerError::NotRunning => (
-            "Not Running",
+            "Not running",
             "settings-local-server-state-not-running",
             true,
         ),
         ServerError::StartupFailed => (
-            "Not Started",
+            "Not started",
             "settings-local-server-state-startup-failed",
             true,
         ),
@@ -425,7 +425,7 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         // nothing new.
         ServerError::Stopped => ("Stopped", "settings-local-server-state-stopped", false),
         ServerError::NotInstalled => (
-            "Not Installed",
+            "Not installed",
             "settings-local-server-state-not-installed",
             false,
         ),
@@ -437,7 +437,7 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
             true,
         ),
         ServerError::UnsafeStorage => (
-            "Unsafe Storage",
+            "Unsafe storage",
             "settings-local-server-state-unsafe-storage",
             true,
         ),
@@ -462,25 +462,25 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
             false,
         ),
         ServerError::IncompatibleState => (
-            "Incompatible State",
+            "Incompatible state",
             "settings-local-server-state-incompatible-state",
             true,
         ),
         ServerError::Protocol => (
-            "Protocol Error",
+            "Protocol error",
             "settings-local-server-state-protocol-error",
             true,
         ),
         // Terminal Session refusals reach this row only through a check, which another check
         // answers afresh.
-        ServerError::Controlled => ("In Use", "settings-local-server-state-controlled", true),
+        ServerError::Controlled => ("In use", "settings-local-server-state-controlled", true),
         ServerError::SessionUnavailable | ServerError::StaleControl => (
             "Unavailable",
             "settings-local-server-state-session-unavailable",
             true,
         ),
         ServerError::DirectoryUnavailable => (
-            "Directory Unavailable",
+            "Directory unavailable",
             "settings-local-server-state-directory-unavailable",
             true,
         ),
@@ -490,30 +490,30 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
             true,
         ),
         ServerError::RuntimeUnavailable => (
-            "Runtime Unavailable",
+            "Runtime unavailable",
             "settings-local-server-state-runtime-unavailable",
             true,
         ),
         // Only another SpaceTerm build includes a server package, so checking again from this
         // one says nothing new.
         ServerError::CandidateMissing => (
-            "Not Included",
+            "Not included",
             "settings-local-server-state-candidate-missing",
             false,
         ),
         ServerError::AuthorizationRequired => (
-            "Authorization Required",
+            "Authorization required",
             "settings-local-server-state-authorization-required",
             false,
         ),
         ServerError::CleanupUnresolved => (
-            "Cleanup Unresolved",
+            "Cleanup unresolved",
             "settings-local-server-state-cleanup-unresolved",
             true,
         ),
         // The server is holding shared edit outcomes for clients that have not acknowledged
         // them. Another check reports whether they have since.
-        ServerError::Capacity => ("At Capacity", "settings-local-server-state-capacity", true),
+        ServerError::Capacity => ("At capacity", "settings-local-server-state-capacity", true),
         // Another surface changed the service after a confirmation was prepared. A check reads
         // its current state before the person asks again.
         ServerError::Changed => ("Changed", "settings-local-server-state-changed", true),
@@ -523,12 +523,12 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         // An update the person confirmed has not resolved, so the server admits no connection
         // until Finish Update resolves it. A check reports whether it has since.
         ServerError::ActivationUnresolved => (
-            "Update Unfinished",
+            "Update unfinished",
             "settings-local-server-state-update-unfinished",
             true,
         ),
         ServerError::ReturnUnavailable => (
-            "Update Failed",
+            "Update failed",
             "settings-local-server-state-return-unavailable",
             true,
         ),
@@ -633,8 +633,8 @@ impl ServiceAction {
     /// where the row renders it.
     pub(super) const fn consequence(self) -> Option<&'static str> {
         match self {
-            Self::Stop => Some("Ends the server's Terminal Sessions."),
-            Self::Restart => Some("Ends the server's Terminal Sessions."),
+            Self::Stop => Some("Ends the server\u{2019}s Terminal Sessions."),
+            Self::Restart => Some("Ends the server\u{2019}s Terminal Sessions."),
             Self::Uninstall => Some("Removes the service."),
             Self::AuthorizeInstall => {
                 Some("Requires an administrator password to install and start the server.")
@@ -957,14 +957,14 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
     let (badge, state_selector, (explanation, tone)) = match (phase, state.failure, &authorization)
     {
         (None, None, _) => (
-            "Not Checked",
+            "Not checked",
             "settings-server-service-state-not-checked",
             guidance("SpaceTerm reads the service when you open this section."),
         ),
         // A Stop that published its intent but could not confirm its cleanup. Only another
         // explicit Stop retries it; nothing offered here starts the server again.
         (None, Some(ServerError::CleanupUnresolved), _) => (
-            "Cleanup Unresolved",
+            "Cleanup unresolved",
             "settings-server-service-state-cleanup-unresolved",
             (
                 SharedString::new_static(
@@ -979,14 +979,14 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
             (SharedString::from(error.to_string()), CaptionTone::Error),
         ),
         (Some(phase), _, Some(pending)) => (
-            "Authorization Required",
+            "Authorization required",
             "settings-server-service-state-authorization-required",
             authorization_caption(pending, phase),
         ),
         (Some(phase), failure, None) => {
             let (badge, selector, caption) = match phase {
                 ServicePhase::NotInstalled => (
-                    "Not Installed",
+                    "Not installed",
                     "settings-server-service-state-not-installed",
                     match install_choices.as_slice() {
                         [] => guidance(
@@ -1068,7 +1068,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                     }),
                 ),
                 ServicePhase::NotRunning => (
-                    "Not Running",
+                    "Not running",
                     "settings-server-service-state-not-running",
                     (
                         SharedString::new_static(
@@ -1142,7 +1142,7 @@ fn authorization_caption(
     let step = step.label().trim_end_matches('\u{2026}');
     let message = match (pending.declined, phase) {
         (true, ServicePhase::NotInstalled | ServicePhase::Stopped) => {
-            format!("Authorization didn't finish. Choose {step} to try again.")
+            format!("Authorization didn\u{2019}t finish. Choose {step} to try again.")
         }
         (true, ServicePhase::NotRunning | ServicePhase::Running) => {
             format!("Choose {step} to try again.")
@@ -1226,6 +1226,29 @@ impl ServerServiceRow {
                 .or(self.automatic_start.requested)
                 .unwrap_or(reported)
         })
+    }
+
+    /// What the last status read explains, while nothing but a passive read runs. A check
+    /// keeps the card's footnote as it was; another action's progress replaces it.
+    pub(super) fn settled_explanation(&self) -> Option<(SharedString, CaptionTone)> {
+        if self
+            .state
+            .working
+            .is_some_and(|action| action != ServiceAction::Check)
+        {
+            return None;
+        }
+        let presentation = match &self.control {
+            Err(error) => present_service(ServiceState {
+                failure: Some(*error),
+                ..ServiceState::default()
+            }),
+            Ok(_) => present_service(ServiceState {
+                working: None,
+                ..self.state.clone()
+            }),
+        };
+        Some((presentation.explanation, presentation.tone))
     }
 
     pub(super) fn presentation(&self) -> ServicePresentation {

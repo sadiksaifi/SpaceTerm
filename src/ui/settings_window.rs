@@ -487,6 +487,21 @@ impl SidebarOwner for SettingsWindow {
     }
 }
 
+/// What a Settings search that matches nothing says, in the shared empty state. The
+/// Keybindings and installed-themes searches use it too.
+pub(super) fn no_results(query: &str, cx: &App) -> spaceterm_ui::EmptyState {
+    crate::ui::empty_state::empty_state(
+        format!("No Results for \u{201C}{}\u{201D}", query.trim()),
+        cx,
+    )
+    .icon(IconName::Search)
+    .detail(SEARCH_DETAIL)
+    .debug_selector("settings-no-results")
+}
+
+/// What every search that finds nothing suggests.
+pub(super) const SEARCH_DETAIL: &str = "Check the spelling or try a different term.";
+
 fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
     (section == SettingsSectionId::Updates).then_some(HostFeature::Updates)
 }
@@ -1272,18 +1287,15 @@ impl SettingsWindow {
                             })
                             .child(section)
                             .when(empty, |detail| {
-                                detail.child(
+                                detail.size_full().child(
                                     div()
-                                        .debug_selector(|| "settings-no-results".to_owned())
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
                                         .px(row_horizontal_inset(appearance))
-                                        .text_color(gpui_color(appearance.colors.text_muted))
-                                        .child(gpui::Text::new(
-                                            "settings-no-results".into(),
-                                            SharedString::from(format!(
-                                                "No settings match “{}”.",
-                                                self.query
-                                            )),
-                                        )),
+                                        .child(no_results(&self.query, cx)),
                                 )
                             }),
                     )
@@ -2006,7 +2018,7 @@ impl SettingsWindow {
         let (label, action_selector) = if critical {
             ("Reload", "settings-banner-reload")
         } else {
-            ("Retry", "settings-banner-retry")
+            ("Try Again", "settings-banner-retry")
         };
         let pair = if critical {
             appearance.semantic_text_pairs.warning_status
@@ -2390,7 +2402,7 @@ impl SettingsWindow {
             ),
             SettingsRowId::EndAllSessions => (
                 SharedString::new_static("Ending them keeps Workspaces."),
-                self.end_all_sessions_error()
+                self.end_all_sessions_note()
                     .map(|text| (text, self.end_all_sessions_caption().1)),
             ),
             SettingsRowId::NetworkAccess => (
@@ -2401,7 +2413,8 @@ impl SettingsWindow {
                 SharedString::new_static(
                     "A paired device can do anything this computer can on this server.",
                 ),
-                None,
+                self.no_paired_devices_note()
+                    .map(|text| (text, CaptionTone::Guidance)),
             ),
             SettingsRowId::ServerWorktreeLocation => (self.server_location_caption(cx).0, None),
             _ => return None,

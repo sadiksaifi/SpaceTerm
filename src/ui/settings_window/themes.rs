@@ -120,13 +120,13 @@ fn present_export_failure(
 fn diagnostic_message(diagnostic: AppearanceDiagnostic) -> &'static str {
     match diagnostic {
         AppearanceDiagnostic::SystemAppearanceUnavailable => {
-            "SpaceTerm can't read the system appearance. Auto is using the Dark Terminal Theme."
+            "SpaceTerm can\u{2019}t read the system appearance. Auto is using the Dark Terminal Theme."
         }
         AppearanceDiagnostic::TerminalThemeUnavailable { .. } => {
-            "SpaceTerm is using a built-in Terminal Theme because your selected theme isn't installed."
+            "SpaceTerm is using a built-in Terminal Theme because your selected theme isn\u{2019}t installed."
         }
         AppearanceDiagnostic::TerminalFontUnavailable => {
-            "SpaceTerm is using a substitute monospace font because your selected font isn't available."
+            "SpaceTerm is using a substitute monospace font because your selected font isn\u{2019}t available."
         }
         AppearanceDiagnostic::TerminalFontNotMonospace => {
             "Choose a monospace font. SpaceTerm is using a substitute until then."

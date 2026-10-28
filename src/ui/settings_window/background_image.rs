@@ -37,7 +37,7 @@ impl ChooseError {
                 BackgroundImageError::Missing
                 | BackgroundImageError::Unsafe
                 | BackgroundImageError::Unavailable,
-            ) => "Couldn't copy image.",
+            ) => "Couldn\u{2019}t copy image.",
         }
     }
 }

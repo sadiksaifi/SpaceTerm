@@ -1323,3 +1323,21 @@ fn the_picker_keeps_clear_of_client_drawn_window_controls(cx: &mut TestAppContex
         "the picker's hover surface should stop before Close, got {picker:?} beside {close:?}"
     );
 }
+
+/// A server running no Terminal Session says so under End All Sessions, which has nothing to end.
+#[gpui::test]
+fn a_server_running_no_terminal_session_says_so_under_end_all_sessions(cx: &mut TestAppContext) {
+    let local = local_writer(running_sessions(2, 0));
+    let servers = present_local_sessions(local, cx);
+    let name = local_name();
+    servers.cx.run_until_parked();
+
+    let note = servers
+        .window
+        .read_with(servers.cx, |settings, _| settings.end_all_sessions_note());
+
+    assert_eq!(
+        note.as_deref(),
+        Some(format!("No Terminal Sessions are running on {name}.").as_str())
+    );
+}

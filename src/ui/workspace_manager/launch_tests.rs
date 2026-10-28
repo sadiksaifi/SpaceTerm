@@ -421,7 +421,10 @@ fn startup_without_usable_server_state_presents_recovery_across_the_window(
 ) {
     let (harness, cx) = launch_harness(vec![Err(ServerError::RuntimeUnavailable), ready()], cx);
     cx.run_until_parked();
-    assert_eq!(harness.launch_title(cx), Some("Couldn't Verify Server"));
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("Couldn\u{2019}t Verify Server")
+    );
     assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
     assert!(!creation_available(cx), "New Workspace has nowhere to go");
     assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
@@ -476,7 +479,7 @@ fn a_missing_server_package_and_a_failed_verification_explain_themselves_differe
 
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     let unverified = presentation(cx);
-    assert_eq!(unverified.title, "Couldn't Verify Server");
+    assert_eq!(unverified.title, "Couldn\u{2019}t Verify Server");
     assert_eq!(unverified.detail, "Reinstall SpaceTerm, then try again.");
     assert!(
         !unverified.detail.contains("include"),
@@ -574,7 +577,7 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the authorization step stays")
         .detail;
-    assert!(detail.starts_with("Authorization didn't finish."));
+    assert!(detail.starts_with("Authorization didn\u{2019}t finish."));
 
     harness.click(LAUNCH_AUTHORIZE_SELECTOR, cx);
     assert_eq!(

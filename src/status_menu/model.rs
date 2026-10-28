@@ -155,9 +155,9 @@ impl Phase {
                 "Stopped",
                 Some("The server stays stopped until you start it.".to_owned()),
             ),
-            Self::NotRunning => ("Not Running", Some("Installed but not running.".to_owned())),
+            Self::NotRunning => ("Not running", Some("Installed but not running.".to_owned())),
             Self::NotInstalled => (
-                "Not Installed",
+                "Not installed",
                 Some(format!("Open {name} to set up the server.")),
             ),
             Self::Unavailable(ServerError::CleanupUnresolved) => (
@@ -180,9 +180,9 @@ impl Phase {
 /// The short state for a status read that failed, matching Settings > Servers.
 fn badge(error: ServerError) -> &'static str {
     match error {
-        ServerError::UnsafeStorage => "Unsafe Storage",
+        ServerError::UnsafeStorage => "Unsafe storage",
         ServerError::CleanupUnresolved => "Stop Unconfirmed",
-        ServerError::IncompatibleState => "Incompatible State",
+        ServerError::IncompatibleState => "Incompatible state",
         ServerError::RuntimeUnavailable => "Server Unavailable",
         ServerError::Unsupported => "Unsupported",
         _ => "Unavailable",

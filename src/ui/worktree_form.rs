@@ -9,10 +9,10 @@ use gpui::{
     accesskit, div, px,
 };
 use spaceterm_ui::{
-    ComboBox, ComboBoxItem, Dialog, DialogCloseDecision, DialogInitialFocus, DialogOutcome,
-    DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId, SegmentedControl,
-    SegmentedOption, TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
-    TextInputVariant,
+    ComboBox, ComboBoxCopy, ComboBoxItem, Dialog, DialogCloseDecision, DialogInitialFocus,
+    DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId,
+    SegmentedControl, SegmentedOption, TextInput, TextInputEscapeBehavior, TextInputEvent,
+    TextInputReturnBehavior, TextInputVariant,
 };
 
 use super::appearance::{ChromeAppearance, gpui_color};
@@ -621,7 +621,7 @@ impl WorktreeForm {
             Err(WorktreeCreateError::Server(_)) => (None,"SpaceTerm could not confirm whether the Worktree was created. Review the sidebar before trying again.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
-                "Git doesn\u{2019}t accept this name.".into(),
+                "Git doesn't accept this name.".into(),
             ),
             Err(WorktreeCreateError::BranchExists) => (
                 Some(FormField::Name),
@@ -958,7 +958,7 @@ impl WorktreeForm {
         let owner = cx.weak_entity();
         let error = self.visible_error(FormField::Branch, cx);
         let prompt = if self.branches.is_none() {
-            "Loading Branches\u{2026}"
+            "Loading Branches..."
         } else if items.is_empty() {
             "No Branches"
         } else {
@@ -973,6 +973,11 @@ impl WorktreeForm {
                 ComboBox::new("new-worktree-branch", label, selected, prompt, items)
                     .full_width(true)
                     .busy(self.branches.is_none())
+                    .copy(
+                        ComboBoxCopy::new("Filter branches", "Search")
+                            .busy_status("Loading Branches...")
+                            .empty_status("No Matching Branches"),
+                    )
                     .disabled(self.pending)
                     .debug_selector("new-worktree-branch")
                     .on_accept(move |acceptance, _, cx| {

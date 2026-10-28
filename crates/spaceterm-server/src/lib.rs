@@ -48,16 +48,16 @@ pub enum ServerError {
     #[error("The server changed. Review and confirm again.")]
     Changed,
     #[error(
-        "SpaceTerm couldn't confirm whether the server update finished. Check the update in Server Settings."
+        "SpaceTerm couldn\u{2019}t confirm whether the server update finished. Check the update in Server Settings."
     )]
     ActivationUnresolved,
-    #[error("SpaceTerm can't safely restore the previous server version.")]
+    #[error("SpaceTerm can\u{2019}t safely restore the previous server version.")]
     ReturnUnavailable,
-    #[error("Couldn't verify this server package.")]
+    #[error("Couldn\u{2019}t verify this server package.")]
     RuntimeUnavailable,
     /// This build includes no server package to verify. Distinct from a package that failed
     /// verification.
-    #[error("This SpaceTerm build doesn't include a server package.")]
+    #[error("This SpaceTerm build doesn\u{2019}t include a server package.")]
     CandidateMissing,
     #[error("Administrator authorization required.")]
     AuthorizationRequired,
@@ -65,11 +65,11 @@ pub enum ServerError {
     NotRunning,
     #[error("Server storage is unavailable.")]
     StorageUnavailable,
-    #[error("This server's saved state is from an incompatible SpaceTerm.")]
+    #[error("This server\u{2019}s saved state is from an incompatible SpaceTerm.")]
     IncompatibleState,
     #[error("Server storage has unsafe permissions.")]
     UnsafeStorage,
-    #[error("SpaceTerm couldn't verify the server or account for this connection.")]
+    #[error("SpaceTerm couldn\u{2019}t verify the server or account for this connection.")]
     AuthenticationRefused,
     #[error("SpaceTerm and this server are incompatible.")]
     IncompatibleProtocol,
@@ -89,11 +89,11 @@ pub enum ServerError {
     SessionUnavailable,
     #[error("This connection no longer controls the Terminal Session.")]
     StaleControl,
-    #[error("This operation isn't supported.")]
+    #[error("This operation isn\u{2019}t supported.")]
     Unsupported,
     #[error("Directory unavailable.")]
     DirectoryUnavailable,
-    #[error("Couldn't confirm the Terminal Sessions ended.")]
+    #[error("Couldn\u{2019}t confirm the Terminal Sessions ended.")]
     CleanupUnresolved,
     #[error("Waiting for other clients to reconnect.")]
     Capacity,

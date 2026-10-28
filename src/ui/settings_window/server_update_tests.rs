@@ -188,7 +188,7 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
     });
     harness.cx.run_until_parked();
     let presentation = harness.presentation();
-    assert_eq!(presentation.state, "Update Available");
+    assert_eq!(presentation.state, "Update available");
     assert!(
         presentation
             .explanation
@@ -221,7 +221,7 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
         [UpdateCall::PrepareUpdate, UpdateCall::Activate]
     );
     let presentation = harness.presentation();
-    assert_eq!(presentation.state, "Up to Date");
+    assert_eq!(presentation.state, "Up to date");
     assert!(presentation.actions.is_empty());
     // The replaced server is read afresh by the other rows.
     assert!(harness.server.refreshes() >= 2);
@@ -241,7 +241,7 @@ fn cancelling_the_confirmation_changes_nothing(cx: &mut TestAppContext) {
 
     assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
     let presentation = harness.presentation();
-    assert_eq!(presentation.state, "Update Available");
+    assert_eq!(presentation.state, "Update available");
     assert_eq!(presentation.actions, [UpdateAction::Update]);
 }
 
@@ -316,7 +316,7 @@ fn updating_a_stopped_server_keeps_it_stopped(cx: &mut TestAppContext) {
     click(UPDATE_SELECTOR, harness.cx);
     click_modal(UPDATE_CONFIRM_SELECTOR, harness.cx);
 
-    assert_eq!(harness.presentation().state, "Up to Date");
+    assert_eq!(harness.presentation().state, "Up to date");
     assert!(
         harness
             .presentation()
@@ -366,9 +366,9 @@ fn a_failed_update_offers_return_only_when_the_service_proves_it_safe(cx: &mut T
     click_modal(UPDATE_CONFIRM_SELECTOR, harness.cx);
 
     let presentation = harness.presentation();
-    assert_eq!(presentation.state, "Update Failed");
+    assert_eq!(presentation.state, "Update failed");
     assert!(
-        presentation.explanation.contains("didn't start"),
+        presentation.explanation.contains("didn\u{2019}t start"),
         "{}",
         presentation.explanation
     );
@@ -422,7 +422,7 @@ fn a_failed_update_offers_return_only_when_the_service_proves_it_safe(cx: &mut T
     assert!(
         unproven
             .explanation
-            .contains("SpaceTerm can't safely restore 1.4.0 (commit aaaaaaa).")
+            .contains("SpaceTerm can\u{2019}t safely restore 1.4.0 (commit aaaaaaa).")
     );
 }
 
@@ -438,7 +438,7 @@ fn an_unresolved_update_finishes_without_asking_again(cx: &mut TestAppContext) {
         cx,
     );
     let presentation = harness.presentation();
-    assert_eq!(presentation.state, "Update Unfinished");
+    assert_eq!(presentation.state, "Update unfinished");
     assert_eq!(presentation.actions, [UpdateAction::Finish]);
 
     click(FINISH_SELECTOR, harness.cx);
@@ -450,7 +450,7 @@ fn an_unresolved_update_finishes_without_asking_again(cx: &mut TestAppContext) {
         activation: Some(activation(ActivationPhase::Uncertain, false)),
         ..available()
     });
-    assert_eq!(uncertain.state, "Update Uncertain");
+    assert_eq!(uncertain.state, "Update uncertain");
     assert_eq!(uncertain.actions, [UpdateAction::Finish]);
 }
 
@@ -461,11 +461,11 @@ fn an_approved_or_unavailable_build_offers_no_update() {
         included.approved = true;
     }
     let presentation = presented(current);
-    assert_eq!(presentation.state, "Up to Date");
+    assert_eq!(presentation.state, "Up to date");
     assert!(presentation.actions.is_empty());
 
     for (error, state) in [
-        (CandidateError::Unavailable, "No Update"),
+        (CandidateError::Unavailable, "No update"),
         (CandidateError::ClientRestartRequired, "Restart SpaceTerm"),
     ] {
         let presentation = presented(UpdateFacts {
@@ -494,7 +494,7 @@ fn an_approved_or_unavailable_build_offers_no_update() {
         included.earlier = true;
     }
     let presentation = presented(earlier);
-    assert_eq!(presentation.state, "No Update");
+    assert_eq!(presentation.state, "No update");
     assert!(presentation.actions.is_empty());
     assert!(
         presentation.explanation.contains("an earlier release"),
@@ -508,7 +508,7 @@ fn an_approved_or_unavailable_build_offers_no_update() {
         )),
         ..available()
     });
-    assert_eq!(unverified.state, "Not Verified");
+    assert_eq!(unverified.state, "Not verified");
     assert_eq!(unverified.actions, [UpdateAction::Check]);
 
     let uninstalled = presented(UpdateFacts {
@@ -516,7 +516,7 @@ fn an_approved_or_unavailable_build_offers_no_update() {
         approved: None,
         ..available()
     });
-    assert_eq!(uninstalled.state, "Not Installed");
+    assert_eq!(uninstalled.state, "Not installed");
     assert!(uninstalled.actions.is_empty());
 }
 
@@ -677,7 +677,7 @@ fn confirmed_update_after_reopening(
 fn a_confirmed_update_finishes_after_settings_reopens(cx: &mut TestAppContext) {
     let (presentation, failure, calls) =
         confirmed_update_after_reopening(available(), Outcome::Ready, cx);
-    assert_eq!(presentation.state, "Up to Date");
+    assert_eq!(presentation.state, "Up to date");
     assert_eq!(failure, None);
     assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
 }
@@ -702,7 +702,7 @@ fn a_successful_update_does_not_keep_a_transient_followup_read_failure(cx: &mut 
         settings.check_server_update(cx);
     });
     harness.cx.run_until_parked();
-    assert_eq!(harness.presentation().state, "Up to Date");
+    assert_eq!(harness.presentation().state, "Up to date");
     assert_eq!(
         harness.window.read_with(harness.cx, |settings, _| {
             settings.server_update.as_ref().unwrap().state.failure
@@ -722,7 +722,7 @@ fn updating_a_stopped_server_after_settings_reopens_keeps_it_stopped(cx: &mut Te
     facts.status = Ok(stopped());
     let (presentation, failure, calls) =
         confirmed_update_after_reopening(facts, Outcome::Ready, cx);
-    assert_eq!(presentation.state, "Up to Date");
+    assert_eq!(presentation.state, "Up to date");
     assert!(presentation.explanation.contains("stopped"));
     assert_eq!(failure, None);
     assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
@@ -799,7 +799,7 @@ fn a_failed_update_names_its_builds_from_its_own_record(cx: &mut TestAppContext)
 
     let tree = A11yTree::read(harness.cx);
     assert!(
-        tree.find_text("Couldn't update to 1.5.0 \u{b7} Still on 1.4.0")
+        tree.find_text("Couldn\u{2019}t update to 1.5.0 \u{b7} Still on 1.4.0")
             .is_some(),
         "the subtitle names both builds"
     );
@@ -893,7 +893,7 @@ fn a_first_version_read_begun_before_a_status_item_uninstall_offers_no_stale_upd
     harness.cx.run_until_parked();
 
     let presentation = harness.presentation();
-    assert_eq!(presentation.state, "Not Installed");
+    assert_eq!(presentation.state, "Not installed");
     assert!(
         !presentation.actions.contains(&UpdateAction::Update),
         "a removed server offers no update"

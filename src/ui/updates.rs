@@ -676,13 +676,15 @@ impl ControlPresentation {
                     UpdateState::Failed { error } => Some(
                         match error {
                             UpdateError::ReadOnly => wording.overdue_read_only_update,
-                            UpdateError::Check => "Update overdue. Couldn't check for updates.",
+                            UpdateError::Check => {
+                                "Update overdue. Couldn\u{2019}t check for updates."
+                            }
                             UpdateError::Download => "Update overdue. Download failed. Try again.",
                             UpdateError::Installation => {
                                 "Update overdue. Install failed. Try again."
                             }
                             UpdateError::Verification => {
-                                "Update overdue. Couldn't verify the update."
+                                "Update overdue. Couldn\u{2019}t verify the update."
                             }
                             UpdateError::Unavailable => {
                                 "Update overdue. Use the installed release to update."

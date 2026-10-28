@@ -31,17 +31,13 @@ use super::terminal_pane::StatusIntent;
 pub(crate) const TAKEOVER_TITLE: &str = "Take Over to Continue";
 pub(crate) const TAKEOVER_DETAIL: &str = "Take Over to type and resize here.";
 pub(crate) const UNCONTROLLED_TITLE: &str = "No Client Controls This Pane";
-pub(crate) const UNCONTROLLED_DETAIL: &str = "Take Over to type and resize this Pane.";
-pub(crate) const EARLIER_ATTACHMENT_DETAIL: &str = "Take Over to type and resize this Pane.";
+/// The detail wherever this window may take over a Pane no other client holds.
+pub(crate) const TAKEOVER_THIS_PANE_DETAIL: &str = "Take Over to type and resize this Pane.";
 pub(crate) const TAKEOVER_FAILED_DETAIL: &str = "Take Over is available once SpaceTerm connects.";
 /// The Takeover Screen's detail once End All Sessions ended the Pane's shell. The control grant
 /// outlives the Session, so the title still names who controls the Pane.
 pub(crate) const TAKEOVER_ENDED_DETAIL: &str =
-    "End All Sessions ended this Pane's shell. Take Over, then choose Start Session.";
-pub(crate) const UNCONTROLLED_ENDED_DETAIL: &str =
-    "End All Sessions ended this Pane's shell. Take Over, then choose Start Session.";
-pub(crate) const EARLIER_ATTACHMENT_ENDED_DETAIL: &str =
-    "End All Sessions ended this Pane's shell. Take Over, then choose Start Session.";
+    "End All Sessions ended this Pane\u{2019}s shell. Take Over, then choose Start Session.";
 /// The Takeover Screen's title and detail while it offers Take Over, naming the Controlling Client
 /// the server reported. `None` means the server has not said, so the screen claims only what this
 /// window knows. `dormant` means End All Sessions ended the Pane's shell, so the detail never
@@ -63,11 +59,11 @@ pub(crate) fn takeover_copy(
             this_client: true, ..
         }) => (
             TAKEOVER_TITLE.into(),
-            detail(EARLIER_ATTACHMENT_DETAIL, EARLIER_ATTACHMENT_ENDED_DETAIL),
+            detail(TAKEOVER_THIS_PANE_DETAIL, TAKEOVER_ENDED_DETAIL),
         ),
         Some(Controller::Nobody) => (
             UNCONTROLLED_TITLE.into(),
-            detail(UNCONTROLLED_DETAIL, UNCONTROLLED_ENDED_DETAIL),
+            detail(TAKEOVER_THIS_PANE_DETAIL, TAKEOVER_ENDED_DETAIL),
         ),
         None => (
             TAKEOVER_TITLE.into(),
@@ -77,11 +73,12 @@ pub(crate) fn takeover_copy(
 }
 /// The notice a Pane of a server this client is not connected to shows. Only connecting the
 /// server's Saved Connection reaches the Pane again.
-pub(crate) const OFFLINE_TITLE: &str = "Not Connected";
+pub(crate) const OFFLINE_TITLE: &str = "Server Not Connected";
 pub(crate) const OFFLINE_DETAIL: &str = "Connect to this server in Settings to use this Pane.";
 pub(crate) const SESSION_ENDED_TITLE: &str = "Session Ended";
 pub(crate) const SESSION_ENDED_DETAIL: &str = "This Terminal Session is no longer available.";
 pub(crate) const TAKING_OVER: &str = "Taking Over…";
+pub(crate) const CLOSE_PANE: &str = "Close Pane";
 pub(crate) const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
 pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 /// End All Sessions ended this Pane's shell and cleared its output. The Pane, its Tab, and its
@@ -131,17 +128,20 @@ impl DormantCopy {
         }
     }
 }
-const START_DESCRIPTION: &str = "Start a new Terminal Session in this Pane's last directory.";
+const START_DESCRIPTION: &str =
+    "Start a new Terminal Session in this Pane\u{2019}s last directory.";
 pub(crate) const RESTORED_DETAIL: &str = "Programs in this Pane ended.";
 pub(crate) const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
 pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str =
-    "Restore access and choose Retry, or choose another directory.";
+    "Restore access and choose Try Again, or choose another directory.";
+pub(crate) const WORKTREE_MISSING_TITLE: &str = "Worktree Missing";
+pub(crate) const WORKTREE_MISSING_DETAIL: &str =
+    "Restore it with Git and choose Try Again, or choose another directory.";
 pub(crate) const STARTING_SHELL: &str = "Starting Session…";
-const RETRY_DIRECTORY: &str = "Retry";
+const RETRY_DIRECTORY: &str = "Try Again";
 const CHOOSE_DIRECTORY: &str = "Choose Directory…";
 const RETRY_DIRECTORY_DESCRIPTION: &str = "Try starting the shell in this directory again.";
-const CHOOSE_DIRECTORY_DESCRIPTION: &str =
-    "Choose a directory for this Pane only; keep its Workspace's Pinned Directory and Worktree.";
+const CHOOSE_DIRECTORY_DESCRIPTION: &str = "Choose a directory for this Pane only; keep its Workspace\u{2019}s Pinned Directory and Worktree.";
 const CHOOSE_DIRECTORY_UNSUPPORTED: &str =
     "Update this SpaceTerm Server to choose another directory.";
 pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
@@ -150,18 +150,16 @@ pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not con
 /// along with what it ends.
 pub(crate) const START_UNKNOWN_TITLE: &str = "Shell Start Not Confirmed";
 pub(crate) const START_UNKNOWN_DETAIL: &str = "Check whether the shell started.";
-/// What restarting ends, where this client can restart the server from Server Settings.
-pub(crate) const START_UNKNOWN_RESTART_HERE: &str =
+/// What restarting ends, wherever the server restarts: from Server Settings on this computer or
+/// on the server's own computer.
+pub(crate) const START_UNKNOWN_RESTART: &str =
     "Restarting the server ends every Terminal Session on it.";
-/// What restarting ends, where only the server's own computer can restart it.
-pub(crate) const START_UNKNOWN_RESTART_ELSEWHERE: &str =
-    "Restarting the server ends every Terminal Session on it.";
-const CHECK_START_DESCRIPTION: &str = "Check whether this Pane's shell started.";
+const CHECK_START_DESCRIPTION: &str = "Check whether this Pane\u{2019}s shell started.";
 const SERVER_SETTINGS: &str = "Server Settings\u{2026}";
 const SERVER_SETTINGS_DESCRIPTION: &str = "Open Server Settings.";
 pub(crate) const CHECKING_START: &str = "Checking\u{2026}";
 pub(crate) const START_STILL_UNKNOWN: &str =
-    "SpaceTerm still can't tell whether the shell started.";
+    "SpaceTerm still can\u{2019}t tell whether the shell started.";
 
 /// The notice title and cause of a connection SpaceTerm stopped retrying. Incompatibility names
 /// the refusal and never which side is older, because release numbers don't say.
@@ -179,7 +177,7 @@ fn failure_copy(error: ServerError) -> (&'static str, SharedString) {
             "Incompatible Server",
             SharedString::new_static("This server needs an update."),
         ),
-        error => ("Disconnected", SharedString::from(error.to_string())),
+        error => (OFFLINE_TITLE, SharedString::from(error.to_string())),
     }
 }
 
@@ -236,33 +234,25 @@ pub(crate) fn render_screen(
     selector: SharedString,
     copy: ScreenCopy,
     announce: bool,
-    action: Option<Button>,
+    actions: ScreenActions,
     status: Option<ScreenStatus>,
     announcements: &ScreenAnnouncements,
     cx: &App,
 ) -> Stateful<gpui::Div> {
-    render_screen_content(
-        selector,
-        copy,
-        announce,
-        action.into_iter().collect(),
-        status,
-        announcements,
-        cx,
-    )
+    render_screen_content(selector, copy, announce, actions, status, announcements, cx)
 }
 
 pub(crate) fn render_directory_screen(
     selector: SharedString,
     path: Option<SharedString>,
-    actions: Vec<Button>,
+    actions: ScreenActions,
     status: Option<ScreenStatus>,
     missing_worktree: bool,
     announcements: &ScreenAnnouncements,
     cx: &App,
 ) -> Stateful<gpui::Div> {
     let detail = if missing_worktree {
-        "Restore it with Git and choose Retry, or choose another directory."
+        WORKTREE_MISSING_DETAIL
     } else {
         DIRECTORY_UNAVAILABLE_DETAIL
     };
@@ -270,12 +260,13 @@ pub(crate) fn render_directory_screen(
         selector,
         ScreenCopy {
             title: if missing_worktree {
-                "Worktree Missing".into()
+                WORKTREE_MISSING_TITLE.into()
             } else {
                 DIRECTORY_UNAVAILABLE_TITLE.into()
             },
             detail: detail.into(),
             path,
+            intent: StatusIntent::Warning,
         },
         true,
         actions,
@@ -284,10 +275,15 @@ pub(crate) fn render_directory_screen(
         cx,
     )
 }
+
+/// The title, detail, and intent of a screen, and the path it is about, if any. The intent
+/// picks the icon the interruption notice uses for it, and colors it only when the person must
+/// act.
 pub(crate) struct ScreenCopy {
     title: SharedString,
     detail: SharedString,
     path: Option<SharedString>,
+    intent: StatusIntent,
 }
 impl ScreenCopy {
     pub(crate) fn new(title: SharedString, detail: SharedString) -> Self {
@@ -295,14 +291,27 @@ impl ScreenCopy {
             title,
             detail,
             path: None,
+            intent: StatusIntent::Information,
         }
     }
+
+    pub(crate) fn intent(mut self, intent: StatusIntent) -> Self {
+        self.intent = intent;
+        self
+    }
 }
+
+/// A screen's Primary action and the action it offers as a link, in that reading and Tab order.
+pub(crate) struct ScreenActions {
+    pub(crate) primary: Option<Button>,
+    pub(crate) link: Option<Button>,
+}
+
 fn render_screen_content(
     selector: SharedString,
     copy: ScreenCopy,
     announce: bool,
-    actions: Vec<Button>,
+    actions: ScreenActions,
     status: Option<ScreenStatus>,
     announcements: &ScreenAnnouncements,
     cx: &App,
@@ -311,6 +320,7 @@ fn render_screen_content(
         title,
         detail,
         path,
+        intent,
     } = copy;
     let appearance = super::appearance::shared_chrome(cx);
     // The configured terminal background, never one the shell chose.
@@ -328,13 +338,71 @@ fn render_screen_content(
         .as_ref()
         .map_or_else(SharedString::default, |status| status.note.clone());
     let element_selector = selector.clone();
+    let differentiate = appearance.capabilities.differentiate_without_color;
+    let mut state = super::empty_state::empty_state(title.clone(), cx)
+        .icon(intent.glyph(differentiate))
+        .tone(match intent {
+            StatusIntent::Warning => spaceterm_ui::EmptyStateTone::Warning,
+            StatusIntent::Error => spaceterm_ui::EmptyStateTone::Error,
+            StatusIntent::Information | StatusIntent::Success => {
+                spaceterm_ui::EmptyStateTone::Quiet
+            }
+        })
+        .detail_element(
+            div()
+                .id(detail_id)
+                .role(gpui::accesskit::Role::Group)
+                .a11y_synthetic_children(move |builder| {
+                    let mut node = entry.node(&message, announce);
+                    if let Some(bounds) = builder.parent_node().bounds() {
+                        node.set_bounds(bounds);
+                    }
+                    builder.push_child(builder.synthetic_node_id("entry"), node);
+                })
+                .child(detail),
+        )
+        // The slot keeps at least one line's height, so the actions stay put while their status
+        // changes, and a status too long for a narrow Pane wraps below them.
+        .footer(
+            div()
+                .id(slot_id)
+                .role(gpui::accesskit::Role::Group)
+                .a11y_synthetic_children(move |builder| {
+                    let mut node = outcome.node(&note, true);
+                    if let Some(bounds) = builder.parent_node().bounds() {
+                        node.set_bounds(bounds);
+                    }
+                    builder.push_child(builder.synthetic_node_id("outcome"), node);
+                })
+                .mt(appearance.spacing(12.0))
+                .min_h(appearance.spacing(20.0))
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .children(status.map(|status| status.content)),
+        );
+    if let Some(path) = path {
+        state = state.supplement(
+            div()
+                .chrome_text(appearance.typography.style(TextRole::Body))
+                .text_color(gpui_color(appearance.colors.text))
+                .child(path),
+        );
+    }
+    if let Some(primary) = actions.primary {
+        state = state.primary(primary);
+    }
+    if let Some(link) = actions.link {
+        state = state.link(link);
+    }
     // The screen scrolls, and its content centers only while it fits. A Pane too short for it
     // shows the title first instead of clipping it under the Pane Caption, and a notice placed
     // after the content never covers the actions.
     div()
         .id(selector)
         .role(gpui::accesskit::Role::Group)
-        .aria_label(title.clone())
+        .aria_label(title)
         .debug_selector(move || element_selector.to_string())
         .absolute()
         .inset_0()
@@ -348,77 +416,9 @@ fn render_screen_content(
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(appearance.spacing(12.0))
                 .px(appearance.spacing(24.0))
                 .py(appearance.spacing(12.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(appearance.spacing(4.0))
-                        .max_w(appearance.spacing(360.0))
-                        .text_center()
-                        // Every line wraps, so a narrow Pane keeps the whole screen readable.
-                        .child(
-                            div()
-                                .whitespace_normal()
-                                .chrome_text(appearance.typography.style(TextRole::Section))
-                                .text_color(gpui_color(appearance.colors.text))
-                                .child(title),
-                        )
-                        .children(path.map(|path| {
-                            div()
-                                .whitespace_normal()
-                                .chrome_text(appearance.typography.style(TextRole::Body))
-                                .text_color(gpui_color(appearance.colors.text))
-                                .child(path)
-                        }))
-                        .child(
-                            div()
-                                .id(detail_id)
-                                .role(gpui::accesskit::Role::Group)
-                                .a11y_synthetic_children(move |builder| {
-                                    let mut node = entry.node(&message, announce);
-                                    if let Some(bounds) = builder.parent_node().bounds() {
-                                        node.set_bounds(bounds);
-                                    }
-                                    builder.push_child(builder.synthetic_node_id("entry"), node);
-                                })
-                                .whitespace_normal()
-                                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                                .text_color(gpui_color(appearance.colors.text_secondary))
-                                .child(detail),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .justify_center()
-                        .gap(appearance.spacing(8.0))
-                        .children(actions),
-                )
-                // The slot keeps at least one line's height, so the action stays put while its
-                // status changes, and a status too long for a narrow Pane wraps below it.
-                .child(
-                    div()
-                        .id(slot_id)
-                        .role(gpui::accesskit::Role::Group)
-                        .a11y_synthetic_children(move |builder| {
-                            let mut node = outcome.node(&note, true);
-                            if let Some(bounds) = builder.parent_node().bounds() {
-                                node.set_bounds(bounds);
-                            }
-                            builder.push_child(builder.synthetic_node_id("outcome"), node);
-                        })
-                        .min_h(appearance.spacing(20.0))
-                        .max_w(appearance.spacing(360.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .children(status.map(|status| status.content)),
-                ),
+                .child(state),
         )
 }
 
@@ -491,13 +491,13 @@ pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App)
     }
 }
 
-/// The Retry and Choose Directory pair the directory screen offers.
+/// The Try Again and Choose Directory pair the directory screen offers.
 ///
 /// The caller owns the element ids, what it knows about availability, and what each action does.
 /// The copy and the enablement policy belong here, so the screen always explains itself the same
 /// way.
 pub(crate) struct DirectoryActions<Retry, Choose> {
-    /// Element id and debug selector for Retry.
+    /// Element id and debug selector for Try Again.
     pub(crate) retry: SharedString,
     /// Element id and debug selector for Choose Directory.
     pub(crate) choose: SharedString,
@@ -538,8 +538,8 @@ where
     Retry: Fn(&mut gpui::Window, &mut App) + 'static,
     Choose: Fn(&mut gpui::Window, &mut App) + 'static,
 {
-    /// Retry first, then the primary Choose Directory, in reading and Tab order.
-    pub(crate) fn buttons(self) -> Vec<Button> {
+    /// The Primary Choose Directory, then Try Again as a link, in reading and Tab order.
+    pub(crate) fn buttons(self) -> ScreenActions {
         let Self {
             retry,
             choose,
@@ -548,25 +548,25 @@ where
             on_retry,
             on_choose,
         } = self;
-        vec![
-            Button::new(retry.clone(), RETRY_DIRECTORY)
-                .variant(ButtonVariant::Secondary)
-                .size(ButtonSize::Regular)
-                .disabled(!enabled)
-                .tab_stop(true)
-                .accessibility_description(RETRY_DIRECTORY_DESCRIPTION)
-                .debug_selector(retry)
-                .on_activate(move |_, window, cx| on_retry(window, cx)),
-            Button::new(choose.clone(), CHOOSE_DIRECTORY)
-                .variant(ButtonVariant::Primary)
-                .size(ButtonSize::Regular)
-                .disabled(!enabled || !offer.offered())
-                .tab_stop(true)
-                // A disabled primary still says why, so nothing is refused silently.
-                .accessibility_description(offer.description())
-                .debug_selector(choose)
-                .on_activate(move |_, window, cx| on_choose(window, cx)),
-        ]
+        ScreenActions {
+            primary: Some(
+                Button::new(choose.clone(), CHOOSE_DIRECTORY)
+                    .disabled(!enabled || !offer.offered())
+                    .tab_stop(true)
+                    // A disabled primary still says why, so nothing is refused silently.
+                    .accessibility_description(offer.description())
+                    .debug_selector(choose)
+                    .on_activate(move |_, window, cx| on_choose(window, cx)),
+            ),
+            link: Some(
+                Button::new(retry.clone(), RETRY_DIRECTORY)
+                    .disabled(!enabled)
+                    .tab_stop(true)
+                    .accessibility_description(RETRY_DIRECTORY_DESCRIPTION)
+                    .debug_selector(retry)
+                    .on_activate(move |_, window, cx| on_retry(window, cx)),
+            ),
+        }
     }
 }
 
@@ -589,7 +589,7 @@ pub(crate) fn directory_status(
     note.map(|note| note_status(selector, note.into(), cx))
 }
 
-/// The screen of a Pane whose start may have run. Retry checks, and never starts a shell. Server
+/// The screen of a Pane whose start may have run. Check Shell checks, and never starts a shell. Server
 /// Settings opens the existing Restart Server journey, which asks before it ends anything.
 ///
 /// The caller owns the element ids, what each action does, and whether this client can restart
@@ -642,40 +642,32 @@ where
         } else {
             None
         };
-        let restart = if server_settings.is_some() {
-            START_UNKNOWN_RESTART_HERE
-        } else {
-            START_UNKNOWN_RESTART_ELSEWHERE
-        };
-        // The secondary action first and the primary last, as the directory screen orders them.
-        let mut actions = Vec::with_capacity(2);
-        if let Some(selector) = server_settings {
-            actions.push(
+        // The Primary check first, then Server Settings as a link, as the directory screen
+        // orders its pair.
+        let actions = ScreenActions {
+            primary: Some(
+                Button::new(retry.clone(), "Check Shell")
+                    .disabled(checking)
+                    .tab_stop(true)
+                    .accessibility_description(CHECK_START_DESCRIPTION)
+                    .debug_selector(retry)
+                    .on_activate(move |_, window, cx| on_retry(window, cx)),
+            ),
+            link: server_settings.map(|selector| {
                 Button::new(selector.clone(), SERVER_SETTINGS)
-                    .variant(ButtonVariant::Secondary)
-                    .size(ButtonSize::Regular)
                     .tab_stop(true)
                     .accessibility_description(SERVER_SETTINGS_DESCRIPTION)
                     .debug_selector(selector)
-                    .on_activate(move |_, window, cx| on_server_settings(window, cx)),
-            );
-        }
-        actions.push(
-            Button::new(retry.clone(), "Check Shell")
-                .variant(ButtonVariant::Primary)
-                .size(ButtonSize::Regular)
-                .disabled(checking)
-                .tab_stop(true)
-                .accessibility_description(CHECK_START_DESCRIPTION)
-                .debug_selector(retry)
-                .on_activate(move |_, window, cx| on_retry(window, cx)),
-        );
+                    .on_activate(move |_, window, cx| on_server_settings(window, cx))
+            }),
+        };
         render_screen_content(
             screen,
             ScreenCopy::new(
                 START_UNKNOWN_TITLE.into(),
-                format!("{START_UNKNOWN_DETAIL} {restart}").into(),
-            ),
+                format!("{START_UNKNOWN_DETAIL} {START_UNKNOWN_RESTART}").into(),
+            )
+            .intent(StatusIntent::Warning),
             true,
             actions,
             status,
@@ -780,13 +772,13 @@ pub(crate) fn start_server_button(
         .on_activate(move |_, window, cx| on_activate(window, cx))
 }
 
-/// The standard Retry action of an interruption notice.
+/// The standard Try Again action of an interruption notice.
 pub(crate) fn retry_button(
     selector: SharedString,
     on_activate: impl Fn(&mut gpui::Window, &mut App) + 'static,
 ) -> Button {
     let debug_selector = selector.clone();
-    Button::new(selector, "Retry")
+    Button::new(selector, "Try Again")
         .variant(ButtonVariant::Link)
         .size(ButtonSize::Compact)
         .tab_stop(true)
@@ -1385,13 +1377,13 @@ mod connection {
         /// What becomes of the Pane once SpaceTerm connects, after it stopped reconnecting.
         fn after_reconnecting(&self) -> &'static str {
             if self.takeover_shown {
-                "Choose Retry to reconnect, then Take Over to use this Pane."
+                "Choose Try Again to reconnect, then Take Over to use this Pane."
             } else if matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended)) {
-                "Choose Retry to reconnect, then Start Session to open a shell."
+                "Choose Try Again to reconnect, then Start Session to open a shell."
             } else if self.dormant.is_some() {
-                "No shell is running in this Pane. Choose Retry to reconnect."
+                "No shell is running in this Pane. Choose Try Again to reconnect."
             } else {
-                "Choose Retry to reconnect."
+                "Choose Try Again to reconnect."
             }
         }
 
