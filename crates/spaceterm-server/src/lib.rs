@@ -41,6 +41,11 @@ pub enum ServerError {
     NotSetUp,
     #[error("Server service unavailable. Sign in and try again.")]
     ServiceUnavailable,
+    /// Another service operation, such as Update, Restart, Stop or Start, holds the service.
+    /// Launch reports this while it runs. Launch and admission also report it when the
+    /// operation outlasts their wait.
+    #[error("Another server operation is running. Try again when it finishes.")]
+    ServiceBusy,
     #[error("Install the server service first.")]
     NotInstalled,
     #[error("The local server was stopped. Use Start Server to start it again.")]

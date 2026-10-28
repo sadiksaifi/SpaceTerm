@@ -10,7 +10,11 @@ mod registration;
 mod runtime;
 pub use runtime::{CandidateMetadata, verify_candidate_bytes};
 
-use crate::{ServerError, host::Paths, storage::Directory};
+use crate::{
+    ServerError,
+    host::Paths,
+    storage::{Directory, LockWait},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::CString,
@@ -368,18 +372,16 @@ impl Service {
             return Ok(None);
         }
         let data = Directory::open(&self.paths.data, true)?;
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let _operation = loop {
-            if cancelled() {
-                return Ok(None);
-            }
-            if let Some(lock) = data.try_lock("service.lock")? {
-                break lock;
-            }
-            if Instant::now() >= deadline {
-                return Err(ServerError::ServiceUnavailable);
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        if cancelled() {
+            return Ok(None);
+        }
+        // Reads and a concurrent launch's start usually finish within the grace. A longer
+        // operation of any kind, such as Update, Restart, Stop or Start, is presented by the
+        // client while it waits through wait_for_operation.
+        let _operation = match data.wait_lock("service.lock", OPERATION_GRACE, Some(&cancelled))? {
+            LockWait::Locked(lock) => lock,
+            LockWait::Held => return Err(ServerError::ServiceBusy),
+            LockWait::Cancelled => return Ok(None),
         };
         data.verify_path(&self.paths.data)?;
         self.resume_activation(&data)?;
@@ -418,6 +420,19 @@ impl Service {
         }
         // Registration/start is now admitted. Observe its result even if cancellation arrives.
         self.install_locked(&data, &installation).map(Some)
+    }
+    /// Wait for the service operation that launch reported as ServiceBusy, at most
+    /// OPERATION_LIMIT. Run launch again afterwards: the operation may have stopped the server.
+    #[cfg(feature = "client")]
+    pub(crate) fn wait_for_operation(
+        &self,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(), ServerError> {
+        let data = Directory::open(&self.paths.data, true)?;
+        match data.wait_lock("service.lock", OPERATION_LIMIT, Some(&cancelled))? {
+            LockWait::Locked(_) | LockWait::Cancelled => Ok(()),
+            LockWait::Held => Err(ServerError::ServiceBusy),
+        }
     }
     /// Explicit Start is the only operation that clears retained Stop intent.
     pub fn start(&self) -> Result<ServiceStatus, ServerError> {
@@ -801,24 +816,36 @@ pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     Ok(())
 }
 
-/// A refusal observed during Restart is provisional until its service operation completes.
+/// How long launch waits for another service operation before it reports ServiceBusy, and
+/// how long a caller that must answer quickly waits at admission. Reads usually finish
+/// within it.
+pub(crate) const OPERATION_GRACE: Duration = Duration::from_secs(1);
+
+/// How long a launch or admission waits for a service operation that holds service.lock.
+/// The longest legitimate hold is a Restart or Update: Linux's 90 s stop, then up to 15 s for
+/// cleanup and 15 s for startup. Only a stuck operation outlasts this limit, and the wait then
+/// reports ServiceBusy instead of waiting forever.
+#[cfg(feature = "client")]
+pub(crate) const OPERATION_LIMIT: Duration = Duration::from_secs(180);
+
+/// A refusal observed during Restart or Update is provisional until its service operation
+/// completes, so admission waits for it, at most `limit`. `cancelled` ends the wait early with
+/// ServiceBusy; without it the wait blocks until the operation ends or the limit passes.
 /// Runtime startup uses check_start directly: waiting here from the service itself would
 /// deadlock the controller that is waiting for its endpoint to become ready.
-pub(crate) fn check_admission(paths: &Paths) -> Result<(), ServerError> {
+pub(crate) fn check_admission(
+    paths: &Paths,
+    limit: Duration,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<(), ServerError> {
     match check_start(paths) {
-        Err(ServerError::Stopped) => {}
+        Err(ServerError::Stopped | ServerError::ActivationUnresolved) => {}
         result => return result,
     }
     let data = Directory::open(&paths.data, false)?;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let _operation = loop {
-        if let Some(lock) = data.try_lock("service.lock")? {
-            break lock;
-        }
-        if Instant::now() >= deadline {
-            return Err(ServerError::ServiceUnavailable);
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    let _operation = match data.wait_lock("service.lock", limit, cancelled)? {
+        LockWait::Locked(lock) => lock,
+        LockWait::Held | LockWait::Cancelled => return Err(ServerError::ServiceBusy),
     };
     data.verify_path(&paths.data)?;
     check_start(paths)
@@ -1839,6 +1866,19 @@ mod tests {
                 _ => panic!("launch did not connect"),
             }
         }
+        /// Launch as the desktop does: wait out a service operation that launch reports, then
+        /// launch again.
+        fn launch_settled(
+            startup: &LocalStartup,
+            mut provision: impl FnMut() -> Result<PathBuf, ServerError>,
+        ) -> StartupOutcome {
+            loop {
+                match startup.run(&mut provision, || false).unwrap() {
+                    StartupOutcome::ServiceBusy => startup.wait_for_service(|| false).unwrap(),
+                    outcome => return outcome,
+                }
+            }
+        }
         fn fresh(fixture: &Fixture) {
             std::fs::remove_file(fixture.paths.data.join("service.json")).unwrap();
         }
@@ -2351,12 +2391,22 @@ mod tests {
             let (entered, waiting) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
                 let sent = AtomicBool::new(false);
-                startup.run(no_provision, || {
+                let observed = || {
                     if !sent.swap(true, Ordering::Relaxed) {
                         entered.send(()).unwrap();
                     }
                     false
-                })
+                };
+                // A launch that outlasts its grace waits for the operation and runs again, as
+                // the desktop does, so the answer never depends on when the lock is released.
+                loop {
+                    match startup.run(no_provision, observed) {
+                        Ok(StartupOutcome::ServiceBusy) => {
+                            startup.wait_for_service(|| false).unwrap()
+                        }
+                        outcome => break outcome,
+                    }
+                }
             });
             waiting.recv_timeout(Duration::from_secs(5)).unwrap();
             retain_stop(&fixture.paths).unwrap();
@@ -2366,6 +2416,60 @@ mod tests {
                 Ok(StartupOutcome::Stopped)
             ));
             assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+        }
+
+        /// A service operation that outlasts the launch grace, as a slow Linux stop during
+        /// Restart or Update does, is reported, then waited for. Launch opens once it ends.
+        #[test]
+        fn launch_reports_a_long_service_operation_then_opens_once_it_ends() {
+            let fixture = Fixture::new();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            *supervisor.registered.lock().unwrap() = Some(
+                fixture
+                    .paths
+                    .data
+                    .join("installations")
+                    .join("a".repeat(64)),
+            );
+            supervisor.spawn_host(Duration::ZERO);
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            let operation = data.lock("service.lock", false).unwrap();
+            let startup = LocalStartup::with_service(supervisor.service()).unwrap();
+            assert!(matches!(
+                startup.run(no_provision, || false),
+                Ok(StartupOutcome::ServiceBusy)
+            ));
+            let held = Duration::from_millis(500);
+            let operation = std::thread::spawn(move || {
+                std::thread::sleep(held);
+                let released = Instant::now();
+                drop(operation);
+                released
+            });
+            startup.wait_for_service(|| false).unwrap();
+            let woke = Instant::now();
+            let released = operation.join().unwrap();
+            assert!(
+                woke.saturating_duration_since(released) < Duration::from_secs(1),
+                "the wait ends when the operation does"
+            );
+            ready(startup.run(no_provision, || false).unwrap());
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn waiting_for_a_service_operation_can_cancel_while_its_lock_is_held() {
+            let fixture = Fixture::new();
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            let _operation = data.lock("service.lock", false).unwrap();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let checks = AtomicUsize::new(0);
+            assert_eq!(
+                LocalStartup::with_service(supervisor.service())
+                    .unwrap()
+                    .wait_for_service(|| checks.fetch_add(1, Ordering::Relaxed) >= 3),
+                Ok(())
+            );
         }
 
         #[test]
@@ -2408,18 +2512,13 @@ mod tests {
                             &service.identity,
                             |archive, signature| {
                                 barrier.wait();
-                                ready(
-                                    LocalStartup::with_service(service.clone())
-                                        .unwrap()
-                                        .run(
-                                            || {
-                                                provisions.fetch_add(1, Ordering::Relaxed);
-                                                provision(service, archive, signature)
-                                            },
-                                            || false,
-                                        )
-                                        .unwrap(),
-                                );
+                                ready(launch_settled(
+                                    &LocalStartup::with_service(service.clone()).unwrap(),
+                                    || {
+                                        provisions.fetch_add(1, Ordering::Relaxed);
+                                        provision(service, archive, signature)
+                                    },
+                                ));
                             },
                         );
                     });
