@@ -856,7 +856,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
 
 #[test]
 fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_restart() {
-    use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome, State};
+    use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome, State, WorktreeMembership};
     use spaceterm_server::worktree::Operation;
     let git = GitFixture::new();
     let outside = GitFixture::new();
@@ -885,7 +885,7 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
         .iter()
         .find(|tab| tab.id == opened)
         .unwrap();
-    assert!(tab.worktree_membership_fixed);
+    assert_eq!(tab.worktree_membership, WorktreeMembership::Opened);
     assert_eq!(tab.worktree.as_ref(), Some(&git.0));
     let target = CloseTarget::Tab {
         workspace,
@@ -910,7 +910,7 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     assert!(promoted.workspaces[0].pinned_directory.is_none());
     assert_eq!(promoted.workspaces[0].root_tab, opened);
     let tab = &promoted.workspaces[0].tabs[0];
-    assert!(!tab.worktree_membership_fixed);
+    assert_eq!(tab.worktree_membership, WorktreeMembership::Following);
     assert_eq!(tab.worktree.as_ref(), Some(&git.0));
     let Reply::Attached { lease } = host.request(
         [1; 32],
@@ -959,7 +959,10 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     assert_eq!(current.tabs.len(), 1);
     assert_eq!(current.tabs[0].worktree, None);
     assert_eq!(current.tabs[0].worktree_repository, None);
-    assert!(!current.tabs[0].worktree_membership_fixed);
+    assert_eq!(
+        current.tabs[0].worktree_membership,
+        WorktreeMembership::Following
+    );
     let saved = current.clone();
     let mut state = State::empty();
     state.inventory = left;
@@ -984,7 +987,10 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     assert_eq!(current.tabs[0].id, saved.tabs[0].id);
     assert_eq!(current.tabs[0].worktree, None);
     assert_eq!(current.tabs[0].worktree_repository, None);
-    assert!(!current.tabs[0].worktree_membership_fixed);
+    assert_eq!(
+        current.tabs[0].worktree_membership,
+        WorktreeMembership::Following
+    );
     assert!(
         reads
             .snapshot()
@@ -993,6 +999,117 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
             .all(|facts| facts.directory != git.0)
     );
     reads.shutdown();
+}
+
+#[test]
+fn a_repaired_tab_promoted_to_root_tab_keeps_its_missing_worktree() {
+    use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome, WorktreeMembership};
+    use spaceterm_server::worktree::Operation;
+    let git = GitFixture::new();
+    let tree = git.0.join("repair-linked");
+    git.git(&["worktree", "add", "-b", "repair", tree.to_str().unwrap()]);
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    let workspace = create_shared(&mut host, 1);
+    let first = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let root_id = first.workspaces[0].root_tab;
+    let Outcome::Accepted { target: opened } = finish_write(
+        &mut host,
+        2,
+        Operation::OpenTab {
+            workspace,
+            root: git.0.clone(),
+            path: tree.clone(),
+            source: None,
+        },
+    ) else {
+        panic!("open a Tab in the linked Worktree")
+    };
+    let pane = shared_inventory(&mut host).workspaces[0]
+        .tabs
+        .iter()
+        .find(|tab| tab.id == opened)
+        .unwrap()
+        .root_pane;
+    std::fs::remove_dir_all(&tree).unwrap();
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None
+            }
+        ),
+        Reply::Refused(Refusal::DirectoryUnavailable)
+    ));
+    let Reply::Restored {
+        recovery: Some(target),
+        ..
+    } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane,
+            explicit: false,
+            size: size(),
+            style: None,
+        },
+    )
+    else {
+        panic!("dormant recovery target")
+    };
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::RepairDirectory {
+                target,
+                replacement: Some(git.0.clone()),
+                size: size(),
+                style: None
+            }
+        ),
+        Reply::Attached { .. }
+    ));
+    let before = shared_inventory(&mut host);
+    let target = CloseTarget::Tab {
+        workspace,
+        tab: root_id,
+    };
+    let confirmation = before.close_confirmation(target).unwrap();
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 3,
+                mutation: Mutation::Close {
+                    target,
+                    confirmation,
+                },
+            }
+        ),
+        Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })
+    ));
+    // Reads of the replacement directory, in the Main Worktree, must not move the Tab there.
+    let after = git_facts(&mut host, &git.0, |facts| {
+        facts.failure.is_none() && facts.worktrees.is_some()
+    });
+    let current = &after.workspaces[0];
+    assert!(current.pinned_directory.is_none());
+    assert_eq!(current.root_tab, opened);
+    assert_eq!(current.tabs.len(), 1);
+    let tab = &current.tabs[0];
+    assert_eq!(tab.panes[0].confirmed_directory.as_ref(), Some(&git.0));
+    assert_eq!(tab.worktree.as_ref(), Some(&tree));
+    assert_eq!(tab.worktree_repository.as_ref(), Some(&git.0));
+    assert_eq!(tab.worktree_membership, WorktreeMembership::Repaired);
+    assert!(!tree.exists());
+    host.shutdown().unwrap();
 }
 
 #[test]
@@ -1054,7 +1171,8 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     let after = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     let mut expected = original.clone();
     expected.tabs[0].panes[0].confirmed_directory = Some(git.0.clone());
-    expected.tabs[0].worktree_membership_fixed = true;
+    expected.tabs[0].worktree_membership =
+        spaceterm_server::hierarchy::WorktreeMembership::Repaired;
     let mut organization = after.workspaces[0].clone();
     // Live terminal presentation is independent of the repaired saved organization.
     organization.tabs[0].panes[0].presentation = None;

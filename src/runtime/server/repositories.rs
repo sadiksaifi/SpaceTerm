@@ -15,7 +15,7 @@ use crate::{
 };
 use spaceterm_server::{
     connection::Wake,
-    hierarchy::{Id, State},
+    hierarchy::{Id, State, WorktreeMembership},
     repository::*,
 };
 use std::{
@@ -402,7 +402,8 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
             let follows = follows_root && tab.id == workspace.root_tab;
             // Outside is authoritative only after a successful read. Pending reads and
             // unavailable directories preserve the saved membership for recovery. Leaving the
-            // repository also ends fixed membership, so the Root Tab follows its next repository.
+            // repository also ends Opened and Repaired membership, so the Root Tab follows its
+            // next repository.
             if follows
                 && tab
                     .panes
@@ -418,12 +419,15 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
             {
                 changed |= tab.worktree.take().is_some();
                 changed |= tab.worktree_repository.take().is_some();
-                changed |= std::mem::take(&mut tab.worktree_membership_fixed);
+                changed |=
+                    std::mem::take(&mut tab.worktree_membership) != WorktreeMembership::Following;
                 continue;
             }
             // Membership belongs to the saved Tab, not its focused Pane or a later cd in any
             // non-Root Tab. Only the unpinned Root Tab follows the Workspace's directory.
-            if tab.worktree_membership_fixed || (tab.worktree.is_some() && !follows) {
+            if tab.worktree_membership != WorktreeMembership::Following
+                || (tab.worktree.is_some() && !follows)
+            {
                 // Older Development records gain a locator without changing saved membership.
                 if let Some(main) = snapshot.directories.iter().find_map(|facts| {
                     let list = facts

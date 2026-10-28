@@ -272,7 +272,7 @@ fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repositor
         let tab = &mut workspace.tabs[0];
         tab.worktree = Some(git.0.clone());
         tab.worktree_repository = Some(git.0.clone());
-        tab.worktree_membership_fixed = true;
+        tab.worktree_membership = spaceterm_server::hierarchy::WorktreeMembership::Repaired;
     }
     let until = Instant::now() + Duration::from_secs(4);
     while reading.poll().directories.len() < 2 {
@@ -291,11 +291,17 @@ fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repositor
         if tab.panes[0].repository_directory() == outside.0 {
             assert_eq!(tab.worktree, None);
             assert_eq!(tab.worktree_repository, None);
-            assert!(!tab.worktree_membership_fixed);
+            assert_eq!(
+                tab.worktree_membership,
+                spaceterm_server::hierarchy::WorktreeMembership::Following
+            );
         } else {
             assert_eq!(tab.worktree.as_ref(), Some(&git.0));
             assert_eq!(tab.worktree_repository.as_ref(), Some(&git.0));
-            assert!(tab.worktree_membership_fixed);
+            assert_eq!(
+                tab.worktree_membership,
+                spaceterm_server::hierarchy::WorktreeMembership::Repaired
+            );
         }
     }
 }
