@@ -45,8 +45,45 @@ fn end_all(host: &mut SharedWorkspaceHost, device: u8, sequence: u64) {
     );
 }
 
+/// Chooses Start Session, the only request that starts a shell in an ended Pane.
+fn start_ended(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Reply {
+    let server = host.prototype.boot;
+    host.request(
+        [device; 32],
+        [device; 32],
+        Request::StartRestored {
+            server,
+            pane,
+            size: size(),
+            style: None,
+        },
+    )
+}
+
+/// Starts the Pane's shell: by first use, or by Start Session once its Session ended.
 fn start(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Lease {
-    match select(host, device, pane, true) {
+    let reply = match select(host, device, pane, true) {
+        Reply::Restored {
+            session_ended: Some(_),
+            ..
+        } => start_ended(host, device, pane),
+        // Another client's grant, or none, holds the ended Pane. Its Start Session takes over.
+        Reply::Takeover {
+            session_ended: Some(_),
+            target,
+            ..
+        } => host.request(
+            [device; 32],
+            [device; 32],
+            Request::TakeOver {
+                target,
+                size: size(),
+                style: None,
+            },
+        ),
+        reply => reply,
+    };
+    match reply {
         Reply::Attached { lease } => lease,
         other => panic!("explicit startup unavailable: {other:?}"),
     }
@@ -231,7 +268,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
     end_all(&mut host, 1, 1);
     std::fs::remove_dir(&restoration).unwrap();
     assert!(matches!(
-        select(&mut host, 1, pane, true),
+        start_ended(&mut host, 1, pane),
         Reply::Refused(Refusal::DirectoryUnavailable)
     ));
     let Reply::Restored {
@@ -707,7 +744,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
     end_all(&mut host, 1, 2);
     std::fs::remove_dir(&root).unwrap();
     assert!(matches!(
-        select(&mut host, 2, pane, true),
+        start_ended(&mut host, 2, pane),
         Reply::Refused(Refusal::DirectoryUnavailable)
     ));
     let Reply::Restored {

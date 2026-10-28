@@ -300,7 +300,9 @@ impl ClaimWorker<'_> {
                 // when creation or repair already supplies that authorization.
                 let created = std::mem::take(&mut created_start);
                 let start_restored = state.start_restored.swap(false, Ordering::AcqRel);
-                let selected = state.selected.swap(false, Ordering::AcqRel);
+                // Selection never starts a Session that ended in this server run.
+                let selected =
+                    state.selected.swap(false, Ordering::AcqRel) && session_ended.is_none();
                 if created || repair.is_some() || start_restored || selected {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -410,7 +412,8 @@ impl ClaimWorker<'_> {
                     grant_appearance = None;
                     reply = exchange(&Request::SelectPane {
                         pane: pane_id,
-                        explicit: state.selected.swap(false, Ordering::AcqRel),
+                        explicit: state.selected.swap(false, Ordering::AcqRel)
+                            && session_ended.is_none(),
                         size,
                         style: None,
                     })?;
@@ -1389,6 +1392,97 @@ mod tests {
             assert_eq!(granted.lease.session, session);
             assert_eq!(selections.load(Ordering::SeqCst), after_health + 1);
         });
+    }
+
+    /// A selection queued before the claim learns that the Session ended starts nothing. The
+    /// Pane waits on Session Ended until Start Session.
+    #[test]
+    fn a_selection_never_starts_an_ended_pane() {
+        let state = DevelopmentPaneState::new();
+        let alive = AtomicBool::new(true);
+        let size = Mutex::new(PaneSize {
+            columns: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+        });
+        let appearance = Mutex::new(TerminalAppearanceUpdate::builtin().unwrap());
+        let (mut attached_session, mut takeover, mut paste_unconfirmed) = (false, false, false);
+        let lease = Lease {
+            server: [1; 32],
+            session: [9; 32],
+            control: [4; 32],
+            connection: [5; 32],
+        };
+        let ended = || Reply::Restored {
+            fresh: false,
+            recovery: None,
+            directory_unavailable: false,
+            session_ended: Some(pane::SessionEnd::Exited { code: 1 }),
+            server: [1; 32],
+            workspace: [6; 32],
+            tab: [7; 32],
+            pane: [2; 32],
+        };
+        let mut phase = 0;
+        let granted = ClaimWorker {
+            state: &state,
+            pane_id: [2; 32],
+            alive: &alive,
+            attachment: &None,
+            size: &size,
+            appearance: &appearance,
+            directory_recovery: true,
+            attached_session: &mut attached_session,
+            takeover: &mut takeover,
+            paste_unconfirmed: &mut paste_unconfirmed,
+        }
+        .run(
+            |request| {
+                let reply = match phase {
+                    0 => {
+                        // A focus or Tab opening selected the Pane before the answer arrived.
+                        state.selected.store(true, Ordering::Release);
+                        ended()
+                    }
+                    1 => {
+                        assert!(
+                            matches!(
+                                request,
+                                Request::SelectPane {
+                                    explicit: false,
+                                    ..
+                                }
+                            ),
+                            "a selection must not start an ended Pane; observed {request:?}"
+                        );
+                        assert_eq!(
+                            state.status(),
+                            DevelopmentPaneStatus::SessionEnded(pane::SessionEnd::Exited {
+                                code: 1
+                            })
+                        );
+                        state.start_restored();
+                        ended()
+                    }
+                    2 => {
+                        assert!(matches!(request, Request::StartRestored { .. }));
+                        Reply::Attached { lease }
+                    }
+                    _ => panic!("claim continued after receiving its lease"),
+                };
+                phase += 1;
+                if phase == 1 {
+                    state.wake.notify();
+                }
+                Ok(reply)
+            },
+            || {},
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(granted.lease, lease);
+        assert_eq!(phase, 3);
     }
 
     #[test]

@@ -205,16 +205,18 @@ impl DevelopmentPaneState {
         }
     }
 
+    /// Selecting a Pane starts or acquires it, except a Pane whose Session ended in this server
+    /// run: that one waits on Session Ended for Start Session, whoever holds its grant.
     pub(crate) fn select(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()
+            && self.session_end().is_none()
             && (*status != DevelopmentPaneStatus::Connecting
                 || *self.admission.lock().unwrap_or_else(|e| e.into_inner()) != Admission::Granted)
             && matches!(
                 *status,
                 DevelopmentPaneStatus::Connecting
                     | DevelopmentPaneStatus::Restored
-                    | DevelopmentPaneStatus::SessionEnded(_)
                     | DevelopmentPaneStatus::Takeover
             )
         {

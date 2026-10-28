@@ -295,5 +295,166 @@ fn a_server_restart_keeps_the_exited_pane_but_not_its_exit() {
             ..
         }
     ));
+    assert!(
+        matches!(
+            select(&mut restarted, 1, pane, true),
+            Reply::Attached { .. }
+        ),
+        "after a restart the retained Pane starts on first use"
+    );
     restarted.shutdown().unwrap();
+}
+
+/// Switching back to an ended Pane or opening its Tab selects it explicitly. That keeps the
+/// Session Ended screen and its cause on every client. Only Start Session starts a shell.
+#[test]
+fn selecting_an_ended_pane_keeps_its_cause_until_start_session() {
+    let mut host = SharedWorkspaceHost::new(host());
+    host.prepare_initial_organization().unwrap();
+    let workspace = shared_inventory(&mut host).workspaces[0].id;
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let lease = start(&mut host, 1, pane);
+    exit_with(&mut host, 1, lease, "exit 5");
+    let ended = Some(SessionEnd::Exited { code: 5 });
+
+    for _ in 0..2 {
+        assert!(
+            matches!(select(&mut host, 1, pane, true), Reply::Restored {
+                session_ended, ..
+            } if session_ended == ended),
+            "the controlling client's selection keeps Session Ended"
+        );
+        assert!(
+            matches!(select(&mut host, 2, pane, true), Reply::Takeover {
+                session_ended, ..
+            } if session_ended == ended),
+            "another client's selection keeps Session Ended"
+        );
+    }
+    let attached = Request::ClaimPane {
+        attachment: spaceterm_server::attachments::Attachment {
+            workspace,
+            generation: 1,
+        },
+        pane,
+        claim: AttachmentClaim::Select { explicit: true },
+        size: size(),
+        style: None,
+    };
+    assert!(matches!(
+        host.request([1; 32], [1; 32], attached),
+        Reply::Restored { session_ended, .. } if session_ended == ended
+    ));
+    assert_eq!(
+        session(&mut host, pane),
+        None,
+        "no selection started a shell"
+    );
+
+    let Reply::Restored { server, .. } = select(&mut host, 1, pane, false) else {
+        panic!("the ended Pane waits");
+    };
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::StartRestored {
+                server,
+                pane,
+                size: size(),
+                style: None,
+            },
+        ),
+        Reply::Attached { .. }
+    ));
+    host.shutdown().unwrap();
+}
+
+/// End All Sessions leaves the same Session Ended screen, which selection keeps too.
+#[test]
+fn selecting_a_pane_end_all_sessions_ended_starts_nothing() {
+    let mut host = SharedWorkspaceHost::new(host());
+    host.prepare_initial_organization().unwrap();
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    start(&mut host, 1, pane);
+    let confirmation = shared_inventory(&mut host).close.unwrap();
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 1,
+                mutation: Mutation::EndAllSessions { confirmation },
+            },
+        ),
+        Reply::Outcome(_)
+    ));
+    host.tick(Instant::now());
+
+    assert!(matches!(
+        select(&mut host, 1, pane, true),
+        Reply::Restored {
+            session_ended: Some(SessionEnd::EndAllSessions),
+            ..
+        }
+    ));
+    assert_eq!(session(&mut host, pane), None);
+    host.shutdown().unwrap();
+}
+
+/// Another client's Take Over can reach the Pane after its shell exited and before the server
+/// noticed. It answers Stale, so that client claims again and sees Session Ended.
+#[test]
+fn take_over_racing_a_shell_exit_leads_to_session_ended() {
+    let mut host = SharedWorkspaceHost::new(host());
+    host.prepare_initial_organization().unwrap();
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let lease = start(&mut host, 1, pane);
+    command(&mut host, 1, lease, "exit 1");
+    // Wait for the exit without draining it, as no tick or observation has run yet.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !host.panes[&pane]
+        .pane
+        .as_ref()
+        .unwrap()
+        .subscription
+        .events
+        .is_closed()
+    {
+        assert!(Instant::now() < deadline, "the shell did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(matches!(
+        host.request(
+            [2; 32],
+            [2; 32],
+            Request::TakeOver {
+                target: lease.into(),
+                size: size(),
+                style: None,
+            },
+        ),
+        Reply::Refused(Refusal::Stale)
+    ));
+    assert!(matches!(
+        select(&mut host, 2, pane, false),
+        Reply::Takeover {
+            session_ended: Some(SessionEnd::Exited { code: 1 }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        host.request(
+            [2; 32],
+            [2; 32],
+            Request::TakeOver {
+                target: lease.into(),
+                size: size(),
+                style: None,
+            },
+        ),
+        Reply::Refused(Refusal::Stale)
+    ));
+    host.shutdown().unwrap();
 }

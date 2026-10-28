@@ -1627,3 +1627,28 @@ fn an_outage_during_protocol_recovery_retains_the_original_failure() {
         DevelopmentPaneStatus::Failed(ServerError::Protocol)
     );
 }
+
+/// Selecting a Pane whose Session ended in this server run, by focus, Tab opening or a click,
+/// queues nothing: only Start Session starts its shell, whoever holds its grant.
+#[test]
+fn selecting_an_ended_pane_queues_no_start() {
+    use pane::control::Controller;
+    let ended = DevelopmentPaneState::new();
+    ended.set(DevelopmentPaneStatus::SessionEnded(
+        pane::SessionEnd::Exited { code: 1 },
+    ));
+    ended.set_session_end(Some(pane::SessionEnd::Exited { code: 1 }));
+    ended.select();
+    assert!(!ended.selected.load(Ordering::Acquire));
+
+    let elsewhere = DevelopmentPaneState::new();
+    elsewhere.offered_take_over(Controller::Nobody, Some(pane::SessionEnd::EndAllSessions));
+    elsewhere.select();
+    assert!(!elsewhere.selected.load(Ordering::Acquire));
+
+    // A Pane retained across a server restart still starts on first use.
+    let restored = DevelopmentPaneState::new();
+    restored.set(DevelopmentPaneStatus::Restored);
+    restored.select();
+    assert!(restored.selected.load(Ordering::Acquire));
+}
