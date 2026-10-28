@@ -507,7 +507,7 @@ pub const MAX_INPUT_METHOD_BYTES: usize = 64 * 1024;
 pub enum InputMethodRefusal {
     #[error("Input method text is over 65,536 bytes.")]
     TooLarge,
-    #[error("Couldn't send input method text. You can still edit it.")]
+    #[error("Couldn\u{2019}t send input method text. You can still edit it.")]
     Unavailable,
 }
 

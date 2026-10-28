@@ -303,6 +303,7 @@ fn returning_to_servers_moves_nothing_while_its_checks_finish_in_any_order(
     }
     let refreshes = server.refreshes();
     let reads = update.reads();
+    let footnote = window.read_with(cx, |settings, cx| settings.server_card_footnote(cx));
 
     // Leaving and returning starts the three checks. The frame drawn at the end of this update
     // shows them all held, since no background work has run yet.
@@ -319,8 +320,8 @@ fn returning_to_servers_moves_nothing_while_its_checks_finish_in_any_order(
             );
             assert_eq!(
                 settings.server_card_footnote(cx),
-                None,
-                "{moment}: no footnote appears"
+                footnote,
+                "{moment}: the footnote stays as it was"
             );
         });
     };
@@ -648,7 +649,7 @@ fn each_service_state_offers_the_steps_that_apply_to_it() {
     for (status, state, actions, tone) in [
         (
             not_installed(),
-            "Not Installed",
+            "Not installed",
             vec![ServiceAction::Install],
             CaptionTone::Guidance,
         ),
@@ -671,7 +672,7 @@ fn each_service_state_offers_the_steps_that_apply_to_it() {
         // Installed and not stopped by the person, yet not running, reads as needing attention.
         (
             not_running(),
-            "Not Running",
+            "Not running",
             vec![ServiceAction::Start, ServiceAction::Uninstall],
             CaptionTone::Warning,
         ),
@@ -734,7 +735,7 @@ fn installing_promises_to_start_the_server_only_when_the_person_has_not_stopped_
         ),
     ] {
         let presentation = presented(uninstalled(), installations, None);
-        assert_eq!(presentation.state, "Not Installed");
+        assert_eq!(presentation.state, "Not installed");
         assert_eq!(presentation.explanation.as_ref(), explanation);
         assert_eq!(presentation.tone, CaptionTone::Guidance);
         assert_eq!(presentation.actions, vec![ServiceAction::Install]);
@@ -786,7 +787,7 @@ fn a_stop_whose_cleanup_was_not_confirmed_offers_only_another_stop() {
         ..ServiceState::default()
     });
 
-    assert_eq!(presentation.state, "Cleanup Unresolved");
+    assert_eq!(presentation.state, "Cleanup unresolved");
     // Retrying Stop never restarts the server, so Start and Restart stay unavailable.
     assert_eq!(
         presentation.actions,
@@ -830,9 +831,18 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
             _ => unreachable!(),
         };
         assert_eq!(confirmation.message.as_ref(), question);
+        let kept = match action {
+            ServiceAction::Stop => {
+                "Workspaces are kept, and the server stays stopped until you start it again."
+            }
+            ServiceAction::Restart => {
+                "Workspaces are kept, and each Pane starts a new shell when you use it."
+            }
+            _ => unreachable!(),
+        };
         assert_eq!(
             confirmation.detail.as_ref(),
-            "All Terminal Sessions on it end for every client."
+            format!("All Terminal Sessions on it end for every client. {kept}")
         );
         assert_eq!(confirmation.confirm, action.label());
     }
@@ -842,10 +852,15 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     let live =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, true, login).expect("live");
     assert!(!idle.message.contains("Terminal Sessions"));
-    assert!(idle.detail.is_empty());
+    assert_eq!(
+        idle.detail.as_ref(),
+        "It no longer starts when you log in. Workspaces are kept, so you can install it again \
+         later."
+    );
     assert_eq!(
         live.detail.as_ref(),
-        "All Terminal Sessions on it end for every client."
+        "All Terminal Sessions on it end for every client. Workspaces are kept, so you can \
+         install it again later."
     );
 }
 
@@ -919,7 +934,7 @@ fn without_a_verified_build_the_row_explains_how_to_keep_one_and_offers_another_
         ..ServiceState::default()
     });
 
-    assert_eq!(presentation.state, "Not Installed");
+    assert_eq!(presentation.state, "Not installed");
     assert_eq!(presentation.actions, vec![ServiceAction::Check]);
     assert!(presentation.install_choices.is_empty());
     assert_eq!(presentation.tone, CaptionTone::Guidance);
@@ -1019,7 +1034,7 @@ fn an_unreadable_build_store_explains_itself_and_offers_another_check(cx: &mut T
     click(NAVIGATION_SELECTOR, cx);
 
     let presented = service_presentation(&window, cx);
-    assert_eq!(presented.state, "Not Installed");
+    assert_eq!(presented.state, "Not installed");
     assert_eq!(presented.tone, CaptionTone::Error);
     assert_eq!(
         presented.explanation.as_ref(),
@@ -1055,7 +1070,7 @@ fn a_refused_installation_explains_itself_and_offers_install_again(cx: &mut Test
     install(cx);
 
     let presented = service_presentation(&window, cx);
-    assert_eq!(presented.state, "Not Installed");
+    assert_eq!(presented.state, "Not installed");
     assert_eq!(presented.tone, CaptionTone::Error);
     assert_eq!(
         presented.explanation.as_ref(),
@@ -1453,13 +1468,15 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
     let stop = ServiceConfirmation::for_action(ServiceAction::Stop, true, boot).expect("stop");
     assert_eq!(
         stop.detail.as_ref(),
-        "All Terminal Sessions on it end for every client."
+        "All Terminal Sessions on it end for every client. Workspaces are kept, and the server \
+         stays stopped until you start it again."
     );
     let uninstall =
-        ServiceConfirmation::for_action(ServiceAction::Uninstall, true, boot).expect("uninstall");
+        ServiceConfirmation::for_action(ServiceAction::Uninstall, false, boot).expect("uninstall");
     assert_eq!(
         uninstall.detail.as_ref(),
-        "All Terminal Sessions on it end for every client."
+        "It no longer starts when the computer starts. Workspaces are kept, so you can install it \
+         again later."
     );
 }
 
@@ -1472,13 +1489,16 @@ fn the_authorization_prompt_names_the_required_permission_and_matching_action() 
     assert_eq!(install.confirm, "Authorize and Install");
     assert_eq!(
         install.message,
-        "Enter an administrator password so your account's services keep running after you log out."
+        "Enter an administrator password so your account\u{2019}s services keep running after you log out."
     );
-    assert!(install.detail.is_empty());
+    assert_eq!(
+        install.detail,
+        "This applies to every service your account runs and stays on if you uninstall the server."
+    );
     let start = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
     assert_eq!(start.confirm, "Authorize and Start");
     assert_eq!(start.message, install.message);
-    assert!(start.detail.is_empty());
+    assert_eq!(start.detail, install.detail);
 }
 
 #[gpui::test]
@@ -1497,7 +1517,7 @@ fn a_boot_installation_waits_for_explained_authorization_then_installs_its_build
     assert_eq!(service.changes(), vec![ServiceCall::Install(build.clone())]);
     assert_eq!(status(&window, cx), "Needs authorization");
     let presented = service_presentation(&window, cx);
-    assert_eq!(presented.state, "Authorization Required");
+    assert_eq!(presented.state, "Authorization required");
     assert_eq!(presented.tone, CaptionTone::Warning);
     assert_eq!(
         presented.explanation.as_ref(),
@@ -1557,10 +1577,10 @@ fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
         vec![ServiceCall::Start, ServiceCall::AuthorizeStartup]
     );
     let presented = service_presentation(&window, cx);
-    assert_eq!(presented.state, "Authorization Required");
+    assert_eq!(presented.state, "Authorization required");
     assert_eq!(
         presented.explanation.as_ref(),
-        "Authorization didn't finish. Choose Authorize and Start to try again."
+        "Authorization didn\u{2019}t finish. Choose Authorize and Start to try again."
     );
     assert_eq!(
         presented.actions,
@@ -1697,7 +1717,7 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
     assert_eq!(prompt["aria"]["role"], "AlertDialog");
     assert_eq!(
         prompt["aria"]["description"],
-        "Enter an administrator password so your account's services keep running after you log out."
+        "Enter an administrator password so your account\u{2019}s services keep running after you log out."
     );
     assert_eq!(
         tree.focused().map(|node| node["aria"]["label"].clone()),

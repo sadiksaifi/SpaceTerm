@@ -77,7 +77,7 @@ macro_rules! commands {
 }
 
 commands! {
-    SwitchWorkspace => ("switch_workspace", "Switch Workspace", Workspace, Application, crate::ui::SwitchWorkspace),
+    SwitchWorkspace => ("switch_workspace", "Choose Workspace", Workspace, Application, crate::ui::SwitchWorkspace),
     NewWorkspace => ("new_workspace", "New Workspace", Workspace, Application, crate::ui::NewWorkspace),
     OpenLocalDirectory => ("open_local_directory", "Open Local Directory", Workspace, Application, crate::ui::OpenLocalDirectory),
     NewWorktree => ("new_worktree", "New Worktree", Workspace, Application, crate::ui::NewWorktree),

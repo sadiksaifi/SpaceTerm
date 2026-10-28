@@ -354,7 +354,7 @@ mod tests {
                 &[PathBuf::from("relative")],
                 LOCAL_FILES
             ),
-            Err("Couldn't drop these files.")
+            Err("Couldn\u{2019}t drop these files.")
         );
     }
 

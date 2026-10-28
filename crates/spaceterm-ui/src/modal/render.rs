@@ -366,6 +366,8 @@ fn render_overlay(
 
     let press_owner = state.press_owner();
     let blocker = render_blocker(geometry, press_owner.clone());
+    let body_presented = has_body(&snapshot.semantics);
+    // An Alert reads as one block above its decisions, so only the footer's rule divides it.
     let header = render_header(
         &snapshot,
         geometry.size.height * metrics.header_maximum_fraction(),
@@ -373,6 +375,7 @@ fn render_overlay(
         paint,
         shell,
         typography.heading().clone(),
+        snapshot.kind != ModalKind::Alert,
     );
     let suppression_is_focused = suppression_focus.is_focused(window);
     let body = render_body(
@@ -517,7 +520,7 @@ fn render_overlay(
         })
         .child(div().size_0().track_focus(&leading))
         .child(header)
-        .child(body)
+        .when(body_presented, |surface| surface.child(body))
         .when(!snapshot.actions.is_empty(), |surface| {
             surface.child(footer)
         })
@@ -681,6 +684,26 @@ fn alert_message(message: &SharedString) -> Option<SharedString> {
     (!message.trim().is_empty()).then(|| message.clone())
 }
 
+/// Whether the modal has anything below its title. A title-only Alert draws no body, so no empty
+/// row or intent mark sits between its title and its decisions.
+fn has_body(semantics: &PreparedModalSemantics) -> bool {
+    match semantics {
+        PreparedModalSemantics::Alert {
+            message,
+            detail,
+            accessory,
+            suppression,
+            ..
+        } => {
+            alert_message(message).is_some()
+                || detail.is_some()
+                || accessory.is_some()
+                || suppression.is_some()
+        }
+        PreparedModalSemantics::Dialog { .. } | PreparedModalSemantics::Progress { .. } => true,
+    }
+}
+
 fn render_header(
     snapshot: &ModalRenderSnapshot,
     maximum_height: gpui::Pixels,
@@ -688,6 +711,7 @@ fn render_header(
     paint: ModalPaint,
     shell: FloatingShell,
     heading_font: gpui::Font,
+    divided: bool,
 ) -> AnyElement {
     let (title, description) = match &snapshot.semantics {
         PreparedModalSemantics::Alert { visible_title, .. } => (visible_title.clone(), None),
@@ -710,8 +734,11 @@ fn render_header(
         .px(metrics.surface_padding)
         .pt(metrics.surface_padding)
         .pb(metrics.section_gap)
-        .border_b(shell.hairline())
-        .border_color(shell.divider())
+        .when(divided, |header| {
+            header
+                .border_b(shell.hairline())
+                .border_color(shell.divider())
+        })
         .child(
             div()
                 .id(("modal-header-title", snapshot.presentation.value()))
@@ -812,26 +839,34 @@ fn render_body(
             } else {
                 px(0.0)
             };
+            let has_text = message.is_some() || detail.is_some();
+            // A destructive decision already signals the danger, so the mark would repeat it.
+            let marked = !snapshot
+                .actions
+                .iter()
+                .any(|action| action.intent == ModalActionIntent::Destructive);
             let message_panel = div()
                 .debug_selector(move || intent_selector.clone())
                 .flex()
                 .items_start()
                 .min_w_0()
                 .gap(metrics.action_gap / 2.0)
-                .child(
-                    div()
-                        .debug_selector(move || marker_selector.clone())
-                        .size(marker_extent)
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(Icon::new(
-                            intent_presentation.icon,
-                            marker_extent * 0.8,
-                            intent_presentation.accent,
-                        )),
-                )
+                .when(marked, |panel| {
+                    panel.child(
+                        div()
+                            .debug_selector(move || marker_selector.clone())
+                            .size(marker_extent)
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(
+                                intent_presentation.icon,
+                                marker_extent * 0.8,
+                                intent_presentation.accent,
+                            )),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
@@ -879,7 +914,7 @@ fn render_body(
                             .child(accessory),
                     )
                 })
-                .child(message_panel)
+                .when(has_text, |body| body.child(message_panel))
                 .when_some(suppression, move |body, (label, selected)| {
                     body.child(render_alert_suppression(
                         label,
@@ -1481,6 +1516,7 @@ fn render_footer(
     let ActionArrangement {
         physical,
         traversal,
+        leading,
     } = arrangement;
     let decisions_are_reversed = axis == ActionAxis::Horizontal && physical != traversal;
     if decisions_are_reversed {
@@ -1492,32 +1528,38 @@ fn render_footer(
     } else {
         debug_assert_eq!(physical, traversal);
     }
-    let mut decisions = div()
-        .flex()
-        .when(axis == ActionAxis::Horizontal, |row| {
-            row.flex_row()
-                .when(decisions_are_reversed, |row| row.flex_row_reverse())
-                .items_center()
-                .justify_end()
-        })
-        .when(axis == ActionAxis::Vertical, |row| row.flex_col())
-        .gap(metrics.action_gap)
-        .min_w_0();
-    for index in traversal {
-        let Some(action) = snapshot.actions.get(index) else {
-            continue;
-        };
-        decisions = decisions.child(render_action(
-            action,
-            index,
-            presentation,
-            owner.clone(),
-            action_focus.get(index).cloned(),
-            button_press_owner.clone(),
-            axis == ActionAxis::Vertical,
-            policy.default_action_presentation(action),
-        ));
-    }
+    let group = |indices: &[usize]| {
+        let mut decisions = div()
+            .flex()
+            .when(axis == ActionAxis::Horizontal, |row| {
+                row.flex_row()
+                    .when(decisions_are_reversed, |row| row.flex_row_reverse())
+                    .items_center()
+                    .justify_end()
+            })
+            .when(axis == ActionAxis::Vertical, |row| row.flex_col())
+            .gap(metrics.action_gap)
+            .min_w_0();
+        for index in indices.iter().copied() {
+            let Some(action) = snapshot.actions.get(index) else {
+                continue;
+            };
+            decisions = decisions.child(render_action(
+                action,
+                index,
+                presentation,
+                owner.clone(),
+                action_focus.get(index).cloned(),
+                button_press_owner.clone(),
+                axis == ActionAxis::Vertical,
+                policy.default_action_presentation(action),
+            ));
+        }
+        decisions
+    };
+    let (apart, decisions) = traversal.split_at(leading.min(traversal.len()));
+    let apart = (!apart.is_empty()).then(|| group(apart));
+    let decisions = group(decisions);
     let footer = div()
         .id(("modal-footer", snapshot.presentation.value()))
         .debug_selector(move || format!("modal-footer-{}", presentation.value()))
@@ -1542,6 +1584,7 @@ fn render_footer(
         })
         .when(axis == ActionAxis::Vertical, |footer| footer.flex_col())
         .gap(metrics.action_gap)
+        .when_some(apart, |footer, apart| footer.child(apart))
         .when(axis == ActionAxis::Horizontal, |footer| {
             footer.child(div().flex_grow(1.0))
         })

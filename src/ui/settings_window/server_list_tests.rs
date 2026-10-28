@@ -924,7 +924,10 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
     let detail = servers
         .window
         .read_with(servers.cx, |settings, _| settings.reset_all_detail());
-    assert_eq!(detail, "This cannot be undone.");
+    assert_eq!(
+        detail,
+        "This can\u{2019}t be undone. Server connections and system permissions are kept."
+    );
 
     click("settings-reset-all", servers.cx);
     answer_alert("settings-reset-all-confirm", servers.cx);
@@ -1024,7 +1027,10 @@ fn present_local_sessions(
 
 fn end_all_sessions_caption(servers: &Servers<'_>) -> String {
     servers.window.read_with(servers.cx, |settings, _| {
-        settings.end_all_sessions_caption().0.to_string()
+        settings
+            .end_all_sessions_caption()
+            .map(|(text, _)| text.to_string())
+            .unwrap_or_default()
     })
 }
 
@@ -1043,10 +1049,8 @@ fn end_all_sessions_confirms_and_reaches_only_this_computers_server(cx: &mut Tes
     assert!(rendered("settings-row-end-all-sessions", servers.cx));
     assert_eq!(
         end_all_sessions_caption(&servers),
-        format!(
-            "Ends all 2 running Terminal Sessions on {name} for every client and clears their \
-             output. The server keeps running, and its Workspaces, Tabs, and Panes remain."
-        )
+        "",
+        "the row's count and its confirmation say what ends"
     );
 
     click(END_SELECTOR, servers.cx);
@@ -1054,6 +1058,11 @@ fn end_all_sessions_confirms_and_reaches_only_this_computers_server(cx: &mut Tes
     assert!(
         tree.find(&format!("End All Sessions on {name}?")).is_some(),
         "the confirmation names the server"
+    );
+    assert_eq!(
+        tree.node(&format!("End All Sessions on {name}?"))["aria"]["description"],
+        "This ends 2 Terminal Sessions for every client and clears their output.",
+        "the confirmation counts the Sessions it ends"
     );
     answer_alert(END_CANCEL_SELECTOR, servers.cx);
     assert!(local.submitted().is_empty(), "Cancel asks nothing");
@@ -1070,9 +1079,12 @@ fn end_all_sessions_confirms_and_reaches_only_this_computers_server(cx: &mut Tes
 
     local.answer(Outcome::Accepted { target: [2; 32] });
     let caption = |cx: &mut VisualTestContext| {
-        servers
-            .window
-            .read_with(cx, |settings, _| settings.end_all_sessions_caption().0)
+        servers.window.read_with(cx, |settings, _| {
+            settings
+                .end_all_sessions_caption()
+                .map(|(text, _)| text)
+                .unwrap_or_default()
+        })
     };
     settle(servers.cx, |cx| {
         cx.executor().advance_clock(Duration::from_millis(100));
@@ -1128,9 +1140,12 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
     // The server's stale answer can't say whether it restarted, so the row claims only a change.
     local.answer(Outcome::StaleConfirmation);
     let caption = |cx: &mut VisualTestContext| {
-        servers
-            .window
-            .read_with(cx, |settings, _| settings.end_all_sessions_caption().0)
+        servers.window.read_with(cx, |settings, _| {
+            settings
+                .end_all_sessions_caption()
+                .map(|(text, _)| text)
+                .unwrap_or_default()
+        })
     };
     settle(servers.cx, |cx| {
         cx.executor().advance_clock(Duration::from_millis(100));
@@ -1322,4 +1337,15 @@ fn the_picker_keeps_clear_of_client_drawn_window_controls(cx: &mut TestAppContex
         picker.right() < close.left(),
         "the picker's hover surface should stop before Close, got {picker:?} beside {close:?}"
     );
+}
+
+/// A server running no Terminal Session needs no caption: the row's count and its disabled End
+/// All say it.
+#[gpui::test]
+fn a_server_running_no_terminal_session_adds_no_caption(cx: &mut TestAppContext) {
+    let local = local_writer(running_sessions(2, 0));
+    let servers = present_local_sessions(local, cx);
+    servers.cx.run_until_parked();
+
+    assert_eq!(end_all_sessions_caption(&servers), "");
 }

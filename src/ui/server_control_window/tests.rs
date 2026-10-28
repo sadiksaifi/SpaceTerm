@@ -200,3 +200,16 @@ fn every_step_a_restart_reaches_fits_the_size_the_window_opened_at(cx: &mut Test
         assert!(needed.height <= size.height, "{needed:?} fits in {size:?}");
     }
 }
+
+/// The control window explains startup authorization in the words Settings uses.
+#[test]
+fn authorization_explains_itself_as_settings_does() {
+    let prompt = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
+    let content = Content::of("SpaceTerm", Operation::Start, &Step::Authorize);
+    assert_eq!(content.heading.as_ref(), prompt.title);
+    assert_eq!(
+        content.body.as_deref(),
+        Some(format!("{} {}", prompt.message, prompt.detail).as_str())
+    );
+    assert_eq!(content.buttons[1].label.as_ref(), prompt.confirm);
+}

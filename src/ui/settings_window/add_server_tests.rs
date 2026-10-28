@@ -1042,7 +1042,8 @@ fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAp
 
     sheet.adopt(join, "studio");
     sheet.settle(|sheet| {
-        sheet.says("SpaceTerm couldn't reach the server. Check your network, then try again.")
+        sheet
+            .says("SpaceTerm couldn\u{2019}t reach the server. Check your network, then try again.")
     });
 
     assert_eq!(sheet.title(), "Pairing Paused");
@@ -1073,7 +1074,8 @@ fn withdrawing_a_join_whose_save_is_unknown_says_the_withdrawal_isnt_saved(
 
     sheet.adopt(join, "studio");
     sheet.settle(|sheet| {
-        sheet.says("studio approved this device, but SpaceTerm couldn't save the connection.")
+        sheet
+            .says("studio approved this device, but SpaceTerm couldn\u{2019}t save the connection.")
     });
 
     assert!(

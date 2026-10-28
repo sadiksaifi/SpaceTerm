@@ -10,6 +10,6 @@ Installation consent binds one signed artifact's identity, target and complete d
 
 One setup attempt owns one foreground SSH authentication connection through discovery and approval waits. Multiplexed commands require that exact owned connection and cannot fall back to fresh authentication. Setup shows its current phase and yields to Authentication Prompts only while interaction is required. The remote-command observation deadline begins after authentication; transfers have no whole-upload deadline. Cancellation releases owned processes and input suppression. Admitted service effects are observed and reported truthfully, without claiming rollback; enrollment cleanup targets only the exact claim and pairing.
 
-After setup, terminal work, directories, status, reconnect, relaunch, Pane Retry and pairing recovery use WSS exclusively. Native service administration remains on the server's machine. Saved connections retain no SSH runtime route, maintenance journal or fallback.
+After setup, terminal work, directories, status, reconnect, relaunch, Pane Try Again and pairing recovery use WSS exclusively. Native service administration remains on the server's machine. Saved connections retain no SSH runtime route, maintenance journal or fallback.
 
 [ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

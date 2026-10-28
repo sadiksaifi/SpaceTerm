@@ -7,18 +7,18 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Keystroke, Modifiers, SharedString, Window, div};
 use spaceterm_ui::{
-    CapturedKey, ChordCapture, IconName, SearchField, SearchFieldToggle, ShortcutRecorder,
-    ShortcutRecorderEvent, TextInput, TextInputEvent, TextInputVariant,
+    CapturedKey, ChordCapture, EmptyStateTone, IconName, SearchField, SearchFieldToggle,
+    ShortcutRecorder, ShortcutRecorderEvent, TextInput, TextInputEvent, TextInputVariant,
 };
 
-use super::{SettingsRowId, SettingsWindow, control_selector};
+use super::{SEARCH_DETAIL, SettingsRowId, SettingsWindow, control_selector};
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::runtime::KeymapRuntime;
 use crate::keybindings::{
     Command, KeybindingPreferences, KeybindingState, Reservation, ResolvedKeymap, Shortcut,
     ShortcutRejection, SystemReservation, TerminalConvention,
 };
-use crate::ui::appearance::{ChromeAppearance, gpui_color};
+use crate::ui::appearance::ChromeAppearance;
 use crate::ui::sidebar_window::form::{CaptionTone, row_horizontal_inset};
 
 /// What the field shows for a Command without a Shortcut.
@@ -239,7 +239,7 @@ fn rejection_message(rejection: ShortcutRejection) -> SharedString {
         ShortcutRejection::Malformed
         | ShortcutRejection::Chord
         | ShortcutRejection::ModifierOnly
-        | ShortcutRejection::UnsupportedKey => "Can't use this key in a shortcut.".into(),
+        | ShortcutRejection::UnsupportedKey => "Can\u{2019}t use this key in a shortcut.".into(),
     }
 }
 
@@ -387,14 +387,14 @@ impl SettingsWindow {
         });
     }
 
-    /// Explains a search that found no Keybindings rows.
+    /// Explains a search that found no Keybindings rows, in the shared empty state.
     pub(super) fn render_no_shortcuts_found(
         &self,
         appearance: &ChromeAppearance,
         cx: &App,
     ) -> Option<AnyElement> {
-        let message = self.no_shortcuts_found(cx)?;
-        // A Reserved Shortcut reads in the same error color the recorder refuses it in.
+        let (title, detail) = self.no_shortcuts_found(cx)?;
+        // A Reserved Shortcut is refused the way the recorder refuses it, in the error color.
         let reserved = matches!(
             self.shortcuts.query(cx),
             ShortcutQuery::Chord(SearchedChord {
@@ -402,23 +402,35 @@ impl SettingsWindow {
                 ..
             })
         );
-        let color = if reserved {
-            appearance.colors.error
+        let state = crate::ui::empty_state::empty_state(title, cx)
+            .debug_selector("settings-keybindings-no-results");
+        let state = if reserved {
+            state
+                .icon(IconName::CircleAlert)
+                .tone(EmptyStateTone::Error)
         } else {
-            appearance.colors.text_muted
+            state.icon(IconName::Search)
         };
         Some(
             div()
-                .debug_selector(|| "settings-keybindings-no-results".to_owned())
+                .w_full()
                 .px(row_horizontal_inset(appearance))
-                .text_color(gpui_color(color))
-                .child(message)
+                .py(appearance.spacing(24.0))
+                .flex()
+                .justify_center()
+                .child(match detail {
+                    Some(detail) => state.detail(detail),
+                    None => state,
+                })
                 .into_any_element(),
         )
     }
 
-    /// What a search that finds nothing says.
-    pub(super) fn no_shortcuts_found(&self, cx: &App) -> Option<SharedString> {
+    /// The title and detail of a search that finds nothing.
+    pub(super) fn no_shortcuts_found(
+        &self,
+        cx: &App,
+    ) -> Option<(SharedString, Option<SharedString>)> {
         Some(match self.shortcuts.query(cx) {
             ShortcutQuery::Everything => return None,
             // A Reserved Shortcut is explained the way the recorder refuses it, which says more than
@@ -426,9 +438,12 @@ impl SettingsWindow {
             ShortcutQuery::Chord(SearchedChord {
                 shortcut: Err(reason),
                 ..
-            }) => reason.clone(),
-            ShortcutQuery::Chord(chord) => format!("No command uses {}.", chord.text).into(),
-            ShortcutQuery::Text(text) => format!("No commands match “{text}”.").into(),
+            }) => ("Shortcut Reserved".into(), Some(reason.clone())),
+            ShortcutQuery::Chord(chord) => (format!("No Command Uses {}", chord.text).into(), None),
+            ShortcutQuery::Text(text) => (
+                format!("No Results for \u{201C}{text}\u{201D}").into(),
+                Some(SEARCH_DETAIL.into()),
+            ),
         })
     }
 

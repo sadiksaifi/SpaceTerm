@@ -486,7 +486,10 @@ fn a_change_the_server_couldnt_save_leaves_access_off_and_says_why(cx: &mut Test
         !access_on(&window, cx),
         "the row reports the server as it is"
     );
-    assert!(reads("\"studio\" couldn't save the change. Try again.", cx));
+    assert!(reads(
+        "\u{201C}studio\u{201D} couldn\u{2019}t save the change. Try again.",
+        cx
+    ));
 }
 
 #[gpui::test]
@@ -511,7 +514,10 @@ fn addresses_the_server_couldnt_read_offer_no_guess_and_say_so(cx: &mut TestAppC
         access.policies().is_empty(),
         "SpaceTerm never substitutes an address the server didn't report"
     );
-    assert!(reads("Couldn't read studio's network addresses.", cx));
+    assert!(reads(
+        "Couldn\u{2019}t read studio\u{2019}s network addresses.",
+        cx
+    ));
 }
 
 #[gpui::test]
@@ -665,10 +671,10 @@ fn a_server_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAp
     );
     assert!(!access_on(&window, cx));
     assert!(reads("Unknown", cx));
-    assert!(reads("Can't reach the server.", cx));
+    assert!(reads("Can\u{2019}t reach the server.", cx));
     assert!(
         !reads(
-            "SpaceTerm can't reach This Computer. Last known Network Access settings:",
+            "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
             cx
         ),
         "nothing was read, so nothing is shown as last known"
@@ -698,7 +704,7 @@ fn navigation_keeps_network_access_live_until_a_read_actually_fails(cx: &mut Tes
     assert!(!window.read_with(cx, |settings, _| settings.network_access_live()));
     assert!(access_on(&window, cx));
     assert!(reads(
-        "SpaceTerm can't reach This Computer. Last known Network Access settings:",
+        "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
         cx
     ));
 }
@@ -721,7 +727,7 @@ fn a_server_spaceterm_loses_keeps_its_last_known_access_and_devices(cx: &mut Tes
     assert!(reads("Devices: 1 paired", cx));
     assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
     assert!(reads(
-        "SpaceTerm can't reach This Computer. Last known Network Access settings:",
+        "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
         cx
     ));
     assert!(
@@ -741,7 +747,7 @@ fn a_server_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
     assert!(open(ACCESS_SELECTOR, cx), "the last reading still shows");
     assert!(!access_on(&window, cx));
     assert!(reads(
-        "SpaceTerm can't reach This Computer. Last known Network Access settings:",
+        "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
         cx
     ));
 }
@@ -862,7 +868,7 @@ fn after_relaunch_a_server_out_of_reach_shows_its_retained_access(cx: &mut TestA
     assert!(reads("Devices: 1 paired", cx));
     assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
     assert!(reads(
-        "SpaceTerm can't reach This Computer. Last known Network Access settings:",
+        "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
         cx
     ));
     assert!(reads("Last known address: 192.168.1.20:9231.", cx));
@@ -880,7 +886,7 @@ fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut Tes
 
     assert!(access_on(&window, cx));
     assert!(reads(
-        "SpaceTerm can't reach This Computer. Last known Network Access settings:",
+        "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
         cx
     ));
 }
@@ -1078,7 +1084,10 @@ fn a_removal_spaceterm_cant_record_keeps_the_device_and_says_why(cx: &mut TestAp
         open(&format!("{DEVICE_SELECTOR}-0-remove"), cx),
         "the device stays removable rather than waiting on a removal nobody records"
     );
-    assert!(reads("SpaceTerm can't reach \"studio\". Try again.", cx));
+    assert!(reads(
+        "SpaceTerm can\u{2019}t reach \u{201C}studio\u{201D}. Try again.",
+        cx
+    ));
 }
 
 #[gpui::test]
@@ -1109,7 +1118,10 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
     // The offline server's first revocation attempt fails, which leaves the unpair unconfirmed
     // until the person retries it.
     settle(cx, |cx| {
-        reads("Unpair from studio isn't confirmed. Choose Retry.", cx)
+        reads(
+            "Unpair from studio isn\u{2019}t confirmed. Choose Try Again.",
+            cx,
+        )
     });
 }
 

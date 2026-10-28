@@ -525,7 +525,7 @@ fn accessible_label(status: &RepositoryStatus, now: Instant) -> String {
         let last_known = format!("Last known {}.", age_text(as_of, now));
         label.push(' ');
         if status.read_failure.is_some() {
-            label.push_str(&format!("Couldn't refresh. {last_known}"));
+            label.push_str(&format!("Couldn\u{2019}t refresh. {last_known}"));
         } else {
             label.push_str(&last_known);
         }
@@ -536,14 +536,17 @@ fn accessible_label(status: &RepositoryStatus, now: Instant) -> String {
 fn footer(status: &RepositoryStatus, now: Instant) -> String {
     match status.freshness {
         Freshness::LastKnown { as_of } if status.read_failure.is_some() => {
-            format!("Couldn't refresh. Last known {}.", age_text(as_of, now))
+            format!(
+                "Couldn\u{2019}t refresh. Last known {}.",
+                age_text(as_of, now)
+            )
         }
         Freshness::LastKnown { as_of } => format!("Last known {}", age_text(as_of, now)),
         Freshness::Current if status.changes == ChangeState::Counting => {
             "Counting changes…".to_owned()
         }
         Freshness::Current if matches!(status.changes, ChangeState::Unavailable(_)) => {
-            "Couldn't count changes".to_owned()
+            "Couldn\u{2019}t count changes".to_owned()
         }
         Freshness::Current => format!("Updated {}", age_text(status.read_at, now)),
     }
@@ -911,7 +914,7 @@ mod tests {
         assert_eq!(
             caption(repository, now).accessible_label,
             "Branch main, rebasing, step 3 of 7. \
-             Couldn't refresh. Last known just now."
+             Couldn\u{2019}t refresh. Last known just now."
         );
 
         let detached = status(
@@ -1109,7 +1112,7 @@ mod tests {
         failed.read_failure = Some(RepositoryReadError::TimedOut);
         assert_eq!(
             footer(failed.clone()),
-            "Couldn't refresh. Last known 3 minutes ago."
+            "Couldn\u{2019}t refresh. Last known 3 minutes ago."
         );
         failed.read_failure = None;
         assert_eq!(footer(failed.clone()), "Last known 3 minutes ago");
@@ -1140,7 +1143,7 @@ mod tests {
         assert!(popover.pull_request.is_some());
         assert!(popover.upstream.is_some());
         assert!(popover.changes.is_none());
-        assert_eq!(popover.footer, "Couldn't count changes");
+        assert_eq!(popover.footer, "Couldn\u{2019}t count changes");
         assert!(!popover.dimmed);
     }
 

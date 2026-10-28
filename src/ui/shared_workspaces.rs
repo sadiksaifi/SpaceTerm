@@ -125,6 +125,9 @@ mod development {
         fn worktree_writes(&self) -> bool {
             self.snapshot().worktree_writes
         }
+
+        /// Reconnects now, rather than after the reconnect delay, while the connection is down.
+        fn retry(&self) {}
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
@@ -146,6 +149,10 @@ mod development {
 
         fn subscribe(&self) -> async_channel::Receiver<()> {
             Self::subscribe(self)
+        }
+
+        fn retry(&self) {
+            Self::retry(self);
         }
     }
 
@@ -206,6 +213,11 @@ mod development {
                 )),
                 subscribers: Rc::default(),
             }
+        }
+
+        /// Asks the transport to reconnect now.
+        pub(crate) fn retry(&self) {
+            self.transport().retry();
         }
 
         /// The transport this source submits to now.
@@ -582,8 +594,8 @@ mod development {
 
         pub(crate) const fn title(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Couldn't Restore Workspaces",
-                Self::Write => "Couldn't Confirm Saved Changes",
+                Self::Read | Self::UnsafeStorage => "Couldn\u{2019}t Restore Workspaces",
+                Self::Write => "Couldn\u{2019}t Confirm Saved Changes",
             }
         }
 
@@ -597,10 +609,10 @@ mod development {
         pub(crate) const fn detail(self) -> &'static str {
             match self {
                 Self::Read => {
-                    "SpaceTerm couldn't read your saved Workspace arrangement. Quit and reopen SpaceTerm to try again."
+                    "SpaceTerm couldn\u{2019}t read your saved Workspace arrangement. Quit and reopen SpaceTerm to try again."
                 }
                 Self::UnsafeStorage => {
-                    "SpaceTerm couldn't open your saved Workspace arrangement safely. Your saved arrangement is unchanged."
+                    "SpaceTerm couldn\u{2019}t open your saved Workspace arrangement safely. Your saved arrangement is unchanged."
                 }
                 Self::Write => {
                     "Quit and reopen SpaceTerm before you rearrange Workspaces again. Your Workspaces keep running."
@@ -1352,6 +1364,7 @@ mod development {
         presentation: Option<Inventory>,
         connected: bool,
         connection_error: Option<spaceterm_server::ServerError>,
+        failed_attempts: u64,
         pending: bool,
         pending_operation: Option<Mutation>,
         /// The sequence of the last outcome this client presented, so one answer is read once.
@@ -1423,6 +1436,7 @@ mod development {
                 presentation: None,
                 connected: false,
                 connection_error: None,
+                failed_attempts: 0,
                 pending: false,
                 pending_operation: None,
                 consumed: None,
@@ -1951,6 +1965,18 @@ mod development {
                 target,
                 scope,
                 workspace: workspace.name.clone(),
+                tabs: workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| {
+                        tab.panes.iter().any(|pane| {
+                            confirmation
+                                .panes
+                                .iter()
+                                .any(|confirmed| confirmed.id == pane.id)
+                        })
+                    })
+                    .count(),
                 confirmation,
                 controls: inventory.close.as_ref().map(|live| live.controls.clone()),
             })
@@ -2091,6 +2117,16 @@ mod development {
             self.connection_error
         }
 
+        /// How many connection attempts have failed, as the connection last published.
+        pub(crate) const fn failed_attempts(&self) -> u64 {
+            self.failed_attempts
+        }
+
+        /// Asks the server connection to reconnect now instead of after its delay.
+        pub(crate) fn retry_connection(&self) {
+            self.edits.retry();
+        }
+
         /// Wakes now, after each change the server connection publishes, and after each edit
         /// this window queues.
         pub(crate) fn subscribe(&self) -> SharedEditNotifications {
@@ -2180,8 +2216,11 @@ mod development {
             }
             self.pending_operation
                 .clone_from(&snapshot.pending_operation);
-            if self.connection_error != snapshot.error {
+            if self.connection_error != snapshot.error
+                || self.failed_attempts != snapshot.failed_attempts
+            {
                 self.connection_error = snapshot.error;
+                self.failed_attempts = snapshot.failed_attempts;
                 poll.changed = true;
             }
             if self.connected != snapshot.connected || self.pending != snapshot.pending {
@@ -2523,6 +2562,8 @@ mod development {
         confirmation: ServerCloseConfirmation,
         controls: Option<Vec<ConfirmedControl>>,
         scope: SharedCloseScope,
+        /// The Tabs that hold the reviewed Panes.
+        tabs: usize,
         /// The Workspace's name as the server published it.
         workspace: String,
     }
@@ -2582,7 +2623,7 @@ mod development {
                 SharedCloseScope::Tab => "Close Tab?".to_owned(),
                 SharedCloseScope::Worktree => "Close Tabs?".to_owned(),
                 SharedCloseScope::Workspace => {
-                    format!("Kill Workspace \"{}\"?", self.workspace)
+                    format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
                 }
             }
         }
@@ -2599,30 +2640,100 @@ mod development {
         /// What closes, what ends, and for whom. Every client loses these Panes and Sessions,
         /// including a client that controls one of the Panes.
         pub(crate) fn message(&self) -> String {
-            let sessions = match self.sessions() {
-                0 => String::new(),
-                1 => "This ends 1 Terminal Session for every client.".to_owned(),
-                count => format!("This ends {count} Terminal Sessions for every client."),
+            let sessions = self.sessions();
+            let ends = match sessions {
+                0 => None,
+                1 => Some("1 Terminal Session".to_owned()),
+                count => Some(format!("{count} Terminal Sessions")),
             };
-            if self.scope == SharedCloseScope::Workspace {
-                if sessions.is_empty() {
-                    "This can't be undone.".to_owned()
-                } else {
-                    format!("{sessions} This can't be undone.")
+            let stops = if sessions == 1 { "its" } else { "their" };
+            match self.target {
+                ServerCloseTarget::Workspace { .. } => {
+                    let tabs = match self.tabs {
+                        1 => "1 Tab".to_owned(),
+                        count => format!("{count} Tabs"),
+                    };
+                    match ends {
+                        Some(ends) => format!(
+                            "Its {tabs} and {ends} end for every client. This can\u{2019}t be undone."
+                        ),
+                        None => format!(
+                            "Its {tabs} close for every client. This can\u{2019}t be undone."
+                        ),
+                    }
                 }
-            } else {
-                sessions
+                ServerCloseTarget::Pane { .. }
+                | ServerCloseTarget::Tab { .. }
+                | ServerCloseTarget::Worktree { .. }
+                    if self.confirmation.removes_workspace =>
+                {
+                    let only = match self.target {
+                        ServerCloseTarget::Pane { .. } => "This is the only Pane",
+                        ServerCloseTarget::Worktree { .. } if self.tabs != 1 => {
+                            "These are the only Tabs"
+                        }
+                        _ => "This is the only Tab",
+                    };
+                    let removal = format!(
+                        "{only} in \u{201C}{}\u{201D}, so the Workspace is removed for every client.",
+                        self.workspace
+                    );
+                    match ends {
+                        Some(ends) => format!("{removal} This ends {ends}."),
+                        None => removal,
+                    }
+                }
+                ServerCloseTarget::Pane { .. } if self.confirmation.removes_tab => {
+                    let removal =
+                        "This is the only Pane in its Tab, so the Tab closes for every client.";
+                    match ends {
+                        Some(ends) => format!(
+                            "{removal} This ends {ends} and stops {stops} running commands."
+                        ),
+                        None => format!("{removal} No Terminal Session is running in it."),
+                    }
+                }
+                ServerCloseTarget::Pane { .. } => match ends {
+                    Some(ends) => format!(
+                        "This ends {ends} and stops {stops} running commands for every client."
+                    ),
+                    None => {
+                        "The Pane closes for every client. No Terminal Session is running in it."
+                            .to_owned()
+                    }
+                },
+                ServerCloseTarget::Tab { .. } => {
+                    let removal = match self.confirmation.panes.len() {
+                        1 => "The Tab and its Pane close for every client.".to_owned(),
+                        count => format!("The Tab and its {count} Panes close for every client."),
+                    };
+                    match ends {
+                        Some(ends) => format!(
+                            "{removal} This ends {ends} and stops {stops} running commands."
+                        ),
+                        None => format!("{removal} No Terminal Session is running in it."),
+                    }
+                }
+                ServerCloseTarget::Worktree { .. } => ends
+                    .map(|ends| format!("This ends {ends} for every client."))
+                    .unwrap_or_default(),
             }
         }
 
-        /// What a removed Workspace leaves behind, when the close removes one.
+        /// What the close keeps, and whether it can be undone.
         pub(crate) fn detail(&self) -> Option<&'static str> {
-            if self.scope == SharedCloseScope::Worktree {
-                return Some("The Worktree, its files, and its branch are kept.");
+            match self.target {
+                ServerCloseTarget::Worktree { .. } if !self.confirmation.removes_workspace => {
+                    Some("The Worktree, its files, and its branch are kept.")
+                }
+                ServerCloseTarget::Workspace { .. } => {
+                    Some("Repository files and Worktrees stay on disk.")
+                }
+                _ if self.confirmation.removes_workspace => Some(
+                    "Repository files and Worktrees stay on disk. This can\u{2019}t be undone.",
+                ),
+                _ => None,
             }
-            self.confirmation.removes_workspace.then_some(
-                "Repository files and Worktree directories stay on disk. This Workspace cannot be restored.",
-            )
         }
 
         /// The title of the notice that replaces a confirmation another client made stale.
@@ -2646,10 +2757,10 @@ mod development {
     /// after the confirmation opened.
     pub(crate) const fn shared_close_changed_title(target: ServerCloseTarget) -> &'static str {
         match target {
-            ServerCloseTarget::Pane { .. } => "Pane Changed",
-            ServerCloseTarget::Tab { .. } => "Tab Changed",
-            ServerCloseTarget::Worktree { .. } => "Tabs Changed",
-            ServerCloseTarget::Workspace { .. } => "Workspace Changed",
+            ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
+            ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
+            ServerCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
+            ServerCloseTarget::Workspace { .. } => "Workspace Changed on Another Client",
         }
     }
 
@@ -3005,6 +3116,8 @@ mod development {
             submitted: Mutex<Vec<Mutation>>,
             /// The next sequence a settled answer carries.
             sequence: Mutex<u64>,
+            /// How many times a person asked to reconnect now.
+            retries: std::sync::atomic::AtomicUsize,
             /// Hints readers after each change, as the real client does.
             changes: crate::terminal::changes::Changes,
         }
@@ -3022,11 +3135,26 @@ mod development {
                         rejected: None,
                         outcome: None,
                         error: None,
+                        failed_attempts: 0,
                     }),
                     submitted: Mutex::new(Vec::new()),
                     sequence: Mutex::new(1),
+                    retries: std::sync::atomic::AtomicUsize::new(0),
                     changes: crate::terminal::changes::Changes::default(),
                 }
+            }
+
+            pub(crate) fn retries(&self) -> usize {
+                self.retries.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            /// One connection attempt failed with `error`, as the real client publishes it.
+            pub(crate) fn fail_attempt(&self, error: spaceterm_server::ServerError) {
+                self.publish(|snapshot| {
+                    snapshot.connected = false;
+                    snapshot.error = Some(error);
+                    snapshot.failed_attempts += 1;
+                });
             }
 
             /// Changes the snapshot, then hints its readers.
@@ -3122,6 +3250,11 @@ mod development {
 
             fn subscribe(&self) -> async_channel::Receiver<()> {
                 self.changes.subscribe()
+            }
+
+            fn retry(&self) {
+                self.retries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }

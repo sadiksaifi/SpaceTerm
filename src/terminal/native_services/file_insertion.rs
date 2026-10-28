@@ -43,11 +43,11 @@ pub(crate) fn prepare_file_insertion(
     let mut text = String::new();
     for path in paths {
         if !policy.paths.is_absolute(path) {
-            return Err("Couldn't drop these files.");
+            return Err("Couldn\u{2019}t drop these files.");
         }
-        let value = path.to_str().ok_or("Couldn't drop these files.")?;
+        let value = path.to_str().ok_or("Couldn\u{2019}t drop these files.")?;
         if value.as_bytes().contains(&0) {
-            return Err("Couldn't drop these files.");
+            return Err("Couldn\u{2019}t drop these files.");
         }
         let ShellInsertionDialect::Posix = policy.shell;
         let quotes = value.bytes().filter(|byte| *byte == b'\'').count();
