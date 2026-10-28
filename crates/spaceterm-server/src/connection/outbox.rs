@@ -24,6 +24,7 @@ use crate::protocol::{
     ReplyBody, RequestId, ServerMessage, limits,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -95,6 +96,8 @@ pub struct Outbox {
 struct Shared {
     state: Mutex<State>,
     wake: Arc<dyn Wake>,
+    /// Set by [`Outbox::request_publication`] until the I/O thread takes it.
+    publication: AtomicBool,
 }
 
 type Frames = Vec<Vec<u8>>;
@@ -157,6 +160,7 @@ impl Outbox {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
                 wake,
+                publication: AtomicBool::new(false),
             }),
         }
     }
@@ -280,6 +284,21 @@ impl Outbox {
             state.closing = true;
             Ok(())
         })
+    }
+
+    /// Asks the connection's I/O thread to call
+    /// [`super::service::PaneService::publish`] before it next writes, for example because a
+    /// Terminal Session bound to one of its channels has something new. It takes no lock, so any
+    /// thread may call it, also under the `PaneService` lock.
+    pub fn request_publication(&self) {
+        self.shared.publication.store(true, Ordering::Release);
+        self.shared.wake.wake();
+    }
+
+    /// Whether publication was requested since the last call. Only the connection's I/O thread
+    /// calls this, before it publishes, so a request made while it publishes is never lost.
+    pub fn take_publication(&self) -> bool {
+        self.shared.publication.swap(false, Ordering::AcqRel)
     }
 
     /// Whether a request this connection began still waits for its reply, for example from the

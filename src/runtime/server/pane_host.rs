@@ -142,7 +142,11 @@ impl DevelopmentPaneHost {
                 appearance(style, 1).map_err(|_| Refusal::Failed)?,
             )
             .map_err(|_| Refusal::Failed)?;
-        let subscription = runtime.subscribe_notifying(self.notifier.clone());
+        let subscription = runtime.subscribe_notifying(
+            self.notifier
+                .as_ref()
+                .map(|notifier| notifier(lease.session)),
+        );
         runtime.route_client_effects();
         self.pane = Some(OwnedPane {
             device: Some(device),
@@ -167,6 +171,7 @@ impl DevelopmentPaneHost {
             size,
             effects: NativeEffects::default(),
             accessibility: accessibility::Accessibility::default(),
+            metadata_revision: 0,
         });
         self.dormant = None;
         Ok(lease)

@@ -1,11 +1,12 @@
 //! Pushes each claimed Pane's presentation and Pane events to the channel bound to its lease.
 //!
 //! A Terminal Session calls its subscription's notifier when it has something new: a screen,
-//! an exit, a client effect, a line state or an accessibility model. The notifier rings the
-//! host's wake, and the host's next tick lets [`super::dispatch::Served`] observe each bound
-//! channel's Pane under the `PaneService` lock. A screen is captured there as an `Arc` and
-//! encoded later on the connection's I/O thread by the channel's own [`ScreenEncoder`]. Nothing
-//! here polls.
+//! an exit, a client effect, a line state or an accessibility model. The notifier asks each
+//! connection with a channel bound to that session to publish, and that connection's I/O thread
+//! lets [`super::dispatch::Served`] observe its channels' Panes under the `PaneService` lock. A
+//! session no channel is bound to rings the host's wake instead, and the host's next tick
+//! observes every bound channel. A screen is captured as an `Arc` and encoded later on the
+//! connection's I/O thread by the channel's own [`ScreenEncoder`]. Nothing here polls.
 use super::screen_encoder::{ScreenCapture, ScreenEncoder};
 use super::*;
 use spaceterm_server::connection::outbox::{
@@ -282,6 +283,20 @@ impl DevelopmentPaneHost {
             };
         }
         Observed::Live(observation)
+    }
+
+    /// Whether the Pane's Terminal Metadata changed since the last call. A presented Terminal
+    /// Session carries such a change with its next screen, which only a connection observes, so
+    /// the host learns of it here.
+    pub(super) fn metadata_changed(&mut self) -> bool {
+        let Some(pane) = &mut self.pane else {
+            return false;
+        };
+        let revision = pane
+            .runtime
+            .metadata_snapshot()
+            .map_or(0, |metadata| metadata.revision);
+        std::mem::replace(&mut pane.metadata_revision, revision) != revision
     }
 
     /// Applies a client `View` to the Pane `lease` controls.

@@ -3,8 +3,8 @@
 //! The thread waits in `poll` on the carrier's descriptors and on a wake pipe that other threads
 //! ring after they queue work. It never sleeps or polls on a timer: its only timeout is the next
 //! health deadline. Each turn follows the rules in [`super::carrier`]: receive until the carrier
-//! has nothing, offer frames in priority order until it is full, flush, record the write attempt,
-//! then check health.
+//! has nothing, publish when the outbox asks for it, offer frames in priority order until it is
+//! full, flush, record the write attempt, then check health.
 use super::Wake;
 use super::carrier::{Carrier, CarrierError, Offer, Priority};
 use super::link::{LinkError, LinkSink, ServerLink, WeakLink};
@@ -400,6 +400,14 @@ pub fn serve(
                 }
                 Err(None) => break,
             }
+        }
+        // A Terminal Session bound to this connection has something new. Publishing here, under
+        // the `PaneService` lock, puts its frame in this turn's writes without the host's tick.
+        if receiving && outbox.take_publication() && !outbox.is_closing() {
+            service
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .publish(connection.peer());
         }
         let written = match write(carrier.as_mut(), &mut held, |lowest| {
             outbox.next_frame_within(lowest)

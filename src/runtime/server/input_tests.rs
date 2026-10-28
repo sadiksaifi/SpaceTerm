@@ -99,7 +99,10 @@ fn await_line(
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        served.tick(Instant::now());
+        // As the connection's I/O thread does when a Terminal Session asks it to publish.
+        if outbox.take_publication() {
+            served.publish(&PEER);
+        }
         received.drain(outbox);
         if received
             .rows
@@ -133,7 +136,7 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         .unwrap()
         .id;
     let mut served = Served::new(shared);
-    // Terminal Sessions ring this wake; a tick publishes only after a ring.
+    // Terminal Sessions ask the connection to publish.
     served.ticker(Arc::new(|| {}));
     let outbox = Outbox::new(Arc::new(|| {}));
     served.admitted(&PEER, "Test".into(), outbox.clone());

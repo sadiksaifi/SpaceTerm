@@ -54,6 +54,8 @@ pub struct SharedWorkspaceHost {
     /// A Terminal Session changed what the inventory presents, such as a title, since the last
     /// tick. Such ticks synchronize and push at most once per [`PRESENTATION_INTERVAL`].
     rung: bool,
+    /// An observation drained an exit or new Terminal Metadata since the host was last asked.
+    observed_change: bool,
     /// When a tick that only presents may next synchronize, and whether one waits for it.
     paced: (Option<Instant>, bool),
     /// Why the last synchronization failed. Requests are refused until one succeeds.
@@ -108,6 +110,7 @@ impl SharedWorkspaceHost {
             ticker: None,
             armed: None,
             rung: false,
+            observed_change: false,
             paced: (None, false),
             blocked: None,
             organization_prepared: false,
@@ -1108,7 +1111,7 @@ impl HostCommands for SharedWorkspaceHost {
     fn lease_live(&self, lease: &Lease) -> bool {
         self.panes.values().any(|host| host.lease_live(lease))
     }
-    fn set_notifier(&mut self, notifier: crate::terminal::session::SubscriptionNotifier) {
+    fn set_notifier(&mut self, notifier: super::dispatch::SessionNotifiers) {
         for host in self.panes.values_mut() {
             host.notifier = Some(Arc::clone(&notifier));
         }
@@ -1142,10 +1145,17 @@ impl HostCommands for SharedWorkspaceHost {
             return super::publish::Observed::Gone { last: None, event };
         };
         let observed = host.observe(device, lease);
-        if matches!(observed, super::publish::Observed::Gone { .. }) {
+        let presented = host.metadata_changed();
+        let gone = matches!(observed, super::publish::Observed::Gone { .. });
+        if gone {
             let _ = self.synchronize();
         }
+        // The host's own tick pushes the inventory that presents the change.
+        self.observed_change |= gone || presented;
         observed
+    }
+    fn take_observed_change(&mut self) -> bool {
+        std::mem::take(&mut self.observed_change)
     }
     fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8) {
         for host in self.panes.values_mut() {

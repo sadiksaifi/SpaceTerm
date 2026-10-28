@@ -1622,10 +1622,13 @@ fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_send
     use spaceterm_server::connection::outbox::Outbox;
     use spaceterm_server::protocol::{RawFrame, frame::Assembler};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let counter = |count: &Arc<AtomicUsize>| -> Arc<dyn Fn() + Send + Sync> {
+    let counter = |count: &Arc<AtomicUsize>| -> super::dispatch::SessionNotifiers {
         let count = Arc::clone(count);
-        Arc::new(move || {
-            count.fetch_add(1, Ordering::SeqCst);
+        Arc::new(move |_| {
+            let count = Arc::clone(&count);
+            Arc::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
         })
     };
     let sent = |outbox: &Outbox| {
