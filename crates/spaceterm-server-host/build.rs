@@ -1,7 +1,7 @@
 #[path = "../../build/identity.rs"]
 mod identity;
 
-const PROTOCOL_MAJOR: u16 = 2;
+const PROTOCOL_MAJOR: u16 = 3;
 const CAPABILITIES: &[&str] = &["workspace_policy"];
 
 fn main() {

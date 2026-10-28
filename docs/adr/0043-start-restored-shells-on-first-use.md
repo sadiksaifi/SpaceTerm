@@ -6,7 +6,7 @@ The first Controlling Client supplies the initial terminal dimensions. The serve
 
 [ADR 0044](0044-restore-panes-in-their-last-confirmed-directory.md) defines directory selection and recovery for restored shells.
 
-[ADR 0048](0048-end-all-sessions-from-the-selected-servers-settings.md) applies first-use startup after End All Sessions, requiring an explicit selection or Tab-opening action before an ended Session starts again.
+First use does not apply to a Pane whose Terminal Session ended in the running server. That Pane waits for Start Session under [ADR 0053](0053-keep-a-pane-whose-shell-exits-unsuccessfully.md).
 
 Reconnecting to a running server reuses its existing Terminal Sessions. Once a restored shell starts, it has the independent server-owned lifetime in [ADR 0030](0030-start-servers-at-boot-independently-of-clients.md).
 

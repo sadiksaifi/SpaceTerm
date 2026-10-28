@@ -119,7 +119,7 @@ class LinuxPrefixTests(unittest.TestCase):
                 "target": target,
                 "commit": "a" * 40,
                 "version": "dev.aaaaaaaaaaaa",
-                "protocol_major": 2,
+                "protocol_major": 3,
                 "capabilities": ["workspace_policy"],
             }
             if target == "x86_64-unknown-linux-gnu":

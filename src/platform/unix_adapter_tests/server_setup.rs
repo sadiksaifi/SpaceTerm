@@ -1327,7 +1327,7 @@ fn native_server_setup_acceptance() {
         !server.is_account_local(),
         "setup returned local file authority"
     );
-    assert_eq!(server.refresh().unwrap().protocol_major, 2);
+    assert_eq!(server.refresh().unwrap().protocol_major, 3);
     let spawns = fixture.adapter.seal();
     let counts = backend.process_counts();
     assert_eq!(counts.active(), 0);
@@ -1379,7 +1379,7 @@ fn native_server_setup_acceptance() {
         relaunched.status(&route) == Some(DirectRouteStatus::Connected)
     });
     let server = relaunched.server(&route).unwrap();
-    assert_eq!(server.refresh().unwrap().protocol_major, 2);
+    assert_eq!(server.refresh().unwrap().protocol_major, 3);
     assert!(
         server
             .paired_devices()
@@ -1499,7 +1499,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                     cycle,
                                     "refresh-protocol",
                                     started,
-                                    if status.protocol_major == 2 {
+                                    if status.protocol_major == 3 {
                                         Ok(())
                                     } else {
                                         Err(ServerError::Protocol)
@@ -1522,7 +1522,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                                 .map_err(|_| ServerError::Protocol),
                         )?;
-                        // Protocol major 2 implies every capability, so a request that changes
+                        // Protocol major 3 implies every capability, so a request that changes
                         // nothing checks the admitted connection.
                         let reply = observed(
                             cycle,

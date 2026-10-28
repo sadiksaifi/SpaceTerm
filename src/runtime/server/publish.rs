@@ -235,8 +235,9 @@ impl OwnedPane {
 }
 
 impl DevelopmentPaneHost {
-    /// What the Pane holds for the channel bound to `lease`, which `device` claimed. An ended
-    /// shell yields its final screen once, then the Pane retires.
+    /// What the Pane holds for the channel bound to `lease`, which `device` claimed. A shell that
+    /// exited with code zero yields its final screen once, then the Pane retires. Any other exit
+    /// keeps the Pane, which presents Session Ended instead of that screen.
     pub(super) fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed {
         let Some(pane) = &mut self.pane else {
             let event = if self.failed_directory_session == Some((*lease).into()) {
@@ -273,12 +274,16 @@ impl DevelopmentPaneHost {
         }
         if pane.ended {
             let event = match self.retire_exited() {
+                // The kept Pane presents Session Ended, so the ended shell's output stays here.
+                Ok(()) if self.dormant.is_some() => PaneEvent::SessionEnded,
                 Ok(()) => PaneEvent::Ended,
                 Err(_) => PaneEvent::Failed,
             };
             self.pane = None;
             return Observed::Gone {
-                last: observation.screen,
+                last: observation
+                    .screen
+                    .filter(|_| matches!(event, PaneEvent::Ended)),
                 event,
             };
         }

@@ -41,7 +41,7 @@ MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
 # The SpaceTerm Protocol major that `crates/spaceterm-server-host/build.rs` stamps into server builds.
-PROTOCOL_MAJOR = 2
+PROTOCOL_MAJOR = 3
 BUILD_KEYS = {"schema", "identity", "target", "commit", "version", "protocol_major", "capabilities"}
 
 

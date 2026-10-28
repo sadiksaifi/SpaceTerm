@@ -8,7 +8,7 @@
 use crate::server_connection::ServerError;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, SharedString, Stateful, div};
-use spaceterm_server::pane::control::Controller;
+use spaceterm_server::pane::{SessionEnd, control::Controller};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, FloatingRole, Icon, IconName, ProgressRing, ProgressSize,
     ProgressState,
@@ -34,41 +34,23 @@ pub(crate) const UNCONTROLLED_TITLE: &str = "No Client Controls This Pane";
 /// The detail wherever this window may take over a Pane no other client holds.
 pub(crate) const TAKEOVER_THIS_PANE_DETAIL: &str = "Take Over to type and resize this Pane.";
 pub(crate) const TAKEOVER_FAILED_DETAIL: &str = "Take Over is available once SpaceTerm connects.";
-/// The Takeover Screen's detail once End All Sessions ended the Pane's shell. The control grant
-/// outlives the Session, so the title still names who controls the Pane.
-pub(crate) const TAKEOVER_ENDED_DETAIL: &str =
-    "End All Sessions ended this Pane\u{2019}s shell. Take Over, then choose Start Session.";
 /// The Takeover Screen's title and detail while it offers Take Over, naming the Controlling Client
 /// the server reported. `None` means the server has not said, so the screen claims only what this
-/// window knows. `dormant` means End All Sessions ended the Pane's shell, so the detail never
-/// says the shell keeps running.
-pub(crate) fn takeover_copy(
-    controller: Option<&Controller>,
-    dormant: bool,
-) -> (SharedString, &'static str) {
-    let detail = |running: &'static str, ended: &'static str| if dormant { ended } else { running };
+/// window knows.
+pub(crate) fn takeover_copy(controller: Option<&Controller>) -> (SharedString, &'static str) {
     match controller {
         Some(Controller::Client {
             name,
             this_client: false,
         }) => (
             format!("Controlled by {}", name.as_str()).into(),
-            detail(TAKEOVER_DETAIL, TAKEOVER_ENDED_DETAIL),
+            TAKEOVER_DETAIL,
         ),
         Some(Controller::Client {
             this_client: true, ..
-        }) => (
-            TAKEOVER_TITLE.into(),
-            detail(TAKEOVER_THIS_PANE_DETAIL, TAKEOVER_ENDED_DETAIL),
-        ),
-        Some(Controller::Nobody) => (
-            UNCONTROLLED_TITLE.into(),
-            detail(TAKEOVER_THIS_PANE_DETAIL, TAKEOVER_ENDED_DETAIL),
-        ),
-        None => (
-            TAKEOVER_TITLE.into(),
-            detail(TAKEOVER_DETAIL, TAKEOVER_ENDED_DETAIL),
-        ),
+        }) => (TAKEOVER_TITLE.into(), TAKEOVER_THIS_PANE_DETAIL),
+        Some(Controller::Nobody) => (UNCONTROLLED_TITLE.into(), TAKEOVER_THIS_PANE_DETAIL),
+        None => (TAKEOVER_TITLE.into(), TAKEOVER_DETAIL),
     }
 }
 /// The notice a Pane of a server this client is not connected to shows. Only connecting the
@@ -85,17 +67,28 @@ pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 /// control stay, so only an explicit start brings a shell back.
 pub(crate) const ENDED_DETAIL: &str =
     "End All Sessions ended this Pane\u{2019}s Terminal Session and cleared its output.";
+/// A signal ended the shell. The server keeps no signal name, because it is native text.
+pub(crate) const SIGNALED_DETAIL: &str = "A signal ended the shell.";
 /// The glyph of a Pane waiting for an explicit start: a Terminal Session that isn't running.
 /// It stays muted, because nothing went wrong.
 pub(crate) const DORMANT_GLYPH: IconName = IconName::Terminal;
 
-/// The copy and selectors of a Pane waiting for an explicit start. End All Sessions and a server
-/// restart both leave a Pane there, and each screen names its own cause and action.
+/// The Session Ended screen's detail: what ended the Session, in bounded facts only.
+pub(crate) fn session_end_detail(end: SessionEnd) -> SharedString {
+    match end {
+        SessionEnd::EndAllSessions => ENDED_DETAIL.into(),
+        SessionEnd::Exited { code } => format!("The shell exited with code {code}.").into(),
+        SessionEnd::Signaled => SIGNALED_DETAIL.into(),
+    }
+}
+
+/// The copy and selectors of a Pane waiting for an explicit start. A Session that ended and a
+/// server restart both leave a Pane there, and each screen names its own cause and action.
 pub(crate) struct DormantCopy {
     /// Names the screen's selector.
     pub(crate) screen: &'static str,
     pub(crate) title: &'static str,
-    pub(crate) detail: &'static str,
+    pub(crate) detail: SharedString,
     /// Names the action's selector, and its status slot's.
     pub(crate) action: &'static str,
     pub(crate) label: &'static str,
@@ -105,13 +98,13 @@ pub(crate) struct DormantCopy {
 }
 
 impl DormantCopy {
-    /// `ended` means End All Sessions ended the Session; otherwise the server restarted.
-    pub(crate) const fn of(ended: bool) -> Self {
-        if ended {
+    /// `ended` says why the Session ended; `None` means the server restarted.
+    pub(crate) fn of(ended: Option<SessionEnd>) -> Self {
+        if let Some(end) = ended {
             Self {
                 screen: "session-ended",
                 title: SESSION_ENDED_TITLE,
-                detail: ENDED_DETAIL,
+                detail: session_end_detail(end),
                 action: "start-session",
                 label: "Start Session",
                 description: START_DESCRIPTION,
@@ -122,7 +115,7 @@ impl DormantCopy {
             Self {
                 screen: "restored",
                 title: RESTORED_TITLE,
-                detail: RESTORED_DETAIL,
+                detail: RESTORED_DETAIL.into(),
                 action: "start-shell",
                 label: "Start Session",
                 description: START_DESCRIPTION,
@@ -191,8 +184,8 @@ fn failure_copy(error: ServerError) -> (&'static str, SharedString) {
 pub(crate) enum Dormant {
     /// The Pane waits for a person to start a fresh shell.
     Restored,
-    /// End All Sessions ended the Pane's Session. It waits for a person to start a fresh one.
-    Ended,
+    /// The Pane's Session ended for this reason. It waits for a person to start a fresh one.
+    Ended(SessionEnd),
     /// The server refused to start a shell, because the Pane's directory is unavailable.
     DirectoryUnavailable,
 }
@@ -830,7 +823,7 @@ pub(crate) use connection::{
 mod connection {
     use std::sync::Arc;
 
-    use super::{Controller, Dormant, ScreenAnnouncements};
+    use super::{Controller, Dormant, ScreenAnnouncements, SessionEnd};
     use crate::server_connection::ServerError;
     use crate::terminal::server_session::{DevelopmentPaneState, DevelopmentPaneStatus};
 
@@ -859,10 +852,10 @@ mod connection {
         /// so a view reads the connection only then.
         fn observe(&self, hint: async_channel::Sender<()>);
 
-        /// Whether End All Sessions ended the Pane's shell and nobody has started a new one, as
-        /// the server last said, including while another client controls the Pane.
-        fn session_dormant(&self) -> bool {
-            false
+        /// Why the Pane's Session ended while nobody has started a new one, as the server last
+        /// said, including while the control grant belongs to another client.
+        fn session_end(&self) -> Option<SessionEnd> {
+            None
         }
 
         /// Identifies the connection that last supplied an authoritative screen. It changes when a
@@ -925,8 +918,8 @@ mod connection {
             Self::observe(self, hint);
         }
 
-        fn session_dormant(&self) -> bool {
-            Self::session_dormant(self)
+        fn session_end(&self) -> Option<SessionEnd> {
+            Self::session_end(self)
         }
 
         fn connection_generation(&self) -> u64 {
@@ -986,16 +979,15 @@ mod connection {
             offered: bool,
             ended: bool,
             controller: Option<Controller>,
-            /// End All Sessions ended the shell, so nothing here says it keeps running.
-            dormant: bool,
         },
-        /// The Pane kept its place and lost its shell: the server restarted, or `ended` says
-        /// End All Sessions ended it. Either way only an explicit start brings a shell back.
+        /// The Pane kept its place and lost its shell: the server restarted, or `ended` says why
+        /// its Session ended. Either way only an explicit start brings a shell back. Every client
+        /// sees an ended Session the same way, whichever client holds its control grant.
         Restored {
             starting: bool,
             unconfirmed: bool,
             offered: bool,
-            ended: bool,
+            ended: Option<SessionEnd>,
         },
         /// The server refused to start a shell because the Pane's directory is unavailable.
         /// Repairing it belongs to directory repair, which is not available yet.
@@ -1028,7 +1020,7 @@ mod connection {
         connection: Arc<dyn ServerPaneConnection>,
         status: DevelopmentPaneStatus,
         controller: Option<Controller>,
-        session_dormant: bool,
+        session_end: Option<SessionEnd>,
         generation: u64,
         takeover_shown: bool,
         take_over_unconfirmed: bool,
@@ -1051,7 +1043,7 @@ mod connection {
                 announcements: ScreenAnnouncements::default(),
                 status: connection.status(),
                 controller: connection.controller(),
-                session_dormant: connection.session_dormant(),
+                session_end: connection.session_end(),
                 generation: connection.connection_generation(),
                 connection: Arc::clone(&connection),
                 takeover_shown: false,
@@ -1084,13 +1076,13 @@ mod connection {
             let generation_changed = generation != self.generation;
             let progress = self.connection.directory_progress();
             let controller = self.connection.controller();
-            let session_dormant = self.connection.session_dormant();
+            let session_end = self.connection.session_end();
             let start_unknown = self.connection.start_unconfirmed();
             if status == self.status
                 && !generation_changed
                 && progress == self.directory_progress
                 && controller == self.controller
-                && session_dormant == self.session_dormant
+                && session_end == self.session_end
                 && start_unknown == self.start_unknown
             {
                 return ServerPaneSync::default();
@@ -1107,7 +1099,7 @@ mod connection {
             self.start_unknown = start_unknown;
             self.directory_progress = progress;
             self.controller = controller;
-            self.session_dormant = session_dormant;
+            self.session_end = session_end;
             // Take Over that returns to the Takeover Screen on the same connection generation is
             // unconfirmed: the server may have refused it, or committed it and lost the reply.
             // A new generation means this client held control and another client took it since.
@@ -1127,7 +1119,7 @@ mod connection {
                 && generation_changed
                 && matches!(
                     status,
-                    DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::SessionEnded
+                    DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::SessionEnded(_)
                 )
             {
                 self.start_pending = false;
@@ -1209,7 +1201,7 @@ mod connection {
         fn apply_dormancy(&mut self) -> bool {
             let dormant = match self.status {
                 DevelopmentPaneStatus::Restored => Dormant::Restored,
-                DevelopmentPaneStatus::SessionEnded => Dormant::Ended,
+                DevelopmentPaneStatus::SessionEnded(end) => Dormant::Ended(end),
                 DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable) => {
                     Dormant::DirectoryUnavailable
                 }
@@ -1257,16 +1249,29 @@ mod connection {
                             || self.start_in_flight(),
                         offered: self.can_start_shell(),
                     },
-                    Dormant::Restored | Dormant::Ended => ServerPaneScreen::Restored {
+                    Dormant::Restored | Dormant::Ended(_) => ServerPaneScreen::Restored {
                         starting: self.starting_shell() || self.start_in_flight(),
                         unconfirmed: self.start_unconfirmed,
                         offered: self.can_start_shell(),
-                        ended: dormant == Dormant::Ended,
+                        ended: match dormant {
+                            Dormant::Ended(end) => Some(end),
+                            _ => None,
+                        },
                     },
                 });
             }
             let taking_over = self.status == DevelopmentPaneStatus::TakingOver;
             let offered = self.can_take_over();
+            // Nothing runs to take over in an ended Session, so this client sees the same Session
+            // Ended screen as the one holding its grant, and its Start Session takes over.
+            if let Some(end) = self.ended_elsewhere() {
+                return Some(ServerPaneScreen::Restored {
+                    starting: taking_over,
+                    unconfirmed: self.take_over_unconfirmed,
+                    offered,
+                    ended: Some(end),
+                });
+            }
             self.takeover_shown.then(|| ServerPaneScreen::Takeover {
                 taking_over,
                 unconfirmed: self.take_over_unconfirmed && !self.session_ended(),
@@ -1274,8 +1279,13 @@ mod connection {
                 ended: self.session_ended(),
                 // An interrupted connection cannot say who controls the Pane now.
                 controller: self.controller.clone().filter(|_| offered || taking_over),
-                dormant: self.session_dormant,
             })
+        }
+
+        /// Why the Session ended while another client holds the Pane's control grant.
+        fn ended_elsewhere(&self) -> Option<SessionEnd> {
+            self.session_end
+                .filter(|_| self.takeover_shown && !self.session_ended())
         }
 
         fn starting_shell(&self) -> bool {
@@ -1283,7 +1293,7 @@ mod connection {
                 && matches!(
                     self.status,
                     DevelopmentPaneStatus::Restored
-                        | DevelopmentPaneStatus::SessionEnded
+                        | DevelopmentPaneStatus::SessionEnded(_)
                         | DevelopmentPaneStatus::Connecting
                         | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 )
@@ -1296,11 +1306,14 @@ mod connection {
         }
 
         pub(crate) fn can_start_shell(&self) -> bool {
+            if self.ended_elsewhere().is_some() {
+                return self.can_take_over();
+            }
             !self.start_unknown
                 && matches!(
                     self.status,
                     DevelopmentPaneStatus::Restored
-                        | DevelopmentPaneStatus::SessionEnded
+                        | DevelopmentPaneStatus::SessionEnded(_)
                         | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 )
                 && !self.start_pending
@@ -1335,10 +1348,12 @@ mod connection {
                     // adds only what reconnecting does.
                     SharedString::new_static(if self.unknown_shown {
                         "SpaceTerm checks whether the shell started after reconnecting."
+                    } else if self.ended_elsewhere().is_some()
+                        || matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended(_)))
+                    {
+                        "Start Session is available after reconnection."
                     } else if self.takeover_shown {
                         "Take Over is available after reconnection."
-                    } else if matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended)) {
-                        "Start Session is available after reconnection."
                     } else if self.dormant.is_some() {
                         "No shell is running."
                     } else {
@@ -1390,10 +1405,12 @@ mod connection {
 
         /// What becomes of the Pane once SpaceTerm connects, after it stopped reconnecting.
         fn after_reconnecting(&self) -> &'static str {
-            if self.takeover_shown {
-                "Choose Try Again to reconnect, then Take Over to use this Pane."
-            } else if matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended)) {
+            if self.ended_elsewhere().is_some()
+                || matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended(_)))
+            {
                 "Choose Try Again to reconnect, then Start Session to open a shell."
+            } else if self.takeover_shown {
+                "Choose Try Again to reconnect, then Take Over to use this Pane."
             } else if self.dormant.is_some() {
                 "No shell is running in this Pane. Choose Try Again to reconnect."
             } else {
@@ -1475,6 +1492,9 @@ mod connection {
         }
 
         pub(crate) fn start_shell(&mut self) -> ServerPaneSync {
+            if self.ended_elsewhere().is_some() {
+                return self.take_over();
+            }
             if !self.can_start_shell() {
                 return ServerPaneSync::default();
             }

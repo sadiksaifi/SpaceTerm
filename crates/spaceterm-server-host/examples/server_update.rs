@@ -22,7 +22,7 @@ use support::Claimed;
 
 const IDENTITY: &str = "spaceterm-development";
 /// The SpaceTerm Protocol major of this build and of the signed candidates.
-const MAJOR: u16 = 2;
+const MAJOR: u16 = 3;
 const SIZE: PaneSize = PaneSize {
     columns: 100,
     rows: 30,

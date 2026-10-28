@@ -103,7 +103,7 @@ fn cleanup_exercise(connection: &ServerLink) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("3".into()).parse()?;
     let client = ServerConnection::for_development_client("directory-recovery", major)?;
     require_idle(&client)?;
     client.setup()?;
