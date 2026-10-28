@@ -520,6 +520,84 @@ fn a_failed_read_keeps_following_its_repositorys_git_directories() {
 }
 
 #[test]
+fn a_failed_read_keeps_its_repositorys_count_in_flight() {
+    /// Holds each count until released, and times out the first discovery run once armed.
+    #[derive(Default)]
+    struct HeldCount {
+        armed: AtomicBool,
+        counting: AtomicBool,
+        released: AtomicBool,
+        cancelled: AtomicBool,
+        ended: AtomicBool,
+    }
+    impl RepositoryProgramRunner for HeldCount {
+        fn run(
+            &self,
+            request: &ProgramRequest,
+            stdout: &mut dyn FnMut(&[u8]),
+            cancellation: &CancellationToken,
+        ) -> Result<ProgramExit, ProgramError> {
+            if is_discovery(request) && self.armed.swap(false, Ordering::AcqRel) {
+                return Err(ProgramError::TimedOut);
+            }
+            let count: Vec<std::ffi::OsString> = policy::local_read::COUNT_ARGUMENTS
+                .iter()
+                .map(Into::into)
+                .collect();
+            if request.arguments.ends_with(&count) && !self.released.load(Ordering::Acquire) {
+                self.counting.store(true, Ordering::Release);
+                let until = Instant::now() + HELD;
+                // Cancellation is checked first, so a count cancelled before its release says so.
+                let result = loop {
+                    if cancellation.is_cancelled() {
+                        self.cancelled.store(true, Ordering::Release);
+                        break Err(ProgramError::Cancelled);
+                    }
+                    if self.released.load(Ordering::Acquire) || Instant::now() >= until {
+                        break DeadlineRunner.run(request, stdout, cancellation);
+                    }
+                    std::thread::sleep(PAUSE);
+                };
+                self.ended.store(true, Ordering::Release);
+                return result;
+            }
+            DeadlineRunner.run(request, stdout, cancellation)
+        }
+    }
+    let git = GitFixture::new();
+    let runner = Arc::new(HeldCount::default());
+    let mut reading = Reading::watched(
+        [git.0.clone()].into(),
+        runner.clone(),
+        git.0.join("unused-home"),
+        Arc::new(Unwatchable),
+    );
+    wait(&mut reading, "the first read did not finish", |snapshot| {
+        runner.counting.load(Ordering::Acquire)
+            && snapshot
+                .directories
+                .iter()
+                .any(|facts| facts.worktrees.is_some())
+    });
+    runner.armed.store(true, Ordering::Release);
+    reading.repositories.reread([git.0.clone()].into());
+    wait(&mut reading, "the armed read did not fail", |snapshot| {
+        snapshot
+            .directories
+            .iter()
+            .any(|facts| facts.failure == Some(RepositoryReadError::TimedOut))
+    });
+    runner.released.store(true, Ordering::Release);
+    wait(&mut reading, "the held count did not end", |_| {
+        runner.ended.load(Ordering::Acquire)
+    });
+    assert!(
+        !runner.cancelled.load(Ordering::Acquire),
+        "a failed read cancelled its repository's count"
+    );
+}
+
+#[test]
 fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repository() {
     let git = GitFixture::new();
     let outside = GitFixture::new();

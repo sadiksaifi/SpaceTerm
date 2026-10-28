@@ -910,10 +910,17 @@ impl ReadSupervisor {
         self.rewatch();
     }
     fn prune_counts(&mut self) {
+        // A failed read keeps the repository it last found, and with it that repository's count.
         let roots: Sources = self
             .directories
             .values()
-            .filter_map(|read| Some(read.facts.as_ref()?.repository.as_ref()?.root.clone()))
+            .filter_map(|read| {
+                read.facts
+                    .as_ref()
+                    .and_then(|facts| facts.repository.as_ref())
+                    .map(|repository| repository.root.clone())
+                    .or_else(|| read.git.as_ref().map(|git| git.root.clone()))
+            })
             .collect();
         self.counts.retain(|root, read| {
             if roots.contains(root) {
