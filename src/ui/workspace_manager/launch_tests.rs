@@ -340,15 +340,16 @@ fn a_launch_during_a_server_operation_says_so_without_asking_the_person_to_act(
         "Another server operation is running. Your Workspaces open when it finishes."
     );
     assert!(presentation.progress.is_some());
-    assert!(presentation.actions.is_empty(), "nothing to dismiss or retry");
+    assert!(
+        presentation.actions.is_empty(),
+        "nothing to dismiss or retry"
+    );
     assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_some());
     assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_none());
 }
 
 #[gpui::test]
-fn a_launch_during_a_server_operation_opens_the_workspaces_once_it_ends(
-    cx: &mut TestAppContext,
-) {
+fn a_launch_during_a_server_operation_opens_the_workspaces_once_it_ends(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::ServiceBusy), ready()], cx);
     cx.run_until_parked();
 

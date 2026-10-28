@@ -863,9 +863,7 @@ impl WorkspaceManager {
             Some(shared) => Some(present(match shared.connection_error() {
                 Some(ServerError::Stopped) => LaunchState::Stopped,
                 // The connection waits for the operation again by itself.
-                Some(ServerError::ServiceBusy) => {
-                    LaunchState::Working(LaunchStep::WaitForService)
-                }
+                Some(ServerError::ServiceBusy) => LaunchState::Working(LaunchStep::WaitForService),
                 // An open connection's refusal offers what the Server version row offers.
                 Some(error) if ends_opening(error) => failed(
                     error,
