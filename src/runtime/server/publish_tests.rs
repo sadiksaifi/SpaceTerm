@@ -447,7 +447,8 @@ mod wakes {
         rings: Arc<Rings>,
         outbox: Outbox,
         rows: Rows,
-        /// The latest frame's grid generation, history epoch and accessibility revision.
+        /// The latest frame's grid generation and history epoch, and the newest accessibility
+        /// revision a frame or a Pane event carried.
         generation: u64,
         epoch: u64,
         accessibility: u64,
@@ -631,13 +632,7 @@ mod wakes {
             loop {
                 self.serve(serve, deadline);
                 let mut first = None;
-                for message in drain(&self.outbox) {
-                    if let ServerMessage::Frame(frame) = &message {
-                        self.rows.apply(frame);
-                        self.generation = frame.update.generation;
-                        self.epoch = frame.update.history.epoch;
-                        self.accessibility = frame.update.accessibility_revision;
-                    }
+                for message in self.receive() {
                     if first.is_none() && found(&message, &self.rows) {
                         first = Some(message);
                     }
@@ -647,6 +642,23 @@ mod wakes {
                     return message;
                 }
             }
+        }
+
+        /// Drains what the connection wrote, as its client reads it: each frame applies to the
+        /// rows the client holds.
+        fn receive(&mut self) -> Vec<ServerMessage> {
+            let messages = drain(&self.outbox);
+            for message in &messages {
+                if let ServerMessage::Frame(frame) = message {
+                    self.rows.apply(frame);
+                    self.generation = frame.update.generation;
+                    self.epoch = frame.update.history.epoch;
+                }
+                if let Some(revision) = accessibility_revision(message) {
+                    self.accessibility = self.accessibility.max(revision);
+                }
+            }
+            messages
         }
 
         /// Waits until the host's wake has rung since the fixture started, without ticking.
@@ -752,7 +764,7 @@ mod wakes {
         let deadline = Instant::now() + Duration::from_secs(10);
         while fixture.rung_by_publication.is_empty() {
             fixture.serve(Serve::Connection, deadline);
-            drain(&fixture.outbox);
+            fixture.receive();
         }
         let pane = fixture.pane;
         let titled = move |message: &ServerMessage| {
@@ -793,25 +805,46 @@ mod wakes {
         fixture.await_event(Serve::Both, |event| matches!(event, PaneEvent::Takeover(_)));
     }
 
-    /// The Terminal Session publishes an accessibility model behind its presentation barrier,
-    /// after the pending screen. The model reaches the connection without the host.
+    /// The accessibility revision `message` carries, if any.
+    fn accessibility_revision(message: &ServerMessage) -> Option<u64> {
+        match message {
+            ServerMessage::Pane(pane) => match pane.event {
+                PaneEvent::Accessibility { revision } => Some(revision),
+                _ => None,
+            },
+            ServerMessage::Frame(frame) => Some(frame.update.accessibility_revision),
+            _ => None,
+        }
+    }
+
+    /// A client's accessibility request makes the Terminal Session publish a model of its
+    /// current screen, behind its presentation barrier. The model reaches the connection without
+    /// the host.
     #[test]
     fn an_accessibility_model_reaches_the_connection_without_the_host() {
         let mut fixture = Fixture::new();
+        let request = |fixture: &mut Fixture, id| {
+            let operation = Operation::Accessibility {
+                channel: CHANNEL,
+                revision: None,
+                offset: 0,
+                base: None,
+            };
+            let _ = fixture.served.request(&FIRST, RequestId(id), operation);
+        };
+        // The first request's model, or the seed model the session publishes on its own.
+        request(&mut fixture, 2);
+        fixture.await_message(Serve::Connection, |message, _| {
+            accessibility_revision(message).is_some_and(|revision| revision > 0)
+        });
+        let modeled = fixture.accessibility;
+        // New text makes the current screen's model differ from every model published so far,
+        // so the next request publishes a newer one.
         fixture.command(2, "printf 'READ%s\\n' ABLE");
         fixture.await_output("READABLE");
-        let presented = fixture.accessibility;
-        let operation = Operation::Accessibility {
-            channel: CHANNEL,
-            revision: None,
-            offset: 0,
-            base: None,
-        };
-        let _ = fixture.served.request(&FIRST, RequestId(2), operation);
-        fixture.await_message(Serve::Connection, |message, _| match message {
-            ServerMessage::Pane(pane) => matches!(pane.event, PaneEvent::Accessibility { .. }),
-            ServerMessage::Frame(frame) => frame.update.accessibility_revision > presented,
-            _ => false,
+        request(&mut fixture, 3);
+        fixture.await_message(Serve::Connection, |message, _| {
+            accessibility_revision(message).is_some_and(|revision| revision > modeled)
         });
     }
 
@@ -920,7 +953,13 @@ mod wakes {
         fixture.served.tick(Instant::now());
         assert!(frames(&drain(&fixture.outbox)).is_empty());
 
+        // Showing presents the screen the host holds. A shell that has not drawn its first
+        // screen yet presents it when it does.
         fixture.show();
-        assert_eq!(frames(&drain(&fixture.outbox)).len(), 1);
+        if frames(&fixture.receive()).is_empty() {
+            fixture.await_message(Serve::Connection, |message, _| {
+                matches!(message, ServerMessage::Frame(_))
+            });
+        }
     }
 }
