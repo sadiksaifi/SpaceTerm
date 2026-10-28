@@ -16,6 +16,8 @@ struct SupervisorFixture {
     stop_takes: Mutex<Option<Duration>>,
     /// When the server dispatched to stop exits.
     exits_at: Mutex<Option<Instant>>,
+    /// When the last Start was dispatched. Activation holds the service lock meanwhile.
+    started_at: Mutex<Option<Instant>>,
 }
 /// How long this fixture's service manager lets a stopping server finish.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -38,6 +40,7 @@ impl Supervisor for SupervisorFixture {
     }
     fn start(&self) -> Result<(), ServerError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
+        *self.started_at.lock().unwrap() = Some(Instant::now());
         Err(ServerError::StartupFailed)
     }
     fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
@@ -116,6 +119,7 @@ fn with_service_identity(
                 fail_replace: AtomicBool::new(false),
                 stop_takes: Mutex::new(None),
                 exits_at: Mutex::new(None),
+                started_at: Mutex::new(None),
             });
             let service = Service::new(
                 fixture.paths.clone(),
@@ -520,6 +524,39 @@ fn stop_past_the_service_managers_timeout_stays_recoverable_without_another_stop
             (1, 1)
         );
         assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+    });
+}
+
+/// A client that connects while an update stops the old server waits for the update's outcome.
+/// It never reports the update unfinished while the update still runs.
+#[test]
+fn admission_during_an_update_waits_for_its_outcome() {
+    with_service(|service, _, candidate, supervisor| {
+        set_running(&service, &supervisor);
+        *supervisor.stop_takes.lock().unwrap() = Some(STOP_TIMEOUT / 2);
+        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        let paths = service.paths.clone();
+        let client = std::thread::spawn(move || {
+            let data = Directory::open(&paths.data, false).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Service::state(&data).unwrap().unwrap().activation.is_none() {
+                assert!(Instant::now() < deadline, "the update never began");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let admission = crate::service::check_admission(&paths, Duration::from_secs(10), None);
+            (admission, Instant::now())
+        });
+        // The fixture's Start always fails after the update dispatched it.
+        assert_eq!(service.activate(approval), Err(ServerError::StartupFailed));
+        let (admission, answered) = client.join().unwrap();
+        // The update dispatched Start while it held the service lock, near its end.
+        let started = supervisor.started_at.lock().unwrap().unwrap();
+        assert!(
+            answered > started,
+            "admission answered before the update ended"
+        );
+        // A dispatched candidate start admits clients, which then find whether it runs.
+        assert_eq!(admission, Ok(()));
     });
 }
 

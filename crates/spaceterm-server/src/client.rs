@@ -374,9 +374,11 @@ impl ServerConnection {
         Ok(server)
     }
     /// Admits a new connection through its route's verified authority, without implicit Start,
-    /// and returns its carrier.
+    /// and returns its carrier. A local admission waits for a Restart or Update to finish;
+    /// `cancelled` ends that wait early.
     fn connect_admitted(
         &self,
+        cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<(Box<dyn crate::connection::carrier::Carrier>, ClientScope), ServerError> {
         if let Some(direct) = &self.direct {
             let connection = direct.connector.connect().map_err(ServerError::from)?;
@@ -390,7 +392,7 @@ impl ServerConnection {
                 self.scope_for(direct.paired.client, direct.paired.pin.server),
             ));
         }
-        crate::service::check_admission(&self.paths)?;
+        crate::service::check_admission(&self.paths, crate::service::OPERATION_LIMIT, cancelled)?;
         let mut stream = host::connect(&self.paths)?;
         let client = self.client_id()?;
         let server = self.server_id()?;
@@ -408,13 +410,31 @@ impl ServerConnection {
     /// Opens a new connection of its own, separate from the shared one. `events` receives its
     /// pushed inventory and health. Dropping every handle of the link closes it.
     pub fn connect(&self, events: Arc<dyn LinkSink>) -> Result<ServerLink, ServerError> {
-        let (carrier, scope) = self.connect_admitted()?;
+        self.connect_cancellable(events, None)
+    }
+    fn connect_cancellable(
+        &self,
+        events: Arc<dyn LinkSink>,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<ServerLink, ServerError> {
+        let (carrier, scope) = self.connect_admitted(cancelled)?;
         self.bind_scope(scope)?;
         crate::connection::io::spawn_link(carrier, events).map_err(|_| ServerError::Protocol)
     }
     /// The one live connection this handle and its clones share with the server. Connects when
     /// none is live. A link that ended is never reused; its pending requests already failed.
     pub fn link(&self) -> Result<ServerLink, ServerError> {
+        self.link_with(None)
+    }
+    /// [`Self::link`] for a worker that may stop while admission waits for a Restart or Update.
+    /// `cancelled` ends that wait with ServiceBusy.
+    pub fn link_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<ServerLink, ServerError> {
+        self.link_with(Some(cancelled))
+    }
+    fn link_with(&self, cancelled: Option<&dyn Fn() -> bool>) -> Result<ServerLink, ServerError> {
         // Callers wait for one connection attempt, so simultaneous Pane workers never open a
         // connection each.
         let mut saved = self.shared.link.lock().unwrap_or_else(|e| e.into_inner());
@@ -424,7 +444,8 @@ impl ServerConnection {
             return Ok(link.clone());
         }
         *saved = None;
-        let link = self.connect(Arc::new(Fanout(Arc::downgrade(&self.shared))))?;
+        let link =
+            self.connect_cancellable(Arc::new(Fanout(Arc::downgrade(&self.shared))), cancelled)?;
         *saved = Some(link.clone());
         let generation = LINK_GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.shared
@@ -458,11 +479,29 @@ impl ServerConnection {
     /// Checks an existing server through the shared connection, connecting only when none is
     /// live. Never sets up storage or starts it.
     pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
+        self.refresh_with(None)
+    }
+    /// [`Self::refresh`] for a caller that may stop while admission waits for a Restart or
+    /// Update. `cancelled` ends that wait with ServiceBusy.
+    pub fn refresh_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<AuthenticatedStatus, ServerError> {
+        self.refresh_with(Some(cancelled))
+    }
+    fn refresh_with(
+        &self,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<AuthenticatedStatus, ServerError> {
         if self.direct.is_none() {
-            crate::service::check_admission(&self.paths)?;
+            crate::service::check_admission(
+                &self.paths,
+                crate::service::OPERATION_LIMIT,
+                cancelled,
+            )?;
             self.server_id()?;
         }
-        self.link()?;
+        self.link_with(cancelled)?;
         Ok(AuthenticatedStatus {
             protocol_major: protocol::MAJOR,
             development_pane: true,
