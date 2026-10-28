@@ -1672,7 +1672,8 @@ mod tests {
             )
         );
         assert!(!idle.destructive, "quitting ends no Terminal Session");
-        let status_area_idle = quit_prompt(StatusAreaName::StatusArea, Some(&quit_sessions(1, &[None])));
+        let status_area_idle =
+            quit_prompt(StatusAreaName::StatusArea, Some(&quit_sessions(1, &[None])));
         assert_eq!(
             status_area_idle.detail,
             format!(
