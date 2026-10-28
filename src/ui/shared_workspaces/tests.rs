@@ -734,13 +734,13 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     assert!(tree.find(crate::ui::server_pane::TAKEOVER_TITLE).is_some());
 }
 
-/// End All Sessions keeps every control grant, so another client's Takeover Screen still names
-/// the Controlling Client. It no longer says the shell keeps running, and nothing starts one.
+/// An ended Session has nothing to take over, so a client without its control grant sees the same
+/// Session Ended screen as the one holding it. Interrupted, the screen waits for reconnection.
 #[gpui::test]
-fn a_takeover_screen_should_keep_its_controller_and_stop_claiming_a_shell_after_end_all_sessions(
+fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::pane::control::Controller;
+    use spaceterm_server::pane::{SessionEnd, control::Controller};
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = shared_tab_manager(cx);
@@ -750,46 +750,35 @@ fn a_takeover_screen_should_keep_its_controller_and_stop_claiming_a_shell_after_
         this_client: false,
     });
     settle(&harness, cx);
-    pane.set_session_dormant(true);
+    pane.set_session_end(Some(SessionEnd::Exited { code: 1 }));
     settle(&harness, cx);
 
     let tree = A11yTree::read(cx);
-    assert_eq!(
-        tree.node(&format!(
-            "Controlled by Build Server. {}",
-            crate::ui::server_pane::TAKEOVER_ENDED_DETAIL
-        ))["aria"]["role"],
-        "Status",
-        "the screen still names who controls the Pane, and says its shell ended"
-    );
+    assert!(tree.find("Controlled by Build Server").is_none());
     assert!(
-        tree.find(&format!(
-            "Controlled by Build Server. {}",
-            crate::ui::server_pane::TAKEOVER_DETAIL
-        ))
-        .is_none(),
-        "an ended Session no longer keeps running"
+        tree.find("Session Ended. The shell exited with code 1.")
+            .is_some(),
+        "the screen says why the shell ended"
     );
-    assert!(cx.debug_bounds("shared-pane-take-over-1").is_some());
+    assert!(cx.debug_bounds("shared-pane-takeover-1").is_none());
+    assert!(cx.debug_bounds("shared-pane-start-session-1").is_some());
+    assert!(cx.debug_bounds("shared-pane-close-pane-1").is_some());
     assert_eq!(pane.restored_starts(), 0, "presenting it starts nothing");
     assert_eq!(pane.take_overs(), 0, "presenting it takes nothing over");
 
-    // Interrupted, the screen names nobody and still makes no claim about a running shell.
     pane.set(DevelopmentPaneStatus::TakeoverReconnecting);
     settle(&harness, cx);
     assert_eq!(
         A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
-        "Take Over is available after reconnection."
+        "Start Session is available after reconnection."
     );
 }
 
-/// Taking over a Pane whose Session End All Sessions ended moves its control only. The Pane then
-/// waits for Start Session, and nothing starts a shell on the way.
+/// Start Session on a Pane whose control grant another client holds takes it over, and the server
+/// starts the shell in that one request.
 #[gpui::test]
-fn taking_over_an_ended_pane_should_offer_start_session_without_starting_one(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_server::pane::control::Controller;
+fn start_session_on_another_clients_ended_pane_should_take_it_over(cx: &mut TestAppContext) {
+    use spaceterm_server::pane::{SessionEnd, control::Controller};
 
     let (harness, cx) = shared_tab_manager(cx);
     let pane = harness.panes.pane(ROOT_PANE);
@@ -797,19 +786,15 @@ fn taking_over_an_ended_pane_should_offer_start_session_without_starting_one(
         name: "Build Server".into(),
         this_client: false,
     });
-    pane.set_session_dormant(true);
+    pane.set_session_end(Some(SessionEnd::EndAllSessions));
     settle(&harness, cx);
 
-    click("shared-pane-take-over-1", cx);
-    assert_eq!(pane.take_overs(), 1);
-    pane.reconnect_to(DevelopmentPaneStatus::SessionEnded);
-    settle(&harness, cx);
-
-    assert!(cx.debug_bounds("shared-pane-takeover-1").is_none());
-    assert!(cx.debug_bounds("shared-pane-session-ended-1").is_some());
-    assert_eq!(pane.restored_starts(), 0, "Take Over starts no shell");
     click("shared-pane-start-session-1", cx);
-    assert_eq!(pane.restored_starts(), 1);
+    assert_eq!(pane.take_overs(), 1);
+    assert_eq!(pane.restored_starts(), 0, "Take Over carries the start");
+    pane.reconnect();
+    settle(&harness, cx);
+    assert!(cx.debug_bounds("shared-pane-session-ended-1").is_none());
 }
 
 #[gpui::test]
@@ -877,7 +862,9 @@ fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAp
     harness
         .panes
         .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::SessionEnded);
+        .set(DevelopmentPaneStatus::SessionEnded(
+            spaceterm_server::pane::SessionEnd::EndAllSessions,
+        ));
     settle(&harness, cx);
 
     assert!(
@@ -892,7 +879,9 @@ fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAp
     harness
         .panes
         .pane(ROOT_PANE)
-        .reconnect_to(DevelopmentPaneStatus::SessionEnded);
+        .reconnect_to(DevelopmentPaneStatus::SessionEnded(
+            spaceterm_server::pane::SessionEnd::EndAllSessions,
+        ));
     settle(&harness, cx);
     assert_eq!(
         harness.panes.pane(ROOT_PANE).restored_starts(),

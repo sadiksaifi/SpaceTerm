@@ -19,3 +19,5 @@ While the server remains running, a reconnecting client resumes control of its p
 Connection-loss presentation and input handling follow [ADR 0045](0045-freeze-terminal-screens-while-reconnecting.md).
 
 Take Over can start a retained Pane's shell, so it obeys [ADR 0043](0043-start-restored-shells-on-first-use.md)'s first-use and unresolved-start rules. Transferring control does not authorize a replacement for an unconfirmed original start under [ADR 0037](0037-resolve-shared-mutations-at-the-server.md).
+
+A Pane whose Terminal Session ended shows every client the same Session Ended screen instead of the Takeover Screen, under [ADR 0053](0053-keep-a-pane-whose-shell-exits-unsuccessfully.md).

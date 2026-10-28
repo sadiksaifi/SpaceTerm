@@ -6,4 +6,4 @@ The server-client architecture has no backward-compatibility requirement. Replac
 
 Resetting incompatible local state still requires explicit confirmation of its exact scope and loss, completed or reconciled started work and proven process cleanup. Compatibility policy grants no authority to delete unrelated data or credentials.
 
-[ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) sets major 2 and replaces major 1 without compatibility.
+[ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) sets major 2 and replaces major 1 without compatibility. Major 3 replaces major 2 without compatibility, because Restored and Takeover replies carry why a Session ended under [ADR 0053](0053-keep-a-pane-whose-shell-exits-unsuccessfully.md).

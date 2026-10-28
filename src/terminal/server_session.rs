@@ -49,7 +49,7 @@ pub(crate) enum DevelopmentPaneStatus {
     TakeoverFailed(ServerError),
     TakingOver,
     Reconnecting,
-    SessionEnded,
+    SessionEnded(pane::SessionEnd),
     Ended,
     Failed(ServerError),
     /// The client is not connected to the Pane's server, so it presents the Pane from what it
@@ -68,7 +68,8 @@ pub(crate) struct DevelopmentPaneState {
     admission: Mutex<Admission>,
     /// Who controlled the Pane when the server last offered Take Over.
     controller: Mutex<Option<pane::control::Controller>>,
-    session_dormant: AtomicBool,
+    /// Why the Pane's Session ended, as the server last said, while nobody started a new one.
+    session_end: Mutex<Option<pane::SessionEnd>>,
     retry: AtomicBool,
     selected: AtomicBool,
     created_start: AtomicBool,
@@ -102,7 +103,7 @@ impl DevelopmentPaneState {
             status: Mutex::new(DevelopmentPaneStatus::Connecting),
             admission: Mutex::new(Admission::Pending),
             controller: Mutex::default(),
-            session_dormant: AtomicBool::new(false),
+            session_end: Mutex::default(),
             retry: AtomicBool::new(false),
             selected: AtomicBool::new(false),
             created_start: AtomicBool::new(false),
@@ -162,8 +163,11 @@ impl DevelopmentPaneState {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-    pub(crate) fn session_dormant(&self) -> bool {
-        self.session_dormant.load(Ordering::Acquire)
+    pub(crate) fn session_end(&self) -> Option<pane::SessionEnd> {
+        *self.session_end.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn set_session_end(&self, end: Option<pane::SessionEnd>) {
+        *self.session_end.lock().unwrap_or_else(|e| e.into_inner()) = end;
     }
     /// What the current connection answered about interactive terminal input.
     ///
@@ -201,16 +205,18 @@ impl DevelopmentPaneState {
         }
     }
 
+    /// Selecting a Pane starts or acquires it, except a Pane whose Session ended in this server
+    /// run: that one waits on Session Ended for Start Session, whoever holds its grant.
     pub(crate) fn select(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()
+            && self.session_end().is_none()
             && (*status != DevelopmentPaneStatus::Connecting
                 || *self.admission.lock().unwrap_or_else(|e| e.into_inner()) != Admission::Granted)
             && matches!(
                 *status,
                 DevelopmentPaneStatus::Connecting
                     | DevelopmentPaneStatus::Restored
-                    | DevelopmentPaneStatus::SessionEnded
                     | DevelopmentPaneStatus::Takeover
             )
         {
@@ -242,7 +248,7 @@ impl DevelopmentPaneState {
             && matches!(
                 *status,
                 DevelopmentPaneStatus::Restored
-                    | DevelopmentPaneStatus::SessionEnded
+                    | DevelopmentPaneStatus::SessionEnded(_)
                     | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
             )
             && !self.directory_busy.swap(true, Ordering::AcqRel)
@@ -311,9 +317,13 @@ impl DevelopmentPaneState {
     /// The server offered Take Over and named who controls the Pane. Every offer replaces the
     /// last one, so the Takeover Screen follows control as it moves. A Take Over in progress
     /// stays in progress until the server answers it.
-    fn offered_take_over(&self, controller: pane::control::Controller, session_ended: bool) {
+    fn offered_take_over(
+        &self,
+        controller: pane::control::Controller,
+        session_ended: Option<pane::SessionEnd>,
+    ) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        self.session_dormant.store(session_ended, Ordering::Release);
+        self.set_session_end(session_ended);
         *self.controller.lock().unwrap_or_else(|e| e.into_inner()) = Some(controller);
         if *status != DevelopmentPaneStatus::TakingOver {
             *status = DevelopmentPaneStatus::Takeover;

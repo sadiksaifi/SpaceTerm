@@ -2873,7 +2873,7 @@ mod development {
             status: Mutex<crate::terminal::server_session::DevelopmentPaneStatus>,
             startup_pending: std::sync::atomic::AtomicBool,
             controller: Mutex<Option<spaceterm_server::pane::control::Controller>>,
-            session_dormant: std::sync::atomic::AtomicBool,
+            session_end: Mutex<Option<spaceterm_server::pane::SessionEnd>>,
             generation: std::sync::atomic::AtomicU64,
             selections: std::sync::atomic::AtomicUsize,
             created_starts: std::sync::atomic::AtomicUsize,
@@ -2892,7 +2892,7 @@ mod development {
                     ),
                     startup_pending: std::sync::atomic::AtomicBool::new(true),
                     controller: Mutex::default(),
-                    session_dormant: std::sync::atomic::AtomicBool::new(false),
+                    session_end: Mutex::default(),
                     generation: std::sync::atomic::AtomicU64::new(0),
                     selections: std::sync::atomic::AtomicUsize::new(0),
                     created_starts: std::sync::atomic::AtomicUsize::new(0),
@@ -2943,10 +2943,9 @@ mod development {
                 self.set(crate::terminal::server_session::DevelopmentPaneStatus::Connected);
             }
 
-            /// The server says whether End All Sessions left the Pane without a shell.
-            pub(crate) fn set_session_dormant(&self, dormant: bool) {
-                self.session_dormant
-                    .store(dormant, std::sync::atomic::Ordering::SeqCst);
+            /// The server says why the Pane's Session ended, if it did.
+            pub(crate) fn set_session_end(&self, end: Option<spaceterm_server::pane::SessionEnd>) {
+                *self.session_end.lock().expect("session end") = end;
                 self.changes.publish();
             }
 
@@ -2999,9 +2998,8 @@ mod development {
                 self.controller.lock().expect("controller").clone()
             }
 
-            fn session_dormant(&self) -> bool {
-                self.session_dormant
-                    .load(std::sync::atomic::Ordering::SeqCst)
+            fn session_end(&self) -> Option<spaceterm_server::pane::SessionEnd> {
+                *self.session_end.lock().expect("session end")
             }
 
             fn connection_generation(&self) -> u64 {

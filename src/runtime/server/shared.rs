@@ -17,6 +17,9 @@ mod publication;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
+#[cfg(test)]
+#[path = "shared/shell_exit_tests.rs"]
+mod shell_exit_tests;
 mod worktrees;
 use journal::{Journal, Retention, Revision};
 use spaceterm_server::connection::outbox::Outbox;
@@ -30,6 +33,27 @@ const RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// How often what Terminal Sessions present, such as titles and progress, is synchronized and
 /// pushed at most. Edits and claims push at once.
 const PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
+
+/// What a claim asks of a Pane. Only `Start` starts a Session that ended in this server run.
+#[derive(Clone, Copy)]
+enum Selection {
+    /// Observes the Pane, which never acquires or starts it.
+    Observe,
+    /// Selects the Pane, which acquires it and starts a shell on first use.
+    Select,
+    /// Start Session.
+    Start,
+}
+
+impl Selection {
+    fn of(explicit: bool) -> Self {
+        if explicit {
+            Self::Select
+        } else {
+            Self::Observe
+        }
+    }
+}
 
 pub struct SharedWorkspaceHost {
     writes: worktrees::Writes,
@@ -415,7 +439,7 @@ impl SharedWorkspaceHost {
         device: Id,
         connection: Id,
         id: Id,
-        explicit: bool,
+        selection: Selection,
         size: PaneSize,
         style: Option<PresentationStyle>,
     ) -> Result<Reply, Refusal> {
@@ -423,6 +447,13 @@ impl SharedWorkspaceHost {
         let creator = self.state.pane(id).ok_or(Refusal::Missing)?.2.creator;
         let fresh = self.fresh_panes.contains(&id);
         let host = self.pane_host(id)?;
+        // A Session that ended in this run keeps its Pane on Session Ended until someone chooses
+        // Start Session. Selecting the Pane or opening its Tab only observes it.
+        let explicit = match selection {
+            Selection::Observe => false,
+            Selection::Select => host.dormant.is_none(),
+            Selection::Start => true,
+        };
         if !explicit
             && let Some(dormant) = host.dormant
             && dormant.device != Some(device)
@@ -460,7 +491,7 @@ impl SharedWorkspaceHost {
             ..
         } = &mut reply
         {
-            *reply_fresh = fresh && !*session_ended;
+            *reply_fresh = fresh && session_ended.is_none();
         }
         Ok(reply)
     }
@@ -479,13 +510,13 @@ impl SharedWorkspaceHost {
         }
         let id = target.pane;
         if self.pane_host(id)?.pane.is_some() {
-            return self.select(device, connection, id, false, size, style);
+            return self.select(device, connection, id, Selection::Observe, size, style);
         }
         let (_, _, pane) = self.state.pane(id).ok_or(Refusal::Missing)?;
         let host = self.panes.get(&id).ok_or(Refusal::Missing)?;
         let controller = host.dormant.map_or(pane.creator, |dormant| dormant.device);
         if controller.is_some_and(|controller| controller != device) {
-            return self.select(device, connection, id, false, size, style);
+            return self.select(device, connection, id, Selection::Observe, size, style);
         }
         if target.original
             != host
@@ -700,13 +731,13 @@ impl SharedWorkspaceHost {
                         self.repair_directory(device, connection, target, replacement, size, style)?
                     }
                     AttachmentClaim::Select { explicit } => {
-                        self.select(device, connection, id, explicit, size, style)?
+                        self.select(device, connection, id, Selection::of(explicit), size, style)?
                     }
                     AttachmentClaim::Start { server } => {
                         if server != self.prototype.boot {
                             return Err(Refusal::Stale);
                         }
-                        self.select(device, connection, id, true, size, style)?
+                        self.select(device, connection, id, Selection::Start, size, style)?
                     }
                     AttachmentClaim::TakeOver { target } => {
                         let host = self.pane_host(id)?;
@@ -728,7 +759,13 @@ impl SharedWorkspaceHost {
                                 return Err(Refusal::Stale);
                             }
                             if host.dormant.is_some() {
-                                host.take_over_ended(device, Some(attachment.generation))?
+                                host.take_over_ended(
+                                    device,
+                                    connection,
+                                    Some(attachment.generation),
+                                    size,
+                                    style,
+                                )?
                             } else {
                                 Reply::Attached {
                                     lease: host.start(device, connection, size, style)?,
@@ -824,7 +861,14 @@ impl SharedWorkspaceHost {
                 explicit,
                 size,
                 style,
-            } => self.select(device, connection, pane, explicit, size, style),
+            } => self.select(
+                device,
+                connection,
+                pane,
+                Selection::of(explicit),
+                size,
+                style,
+            ),
             Request::TakeOver {
                 target,
                 size,
@@ -839,7 +883,7 @@ impl SharedWorkspaceHost {
                     return Err(Refusal::Stale);
                 }
                 if host.dormant.is_some() {
-                    return host.take_over_ended(device, None);
+                    return host.take_over_ended(device, connection, None, size, style);
                 }
                 host.start(device, connection, size, style)
                     .map(|lease| Reply::Attached { lease })
@@ -857,7 +901,7 @@ impl SharedWorkspaceHost {
                 if server != self.prototype.boot {
                     return Err(Refusal::Stale);
                 }
-                self.select(device, connection, pane, true, size, style)
+                self.select(device, connection, pane, Selection::Start, size, style)
             }
             Request::Attach {
                 create,
@@ -914,6 +958,12 @@ impl SharedWorkspaceHost {
                     | Request::Close { lease } => (*lease).into(),
                     _ => return Err(Refusal::Unsupported),
                 };
+                // A Session that ended and kept its Pane answers Stale, so the client claims the
+                // Pane again and learns that it ended.
+                let kept = self.panes.values().any(|host| {
+                    host.dormant
+                        .is_some_and(|dormant| dormant.session == Some(target))
+                });
                 let host = self
                     .panes
                     .values_mut()
@@ -923,13 +973,15 @@ impl SharedWorkspaceHost {
                             .is_some_and(|p| PaneTarget::from(p.lease) == target)
                     })
                     .ok_or_else(|| {
-                        if self.state.session_ends().is_some_and(|ends| {
-                            ends.boot == target.server
-                                && ends
-                                    .sessions
-                                    .iter()
-                                    .any(|p| p.session == Some(target.session))
-                        }) {
+                        if kept
+                            || self.state.session_ends().is_some_and(|ends| {
+                                ends.boot == target.server
+                                    && ends
+                                        .sessions
+                                        .iter()
+                                        .any(|p| p.session == Some(target.session))
+                            })
+                        {
                             Refusal::Stale
                         } else {
                             Refusal::Missing
@@ -1149,14 +1201,18 @@ impl HostCommands for SharedWorkspaceHost {
                 .as_ref()
                 .is_some_and(|pane| PaneTarget::from(pane.lease) == target)
         }) else {
-            // A Pane removed, closed or ended by End All Sessions no longer has this lease.
+            // A Pane removed, closed, ended by End All Sessions or kept after its shell exited
+            // no longer has this lease.
             let event = if self
                 .panes
                 .values()
                 .any(|host| host.failed_directory_session == Some(target))
             {
                 PaneEvent::DirectoryUnavailable
-            } else if self.state.session_ends().is_some_and(|ends| {
+            } else if self.panes.values().any(|host| {
+                host.dormant
+                    .is_some_and(|dormant| dormant.session == Some(target))
+            }) || self.state.session_ends().is_some_and(|ends| {
                 ends.boot == target.server
                     && ends
                         .sessions
@@ -1737,7 +1793,7 @@ mod tests {
             ),
             Reply::Restored {
                 fresh: true,
-                session_ended: false,
+                session_ended: None,
                 ..
             }
         ));
@@ -1793,7 +1849,7 @@ mod tests {
             host.request([1; 32], [3; 32], select(false)),
             Reply::Restored {
                 fresh: false,
-                session_ended: true,
+                session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions),
                 ..
             }
         ));
@@ -1806,9 +1862,27 @@ mod tests {
             screen(&mut host, [1; 32], lease),
             Err(PaneEvent::SessionEnded)
         ));
-        let Reply::Attached { lease: replacement } = host.request([1; 32], [3; 32], select(true))
-        else {
-            panic!("controller explicitly starts replacement");
+        assert!(
+            matches!(
+                host.request([1; 32], [3; 32], select(true)),
+                Reply::Restored {
+                    session_ended: Some(_),
+                    ..
+                }
+            ),
+            "selection alone starts no replacement"
+        );
+        let Reply::Attached { lease: replacement } = host.request(
+            [1; 32],
+            [3; 32],
+            Request::StartRestored {
+                server: lease.server,
+                pane,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("Start Session starts the replacement");
         };
         assert_ne!(replacement.session, lease.session);
         assert!(matches!(
@@ -1992,7 +2066,7 @@ mod tests {
             restored.request([1; 32], [2; 32], claim(false)),
             Reply::Restored {
                 fresh: false,
-                session_ended: false,
+                session_ended: None,
                 ..
             }
         ));

@@ -10879,6 +10879,47 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
     );
 }
 
+/// Switching away from an ended Pane and back, or opening its Tab again, keeps Session Ended and
+/// its cause. Nothing starts a shell until the person chooses Start Session.
+#[gpui::test]
+fn returning_to_an_ended_pane_should_keep_session_ended_without_starting_a_shell(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+    use spaceterm_server::pane::SessionEnd;
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    let pane = harness.panes.pane(ATTACHED_BUILD_PANE);
+    let activate = |workspace: u64, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(WorkspaceId::new(workspace), window, cx);
+            });
+        });
+        settle_shared_panes(cx);
+    };
+    activate(2, cx);
+    pane.set(DevelopmentPaneStatus::SessionEnded(SessionEnd::Exited {
+        code: 1,
+    }));
+    settle_shared_panes(cx);
+    let cause = "Session Ended. The shell exited with code 1.";
+    assert!(A11yTree::read(cx).find(cause).is_some());
+
+    for workspace in [3, 2, 1, 2] {
+        activate(workspace, cx);
+    }
+
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert!(
+        A11yTree::read(cx).find(cause).is_some(),
+        "the cause outlives switching away and back"
+    );
+    assert_eq!(pane.restored_starts(), 0, "switching back starts no shell");
+    assert_eq!(pane.take_overs(), 0, "switching back takes nothing over");
+}
+
 /// A neighbor whose Pane waits for first use takes the keyboard on the screen in the Pane's
 /// place, so Tab reaches Start Session and nothing starts until the person presses it.
 #[gpui::test]

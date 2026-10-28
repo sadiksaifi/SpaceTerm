@@ -86,6 +86,18 @@ pub struct LineState {
     pub mode: LineMode,
 }
 
+/// Why a Pane the running server keeps has no Terminal Session. It carries bounded facts only,
+/// never the shell's output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionEnd {
+    /// End All Sessions ended the Session.
+    EndAllSessions,
+    /// The shell exited on its own with a nonzero code. A zero exit closes the Pane instead.
+    Exited { code: u32 },
+    /// A signal ended the shell.
+    Signaled,
+}
+
 /// Identifies a running Pane without granting access to its terminal content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneTarget {
@@ -386,8 +398,8 @@ pub enum Reply {
     Restored {
         /// This running server created the Pane; no previous shell ended in a server restart.
         fresh: bool,
-        /// End All Sessions cleared this Pane in the current running server.
-        session_ended: bool,
+        /// Why this Pane's Session ended in the current running server, if one did.
+        session_ended: Option<SessionEnd>,
         recovery: Option<directories::Target>,
         directory_unavailable: bool,
         server: [u8; 32],
@@ -397,7 +409,7 @@ pub enum Reply {
     },
     /// This client does not control the Pane. `controller` says who does, for presentation only.
     Takeover {
-        session_ended: bool,
+        session_ended: Option<SessionEnd>,
         target: PaneTarget,
         controller: control::Controller,
     },

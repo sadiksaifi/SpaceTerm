@@ -89,6 +89,10 @@ impl DevelopmentPaneHost {
                 style,
             } => {
                 self.reconcile_selection()?;
+                // The shell exited and kept its Pane. A new claim offers Session Ended.
+                if self.pane.is_none() && self.dormant.is_some() {
+                    return Err(Refusal::Stale);
+                }
                 let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
                 if PaneTarget::from(pane.lease) != target {
                     return Err(Refusal::Stale);

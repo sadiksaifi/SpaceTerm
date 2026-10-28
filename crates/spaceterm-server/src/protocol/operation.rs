@@ -128,7 +128,8 @@ pub enum ClaimReply {
 /// The Takeover Screen facts. `controller` is presentation only.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Takeover {
-    pub session_ended: bool,
+    /// Why the Pane's Session ended, if it did. Then Take Over starts a fresh one.
+    pub session_ended: Option<crate::pane::SessionEnd>,
     pub target: PaneTarget,
     pub controller: control::Controller,
 }
@@ -137,8 +138,8 @@ pub struct Takeover {
 pub struct Restored {
     /// This running server created the Pane; no previous shell ended in a server restart.
     pub fresh: bool,
-    /// End All Sessions cleared this Pane in the current running server.
-    pub session_ended: bool,
+    /// Why this Pane's Session ended in the current running server, if one did.
+    pub session_ended: Option<crate::pane::SessionEnd>,
     pub recovery: Option<directories::Target>,
     pub directory_unavailable: bool,
     pub server: [u8; 32],

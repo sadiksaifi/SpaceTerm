@@ -383,7 +383,7 @@ fn run(
                 link.acknowledge(last.sequence)?;
             }
             state.publish(|s| {
-                // Protocol major 2 servers write Worktrees and end all Sessions.
+                // Protocol major 3 servers write Worktrees and end all Sessions.
                 s.worktree_writes = true;
                 s.end_all_sessions = true;
                 s.inventory = Some(initial.inventory.clone());
