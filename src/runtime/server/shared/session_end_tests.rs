@@ -37,12 +37,30 @@ fn mutate(host: &mut SharedWorkspaceHost, device: u8, sequence: u64, mutation: M
 
 fn end_all(host: &mut SharedWorkspaceHost, device: u8, sequence: u64) {
     let confirmation = shared_inventory(host).close.unwrap();
+    let confirmed: Vec<_> = confirmation
+        .sessions
+        .iter()
+        .filter_map(|pane| pane.session)
+        .collect();
     mutate(
         host,
         device,
         sequence,
         Mutation::EndAllSessions { confirmation },
     );
+    // The edit ends the confirmed Sessions once it is on disk, which a loaded host may finish
+    // after the tick.
+    let until = Instant::now() + Duration::from_secs(12);
+    while shared_inventory(host).close.is_some_and(|close| {
+        close.sessions.iter().any(|pane| {
+            pane.session
+                .is_some_and(|session| confirmed.contains(&session))
+        })
+    }) {
+        assert!(Instant::now() < until, "End All Sessions did not end them");
+        std::thread::sleep(Duration::from_millis(10));
+        host.tick(Instant::now());
+    }
 }
 
 /// Chooses Start Session, the only request that starts a shell in an ended Pane.

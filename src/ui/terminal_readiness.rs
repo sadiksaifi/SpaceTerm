@@ -35,6 +35,8 @@ struct State {
     previous: Option<gpui::EntityId>,
     direction: isize,
     clock: u64,
+    /// Reads the time, which tests advance by hand.
+    executor: gpui::BackgroundExecutor,
 }
 
 #[derive(Clone)]
@@ -74,6 +76,7 @@ impl Readiness {
             previous: None,
             direction: 0,
             clock: 0,
+            executor: cx.background_executor().clone(),
         })));
         let worker = Rc::downgrade(&this.0);
         let task = cx.spawn(async move |cx: &mut AsyncApp| {
@@ -126,7 +129,9 @@ impl Readiness {
         tab: WeakEntity<TabView>,
         pane_id: PaneId,
     ) {
-        self.0.borrow_mut().entries.push(Entry {
+        let mut state = self.0.borrow_mut();
+        let queued = state.executor.now();
+        state.entries.push(Entry {
             pane: pane.downgrade(),
             tab,
             pane_id,
@@ -135,12 +140,13 @@ impl Readiness {
             visible: false,
             focused: false,
             selected_at: 0,
-            queued: Instant::now(),
+            queued,
             dirty: true,
             starting: false,
             retained: 0,
             preparing: false,
         });
+        drop(state);
         self.wake();
     }
 
@@ -174,13 +180,14 @@ impl Readiness {
 
     pub(crate) fn dirty(&self, pane: gpui::EntityId) {
         let mut state = self.0.borrow_mut();
+        let now = state.executor.now();
         if let Some(entry) = state
             .entries
             .iter_mut()
             .find(|entry| entry.pane.entity_id() == pane)
         {
             if !entry.dirty {
-                entry.queued = Instant::now();
+                entry.queued = now;
             }
             entry.dirty = true;
         }
@@ -227,7 +234,8 @@ impl Readiness {
     }
 
     fn step(&self, window: &mut Window, cx: &mut App) -> bool {
-        let began = Instant::now();
+        let executor = self.0.borrow().executor.clone();
+        let began = executor.now();
         let now = began;
         let Some(size) = self.0.borrow().content_size else {
             return false;
@@ -295,7 +303,7 @@ impl Readiness {
         let mut worked = false;
         let mut more = starting > 0;
         for entry in &mut entries {
-            if worked && began.elapsed() >= SLICE {
+            if worked && executor.now().duration_since(began) >= SLICE {
                 more |= entry.dirty;
                 continue;
             }
@@ -323,7 +331,7 @@ impl Readiness {
             }
             entry.dirty = !done;
             if allowed || done {
-                entry.queued = Instant::now();
+                entry.queued = executor.now();
             }
             entry.retained = pane.read(cx).readiness_cache_cost(cx);
             more |= !done;

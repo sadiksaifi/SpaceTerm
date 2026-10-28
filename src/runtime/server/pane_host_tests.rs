@@ -1607,14 +1607,25 @@ fn reconnect_and_stale_generations_cannot_start_or_mutate_a_replacement() {
 fn a_waiting_client_observes_exit_without_the_controller_polling() {
     let mut host = host();
     let lease = attach(&mut host, 2, true);
+    // The shell exits once the test has seen its screen and disconnected its controller.
+    let release = std::env::temp_dir().join(format!(
+        "spaceterm-exit-{}-{:x}",
+        std::process::id(),
+        u64::from_ne_bytes(nonce().unwrap()[..8].try_into().unwrap())
+    ));
     command(
         &mut host,
         2,
         lease,
-        "stty -echo; printf '\\033[2J\\033[HEXITING\\n'; sleep 0.2; exit\n",
+        &format!(
+            "stty -echo; printf '\\033[2J\\033[HEXITING\\n'; \
+             while [ ! -e '{}' ]; do sleep 0.02; done; exit\n",
+            release.display()
+        ),
     );
     await_text(&mut host, lease, "EXITING");
     host.disconnected([2; 32]);
+    std::fs::write(&release, "").unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let reply = host.request(
@@ -1652,6 +1663,7 @@ fn a_waiting_client_observes_exit_without_the_controller_polling() {
     let replacement = attach(&mut host, 3, true);
     assert_ne!(replacement.session, lease.session);
     host.shutdown().unwrap();
+    let _ = std::fs::remove_file(&release);
 }
 
 #[test]

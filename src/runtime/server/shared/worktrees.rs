@@ -961,7 +961,8 @@ mod tests {
             matches!(reply, Reply::MutationPending),
             "unexpected preflight reply: {reply:?}"
         );
-        let until = Instant::now() + Duration::from_secs(4);
+        // The filter holds Git for at least 20 seconds, so this waits only for Git to start.
+        let until = Instant::now() + Duration::from_secs(12);
         while !gate.0.join("started").exists() {
             assert!(
                 matches!(
@@ -1056,7 +1057,8 @@ mod tests {
         assert!(reply.is_none(), "read must be asynchronous");
         // Another connection's cancellation never reaches this read.
         host.cancel_read([3; 32], id);
-        let until = Instant::now() + Duration::from_secs(4);
+        // The filter holds Git for at least 20 seconds, so this waits only for Git to start.
+        let until = Instant::now() + Duration::from_secs(12);
         while !gate.0.join("started").exists() {
             assert!(
                 Instant::now() < until,

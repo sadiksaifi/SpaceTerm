@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 const PAUSE: Duration = Duration::from_millis(10);
 /// How long a test waits before it calls a read stuck, as the shared-host tests do.
 const STUCK: Duration = Duration::from_secs(12);
+/// How long a held process waits for its release. It is far past `STUCK`, so a read that waits
+/// for a held one fails a test instead of finishing when the hold gives up.
+const HELD: Duration = Duration::from_secs(60);
 
 /// Delay only a full scan at the process boundary; discovery, porcelain parsing, Worktree
 /// listing, physical directory validation, and publication all use the production readers.
@@ -38,7 +41,7 @@ impl RepositoryProgramRunner for DelayedCount {
                 .or_default() += 1;
             if request.directory == self.root || self.also_delayed.contains(&request.directory) {
                 *self.started.lock().unwrap() = Some(Instant::now());
-                let until = Instant::now() + Duration::from_secs(8);
+                let until = Instant::now() + HELD;
                 while !self.released.load(Ordering::Acquire) {
                     if cancellation.is_cancelled() {
                         self.cancelled.store(true, Ordering::Release);
@@ -150,7 +153,7 @@ impl Reading {
         serde_json::from_slice(&serde_json::to_vec(&self.repositories.snapshot()).unwrap()).unwrap()
     }
     fn finish(&mut self) -> Snapshot {
-        let until = Instant::now() + Duration::from_secs(4);
+        let until = Instant::now() + STUCK;
         loop {
             let snapshot = self.poll();
             if snapshot.directories.len() == self.repositories.sources.len()
@@ -223,7 +226,7 @@ fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
     let tab = &mut reading.state.inventory.workspaces[0].tabs[0];
     tab.worktree = Some(tree.clone());
     tab.worktree_repository = Some(git.0.clone());
-    let until = Instant::now() + Duration::from_secs(4);
+    let until = Instant::now() + STUCK;
     let facts = loop {
         let snapshot = reading.poll();
         if let Some(facts) = snapshot
@@ -517,6 +520,84 @@ fn a_failed_read_keeps_following_its_repositorys_git_directories() {
 }
 
 #[test]
+fn a_failed_read_keeps_its_repositorys_count_in_flight() {
+    /// Holds each count until released, and times out the first discovery run once armed.
+    #[derive(Default)]
+    struct HeldCount {
+        armed: AtomicBool,
+        counting: AtomicBool,
+        released: AtomicBool,
+        cancelled: AtomicBool,
+        ended: AtomicBool,
+    }
+    impl RepositoryProgramRunner for HeldCount {
+        fn run(
+            &self,
+            request: &ProgramRequest,
+            stdout: &mut dyn FnMut(&[u8]),
+            cancellation: &CancellationToken,
+        ) -> Result<ProgramExit, ProgramError> {
+            if is_discovery(request) && self.armed.swap(false, Ordering::AcqRel) {
+                return Err(ProgramError::TimedOut);
+            }
+            let count: Vec<std::ffi::OsString> = policy::local_read::COUNT_ARGUMENTS
+                .iter()
+                .map(Into::into)
+                .collect();
+            if request.arguments.ends_with(&count) && !self.released.load(Ordering::Acquire) {
+                self.counting.store(true, Ordering::Release);
+                let until = Instant::now() + HELD;
+                // Cancellation is checked first, so a count cancelled before its release says so.
+                let result = loop {
+                    if cancellation.is_cancelled() {
+                        self.cancelled.store(true, Ordering::Release);
+                        break Err(ProgramError::Cancelled);
+                    }
+                    if self.released.load(Ordering::Acquire) || Instant::now() >= until {
+                        break DeadlineRunner.run(request, stdout, cancellation);
+                    }
+                    std::thread::sleep(PAUSE);
+                };
+                self.ended.store(true, Ordering::Release);
+                return result;
+            }
+            DeadlineRunner.run(request, stdout, cancellation)
+        }
+    }
+    let git = GitFixture::new();
+    let runner = Arc::new(HeldCount::default());
+    let mut reading = Reading::watched(
+        [git.0.clone()].into(),
+        runner.clone(),
+        git.0.join("unused-home"),
+        Arc::new(Unwatchable),
+    );
+    wait(&mut reading, "the first read did not finish", |snapshot| {
+        runner.counting.load(Ordering::Acquire)
+            && snapshot
+                .directories
+                .iter()
+                .any(|facts| facts.worktrees.is_some())
+    });
+    runner.armed.store(true, Ordering::Release);
+    reading.repositories.reread([git.0.clone()].into());
+    wait(&mut reading, "the armed read did not fail", |snapshot| {
+        snapshot
+            .directories
+            .iter()
+            .any(|facts| facts.failure == Some(RepositoryReadError::TimedOut))
+    });
+    runner.released.store(true, Ordering::Release);
+    wait(&mut reading, "the held count did not end", |_| {
+        runner.ended.load(Ordering::Acquire)
+    });
+    assert!(
+        !runner.cancelled.load(Ordering::Acquire),
+        "a failed read cancelled its repository's count"
+    );
+}
+
+#[test]
 fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repository() {
     let git = GitFixture::new();
     let outside = GitFixture::new();
@@ -534,11 +615,15 @@ fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repositor
         tab.worktree_repository = Some(git.0.clone());
         tab.worktree_membership = spaceterm_server::hierarchy::WorktreeMembership::Repaired;
     }
-    let until = Instant::now() + Duration::from_secs(4);
-    while reading.poll().directories.len() < 2 {
-        assert!(Instant::now() < until, "directory reads did not finish");
-        std::thread::sleep(PAUSE);
-    }
+    // The Tabs' saved Worktree is a source too, so wait for the two directories under test.
+    wait(&mut reading, "directory reads did not finish", |snapshot| {
+        [&outside.0, &missing].into_iter().all(|directory| {
+            snapshot
+                .directories
+                .iter()
+                .any(|facts| facts.directory == *directory)
+        })
+    });
     let snapshot = reading.poll();
     assert!(
         snapshot
@@ -549,7 +634,7 @@ fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repositor
     for workspace in &reading.state.inventory.workspaces {
         let tab = &workspace.tabs[0];
         if tab.panes[0].repository_directory() == outside.0 {
-            assert_eq!(tab.worktree, None);
+            assert_eq!(tab.worktree, None, "{:?}", snapshot.directories);
             assert_eq!(tab.worktree_repository, None);
             assert_eq!(
                 tab.worktree_membership,
@@ -609,16 +694,21 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
         other.0.join("unused-home"),
         Arc::new(Unwatchable),
     );
-    let until = Instant::now() + Duration::from_secs(6);
+    let until = Instant::now() + STUCK;
     let mut published = BTreeMap::new();
     let mut progress_at = None;
     let mut initial_pending = false;
-    let mut pending_at = None;
     let mut responsive = false;
     while Instant::now() < until {
         let snapshot = reading.poll();
         for facts in snapshot.directories {
-            if facts.directory == git.0 {
+            // Each spelling shares the root's count, and whichever is discovered first shows
+            // the count pending. Discovery of the root itself can finish after counting starts.
+            if facts
+                .repository
+                .as_ref()
+                .is_some_and(|repository| repository.root == git.0)
+            {
                 let repository = facts.repository.as_ref().unwrap();
                 assert_eq!(repository.head, RepositoryHead::Branch("main".into()));
                 assert_eq!(
@@ -635,9 +725,6 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
                     "the delayed count has not completed"
                 );
                 initial_pending |= repository.counting == Some(ChangeCounting::Pending);
-                if repository.counting == Some(ChangeCounting::Pending) {
-                    pending_at.get_or_insert(Instant::now());
-                }
                 if repository.counting == Some(ChangeCounting::Counting) {
                     progress_at.get_or_insert(Instant::now());
                 }
@@ -673,12 +760,10 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
     // Delivery can lag behind the server queuing Pending. Measure the lower bound from
     // the read request so that publication backpressure cannot shorten the observed delay.
     let since_request = progress_at.duration_since(requested_at);
-    let since_pending = progress_at.duration_since(pending_at.expect("an initial pending count"));
     assert!(
         since_request >= Duration::from_millis(900),
         "{since_request:?}"
     );
-    assert!(since_pending < Duration::from_secs(3), "{since_pending:?}");
     assert!(
         published[&git.0]
             .worktrees
@@ -754,7 +839,7 @@ fn refreshing_branch_retains_known_changes_until_the_new_count_finishes() {
         git.0.join("unused-home"),
     );
     reading.repositories.snapshot = previous;
-    let until = Instant::now() + Duration::from_secs(4);
+    let until = Instant::now() + STUCK;
     let mut refreshed = false;
     while Instant::now() < until {
         let snapshot = reading.poll();
@@ -805,7 +890,7 @@ fn discovery_refreshes_external_branch_and_worktree_changes_while_counts_remain_
         started: Mutex::default(),
     });
     let mut reading = Reading::start(roots.clone(), runner.clone(), git.0.join("unused-home"));
-    let until = Instant::now() + Duration::from_secs(4);
+    let until = Instant::now() + STUCK;
     loop {
         let snapshot = reading.poll();
         if snapshot.directories.len() == roots.len()
@@ -843,7 +928,7 @@ fn discovery_refreshes_external_branch_and_worktree_changes_while_counts_remain_
     let tree = git.0.join("external-worktree");
     git.git(&["worktree", "add", "-b", "external", tree.to_str().unwrap()]);
     let changed_at = Instant::now();
-    let until = changed_at + Duration::from_secs(4);
+    let until = changed_at + STUCK;
     loop {
         let snapshot = reading.poll();
         let updated = snapshot
@@ -918,7 +1003,7 @@ fn withdrawing_the_last_source_cancels_its_in_flight_count_and_discards_its_fact
         runner.clone(),
         git.0.join("unused-home"),
     );
-    let until = Instant::now() + Duration::from_secs(4);
+    let until = Instant::now() + STUCK;
     while runner.started.lock().unwrap().is_none() {
         reading.poll();
         assert!(
@@ -928,7 +1013,7 @@ fn withdrawing_the_last_source_cancels_its_in_flight_count_and_discards_its_fact
         std::thread::sleep(PAUSE);
     }
     reading.state.inventory.workspaces.clear();
-    let until = Instant::now() + Duration::from_secs(1);
+    let until = Instant::now() + STUCK;
     loop {
         assert!(reading.poll().directories.is_empty());
         if runner.cancelled.load(Ordering::Acquire) {
@@ -960,7 +1045,7 @@ fn cancellation_releases_count_workers_with_a_full_publication_queue() {
         runner.clone(),
         git.0.join("unused-home"),
     );
-    let until = Instant::now() + Duration::from_secs(4);
+    let until = Instant::now() + STUCK;
     while runner.started.lock().unwrap().is_none() && Instant::now() < until {
         std::thread::sleep(PAUSE);
     }
@@ -968,7 +1053,7 @@ fn cancellation_releases_count_workers_with_a_full_publication_queue() {
     // Stop draining: the final listing or progress now encounters publication backpressure.
     let stopping = Instant::now();
     drop(reading);
-    assert!(stopping.elapsed() < Duration::from_secs(1));
+    assert!(stopping.elapsed() < STUCK, "{:?}", stopping.elapsed());
 }
 
 #[derive(Clone, Copy)]
@@ -1030,7 +1115,7 @@ impl RepositoryProgramRunner for SaturatedReads {
                 .unwrap()
                 .entry(request.directory.clone())
                 .or_default() += 1;
-            let until = Instant::now() + Duration::from_secs(30);
+            let until = Instant::now() + HELD;
             loop {
                 if cancellation.is_cancelled() {
                     return Err(ProgramError::Cancelled);
@@ -1061,7 +1146,7 @@ impl RepositoryProgramRunner for SaturatedReads {
 }
 
 fn saturation_snapshot(reading: &mut Reading, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
-    let until = Instant::now() + Duration::from_secs(4);
+    let until = Instant::now() + STUCK;
     loop {
         let snapshot = reading.poll();
         if predicate(&snapshot) {

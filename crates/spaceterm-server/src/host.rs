@@ -1937,9 +1937,12 @@ mod startup_tests {
                 let reply = current.request(round_trip()).unwrap().wait();
                 assert!(matches!(reply, Ok(ReplyBody::Done)));
             }
+            // A connection whose writes stall ends after `STALL_AFTER`, which would free one
+            // that it blocked. Finishing sooner shows that nothing waited for the slow reader.
             assert!(
-                started.elapsed() < Duration::from_secs(2),
-                "a slow reader blocked another connection"
+                started.elapsed() < crate::protocol::limits::STALL_AFTER,
+                "a slow reader blocked another connection for {:?}",
+                started.elapsed()
             );
         }
     }
