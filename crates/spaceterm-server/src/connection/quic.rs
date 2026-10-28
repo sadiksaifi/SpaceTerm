@@ -17,6 +17,9 @@
 //!   On close the server finishes all three streams, opening any it never used, and the client
 //!   holds the server's goodbye until L1 and L2 have ended, so a goodbye never overtakes frames
 //!   in flight.
+//! - **Draining.** A server connection whose thread ends drains on the listener's thread, which
+//!   sends the close again when the peer's packets show it was lost, so a lost close never reads
+//!   as a stateless reset.
 //! - **Readiness.** The carrier reports its socket or bell as readable when datagrams arrive, and
 //!   QUIC's next timer as a deadline. Write progress needs incoming acknowledgements, so the same
 //!   descriptor is the progress descriptor. A client also reports its route-change signal and the
@@ -34,6 +37,7 @@ use noq_proto::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Read, Write};
+use std::mem::ManuallyDrop;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -61,6 +65,19 @@ const ADMISSION_WINDOW: u32 = 64 * 1024;
 const ADMITTED_WINDOW: u32 = 2 * limits::MAX_FRAME_BYTES as u32;
 /// Connections whose handshake started and that the host has not taken yet.
 const MAX_PENDING: usize = 32;
+/// Paths one connection holds at once: the one in use and the one a moving client opens.
+const PATHS: u32 = 2;
+/// Closed server connections the listener keeps draining at once. Past it a closed connection is
+/// forgotten at once, and a peer that lost its close sees a stateless reset.
+const MAX_DRAINING: usize = 64;
+/// How long a closed server connection drains: at least QUIC's three probe timeouts, and at least
+/// [`DRAIN_MIN`], so a peer whose probe timer backed off while the close was lost still reaches
+/// it, but never past [`DRAIN_MAX`].
+const DRAIN_MIN: Duration = Duration::from_secs(1);
+const DRAIN_MAX: Duration = Duration::from_secs(3);
+/// Datagrams a draining connection sends in answer to its peer: QUIC resends the close for every
+/// packet that arrives, and this bounds what a peer can make the server send.
+const DRAIN_SENDS: usize = 8;
 /// How long a client tries each address but the last. QUIC's first probe timeout is about one
 /// second at its initial 333 ms round-trip estimate, so one lost Initial packet or Retry is sent
 /// again, and its answer has another second to arrive, before the client moves on.
@@ -100,6 +117,11 @@ fn transport() -> Arc<TransportConfig> {
         // The server opens the one L0 stream; each side opens one stream per other level.
         .max_concurrent_bidi_streams(VarInt::from_u32(1))
         .max_concurrent_uni_streams(VarInt::from_u32(2))
+        // A client that moves opens a new path and abandons the old one, so both ends start the
+        // new path's round-trip estimate and congestion window afresh. RFC 9000 migration keeps
+        // the old path's estimate when only the port changes, and the server then gives up
+        // validating a slower new path after three of the old path's probe timeouts.
+        .max_concurrent_multipath_paths(PATHS)
         .ack_frequency_config(Some(acknowledgements))
         .congestion_controller_factory(Arc::new(Floored(Arc::default())))
         // Routers forget idle UDP flows after about 30 seconds.
@@ -358,6 +380,111 @@ fn drain_bell(bell: &UnixStream) {
 struct Server {
     endpoint: Endpoint,
     routes: HashMap<ConnectionHandle, Arc<Route>>,
+    /// Closed connections whose threads ended. The listener's thread answers their peers with
+    /// the close again until they drain, so one lost close never reads as a reset.
+    draining: HashMap<ConnectionHandle, Draining>,
+}
+
+/// A closed connection the listener's thread drives until it drains.
+struct Draining {
+    connection: Connection,
+    until: Instant,
+    sends: usize,
+}
+
+impl Server {
+    /// Takes over a closed connection whose thread ends, or forgets it when it already drained
+    /// or too many drain.
+    fn drain(&mut self, handle: ConnectionHandle, connection: Connection, now: Instant) {
+        self.routes.remove(&handle);
+        if connection.is_drained() {
+            return;
+        }
+        if self.draining.len() >= MAX_DRAINING {
+            self.endpoint.handle_event(handle, EndpointEvent::drained());
+            return;
+        }
+        // QUIC's own close timer is three probe timeouts away.
+        let until = connection
+            .poll_timeout()
+            .unwrap_or(now)
+            .clamp(now + DRAIN_MIN, now + DRAIN_MAX);
+        self.draining.insert(
+            handle,
+            Draining {
+                connection,
+                until,
+                sends: 0,
+            },
+        );
+    }
+
+    /// When the next draining connection ends.
+    fn next_drained(&self) -> Option<Instant> {
+        self.draining.values().map(|draining| draining.until).min()
+    }
+
+    /// Forgets the draining connections whose time ended.
+    fn expire(&mut self, now: Instant) {
+        let ended: Vec<_> = self
+            .draining
+            .iter()
+            .filter(|(_, draining)| draining.until <= now)
+            .map(|(handle, _)| *handle)
+            .collect();
+        for handle in ended {
+            self.forget(handle);
+        }
+    }
+
+    fn forget(&mut self, handle: ConnectionHandle) {
+        if self.draining.remove(&handle).is_some() {
+            self.endpoint.handle_event(handle, EndpointEvent::drained());
+        }
+    }
+
+    /// Hands a datagram to a draining connection and sends what it answers: its close again.
+    /// QUIC's own close timer never runs here, so the connection stays closed until `until`.
+    fn answer_draining(
+        &mut self,
+        handle: ConnectionHandle,
+        event: ConnectionEvent,
+        now: Instant,
+        socket: &Udp,
+        buffer: &mut Vec<u8>,
+    ) {
+        let Some(draining) = self.draining.get_mut(&handle) else {
+            return;
+        };
+        draining.connection.handle_event(event);
+        while draining.sends < DRAIN_SENDS {
+            buffer.clear();
+            let Some(transmit) =
+                draining
+                    .connection
+                    .poll_transmit(now, std::num::NonZeroUsize::MIN, buffer)
+            else {
+                break;
+            };
+            draining.sends += 1;
+            let _ = socket.send(
+                &buffer[..transmit.size],
+                transmit.destination,
+                transmit.src_ip,
+            );
+        }
+        let mut drained = false;
+        while let Some(event) = draining.connection.poll_endpoint_events() {
+            drained |= event.is_drained();
+            if !drained && let Some(event) = self.endpoint.handle_event(handle, event) {
+                draining.connection.handle_event(event);
+            }
+        }
+        // A stateless reset or the peer's own close can drain the connection early.
+        if drained || draining.connection.is_drained() {
+            self.forget(handle);
+        }
+    }
 }
 
 /// Datagrams for one server connection, waiting for its thread.
@@ -401,11 +528,19 @@ impl<T> Bounded<T> {
 struct Shared {
     server: Mutex<Server>,
     socket: Arc<Udp>,
+    /// Wakes the listener's thread: to stop, or to drain a connection whose thread ended.
+    ring: UnixStream,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Server> {
         self.server.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hands a closed connection whose thread ends to the listener's thread.
+    fn drain(&self, handle: ConnectionHandle, connection: Connection, now: Instant) {
+        self.lock().drain(handle, connection, now);
+        ring(&self.ring);
     }
 }
 
@@ -414,7 +549,6 @@ impl Shared {
 /// [`QuicListener::accept`] after the wake it set rings.
 pub struct QuicListener {
     demux: Arc<Demux>,
-    stop: UnixStream,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -442,13 +576,16 @@ impl QuicListener {
     pub fn bind(address: SocketAddr, config: Arc<ServerConfig>) -> Result<Self, QuicError> {
         let socket = Arc::new(Udp::bind(address)?);
         let endpoint = Endpoint::new(endpoint_config(), Some(Arc::clone(&config)), true);
+        let (stopped, stop) = bell()?;
         let demux = Arc::new(Demux {
             shared: Arc::new(Shared {
                 server: Mutex::new(Server {
                     endpoint,
                     routes: HashMap::new(),
+                    draining: HashMap::new(),
                 }),
                 socket,
+                ring: stop,
             }),
             config,
             accepted: Mutex::default(),
@@ -457,7 +594,6 @@ impl QuicListener {
             phase: AtomicU8::new(ACCEPTING),
             stopping: AtomicBool::new(false),
         });
-        let (stopped, stop) = bell()?;
         let running = Arc::clone(&demux);
         let thread = std::thread::Builder::new()
             .name("spaceterm-quic".into())
@@ -465,7 +601,6 @@ impl QuicListener {
             .map_err(|_| QuicError::Transport)?;
         Ok(Self {
             demux,
-            stop,
             thread: Some(thread),
         })
     }
@@ -505,7 +640,7 @@ impl QuicListener {
                 .unwrap_or_else(|e| e.into_inner()),
         );
         drop(waiting);
-        ring(&self.stop);
+        ring(&self.demux.shared.ring);
         live
     }
 
@@ -546,7 +681,7 @@ impl Drop for QuicListener {
     /// Ends routing at once, even to live connections.
     fn drop(&mut self) {
         self.demux.stopping.store(true, Ordering::Release);
-        ring(&self.stop);
+        ring(&self.demux.shared.ring);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -571,9 +706,20 @@ impl Demux {
                     revents: 0,
                 },
             ];
-            // A retired listener looks for its last connection's end now and then.
+            // A retired listener looks for its last connection's end now and then, and a
+            // draining connection ends at its time.
             let retired = self.phase.load(Ordering::Acquire) == RETIRED;
-            let timeout = if retired { 100 } else { -1 };
+            let drained = self.shared.lock().next_drained();
+            let timeout = [
+                retired.then(|| Duration::from_millis(100)),
+                drained.map(|until| until.saturating_duration_since(Instant::now())),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(-1, |wait| {
+                wait.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
+            });
             // SAFETY: `descriptors` is a live, writable array of `pollfd` for the whole call.
             unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) };
             if descriptors[1].revents != 0 {
@@ -583,6 +729,7 @@ impl Demux {
                 return;
             }
             self.route(&mut buffer, &mut send);
+            self.shared.lock().expire(Instant::now());
             if self.try_finish() {
                 // The host binds again once a retired socket is free.
                 if let Some(wake) = &*self.wake.lock().unwrap_or_else(|e| e.into_inner()) {
@@ -598,6 +745,7 @@ impl Demux {
     fn try_finish(&self) -> bool {
         let server = self.shared.lock();
         server.routes.is_empty()
+            && server.draining.is_empty()
             && self
                 .phase
                 .compare_exchange(RETIRED, FINISHED, Ordering::AcqRel, Ordering::Acquire)
@@ -650,14 +798,17 @@ impl Demux {
             .handle(now, FourTuple::new(remote, local), None, data, send);
         match event {
             Some(DatagramEvent::ConnectionEvent(handle, event)) => {
-                if let Some(route) = server.routes.get(&handle)
-                    && route
+                if let Some(route) = server.routes.get(&handle) {
+                    if route
                         .events
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(event, count)
-                {
-                    ring(&route.ring);
+                    {
+                        ring(&route.ring);
+                    }
+                } else {
+                    server.answer_draining(handle, event, now, &self.shared.socket, send);
                 }
             }
             // A client whose address is not yet proven gets a stateless retry: it must echo
@@ -721,7 +872,7 @@ impl Demux {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .push_back(QuicStream::new(Driver {
-                                connection,
+                                connection: ManuallyDrop::new(connection),
                                 handle,
                                 socket: Arc::clone(&self.shared.socket),
                                 peer: None,
@@ -801,7 +952,8 @@ impl DriverState {
 
 /// One QUIC connection and its I/O, driven only when its thread calls it.
 struct Driver {
-    connection: Connection,
+    /// Taken only by `Drop`, which hands a server's closed connection to the listener.
+    connection: ManuallyDrop<Connection>,
     handle: ConnectionHandle,
     socket: Arc<Udp>,
     /// The server a client's socket is connected to.
@@ -896,9 +1048,10 @@ impl Driver {
                 arrived = !datagrams.is_empty();
                 for (remote, local, data) in datagrams {
                     // noq-proto reads a close's reason only when its events are polled, and a
-                    // later stateless reset replaces it. A server forgets a connection as soon
-                    // as it closes, so its reset to this end's next packet can arrive in the same
-                    // batch as its close, and the TLS alert of a refusal would be lost.
+                    // later stateless reset replaces it. A server past its draining bound forgets
+                    // a connection as soon as it closes, so its reset to this end's next packet
+                    // can arrive in the same batch as its close, and the TLS alert of a refusal
+                    // would be lost.
                     if self.connection.is_closed() {
                         break;
                     }
@@ -1013,9 +1166,9 @@ impl Driver {
         }
     }
 
-    /// Moves a client to a new UDP socket, as after a switch between networks. The server
-    /// validates the new path and the connection continues without a new handshake. Returns
-    /// whether the client moved.
+    /// Moves a client to a new UDP socket, as after a switch between networks. The client opens
+    /// a new QUIC path from it and abandons the old one; the server validates the new path, and
+    /// the connection continues without a new handshake. Returns whether the client moved.
     fn rebind(&mut self, now: Instant) -> bool {
         let Some(peer) = self.peer else {
             return false;
@@ -1102,7 +1255,9 @@ impl Driver {
 }
 
 impl Drop for Driver {
-    /// Closes the connection, sends the close, and makes a server forget it at once.
+    /// Closes the connection and sends the close. A server's connection then drains on the
+    /// listener's thread, which sends the close again whenever the peer's packets show it was
+    /// lost.
     fn drop(&mut self) {
         let now = Instant::now();
         if !self.connection.is_closed() {
@@ -1110,12 +1265,12 @@ impl Drop for Driver {
                 .close(now, VarInt::from_u32(0), bytes::Bytes::new());
         }
         self.transmit(now);
+        // A connection that already drained told its endpoint here, so it is told only once.
+        self.endpoint_events();
+        // SAFETY: `drop` runs once, and nothing reads the field after this.
+        let connection = unsafe { ManuallyDrop::take(&mut self.connection) };
         if let Side::Server { shared, .. } = &self.side {
-            let mut server = shared.lock();
-            server
-                .endpoint
-                .handle_event(self.handle, EndpointEvent::drained());
-            server.routes.remove(&self.handle);
+            shared.drain(self.handle, connection, now);
         }
     }
 }
@@ -1166,7 +1321,7 @@ impl QuicStream {
                 continue;
             };
             let driver = Driver {
-                connection,
+                connection: ManuallyDrop::new(connection),
                 handle,
                 socket,
                 peer: Some(*address),
@@ -1852,7 +2007,7 @@ mod tests {
                 QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
             // With no connection the thread finishes at its next turn, racing this revive.
             listener.demux.phase.store(RETIRED, Ordering::Release);
-            ring(&listener.stop);
+            ring(&listener.demux.shared.ring);
             let won = listener.revive();
             let settled = Instant::now() + Duration::from_millis(150);
             while Instant::now() < settled {
