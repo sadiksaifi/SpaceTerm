@@ -22,6 +22,9 @@ fn large_grid_dimensions_reach_the_emulator_screen_and_pty_together() {
     ) else {
         panic!("large grid must attach")
     };
+    // Each command prints on a new line below the last, without clearing the screen. A debug
+    // build takes about a second to present a whole 512×256 grid again, so a clear adds one such
+    // redraw to the resize's, and a loaded host stretched the two past the wait for the output.
     for (columns, rows) in [(320, 120), (512, 256)] {
         size.columns = columns;
         size.rows = rows;
@@ -30,18 +33,14 @@ fn large_grid_dimensions_reach_the_emulator_screen_and_pty_together() {
             Reply::Unchanged
         ));
         assert!(matches!(
-            command(
-                &mut host,
-                1,
-                lease,
-                "stty -echo; printf '\\033[2J\\033[H'; stty size; printf 'SIZE-DONE\\n'"
-            ),
+            command(&mut host, 1, lease, "stty -echo; echo; stty size"),
             Reply::Unchanged
         ));
         await_text(&mut host, lease, &format!("{rows} {columns}"));
-        command(&mut host, 1, lease, "printf 'GRID-DONE\\n'");
+        let done = format!("GRID-DONE-{columns}");
+        command(&mut host, 1, lease, &format!("printf '{done}\\n'"));
         let update = await_screen(&mut host, [1; 32], lease, |update| {
-            lines(update).iter().any(|line| line.contains("GRID-DONE"))
+            lines(update).iter().any(|line| line.contains(&done))
         });
         let geometry = update.geometry.unwrap();
         assert_eq!((geometry.columns, geometry.rows), (columns, rows));
