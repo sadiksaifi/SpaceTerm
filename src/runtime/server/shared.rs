@@ -48,6 +48,9 @@ pub struct SharedWorkspaceHost {
     publication: Arc<publication::Publication>,
     /// Edits whose replies wait for a Worktree write to settle.
     waiting: Vec<edits::Waiting>,
+    /// Revoked devices whose records wait for their Worktree write to settle before they are
+    /// forgotten.
+    forgetting: BTreeSet<Id>,
     /// The host's wake, and the deadline the host last received from a tick.
     ticker: Option<Arc<dyn spaceterm_server::connection::Wake>>,
     armed: Option<Instant>,
@@ -105,6 +108,7 @@ impl SharedWorkspaceHost {
             sync,
             publication: Arc::default(),
             waiting: Vec::new(),
+            forgetting: BTreeSet::new(),
             ticker: None,
             armed: None,
             rung: false,
@@ -597,6 +601,25 @@ impl SharedWorkspaceHost {
             self.retain_later(revision);
         }
         Ok(())
+    }
+    /// Forgets a revoked device's edit outcomes and record in a journaled commit. Nothing waits
+    /// for the write. Every boot delivers each revoked device again, so a write lost to a crash
+    /// or an unreadable journal is repeated then.
+    fn forget(&mut self, device: Id) {
+        if self.recover().is_err() {
+            return;
+        }
+        let mut next = self.state.clone();
+        if !next.forget(device) {
+            self.forgetting.insert(device);
+            return;
+        }
+        self.forgetting.remove(&device);
+        if next != self.state
+            && let Ok(revision) = self.commit(next)
+        {
+            self.retain_later(revision);
+        }
     }
     /// An in-process edit waits for its revision under the lock.
     fn reply(&self, answer: Answer) -> Result<Reply, Refusal> {
@@ -1196,6 +1219,8 @@ impl HostCommands for SharedWorkspaceHost {
         }
     }
     fn revoked(&mut self, client: Id) {
+        // First, because reading back an uncertain journal restores the state from storage.
+        self.forget(client);
         self.prototype.revoked(client);
         for host in self.panes.values_mut() {
             host.revoked(client);
@@ -1356,6 +1381,80 @@ mod tests {
         assert!(!retained_outcome(&memory, device, 1));
         assert!(drain(&outbox).is_empty(), "an acknowledgement has no reply");
         host.shutdown().unwrap();
+    }
+
+    fn edit(host: &mut SharedWorkspaceHost, device: Id, sequence: u64, name: &str) -> Reply {
+        let mutation = rename(host, name);
+        host.request(device, device, Request::Mutate { sequence, mutation })
+    }
+
+    fn accepted(reply: &Reply) -> bool {
+        matches!(reply, Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
+    }
+
+    #[test]
+    fn revoked_devices_never_exhaust_edits_while_a_connected_device_keeps_its_outcome() {
+        let (mut host, memory) = journaled();
+        let connected = [200; 32];
+        assert!(accepted(&edit(&mut host, connected, 1, "Connected")));
+        // More devices than the server keeps records or outcomes for each edit, never
+        // acknowledge, and are revoked.
+        for n in 1..=70 {
+            let device = [n; 32];
+            assert!(
+                accepted(&edit(&mut host, device, 1, &format!("{n}"))),
+                "{n}"
+            );
+            host.revoked(device);
+        }
+        assert!(accepted(&edit(&mut host, [180; 32], 1, "Newcomer")));
+        // The connected device's lost reply still resolves to its original outcome.
+        let Reply::Outcome(resolved) =
+            host.request(connected, connected, Request::Resolve { sequence: 1 })
+        else {
+            panic!("the unacknowledged outcome is retained");
+        };
+        assert!(matches!(resolved.outcome, Outcome::Accepted { .. }));
+        host.sync.flush().unwrap();
+        assert!(retained_outcome(&memory, connected, 1));
+        assert!((1..=70).all(|n| !retained_outcome(&memory, [n; 32], 1)));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_revocation_whose_write_is_lost_is_forgotten_when_the_next_boot_delivers_it_again() {
+        use std::sync::atomic::Ordering;
+        let (mut original, memory) = journaled();
+        let device = [2; 32];
+        assert!(accepted(&edit(&mut original, device, 1, "Revoked")));
+        memory.fail.store(true, Ordering::SeqCst);
+        original.revoked(device);
+        original.sync.flush().unwrap();
+        memory.fail.store(false, Ordering::SeqCst);
+        original.shutdown().unwrap();
+        assert!(retained_outcome(&memory, device, 1), "the write was lost");
+
+        let restart = || {
+            let mut host = SharedWorkspaceHost::new(host());
+            host.retain_in(Box::new(journal::memory::Shared(Arc::clone(&memory))))
+                .unwrap();
+            host
+        };
+        // Every boot delivers each revoked device to the service again.
+        let mut restored = restart();
+        restored.revoked(device);
+        restored.sync.flush().unwrap();
+        assert!(!retained_outcome(&memory, device, 1));
+        restored.shutdown().unwrap();
+
+        let mut restored = restart();
+        assert!(restored.state.outcome(device, 1).is_none());
+        assert_eq!(
+            restored.state.next_sequence(device),
+            1,
+            "the device record is gone"
+        );
+        restored.shutdown().unwrap();
     }
 
     #[test]

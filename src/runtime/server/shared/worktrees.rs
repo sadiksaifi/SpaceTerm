@@ -515,6 +515,9 @@ impl SharedWorkspaceHost {
         self.commit_retained(next)?;
         self.writes.operation = None;
         self.repositories.refresh();
+        if self.forgetting.contains(&device) {
+            self.forget(device);
+        }
         Ok(())
     }
 }
@@ -536,6 +539,47 @@ mod tests {
 
     mod close_fallback {
         include!("worktrees/close_fallback_tests.rs");
+    }
+
+    #[test]
+    fn a_device_revoked_during_its_worktree_write_is_forgotten_once_the_write_settles() {
+        use spaceterm_server::worktree::{Branch, BranchName};
+        let git = GitFixture::new();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        let mutation = Mutation::Worktree(Operation::Create {
+            workspace,
+            root: git.0.clone(),
+            path: git.0.join("created"),
+            branch: Branch::New {
+                name: "created".into(),
+                base: BranchName::Local("main".into()),
+            },
+        });
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 2,
+                    mutation
+                }
+            ),
+            Reply::MutationPending
+        ));
+        host.revoked([1; 32]);
+        assert!(
+            host.state.outcome([1; 32], 2).is_some(),
+            "the running write keeps its record"
+        );
+        host.finish_worktrees(true).unwrap();
+        assert!(host.state.outcome([1; 32], 1).is_none());
+        assert!(host.state.outcome([1; 32], 2).is_none());
+        assert_eq!(host.state.next_sequence([1; 32]), 1);
+        assert!(host.forgetting.is_empty());
+        host.shutdown().unwrap();
     }
 
     #[test]

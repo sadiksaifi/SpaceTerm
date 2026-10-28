@@ -9,6 +9,8 @@ pub const MAX_WORKSPACES: usize = 64;
 pub const MAX_TABS: usize = 128;
 pub const MAX_PANES: usize = 128;
 const MAX_OUTCOMES: usize = 32;
+/// Editing devices the server keeps records for at once. See [`State::apply`].
+const MAX_DEVICES: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
@@ -330,7 +332,12 @@ pub struct State {
     #[serde(default)]
     pub worktree_settings: Option<crate::worktree::Settings>,
     pub inventory: Inventory,
+    /// Ordered from the least to the most recently editing device.
     devices: Vec<DeviceOutcomes>,
+    /// The highest sequence of any device record the server replaced. A device without a record
+    /// continues above it, so a replaced device that returns never reuses a sequence.
+    #[serde(default)]
+    sequence_floor: u64,
     #[serde(default)]
     creator_boot: Option<Id>,
     /// Durable cleanup intent names original Sessions, never future replacements.
@@ -349,6 +356,7 @@ impl State {
                 close: None,
             },
             devices: Vec::new(),
+            sequence_floor: 0,
             creator_boot: None,
             session_ends: None,
         }
@@ -426,6 +434,7 @@ impl State {
                 }],
             },
             devices: Vec::new(),
+            sequence_floor: 0,
             creator_boot: None,
             session_ends: None,
         })
@@ -488,9 +497,23 @@ impl State {
         self.devices
             .iter()
             .find(|d| d.device == device)
-            .map_or(1, |d| {
+            .map_or(self.sequence_floor + 1, |d| {
                 d.pending.last().map_or(d.retired + 1, |o| o.sequence + 1)
             })
+    }
+    /// Forgets a revoked device's record and every outcome it retains. A revoked identity never
+    /// connects again, so nothing would acknowledge them. Returns `false`, changing nothing, while
+    /// the device's Worktree write is still in progress.
+    pub fn forget(&mut self, device: Id) -> bool {
+        if self
+            .devices
+            .iter()
+            .any(|d| d.device == device && d.pending.iter().any(|o| o.outcome == Outcome::Pending))
+        {
+            return false;
+        }
+        self.devices.retain(|d| d.device != device);
+        true
     }
     pub fn pending_worktrees(&self) -> Vec<(Id, RetainedOutcome)> {
         self.devices
@@ -588,20 +611,34 @@ impl State {
         if self.devices.iter().map(|d| d.pending.len()).sum::<usize>() >= MAX_OUTCOMES {
             return Err(Refusal::Capacity);
         }
-        if !self.devices.iter().any(|d| d.device == device) {
-            if self.devices.len() >= 64 {
-                return Err(Refusal::Capacity);
+        let record = match self.devices.iter().position(|d| d.device == device) {
+            Some(index) => self.devices.remove(index),
+            None => {
+                // A full table replaces the least recently editing device that has nothing left
+                // to acknowledge, such as a reinstalled app's old identity. A device that still
+                // retains an outcome keeps it under ADR 0037 until it acknowledges it or is
+                // revoked.
+                if self.devices.len() >= MAX_DEVICES {
+                    let idle = self
+                        .devices
+                        .iter()
+                        .position(|d| d.pending.is_empty())
+                        .ok_or(Refusal::Capacity)?;
+                    let replaced = self.devices.remove(idle);
+                    self.sequence_floor = self.sequence_floor.max(replaced.retired);
+                }
+                // The floor the device's sequence was checked against, before any replacement.
+                DeviceOutcomes {
+                    device,
+                    retired: sequence - 1,
+                    pending: Vec::new(),
+                }
             }
-            self.devices.push(DeviceOutcomes {
-                device,
-                retired: 0,
-                pending: Vec::new(),
-            });
-        }
+        };
+        self.devices.push(record);
         let outcome = self.edit(device, &mutation, directory, validate_pin)?;
         self.devices
-            .iter_mut()
-            .find(|d| d.device == device)
+            .last_mut()
             .ok_or(Refusal::Failed)?
             .pending
             .push(RetainedOutcome {
@@ -1158,7 +1195,8 @@ impl State {
             || self.inventory.workspaces.len() > MAX_WORKSPACES
             || self.tab_count() > MAX_TABS
             || self.pane_count() > MAX_PANES
-            || self.devices.len() > 64
+            || self.devices.len() > MAX_DEVICES
+            || self.sequence_floor == u64::MAX
             || self.devices.iter().map(|d| d.pending.len()).sum::<usize>() > MAX_OUTCOMES
         {
             return Err(invalid());
@@ -2218,6 +2256,103 @@ mod tests {
             .apply([1; 32], 33, create, "/tmp".as_ref(), |_| true)
             .unwrap();
         assert_eq!(state.inventory.workspaces.len(), 33);
+    }
+
+    #[test]
+    fn a_full_device_table_replaces_the_least_recently_editing_device_with_nothing_to_acknowledge()
+    {
+        let mut state = State::empty();
+        // Any recorded outcome counts. A missing Workspace keeps the inventory empty.
+        let create = Mutation::RenameWorkspace {
+            workspace: [9; 32],
+            version: 0,
+            name: "Build".into(),
+        };
+        let device = |n: usize| [u8::try_from(n).unwrap(); 32];
+        // Device 0 never acknowledges its edit. Every other device does.
+        for n in 0..MAX_DEVICES {
+            state
+                .apply(device(n), 1, create.clone(), "/tmp".as_ref(), |_| true)
+                .unwrap();
+            if n != 0 {
+                state.acknowledge(device(n), 1).unwrap();
+            }
+        }
+        // Device 1 edits again, so device 2 becomes the least recently editing idle device.
+        state
+            .apply(device(1), 2, create.clone(), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        state.acknowledge(device(1), 2).unwrap();
+        let newcomer = device(MAX_DEVICES);
+        state
+            .apply(newcomer, 1, create.clone(), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        assert_eq!(state.devices.len(), MAX_DEVICES);
+        assert!(state.outcome(newcomer, 1).is_some());
+        assert!(
+            state.outcome(device(0), 1).is_some(),
+            "an unacknowledged outcome keeps its device"
+        );
+        assert_eq!(state.next_sequence(device(1)), 3);
+        assert!(state.devices.iter().all(|d| d.device != device(2)));
+        // The replaced device returns above every sequence it used, so its old edit is stale
+        // and its repeated acknowledgement retires nothing.
+        assert_eq!(state.next_sequence(device(2)), 2);
+        assert!(matches!(
+            state.apply(device(2), 1, create.clone(), "/tmp".as_ref(), |_| true),
+            Err(Refusal::Stale)
+        ));
+        assert_eq!(state.acknowledge(device(2), 1), Ok(()));
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn forgetting_a_device_frees_its_outcomes_once_its_worktree_write_settles() {
+        let mut state = State::empty();
+        for sequence in 1..MAX_OUTCOMES as u64 {
+            state
+                .apply(
+                    [1; 32],
+                    sequence,
+                    Mutation::CreateWorkspace {
+                        name: "Build".into(),
+                        directory: None,
+                    },
+                    "/tmp".as_ref(),
+                    |_| true,
+                )
+                .unwrap();
+        }
+        let location = Mutation::Worktree(crate::worktree::Operation::SetLocation {
+            version: 0,
+            template: "{repository}-{branch}".into(),
+        });
+        let sequence = MAX_OUTCOMES as u64;
+        assert_eq!(
+            state.apply([1; 32], sequence, location, "/tmp".as_ref(), |_| true),
+            Ok(Outcome::Pending)
+        );
+        let create = Mutation::CreateWorkspace {
+            name: "Other".into(),
+            directory: None,
+        };
+        assert!(matches!(
+            state.apply([2; 32], 1, create.clone(), "/tmp".as_ref(), |_| true),
+            Err(Refusal::Capacity)
+        ));
+        let before = state.clone();
+        assert!(!state.forget([1; 32]), "a running write keeps its record");
+        assert!(state == before);
+        state
+            .finish_worktree([1; 32], sequence, Outcome::Accepted { target: [1; 32] })
+            .unwrap();
+        assert!(state.forget([1; 32]));
+        assert!(state.outcome([1; 32], 1).is_none());
+        assert_eq!(state.next_sequence([1; 32]), 1);
+        state
+            .apply([2; 32], 1, create, "/tmp".as_ref(), |_| true)
+            .unwrap();
+        assert!(state.validate().is_ok());
     }
 
     #[test]
