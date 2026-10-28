@@ -583,10 +583,12 @@ impl Server {
     /// Takes over a closed connection whose thread ends, or forgets it when it already drained
     /// or too many drain.
     fn drain(&mut self, handle: ConnectionHandle, connection: Connection, now: Instant) {
-        self.routes.remove(&handle);
+        // A drained connection already gave up its handle and route, and the endpoint may have
+        // given the handle to a new connection whose route this must keep.
         if connection.is_drained() {
             return;
         }
+        self.routes.remove(&handle);
         if self.draining.len() >= MAX_DRAINING {
             self.endpoint.handle_event(handle, EndpointEvent::drained());
             return;
@@ -2317,6 +2319,50 @@ mod tests {
         .unwrap();
         tls.alpn_protocols = vec![ALPN.to_vec()];
         server_config(tls).unwrap()
+    }
+
+    /// A connection whose thread outlived its drain gave its handle back, and the endpoint may
+    /// have given that handle to a new connection. Handing the old one over keeps the new
+    /// route.
+    #[test]
+    fn a_drained_connection_leaves_a_reused_handle_routed() {
+        let now = Instant::now();
+        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+        tls.alpn_protocols = vec![ALPN.to_vec()];
+        let mut client = Endpoint::new(endpoint_config(), None, true);
+        let (handle, mut connection) = client
+            .connect(
+                now,
+                client_config(tls).unwrap(),
+                "127.0.0.1:9".parse().unwrap(),
+                SERVER_NAME,
+            )
+            .unwrap();
+        connection.close(now, VarInt::from_u32(0), bytes::Bytes::new());
+        connection.handle_timeout(now + Duration::from_secs(60));
+        assert!(connection.is_drained());
+
+        let (_, ringer) = bell().unwrap();
+        let mut server = Server {
+            endpoint: Endpoint::new(endpoint_config(), Some(server_config_for_tests()), true),
+            routes: HashMap::from([(
+                handle,
+                Arc::new(Route {
+                    events: Mutex::default(),
+                    ring: ringer,
+                }),
+            )]),
+            draining: HashMap::new(),
+        };
+        server.drain(handle, connection, now);
+        assert!(server.routes.contains_key(&handle), "the new route stays");
+        assert!(server.draining.is_empty());
     }
 
     /// A revive and the thread's finish race for a retired listener. Exactly one wins: a
