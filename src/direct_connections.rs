@@ -269,7 +269,15 @@ impl DirectConnections {
                             },
                             server: None,
                             gate: Arc::new(std::sync::atomic::AtomicBool::new(saved.active)),
-                            retry: Retry::new(Interaction::Quiet),
+                            // The person left this route connected. Its first attempt after
+                            // launch may let the credential store ask them, so a store that no
+                            // longer trusts this build asks now instead of waiting for Resume.
+                            // Later retries stay quiet.
+                            retry: Retry::new(if saved.active {
+                                Interaction::Requested
+                            } else {
+                                Interaction::Quiet
+                            }),
                             health: None,
                         },
                     );

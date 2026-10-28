@@ -42,6 +42,10 @@ pub(crate) fn native(identity: &str) -> Arc<dyn CredentialStore> {
     }
     #[cfg(target_os = "macos")]
     {
+        // Preflight is ad hoc signed. Its credentials must outlive each build's code identity.
+        if identity == "spaceterm-preflight" {
+            return Arc::new(macos::SecurityTool::new(identity));
+        }
         Arc::new(macos::Keychain::new(identity))
     }
     #[cfg(target_os = "linux")]
@@ -53,13 +57,18 @@ pub(crate) fn native(identity: &str) -> Arc<dyn CredentialStore> {
 }
 
 fn account(key: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut account = String::with_capacity(64);
-    for byte in key {
-        account.push(char::from(HEX[usize::from(byte >> 4)]));
-        account.push(char::from(HEX[usize::from(byte & 15)]));
-    }
+    hex(key, &mut account);
     account
+}
+
+/// Appends lowercase hexadecimal digits.
+fn hex(bytes: &[u8], text: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        text.push(char::from(HEX[usize::from(byte >> 4)]));
+        text.push(char::from(HEX[usize::from(byte & 15)]));
+    }
 }
 
 struct Unavailable;
@@ -84,17 +93,22 @@ impl CredentialStore for Unavailable {
 
 #[cfg(all(test, feature = "native-tests"))]
 mod native_tests {
-    use super::{CredentialError, Interaction, native};
+    use super::{CredentialError, CredentialStore, Interaction, native};
 
     #[test]
     #[ignore = "writes two randomly scoped Development native credential items; requires explicit authorization"]
     fn unix_native_store_refuses_replacement_and_preserves_other_pairings()
     -> Result<(), CredentialError> {
+        refuses_replacement_and_preserves_other_pairings(native("spaceterm-development").as_ref())
+    }
+
+    pub(super) fn refuses_replacement_and_preserves_other_pairings(
+        store: &dyn CredentialStore,
+    ) -> Result<(), CredentialError> {
         let mut first = [0; 32];
         let mut second = [0; 32];
         getrandom::fill(&mut first).map_err(|_| CredentialError::Unavailable)?;
         getrandom::fill(&mut second).map_err(|_| CredentialError::Unavailable)?;
-        let store = native("spaceterm-development");
         let exercise = || {
             store.insert(&first, b"first native verification secret")?;
             store.insert(&second, b"second native verification secret")?;
