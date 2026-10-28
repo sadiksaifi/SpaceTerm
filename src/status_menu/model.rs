@@ -163,7 +163,7 @@ impl Phase {
             Self::Unavailable(ServerError::CleanupUnresolved) => (
                 badge(ServerError::CleanupUnresolved),
                 Some(
-                    "SpaceTerm couldn't confirm that the server's Terminal Sessions ended. \
+                    "SpaceTerm couldn\u{2019}t confirm that the server\u{2019}s Terminal Sessions ended. \
                      Choose Stop Server to try again."
                         .to_owned(),
                 ),
@@ -181,9 +181,9 @@ impl Phase {
 fn badge(error: ServerError) -> &'static str {
     match error {
         ServerError::UnsafeStorage => "Unsafe storage",
-        ServerError::CleanupUnresolved => "Stop Unconfirmed",
+        ServerError::CleanupUnresolved => "Cleanup unresolved",
         ServerError::IncompatibleState => "Incompatible state",
-        ServerError::RuntimeUnavailable => "Server Unavailable",
+        ServerError::RuntimeUnavailable => "Runtime unavailable",
         ServerError::Unsupported => "Unsupported",
         _ => "Unavailable",
     }

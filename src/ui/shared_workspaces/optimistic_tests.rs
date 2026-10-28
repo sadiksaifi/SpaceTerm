@@ -40,6 +40,7 @@ impl DelayedServer {
                     rejected: None,
                     outcome: None,
                     error: None,
+                    failed_attempts: 0,
                 },
                 original: None,
                 dispatched: Vec::new(),

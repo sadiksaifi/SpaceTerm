@@ -4817,7 +4817,15 @@ fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAp
     assert_eq!(text, ["SpaceTerm Light", "Built into SpaceTerm"]);
 
     set_query(&window, "zzzz", cx);
-    assert!(cx.debug_bounds("settings-no-results").is_some());
+    let tree = A11yTree::read(cx);
+    assert!(
+        tree.find_text("No Results for \u{201C}zzzz\u{201D}")
+            .is_some()
+    );
+    assert!(
+        tree.find_text("Check the spelling or try a different term.")
+            .is_some()
+    );
 }
 
 #[gpui::test]

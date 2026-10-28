@@ -3206,7 +3206,10 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             state = state.detail_element(
                 div()
                     .debug_selector(|| "command-palette-empty-description".to_owned())
-                    .child(description),
+                    .child(gpui::Text::new(
+                        "command-palette-empty-description".into(),
+                        description,
+                    )),
             );
         }
         for (index, action) in self.empty.actions.iter().enumerate() {
@@ -3534,7 +3537,6 @@ fn separator_line(theme: CommandPaletteTheme) -> impl IntoElement {
         .bg(theme.shell.divider())
 }
 
-/// Counts the lines `text` occupies at `wrap_width`, bounded by the empty-state line limit.
 /// The palette's empty state: its section and secondary text on the panel's paint.
 fn empty_state_style(
     metrics: CommandPaletteMetrics,
@@ -3560,6 +3562,7 @@ fn empty_state_style(
     )
 }
 
+/// Counts the lines `text` occupies at `wrap_width`, bounded by the empty-state line limit.
 fn wrapped_line_count(
     text: &SharedString,
     font: &gpui::Font,

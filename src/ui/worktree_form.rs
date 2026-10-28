@@ -958,7 +958,7 @@ impl WorktreeForm {
         let owner = cx.weak_entity();
         let error = self.visible_error(FormField::Branch, cx);
         let prompt = if self.branches.is_none() {
-            "Loading Branches..."
+            "Loading Branches\u{2026}"
         } else if items.is_empty() {
             "No Branches"
         } else {
@@ -975,7 +975,7 @@ impl WorktreeForm {
                     .busy(self.branches.is_none())
                     .copy(
                         ComboBoxCopy::new("Filter branches", "Search")
-                            .busy_status("Loading Branches...")
+                            .busy_status("Loading Branches\u{2026}")
                             .empty_status("No Matching Branches"),
                     )
                     .disabled(self.pending)

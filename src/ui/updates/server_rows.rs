@@ -15,8 +15,8 @@ use crate::ui::direct_servers::DirectChanges;
 use crate::ui::settings_window;
 
 /// Each status is a few words that fit the menu. The action's Settings journey explains it.
-const UPDATE_STATUS_UNKNOWN: &str = "Status Unknown";
-const UPDATE_NEEDS_ATTENTION: &str = "Update Needs Attention";
+const UPDATE_STATUS_UNKNOWN: &str = "Status unknown";
+const UPDATE_NEEDS_ATTENTION: &str = "Update needs attention";
 
 /// What a passive read of this computer's server reported about updating it.
 #[derive(Clone, Debug)]
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn a_stopped_local_update_needs_attention_while_unknown_status_asks_nothing() {
         let unresolved = local_row(Err(ServerError::ActivationUnresolved));
-        assert_eq!(&*unresolved.detail, "Update Needs Attention");
+        assert_eq!(&*unresolved.detail, "Update needs attention");
         assert_eq!(
             unresolved.action.unwrap().need(),
             Some(ServerNeed::Attention)

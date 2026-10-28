@@ -8,7 +8,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Font, Pixels, RenderOnce, Rgba, SharedString, Window, div, px};
+use gpui::{AnyElement, Font, Pixels, RenderOnce, Rgba, SharedString, Text, Window, div, px};
 
 use crate::{Button, ButtonSize, ButtonVariant, CustomIconName, Icon, IconName};
 
@@ -196,8 +196,8 @@ impl EmptyState {
 
     /// One or two sentences under the title, each ending with a period.
     pub fn detail(self, detail: impl Into<SharedString>) -> Self {
-        let detail: SharedString = detail.into();
-        self.detail_element(detail)
+        // Text with an id publishes itself, so assistive technology reads the detail.
+        self.detail_element(Text::new("empty-state-detail".into(), detail.into()))
     }
 
     /// A detail that carries its own accessibility, styled as the detail.
@@ -296,7 +296,7 @@ impl RenderOnce for EmptyState {
                     .text_size(style.title.size)
                     .line_height(style.title.line_height)
                     .text_color(style.title.color)
-                    .child(title),
+                    .child(Text::new("empty-state-title".into(), title)),
             )
             .when_some(supplement, |state, supplement| {
                 state.child(

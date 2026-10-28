@@ -275,9 +275,9 @@ pub(super) struct LaunchPresentation {
     pub(super) waiting: bool,
 }
 
-pub(super) const OPENING_TITLE: &str = "Opening Workspaces\u{2026}";
+pub(super) const OPENING_TITLE: &str = "Opening Workspaces";
 // Launch reuses a running server or starts it, so the detail claims neither.
-const OPENING_DETAIL: &str = "Waiting for the server…";
+const OPENING_DETAIL: &str = "SpaceTerm is waiting for the server.";
 pub(super) const STOPPED_TITLE: &str = "Server Stopped";
 const STOPPED_DETAIL: &str = "Start the server to open your Workspaces.";
 pub(super) const AUTHORIZATION_TITLE: &str = "Run the Server at Startup";
@@ -473,6 +473,9 @@ pub(super) struct LocalLaunchState {
     /// New Workspace was chosen with no Workspace Window open. The window opened for it creates
     /// the Workspace once this computer's server presents its Workspaces.
     create_when_presented: bool,
+    /// The failed connection attempts counted when the person last chose Try Again on the empty
+    /// view, while that view still waits for this computer's server.
+    pub(super) reconnect_from: std::cell::Cell<Option<u64>>,
 }
 
 impl LocalLaunchState {
@@ -491,6 +494,7 @@ impl LocalLaunchState {
             refusal_offer: None,
             _refusal_offer: None,
             create_when_presented: false,
+            reconnect_from: std::cell::Cell::new(None),
         }
     }
 
@@ -694,9 +698,13 @@ impl WorkspaceManager {
             self.run_local_launch(None, window, cx);
             return;
         }
-        // A running server answers the Panes a stop interrupted, so they connect again.
+        // A running server answers the Panes a stop interrupted, so they connect again, and the
+        // window's own connection reconnects without waiting for its delay.
         if state == LaunchState::Ready {
             self.server_started(cx);
+            if let Some(shared) = self.shared.local() {
+                shared.retry_connection();
+            }
         }
         // While Workspaces are presented the launch screen is hidden, so a step that could not
         // finish explains itself in an alert instead.

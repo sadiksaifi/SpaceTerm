@@ -744,7 +744,7 @@ impl ControlPresentation {
             UpdateState::Failed { error } => {
                 let version = pending_version?;
                 control(
-                    "Retry",
+                    "Try Again",
                     version,
                     Some(failure_message(*error, wording)),
                     format!("Download SpaceTerm {version} Again"),
@@ -1280,7 +1280,7 @@ mod tests {
                     error: UpdateError::Download,
                 },
                 None,
-                "Retry 0.4.2",
+                "Try Again 0.4.2",
                 PillTone::Neutral,
                 ControlGlyph::Warning,
                 Some(ControlCommand::RetryDownload),
@@ -1290,7 +1290,7 @@ mod tests {
                     error: UpdateError::Download,
                 },
                 Some(UpdateStage::Warning),
-                "Retry 0.4.2",
+                "Try Again 0.4.2",
                 PillTone::Neutral,
                 ControlGlyph::Warning,
                 Some(ControlCommand::RetryDownload),
