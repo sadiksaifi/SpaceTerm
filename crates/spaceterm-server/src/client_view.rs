@@ -1,6 +1,6 @@
 //! Client-owned arrangements. These records never enter the protocol or server organization.
 use crate::ServerError;
-use crate::hierarchy::{Axis, Id, MAX_PANES, MAX_TABS, MAX_WORKSPACES, Tab, Workspace};
+use crate::hierarchy::{Axis, Id, Inventory, MAX_PANES, MAX_TABS, MAX_WORKSPACES, Tab, Workspace};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -240,6 +240,209 @@ impl ClientView {
     }
 }
 
+/// The bound on one retained Workspace name, which the server applies to every name it accepts.
+const MAX_NAME_BYTES: usize = 256;
+
+/// The Workspaces and Tabs a client last presented from one server, kept so it can present them
+/// while that server is not connected.
+///
+/// It holds identities, Workspace names, Split structure and Pane titles only. Directories,
+/// Worktrees, terminal contents, commands and live Session facts never enter it, and it never
+/// supplies authority: the server's next inventory replaces it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedInventory {
+    pub revision: u64,
+    pub workspaces: Vec<RetainedWorkspace>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedWorkspace {
+    pub id: Id,
+    pub name: String,
+    pub root_tab: Id,
+    pub tabs: Vec<RetainedTab>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedTab {
+    pub id: Id,
+    pub root_pane: Id,
+    pub panes: Vec<RetainedPane>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedPane {
+    pub id: Id,
+    pub source: Option<Id>,
+    pub axis: Axis,
+    /// The title a program set for the Pane, or its shell's name.
+    pub title: Option<String>,
+}
+
+impl RetainedInventory {
+    /// The structure and titles of `inventory`'s Workspaces. A title is one a program set, or
+    /// else the shell's name; a running command line is never kept.
+    pub fn retain(inventory: &Inventory) -> Self {
+        let title = |pane: &crate::hierarchy::Pane| {
+            use crate::pane::metadata::{MAX_TITLE_CHARS, TitleProvenance};
+            let presentation = pane.presentation.as_deref()?;
+            let title = match presentation.title_provenance {
+                TitleProvenance::TerminalControl => &presentation.title,
+                TitleProvenance::Fallback | TitleProvenance::WorkingDirectory => {
+                    &presentation.shell_name
+                }
+            };
+            let title: String = title
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_TITLE_CHARS)
+                .collect();
+            let title = title.trim();
+            (!title.is_empty()).then(|| title.to_owned())
+        };
+        Self {
+            revision: inventory.revision,
+            workspaces: inventory
+                .workspaces
+                .iter()
+                .map(|workspace| RetainedWorkspace {
+                    id: workspace.id,
+                    name: workspace.name.clone(),
+                    root_tab: workspace.root_tab,
+                    tabs: workspace
+                        .tabs
+                        .iter()
+                        .map(|tab| RetainedTab {
+                            id: tab.id,
+                            root_pane: tab.root_pane,
+                            panes: tab
+                                .panes
+                                .iter()
+                                .map(|pane| RetainedPane {
+                                    id: pane.id,
+                                    source: pane.source,
+                                    axis: pane.axis,
+                                    title: title(pane),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Holds the copy to the server's own bounds on Workspaces, Tabs, Panes and names, and the
+    /// bound on Terminal Metadata titles.
+    pub fn validate(&self) -> Result<(), ServerError> {
+        let invalid = || ServerError::UnsafeStorage;
+        let text = |value: &str, bound: usize| {
+            !value.trim().is_empty() && value.len() <= bound && !value.chars().any(char::is_control)
+        };
+        let mut ids = BTreeSet::new();
+        let (mut tabs, mut panes) = (0_usize, 0_usize);
+        if self.workspaces.len() > MAX_WORKSPACES {
+            return Err(invalid());
+        }
+        for workspace in &self.workspaces {
+            if !ids.insert(workspace.id)
+                || !text(&workspace.name, MAX_NAME_BYTES)
+                || !workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.id == workspace.root_tab)
+            {
+                return Err(invalid());
+            }
+            tabs += workspace.tabs.len();
+            for tab in &workspace.tabs {
+                if !ids.insert(tab.id) || !tab.panes.iter().any(|pane| pane.id == tab.root_pane) {
+                    return Err(invalid());
+                }
+                panes += tab.panes.len();
+                for pane in &tab.panes {
+                    if !ids.insert(pane.id)
+                        || pane.title.as_deref().is_some_and(|title| {
+                            !text(title, 4 * crate::pane::metadata::MAX_TITLE_CHARS)
+                                || title.chars().count() > crate::pane::metadata::MAX_TITLE_CHARS
+                        })
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
+        }
+        if tabs > MAX_TABS || panes > MAX_PANES || ids.contains(&[0; 32]) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    /// The copy as an inventory a client can present. It names no directory and carries no live
+    /// facts, so nothing it presents can open a Terminal Session or grant local authority.
+    pub fn inventory(&self) -> Inventory {
+        use crate::hierarchy::Pane;
+        Inventory {
+            repositories: None,
+            revision: self.revision,
+            workspaces: self
+                .workspaces
+                .iter()
+                .map(|workspace| Workspace {
+                    id: workspace.id,
+                    name: workspace.name.clone(),
+                    name_version: 0,
+                    pin_version: 0,
+                    pinned_directory: None,
+                    root_tab: workspace.root_tab,
+                    tabs: workspace
+                        .tabs
+                        .iter()
+                        .map(|tab| Tab {
+                            worktree_membership_fixed: false,
+                            worktree: None,
+                            worktree_repository: None,
+                            id: tab.id,
+                            root_pane: tab.root_pane,
+                            panes: tab
+                                .panes
+                                .iter()
+                                .map(|pane| Pane {
+                                    id: pane.id,
+                                    source: pane.source,
+                                    axis: pane.axis,
+                                    starting_directory: std::path::PathBuf::new(),
+                                    current_directory: None,
+                                    repository_directory: None,
+                                    presentation: None,
+                                    confirmed_directory: None,
+                                    creator: None,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            close: None,
+        }
+    }
+
+    /// The title retained for one Pane.
+    pub fn title(&self, pane: Id) -> Option<&str> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .find(|retained| retained.id == pane)?
+            .title
+            .as_deref()
+    }
+}
+
 #[cfg(feature = "client")]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,6 +453,25 @@ struct Record {
     view: ClientView,
 }
 
+#[cfg(feature = "client")]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InventoryRecord {
+    version: u32,
+    server: Id,
+    client: Id,
+    inventory: RetainedInventory,
+}
+
+#[cfg(feature = "client")]
+const INVENTORY: &std::ffi::CStr = c"inventory.json";
+
+/// Removes the retained inventory in one client directory.
+#[cfg(feature = "client")]
+pub(crate) fn discard_inventory(directory: &crate::storage::Directory) -> Result<(), ServerError> {
+    directory.remove(INVENTORY)
+}
+
 /// Separate from Settings and shared organization; its lock admits one Workspace Window per client.
 #[cfg(feature = "client")]
 pub struct ClientViewStore {
@@ -257,6 +479,9 @@ pub struct ClientViewStore {
     _lock: ClientViewLock,
     record: Record,
     blocked: bool,
+    /// The retained inventory as last read or written. A copy that can't be read is absent: it
+    /// only ever stands in for the server, whose next inventory replaces it.
+    inventory: Option<RetainedInventory>,
 }
 #[cfg(feature = "client")]
 struct ClientViewLock(std::fs::File);
@@ -281,12 +506,52 @@ impl ClientViewStore {
             return Err(ServerError::AuthenticationRefused);
         }
         record.view.validate()?;
+        let inventory = directory
+            .read_json::<InventoryRecord>("inventory.json")
+            .ok()
+            .flatten()
+            .filter(|retained| {
+                retained.version == 1
+                    && retained.server == server
+                    && retained.client == client
+                    && retained.inventory.validate().is_ok()
+            })
+            .map(|retained| retained.inventory);
         Ok(Self {
             directory,
             _lock: lock,
             record,
             blocked: false,
+            inventory,
         })
+    }
+    /// The Workspaces and Tabs this client last presented from the server, if it retains them.
+    pub fn retained_inventory(&self) -> Option<&RetainedInventory> {
+        self.inventory.as_ref()
+    }
+    /// Replaces the retained inventory. A copy outside its bounds is refused and the previous
+    /// one stays.
+    pub fn save_inventory(&mut self, inventory: RetainedInventory) -> Result<(), ServerError> {
+        inventory.validate()?;
+        if self.inventory.as_ref() == Some(&inventory) {
+            return Ok(());
+        }
+        self.directory.write_json(
+            INVENTORY,
+            &InventoryRecord {
+                version: 1,
+                server: self.record.server,
+                client: self.record.client,
+                inventory: inventory.clone(),
+            },
+        )?;
+        self.inventory = Some(inventory);
+        Ok(())
+    }
+    /// Removes the retained inventory, as when the route that kept it is removed.
+    pub fn discard_inventory(&mut self) -> Result<(), ServerError> {
+        self.inventory = None;
+        discard_inventory(&self.directory)
     }
     pub fn view(&self) -> &ClientView {
         &self.record.view
@@ -532,6 +797,167 @@ mod reconciliation_tests {
             ],
         ] {
             assert_eq!(Layout { nodes }.validate(), Err(ServerError::UnsafeStorage));
+        }
+    }
+}
+
+#[cfg(test)]
+mod retained_inventory_tests {
+    use super::*;
+    use crate::hierarchy::Pane;
+    use crate::pane::metadata::{
+        Command, CommandState, DirectoryProvenance, Freshness, MAX_TITLE_CHARS, Progress,
+        PromptZone, Snapshot, TitleGlyph, TitleProvenance,
+    };
+
+    fn presentation(title: &str, provenance: TitleProvenance) -> Box<Snapshot> {
+        Box::new(Snapshot {
+            revision: 1,
+            shell_name: "zsh".into(),
+            title: title.into(),
+            title_provenance: provenance,
+            directory: "/home/tester/secret".into(),
+            directory_provenance: DirectoryProvenance::Osc7,
+            user: Some("tester".into()),
+            host: Some("server".into()),
+            home: Some("/home/tester".into()),
+            freshness: Freshness::Live,
+            finished_commands: 3,
+            prompt_zone: PromptZone::CommandOutput,
+            command: Some(Command {
+                line: "export TOKEN=secret".into(),
+                state: CommandState::Running,
+            }),
+            title_activity: false,
+            title_glyph: TitleGlyph::Reported,
+            progress: Progress::None,
+        })
+    }
+
+    fn pane(id: u8, presentation: Option<Box<Snapshot>>) -> Pane {
+        Pane {
+            id: [id; 32],
+            source: None,
+            axis: Axis::Down,
+            starting_directory: "/home/tester/project".into(),
+            current_directory: Some("/home/tester/project/src".into()),
+            repository_directory: Some("/home/tester/project".into()),
+            presentation,
+            confirmed_directory: Some("/home/tester/project".into()),
+            creator: Some([9; 32]),
+        }
+    }
+
+    fn inventory(panes: Vec<Pane>) -> Inventory {
+        Inventory {
+            repositories: None,
+            revision: 7,
+            workspaces: vec![Workspace {
+                id: [1; 32],
+                name: "Work".into(),
+                name_version: 3,
+                pin_version: 2,
+                pinned_directory: Some("/home/tester/project".into()),
+                root_tab: [2; 32],
+                tabs: vec![Tab {
+                    worktree_membership_fixed: true,
+                    worktree: Some("/home/tester/project".into()),
+                    worktree_repository: Some("/home/tester/project".into()),
+                    id: [2; 32],
+                    root_pane: panes[0].id,
+                    panes,
+                }],
+            }],
+            close: None,
+        }
+    }
+
+    #[test]
+    fn a_retained_copy_keeps_structure_and_titles_and_drops_directories_and_commands() {
+        let published = inventory(vec![
+            pane(
+                3,
+                Some(presentation("vim notes", TitleProvenance::TerminalControl)),
+            ),
+            pane(
+                4,
+                Some(presentation("~/project", TitleProvenance::WorkingDirectory)),
+            ),
+            pane(5, None),
+        ]);
+
+        let retained = RetainedInventory::retain(&published);
+        let presented = retained.inventory();
+        let stored = serde_json::to_string(&retained).unwrap();
+
+        assert_eq!(retained.validate(), Ok(()));
+        assert_eq!(
+            (
+                retained.title([3; 32]),
+                retained.title([4; 32]),
+                retained.title([5; 32])
+            ),
+            (Some("vim notes"), Some("zsh"), None)
+        );
+        for secret in ["/home/tester", "TOKEN", "tester", "server"] {
+            assert!(!stored.contains(secret), "the copy holds {secret:?}");
+        }
+        let workspace = &presented.workspaces[0];
+        assert_eq!(
+            (
+                workspace.name.as_str(),
+                workspace.pinned_directory.as_ref(),
+                workspace.tabs[0].worktree.as_ref(),
+                presented.revision,
+            ),
+            ("Work", None, None, 7)
+        );
+        assert!(workspace.tabs[0].panes.iter().all(|pane| {
+            pane.starting_directory.as_os_str().is_empty()
+                && pane.presentation.is_none()
+                && pane.creator.is_none()
+        }));
+    }
+
+    #[test]
+    fn a_retained_copy_stays_within_the_server_bounds() {
+        let long = "t".repeat(MAX_TITLE_CHARS * 2);
+        let retained = RetainedInventory::retain(&inventory(vec![pane(
+            3,
+            Some(presentation(&long, TitleProvenance::TerminalControl)),
+        )]));
+        assert_eq!(
+            retained.title([3; 32]).map(|title| title.chars().count()),
+            Some(MAX_TITLE_CHARS),
+            "a long title is cut to the Terminal Metadata bound"
+        );
+        assert_eq!(retained.validate(), Ok(()));
+
+        let mut oversized = retained.clone();
+        oversized.workspaces[0].tabs[0].panes[0].title = Some(long);
+        let mut unnamed = retained.clone();
+        unnamed.workspaces[0].name = " ".into();
+        let mut too_many_panes = retained.clone();
+        too_many_panes.workspaces[0].tabs[0].panes = (0..=MAX_PANES)
+            .map(|index| RetainedPane {
+                id: [u8::try_from(index % 250).unwrap() + 3, 1, 2, 3]
+                    .into_iter()
+                    .chain(std::iter::repeat_n(u8::try_from(index / 250).unwrap(), 28))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+                source: None,
+                axis: Axis::Right,
+                title: None,
+            })
+            .collect();
+        too_many_panes.workspaces[0].tabs[0].root_pane =
+            too_many_panes.workspaces[0].tabs[0].panes[0].id;
+        let mut duplicate = retained.clone();
+        let copy = duplicate.workspaces[0].clone();
+        duplicate.workspaces.push(copy);
+        for invalid in [oversized, unnamed, too_many_panes, duplicate] {
+            assert_eq!(invalid.validate(), Err(ServerError::UnsafeStorage));
         }
     }
 }

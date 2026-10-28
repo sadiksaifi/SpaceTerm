@@ -142,6 +142,18 @@ impl Directory {
             .sync_all()
             .map_err(|_| ServerError::StorageUnavailable)
     }
+    /// Removes one private record. A record that is already absent is removed.
+    pub(crate) fn remove(&self, name: &std::ffi::CStr) -> Result<(), ServerError> {
+        // SAFETY: descriptor and terminated single-component name remain live for this call.
+        if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0
+            && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(ServerError::StorageUnavailable);
+        }
+        self.0
+            .sync_all()
+            .map_err(|_| ServerError::StorageUnavailable)
+    }
     /// Publish a prepared private socket without replacing any existing ready endpoint.
     /// Caller holds server.lock. Both names must remain beneath this retained directory.
     pub fn publish_socket(
@@ -502,6 +514,69 @@ mod tests {
             0o600
         );
         assert!(!fixture.0.join("settings.json").exists());
+    }
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_retained_inventory_survives_reopen_until_discarded_and_never_blocks_the_views() {
+        use crate::client_view::{
+            ClientViewStore, RetainedInventory, RetainedPane, RetainedTab, RetainedWorkspace,
+        };
+        use crate::hierarchy::{Axis, MAX_WORKSPACES};
+        let fixture = Fixture::new();
+        let workspace = |id: u8| RetainedWorkspace {
+            id: [id; 32],
+            name: format!("Workspace {id}"),
+            root_tab: [id.wrapping_add(100); 32],
+            tabs: vec![RetainedTab {
+                id: [id.wrapping_add(100); 32],
+                root_pane: [id.wrapping_add(200); 32],
+                panes: vec![RetainedPane {
+                    id: [id.wrapping_add(200); 32],
+                    source: None,
+                    axis: Axis::Right,
+                    title: Some("vim".into()),
+                }],
+            }],
+        };
+        let retained = RetainedInventory {
+            revision: 4,
+            workspaces: vec![workspace(1)],
+        };
+        let mut store = ClientViewStore::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        assert_eq!(store.retained_inventory(), None);
+        store.save_inventory(retained.clone()).unwrap();
+        // A copy beyond the server's bounds is refused and the previous copy stays.
+        let oversized = RetainedInventory {
+            revision: 5,
+            workspaces: (1..=u8::try_from(MAX_WORKSPACES + 1).unwrap())
+                .map(workspace)
+                .collect(),
+        };
+        assert_eq!(
+            store.save_inventory(oversized),
+            Err(ServerError::UnsafeStorage)
+        );
+        drop(store);
+        let store = ClientViewStore::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        assert_eq!(store.retained_inventory(), Some(&retained));
+        drop(store);
+        let other = ClientViewStore::open(fixture.open(), [1; 32], [3; 32]).unwrap();
+        assert_eq!(
+            other.retained_inventory(),
+            None,
+            "another client's copy is never read"
+        );
+        drop(other);
+        // An unreadable copy is absent and leaves the client views readable.
+        fs::write(fixture.0.join("inventory.json"), b"incomplete document").unwrap();
+        let mut store = ClientViewStore::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        assert_eq!(store.retained_inventory(), None);
+        store.save_inventory(retained.clone()).unwrap();
+        store.discard_inventory().unwrap();
+        drop(store);
+        assert!(!fixture.0.join("inventory.json").exists());
+        let store = ClientViewStore::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        assert_eq!(store.retained_inventory(), None);
     }
     #[cfg(feature = "client")]
     #[test]
