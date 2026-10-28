@@ -125,6 +125,8 @@ impl Carrier for Loopback {
         Readiness {
             read: self.bell.as_raw_fd(),
             write: None,
+            progress: None,
+            deadline: None,
         }
     }
 

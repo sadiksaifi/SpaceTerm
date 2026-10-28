@@ -33,7 +33,7 @@ pub(in crate::ui::settings_window) type Paired = (DirectConnections, Vec<DirectR
 pub(in crate::ui::settings_window) fn disconnected(names: &[&str]) -> Paired {
     let endpoints: Vec<String> = (10..)
         .take(names.len())
-        .map(|host| format!("wss://192.168.1.{host}:9231"))
+        .map(|host| format!("quic://192.168.1.{host}:9231"))
         .collect();
     let routes: Vec<(&str, &str)> = names
         .iter()
@@ -274,7 +274,7 @@ fn all_servers_names_this_computer_first_then_each_paired_server(cx: &mut TestAp
     );
     assert_eq!(
         tree.node("penguin")["aria"]["description"],
-        "wss://192.168.1.10:9231, Not connected",
+        "quic://192.168.1.10:9231, Not connected",
         "a paired server names its address and its short status"
     );
 }

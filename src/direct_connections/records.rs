@@ -158,6 +158,19 @@ impl Document {
         }
     }
 
+    /// Drops routes and pending operations whose endpoint is not a QUIC endpoint. Servers paired
+    /// over WSS must be paired again; the rest of the document still loads. Their native
+    /// credentials stay in the store, unreferenced.
+    fn discard_obsolete(&mut self) {
+        let current = |endpoint: &str| endpoint.starts_with("quic://");
+        self.routes.retain(|saved| current(&saved.route.endpoint));
+        self.pending.retain(|pending| match &pending.authority {
+            Authority::Direct(actor) => current(&actor.route.endpoint),
+            Authority::Enrollment { endpoint, .. } => current(endpoint),
+            Authority::Account { .. } => true,
+        });
+    }
+
     fn validate(&self) -> Result<(), ()> {
         if self.schema != 1 || self.routes.len().saturating_add(self.pending.len()) > CAPACITY {
             return Err(());
@@ -191,7 +204,7 @@ impl Document {
                     if *claim == [0; 32]
                         || *credential == [0; 32]
                         || endpoint.len() > 512
-                        || !endpoint.starts_with("wss://")
+                        || !endpoint.starts_with("quic://")
                     {
                         return Err(());
                     }
@@ -227,7 +240,7 @@ fn validate_route(saved: &SavedRoute) -> Result<(), ()> {
         || saved.route.paired.client == [0; 32]
         || saved.route.label.len() > 512
         || saved.route.endpoint.len() > 512
-        || !saved.route.endpoint.starts_with("wss://")
+        || !saved.route.endpoint.starts_with("quic://")
         || saved.route.endpoint.chars().any(char::is_control)
     {
         return Err(());
@@ -297,7 +310,8 @@ impl Records for PrivateRecords {
             *expected = WriteAuthority::default();
             return Ok(Document::default());
         };
-        let document: Document = serde_json::from_slice(&snapshot.bytes).map_err(|_| ())?;
+        let mut document: Document = serde_json::from_slice(&snapshot.bytes).map_err(|_| ())?;
+        document.discard_obsolete();
         document.validate()?;
         *expected = WriteAuthority {
             identity: Some(snapshot.identity),
@@ -368,6 +382,22 @@ mod tests {
         )
         .unwrap();
         (PrivateRecords::new(Arc::new(paths)), filesystem)
+    }
+
+    /// A route saved over WSS before QUIC replaced it is dropped as the document loads; the
+    /// others still load.
+    #[test]
+    fn an_obsolete_wss_route_is_dropped_and_the_rest_still_loads() {
+        let mut document = Document::default();
+        document.routes.push(super::super::tests::saved(1, 5));
+        let mut obsolete = super::super::tests::saved(2, 6);
+        obsolete.route.endpoint = "wss://127.0.0.1:9231/spaceterm".into();
+        document.routes.push(obsolete);
+        assert!(document.validate().is_err());
+        document.discard_obsolete();
+        assert_eq!(document.validate(), Ok(()));
+        assert_eq!(document.routes.len(), 1);
+        assert_eq!(document.routes[0].route.id, [1; 32]);
     }
 
     #[test]

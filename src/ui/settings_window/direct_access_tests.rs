@@ -309,7 +309,7 @@ fn paired(
 ) {
     let routes: Vec<(&str, &str)> = labels
         .iter()
-        .map(|label| (*label, "wss://192.168.1.30:9231"))
+        .map(|label| (*label, "quic://192.168.1.30:9231"))
         .collect();
     crate::direct_connections::tests::disconnected_routes_at(&routes)
 }

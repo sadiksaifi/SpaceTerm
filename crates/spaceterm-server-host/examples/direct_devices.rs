@@ -725,7 +725,7 @@ mod exercise {
                         .close
                         .ok_or("current server boot missing")?
                         .boot,
-                "WSS-created Workspace changed server boot",
+                "QUIC-created Workspace changed server boot",
             )?;
             println!("SCOPE test Workspace {}", hex(&workspace));
             let response = peer.message(json!({"workspace_owned": workspace}))?;
@@ -738,7 +738,7 @@ mod exercise {
                 .ok_or("test Workspace ownership missing")?;
             require(
                 pinned == owned.directory,
-                "WSS-created Workspace directory changed during handoff",
+                "QUIC-created Workspace directory changed during handoff",
             )?;
             owned.pane = Some(pane);
             let current = inventory(&connection)?.0;
@@ -749,17 +749,17 @@ mod exercise {
                 .ok_or("test Workspace missing")?;
             require(
                 work.pinned_directory.as_ref() == Some(&pinned),
-                "WSS-created Workspace lost its owning-server directory",
+                "QUIC-created Workspace lost its owning-server directory",
             )?;
             require(
                 work.tabs.first().is_some_and(|tab| tab.root_pane == pane),
-                "WSS-created root Pane identity changed",
+                "QUIC-created root Pane identity changed",
             )?;
             println!(
-                "PASS WSS Workspace creation, directory browsing, physical matching and attachment"
+                "PASS QUIC Workspace creation, directory browsing, physical matching and attachment"
             );
             let first = take(&connection, pane, DEVICE_NAME)?;
-            println!("PASS account-local owner explicitly took over the WSS-created Pane");
+            println!("PASS account-local owner explicitly took over the QUIC-created Pane");
             command(
                 &first,
                 "stty -echo; printf '\\033[2J\\033[HDIRECT-LOCAL\\n'",
@@ -780,7 +780,7 @@ mod exercise {
                     let reply = support::round_trip(&connection);
                     if reply.is_err() {
                         eprintln!(
-                            "WSS fixture failure: stage=owner-keepalive, class={}, elapsed_ms={}, heartbeats={heartbeats}",
+                            "QUIC fixture failure: stage=owner-keepalive, class={}, elapsed_ms={}, heartbeats={heartbeats}",
                             reply_classification(&reply),
                             started.elapsed().as_millis(),
                         );
@@ -799,12 +799,12 @@ mod exercise {
             let observer = api(ServerConnection::for_development_client(&observer_name, 2))?;
             let observer = api(support::connect(&observer))?;
             super::presentation::observe_hidden_inventory(&observer, pane).map_err(|failure| {
-                eprintln!("WSS inventory observer: {failure}");
+                eprintln!("QUIC inventory observer: {failure}");
                 "independent inventory observer did not see hidden metadata"
             })?;
             let response = peer.message(json!({"presentation_observed": true}))?;
             println!(
-                "PASS delayed WSS consumer: Scrollback checked={}, copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}",
+                "PASS delayed QUIC consumer: Scrollback checked={}, copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}",
                 response["reading_checked"]
                     .as_bool()
                     .ok_or("reading capability report missing")?,
@@ -824,16 +824,16 @@ mod exercise {
             let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
             if remote.session != first.lease().session {
                 eprintln!(
-                    "WSS fixture failure: stage=takeover-session, class=session-changed, elapsed_ms={}, heartbeats={heartbeats}",
+                    "QUIC fixture failure: stage=takeover-session, class=session-changed, elapsed_ms={}, heartbeats={heartbeats}",
                     started.elapsed().as_millis(),
                 );
-                return Err("WSS takeover changed the Session");
+                return Err("QUIC takeover changed the Session");
             }
             // The server ends the original owner's channel with the Takeover.
             let stale = first.ending();
             if !matches!(stale, Ok(Ending::Pane(PaneEvent::Takeover(_)))) {
                 eprintln!(
-                    "WSS fixture failure: stage=takeover-old-control, class={}, elapsed_ms={}, heartbeats={heartbeats}",
+                    "QUIC fixture failure: stage=takeover-old-control, class={}, elapsed_ms={}, heartbeats={heartbeats}",
                     match &stale {
                         Ok(Ending::Pane(_)) => "other-channel-end",
                         Ok(Ending::Link(_)) => "connection-ended",
@@ -856,7 +856,7 @@ mod exercise {
             let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
             require(
                 remote.session == first.lease().session,
-                "second WSS Take Over replaced the Session",
+                "second QUIC Take Over replaced the Session",
             )?;
             api(scope.owner.revoke_device(random()?, paired.pairing))?;
             let response = peer.message(json!({"revoked": true}))?;
@@ -1023,7 +1023,7 @@ mod exercise {
         ))?;
         require(
             api(server.refresh())?.protocol_major == 2,
-            "WSS did not negotiate major 2",
+            "QUIC did not negotiate major 2",
         )?;
         send_json(output, json!({"paired": paired}))?;
         Ok((server, connector))
@@ -1039,7 +1039,7 @@ mod exercise {
             .map_err(ServerError::from))?;
         match pending.wait_for(Duration::from_secs(15)) {
             Some(Ok(ReplyBody::Directory(Ok(value)))) => Ok(value),
-            _ => Err("WSS directory read did not complete"),
+            _ => Err("QUIC directory read did not complete"),
         }
     }
 
@@ -1052,9 +1052,9 @@ mod exercise {
         let directories::Value::Directory(home) =
             directory_read(&connection, directories::Operation::Home)?
         else {
-            return Err("WSS home directory missing");
+            return Err("QUIC home directory missing");
         };
-        require(home.is_absolute(), "WSS home directory was not absolute")?;
+        require(home.is_absolute(), "QUIC home directory was not absolute")?;
         require(
             matches!(
                 directory_read(
@@ -1063,7 +1063,7 @@ mod exercise {
                 )?,
                 directories::Value::Listing { .. }
             ),
-            "WSS directory browsing did not return a listing",
+            "QUIC directory browsing did not return a listing",
         )?;
         let alias = home.join(".");
         require(
@@ -1076,7 +1076,7 @@ mod exercise {
                 )?,
                 directories::Value::Directory(_)
             ),
-            "WSS directory validation failed",
+            "QUIC directory validation failed",
         )?;
         require(
             matches!(
@@ -1089,7 +1089,7 @@ mod exercise {
                 )?,
                 directories::Value::Match { index: Some(0) }
             ),
-            "WSS physical directory identity did not match",
+            "QUIC physical directory identity did not match",
         )?;
         let boot = inventory(&connection)?
             .0
@@ -1125,22 +1125,22 @@ mod exercise {
             .workspaces
             .iter()
             .find(|work| work.id == workspace)
-            .ok_or("WSS-created Workspace missing")?;
+            .ok_or("QUIC-created Workspace missing")?;
         require(
             work.pinned_directory.as_ref() == Some(&home),
-            "WSS Workspace pin did not retain its owning directory",
+            "QUIC Workspace pin did not retain its owning directory",
         )?;
-        let pane = work.tabs.first().ok_or("WSS root Tab missing")?.root_pane;
+        let pane = work.tabs.first().ok_or("QUIC root Tab missing")?.root_pane;
         let attachments = api(server.attachments())?;
         api(attachments.initialize(&current, Some(workspace)))?;
         require(
             attachments.is_attached(workspace),
-            "WSS-created Workspace did not attach",
+            "QUIC-created Workspace did not attach",
         )?;
         drop(attachments);
         require(
             api(server.attachments())?.is_attached(workspace),
-            "WSS attachment did not survive reopening",
+            "QUIC attachment did not survive reopening",
         )?;
         cleanup.owned = None;
         Ok(json!({"workspace": workspace, "pane": pane, "directory": home}))
@@ -1153,7 +1153,7 @@ mod exercise {
         )?;
         pipe_only(libc::STDIN_FILENO)?;
         pipe_only(libc::STDOUT_FILENO)?;
-        // SAFETY: this runs at single-threaded entry, before any WSS/native worker starts.
+        // SAFETY: this runs at single-threaded entry, before any QUIC/native worker starts.
         unsafe {
             std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", DEVICE_NAME);
         }
@@ -1169,7 +1169,7 @@ mod exercise {
             let request = receive_json(&mut input)?;
             let name = request["create_workspace"]
                 .as_str()
-                .ok_or("WSS Workspace creation phase missing")?;
+                .ok_or("QUIC Workspace creation phase missing")?;
             if request["fail_before_handoff"] == true {
                 let mut owned = None;
                 let result = create_remote_workspace(&server, name.to_owned(), |workspace| {
@@ -1207,15 +1207,15 @@ mod exercise {
         let taken = take(&connection, pane, owner)?;
         require(
             taken.lease().session == session,
-            "WSS Take Over changed the Session",
+            "QUIC Take Over changed the Session",
         )?;
         let report = super::terminal_semantics::exercise(&taken).map_err(|failure| {
-            eprintln!("WSS fixture exercise failed: {failure}");
-            "WSS semantic protocol exercise failed"
+            eprintln!("QUIC fixture exercise failed: {failure}");
+            "QUIC semantic protocol exercise failed"
         })?;
         let witness = super::presentation::begin(&taken).map_err(|failure| {
-            eprintln!("WSS presentation begin: {failure}");
-            "WSS presentation exercise failed"
+            eprintln!("QUIC presentation begin: {failure}");
+            "QUIC presentation exercise failed"
         })?;
         send_json(&mut output_pipe, json!({"presentation_hidden": true}))?;
         require(
@@ -1229,11 +1229,11 @@ mod exercise {
         let resumed = attached(select(&connection, pane, false)?)?;
         require(
             resumed.lease().session == session,
-            "WSS reconnect lost the running Session",
+            "QUIC reconnect lost the running Session",
         )?;
         super::presentation::finish(&resumed, previous, witness).map_err(|failure| {
-            eprintln!("WSS presentation finish: {failure}");
-            "WSS presentation reconnect or clear exercise failed"
+            eprintln!("QUIC presentation finish: {failure}");
+            "QUIC presentation reconnect or clear exercise failed"
         })?;
         command(&resumed, "printf 'DIRECT-RECONNECTED\\n'")?;
         output(&resumed, "DIRECT-RECONNECTED")?;
@@ -1256,7 +1256,7 @@ mod exercise {
         )?;
         require(
             support::inventory(&connection).is_err() && support::inventory(&second).is_err(),
-            "revocation retained an existing WSS connection",
+            "revocation retained an existing QUIC connection",
         )?;
         require(
             matches!(connector.connect(), Err(DirectError::Revoked)),
@@ -1395,7 +1395,7 @@ mod exercise {
             }
         }
         if !confirmed || help {
-            println!("DRY RUN: no storage, service, desktop, SSH or WSS access performed.");
+            println!("DRY RUN: no storage, service, desktop, SSH or QUIC access performed.");
             println!(
                 "Requires a parent-prepared foreground Development server and signed native examples on macOS and Penguin."
             );

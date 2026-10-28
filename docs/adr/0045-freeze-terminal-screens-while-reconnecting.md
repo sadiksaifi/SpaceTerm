@@ -13,3 +13,5 @@ One connection owner publishes status for the Workspace Window and Settings. Sav
 [ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) judges connection health from traffic and pings on the live connection.
 
 [ADR 0051](0051-predict-typed-characters-at-the-shells-line-editor.md) drops predicted characters when the connection is lost, so the frozen screen shows only what the server confirmed.
+
+[ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

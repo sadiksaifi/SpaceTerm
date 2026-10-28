@@ -1,4 +1,4 @@
-//! Deliberately enabled WSS access, exact device enrollment and restricted revocation.
+//! Deliberately enabled QUIC access, exact device enrollment and restricted revocation.
 //! Native credential access and connection persistence belong to the calling client.
 use crate::{ServerError, pane::control::ClientName};
 use serde::{Deserialize, Serialize};
@@ -12,11 +12,11 @@ mod endpoint;
 pub use endpoint::Endpoint;
 pub(crate) mod host;
 mod network;
+mod quic;
 mod storage;
 #[cfg(test)]
 pub(crate) mod tests;
 mod wire;
-mod wss;
 
 pub(super) fn setup_generation(operation: &[u8; 32]) -> u64 {
     let mut generation = [0; 8];
@@ -209,7 +209,7 @@ pub enum DirectError {
     Disabled,
     #[error("This connection request is invalid.")]
     InvalidRequest,
-    #[error("Enter a DNS name or IP address and a nonzero TCP port.")]
+    #[error("Enter a DNS name or IP address and a nonzero UDP port.")]
     InvalidAddress,
     #[error("This claim has already been decided.")]
     AlreadyDecided,
@@ -305,14 +305,14 @@ pub trait DirectConnector: Send + Sync {
     fn connect(&self) -> Result<DirectConnection, DirectError>;
 }
 
-/// An authenticated WSS socket before admission. Admission turns it into the connection's
-/// carrier; dropping it closes the socket.
+/// An authenticated QUIC connection before admission. Admission turns it into the connection's
+/// carrier; dropping it closes the connection.
 pub struct DirectConnection {
     #[cfg_attr(
         not(any(feature = "client", test)),
-        allow(dead_code, reason = "the desktop admits and carries the socket")
+        allow(dead_code, reason = "the desktop admits and carries the connection")
     )]
-    ws: wss::Ws,
+    stream: Box<crate::connection::quic::QuicStream>,
     #[cfg_attr(
         not(feature = "client"),
         allow(
@@ -351,7 +351,7 @@ impl Enrollment {
         claim: ClaimId,
         credential: &DeviceCredential,
     ) -> Result<Self, DirectError> {
-        wss::validate_endpoint(endpoint)?;
+        Endpoint::from_url(endpoint)?;
         if claim == [0; 32]
             || pin.server == [0; 32]
             || pin.public_key == [0; 32]

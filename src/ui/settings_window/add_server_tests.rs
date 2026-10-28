@@ -975,7 +975,7 @@ fn invitation(server: &str) -> Zeroizing<String> {
     };
     let payload = Zeroizing::new(
         serde_json::to_vec(&serde_json::json!({
-            "schema": 1, "id": ([7_u8; 32]), "endpoint": "wss://127.0.0.1:9231/spaceterm",
+            "schema": 1, "id": ([7_u8; 32]), "endpoint": "quic://127.0.0.1:9231",
             "pin": pin, "server_name": server, "token": ([8_u8; 32]), "expires": expires,
             "valid_for_seconds": 300,
         }))

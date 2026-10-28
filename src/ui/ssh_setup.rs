@@ -4,7 +4,7 @@
 //! SSH is temporary provisioning authority. One explicit attempt signs in once, asks the person
 //! before it installs or starts the server or changes its network access, enrolls this device and
 //! closes its SSH resources. The attempt succeeds only once this device is admitted over paired
-//! WSS, so every later operation uses that connection.
+//! QUIC, so every later operation uses that connection.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -209,7 +209,7 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
         SetupFailure::Unreachable { address } => SetupProblem {
             state: "Not Reachable",
             explanation: format!(
-                "SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {}. Check the address and any firewall, or enter the address this computer uses to reach it.",
+                "SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {}. Check the address and that any firewall allows UDP, or enter the address this computer uses to reach it.",
                 address.authority()
             )
             .into(),

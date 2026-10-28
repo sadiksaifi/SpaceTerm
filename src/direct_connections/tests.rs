@@ -45,7 +45,7 @@ pub(crate) fn waiting_invitation(
     .comparison_code();
     let payload = Zeroizing::new(
         serde_json::to_vec(&serde_json::json!({
-            "schema": 1, "id": invitation, "endpoint": "wss://127.0.0.1:9231/spaceterm",
+            "schema": 1, "id": invitation, "endpoint": "quic://127.0.0.1:9231",
             "pin": pin, "server_name": label, "token": random_id().unwrap(),
             "expires": expires, "valid_for_seconds": 300,
         }))
@@ -259,7 +259,7 @@ pub(super) fn saved(id: u8, key: u8) -> SavedRoute {
         route: DirectRoute {
             id: [id; 32],
             label: format!("Server {id}"),
-            endpoint: "wss://127.0.0.1:9231".into(),
+            endpoint: "quic://127.0.0.1:9231".into(),
             paired: PairedDevice {
                 pin: direct::ServerPin {
                     build: "spaceterm-development".into(),
@@ -728,7 +728,7 @@ fn interrupted_enrollment_resolves_only_its_retained_claim_without_reenrolling_o
         document.pending.push(PendingRecord::enrollment(
             [7; 32],
             "Interrupted server".into(),
-            "wss://127.0.0.1:9231".into(),
+            "quic://127.0.0.1:9231".into(),
             pin.clone(),
             [8; 32],
             [5; 32],
@@ -746,7 +746,7 @@ fn interrupted_enrollment_resolves_only_its_retained_claim_without_reenrolling_o
     await_condition(|| reopened.pending_unpairs().is_empty());
     assert_eq!(
         network.cancellations.lock().unwrap().as_slice(),
-        &[("wss://127.0.0.1:9231".into(), pin, [8; 32])]
+        &[("quic://127.0.0.1:9231".into(), pin, [8; 32])]
     );
     assert!(network.calls.lock().unwrap().is_empty());
     assert!(reopened.route(&[1; 32]).is_none());

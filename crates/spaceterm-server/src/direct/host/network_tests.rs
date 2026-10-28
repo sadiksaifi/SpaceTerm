@@ -157,25 +157,14 @@ fn wildcard_invitations_advertise_only_the_bound_socket_family() {
             &["10.0.0.5", "10.0.0.9", "fd00::5", "fd00::9"],
             &[preferred],
         ));
-        let listener = TcpListener::bind((bind_ip, 0)).unwrap();
-        let bind = listener.local_addr().unwrap();
-        drop(listener);
-        fixture
-            .management(Management::SetPolicy {
-                policy: Some(NetworkPolicy::new(bind).unwrap()),
-                enabled: true,
-            })
-            .unwrap();
+        let bind = fixture.listen_at(bind_ip.parse().unwrap());
         assert_eq!(
             status(&fixture).listener,
             ListenerState::Listening { addr: bind }
         );
         let invitation = fixture.invite();
         let advertised = std::net::SocketAddr::new(expected.parse().unwrap(), bind.port());
-        assert_eq!(
-            invitation.endpoint(),
-            format!("wss://{advertised}/spaceterm")
-        );
+        assert_eq!(invitation.endpoint(), format!("quic://{advertised}"));
     }
 }
 
@@ -183,15 +172,7 @@ fn wildcard_invitations_advertise_only_the_bound_socket_family() {
 fn wildcard_invitation_without_an_eligible_bound_family_refuses_before_allocation() {
     for (bind_ip, other_family) in [("0.0.0.0", "fd00::9"), ("::", "10.0.0.9")] {
         let fixture = fixture(network(&[other_family], &[other_family]));
-        let listener = TcpListener::bind((bind_ip, 0)).unwrap();
-        let bind = listener.local_addr().unwrap();
-        drop(listener);
-        fixture
-            .management(Management::SetPolicy {
-                policy: Some(NetworkPolicy::new(bind).unwrap()),
-                enabled: true,
-            })
-            .unwrap();
+        let bind = fixture.listen_at(bind_ip.parse().unwrap());
         let before = status(&fixture);
         assert_eq!(before.listener, ListenerState::Listening { addr: bind });
         let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();

@@ -1082,7 +1082,7 @@ pub(super) mod enrollment_tests {
             owner.resume_retained();
             let payload = Zeroizing::new(
                 serde_json::to_vec(&serde_json::json!({
-                    "schema": 1, "id": ([7_u8; 32]), "endpoint": "wss://127.0.0.1:9231/spaceterm",
+                    "schema": 1, "id": ([7_u8; 32]), "endpoint": "quic://127.0.0.1:9231",
                     "pin": network.paired.pin, "server_name": label, "token": ([8_u8; 32]),
                     "expires": expires, "valid_for_seconds": 300,
                 }))
@@ -1156,7 +1156,7 @@ pub(super) mod enrollment_tests {
             fixture.wait(|status| matches!(status, JoinStatus::Approved(id) if *id == fixture.id));
 
             let route = fixture.owner.route(&fixture.id).unwrap();
-            assert_eq!(route.endpoint, "wss://127.0.0.1:9231/spaceterm");
+            assert_eq!(route.endpoint, "quic://127.0.0.1:9231");
             assert_eq!(route.paired, fixture.network.paired);
             assert!(fixture.owner.pending_unpairs().is_empty());
             assert_eq!(fixture.credentials.values.lock().unwrap().len(), 1);

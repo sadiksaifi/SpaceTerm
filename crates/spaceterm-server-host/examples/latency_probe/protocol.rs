@@ -205,7 +205,7 @@ impl DirectConnector for Paired {
     }
 }
 
-/// How the probe reaches the server: account-local IPC or a paired WSS connection.
+/// How the probe reaches the server: account-local IPC or a paired QUIC connection.
 pub enum Route {
     Local,
     Paired(Arc<Paired>),

@@ -23,3 +23,5 @@ Protocol major 2 replaces major 1 under [ADR 0035](0035-negotiate-one-protocol-m
 This decision amends the exchange in ADR 0028, the protocol major in ADR 0035, the publication mechanism in [ADR 0036](0036-publish-workspace-changes-to-connected-clients.md), the resolution round trips in ADR 0037, the Scrollback reading in ADR 0041, and what renews recovery in ADR 0045. Pane control still follows [ADR 0022](0022-give-one-client-control-of-each-pane.md). QUIC, predictive local echo and any shared-memory path each need their own decision.
 
 [ADR 0051](0051-predict-typed-characters-at-the-shells-line-editor.md) replaces the hidden-input Pane event with Line Mode and predicts typed characters from the frames' input serials.
+
+[ADR 0052](0052-carry-paired-connections-over-quic.md) carries paired connections over QUIC instead of WSS.

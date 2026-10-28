@@ -25,7 +25,7 @@ APPS = {
     "terminal": "Terminal",
 }
 PIXEL_SOURCE = Path(__file__).with_name("latency_pixels.swift")
-# Cargo arguments for the protocol probe example. Release crypto keeps WSS timings realistic.
+# Cargo arguments for the protocol probe example. Release crypto keeps QUIC timings realistic.
 PROTOCOL_PROBE = (
     "--package",
     "spaceterm-server-host",
@@ -114,7 +114,7 @@ def resolve(host):
 def guard_route(host, interface):
     """Refuse to continue unless `host` routes through `interface`.
 
-    Established TCP connections to `host`, such as a paired desktop's WSS connection, must also
+    Established TCP connections to `host`, such as an SSH session, must also
     use a local address on `interface`; a connection opened before the route changed keeps its
     old interface.
     """

@@ -1,4 +1,4 @@
-//! Temporary SSH provisioning with paired WSS admission as its completion boundary.
+//! Temporary SSH provisioning with paired QUIC admission as its completion boundary.
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -563,7 +563,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         let cancelled = cancellation.is_cancelled();
         let cleanup_confirmed = (enrolled.is_err() || cancelled)
             && session.cancel_enrollment(prepared.operation(), &status.pin);
-        // Every command is reaped synchronously. The broker/socket also closes before WSS.
+        // Every command is reaped synchronously. The broker/socket also closes before QUIC.
         drop(session);
         let enrolled = match enrolled {
             Ok(enrolled) => enrolled,
@@ -881,7 +881,7 @@ fn resolved_setup_address(output: &CapturedProcessOutput) -> Result<SetupAddress
             _ => (),
         }
     }
-    // SSH's port selects its authentication transport, never the WSS listener.
+    // SSH's port selects its authentication transport, never the QUIC listener.
     if port.is_none() {
         return Err(SetupFailure::Refused(RefusalKind::InvalidEndpoint));
     }

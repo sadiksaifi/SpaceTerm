@@ -128,7 +128,7 @@ fn saved(id: u8) -> SavedRoute {
         route: DirectRoute {
             id: [id; 32],
             label: format!("Server {id}"),
-            endpoint: "wss://127.0.0.1:9231".into(),
+            endpoint: "quic://127.0.0.1:9231".into(),
             paired: PairedDevice {
                 pin: direct::ServerPin {
                     build: "spaceterm-development".into(),

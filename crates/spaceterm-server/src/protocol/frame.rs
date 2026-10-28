@@ -3,8 +3,8 @@
 //! `len` counts the bytes after it: the kind byte and the body. The kind's low seven bits name the
 //! message; the high bit marks a frame that more frames of the same kind continue. A writer
 //! builds each frame in one buffer and never starts a message of a kind while another message of
-//! that kind is partly written. Over IPC frames run back to back; over WSS one binary message
-//! carries exactly one frame.
+//! that kind is partly written. Frames run back to back, over IPC on one socket and over QUIC on
+//! each stream.
 //!
 //! Decoding is bounded per kind before allocation, and errors never carry peer bytes.
 use super::limits;
@@ -136,7 +136,7 @@ pub struct RawFrame {
 }
 
 impl RawFrame {
-    /// Parses exactly one whole frame, as one WSS binary message carries.
+    /// Parses exactly one whole frame.
     pub fn parse(bytes: &[u8]) -> Result<Self, DecodeError> {
         let (frame, used) = parse_prefix(bytes)?.ok_or(DecodeError::Malformed)?;
         if used != bytes.len() {

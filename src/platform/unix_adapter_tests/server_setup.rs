@@ -1,4 +1,4 @@
-//! Opt-in provisioning acceptance through real OpenSSH, signed packages and paired WSS.
+//! Opt-in provisioning acceptance through real OpenSSH, signed packages and paired QUIC.
 #[path = "setup_consent.rs"]
 mod consent_tests;
 
@@ -71,7 +71,7 @@ fn terminal_fixture_command(
             .strip_prefix(&status)
             .and_then(|code| code.parse::<u8>().ok())
     }) {
-        eprintln!("WSS fixture shell failure: stage={stage}, exit={code}");
+        eprintln!("QUIC fixture shell failure: stage={stage}, exit={code}");
         return Err(terminal_semantics::Failure::from("fixture-shell-command-failed").at(stage));
     }
     Err(terminal_semantics::Failure::from("fixture-shell-witness-missing").at(stage))
@@ -91,41 +91,45 @@ fn native_server_owned_work(
     };
     use terminal_semantics::stage as api;
     if identity() != "spaceterm-preflight" {
-        return Err("WSS fixture requires the installed Preflight identity".into());
+        return Err("QUIC fixture requires the installed Preflight identity".into());
     }
-    let journal = api("wss-open-fixture-journal", server.shared_journal())?;
+    let journal = api("quic-open-fixture-journal", server.shared_journal())?;
     if journal.pending().is_some() {
-        return Err("WSS fixture has an unresolved original; preserve it before new work".into());
+        return Err("QUIC fixture has an unresolved original; preserve it before new work".into());
     }
     drop(journal);
-    let mut connection = api("wss-connect-pane", server.link())?;
-    let baseline = api("wss-baseline-inventory", repository::inventory(&connection))?.0;
+    let mut connection = api("quic-connect-pane", server.link())?;
+    let baseline = api(
+        "quic-baseline-inventory",
+        repository::inventory(&connection),
+    )?
+    .0;
     let created = api(
-        "wss-create-workspace",
+        "quic-create-workspace",
         worktree_fixture::journaled_mutation(
             server,
             &connection,
             Mutation::CreateWorkspace {
-                name: "WSS native semantics".into(),
+                name: "QUIC native semantics".into(),
                 directory: None,
             },
         ),
     )?;
     let Outcome::Accepted { target: workspace } = created.outcome else {
-        return Err("WSS native fixture Workspace creation refused".into());
+        return Err("QUIC native fixture Workspace creation refused".into());
     };
     // The fixture Pane outlives the exercise, so cleanup can still run its shell commands.
     let mut fixture: Option<support::Pane> = None;
     let mut remote_root = None;
     let mut root_identity = None;
     let exercise = (|| -> Result<_, terminal_semantics::Failure> {
-        let current = api("wss-fixture-inventory", repository::inventory(&connection))?.0;
+        let current = api("quic-fixture-inventory", repository::inventory(&connection))?.0;
         let pane = current
             .workspaces
             .iter()
             .find(|work| work.id == workspace)
             .and_then(|work| work.tabs.first())
-            .ok_or("WSS fixture Pane missing")?
+            .ok_or("QUIC fixture Pane missing")?
             .root_pane;
         let size = PaneSize {
             columns: 80,
@@ -134,59 +138,59 @@ fn native_server_owned_work(
             cell_height: 18,
         };
         let started = api(
-            "wss-select-fixture-pane",
+            "quic-select-fixture-pane",
             support::select(&connection, pane, true, size),
         )?
         .attached()
-        .ok_or("WSS fixture Pane did not start")?;
+        .ok_or("QUIC fixture Pane did not start")?;
         let shell = &*fixture.insert(started);
         let report = terminal_semantics::exercise(shell)?;
         terminal_fixture_command(
             shell,
             "st653_live=retained; printf 'ST653-LIVE\\n'",
-            "wss-live-shell",
+            "quic-live-shell",
             "ST653-LIVE",
         )?;
-        let before = api("wss-before-reconnect", repository::inventory(&connection))?.0;
+        let before = api("quic-before-reconnect", repository::inventory(&connection))?.0;
         let reconnected = reconnect();
-        if api("wss-original-client", server.client_scope())?
-            != api("wss-reconnected-client", reconnected.client_scope())?
+        if api("quic-original-client", server.client_scope())?
+            != api("quic-reconnected-client", reconnected.client_scope())?
         {
-            return Err("WSS reconnect changed the paired Client Identity".into());
+            return Err("QUIC reconnect changed the paired Client Identity".into());
         }
         connection.close();
-        connection = api("wss-reconnect-pane", reconnected.link())?;
-        let after = api("wss-after-reconnect", repository::inventory(&connection))?.0;
-        let before = before.close.ok_or("WSS original live inventory missing")?;
+        connection = api("quic-reconnect-pane", reconnected.link())?;
+        let after = api("quic-after-reconnect", repository::inventory(&connection))?.0;
+        let before = before.close.ok_or("QUIC original live inventory missing")?;
         let after = after
             .close
-            .ok_or("WSS reconnected live inventory missing")?;
+            .ok_or("QUIC reconnected live inventory missing")?;
         if before.boot != after.boot
             || !before
                 .sessions
                 .iter()
                 .all(|live| after.sessions.contains(live))
         {
-            return Err("WSS reconnect replaced existing Terminal Sessions".into());
+            return Err("QUIC reconnect replaced existing Terminal Sessions".into());
         }
         let resumed = api(
-            "wss-resume-fixture-pane",
+            "quic-resume-fixture-pane",
             support::select(&connection, pane, true, size),
         )?
         .attached()
-        .ok_or("WSS fixture Pane did not resume")?;
+        .ok_or("QUIC fixture Pane did not resume")?;
         let shell = &*fixture.insert(resumed);
         terminal_fixture_command(
             shell,
             "test \"$st653_live\" = retained && printf 'ST653-REUSED\\n'",
-            "wss-shell-reuse",
+            "quic-shell-reuse",
             "ST653-REUSED",
         )?;
         // Only the owning server's shell creates or accesses these paths. They never enter local I/O.
         terminal_fixture_command(
             shell,
             r#"st653_root=$(mktemp -d /tmp/st653.XXXXXXXX) && printf 'ST-ROOT-CREATED\n'"#,
-            "wss-root-mkdir",
+            "quic-root-mkdir",
             "ST-ROOT-CREATED",
         )?;
         // A cd inside command substitution captures the integration's chpwd OSC output.
@@ -194,20 +198,20 @@ fn native_server_owned_work(
         terminal_fixture_command(
             shell,
             r#"st653_root=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$st653_root") && printf 'ST-ROOT-CANONICAL\n'"#,
-            "wss-root-canonicalize",
+            "quic-root-canonicalize",
             "ST-ROOT-CANONICAL",
         )?;
         let output = terminal_fixture_command(
             shell,
             r#"st653_identity=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1],follow_symlinks=False); print("%d:%d"%(s.st_dev,s.st_ino))' "$st653_root") && printf 'ST-FIXTURE-ROOT=%s\nST-FIXTURE-IDENTITY=%s\nST-ROOT-READY\n' "$st653_root" "$st653_identity""#,
-            "wss-root-identity",
+            "quic-root-identity",
             "ST-ROOT-READY",
         )?;
         let lines = &output.rows;
         let root = lines
             .iter()
             .find_map(|line| line.trim_end().strip_prefix("ST-FIXTURE-ROOT="))
-            .ok_or("WSS fixture root identity missing")?;
+            .ok_or("QUIC fixture root identity missing")?;
         let path = PathBuf::from(root);
         if !matches!(
             path.parent().and_then(|p| p.to_str()),
@@ -221,7 +225,7 @@ fn native_server_owned_work(
                     && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
             })
         {
-            return Err("WSS fixture root shape changed".into());
+            return Err("QUIC fixture root shape changed".into());
         }
         let identity = lines
             .iter()
@@ -230,7 +234,7 @@ fn native_server_owned_work(
             .and_then(|(device, inode)| {
                 Some((device.parse::<u64>().ok()?, inode.parse::<u64>().ok()?))
             })
-            .ok_or("WSS fixture filesystem identity missing")?;
+            .ok_or("QUIC fixture filesystem identity missing")?;
         remote_root = Some(path.clone());
         root_identity = Some(identity);
         let created_directory = path.join("created-directory");
@@ -242,7 +246,7 @@ fn native_server_owned_work(
         )?;
         if !matches!(value, directories::Value::Directory(ref value) if value == &created_directory)
         {
-            return Err("WSS directory creation returned another directory".into());
+            return Err("QUIC directory creation returned another directory".into());
         }
         let value = directory_operation(
             &connection,
@@ -250,12 +254,12 @@ fn native_server_owned_work(
         )?;
         if !matches!(value, directories::Value::Listing { names, truncated: false } if names.iter().any(|name| name == "created-directory"))
         {
-            return Err("WSS directory browsing missed its created directory".into());
+            return Err("QUIC directory browsing missed its created directory".into());
         }
         terminal_fixture_command(
             shell,
             r#"ln -s "$st653_root/created-directory" "$st653_root/alias" && printf 'ST-ALIAS-READY\n'"#,
-            "wss-directory-alias",
+            "quic-directory-alias",
             "ST-ALIAS-READY",
         )?;
         let value = directory_operation(
@@ -266,16 +270,16 @@ fn native_server_owned_work(
             }),
         )?;
         if !matches!(value, directories::Value::Match { index: Some(0) }) {
-            return Err("WSS directory comparison did not resolve the owning-server alias".into());
+            return Err("QUIC directory comparison did not resolve the owning-server alias".into());
         }
         terminal_fixture_command(
             shell,
             r#"GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$st653_root" -c init.defaultBranch=main init -q && git -C "$st653_root" config core.hooksPath /dev/null && git -C "$st653_root" -c commit.gpgSign=false -c user.name=Fixture -c user.email=fixture@invalid commit -q --allow-empty -m fixture && printf 'ST-REPOSITORY-READY\n'"#,
-            "wss-repository-ready",
+            "quic-repository-ready",
             "ST-REPOSITORY-READY",
         )?;
         let pinned = api(
-            "wss-pin-fixture-workspace",
+            "quic-pin-fixture-workspace",
             worktree_fixture::journaled_mutation(
                 server,
                 &connection,
@@ -287,11 +291,11 @@ fn native_server_owned_work(
             ),
         )?;
         if !matches!(pinned.outcome, Outcome::Accepted { .. }) {
-            return Err("WSS fixture pin refused".into());
+            return Err("QUIC fixture pin refused".into());
         }
         let worktree = path.join("created");
         let created = api(
-            "wss-create-fixture-worktree",
+            "quic-create-fixture-worktree",
             worktree_fixture::journaled_mutation(
                 server,
                 &connection,
@@ -307,10 +311,10 @@ fn native_server_owned_work(
             ),
         )?;
         if !matches!(created.outcome, Outcome::Accepted { .. }) {
-            return Err("WSS Worktree creation refused".into());
+            return Err("QUIC Worktree creation refused".into());
         }
         let published = api(
-            "wss-observe-created-worktree",
+            "quic-observe-created-worktree",
             repository::await_facts(&connection, &path, |facts| {
                 facts
                     .worktrees
@@ -328,27 +332,27 @@ fn native_server_owned_work(
                     && tab.worktree_repository.as_ref() == Some(&path)
             })
         {
-            return Err("WSS Worktree Tab did not belong to its owning server".into());
+            return Err("QUIC Worktree Tab did not belong to its owning server".into());
         }
         terminal_fixture_command(
             shell,
             r#"test -d "$st653_root/created" && printf 'ST-WORKTREE-EXISTS\n'"#,
-            "wss-worktree-exists",
+            "quic-worktree-exists",
             "ST-WORKTREE-EXISTS",
         )?;
         let removal = api(
-            "wss-review-worktree-removal",
+            "quic-review-worktree-removal",
             worktree_fixture::review(&connection, &path, &worktree),
         )?;
         let removed = api(
-            "wss-remove-fixture-worktree",
+            "quic-remove-fixture-worktree",
             worktree_fixture::journaled_mutation(server, &connection, Mutation::Worktree(removal)),
         )?;
         if !matches!(removed.outcome, Outcome::Accepted { .. }) {
-            return Err("WSS Worktree removal refused".into());
+            return Err("QUIC Worktree removal refused".into());
         }
         api(
-            "wss-observe-removed-worktree",
+            "quic-observe-removed-worktree",
             repository::await_facts(&connection, &path, |facts| {
                 facts
                     .worktrees
@@ -359,40 +363,40 @@ fn native_server_owned_work(
         terminal_fixture_command(
             shell,
             r#"test ! -e "$st653_root/created" && printf 'ST-WORKTREE-REMOVED\n'"#,
-            "wss-worktree-removed",
+            "quic-worktree-removed",
             "ST-WORKTREE-REMOVED",
         )?;
         Ok(report)
     })();
     if let Err(failure) = &exercise {
-        eprintln!("WSS fixture exercise failed: {failure}");
+        eprintln!("QUIC fixture exercise failed: {failure}");
     }
-    if api("wss-cleanup-journal-check", server.shared_journal())?
+    if api("quic-cleanup-journal-check", server.shared_journal())?
         .pending()
         .is_some()
     {
-        return Err("WSS fixture cleanup waits for original-operation recovery".into());
+        return Err("QUIC fixture cleanup waits for original-operation recovery".into());
     }
     // Recheck the exact remote filesystem object before descriptor-safe recursive removal.
     // A changed target is retained, and an uncertain write never reaches this cleanup.
     let directory_cleanup = if let (Some(path), Some(shell), Some((device, inode))) =
         (remote_root, fixture.as_ref(), root_identity)
     {
-        let root = path.to_str().ok_or("WSS fixture root encoding changed")?;
+        let root = path.to_str().ok_or("QUIC fixture root encoding changed")?;
         let cleanup = format!(
             r#"python3 -c 'import os,shutil,stat,sys; p=sys.argv[1]; parent=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY); name=os.path.basename(p); fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent); s=os.fstat(fd); assert (s.st_dev,s.st_ino)==({device},{inode}) and shutil.rmtree.avoids_symlink_attacks; os.fchdir(fd); [shutil.rmtree(n) if stat.S_ISDIR(os.stat(n,dir_fd=fd,follow_symlinks=False).st_mode) else os.unlink(n,dir_fd=fd) for n in os.listdir(fd)]; s=os.stat(name,dir_fd=parent,follow_symlinks=False); assert (s.st_dev,s.st_ino)==({device},{inode}); os.rmdir(name,dir_fd=parent); os.close(fd); os.close(parent); print("ST-ROOT-REMOVED")' '{root}' 2>/dev/null"#
         );
-        terminal_fixture_command(shell, &cleanup, "wss-root-removed", "ST-ROOT-REMOVED").map(drop)
+        terminal_fixture_command(shell, &cleanup, "quic-root-removed", "ST-ROOT-REMOVED").map(drop)
     } else {
         Ok(())
     };
     let target = CloseTarget::Workspace { workspace };
-    let current = api("wss-cleanup-inventory", repository::inventory(&connection))?.0;
+    let current = api("quic-cleanup-inventory", repository::inventory(&connection))?.0;
     let confirmation = current
         .close_confirmation(target)
-        .ok_or("WSS fixture close target missing")?;
+        .ok_or("QUIC fixture close target missing")?;
     let closed = api(
-        "wss-close-fixture-workspace",
+        "quic-close-fixture-workspace",
         worktree_fixture::journaled_mutation(
             server,
             &connection,
@@ -403,10 +407,10 @@ fn native_server_owned_work(
         ),
     )?;
     if !matches!(closed.outcome, Outcome::Accepted { .. }) {
-        return Err("WSS fixture close refused".into());
+        return Err("QUIC fixture close refused".into());
     }
     let after = api(
-        "wss-verify-baseline-inventory",
+        "quic-verify-baseline-inventory",
         repository::inventory(&connection),
     )?
     .0;
@@ -423,12 +427,12 @@ fn native_server_owned_work(
             })
         })
     {
-        return Err("baseline server work changed during the WSS fixture".into());
+        return Err("baseline server work changed during the QUIC fixture".into());
     }
     let report = exercise?;
     directory_cleanup?;
     eprintln!(
-        "PASS WSS semantic protocol: copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}, owning-server Worktree create/remove; fixture cleanup and baseline work retained",
+        "PASS QUIC semantic protocol: copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}, owning-server Worktree create/remove; fixture cleanup and baseline work retained",
         report.copied_rows,
         report.accessible_rows,
         report.graphics_supported,
@@ -534,7 +538,7 @@ impl SetupApprovalHandler for NativeApprovals {
                 if let Some(expected) = &*self.expected_address.lock().unwrap() {
                     assert!(
                         &address == expected,
-                        "network approval changed the selected WSS address"
+                        "network approval changed the selected QUIC address"
                     );
                 }
                 (NativeOfferKind::Network, Some(address), self.permissions.2)
@@ -882,7 +886,7 @@ impl NativeDnsHome {
         );
         assert!(
             expected_address == &address,
-            "EXPECT_ADDRESS must independently confirm the override's default WSS address"
+            "EXPECT_ADDRESS must independently confirm the override's default QUIC address"
         );
         let literal_alias = |value: &str| {
             !value.is_empty()
@@ -1184,13 +1188,13 @@ fn directory_operation(
     use spaceterm_server::protocol::ReplyBody;
     let pending = link
         .request(operation)
-        .map_err(|_| "WSS directory request failed")?;
+        .map_err(|_| "QUIC directory request failed")?;
     match pending.wait_for(Duration::from_secs(8)) {
         Some(Ok(ReplyBody::Directory(Ok(value)))) => Ok(value),
-        Some(_) => Err("WSS directory operation refused".into()),
+        Some(_) => Err("QUIC directory operation refused".into()),
         None => {
             pending.cancel();
-            Err("WSS directory operation exceeded its deadline".into())
+            Err("QUIC directory operation exceeded its deadline".into())
         }
     }
 }
@@ -1226,7 +1230,7 @@ fn setup_with_approvals(
 }
 
 #[test]
-#[ignore = "requires compiled and installed Preflight; one SSH authentication spans approved setup, then WSS owns work, reconnect and exact pairing cleanup"]
+#[ignore = "requires compiled and installed Preflight; one SSH authentication spans approved setup, then QUIC owns work, reconnect and exact pairing cleanup"]
 fn native_server_setup_acceptance() {
     let mut fixture = NativeFixture::new("accept", configured_catalog(), false);
     let permissions = accepted_permissions();
@@ -1235,7 +1239,7 @@ fn native_server_setup_acceptance() {
     let require_network_offer = request.address.is_none() || expected_state() == "missing";
     let expected_address = request.address.clone().unwrap_or_else(|| {
         let expected = std::env::var("SPACETERM_SETUP_NATIVE_EXPECT_ADDRESS")
-            .expect("confirm the SSH alias's effective DNS HostName and WSS port");
+            .expect("confirm the SSH alias's effective DNS HostName and QUIC port");
         let address = SetupAddress::parse(&expected).unwrap();
         assert!(
             address.host().parse::<std::net::IpAddr>().is_err(),
@@ -1254,7 +1258,7 @@ fn native_server_setup_acceptance() {
     let (base_progress, phases) = fixture.progress();
     let connecting = Arc::new(AtomicBool::new(false));
     let observed_connecting = Arc::clone(&connecting);
-    let expected_before_wss = expected_address.clone();
+    let expected_before_quic = expected_address.clone();
     let progress = SetupProgress::new(move |phase| {
         base_progress.report(phase);
         if phase == SetupPhase::Connecting {
@@ -1264,8 +1268,8 @@ fn native_server_setup_acceptance() {
                 assert!(
                     offers
                         .iter()
-                        .any(|offer| { offer.address.as_ref() == Some(&expected_before_wss) }),
-                    "the default-DNS or fresh-install cell requires a network offer before WSS admission"
+                        .any(|offer| { offer.address.as_ref() == Some(&expected_before_quic) }),
+                    "the default-DNS or fresh-install cell requires a network offer before QUIC admission"
                 );
             }
             observed_connecting.store(true, Ordering::SeqCst);
@@ -1280,7 +1284,7 @@ fn native_server_setup_acceptance() {
     };
     let route = backend
         .setup(request, &CancellationToken::default(), &progress)
-        .expect("setup must finish with admitted saved WSS");
+        .expect("setup must finish with admitted saved QUIC");
     drop(dns_home);
     approvals.assert_one_authentication();
     assert!(connecting.load(Ordering::SeqCst));
@@ -1351,7 +1355,7 @@ fn native_server_setup_acceptance() {
             "the disconnected handle retained authority"
         );
         fixture.direct.connect(&route);
-        wait_for("WSS reconnect", || {
+        wait_for("QUIC reconnect", || {
             fixture.direct.status(&route) == Some(DirectRouteStatus::Connected)
         });
         assert_eq!(fixture.direct.route(&route).unwrap().paired, paired);
@@ -1371,7 +1375,7 @@ fn native_server_setup_acceptance() {
         expected_address.url()
     );
     relaunched.resume(&route);
-    wait_for("saved WSS relaunch", || {
+    wait_for("saved QUIC relaunch", || {
         relaunched.status(&route) == Some(DirectRouteStatus::Connected)
     });
     let server = relaunched.server(&route).unwrap();
@@ -1401,7 +1405,7 @@ fn native_server_setup_acceptance() {
 }
 
 #[test]
-#[ignore = "requires installed Preflight and reachable WSS; overlaps read-only admission on one saved pairing, then revokes only that pairing"]
+#[ignore = "requires installed Preflight and reachable QUIC; overlaps read-only admission on one saved pairing, then revokes only that pairing"]
 fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admission() {
     use spaceterm_server::ServerError;
     use std::sync::{Barrier, mpsc};
@@ -1434,7 +1438,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
     let (progress, _) = fixture.progress();
     let route = backend
         .setup(request, &CancellationToken::default(), &progress)
-        .expect("setup must finish with admitted saved WSS");
+        .expect("setup must finish with admitted saved QUIC");
     approvals.assert_one_authentication();
     assert_eq!(
         fixture.direct.status(&route),
@@ -1606,7 +1610,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
 }
 
 #[test]
-#[ignore = "requires a running disposable server and reachable WSS; fails only the fixture's save directory after enrollment, then resolves its exact cleanup over WSS"]
+#[ignore = "requires a running disposable server and reachable QUIC; fails only the fixture's save directory after enrollment, then resolves its exact cleanup over QUIC"]
 fn native_server_setup_save_failure_keeps_cleanup_without_publishing_a_connection() {
     assert_eq!(expected_state(), "ready");
     let fixture = NativeFixture::new("save", None, false);
@@ -1632,7 +1636,7 @@ fn native_server_setup_save_failure_keeps_cleanup_without_publishing_a_connectio
     assert!(cleanup[0].enrollment_cleanup);
     unavailable.restore().unwrap();
     fixture.direct.resume_unpair(cleanup[0].key);
-    wait_for("failed-save WSS cleanup", || {
+    wait_for("failed-save QUIC cleanup", || {
         fixture.direct.pending_unpairs().is_empty()
             && fixture.credentials.keys.lock().unwrap().is_empty()
     });
@@ -1763,7 +1767,7 @@ impl SshServerBootstrap for LostEnrollmentReply {
             Some("setup-direct-cancel") => {
                 self.cancellation_requests.fetch_add(1, Ordering::SeqCst);
                 if self.refuse_cancellation {
-                    // Leave the real claim intact so only pinned WSS can settle its cleanup.
+                    // Leave the real claim intact so only pinned QUIC can settle its cleanup.
                     "exit 75\n".into()
                 } else {
                     script
@@ -1791,14 +1795,14 @@ impl SshServerBootstrap for LostEnrollmentReply {
 }
 
 #[test]
-#[ignore = "enrolls on a selected running server and drops its real SSH reply; cleanup may finish during setup or continue over pinned WSS"]
+#[ignore = "enrolls on a selected running server and drops its real SSH reply; cleanup may finish during setup or continue over pinned QUIC"]
 fn native_server_setup_lost_enrollment_reply_settles_cleanup_without_ssh_recovery() {
     lost_enrollment_reply_cleanup(false);
 }
 
 #[test]
-#[ignore = "enrolls on a selected running server, loses its enrollment reply and refuses SSH cancellation so pinned WSS must settle cleanup"]
-fn native_server_setup_lost_enrollment_reply_cleans_up_over_wss_without_ssh_recovery() {
+#[ignore = "enrolls on a selected running server, loses its enrollment reply and refuses SSH cancellation so pinned QUIC must settle cleanup"]
+fn native_server_setup_lost_enrollment_reply_cleans_up_over_quic_without_ssh_recovery() {
     lost_enrollment_reply_cleanup(true);
 }
 
@@ -1823,10 +1827,10 @@ fn lost_enrollment_reply_cleanup(refuse_cancellation: bool) {
     let counts = backend.process_counts();
     assert_eq!(counts.active(), 0);
     assert_eq!(counts.spawned, counts.reaped);
-    // Confirmed setup cleanup or WSS cleanup may already have completed before return.
+    // Confirmed setup cleanup or QUIC cleanup may already have completed before return.
     wait_for(
         if refuse_cancellation {
-            "lost-reply WSS claim cancellation"
+            "lost-reply QUIC claim cancellation"
         } else {
             "lost-reply claim cleanup"
         },

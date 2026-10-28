@@ -4,7 +4,7 @@
 # USAGE arg "<interface>" help="Expected interface, such as en8"
 """Refuse a remote batch unless the route to the remote host uses the expected interface.
 
-Established TCP connections to the host, such as a paired desktop's WSS connection, must also
+Established TCP connections to the host, such as an SSH session, must also
 use a local address on that interface.
 """
 
