@@ -201,7 +201,7 @@ fn attached(claimed: Claimed, failure: &'static str) -> Result<Pane, Box<dyn Err
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "2".into())
+        .unwrap_or_else(|| "3".into())
         .parse()?;
     let first = ServerConnection::for_development_client("input-first", major)?;
     let second = ServerConnection::for_development_client("input-second", major)?;

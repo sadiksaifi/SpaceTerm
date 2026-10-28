@@ -614,10 +614,10 @@ mod exercise {
             "two-host verification requires a reachable native host address",
         )?;
         let name = format!("direct541-owner-{}", &hex(&random()?)[..6]);
-        let owner = api(ServerConnection::for_development_client(&name, 2))?;
+        let owner = api(ServerConnection::for_development_client(&name, 3))?;
         require(
-            api(owner.refresh())?.protocol_major == 2,
-            "expected protocol major 2",
+            api(owner.refresh())?.protocol_major == 3,
+            "expected protocol major 3",
         )?;
         let mut connection = api(support::connect(&owner))?;
         let baseline = inventory(&connection)?.0;
@@ -692,7 +692,7 @@ mod exercise {
             )?;
             let paired = scope.enroll(&mut peer)?;
             println!(
-                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 2"
+                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 3"
             );
             let failed = peer.message(json!({"create_workspace": format!("Direct devices cleanup {}", &hex(&random()?)[..12]), "fail_before_handoff": true}))?;
             scope.workspace = Some(api(serde_json::from_value(
@@ -796,7 +796,7 @@ mod exercise {
                 "hidden presentation phase missing",
             )?;
             let observer_name = format!("p612-observer-{}", &hex(&random()?)[..6]);
-            let observer = api(ServerConnection::for_development_client(&observer_name, 2))?;
+            let observer = api(ServerConnection::for_development_client(&observer_name, 3))?;
             let observer = api(support::connect(&observer))?;
             super::presentation::observe_hidden_inventory(&observer, pane).map_err(|failure| {
                 eprintln!("QUIC inventory observer: {failure}");
@@ -1022,8 +1022,8 @@ mod exercise {
             connector.clone(),
         ))?;
         require(
-            api(server.refresh())?.protocol_major == 2,
-            "QUIC did not negotiate major 2",
+            api(server.refresh())?.protocol_major == 3,
+            "QUIC did not negotiate major 3",
         )?;
         send_json(output, json!({"paired": paired}))?;
         Ok((server, connector))

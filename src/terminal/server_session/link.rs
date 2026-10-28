@@ -735,7 +735,7 @@ impl PaneLink {
                         } else if let InputOutcome::Discarded(refusal) = outcome
                             && refusal != pane::Refusal::Unsupported
                         {
-                            // Every major 2 server takes interactive input, so `Unsupported`
+                            // Every major 3 server takes interactive input, so `Unsupported`
                             // refuses only that message, such as text no key types. Any other
                             // discard means the lease or focus moved on, as a refused exchange
                             // did.

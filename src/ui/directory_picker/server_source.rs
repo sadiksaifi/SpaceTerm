@@ -45,7 +45,7 @@ struct LinkDirectories {
 }
 
 impl DirectoryConnection for LinkDirectories {
-    // Protocol major 2 servers read, create and match directories.
+    // Protocol major 3 servers read, create and match directories.
     fn reads_directories(&self) -> bool {
         true
     }
@@ -647,7 +647,7 @@ pub(crate) mod testing {
 
     impl DirectoryConnector for InProcessServer {
         fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-            // Protocol major 2 servers read, create and match directories.
+            // Protocol major 3 servers read, create and match directories.
             Ok(Box::new(InProcessConnection {
                 server: Arc::clone(&self.0),
                 reads: true,

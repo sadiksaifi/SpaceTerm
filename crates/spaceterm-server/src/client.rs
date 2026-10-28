@@ -738,7 +738,7 @@ mod tests {
         assert_eq!(
             server.refresh(),
             Ok(AuthenticatedStatus {
-                protocol_major: 2,
+                protocol_major: 3,
                 development_pane: true,
             })
         );
@@ -976,7 +976,7 @@ mod tests {
         root: &std::path::Path,
         paired: crate::direct::PairedDevice,
     ) -> ServerConnection {
-        let mut local = ServerConnection::for_development_client("first", 2).unwrap();
+        let mut local = ServerConnection::for_development_client("first", 3).unwrap();
         local.paths = Paths {
             identity: "spaceterm-development".into(),
             data: root.join("data"),
@@ -1045,7 +1045,7 @@ mod tests {
     #[test]
     fn local_and_direct_workspace_owners_stay_distinct_when_server_and_client_ids_collide() {
         let paired = paired_identity();
-        let local = ServerConnection::for_development_client("first", 2).unwrap();
+        let local = ServerConnection::for_development_client("first", 3).unwrap();
         // Supply the admitted identity at the transport boundary without starting a server.
         local
             .bind_scope(local.scope_for(paired.client, paired.pin.server))
@@ -1061,7 +1061,7 @@ mod tests {
     fn workspace_owners_ignore_storage_paths_and_development_client_environment_names() {
         let paired = paired_identity();
         let original = direct_fixture(std::path::Path::new("/first"), paired.clone());
-        let mut relaunched = ServerConnection::for_development_client("second", 2).unwrap();
+        let mut relaunched = ServerConnection::for_development_client("second", 3).unwrap();
         relaunched.paths.data = std::path::PathBuf::from("/second");
         let relaunched = relaunched
             .with_direct([3; 32], paired, Arc::new(NoConnect))
@@ -1097,7 +1097,7 @@ mod tests {
             u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
         ));
         let local = |name| {
-            let mut connection = ServerConnection::for_development_client(name, 2).unwrap();
+            let mut connection = ServerConnection::for_development_client(name, 3).unwrap();
             connection.paths = Paths {
                 identity: "spaceterm-development".into(),
                 data: root.join("data"),

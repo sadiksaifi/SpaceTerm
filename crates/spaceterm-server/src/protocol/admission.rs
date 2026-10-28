@@ -12,7 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 /// The protocol major of the pushed, multiplexed exchange.
-pub const MAJOR: u16 = 2;
+pub const MAJOR: u16 = 3;
 const MAX_FRAME: usize = 8192;
 const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
 
