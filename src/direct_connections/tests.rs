@@ -809,6 +809,35 @@ fn a_disconnected_route_stops_following_its_old_link() {
     });
 }
 
+/// Reconnect on a connected route drops its link and connects again, rather than doing
+/// nothing because a link is live.
+#[test]
+fn reconnecting_a_connected_route_replaces_its_link() {
+    let (connections, ids) = connected_routes(&["Studio"]);
+    let id = ids[0];
+    let (old_gate, old_server) = {
+        let state = connections.0.state.lock().unwrap();
+        let route = &state.routes[&id];
+        assert_eq!(route.status, DirectRouteStatus::Connected);
+        (Arc::clone(&route.gate), route.server.clone().unwrap())
+    };
+    connections.connect(&id);
+    assert!(
+        !old_gate.load(Ordering::Acquire),
+        "the old link's connector is disabled"
+    );
+    await_condition(|| {
+        let state = connections.0.state.lock().unwrap();
+        let route = &state.routes[&id];
+        route.status == DirectRouteStatus::Connected
+            && !Arc::ptr_eq(&route.gate, &old_gate)
+            && route
+                .server
+                .as_ref()
+                .is_some_and(|server| !server.same_handle(&old_server))
+    });
+}
+
 #[test]
 fn disconnect_then_connect_ignores_the_previous_attempt_and_never_reopens_its_gate() {
     struct BlockingNetwork {

@@ -371,6 +371,8 @@ impl DirectConnections {
             .persistence_error
     }
 
+    /// Connects a saved route. On a route that is already connected this is Reconnect: the
+    /// live link is dropped and a new connection, with a new socket and admission, replaces it.
     pub(crate) fn connect(&self, id: &DirectRouteId) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(saved) = state.document.routes.iter_mut().find(|r| &r.route.id == id) else {
@@ -378,6 +380,15 @@ impl DirectConnections {
         };
         saved.active = true;
         if let Some(route) = state.routes.get_mut(id) {
+            if route.server.is_some() {
+                // The old link's connector stays disabled; the worker follows the new link.
+                route
+                    .gate
+                    .store(false, std::sync::atomic::Ordering::Release);
+                route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                route.server = None;
+                route.health = None;
+            }
             route.gate.store(true, std::sync::atomic::Ordering::Release);
             route.status = DirectRouteStatus::Connecting;
             route.retry = Retry::new(Interaction::Requested);

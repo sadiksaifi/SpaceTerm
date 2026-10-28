@@ -2,6 +2,8 @@
 //!
 //! - [`carrier`] moves whole frames over one connection. [`unix`] carries account-local IPC,
 //!   [`quic`] paired connections, and [`loopback`] is an in-memory carrier for tests.
+//! - [`path`] tells a paired client when the system would reach its server from another local
+//!   address, so its QUIC socket moves there.
 //! - [`io`] runs one I/O thread per connection, waiting on carrier readiness and a wake pipe.
 //! - [`outbox`] orders a server's outgoing messages by priority and holds the latest presentation
 //!   per channel under one frame of credit.
@@ -20,6 +22,7 @@ pub mod io;
 pub mod link;
 pub mod loopback;
 pub mod outbox;
+pub mod path;
 pub mod quic;
 pub mod registry;
 pub mod server;

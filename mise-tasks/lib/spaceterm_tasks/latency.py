@@ -111,12 +111,20 @@ def resolve(host):
         raise TaskError("the route guard could not resolve its host") from None
 
 
+def connected_sources(selector):
+    """Return the local address of each connection that lsof's `selector` picks."""
+    listing = subprocess.run(
+        ["lsof", "-nP", *selector, "-F", "n"], capture_output=True, text=True, check=False
+    )
+    return parse_local_addresses(listing.stdout)
+
+
 def guard_route(host, interface):
     """Refuse to continue unless `host` routes through `interface`.
 
-    Established TCP connections to `host`, such as an SSH session, must also
-    use a local address on `interface`; a connection opened before the route changed keeps its
-    old interface.
+    Established TCP connections to `host`, such as an SSH session, and connected UDP sockets to
+    it, such as an app's paired QUIC connection, must also use a local address on `interface`.
+    A connection opened before the route changed can keep its old interface.
     """
     address = resolve(host)
     family = "-inet6" if ":" in address else "-inet"
@@ -130,22 +138,23 @@ def guard_route(host, interface):
         ["ifconfig", interface], capture_output=True, text=True, check=False
     )
     local = parse_interface_addresses(configured.stdout)
-    connections = subprocess.run(
-        ["lsof", "-nP", f"-iTCP@{address}", "-sTCP:ESTABLISHED", "-F", "n"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    established = parse_local_addresses(connections.stdout)
+    established = connected_sources([f"-iTCP@{address}", "-sTCP:ESTABLISHED"])
+    flows = connected_sources([f"-iUDP@{address}"])
     elsewhere = [source for source in established if source not in local]
     if elsewhere:
         raise TaskError(
             f"{len(elsewhere)} established connections to {address} use another interface; "
             "reconnect them before measuring"
         )
+    elsewhere = [source for source in flows if source not in local]
+    if elsewhere:
+        raise TaskError(
+            f"{len(elsewhere)} UDP flows to {address} use another interface; "
+            "wait for the app to move them or reconnect before measuring"
+        )
     print(
         f"route guard: {address} uses {interface}; "
-        f"{len(established)} established connections use it too"
+        f"{len(established)} established connections and {len(flows)} UDP flows use it too"
     )
 
 

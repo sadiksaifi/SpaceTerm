@@ -377,6 +377,7 @@ mod tests {
                 available: vec!["192.168.1.21".parse().expect("an address")],
                 suggested: None,
             }),
+            abandoned_setups: Vec::new(),
             setup_generation: 0,
         }
     }

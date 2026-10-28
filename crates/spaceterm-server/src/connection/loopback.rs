@@ -127,6 +127,7 @@ impl Carrier for Loopback {
             write: None,
             progress: None,
             deadline: None,
+            signal: None,
         }
     }
 

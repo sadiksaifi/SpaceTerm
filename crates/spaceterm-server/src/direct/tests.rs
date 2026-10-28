@@ -63,17 +63,26 @@ pub(crate) fn accept_raw(state: &host::Shared) -> QuicStream {
 
 /// A listener of `state`'s certificate on a free loopback port, outside its policy.
 pub(crate) fn listener(state: &host::Shared) -> (QuicListener, String) {
-    let address = UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let state = state.lock().unwrap();
-    let (certificate, key) = state.certificate();
-    let config = quic::server_config(certificate, key).unwrap();
-    (
-        QuicListener::bind(address, config).unwrap(),
-        format!("quic://{address}"),
-    )
+    let config = {
+        let state = state.lock().unwrap();
+        let (certificate, key) = state.certificate();
+        quic::server_config(certificate, key).unwrap()
+    };
+    let listener = loopback_listener(config);
+    let endpoint = format!("quic://{}", listener.address());
+    (listener, endpoint)
+}
+
+/// A listener of `config` on a free loopback port. Another test can take the port between
+/// finding it and binding it, so a failed bind tries another.
+fn loopback_listener(config: Arc<noq_proto::ServerConfig>) -> QuicListener {
+    for _ in 0..8 {
+        let address = free_udp(std::net::Ipv4Addr::LOCALHOST.into());
+        if let Ok(listener) = QuicListener::bind(address, Arc::clone(&config)) {
+            return listener;
+        }
+    }
+    panic!("no free UDP port to listen on");
 }
 
 /// Accepts the next connection of a test listener and completes its handshake.
@@ -1106,9 +1115,8 @@ fn an_unadmitted_peer_cannot_send_a_message_larger_than_the_authentication_bound
     let oversized = (wire::MAX_AUTH_FRAME as u32 + 1).to_be_bytes();
     let deadline = Instant::now() + Duration::from_secs(5);
     stream.send_bytes(&oversized, deadline).unwrap();
-    stream
-        .send_bytes(&vec![b'1'; wire::MAX_AUTH_FRAME + 1], deadline)
-        .unwrap();
+    // The server refuses on the length alone and may close before the body leaves.
+    let _ = stream.send_bytes(&vec![b'1'; wire::MAX_AUTH_FRAME + 1], deadline);
     assert_eq!(server.join().unwrap().err(), Some(DirectError::Transport));
 }
 
@@ -2088,6 +2096,53 @@ fn client_clock_cannot_expire_or_reject_an_invitation_before_server_observation(
     }
 }
 
+/// A setup reserved over WSS, before QUIC replaced it, is dropped when the server loads its
+/// record. Everything else loads, and the unfinished setup is reported as abandoned.
+#[test]
+fn a_wss_setup_reservation_is_dropped_and_the_record_still_loads() {
+    let mut fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let reservation = DeviceCredential::generate().unwrap();
+    let request = setup(&fixture, [105; 32], &reservation);
+    reserve(&fixture, &request);
+    let Management::Setup { operation, .. } = &request else {
+        panic!()
+    };
+    let operation = *operation;
+    fixture.state.lock().unwrap().stop();
+    let path = fixture.paths.data.join("direct.json");
+    let stored = std::fs::read_to_string(&path).unwrap();
+    let (start, _) = stored
+        .match_indices("\"endpoint\":\"quic://")
+        .next()
+        .unwrap();
+    let rest = &stored[start + "\"endpoint\":\"quic://".len()..];
+    let authority = &rest[..rest.find('"').unwrap()];
+    let obsolete = stored.replacen(
+        &format!("\"endpoint\":\"quic://{authority}\""),
+        &format!("\"endpoint\":\"wss://{authority}/spaceterm\""),
+        1,
+    );
+    assert_ne!(obsolete, stored);
+    std::fs::write(&path, obsolete).unwrap();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    assert_eq!(status.abandoned_setups, [operation]);
+    assert!(matches!(status.listener, ListenerState::Listening { .. }));
+    let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap() else {
+        panic!()
+    };
+    assert!(
+        devices
+            .iter()
+            .any(|device| device.pairing == paired.pairing)
+    );
+}
+
 #[test]
 fn setup_preserves_distinct_public_and_listener_ports_across_reopen_and_exact_replay() {
     let mut fixture = Fixture::new();
@@ -2567,6 +2622,31 @@ mod quic_connections {
         }
     }
 
+    /// A client acknowledges the server's answer as it arrives, so the server may close before
+    /// the client reads it. The client still reads the answer, as the pairing exchange's final
+    /// answer must arrive.
+    #[test]
+    fn an_answer_that_arrived_before_the_servers_close_is_still_read() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            stream.send(&"answer").unwrap();
+            // Dropping the stream closes the connection.
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        server.join().unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        assert_eq!(stream.receive::<String>().unwrap(), "answer");
+        assert_eq!(
+            stream.receive::<String>().err(),
+            Some(DirectError::Transport)
+        );
+    }
+
     /// The server writes L0 before L1, so without the client's rule a goodbye written after a
     /// large frame would arrive first.
     #[test]
@@ -2648,10 +2728,12 @@ mod quic_connections {
         );
     }
 
-    /// A switch between networks moves the client to a new socket and source port. The server
-    /// validates the new path; the session continues without a second admission.
+    /// A switch between networks, or a route that now prefers another local address, moves the
+    /// client to a new socket and source port. The server validates the new path; the session
+    /// continues without a second admission.
     #[test]
     fn a_client_on_a_new_socket_keeps_its_session_without_admission() {
+        use crate::connection::carrier::Carrier;
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct Admissions(Arc<AtomicUsize>);
         impl PaneService for Admissions {
@@ -2696,7 +2778,11 @@ mod quic_connections {
             &[crate::protocol::MAJOR],
         )
         .unwrap();
-        let carrier = stream.into_carrier();
+        let mut carrier = stream.into_carrier();
+        let before = carrier.local_address().unwrap();
+        carrier.prefer_sources(|_| Some(std::net::Ipv4Addr::new(127, 0, 0, 2).into()));
+        carrier.flush().unwrap();
+        assert_ne!(carrier.local_address().unwrap().port(), before.port());
         let rebind = carrier.rebinder();
         let link = spawn_link(Box::new(carrier), Arc::new(|_| {})).unwrap();
         assert!(matches!(
@@ -2978,16 +3064,19 @@ mod quic_connections {
             .unwrap()
             .frames
             .remove(0);
-            (offers, carrier.offer(&ping, Priority::L0).unwrap())
+            let control = carrier.offer(&ping, Priority::L0).unwrap();
+            // The connection stays open until the client is done.
+            (offers, control, carrier)
         });
         let credential = DeviceCredential::generate().unwrap();
         let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         // The client never reads, so L2 runs out of credit.
-        let (offers, control) = server.join().unwrap();
+        let (offers, control, carrier) = server.join().unwrap();
         assert!(offers.contains(&Offer::Full), "L2 must fill up: {offers:?}");
         assert_eq!(control, Offer::Accepted);
         drop(stream);
+        drop(carrier);
     }
 
     /// The 33rd connection waiting for the host is refused at once.
@@ -3070,11 +3159,13 @@ mod quic_connections {
 
     /// A UDP relay between clients and a server. Each client source gets its own upstream
     /// socket, so the server sees a new address when a client moves. `blackhole` drops a source's
-    /// traffic both ways, as a network that vanished under a still-valid address.
+    /// traffic both ways, as a network that vanished under a still-valid address. `losses` drops
+    /// that many of the first datagrams from clients.
     struct Relay {
         address: std::net::SocketAddr,
         sources: Arc<Mutex<Vec<std::net::SocketAddr>>>,
         blackhole: Arc<Mutex<Option<std::net::SocketAddr>>>,
+        losses: Arc<std::sync::atomic::AtomicUsize>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -3087,10 +3178,12 @@ mod quic_connections {
             let address = front.local_addr().unwrap();
             let sources: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::default();
             let blackhole: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::default();
+            let losses: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (seen, hole, stopping) = (
+            let (seen, hole, lose, stopping) = (
                 Arc::clone(&sources),
                 Arc::clone(&blackhole),
+                Arc::clone(&losses),
                 Arc::clone(&stop),
             );
             let thread = std::thread::spawn(move || {
@@ -3100,7 +3193,13 @@ mod quic_connections {
                     let mut idle = true;
                     while let Ok((count, source)) = front.recv_from(&mut buffer) {
                         idle = false;
-                        if *hole.lock().unwrap() == Some(source) {
+                        if *hole.lock().unwrap() == Some(source)
+                            || lose
+                                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                                    left.checked_sub(1)
+                                })
+                                .is_ok()
+                        {
                             continue;
                         }
                         if !upstreams.iter().any(|(known, _)| *known == source) {
@@ -3133,6 +3232,7 @@ mod quic_connections {
                 address,
                 sources,
                 blackhole,
+                losses,
                 stop,
                 thread: Some(thread),
             }
@@ -3146,6 +3246,46 @@ mod quic_connections {
                 let _ = thread.join();
             }
         }
+    }
+
+    /// A client sends a lost Initial packet again before it tries the next address, so one lost
+    /// packet never moves it off a server that answers.
+    #[test]
+    fn a_lost_initial_is_sent_again_before_the_next_address() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server_address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let relay = Relay::new(server_address);
+        relay.losses.store(1, std::sync::atomic::Ordering::Release);
+        // Nothing answers at the next address.
+        let silent = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            stream
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let seen = Arc::new(quic::Verification::default());
+        let config = quic::presenting(
+            &pin,
+            quic::tests_certificate(credential.expose_bytes()).into(),
+            rustls::pki_types::PrivateKeyDer::Pkcs8(credential.expose_bytes().to_vec().into()),
+            Arc::clone(&seen),
+        )
+        .unwrap();
+        let mut stream = QuicStream::connect(
+            config,
+            &[relay.address, silent.local_addr().unwrap()],
+            Instant::now() + Duration::from_secs(5),
+            &seen.verified,
+        )
+        .unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        drop(server.join().unwrap());
     }
 
     /// The path under a client dies while its address stays valid. The client's unanswered ping
@@ -3319,7 +3459,7 @@ mod quic_connections {
             .unwrap();
             tls.alpn_protocols = vec![b"other/1".to_vec()];
             let config = crate::connection::quic::server_config(tls).unwrap();
-            QuicListener::bind(free_udp(std::net::Ipv4Addr::LOCALHOST.into()), config).unwrap()
+            loopback_listener(config)
         };
         let other_address = other.address();
         let elsewhere = std::thread::spawn(move || {

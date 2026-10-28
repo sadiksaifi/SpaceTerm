@@ -19,8 +19,10 @@
 //!   in flight.
 //! - **Readiness.** The carrier reports its socket or bell as readable when datagrams arrive, and
 //!   QUIC's next timer as a deadline. Write progress needs incoming acknowledgements, so the same
-//!   descriptor is the progress descriptor.
+//!   descriptor is the progress descriptor. A client also reports its route-change signal and the
+//!   next check of its preferred local address, from [`super::path`].
 use super::carrier::{Carrier, CarrierError, Flush, Offer, Priority, Readiness};
+use super::path::PathWatch;
 use crate::protocol::frame::FrameReader;
 use crate::protocol::{RawFrame, limits};
 use bytes::BytesMut;
@@ -59,6 +61,10 @@ const ADMISSION_WINDOW: u32 = 64 * 1024;
 const ADMITTED_WINDOW: u32 = 2 * limits::MAX_FRAME_BYTES as u32;
 /// Connections whose handshake started and that the host has not taken yet.
 const MAX_PENDING: usize = 32;
+/// How long a client tries each address but the last. QUIC's first probe timeout is about one
+/// second at its initial 333 ms round-trip estimate, so one lost Initial packet or Retry is sent
+/// again, and its answer has another second to arrive, before the client moves on.
+const ADDRESS_LIMIT: Duration = Duration::from_secs(2);
 /// The server name every client sends. The pinned certificate, not a name, authenticates.
 pub const SERVER_NAME: &str = "spaceterm.invalid";
 
@@ -889,6 +895,13 @@ impl Driver {
                 }
                 arrived = !datagrams.is_empty();
                 for (remote, local, data) in datagrams {
+                    // noq-proto reads a close's reason only when its events are polled, and a
+                    // later stateless reset replaces it. A server forgets a connection as soon
+                    // as it closes, so its reset to this end's next packet can arrive in the same
+                    // batch as its close, and the TLS alert of a refusal would be lost.
+                    if self.connection.is_closed() {
+                        break;
+                    }
                     self.state.transmit.clear();
                     match endpoint.handle(
                         now,
@@ -991,7 +1004,7 @@ impl Driver {
                                 | ErrorKind::NetworkDown
                         ) =>
                 {
-                    self.rebind(now);
+                    let _ = self.rebind(now);
                     return;
                 }
                 // A lost datagram is QUIC's to recover.
@@ -1001,18 +1014,29 @@ impl Driver {
     }
 
     /// Moves a client to a new UDP socket, as after a switch between networks. The server
-    /// validates the new path and the connection continues without a new handshake.
-    fn rebind(&mut self, now: Instant) {
+    /// validates the new path and the connection continues without a new handshake. Returns
+    /// whether the client moved.
+    fn rebind(&mut self, now: Instant) -> bool {
         let Some(peer) = self.peer else {
-            return;
+            return false;
         };
         let Ok(socket) = Udp::client(peer) else {
-            return;
+            return false;
         };
         self.socket = Arc::new(socket);
         self.state.stashed = None;
         self.connection.handle_network_change(None, now);
         self.transmit(now);
+        true
+    }
+
+    /// The local address a client's socket uses.
+    fn local_ip(&self) -> Option<std::net::IpAddr> {
+        self.socket
+            .socket
+            .local_addr()
+            .ok()
+            .map(|address| address.ip())
     }
 
     /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
@@ -1126,11 +1150,10 @@ impl QuicStream {
         let mut last = QuicError::Transport;
         for (index, address) in addresses.iter().enumerate() {
             server_verified.store(false, Ordering::Release);
-            // Each address but the last gets at most a second, as a TCP connect would.
             let until = if index + 1 == addresses.len() {
                 deadline
             } else {
-                deadline.min(Instant::now() + Duration::from_secs(1))
+                deadline.min(Instant::now() + ADDRESS_LIMIT)
             };
             let Ok(socket) = Udp::client(*address) else {
                 continue;
@@ -1169,11 +1192,11 @@ impl QuicStream {
     }
 
     /// The server opens L0 once the handshake completes; the client accepts it when its first
-    /// bytes arrive.
+    /// bytes arrive. Those bytes can arrive in the same read as the server's close, so L0 is
+    /// taken before the close is reported, and the bytes are still read.
     fn open_l0(&mut self, deadline: Instant) -> Result<(), QuicError> {
         loop {
             self.driver.pump();
-            self.driver.check()?;
             if self.driver.state.connected {
                 let opened = match self.driver.connection.side() {
                     noq_proto::Side::Server => self.driver.connection.streams().open(Dir::Bi),
@@ -1189,6 +1212,7 @@ impl QuicStream {
                     return Ok(());
                 }
             }
+            self.driver.check()?;
             self.driver.wait(deadline)?;
         }
     }
@@ -1240,7 +1264,9 @@ impl QuicStream {
         }
     }
 
-    /// Reads exactly `count` L0 bytes before `deadline`.
+    /// Reads exactly `count` L0 bytes before `deadline`. Bytes that arrived before the peer
+    /// closed are still read: a peer's final answer is acknowledged as it arrives, so the peer
+    /// may close before this end reads it.
     fn receive_exact(&mut self, count: usize, deadline: Instant) -> Result<Vec<u8>, QuicError> {
         let id = self.l0()?;
         loop {
@@ -1249,11 +1275,17 @@ impl QuicStream {
                 return Ok(std::mem::replace(&mut self.read, rest));
             }
             self.driver.pump();
-            self.driver.check()?;
-            let ended = read_stream(&mut self.driver.connection, id, &mut self.read, count)?;
+            let ended = match read_stream(&mut self.driver.connection, id, &mut self.read, count) {
+                Ok(ended) => ended,
+                Err(error) => {
+                    self.driver.check()?;
+                    return Err(error);
+                }
+            };
             if self.read.len() >= count {
                 continue;
             }
+            self.driver.check()?;
             if ended {
                 return Err(QuicError::Closed);
             }
@@ -1395,6 +1427,8 @@ pub struct QuicCarrier {
     client: bool,
     /// Set to move a client to a new socket at its next call.
     rebind: Arc<std::sync::atomic::AtomicBool>,
+    /// A client's watch on the local address the system prefers for its server.
+    path: Option<PathWatch>,
     /// The server's goodbye, held until its L1 and L2 streams ended.
     goodbye: Option<RawFrame>,
     /// Packets sent, so a flush reports progress.
@@ -1432,6 +1466,7 @@ impl QuicCarrier {
         Self {
             client,
             rebind: Arc::default(),
+            path: client.then(|| PathWatch::new(Instant::now())),
             goodbye: None,
             driver,
             outgoing,
@@ -1465,10 +1500,34 @@ impl QuicCarrier {
         Arc::clone(&self.rebind)
     }
 
-    fn rebind_if_asked(&mut self) {
+    /// Moves a client to a new socket when its rebinder asked, or when the system now prefers
+    /// another local address for its server.
+    fn rebind_if_needed(&mut self) {
+        let now = Instant::now();
         if self.rebind.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            self.driver.rebind(Instant::now());
+            let _ = self.driver.rebind(now);
         }
+        if let (Some(path), Some(peer)) = (self.path.as_mut(), self.driver.peer) {
+            let current = self.driver.local_ip();
+            path.follow(now, peer, current, || self.driver.rebind(now));
+        }
+    }
+
+    /// Replaces how this client learns its preferred local address, and checks at its next call.
+    #[cfg(test)]
+    pub(crate) fn prefer_sources(
+        &mut self,
+        source: impl Fn(SocketAddr) -> Option<std::net::IpAddr> + Send + 'static,
+    ) {
+        if let Some(path) = self.path.as_mut() {
+            path.set_source(Box::new(source));
+        }
+    }
+
+    /// The local address and port of a client's socket.
+    #[cfg(test)]
+    pub(crate) fn local_address(&self) -> Option<SocketAddr> {
+        self.driver.socket.socket.local_addr().ok()
     }
 
     fn packets_sent(&mut self) -> u64 {
@@ -1636,7 +1695,7 @@ impl Carrier for QuicCarrier {
     }
 
     fn flush(&mut self) -> Result<Flush, CarrierError> {
-        self.rebind_if_asked();
+        self.rebind_if_needed();
         // Frames first, so acknowledgements of what `receive` took ride on them.
         self.write_streams()?;
         if self.closing || !self.client {
@@ -1715,7 +1774,14 @@ impl Carrier for QuicCarrier {
                 .then(|| self.driver.socket.fd()),
             // Acknowledgements arrive on the same descriptor and free QUIC's buffers.
             progress: Some(descriptor),
-            deadline: self.driver.connection.poll_timeout(),
+            deadline: [
+                self.driver.connection.poll_timeout(),
+                self.path.as_ref().map(PathWatch::deadline),
+            ]
+            .into_iter()
+            .flatten()
+            .min(),
+            signal: self.path.as_ref().and_then(PathWatch::descriptor),
         }
     }
 
@@ -1725,7 +1791,7 @@ impl Carrier for QuicCarrier {
 
     fn path_suspect(&mut self) {
         if self.client {
-            self.driver.rebind(Instant::now());
+            let _ = self.driver.rebind(Instant::now());
         }
     }
 }

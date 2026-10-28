@@ -118,7 +118,7 @@ mise run bench:latency:netem --owner-host penguin --jail /var/tmp/spaceterm-nete
 
 The idle task reads per-flow UDP byte counters with `nettop`, so it sees paired QUIC connections but not account-local IPC.
 
-On macOS, remote tasks accept `--interface` with a remote host, and the pixel, idle and protocol tasks take that host as `--route-host`. A task given them refuses to run unless the route to the host uses that interface and every established TCP connection to the host uses an address on it. Paired connections are UDP, so the guard checks only the route for them. Use them to keep a wired batch on Ethernet.
+On macOS, remote tasks accept `--interface` with a remote host, and the pixel, idle and protocol tasks take that host as `--route-host`. A task given them refuses to run unless the route to the host uses that interface, and every established TCP connection and connected UDP socket to the host uses an address on it. A paired connection's QUIC socket is a connected UDP socket, so the guard also refuses an app whose socket stayed on another interface. Use them to keep a wired batch on Ethernet.
 
 ## Replace incompatible development state
 

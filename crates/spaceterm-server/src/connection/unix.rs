@@ -111,6 +111,7 @@ impl Carrier for UnixCarrier {
             write: Some(fd),
             progress: None,
             deadline: None,
+            signal: None,
         }
     }
 

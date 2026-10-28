@@ -74,6 +74,31 @@ class RouteGuardPlatformTests(unittest.TestCase):
         guard.assert_not_called()
 
 
+class RouteGuardTests(unittest.TestCase):
+    def guard(self, udp):
+        outputs = {
+            "route": ROUTE,
+            "ifconfig": IFCONFIG,
+            "-iTCP@192.168.1.206": "",
+            "-iUDP@192.168.1.206": udp,
+        }
+
+        def run(command, **_):
+            key = command[2] if command[0] == "lsof" else command[0]
+            return mock.Mock(stdout=outputs[key])
+
+        with mock.patch.object(latency.subprocess, "run", side_effect=run):
+            latency.guard_route("192.168.1.206", "en8")
+
+    def test_accepts_a_udp_flow_on_the_interface(self):
+        with mock.patch("builtins.print"):
+            self.guard("p1876\nf3\nn192.168.1.36:51051->192.168.1.206:9231\n")
+
+    def test_refuses_a_udp_flow_left_on_another_interface(self):
+        with self.assertRaisesRegex(TaskError, "1 UDP flows to 192.168.1.206 use another"):
+            self.guard("p1876\nf3\nn192.168.1.42:51051->192.168.1.206:9231\n")
+
+
 class ScreenLockTests(unittest.TestCase):
     def test_excludes_other_holders_until_released(self):
         with tempfile.TemporaryDirectory() as directory:

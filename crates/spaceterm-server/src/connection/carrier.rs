@@ -75,6 +75,9 @@ pub struct Readiness {
     pub write: Option<RawFd>,
     pub progress: Option<RawFd>,
     pub deadline: Option<std::time::Instant>,
+    /// Readable when the carrier wants a turn even while the thread neither reads nor writes,
+    /// such as a client's route-change signal. The next `flush` consumes it.
+    pub signal: Option<RawFd>,
 }
 
 /// Classifications only. Native errors and peer bytes never cross this boundary.
