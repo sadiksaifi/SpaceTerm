@@ -725,6 +725,22 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         }))
     ));
 
+    // A fence names what `list` expects; where nothing runs the reply says so all the same.
+    let fenced_before = agent.reply(
+        &mut served,
+        Operation::Observe {
+            channel: Channel(3),
+            pane,
+            session: Some([7; 32]),
+        },
+    );
+    assert!(matches!(
+        fenced_before,
+        Ok(ReplyBody::Observe(protocol::ObserveReply::NoSession {
+            state: protocol::SessionState::NotStarted
+        }))
+    ));
+
     let claimed = person.reply(
         &mut served,
         Operation::Claim(protocol::Claim {
@@ -753,10 +769,22 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         },
     );
 
+    // Another running Session than the fence names is refused.
+    assert!(matches!(
+        agent.reply(
+            &mut served,
+            Operation::Observe {
+                channel: Channel(4),
+                pane,
+                session: Some([7; 32]),
+            },
+        ),
+        Err(Refusal::Stale)
+    ));
     let observed = agent.reply(
         &mut served,
         Operation::Observe {
-            channel: Channel(2),
+            channel: Channel(5),
             pane,
             session: Some(lease.session),
         },
@@ -766,7 +794,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         Ok(ReplyBody::Observe(protocol::ObserveReply::Observing { session, .. }))
             if session == lease.session
     ));
-    agent.show(&mut served, Channel(2), true);
+    agent.show(&mut served, Channel(5), true);
     // The person hides the Pane; the visible observer still receives its frames.
     person.show(&mut served, CHANNEL, false);
     served.input(
@@ -779,19 +807,19 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         },
     );
     pump_until(&mut served, &mut [&mut person, &mut agent], |clients| {
-        clients[1].shows(Channel(2), "OBS-seen")
+        clients[1].shows(Channel(5), "OBS-seen")
     });
 
     // Every terminal command on the observer channel is refused; input is discarded.
     for operation in [
         Operation::ClearScrollback {
-            channel: Channel(2),
+            channel: Channel(5),
         },
         Operation::Close {
-            channel: Channel(2),
+            channel: Channel(5),
         },
         Operation::EndAccessibility {
-            channel: Channel(2),
+            channel: Channel(5),
         },
     ] {
         assert!(matches!(
@@ -802,7 +830,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
     served.input(
         &OBSERVER,
         protocol::Input {
-            channel: Channel(2),
+            channel: Channel(5),
             serial: 1,
             generation: 1,
             events: vec![InputEvent::Resize(PaneSize {
@@ -816,7 +844,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         agent
             .events
             .iter()
-            .any(|(channel, event)| *channel == Channel(2)
+            .any(|(channel, event)| *channel == Channel(5)
                 && matches!(
                     event,
                     PaneEvent::Input {
@@ -846,7 +874,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
             &OBSERVER,
             RequestId(2),
             Operation::ScrollbackPage {
-                channel: Channel(2),
+                channel: Channel(5),
                 epoch: 1,
                 start: 0,
                 rows: 10,
@@ -863,7 +891,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         agent.reply(
             &mut served,
             Operation::Release {
-                channel: Channel(2)
+                channel: Channel(5)
             }
         ),
         Ok(ReplyBody::Done)

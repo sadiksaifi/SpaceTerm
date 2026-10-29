@@ -53,7 +53,7 @@ impl OwnedPane {
 
 impl DevelopmentPaneHost {
     /// Starts an observation of this Pane's running Terminal Session. `fence` refuses another
-    /// Session as `Stale`.
+    /// running Session as `Stale`. A Pane where nothing runs says why, fenced or not.
     pub(super) fn observe_start(
         &mut self,
         fence: Option<[u8; 32]>,
@@ -62,9 +62,6 @@ impl DevelopmentPaneHost {
             pane.drain();
         }
         let Some(pane) = self.pane.as_ref().filter(|pane| pane.running()) else {
-            if fence.is_some() {
-                return Err(Refusal::Stale);
-            }
             return Ok(ObserveReply::NoSession {
                 state: match self.dormant {
                     Some(dormant) => SessionState::Ended(dormant.end),

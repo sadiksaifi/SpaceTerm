@@ -1387,13 +1387,12 @@ impl HostCommands for SharedWorkspaceHost {
                 .iter()
                 .any(|tab| tab.panes.iter().any(|candidate| candidate.id == pane))
         });
-        match (known, session) {
-            (true, None) => Ok(spaceterm_server::protocol::ObserveReply::NoSession {
-                state: spaceterm_server::protocol::SessionState::NotStarted,
-            }),
-            (true, Some(_)) => Err(Refusal::Stale),
-            (false, _) => Err(Refusal::Missing),
+        if !known {
+            return Err(Refusal::Missing);
         }
+        Ok(spaceterm_server::protocol::ObserveReply::NoSession {
+            state: spaceterm_server::protocol::SessionState::NotStarted,
+        })
     }
     fn observe_session(&mut self, pane: Id, session: Id) -> super::publish::Observed {
         match self.panes.get_mut(&pane) {
