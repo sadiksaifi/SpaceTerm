@@ -1,4 +1,5 @@
 pub(crate) mod about_window;
+pub(crate) mod after_paint;
 pub(crate) mod appearance;
 pub(crate) mod appearance_runtime;
 pub(crate) mod application_commands;

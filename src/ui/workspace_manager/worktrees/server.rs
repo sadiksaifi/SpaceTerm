@@ -599,7 +599,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&self.after_paint))
         .is_ok()
     }
     /// Presents a failed Worktree operation no other surface presented. Returns whether it was
@@ -612,17 +612,12 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // The close fallback and Settings present their own operations' failures.
-        if self.is_worktree_close_fallback(&Mutation::Worktree(operation.clone())) {
-            notice.acknowledge();
-            return true;
-        }
         let (path, creating) = match operation {
             Operation::Create { path, .. } => (path, true),
             Operation::Remove { path, .. } | Operation::OpenTab { path, .. } => (path, false),
+            // Settings presents its own change unless it closed or moved to another server.
             Operation::SetLocation { .. } => {
-                notice.acknowledge();
-                return true;
+                return self.server_location_failure(error, notice, window, cx);
             }
         };
         if error == Error::Interrupted && !matches!(operation, Operation::OpenTab { .. }) {
@@ -708,7 +703,45 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&self.after_paint))
+        .is_ok()
+    }
+    /// A New Worktree Location change that Settings did not present. Returns whether the alert
+    /// was admitted.
+    fn server_location_failure(
+        &mut self,
+        error: Error,
+        notice: &OutcomeNotice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let message = match error {
+            Error::Template(
+                spaceterm_server::worktree::path_template::WorktreePathTemplateError::NotWritable,
+            ) => {
+                "The New Worktree Location directory is not writable. Choose another directory in Settings > Git."
+            }
+            Error::Template(_) => "Correct New Worktree Location in Settings > Git.",
+            Error::Changed => {
+                "Another device changed New Worktree Location first. Review it in Settings > Git."
+            }
+            _ => "Review New Worktree Location in Settings > Git.",
+        };
+        let title = "Couldn\u{2019}t Change New Worktree Location";
+        Alert::new(
+            ModalId::new("server-worktree-location-failed"),
+            title,
+            title,
+            message,
+            vec![ModalAction::new(
+                false,
+                "OK",
+                ModalActionRole::Cancel,
+                "server-worktree-location-failed-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&self.after_paint))
         .is_ok()
     }
     /// Returns whether the alert was admitted. `notice` records the presentation of an unseen
@@ -774,7 +807,7 @@ impl WorkspaceManager {
         ));
         let owner = cx.weak_entity();
         let handle = window.window_handle();
-        let lifecycle = notice.map(OutcomeNotice::lifecycle);
+        let lifecycle = notice.map(|notice| notice.lifecycle(&self.after_paint));
         Alert::new(
             ModalId::new("worktree-removal-changed"),
             if error == Error::Missing {

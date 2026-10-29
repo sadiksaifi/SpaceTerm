@@ -41,9 +41,13 @@ trait EditJournal {
     fn pending(&self) -> Option<&ClientOperation>;
     fn last(&self) -> Option<&RetainedOutcome>;
     fn unseen(&self) -> &[RetainedOutcome];
+    /// How many unseen outcomes the bound forgot in total, and how many of those the client has
+    /// said went unseen.
+    fn forgotten(&self) -> (u64, u64);
     fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError>;
     fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError>;
     fn presented(&mut self, sequence: u64) -> Result<(), ServerError>;
+    fn forgotten_presented(&mut self, total: u64) -> Result<(), ServerError>;
 }
 
 impl EditServer for ServerConnection {
@@ -72,6 +76,9 @@ impl EditJournal for ClientJournal {
     fn unseen(&self) -> &[RetainedOutcome] {
         ClientJournal::unseen(self)
     }
+    fn forgotten(&self) -> (u64, u64) {
+        ClientJournal::forgotten(self)
+    }
     fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
         ClientJournal::submit(self, sequence, mutation)
     }
@@ -80,6 +87,9 @@ impl EditJournal for ClientJournal {
     }
     fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
         ClientJournal::presented(self, sequence)
+    }
+    fn forgotten_presented(&mut self, total: u64) -> Result<(), ServerError> {
+        ClientJournal::forgotten_presented(self, total)
     }
 }
 
@@ -95,6 +105,8 @@ enum Event {
     Retry,
     /// A surface presented the outcome of this operation.
     Presented(u64),
+    /// A surface said that the first this many forgotten outcomes went unseen.
+    ForgottenPresented(u64),
     /// The client is gone.
     Stop,
 }
@@ -137,6 +149,10 @@ pub(crate) struct SharedWorkspaceSnapshot {
     pub unseen: Vec<RetainedOutcome>,
     /// Presented outcomes the journal has not recorded yet. They never return to `unseen`.
     pub presenting: Vec<u64>,
+    /// How many unseen outcomes the journal's bound forgot in total, and how many of those a
+    /// surface has said went unseen. A notice is due while the first exceeds the second.
+    pub forgotten: u64,
+    pub forgotten_presented: u64,
     pub error: Option<ServerError>,
     /// How many connection attempts have failed, so a reader can tell that an attempt it asked
     /// for has finished.
@@ -151,6 +167,9 @@ impl SharedWorkspaceSnapshot {
             .filter(|unseen| !self.presenting.contains(&unseen.sequence))
             .cloned()
             .collect();
+        let (forgotten, presented) = journal.forgotten();
+        self.forgotten = forgotten;
+        self.forgotten_presented = self.forgotten_presented.max(presented);
     }
 }
 pub(crate) struct SharedWorkspaceClient {
@@ -219,6 +238,8 @@ impl SharedWorkspaceClient {
             outcome: None,
             unseen: Vec::new(),
             presenting: Vec::new(),
+            forgotten: 0,
+            forgotten_presented: 0,
             error: None,
             failed_attempts: 0,
         }));
@@ -280,6 +301,13 @@ impl SharedWorkspaceClient {
             }
         });
         let _ = self.commands.send(Event::Presented(sequence));
+    }
+    /// Records that a surface said the first `total` forgotten outcomes went unseen.
+    pub(crate) fn forgotten_presented(&self, total: u64) {
+        self.snapshot.publish(|state| {
+            state.forgotten_presented = state.forgotten_presented.max(total);
+        });
+        let _ = self.commands.send(Event::ForgottenPresented(total));
     }
     /// Coalesced change hints, including an initial hint. Read `snapshot` after each wake.
     /// Dropping the receiver unsubscribes; closed senders are pruned on publication or subscription.
@@ -435,6 +463,12 @@ fn run(
                 journal.presented(sequence)?;
                 state.publish(|s| s.presenting.retain(|presenting| *presenting != sequence));
             }
+            let forgotten_presented = state
+                .value
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .forgotten_presented;
+            journal.forgotten_presented(forgotten_presented)?;
             state.publish(|s| {
                 // Protocol major 3 servers write Worktrees and end all Sessions.
                 s.worktree_writes = true;
@@ -507,6 +541,7 @@ fn run(
                             s.presenting.retain(|presenting| *presenting != sequence);
                         });
                     }
+                    Ok(Event::ForgottenPresented(total)) => journal.forgotten_presented(total)?,
                     Ok(Event::Stop) | Err(_) => return Ok(()),
                 }
             }
@@ -539,6 +574,11 @@ fn run(
                             s.presenting.retain(|presenting| *presenting != sequence);
                         });
                     }
+                }
+                Ok(Event::ForgottenPresented(total)) => {
+                    let _ = server
+                        .journal()
+                        .and_then(|mut journal| journal.forgotten_presented(total));
                 }
                 Ok(Event::Retry) => break,
                 Ok(Event::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -573,6 +613,8 @@ mod tests {
             outcome: None,
             unseen: Vec::new(),
             presenting: Vec::new(),
+            forgotten: 0,
+            forgotten_presented: 0,
             error: None,
             failed_attempts: 0,
         }));
@@ -616,6 +658,8 @@ mod tests {
             outcome: None,
             unseen: Vec::new(),
             presenting: Vec::new(),
+            forgotten: 0,
+            forgotten_presented: 0,
             error: None,
             failed_attempts: 0,
         }));
@@ -690,6 +734,12 @@ mod tests {
             }
             fn unseen(&self) -> &[RetainedOutcome] {
                 &self.record.unseen
+            }
+            fn forgotten(&self) -> (u64, u64) {
+                (0, 0)
+            }
+            fn forgotten_presented(&mut self, _: u64) -> Result<(), ServerError> {
+                Ok(())
             }
             fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
                 self.record

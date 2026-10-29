@@ -17,9 +17,9 @@ use spaceterm_server::hierarchy::{
 
 use super::development::testing::{ScriptedEdits, ScriptedPanes};
 use super::development::{
-    SharedEditSource, SharedEditability, SharedPaneOpener, SharedPaneSessions, SharedRefusalReason,
-    SharedSubmission, SharedTabs, SharedWorkspaceDraft, SharedWorkspaceEdits, SharedWorkspaceFacts,
-    SharedWorkspaceField, SharedWorkspacePlan, SharedWorkspaces,
+    SharedEditSource, SharedEditability, SharedPaneOpener, SharedPaneSessions, SharedRefusal,
+    SharedRefusalReason, SharedSubmission, SharedTabs, SharedWorkspaceDraft, SharedWorkspaceEdits,
+    SharedWorkspaceFacts, SharedWorkspaceField, SharedWorkspacePlan, SharedWorkspaces,
 };
 use crate::terminal::server_session::DevelopmentPaneStatus;
 use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
@@ -1553,6 +1553,96 @@ mod edits {
         }
     }
 
+    /// A window that presents alerts and records how many outcomes were unseen in the first frame
+    /// that drew one.
+    struct AlertProbe {
+        painted: crate::ui::after_paint::AfterPaint,
+        edits: Rc<ScriptedEdits>,
+        first_drawn: Rc<std::cell::Cell<Option<usize>>>,
+    }
+
+    impl gpui::Render for AlertProbe {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            let edits = Rc::clone(&self.edits);
+            let first_drawn = Rc::clone(&self.first_drawn);
+            let probe = gpui::canvas(
+                |_, _, _| {},
+                move |_, (), window, cx| {
+                    if spaceterm_ui::window_modal_is_open(window, cx) && first_drawn.get().is_none()
+                    {
+                        first_drawn.set(Some(edits.unseen().len()));
+                    }
+                },
+            );
+            spaceterm_ui::ModalLayer::new(
+                gpui::div()
+                    .size_full()
+                    .child(probe)
+                    .child(self.painted.hook()),
+            )
+        }
+    }
+
+    /// An alert's outcome counts as presented only after a frame has drawn the open alert, so a
+    /// crash before that frame leaves it unseen.
+    #[gpui::test]
+    fn an_alert_should_count_as_presented_only_after_a_frame_draws_it(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let (mut shared, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::Worktree(refused_removal()));
+        edits.answer(Outcome::WorktreeFailed(
+            spaceterm_server::worktree::Error::Changed,
+        ));
+        shared.poll();
+        let (_, notice) = shared
+            .next_worktree_failure()
+            .expect("a failure to present");
+        let painted = crate::ui::after_paint::AfterPaint::default();
+        let first_drawn: Rc<std::cell::Cell<Option<usize>>> = Rc::default();
+        let probe = AlertProbe {
+            painted: painted.clone(),
+            edits: Rc::clone(&edits),
+            first_drawn: Rc::clone(&first_drawn),
+        };
+        let (root, cx) = cx.add_window_view(|_, _| probe);
+        cx.update(|window, cx| {
+            root.update(cx, |_, cx| {
+                spaceterm_ui::Alert::new(
+                    spaceterm_ui::ModalId::new("probe-alert"),
+                    "Couldn\u{2019}t Remove",
+                    "Couldn\u{2019}t Remove",
+                    "Nothing was removed.",
+                    vec![spaceterm_ui::ModalAction::new(
+                        (),
+                        "OK",
+                        spaceterm_ui::ModalActionRole::Cancel,
+                        "probe-alert-ok",
+                    )],
+                )
+                .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&painted))
+                .expect("the alert is admitted");
+            });
+        });
+        let _ = shared.take_worktree_failure();
+        cx.run_until_parked();
+
+        assert_eq!(
+            first_drawn.get(),
+            Some(1),
+            "the outcome is still unseen in the frame that first draws the alert"
+        );
+        assert!(
+            edits.unseen().is_empty(),
+            "it is presented after that frame"
+        );
+    }
+
     /// A refused rename waits behind an open dialog while a later Worktree removal fails, and
     /// the process ends before either is presented. The relaunched process presents both, and
     /// neither reaches the person again after that.
@@ -1670,6 +1760,142 @@ mod edits {
 
         assert!(edits.unseen().is_empty());
         assert!(reopened.next_conflict().is_none());
+    }
+
+    /// Records a disconnected route's presentations where its journal would.
+    struct Journal(Rc<ScriptedEdits>);
+
+    impl super::super::PresentationRecord for Journal {
+        fn presented(&self, sequence: u64) {
+            SharedWorkspaceEdits::presented(&*self.0, sequence);
+        }
+
+        fn forgotten_presented(&self, total: u64) {
+            SharedWorkspaceEdits::forgotten_presented(&*self.0, total);
+        }
+    }
+
+    /// Draft review opens and draws while a paired route has no connection, and the person then
+    /// closes the window. The reopened window's route reconnects and never presents the draft
+    /// again.
+    #[test]
+    fn a_presentation_while_disconnected_should_outlive_the_window() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = first.poll();
+        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
+        let (_, notice) = first.next_conflict().expect("draft review");
+        let _ = first.take_conflict();
+        let disconnected = || {
+            Rc::new(super::super::UnavailableEdits::recording(Rc::new(Journal(
+                Rc::clone(&edits),
+            )))) as Rc<dyn SharedWorkspaceEdits>
+        };
+        first.edits().replace_transport(disconnected());
+        notice.acknowledge();
+        drop(first);
+
+        let reopened = SharedEditSource::new(disconnected());
+        let mut second = window(reopened.clone());
+        reopened.replace_transport(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        let poll = second.poll();
+        bind(&mut second, poll.inventory.as_ref().expect("inventory"));
+
+        assert!(edits.unseen().is_empty());
+        assert!(second.next_conflict().is_none());
+    }
+
+    /// A relaunch recovers a rename the server refused after another client removed its
+    /// Workspace. The person learns that the change could not be applied, once.
+    #[test]
+    fn a_recovered_conflict_for_a_removed_workspace_should_present_its_refusal() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        let mut removed = root_only();
+        removed.revision = 2;
+        removed.workspaces.clear();
+        edits.set_inventory(removed);
+        edits.answer(Outcome::Conflict);
+
+        shared.poll();
+        let unseen_before = edits.unseen().len();
+        let refusal = shared.next_refusal().map(|(refusal, notice)| {
+            notice.acknowledge();
+            refusal
+        });
+        let _ = shared.take_refusal();
+
+        assert_eq!(
+            unseen_before, 1,
+            "nothing is presented until the refusal is"
+        );
+        assert_eq!(refusal, Some(SharedRefusal::Missing));
+        assert!(edits.unseen().is_empty());
+    }
+
+    /// Two edits are refused for different reasons. Each reason reaches the person, and each
+    /// notice records only the outcomes it stands for.
+    #[test]
+    fn refusals_for_different_reasons_should_each_be_presented() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        let missing_tab = Mutation::CreateTab {
+            workspace: [9; 32],
+            source: None,
+        };
+        edits.submit_for_recovery(missing_tab.clone());
+        edits.answer(Outcome::Missing);
+        edits.submit_for_recovery(missing_tab);
+        edits.answer(Outcome::Limit);
+
+        shared.poll();
+        let first = shared.next_refusal().map(|(refusal, notice)| {
+            notice.acknowledge();
+            refusal
+        });
+        let _ = shared.take_refusal();
+        let unseen_between = edits.unseen().len();
+        let second = shared.next_refusal().map(|(refusal, notice)| {
+            notice.acknowledge();
+            refusal
+        });
+        let _ = shared.take_refusal();
+
+        assert_eq!(first, Some(SharedRefusal::Missing));
+        assert_eq!(unseen_between, 1, "the Limit refusal is still unseen");
+        assert_eq!(second, Some(SharedRefusal::Limit));
+        assert!(edits.unseen().is_empty());
+        assert!(shared.next_refusal().is_none());
+    }
+
+    /// The journal forgot unseen outcomes beyond its bound. One notice says so, and once a
+    /// window has shown it, no later window shows it again.
+    #[test]
+    fn forgotten_outcomes_should_be_noticed_once() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.forget(2);
+        first.poll();
+        let noticed = first.next_forgotten().map(|notice| notice.acknowledge());
+        let _ = first.take_forgotten();
+        drop(first);
+        let mut later = reader(&edits);
+        later.poll();
+
+        assert!(
+            noticed.is_some(),
+            "the window says some outcomes went unseen"
+        );
+        assert_eq!(edits.forgotten_unsaid(), 0);
+        assert!(later.next_forgotten().is_none());
     }
 
     #[test]

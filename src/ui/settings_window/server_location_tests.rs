@@ -324,6 +324,48 @@ mod presented {
         );
     }
 
+    /// Settings presents its own failed change, and records it once a frame has drawn the
+    /// message, so no window presents it again.
+    #[gpui::test]
+    fn a_failure_settings_shows_should_count_as_presented(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert!(says("Couldn\u{2019}t save this location.", servers.cx));
+        assert!(edits.unseen().is_empty());
+    }
+
+    /// The person chose another server before the change was answered, so Settings never showed
+    /// the failure. It stays unseen for the Workspace Window.
+    #[gpui::test]
+    fn a_failure_for_a_server_settings_left_should_stay_unseen(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        servers.cx.update(|_, cx| {
+            servers.window.update(cx, |settings, cx| {
+                settings.server_location.choose(None, cx);
+            });
+        });
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert_eq!(edits.unseen().len(), 1);
+    }
+
     #[gpui::test]
     fn a_server_that_is_not_connected_shows_its_last_known_git_settings(cx: &mut TestAppContext) {
         // As after a relaunch: the record keeps what penguin last answered, and nothing

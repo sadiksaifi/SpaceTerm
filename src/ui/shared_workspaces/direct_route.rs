@@ -101,11 +101,46 @@ impl ServerPaneConnection for UnavailablePane {
     fn start_restored(&self) {}
 }
 
+/// Where a paired route with no connection records what a surface presented: this client's own
+/// journal, which needs no connection, so the presentation outlives the Workspace Window.
+pub(crate) trait PresentationRecord {
+    fn presented(&self, sequence: u64);
+    fn forgotten_presented(&self, total: u64);
+}
+
+/// A route's client storage, as [`crate::direct_connections::DirectConnections::storage`] opens
+/// it. A journal another writer still holds records nothing; the source records it again on
+/// reconnecting.
+impl PresentationRecord for spaceterm_server::ServerConnection {
+    fn presented(&self, sequence: u64) {
+        let _ = self
+            .shared_journal()
+            .and_then(|mut journal| journal.presented(sequence));
+    }
+
+    fn forgotten_presented(&self, total: u64) {
+        let _ = self
+            .shared_journal()
+            .and_then(|mut journal| journal.forgotten_presented(total));
+    }
+}
+
 /// The transport of a paired route with no connection. It publishes no inventory and accepts no
 /// edit, so the retained copy stands in and shared edits stay unavailable.
 #[derive(Default)]
 pub(crate) struct UnavailableEdits {
     subscribers: RefCell<Vec<async_channel::Sender<()>>>,
+    record: Option<Rc<dyn PresentationRecord>>,
+}
+
+impl UnavailableEdits {
+    /// The transport of a route whose presentations `record` keeps.
+    pub(crate) fn recording(record: Rc<dyn PresentationRecord>) -> Self {
+        Self {
+            subscribers: RefCell::default(),
+            record: Some(record),
+        }
+    }
 }
 
 impl SharedWorkspaceEdits for UnavailableEdits {
@@ -121,6 +156,8 @@ impl SharedWorkspaceEdits for UnavailableEdits {
             outcome: None,
             unseen: Vec::new(),
             presenting: Vec::new(),
+            forgotten: 0,
+            forgotten_presented: 0,
             error: Some(spaceterm_server::ServerError::Direct(
                 spaceterm_server::direct::DirectError::Transport,
             )),
@@ -145,5 +182,17 @@ impl SharedWorkspaceEdits for UnavailableEdits {
             .retain(|sender| !sender.is_closed());
         self.subscribers.borrow_mut().push(sender);
         receiver
+    }
+
+    fn presented(&self, sequence: u64) {
+        if let Some(record) = &self.record {
+            record.presented(sequence);
+        }
+    }
+
+    fn forgotten_presented(&self, total: u64) {
+        if let Some(record) = &self.record {
+            record.forgotten_presented(total);
+        }
     }
 }

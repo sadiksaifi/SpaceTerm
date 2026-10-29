@@ -27,6 +27,18 @@ pub(super) struct DirectRoute {
     key: ServerKey,
     panes: Rc<DirectRoutePanes>,
     server: Option<spaceterm_server::ServerConnection>,
+    /// The route's own client storage, where its presentations are recorded while it has no
+    /// connection.
+    storage: Option<Rc<dyn crate::ui::shared_workspaces::PresentationRecord>>,
+}
+
+impl DirectRoute {
+    /// The transport while the route has no connection.
+    fn unavailable(&self) -> UnavailableEdits {
+        self.storage
+            .clone()
+            .map_or_else(UnavailableEdits::default, UnavailableEdits::recording)
+    }
 }
 
 /// The paired routes one Workspace Window presents, by route, and the revision of what each
@@ -222,7 +234,16 @@ impl WorkspaceManager {
             Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
             &self.pane_construction,
         );
-        let edits = SharedEditSource::new(Rc::new(UnavailableEdits::default()));
+        let storage = crate::ui::direct_servers::installed(cx)
+            .and_then(|direct| direct.storage(&route))
+            .map(|storage| {
+                Rc::new(storage) as Rc<dyn crate::ui::shared_workspaces::PresentationRecord>
+            });
+        let edits = SharedEditSource::new(Rc::new(
+            storage
+                .clone()
+                .map_or_else(UnavailableEdits::default, UnavailableEdits::recording),
+        ));
         let key = self.present_server_workspaces(
             ServerOrigin::Direct(direct),
             edits,
@@ -236,6 +257,7 @@ impl WorkspaceManager {
                 key,
                 panes,
                 server: None,
+                storage,
             },
         );
         Some(key)
@@ -326,7 +348,7 @@ impl WorkspaceManager {
             None => {
                 followed.panes.retain_titles(shared.unavailable_titles());
                 followed.panes.follow(None);
-                shared.replace_transport(Rc::new(UnavailableEdits::default()));
+                shared.replace_transport(Rc::new(followed.unavailable()));
             }
         }
     }

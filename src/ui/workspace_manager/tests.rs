@@ -12237,6 +12237,38 @@ mod shared_repositories {
         assert!(edits.unseen().is_empty());
     }
 
+    /// A New Worktree Location change fails after Settings closed or moved to another server, so
+    /// Settings never showed it. The window alerts it once, and records it after drawing that.
+    #[gpui::test]
+    fn a_location_failure_settings_never_showed_should_alert_once(cx: &mut TestAppContext) {
+        let (_, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        edits.submit_for_recovery(spaceterm_server::hierarchy::Mutation::Worktree(
+            spaceterm_server::worktree::Operation::SetLocation {
+                version: 0,
+                template: "~/elsewhere/{branch}".into(),
+            },
+        ));
+        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(
+            spaceterm_server::worktree::Error::Changed,
+        ));
+        cx.run_until_parked();
+        let alerted = cx
+            .debug_bounds("modal-action-server-worktree-location-failed-ok")
+            .is_some();
+        click("modal-action-server-worktree-location-failed-ok", cx);
+        close_window(cx);
+        let mut reopened = reopened_window(&edits, cx);
+        reopened.run_until_parked();
+
+        assert!(alerted);
+        assert!(edits.unseen().is_empty());
+        assert!(
+            reopened
+                .debug_bounds("modal-action-server-worktree-location-failed-ok")
+                .is_none()
+        );
+    }
+
     /// The form presents a failure, the person retries at the same location, then cancels
     /// while the connection is lost. The retry's own failure alerts once.
     #[gpui::test]

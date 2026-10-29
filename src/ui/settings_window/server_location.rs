@@ -246,6 +246,9 @@ pub(super) struct ServerLocation {
     git_answered: bool,
     /// The owning server's check of the text being typed. Replacing it cancels the earlier one.
     check: Option<Task<()>>,
+    /// Records a failed change as presented once a frame has drawn its message. Choosing
+    /// another server, or closing Settings first, leaves it to the Workspace Window.
+    shown: crate::ui::after_paint::AfterPaint,
 }
 
 impl ServerLocation {
@@ -275,6 +278,7 @@ impl ServerLocation {
             poll: None,
             git_answered: false,
             check: None,
+            shown: crate::ui::after_paint::AfterPaint::default(),
         }
     }
 
@@ -288,6 +292,7 @@ impl ServerLocation {
         self.client = None;
         self.poll = None;
         self.check = None;
+        self.shown.clear();
         self.show(Some(String::new()), cx);
         self.show_last_known(cx);
     }
@@ -562,7 +567,9 @@ impl SettingsWindow {
             version: write.version,
             template: write.template.clone(),
         };
-        let written = client.write(operation, cx);
+        // Settings presents its own change's answer while it shows this server.
+        let answer = client.source.owner();
+        let written = client.write_owned(operation, answer.ticket(), cx);
         cx.spawn(async move |settings, cx| {
             let result = written.await.and_then(crate::ui::server_worktrees::result);
             let current = if result == Err(WriteError::Server(Error::Changed)) {
@@ -580,9 +587,20 @@ impl SettingsWindow {
                 if state.generation != generation {
                     return;
                 }
+                // A template problem shows only while the field still holds the written text.
+                let shown = match &result {
+                    Err(WriteError::Server(Error::Template(_))) => {
+                        state.model.draft == write.template
+                    }
+                    Err(WriteError::Server(_)) => true,
+                    _ => false,
+                };
                 if state.model.committed(write, result) {
                     let text = state.model.changed_elsewhere(current);
                     state.show(text, cx);
+                }
+                if shown {
+                    state.shown.push(move |_| answer.presented());
                 }
                 state.retain(cx);
                 cx.notify();
@@ -610,6 +628,7 @@ impl SettingsWindow {
         let editable = model.editable();
         let invalid = model.problem.is_some();
         let message = model.message();
+        let shown = self.server_location.shown.clone();
         let input = self.server_location.input.clone();
         input.update(cx, |input, cx| input.set_editable(editable, cx));
         let focus = input.read(cx).focus_handle();
@@ -662,6 +681,7 @@ impl SettingsWindow {
                             .into(),
                         SharedString::new_static(message),
                     ))
+                    .child(shown.hook())
             }))
             .into_any_element()
     }

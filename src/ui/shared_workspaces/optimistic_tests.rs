@@ -43,6 +43,8 @@ impl DelayedServer {
                     outcome: None,
                     unseen: Vec::new(),
                     presenting: Vec::new(),
+                    forgotten: 0,
+                    forgotten_presented: 0,
                     error: None,
                     failed_attempts: 0,
                 },

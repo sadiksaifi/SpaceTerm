@@ -119,7 +119,13 @@ impl WorkspaceManager {
             root: root.clone(),
             path: outside.clone(),
         });
-        let completion = match shared.edits().submit_waiting(mutation.clone()) {
+        // The fallback presents its own failure, so the window presents it only if that alert
+        // never draws.
+        let answer = shared.edits().owner();
+        let completion = match shared
+            .edits()
+            .submit_owned(mutation.clone(), answer.ticket())
+        {
             Ok(completion) => completion,
             Err(reason) => {
                 Self::show_shared_refusal(
@@ -154,8 +160,10 @@ impl WorkspaceManager {
                     return;
                 };
                 let Outcome::Accepted { target: accepted } = outcome.outcome else {
-                    Self::worktree_fallback_failed(
+                    let lifecycle = answer.lifecycle(&manager.after_paint);
+                    Self::worktree_fallback_failed_with(
                         "SpaceTerm couldn\u{2019}t open a Tab outside this Worktree.",
+                        lifecycle,
                         window,
                         cx,
                     );
@@ -209,6 +217,16 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        Self::worktree_fallback_failed_with(message, |_, _| {}, window, cx);
+    }
+
+    /// Presents the fallback's failure with `lifecycle` observing the alert.
+    fn worktree_fallback_failed_with(
+        message: &'static str,
+        lifecycle: impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let _ = Alert::new(
             ModalId::new("worktree-tabs-not-closed"),
             "Tabs Not Closed",
@@ -222,6 +240,6 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present(window, cx, |_, _| {});
+        .present_with_lifecycle(window, cx, |_, _| {}, lifecycle);
     }
 }

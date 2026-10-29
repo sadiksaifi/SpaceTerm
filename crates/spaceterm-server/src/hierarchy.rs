@@ -1311,7 +1311,7 @@ pub struct ClientOperation {
     pub mutation: Mutation,
 }
 /// How many retired outcomes the client keeps until it presents them. Beyond this, the oldest
-/// is forgotten.
+/// is forgotten, and the client counts it so it can say that some went unseen.
 #[cfg(feature = "client")]
 pub const UNSEEN_OUTCOMES: usize = 32;
 #[cfg(feature = "client")]
@@ -1325,6 +1325,12 @@ struct JournalRecord {
     /// own record; the server's acknowledgement retires an outcome independently.
     #[serde(default)]
     unseen: Vec<RetainedOutcome>,
+    /// How many unseen outcomes the bound ever forgot, and how many of those the client has
+    /// said went unseen. Both only grow, so recording a presentation again changes nothing.
+    #[serde(default)]
+    forgotten: u64,
+    #[serde(default)]
+    forgotten_presented: u64,
 }
 /// Pending shared edits live outside Settings and are fenced to their original authority.
 #[cfg(feature = "client")]
@@ -1367,6 +1373,20 @@ impl ClientJournal {
     pub fn unseen(&self) -> &[RetainedOutcome] {
         &self.record.unseen
     }
+    /// How many unseen outcomes the bound forgot in total, and how many of those the client has
+    /// said went unseen.
+    pub fn forgotten(&self) -> (u64, u64) {
+        (self.record.forgotten, self.record.forgotten_presented)
+    }
+    /// Records that the client said the first `total` forgotten outcomes went unseen.
+    pub fn forgotten_presented(&mut self, total: u64) -> Result<(), ServerError> {
+        let total = total.min(self.record.forgotten);
+        if total <= self.record.forgotten_presented {
+            return Ok(());
+        }
+        self.record.forgotten_presented = total;
+        self.save()
+    }
     /// Records that the client presented the outcome of `sequence`, so it is never presented
     /// again. A sequence that is not unseen changes nothing.
     pub fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
@@ -1398,6 +1418,7 @@ impl ClientJournal {
         if result.outcome.needs_presentation() {
             if self.record.unseen.len() >= UNSEEN_OUTCOMES {
                 self.record.unseen.remove(0);
+                self.record.forgotten = self.record.forgotten.saturating_add(1);
             }
             self.record.unseen.push(result.clone());
         }
@@ -2722,7 +2743,7 @@ mod tests {
         }
 
         #[test]
-        fn unseen_outcomes_should_be_bounded_by_forgetting_the_oldest() {
+        fn unseen_outcomes_should_be_bounded_by_counting_the_ones_forgotten() {
             let root = Root::new();
             let mut journal = root.open();
             let total = UNSEEN_OUTCOMES as u64 + 2;
@@ -2731,14 +2752,24 @@ mod tests {
             }
 
             drop(journal);
-            let kept: Vec<u64> = root
-                .open()
+            let mut relaunched = root.open();
+            let kept: Vec<u64> = relaunched
                 .unseen()
                 .iter()
                 .map(|unseen| unseen.sequence)
                 .collect();
+            let forgotten = relaunched.forgotten();
+            relaunched.forgotten_presented(2).unwrap();
+            settle(&mut relaunched, total + 1, Outcome::Invalid);
+            drop(relaunched);
 
             assert_eq!(kept, (3..=total).collect::<Vec<_>>());
+            assert_eq!(forgotten, (2, 0), "the relaunch can say two went unseen");
+            assert_eq!(
+                root.open().forgotten(),
+                (3, 2),
+                "only the one forgotten after that notice still needs one"
+            );
         }
 
         /// A journal written before the client recorded unseen outcomes still opens, with none.
