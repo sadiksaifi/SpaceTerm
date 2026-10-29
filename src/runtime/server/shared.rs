@@ -1404,6 +1404,10 @@ impl HostCommands for SharedWorkspaceHost {
             },
         }
     }
+    fn session_size(&self, pane: Id) -> Option<PaneSize> {
+        let pane = self.panes.get(&pane)?.pane.as_ref()?;
+        (!pane.ended && !pane.failed).then_some(pane.size)
+    }
     fn observer_live(&self, pane: Id, session: Id) -> bool {
         self.panes
             .get(&pane)

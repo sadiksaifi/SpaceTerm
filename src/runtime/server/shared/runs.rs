@@ -158,11 +158,3 @@ impl SharedWorkspaceHost {
         self.panes.get(&pane)?.pane.as_ref().map(|pane| pane.lease)
     }
 }
-
-#[cfg(test)]
-impl SharedWorkspaceHost {
-    /// The size of the Pane's running Terminal Session.
-    pub(in crate::runtime::server) fn running_size(&self, pane: Id) -> Option<PaneSize> {
-        self.panes.get(&pane)?.pane.as_ref().map(|pane| pane.size)
-    }
-}

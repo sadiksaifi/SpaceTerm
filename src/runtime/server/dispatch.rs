@@ -553,6 +553,10 @@ pub trait HostCommands: Send {
     /// The observers of each Terminal Session. A session without a visible observer publishes
     /// frames only for its controller.
     fn observers(&mut self, _observers: &BTreeMap<[u8; 32], Observers>) {}
+    /// The size of `pane`'s running Terminal Session.
+    fn session_size(&self, _pane: [u8; 32]) -> Option<PaneSize> {
+        None
+    }
     /// Receipts that settled since the last call, each with the channel that admitted it.
     fn take_settled_runs(&mut self) -> Vec<spaceterm_server::pane::run::Settled> {
         Vec::new()
@@ -560,6 +564,14 @@ pub trait HostCommands: Send {
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
 }
+
+/// The size of a Session that a claim without a size starts: 120 by 40.
+pub const DEFAULT_SIZE: PaneSize = PaneSize {
+    columns: 120,
+    rows: 40,
+    cell_width: 8,
+    cell_height: 16,
+};
 
 /// The observer channels of one Terminal Session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1034,10 +1046,12 @@ impl<H: HostCommands> Served<H> {
     }
 
     fn claim(&mut self, peer: &Peer, claim: Claim) -> Result<ReplyBody, Refusal> {
-        // The connection refuses a claim that keeps the running size.
-        let Some(size) = claim.size else {
-            return Err(Refusal::Unsupported);
-        };
+        // A claim without a size keeps the running Session's size, and starts a fresh one at
+        // the server default.
+        let size = claim
+            .size
+            .or_else(|| self.host.session_size(claim.pane))
+            .unwrap_or(DEFAULT_SIZE);
         let channel = claim.channel;
         let pane = claim.pane;
         // A new claim of a Pane this connection already holds replaces that binding. The host

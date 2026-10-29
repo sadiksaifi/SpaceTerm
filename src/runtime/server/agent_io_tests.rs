@@ -177,7 +177,8 @@ impl Bench {
             },
             pane: self.pane,
             claim,
-            size: size(),
+            // An agent keeps the running size; a fresh Session starts at the default.
+            size: None,
             style: None,
         })
     }
@@ -487,6 +488,11 @@ fn zsh_runs_settle_when_the_session_ends_or_control_moves() {
         bench.reply(&PERSON, takeover),
         Ok(ReplyBody::Claim(ClaimReply::Attached { .. }))
     ));
+    assert_eq!(
+        bench.served.host().session_size(bench.pane),
+        Some(super::dispatch::DEFAULT_SIZE),
+        "a claim without a size keeps the running size"
+    );
     bench.pump();
     let Ok(ReplyBody::Run(RunReply::Receipt(receipt))) = bench.reply(
         &AGENT,
@@ -707,7 +713,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
             },
             pane,
             claim: AttachmentClaim::Select { explicit: true },
-            size: size(),
+            size: Some(size()),
             style: None,
         }),
     );
@@ -809,7 +815,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         Some(lease),
         "control and Session are unchanged"
     );
-    assert_eq!(served.host().running_size(pane), Some(size()));
+    assert_eq!(served.host().session_size(pane), Some(size()));
 
     // Scrollback pages answer on the observer channel.
     agent.outbox.begin(RequestId(2)).unwrap();
