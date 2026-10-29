@@ -194,7 +194,18 @@ fn remote_relative_path_usage_fails_before_recovery_or_any_dispatch() {
     assert!(script.borrow().events.is_empty());
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    assert_eq!(output.write(true, false, true, &mut stdout, &mut stderr), 2);
+    assert_eq!(
+        output.write(
+            Mode {
+                json: true,
+                quiet: false,
+                verbose: true,
+            },
+            &mut stdout,
+            &mut stderr,
+        ),
+        2
+    );
     let encoded = String::from_utf8(stdout).unwrap();
     assert!(!encoded.contains("private-title"));
     assert!(!encoded.contains("private-path"));
@@ -330,7 +341,15 @@ fn list_output_keeps_operational_titles_and_paths_out_of_diagnostics() {
     assert_eq!(output.envelope.exit(), 0);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    output.write(false, false, true, &mut stdout, &mut stderr);
+    output.write(
+        Mode {
+            json: false,
+            quiet: false,
+            verbose: true,
+        },
+        &mut stdout,
+        &mut stderr,
+    );
     let text = String::from_utf8(stdout).unwrap();
     let diagnostics = String::from_utf8(stderr).unwrap();
     assert!(text.contains("private-title"));
@@ -371,7 +390,15 @@ fn a_broken_output_pipe_is_silent_and_exits_141() {
     );
     let mut errors = Vec::new();
     assert_eq!(
-        output.write(false, false, true, &mut Broken, &mut errors),
+        output.write(
+            Mode {
+                json: false,
+                quiet: false,
+                verbose: true,
+            },
+            &mut Broken,
+            &mut errors,
+        ),
         141
     );
     assert!(errors.is_empty());

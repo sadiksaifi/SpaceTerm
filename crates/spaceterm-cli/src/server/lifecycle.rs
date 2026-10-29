@@ -56,6 +56,9 @@ pub fn start(context: &Context<'_>) -> Reply {
         return Reply::failure(COMMAND, None, failure);
     }
     let server = super::local_ref(context.identity).ok();
+    if let Err(failure) = crate::interrupt::dispatch() {
+        return Reply::failure(COMMAND, server, failure);
+    }
     let started = Service::for_identity(context.identity)
         .and_then(|service| Controller::new(service).start())
         .map_err(contract::from_server_error);
@@ -164,6 +167,10 @@ fn preview(
     );
     let summary = format!("{}\n{}\n", wording.message(), wording.detail());
     if context.interactive() {
+        let warnings: Vec<_> = super::recovered_warning(&opened.recovered)
+            .into_iter()
+            .collect();
+        contract::write_warnings(&warnings, &mut std::io::stderr().lock());
         eprint!("{summary}");
         if super::confirm(wording.confirm_label()) {
             return execute(context, kind, routed, opened, pending, token);
@@ -242,6 +249,7 @@ fn execute(
         token,
         context.timeout(kind.wait()),
         &mut |operation| pending.add(operation),
+        &crate::interrupt::settle_by,
     );
     let outcome = match outcome {
         Ok(outcome) => outcome,

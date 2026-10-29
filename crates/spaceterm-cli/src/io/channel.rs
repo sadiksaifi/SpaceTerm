@@ -261,26 +261,15 @@ impl Channel {
                 if let Some(event) = events.pop_front() {
                     break event;
                 }
-                match deadline.until() {
-                    None => {
-                        events = self
-                            .inbox
-                            .ready
-                            .wait(events)
-                            .unwrap_or_else(|e| e.into_inner());
-                    }
-                    Some(until) => {
-                        let Some(remaining) = until.checked_duration_since(Instant::now()) else {
-                            return Ok(None);
-                        };
-                        events = self
-                            .inbox
-                            .ready
-                            .wait_timeout(events, remaining)
-                            .unwrap_or_else(|e| e.into_inner())
-                            .0;
-                    }
-                }
+                let Some(slice) = deadline.slice() else {
+                    return Ok(None);
+                };
+                events = self
+                    .inbox
+                    .ready
+                    .wait_timeout(events, slice)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
             }
         };
         Ok(Some(match event {

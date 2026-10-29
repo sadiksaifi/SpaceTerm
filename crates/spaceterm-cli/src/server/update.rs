@@ -305,6 +305,11 @@ fn preview(
     };
     let summary = summary(&routed.server.name, &data);
     if context.interactive() {
+        let warnings: Vec<_> = major_warning(effects.to_major)
+            .into_iter()
+            .chain(super::recovered_warning(&opened.recovered))
+            .collect();
+        contract::write_warnings(&warnings, &mut std::io::stderr().lock());
         eprint!("{summary}");
         if super::confirm("Update Server") {
             return execute(context, routed, opened, pending, action, token, candidate);
@@ -410,6 +415,7 @@ fn execute(
         token,
         context.timeout(RETURN_WAIT),
         &mut |operation| pending.add(operation),
+        &crate::interrupt::settle_by,
     );
     let outcome = match outcome {
         Ok(outcome) => outcome,

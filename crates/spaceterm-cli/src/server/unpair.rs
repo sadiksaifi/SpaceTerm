@@ -139,6 +139,9 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
     if ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut operation).is_err() {
         return fail(Failure::new(Code::StorageUnavailable));
     }
+    if let Err(failure) = crate::interrupt::dispatch() {
+        return fail(failure);
+    }
     match connection.revoke_device(operation, device.pairing) {
         Ok(_) => {
             let text = format!("Unpaired {}.\n", named.name);

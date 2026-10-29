@@ -290,7 +290,15 @@ impl Fixture {
                 let accepted = state.lock().unwrap().accept();
                 if let Some((stream, generation)) = accepted {
                     let (waker, wake) = Waker::new().unwrap();
-                    return host::serve(stream, generation, state, &environment, waker, wake);
+                    return host::serve(
+                        stream,
+                        generation,
+                        state,
+                        &environment,
+                        waker,
+                        wake,
+                        &host::LaneStop::default(),
+                    );
                 }
                 assert!(Instant::now() < deadline, "QUIC accept deadline");
                 std::thread::sleep(Duration::from_millis(2));
@@ -1126,7 +1134,15 @@ fn a_paired_device_reaches_the_service_lane_as_its_own_pairing() {
             let accepted = state.lock().unwrap().accept();
             if let Some((stream, generation)) = accepted {
                 let (waker, wake) = Waker::new().unwrap();
-                return host::serve(stream, generation, state, &environment, waker, wake);
+                return host::serve(
+                    stream,
+                    generation,
+                    state,
+                    &environment,
+                    waker,
+                    wake,
+                    &host::LaneStop::default(),
+                );
             }
             assert!(Instant::now() < deadline, "QUIC accept deadline");
             std::thread::sleep(Duration::from_millis(2));
@@ -1189,7 +1205,7 @@ fn a_paired_device_reaches_the_service_lane_as_its_own_pairing() {
         }
     );
     drop(stream);
-    assert_eq!(server.join().unwrap(), Err(ServerError::Unsupported));
+    assert_eq!(server.join().unwrap(), Ok(()));
 }
 
 #[test]
@@ -1359,7 +1375,8 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
             &paired,
             challenge.generation,
             [5; 32],
-            outbox.clone(),
+            paired.client,
+            Some(outbox.clone()),
             Box::new(Quiet),
         )
         .unwrap();
@@ -1400,7 +1417,8 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
             &paired,
             challenge.generation,
             [6; 32],
-            Outbox::new(Arc::new(|| {})),
+            paired.client,
+            Some(Outbox::new(Arc::new(|| {}))),
             Box::new(Quiet)
         ),
         Err(DirectError::Disabled)
@@ -1453,7 +1471,8 @@ fn a_connection_accepted_before_policy_replacement_cannot_join_the_new_listener(
             Arc::clone(&fixture.state),
             &environment,
             waker,
-            wake
+            wake,
+            &host::LaneStop::default(),
         ),
         Err(ServerError::Direct(DirectError::Disabled))
     );

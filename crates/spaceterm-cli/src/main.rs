@@ -22,6 +22,14 @@ fn main() -> ExitCode {
         Err(error) => return usage(&argv, &error),
     };
     let command = cli.command.path();
+    // The server and its helper keep the default signal handling.
+    if !matches!(
+        cli.command,
+        Command::Server(ServerCommand::Run { .. } | ServerCommand::Provision(_))
+    ) && let Err(failure) = spaceterm_cli::interrupt::install(command, (&cli.global).into())
+    {
+        return finish(command, cli.global.json, failure);
+    }
     #[cfg(target_os = "macos")]
     if let Err(error) = resolve_launcher() {
         return finish(command, cli.global.json, contract::from_server_error(error));
@@ -33,7 +41,7 @@ fn main() -> ExitCode {
             env!("SPACETERM_SERVER_IDENTITY"),
         );
         return ExitCode::from(result.render(
-            &cli.global,
+            (&cli.global).into(),
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         ));
@@ -177,22 +185,18 @@ fn main() -> ExitCode {
     {
         let reply =
             spaceterm_cli::server::run(env!("SPACETERM_SERVER_IDENTITY"), &cli.global, command);
-        return ExitCode::from(reply.write(cli.global.json, cli.global.quiet));
+        return ExitCode::from(reply.write((&cli.global).into()));
     }
     if let Some(output) = spaceterm_cli::io::start::start(&cli) {
         return ExitCode::from(output.write(
-            cli.global.json,
-            cli.global.quiet,
-            cli.global.verbose,
+            (&cli.global).into(),
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         ));
     }
     if let Some(output) = spaceterm_cli::work::start::start(&cli) {
         return ExitCode::from(output.write(
-            cli.global.json,
-            cli.global.quiet,
-            cli.global.verbose,
+            (&cli.global).into(),
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         ));
@@ -250,22 +254,15 @@ fn run_server(service: bool, owned: bool) -> Result<(), ServerError> {
 }
 
 fn complete<D: serde::Serialize>(cli: &Cli, envelope: Envelope<D>, text: &str) -> ExitCode {
-    if cli.global.json {
-        let mut output = std::io::stdout().lock();
-        let result = serde_json::to_writer(&mut output, &envelope)
-            .map_err(std::io::Error::from)
-            .and_then(|()| output.write_all(b"\n"))
-            .and_then(|()| output.flush());
-        if let Err(error) = result {
-            return output_failed(&error);
-        }
-    } else if !cli.global.quiet || envelope.exit() != 0 {
-        let mut output = std::io::stdout().lock();
-        if let Err(error) = writeln!(output, "{text}").and_then(|()| output.flush()) {
-            return output_failed(&error);
-        }
-    }
-    ExitCode::from(envelope.exit())
+    ExitCode::from(contract::render(
+        &envelope,
+        &format!("{text}\n"),
+        "",
+        (&cli.global).into(),
+        spaceterm_cli::interrupt::finish(),
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    ))
 }
 
 fn validate_route(cli: &Cli) -> Result<(), Failure> {
@@ -328,30 +325,18 @@ fn partial_path(argv: &[OsString]) -> String {
     path.join(".")
 }
 fn finish(command: &str, json: bool, failure: Failure) -> ExitCode {
-    let text = failure.text();
-    let usage = match &failure.details {
-        Details::Usage(details) => details.argument.clone(),
-        _ => None,
-    };
-    let envelope = Envelope::error(command, None, failure, Empty {});
-    let exit = envelope.exit();
-    if json {
-        let mut output = std::io::stdout().lock();
-        let written = serde_json::to_writer(&mut output, &envelope)
-            .map_err(std::io::Error::from)
-            .and_then(|()| output.write_all(b"\n"))
-            .and_then(|()| output.flush());
-        if let Err(error) = written {
-            return output_failed(&error);
-        }
-    } else {
-        let mut errors = std::io::stderr().lock();
-        let _ = writeln!(errors, "{text}");
-        if let Some(argument) = usage {
-            let _ = writeln!(errors, "argument: {argument}");
-        }
-    }
-    ExitCode::from(exit)
+    ExitCode::from(contract::render(
+        &Envelope::error(command, None, failure, Empty {}),
+        "",
+        "",
+        contract::Mode {
+            json,
+            ..contract::Mode::default()
+        },
+        spaceterm_cli::interrupt::finish(),
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    ))
 }
 fn output_failed(error: &std::io::Error) -> ExitCode {
     if error.kind() == std::io::ErrorKind::BrokenPipe {

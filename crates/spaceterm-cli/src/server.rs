@@ -36,34 +36,18 @@ const PENDING_FILE: &std::ffi::CStr = c"service-operations.json";
 /// At most this many pending operations are kept. The server holds no more than 16.
 const MAX_PENDING: usize = 16;
 
-/// One finished server command: its envelope, its operational text and its exit status.
+/// One finished server command: its envelope and its operational text.
 pub struct Reply {
-    json: String,
+    envelope: Envelope<serde_json::Value>,
     /// Operational output for stdout in text mode. It may name servers, devices and paths.
     stdout: String,
-    /// The fixed error line for stderr, when the command failed.
-    stderr: Option<String>,
-    exit: u8,
 }
 
 impl Reply {
     pub fn new<D: Serialize>(envelope: &Envelope<D>, stdout: String) -> Self {
-        let stderr = envelope.error.as_ref().map(|error| {
-            let mut line = format!("error: {} ({})", error.message, error.code);
-            if let contract::Details::Usage(contract::UsageDetails {
-                argument: Some(argument),
-                ..
-            }) = &error.details
-            {
-                line.push_str(&format!("\nargument: {argument}"));
-            }
-            line
-        });
         Self {
-            json: serde_json::to_string(envelope).unwrap_or_default(),
+            envelope: envelope.erased(),
             stdout,
-            stderr,
-            exit: envelope.exit(),
         }
     }
 
@@ -92,43 +76,20 @@ impl Reply {
     }
 
     pub fn exit(&self) -> u8 {
-        self.exit
+        self.envelope.exit()
     }
 
-    /// The envelope, as `--json` prints it.
-    pub fn json(&self) -> &str {
-        &self.json
-    }
-
-    /// Writes the reply and returns the exit status. A broken stdout pipe exits 141 without a
-    /// message.
-    pub fn write(&self, json: bool, quiet: bool) -> u8 {
-        let mut output = std::io::stdout().lock();
-        let written = if json {
-            output
-                .write_all(self.json.as_bytes())
-                .and_then(|()| output.write_all(b"\n"))
-        } else if quiet && self.exit == 0 {
-            Ok(())
-        } else {
-            output.write_all(self.stdout.as_bytes())
-        }
-        .and_then(|()| output.flush());
-        if let Err(error) = written {
-            if error.kind() == std::io::ErrorKind::BrokenPipe {
-                return contract::EXIT_BROKEN_PIPE;
-            }
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "{}",
-                Failure::new(Code::OutputFailed).text()
-            );
-            return Code::OutputFailed.exit();
-        }
-        if !json && let Some(line) = &self.stderr {
-            let _ = writeln!(std::io::stderr().lock(), "{line}");
-        }
-        self.exit
+    /// Writes the reply through [`contract::render`] and returns the exit status.
+    pub fn write(&self, mode: contract::Mode) -> u8 {
+        contract::render(
+            &self.envelope,
+            &self.stdout,
+            "",
+            mode,
+            crate::interrupt::finish(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )
     }
 }
 
@@ -320,6 +281,7 @@ pub fn lane_failure(error: LaneError) -> Failure {
     match error {
         LaneError::Code(code) => contract::from_lane_code(&code),
         LaneError::Server(error) => contract::from_server_error(error),
+        LaneError::Interrupted => Failure::new(Code::Interrupted),
     }
 }
 
@@ -371,8 +333,10 @@ impl Pending {
         self.change(|_| Ok(()))
     }
 
-    /// Records an operation before its `Execute` is sent.
-    pub fn add(&self, operation: &OperationId) -> Result<(), ServerError> {
+    /// Marks the command dispatched and records an operation, right before its `Execute` is
+    /// sent. `SIGINT` from here on resolves the operation instead of ending the command.
+    pub fn add(&self, operation: &OperationId) -> Result<(), LaneError> {
+        crate::interrupt::dispatch().map_err(|_| LaneError::Interrupted)?;
         self.change(|pending| {
             if pending.len() >= MAX_PENDING {
                 return Err(Failure::new(Code::Capacity));
@@ -381,7 +345,7 @@ impl Pending {
             Ok(())
         })
         .map(drop)
-        .map_err(|_| ServerError::StorageUnavailable)
+        .map_err(|_| LaneError::Server(ServerError::StorageUnavailable))
     }
 
     pub fn remove(&self, operation: &str) -> Result<(), Failure> {
@@ -574,25 +538,26 @@ pub fn read_line_until(limit: usize, deadline: Option<std::time::Instant>) -> Op
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
-        if signal::interrupted() {
+        if crate::interrupt::interrupted() {
             return None;
         }
+        let mut wait = crate::interrupt::TICK;
         if let Some(deadline) = deadline {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
                 return None;
             }
-            let mut poll = libc::pollfd {
-                fd: libc::STDIN_FILENO,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // Wake at least every 200 ms, so an interrupt is noticed.
-            let wait = left.min(Duration::from_millis(200)).as_millis() as libc::c_int;
-            // SAFETY: one live pollfd for the duration of the call.
-            if unsafe { libc::poll(&mut poll, 1, wait) } <= 0 {
-                continue;
-            }
+            wait = wait.min(left);
+        }
+        // SIGINT restarts a blocking read, so the read waits for input in short polls.
+        let mut ready = [libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: `ready` is a live, writable array of one `pollfd` for the whole call.
+        if unsafe { libc::poll(ready.as_mut_ptr(), 1, wait.as_millis() as libc::c_int) } <= 0 {
+            continue;
         }
         // SAFETY: reads at most one byte into a live buffer.
         let count = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };
@@ -610,35 +575,6 @@ pub fn read_line_until(limit: usize, deadline: Option<std::time::Instant>) -> Op
         }
     }
     String::from_utf8(line).ok()
-}
-
-/// `SIGINT` while a server command waits on the person or the server.
-pub mod signal {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-    extern "C" fn record(_: libc::c_int) {
-        INTERRUPTED.store(true, Ordering::SeqCst);
-    }
-
-    /// Records `SIGINT` instead of ending the process, and interrupts blocking reads so a
-    /// waiting command can withdraw what it opened.
-    pub fn install() {
-        // SAFETY: the handler only stores to an atomic, which is async-signal-safe. The action
-        // is fully initialized before use and has no SA_RESTART, so reads return EINTR.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = record as *const () as libc::sighandler_t;
-            libc::sigemptyset(&mut action.sa_mask);
-            action.sa_flags = 0;
-            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
-        }
-    }
-
-    pub fn interrupted() -> bool {
-        INTERRUPTED.load(Ordering::SeqCst)
-    }
 }
 
 /// The text line for a receipt's state.

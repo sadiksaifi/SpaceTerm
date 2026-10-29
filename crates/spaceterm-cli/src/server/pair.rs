@@ -4,7 +4,7 @@
 //! claim, then asks the person to type the Comparison Code the joining device shows. A match
 //! approves the claim. A mismatch rejects it. The invitation is withdrawn on end of input,
 //! interrupt, timeout and every failure, so no link outlives the command.
-use super::{Context, Reply, signal};
+use super::{Context, Reply};
 use crate::contract::{self, Code, Envelope, Failure, Warning, WarningCode, WarningDetails};
 use spaceterm_server::ServerConnection;
 use spaceterm_server::direct::{ClaimId, PairingClaim};
@@ -86,11 +86,11 @@ impl Person for Terminal {
         super::read_line_until(CODE_LIMIT, Some(deadline))
     }
     fn interrupted(&self) -> bool {
-        signal::interrupted()
+        crate::interrupt::interrupted()
     }
     fn sleep(&mut self, duration: Duration) {
         let until = Instant::now() + duration;
-        while !signal::interrupted() && Instant::now() < until {
+        while !crate::interrupt::interrupted() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -201,7 +201,11 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         Ok(connection) => connection,
         Err(failure) => return Reply::failure(COMMAND, server, failure),
     };
-    signal::install();
+    // Ctrl-C withdraws the invitation, so while pairing runs it is only recorded.
+    let _cooperation = match crate::interrupt::cooperate() {
+        Ok(cooperation) => cooperation,
+        Err(failure) => return Reply::failure(COMMAND, server, failure),
+    };
     match pair(
         &connection,
         &mut Terminal,

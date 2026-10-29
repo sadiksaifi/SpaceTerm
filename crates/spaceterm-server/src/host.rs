@@ -267,7 +267,6 @@ impl Environment {
                 Arc::new(HostDirect {
                     state,
                     panes: Arc::clone(&panes),
-                    ledger: None,
                 }) as Arc<dyn DirectManagement>
             }),
             panes,
@@ -379,8 +378,6 @@ impl PaneService for NoPanes {
 struct HostDirect {
     state: crate::direct::host::Shared,
     panes: SharedPaneService,
-    /// The data directory whose service-operation ledger a revocation updates.
-    ledger: Option<std::path::PathBuf>,
 }
 impl DirectManagement for HostDirect {
     fn manage(
@@ -395,14 +392,6 @@ impl DirectManagement for HostDirect {
             .unwrap_or_else(|e| e.into_inner())
             .manage(actor, request);
         let (reply, retired) = result?;
-        // Revoking a pairing forgets its service-operation outcomes too.
-        if let crate::direct::ManagementReply::Revoked(receipt) = &reply
-            && let Some(ledger) = &self.ledger
-            && let Ok(data) = Directory::open(ledger, false)
-        {
-            let _ = crate::service::operations::Ledger::in_directory(data)
-                .forget_pairing(&receipt.target);
-        }
         if !retired.is_empty() {
             let mut panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
             for client in retired {
@@ -494,8 +483,18 @@ impl crate::service::lane::LaneHost for HostLane {
     }
 }
 
+/// Every revocation, over IPC or the network, forgets the revoked pairing's service operations
+/// in the ledger under `data`, so they never hold its capacity.
+pub(crate) fn forget_service_operations(data: std::path::PathBuf) -> crate::direct::host::Revoked {
+    Box::new(move |pairing| {
+        if let Ok(data) = Directory::open(&data, false) {
+            let _ = crate::service::operations::Ledger::in_directory(data).forget_pairing(pairing);
+        }
+    })
+}
+
 /// One serving thread and what ends it: its socket's read side and its I/O thread's wake pipe.
-struct Running {
+pub(crate) struct Running {
     thread: std::thread::JoinHandle<()>,
     /// Set by the thread just before it rings the host's bell and ends.
     done: Arc<AtomicBool>,
@@ -505,7 +504,7 @@ struct Running {
 impl Running {
     /// A connection still in admission sees its socket close. An admitted one stops reading,
     /// writes its pending replies and says goodbye.
-    fn stop(self) -> std::thread::JoinHandle<()> {
+    pub(crate) fn stop(self) -> std::thread::JoinHandle<()> {
         (self.sever)();
         self.wake.wake();
         self.thread
@@ -618,10 +617,9 @@ fn serve_runtime_ready(
     // A failed direct-network store never prevents owning-account admission.
     let direct = crate::direct::host::State::open(paths).ok();
     if let Some(state) = &direct {
-        state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .set_wake(Arc::clone(&stop.wake));
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        state.set_wake(Arc::clone(&stop.wake));
+        state.on_revoke(forget_service_operations(paths.data.clone()));
     }
     // The lane settles what an earlier run left in the service-operation ledger before any
     // connection is accepted. A server without service state answers no lane.
@@ -642,7 +640,6 @@ fn serve_runtime_ready(
             Arc::new(HostDirect {
                 state: Arc::clone(state),
                 panes: Arc::clone(&panes),
-                ledger: Some(paths.data.clone()),
             }) as Arc<dyn DirectManagement>
         }),
         stop: Arc::clone(&stop),
@@ -905,7 +902,15 @@ fn serve_local(
     environment: &Environment,
 ) -> Result<(), ServerError> {
     let protocol::Admitted { client, name, .. } =
-        protocol::admit_server(&mut stream, &server, identity, environment.lane.as_ref())?;
+        match protocol::admit_server(&mut stream, &server, identity)? {
+            protocol::Admission::Work(admitted) => admitted,
+            // Account authority never changes while the server runs. Stopping severs this
+            // socket's reading, which ends the lane's wait for a request.
+            protocol::Admission::Service(actor) => {
+                let lane = environment.lane.as_ref().ok_or(ServerError::Unsupported)?;
+                return lane.serve(&mut stream, actor, &|| Ok(()));
+            }
+        };
     let peer = Peer {
         client,
         connection: protocol::random()?,
@@ -924,8 +929,8 @@ fn serve_local(
 }
 
 /// Serves one QUIC connection. Its handshake and pairing exchange wait under deadlines, and an
-/// admitted connection stops on the wake, so stopping needs no sever.
-fn spawn_network(
+/// admitted work connection stops on the wake. Stopping severs an admitted service lane.
+pub(crate) fn spawn_network(
     stream: crate::connection::quic::QuicStream,
     generation: [u8; 32],
     state: &crate::direct::host::Shared,
@@ -937,6 +942,8 @@ fn spawn_network(
     let outbox_wake = Arc::clone(&wake);
     let done = Arc::new(AtomicBool::new(false));
     let finished = Arc::clone(&done);
+    let lane = crate::direct::host::LaneStop::default();
+    let stopping = lane.clone();
     let thread = std::thread::Builder::new()
         .name("spaceterm-network".into())
         .spawn(move || {
@@ -951,13 +958,14 @@ fn spawn_network(
                 &environment,
                 waker,
                 outbox_wake,
+                &stopping,
             );
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
         thread,
         done,
-        sever: Box::new(|| {}),
+        sever: Box::new(move || lane.stop()),
         wake,
     })
 }

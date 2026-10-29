@@ -96,6 +96,122 @@ impl<E: Serialize> Envelope<ConfirmationData<E>> {
     }
 }
 
+impl<D: Serialize> Envelope<D> {
+    /// The same envelope with `data` as a JSON value, so commands of every type share one
+    /// renderer.
+    pub fn erased(&self) -> Envelope<serde_json::Value> {
+        Envelope {
+            schema: self.schema,
+            command: self.command.clone(),
+            status: self.status,
+            server: self.server.clone(),
+            data: Data {
+                body: serde_json::to_value(&self.data.body).unwrap_or_default(),
+                recovered_operations: self.data.recovered_operations.clone(),
+            },
+            error: self.error.clone(),
+            warnings: self.warnings.clone(),
+        }
+    }
+
+    /// Records that `SIGINT` arrived after dispatch. The envelope keeps its data, the confirmed
+    /// outcome, and exits 130 unless its own class outranks `interrupted`, as `unconfirmed` does.
+    pub fn interrupt(&mut self) {
+        let class = self.error.as_ref().map_or(Class::Ok, |error| error.class);
+        if decisive([class, Class::Interrupted]) == Class::Interrupted {
+            self.status = Status::Error;
+            self.error = Some(ErrorBody::from(Failure::new(Code::Interrupted)));
+        }
+    }
+}
+
+// Rendering
+
+/// The output flags every command shares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mode {
+    pub json: bool,
+    pub quiet: bool,
+    pub verbose: bool,
+}
+
+impl From<&crate::args::Global> for Mode {
+    fn from(global: &crate::args::Global) -> Self {
+        Self {
+            json: global.json,
+            quiet: global.quiet,
+            verbose: global.verbose,
+        }
+    }
+}
+
+/// Writes a command's one result and returns its exit status. Every command ends here.
+///
+/// JSON mode prints the envelope and a newline on stdout. Text mode prints `text` on stdout,
+/// except with `--quiet` after success, then the error line, a usage error's argument and every
+/// warning on stderr. `--verbose` adds `diagnostics` on stderr. A broken stdout pipe stops output
+/// and exits 141 with no message. `interrupted` means `SIGINT` arrived after dispatch: the
+/// envelope reports it, so the exit status follows the precedence of section 5.2.
+pub fn render<D: Serialize>(
+    envelope: &Envelope<D>,
+    text: &str,
+    diagnostics: &str,
+    mode: Mode,
+    interrupted: bool,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+) -> u8 {
+    if interrupted {
+        let mut envelope = envelope.erased();
+        envelope.interrupt();
+        return render(&envelope, text, diagnostics, mode, false, stdout, stderr);
+    }
+    let exit = envelope.exit();
+    let written = if mode.json {
+        serde_json::to_writer(&mut *stdout, envelope)
+            .map_err(std::io::Error::from)
+            .and_then(|()| stdout.write_all(b"\n"))
+            .and_then(|()| stdout.flush())
+    } else if mode.quiet && exit == 0 {
+        Ok(())
+    } else {
+        stdout
+            .write_all(text.as_bytes())
+            .and_then(|()| stdout.flush())
+    };
+    if let Err(error) = written {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            return EXIT_BROKEN_PIPE;
+        }
+        let _ = writeln!(stderr, "{}", Failure::new(Code::OutputFailed).text());
+        return Code::OutputFailed.exit();
+    }
+    if !mode.json {
+        if let Some(error) = &envelope.error {
+            let _ = writeln!(stderr, "error: {} ({})", error.message, error.code.as_str());
+            if let Details::Usage(UsageDetails {
+                argument: Some(argument),
+                ..
+            }) = &error.details
+            {
+                let _ = writeln!(stderr, "argument: {argument}");
+            }
+        }
+        write_warnings(&envelope.warnings, stderr);
+    }
+    if mode.verbose {
+        let _ = stderr.write_all(diagnostics.as_bytes());
+    }
+    exit
+}
+
+/// The text-mode warning lines, which a command also prints before it asks for confirmation.
+pub fn write_warnings(warnings: &[Warning], stderr: &mut dyn std::io::Write) {
+    for warning in warnings {
+        let _ = writeln!(stderr, "warning: {}", warning.message);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -1774,6 +1890,78 @@ pub(crate) mod golden {
 mod tests {
     use super::golden::assert_golden;
     use super::*;
+
+    #[test]
+    fn an_interrupt_after_dispatch_keeps_the_outcome_and_yields_only_to_unconfirmed() {
+        let mut done = Envelope::ok("pane.run", None, Empty {});
+        done.interrupt();
+        assert_eq!(done.exit(), 130);
+        assert_eq!(done.status, Status::Error);
+        let mut timed_out =
+            Envelope::error("pane.run", None, Failure::new(Code::Timeout), Empty {});
+        timed_out.interrupt();
+        assert_eq!(timed_out.exit(), 130);
+        let mut unconfirmed = Envelope::error(
+            "server.restart",
+            None,
+            Failure::new(Code::OutcomeUnconfirmed),
+            Empty {},
+        );
+        unconfirmed.interrupt();
+        assert_eq!(unconfirmed.exit(), 7);
+        assert_eq!(unconfirmed.error.unwrap().code, Code::OutcomeUnconfirmed);
+    }
+
+    #[test]
+    fn text_mode_writes_the_text_then_the_error_and_every_warning_on_stderr() {
+        let mut envelope = Envelope::error(
+            "server.update",
+            None,
+            Failure::new(Code::ConfirmationRequired),
+            Empty {},
+        );
+        envelope.warnings.push(Warning::new(
+            WarningCode::RecoveredOperation,
+            WarningDetails::Recovered { count: 1 },
+        ));
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let exit = render(
+            &envelope,
+            "Update Server?\n",
+            "diagnostics\n",
+            Mode::default(),
+            false,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 3);
+        assert_eq!(stdout, b"Update Server?\n");
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.starts_with(&format!(
+            "{}\nwarning: {}\n",
+            Failure::new(Code::ConfirmationRequired).text(),
+            WarningCode::RecoveredOperation.message()
+        )));
+        assert!(!stderr.contains("diagnostics"));
+        // JSON mode prints only the envelope, even when it failed.
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let json = Mode {
+            json: true,
+            ..Mode::default()
+        };
+        render(
+            &envelope,
+            "Update Server?\n",
+            "",
+            json,
+            false,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(value["warnings"][0]["code"], "recovered_operation");
+    }
 
     #[test]
     fn every_code_has_one_name_a_message_and_a_round_trip() {

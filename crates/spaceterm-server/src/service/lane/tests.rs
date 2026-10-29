@@ -553,14 +553,18 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
                 serde_json::from_slice(&client.receive(MAX_FRAME, deadline).unwrap()).unwrap();
             (major, reply)
         });
-        // The lane consumes the connection, so admission reports it as not for the work lane.
+        // Admission hands the lane connection to the caller with its actor.
         let admitted = crate::protocol::admit_server(
             &mut server,
             &lane.lane.server,
             &lane.lane.service.identity,
-            Some(&lane.lane),
-        );
-        assert_eq!(admitted.err(), Some(ServerError::Unsupported));
+        )
+        .unwrap();
+        let crate::protocol::Admission::Service(actor) = admitted else {
+            panic!("expected a service-lane connection");
+        };
+        assert_eq!(actor.client, derived);
+        lane.lane.serve(&mut server, actor, &|| Ok(())).unwrap();
         let (major, reply) = peer.join().unwrap();
         assert_eq!(major, crate::protocol::MAJOR);
         assert_eq!(code(reply), "not_found");
@@ -625,7 +629,7 @@ fn a_stopping_server_closes_a_polling_lane_connection() {
             client.receive(MAX_FRAME, deadline).is_err()
         });
         let started = Instant::now();
-        lane.lane.serve(&mut server, ACTOR).unwrap();
+        lane.lane.serve(&mut server, ACTOR, &|| Ok(())).unwrap();
         drop(server);
         assert!(peer.join().unwrap(), "the client saw the connection close");
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -654,7 +658,7 @@ fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
             }
             replies
         });
-        lane.lane.serve(&mut server, ACTOR).unwrap();
+        lane.lane.serve(&mut server, ACTOR, &|| Ok(())).unwrap();
         let mut replies = peer.join().unwrap().into_iter();
         assert_eq!(code(replies.next().unwrap()), "protocol_error");
         assert!(matches!(replies.next().unwrap(), LaneReply::Status(_)));
@@ -699,7 +703,7 @@ mod flow {
                 .lock()
                 .unwrap()
                 .push(server.try_clone().map_err(|_| ServerError::Protocol)?);
-            std::thread::spawn(move || lane.serve(&mut server, ACTOR));
+            std::thread::spawn(move || lane.serve(&mut server, ACTOR, &|| Ok(())));
             Ok(Box::new(client))
         }
     }
@@ -773,6 +777,7 @@ mod flow {
                     admitted.push(*op);
                     Ok(())
                 },
+                &|| None,
             )
             .unwrap();
             let Outcome::Settled { receipt, boot } = outcome else {
@@ -815,6 +820,7 @@ mod flow {
                     admitted = Some(*op);
                     Ok(())
                 },
+                &|| None,
             )
             .unwrap();
             assert!(matches!(outcome, Outcome::Shutdown { .. }), "{outcome:?}");
@@ -865,6 +871,7 @@ mod flow {
                 token,
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
+                &|| None,
             )
             .unwrap();
             let Outcome::Settled { receipt, .. } = outcome else {
@@ -873,6 +880,156 @@ mod flow {
             assert_eq!(receipt.state, LaneOperationState::Failed);
             assert_eq!(receipt.code.as_deref(), Some("startup_failed"));
             assert!(started.elapsed() < Duration::from_secs(10));
+        });
+    }
+
+    /// A server that, once `lose` is set, admits the next `Execute` and closes its connection
+    /// before the reply leaves.
+    #[derive(Default)]
+    struct Lossy {
+        lane: Mutex<Option<Arc<LaneServer>>>,
+        lose: Arc<AtomicBool>,
+    }
+    impl Connector for Lossy {
+        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, ServerError> {
+            let lane = self
+                .lane
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or(ServerError::NotRunning)?;
+            let (client, mut server) = UnixStream::pair().map_err(|_| ServerError::Protocol)?;
+            let lose = self.lose.clone();
+            std::thread::spawn(move || {
+                loop {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let Ok(bytes) = server.receive(MAX_FRAME, deadline) else {
+                        return;
+                    };
+                    let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
+                    let execute = matches!(request, LaneRequest::Execute { .. });
+                    let reply = lane.answer(request, &ACTOR);
+                    if execute && lose.swap(false, Ordering::SeqCst) {
+                        let _ = server.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    let _ = server.send(&serde_json::to_vec(&reply).unwrap(), deadline);
+                }
+            });
+            Ok(Box::new(client))
+        }
+    }
+
+    impl Lossy {
+        fn up(lane: &Lane) -> Arc<Self> {
+            let lossy = Arc::new(Self::default());
+            *lossy.lane.lock().unwrap() = Some(lane.lane.clone());
+            let ledger_lane = lane.lane.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                let (old, op) = (ledger_lane.clone(), *op);
+                std::thread::spawn(move || {
+                    let _helper = helper_lock(&old);
+                    let mut ledger = old.ledger().unwrap();
+                    ledger.claim(&op).unwrap();
+                    ledger.mark(&op, State::Done).unwrap();
+                });
+            }));
+            lossy
+        }
+
+        fn previewed(&self, action: LaneAction) -> (Session, String) {
+            let mut session = Session::open(self, Instant::now() + Duration::from_secs(5)).unwrap();
+            let LaneReply::Preview { token, .. } = session
+                .request(
+                    &LaneRequest::Preview { action },
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap()
+            else {
+                panic!("expected a preview");
+            };
+            self.lose.store(true, Ordering::SeqCst);
+            (session, token)
+        }
+    }
+
+    #[test]
+    fn a_lost_accepted_reply_follows_the_same_operation_without_launching_it_twice() {
+        with_lane(|lane| {
+            let lossy = Lossy::up(&lane);
+            let (session, token) = lossy.previewed(LaneAction::Restart);
+            let mut admitted = None;
+            let outcome = client::perform(
+                lossy.as_ref(),
+                session,
+                LaneAction::Restart,
+                token,
+                Duration::from_secs(20),
+                &mut |op| {
+                    admitted = Some(*op);
+                    Ok(())
+                },
+                &|| None,
+            )
+            .unwrap();
+            let Outcome::Settled { receipt, .. } = outcome else {
+                panic!("expected a settled restart, got {outcome:?}");
+            };
+            assert_eq!(receipt.state, LaneOperationState::Done);
+            assert_eq!(receipt.operation, admitted.unwrap().to_string());
+            // The repeated Execute found the admitted record and dispatched nothing.
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn an_interrupted_flow_resolves_a_lost_accepted_reply_without_sending_execute_again() {
+        with_lane(|lane| {
+            let lossy = Lossy::up(&lane);
+            let (session, token) = lossy.previewed(LaneAction::Restart);
+            let started = Instant::now();
+            let interrupted = started + Duration::from_secs(3);
+            let outcome = client::perform(
+                lossy.as_ref(),
+                session,
+                LaneAction::Restart,
+                token,
+                Duration::from_secs(60),
+                &mut |_| Ok(()),
+                &|| Some(interrupted),
+            )
+            .unwrap();
+            let Outcome::Settled { receipt, .. } = outcome else {
+                panic!("expected a settled restart, got {outcome:?}");
+            };
+            assert_eq!(receipt.state, LaneOperationState::Done);
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+            assert!(started.elapsed() < Duration::from_secs(5));
+        });
+    }
+
+    #[test]
+    fn a_stop_whose_accepted_reply_was_lost_reports_shutdown_when_the_server_is_gone() {
+        with_lane(|lane| {
+            let lossy = Lossy::up(&lane);
+            let (session, token) = lossy.previewed(LaneAction::Stop);
+            // The server stops right after it admitted the Stop.
+            let gone = lossy.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |_: &OperationId| {
+                *gone.lane.lock().unwrap() = None;
+            }));
+            let outcome = client::perform(
+                lossy.as_ref(),
+                session,
+                LaneAction::Stop,
+                token,
+                Duration::from_secs(20),
+                &mut |_| Ok(()),
+                &|| None,
+            )
+            .unwrap();
+            assert!(matches!(outcome, Outcome::Shutdown { .. }), "{outcome:?}");
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
         });
     }
 }
