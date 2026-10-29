@@ -180,7 +180,10 @@ pub enum RunReply {
 pub enum RunRefusal {
     NotAtPrompt,
     InputPending,
-    NoIntegration,
+    NoIntegration {
+        /// The launch installed integration, but its first owner-marked prompt has not arrived.
+        first_prompt_pending: bool,
+    },
     NoBracketedPaste,
     SessionChanged,
     RunPending,

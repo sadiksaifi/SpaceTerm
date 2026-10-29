@@ -63,7 +63,7 @@ impl Output {
             &self.text,
             &self.diagnostics,
             mode,
-            crate::interrupt::finish(),
+            crate::interrupt::finish(self.envelope.exit()),
             stdout,
             stderr,
         )
