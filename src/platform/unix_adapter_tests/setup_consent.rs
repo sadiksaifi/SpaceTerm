@@ -200,8 +200,7 @@ impl SshProcessAdapter for ProcessAdapter {
                     .clone()
                     .unwrap_or_else(|| serde_json::to_vec(&discovery(false)).unwrap());
                 (true, vec![], vec![])
-            } else if self.effects_succeed.load(Ordering::SeqCst) && action.contains("ssh-start")
-            {
+            } else if self.effects_succeed.load(Ordering::SeqCst) && action.contains("ssh-start") {
                 *self.discovery.lock().unwrap() = serde_json::to_vec(&discovery(true)).unwrap();
                 (true, vec![], vec![])
             } else {
