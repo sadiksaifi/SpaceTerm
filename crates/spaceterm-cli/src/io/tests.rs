@@ -553,6 +553,46 @@ fn observe_controlled_panes_and_end_sessions() {
     );
 }
 
+/// Forward pages spend their byte budget on history when the screen is omitted.
+#[test]
+fn forward_pages_reclaim_the_omitted_screen_budget() {
+    struct LargeScreen(Rewrapping);
+    impl Source for LargeScreen {
+        fn snapshot(&mut self, format: Format) -> Result<Snapshot, Failure> {
+            let mut snapshot = self.0.snapshot(format)?;
+            snapshot.screen.rows = vec!["screen exceeds the page budget".into()];
+            Ok(snapshot)
+        }
+        fn page(
+            &mut self,
+            epoch: u64,
+            start: u64,
+            rows: u16,
+            format: Format,
+        ) -> Result<Option<read::PageRows>, Failure> {
+            self.0.page(epoch, start, rows, format)
+        }
+    }
+    for (limit, budget, expected) in [(2, 3, 1), (2, 6, 2), (10, 6, 3)] {
+        let mut source = LargeScreen(Rewrapping { snapshots: 1 });
+        let captured = read::capture(
+            &mut source,
+            Mode::After {
+                row: 0,
+                rows: limit,
+            },
+            None,
+            budget,
+            Format::Text,
+        )
+        .unwrap();
+        assert_eq!(captured.rows.len(), expected);
+        assert_eq!(captured.after, expected as u64);
+        assert!(captured.truncated);
+        assert!(captured.screen.is_none());
+    }
+}
+
 /// A source whose epoch changes on the first snapshot's pages, then holds.
 struct Rewrapping {
     snapshots: u32,

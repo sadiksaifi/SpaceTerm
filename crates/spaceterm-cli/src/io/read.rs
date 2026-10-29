@@ -139,10 +139,20 @@ pub(crate) fn capture(
         let screen_bytes = screen.as_ref().map_or(0, |screen| {
             screen.rows.iter().map(|row| row.len() + 1).sum::<usize>()
         });
-        let budget = max_bytes.saturating_sub(screen_bytes);
         let oldest_first = matches!(mode, Mode::After { .. } | Mode::Range { .. });
+        // A forward page includes the screen only when all its history fits alongside it.
+        // Decide before dropping rows, so an omitted screen reserves no bytes.
+        let omit_screen = matches!(mode, Mode::After { .. })
+            && (row_capped
+                || rows.iter().map(|row| row.text.len() + 1).sum::<usize>()
+                    > max_bytes.saturating_sub(screen_bytes));
+        let budget = if omit_screen {
+            max_bytes
+        } else {
+            max_bytes.saturating_sub(screen_bytes)
+        };
         let byte_capped = cap(&mut rows, budget, oldest_first);
-        let truncated = row_capped || byte_capped;
+        let truncated = row_capped || byte_capped || omit_screen;
         let first = rows.first().map_or(first, |row| row.row);
         let after = match mode {
             Mode::Before { row, .. } => row,
@@ -151,7 +161,7 @@ pub(crate) fn capture(
             _ => history.total,
         };
         // `--after` omits the screen once rows were capped, so it never skips them.
-        let screen = screen.filter(|_| !(matches!(mode, Mode::After { .. }) && truncated));
+        let screen = screen.filter(|_| !omit_screen);
         return Ok(Capture {
             history,
             rows,
