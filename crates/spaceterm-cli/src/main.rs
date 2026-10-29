@@ -19,8 +19,16 @@ fn main() -> ExitCode {
         Err(error) => return usage(&argv, &error),
     };
     if let args::Command::Connection(command) = &cli.command {
-        let result = spaceterm_cli::connection::execute(command, &cli.global, env!("SPACETERM_SERVER_IDENTITY"));
-        return ExitCode::from(result.render(&cli.global, &mut std::io::stdout().lock(), &mut std::io::stderr().lock()));
+        let result = spaceterm_cli::connection::execute(
+            command,
+            &cli.global,
+            env!("SPACETERM_SERVER_IDENTITY"),
+        );
+        return ExitCode::from(result.render(
+            &cli.global,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ));
     }
     if let Err(failure) = validate_route(&cli) {
         return finish(cli.command.path(), cli.global.json, failure);
@@ -30,7 +38,13 @@ fn main() -> ExitCode {
         return ExitCode::from(reply.write(cli.global.json, cli.global.quiet));
     }
     if let Some(output) = spaceterm_cli::work::start::start(&cli) {
-        return ExitCode::from(output.write(cli.global.json, cli.global.quiet, cli.global.verbose, &mut std::io::stdout().lock(), &mut std::io::stderr().lock()));
+        return ExitCode::from(output.write(
+            cli.global.json,
+            cli.global.quiet,
+            cli.global.verbose,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ));
     }
     finish(
         cli.command.path(),

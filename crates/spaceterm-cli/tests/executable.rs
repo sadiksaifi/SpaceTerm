@@ -35,20 +35,10 @@ fn unimplemented_commands_exit_through_the_contract() {
     for (args, command) in [
         (&["server", "run"][..], "server.run"),
         (&["server", "provision", "build-info"], "server.provision"),
-        (&["list"], "list"),
-        (&["workspace", "create", "api"], "workspace.create"),
-        (&["workspace", "rename", "api-v2"], "workspace.rename"),
-        (&["workspace", "kill"], "workspace.kill"),
-        (&["tab", "create"], "tab.create"),
-        (&["tab", "close"], "tab.close"),
-        (&["pane", "split"], "pane.split"),
-        (&["pane", "close"], "pane.close"),
         (&["pane", "run", "true"], "pane.run"),
         (&["pane", "send", "x"], "pane.send"),
         (&["pane", "read"], "pane.read"),
         (&["pane", "release"], "pane.release"),
-        (&["worktree", "create", "feature-y"], "worktree.create"),
-        (&["worktree", "remove"], "worktree.remove"),
         (&["completion", "zsh"], "completion"),
         // The server commands Stream F implements are covered by its own tests, and running them
         // here would act on this account's server.
@@ -110,16 +100,40 @@ fn version_prints_the_build_version() {
 #[test]
 fn connection_usage_is_validated_before_input_or_native_credentials() {
     for (args, exit, code, argument) in [
-        (&["connection", "add", "--json"][..], 3, "interaction_required", None),
-        (&["--server", "remote-fixture", "connection", "list", "--json"], 2, "invalid_arguments", Some("--server")),
-        (&["connection", "add", "--join", "--address", "private-invalid/address", "--json"], 2, "invalid_arguments", Some("--address")),
+        (
+            &["connection", "add", "--json"][..],
+            3,
+            "interaction_required",
+            None,
+        ),
+        (
+            &["--server", "remote-fixture", "connection", "list", "--json"],
+            2,
+            "invalid_arguments",
+            Some("--server"),
+        ),
+        (
+            &[
+                "connection",
+                "add",
+                "--join",
+                "--address",
+                "private-invalid/address",
+                "--json",
+            ],
+            2,
+            "invalid_arguments",
+            Some("--address"),
+        ),
     ] {
         let output = spaceterm(args);
         assert_eq!(output.status.code(), Some(exit));
         assert!(output.stderr.is_empty());
         let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(envelope["error"]["code"], code);
-        if let Some(argument) = argument { assert_eq!(envelope["error"]["details"]["argument"], argument); }
+        if let Some(argument) = argument {
+            assert_eq!(envelope["error"]["details"]["argument"], argument);
+        }
         assert!(!String::from_utf8_lossy(&output.stdout).contains("private-invalid"));
     }
 }
@@ -131,4 +145,22 @@ fn machine_only_commands_reject_remote_routes_before_contacting_a_server() {
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["error"]["code"], "local_only");
     assert_eq!(envelope["server"], serde_json::Value::Null);
+}
+
+#[test]
+fn remote_work_paths_are_rejected_before_route_or_credential_access() {
+    let output = spaceterm(&[
+        "--server",
+        "remote-fixture",
+        "workspace",
+        "create",
+        "api",
+        "--directory",
+        "private-relative-directory",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "invalid_arguments");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-relative-directory"));
 }
