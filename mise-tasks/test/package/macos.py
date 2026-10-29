@@ -210,6 +210,10 @@ int main(int argc, char **argv) {{
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         server = bundled.with_name("spaceterm")
         self.assertFalse(server.exists())
+        self.assertEqual(
+            (bundled.parent.parent / "Resources/shell-integration/elvish/rc.elv").read_bytes(),
+            (ROOT / "assets/shell-integration/elvish/rc.elv").read_bytes(),
+        )
         artifact = bundled.parent.parent / "Resources/server-artifact"
         self.assertEqual(
             (artifact / "artifact.tar.gz").read_bytes(),
