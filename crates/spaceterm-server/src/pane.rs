@@ -5,6 +5,7 @@ pub mod directories;
 pub mod effects;
 pub mod graphics;
 pub mod metadata;
+pub mod keys;
 pub mod run;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};

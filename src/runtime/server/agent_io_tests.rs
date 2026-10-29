@@ -849,3 +849,42 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
     assert_eq!(served.host().running_lease(pane), Some(lease));
     served.shutdown().unwrap();
 }
+
+/// Each key name `pane send --key` accepts decodes to the terminal's own key.
+#[test]
+fn named_keys_decode_to_the_terminals_own_keys() {
+    use crate::terminal::key::PhysicalKey;
+    use spaceterm_server::pane::keys::named;
+    let expected = [
+        ("Enter", PhysicalKey::Enter),
+        ("Tab", PhysicalKey::Tab),
+        ("Escape", PhysicalKey::Escape),
+        ("BSpace", PhysicalKey::Backspace),
+        ("Up", PhysicalKey::ArrowUp),
+        ("Down", PhysicalKey::ArrowDown),
+        ("Left", PhysicalKey::ArrowLeft),
+        ("Right", PhysicalKey::ArrowRight),
+        ("Home", PhysicalKey::Home),
+        ("End", PhysicalKey::End),
+        ("PageUp", PhysicalKey::PageUp),
+        ("PageDown", PhysicalKey::PageDown),
+        ("F1", PhysicalKey::F1),
+        ("F12", PhysicalKey::F12),
+        ("C-a", PhysicalKey::A),
+        ("C-z", PhysicalKey::Z),
+        ("M-x", PhysicalKey::Escape),
+    ];
+    for (name, physical) in expected {
+        let keys = named(name).unwrap();
+        for key in &keys {
+            assert!(decode_key(key.clone()).is_some(), "{name} decodes");
+        }
+        assert_eq!(
+            decode_key(keys[0].clone()).unwrap().physical_key,
+            physical,
+            "{name}"
+        );
+    }
+    let control = decode_key(named("C-c").unwrap().remove(0)).unwrap();
+    assert!(control.modifiers.control);
+}
