@@ -219,6 +219,8 @@ pub fn run_connected(
         {
             env.confirmation = Some(&token);
             env.now = jiff::Timestamp::now().as_second();
+            let warnings = output.envelope.warnings;
+            let recovered = output.envelope.data.recovered_operations;
             output = execute::run(
                 &cli.command,
                 &cli.global,
@@ -228,6 +230,8 @@ pub fn run_connected(
                 server_name,
                 route,
             );
+            output.envelope.warnings.extend(warnings);
+            output.envelope.data.recovered_operations.extend(recovered);
         } else {
             output.text.clear();
         }
