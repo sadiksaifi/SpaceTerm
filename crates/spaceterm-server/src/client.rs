@@ -255,7 +255,10 @@ impl ServerConnection {
         let directory = match &self.cli {
             Some(cli) if cli.agent.is_some() => {
                 self.client_directory()?;
-                Directory::open(&self.paths.data.join("clients").join(cli.base_account()), true)?
+                Directory::open(
+                    &self.paths.data.join("clients").join(cli.base_account()),
+                    true,
+                )?
             }
             _ => self.client_directory()?,
         };

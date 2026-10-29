@@ -422,6 +422,12 @@ pub(crate) enum TabViewEvent {
     UserClosePaneRequested { tab_id: TabId, pane_id: PaneId },
     CloseTabRequested { tab_id: TabId },
     PresentationChanged { tab_id: TabId },
+    /// This Tab's Focused Pane asked to show work the server created for it.
+    RevealRequested {
+        tab_id: TabId,
+        origin: PaneId,
+        target: spaceterm_server::hierarchy::Placement,
+    },
 }
 
 impl std::fmt::Debug for TabViewEvent {
@@ -430,6 +436,7 @@ impl std::fmt::Debug for TabViewEvent {
             Self::UserClosePaneRequested { .. } => "TabViewEvent::UserClosePaneRequested",
             Self::CloseTabRequested { .. } => "TabViewEvent::CloseTabRequested",
             Self::PresentationChanged { .. } => "TabViewEvent::PresentationChanged",
+            Self::RevealRequested { .. } => "TabViewEvent::RevealRequested",
         })
     }
 }
@@ -656,6 +663,15 @@ impl TabView {
                     view.release_shared_pane(pane_id, window, cx);
                 }
                 TerminalPaneEvent::Exited => view.close_pane(pane_id, window, cx),
+                // Only the Focused Pane may move the view; a Reveal from any other is dropped.
+                TerminalPaneEvent::Reveal(target) if pane_id == view.tab.focused_pane_id() => {
+                    cx.emit(TabViewEvent::RevealRequested {
+                        tab_id: view.tab.id(),
+                        origin: pane_id,
+                        target: *target,
+                    });
+                }
+                TerminalPaneEvent::Reveal(_) => {}
             },
         )
         .detach();

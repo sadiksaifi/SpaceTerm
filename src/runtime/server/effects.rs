@@ -3,17 +3,42 @@ use crate::terminal::session::ClientEffectRequest;
 use pane::effects::{ClipboardTarget, Completion, Effect};
 use std::collections::VecDeque;
 
+/// How long an effect the server itself sends waits for its client, like a terminal's own.
+const SERVER_EFFECT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Default)]
 pub(super) struct NativeEffects {
     next_id: u64,
     clipboard: Option<(u64, ClipboardRequest, bool)>,
     events: VecDeque<ClientEffectRequest>,
+    /// Effects the server sends, such as a Reveal, each with its deadline.
+    server: VecDeque<(Effect, std::time::Instant)>,
+}
+
+impl DevelopmentPaneHost {
+    /// Queues `effect` for this Pane's channel when `controller` controls its running Session.
+    /// No other client receives it.
+    pub(super) fn send_server_effect(&mut self, controller: [u8; 32], effect: Effect) {
+        if let Some(pane) = &mut self.pane
+            && pane.device == Some(controller)
+        {
+            pane.effects.push_server(effect);
+        }
+    }
 }
 
 impl NativeEffects {
     pub(super) fn clear(&mut self) {
         self.clipboard = None;
         self.events.clear();
+        self.server.clear();
+    }
+    fn push_server(&mut self, effect: Effect) {
+        let now = std::time::Instant::now();
+        self.server.retain(|(_, deadline)| *deadline > now);
+        if self.server.len() < 8 {
+            self.server.push_back((effect, now + SERVER_EFFECT_LIFETIME));
+        }
     }
     pub(super) fn push(&mut self, request: ClientEffectRequest) {
         if request.grant.current() && self.events.len() < 8 {
@@ -65,6 +90,17 @@ impl NativeEffects {
                     generation,
                     remaining_ms: remaining.as_millis().min(1000) as u32,
                     effect: request.effect,
+                });
+            }
+        }
+        while let Some((effect, deadline)) = self.server.pop_front() {
+            if let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+                self.next_id = self.next_id.saturating_add(1);
+                return Some(pane::effects::Request {
+                    id: self.next_id,
+                    generation,
+                    remaining_ms: remaining.as_millis().min(1000) as u32,
+                    effect,
                 });
             }
         }

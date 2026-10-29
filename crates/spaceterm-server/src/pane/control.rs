@@ -270,14 +270,21 @@ mod tests {
         }
         let agent: crate::protocol::AgentName = "a".repeat(32).parse().unwrap();
         let mac = Named(Some("Sadik’s MacBook Pro"));
-        assert_eq!(ClientName::for_cli(&mac, None).as_str(), "Sadik’s MacBook Pro CLI");
+        assert_eq!(
+            ClientName::for_cli(&mac, None).as_str(),
+            "Sadik’s MacBook Pro CLI"
+        );
         let name = ClientName::for_cli(&mac, Some(&agent));
         assert_eq!(name.as_str().chars().count(), MAX_CLIENT_NAME_CHARS);
         assert_eq!(
             name.as_str(),
             format!("Sadik’s Ma\u{2026} CLI {}", "a".repeat(32))
         );
-        assert_eq!(received(name.as_str()), name.as_str(), "the server keeps it unchanged");
+        assert_eq!(
+            received(name.as_str()),
+            name.as_str(),
+            "the server keeps it unchanged"
+        );
         let short: crate::protocol::AgentName = "agent-1".parse().unwrap();
         assert_eq!(
             ClientName::for_cli(&Named(None), Some(&short)).as_str(),

@@ -1247,7 +1247,10 @@ impl State {
             .filter(|d| d.revoked && !self.released.contains(&d.info.client))
             .collect();
         self.released.extend(devices.iter().map(|d| d.info.client));
-        Ok(devices.into_iter().flat_map(storage::Device::clients).collect())
+        Ok(devices
+            .into_iter()
+            .flat_map(storage::Device::clients)
+            .collect())
     }
 }
 

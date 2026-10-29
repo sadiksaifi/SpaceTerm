@@ -503,12 +503,17 @@ mod tests {
         let agent: AgentName = "agent-1".parse().unwrap();
         let derived = agent.client(&[9; 32]);
         assert_ne!(derived, [9; 32]);
-        assert_ne!(derived, agent.client(&[8; 32]), "each base derives its own agents");
+        assert_ne!(
+            derived,
+            agent.client(&[8; 32]),
+            "each base derives its own agents"
+        );
         let other: AgentName = "agent-2".parse().unwrap();
         assert_ne!(derived, other.client(&[9; 32]));
         let (mut client, mut server) = UnixStream::pair().unwrap();
-        let thread =
-            std::thread::spawn(move || admit_server(&mut server, &[7; 32], "spaceterm-development"));
+        let thread = std::thread::spawn(move || {
+            admit_server(&mut server, &[7; 32], "spaceterm-development")
+        });
         let name: ClientName = "Build Mac CLI agent-1".into();
         admit_client(
             &mut client,
@@ -531,8 +536,9 @@ mod tests {
     fn an_agent_whose_name_hides_it_is_refused() {
         let agent: AgentName = "agent-1".parse().unwrap();
         let (mut client, mut server) = UnixStream::pair().unwrap();
-        let thread =
-            std::thread::spawn(move || admit_server(&mut server, &[7; 32], "spaceterm-development"));
+        let thread = std::thread::spawn(move || {
+            admit_server(&mut server, &[7; 32], "spaceterm-development")
+        });
         let name: ClientName = "Build Mac".into();
         assert!(
             admit_client(
@@ -558,7 +564,12 @@ mod tests {
         let agent: AgentName = "agent-1".parse().unwrap();
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let thread = std::thread::spawn(move || {
-            admit_server_transport(&mut server, &[7; 32], "spaceterm-development", Some([9; 32]))
+            admit_server_transport(
+                &mut server,
+                &[7; 32],
+                "spaceterm-development",
+                Some([9; 32]),
+            )
         });
         let name: ClientName = "Build Mac CLI agent-1".into();
         assert!(
@@ -575,7 +586,10 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(thread.join().unwrap(), Err(ServerError::AuthenticationRefused));
+        assert_eq!(
+            thread.join().unwrap(),
+            Err(ServerError::AuthenticationRefused)
+        );
     }
 
     #[test]

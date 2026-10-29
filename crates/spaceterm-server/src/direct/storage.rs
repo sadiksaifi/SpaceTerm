@@ -22,7 +22,11 @@ impl Device {
     /// The pairing's own Client Identity, then each of its agents'.
     pub fn clients(&self) -> Vec<[u8; 32]> {
         std::iter::once(self.info.client)
-            .chain(self.agents.iter().map(|agent| agent.client(&self.info.client)))
+            .chain(
+                self.agents
+                    .iter()
+                    .map(|agent| agent.client(&self.info.client)),
+            )
             .collect()
     }
 }
