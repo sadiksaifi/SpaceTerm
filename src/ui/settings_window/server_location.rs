@@ -269,8 +269,8 @@ impl ServerLocation {
         let events = cx.subscribe_in(
             &input,
             window,
-            |settings, input, event: &TextInputEvent, _, cx| {
-                settings.server_location_event(input, event, cx);
+            |settings, input, event: &TextInputEvent, window, cx| {
+                settings.server_location_event(input, event, window.is_window_active(), cx);
             },
         );
         Self {
@@ -315,6 +315,11 @@ impl ServerLocation {
             answer.presented();
         }
         self.displayed.forget();
+    }
+
+    /// Whether the section holds a failure the person has not answered.
+    pub(super) fn holds_failure(&self) -> bool {
+        self.unanswered.is_some()
     }
 
     /// A render starts. Unless it draws the Location row, the person can't see its failure.
@@ -548,10 +553,13 @@ impl SettingsWindow {
         self.commit_server_location(cx);
     }
 
+    /// `window_active` tells focus the person moved within Settings from focus the window lost
+    /// to another app or window, or to minimizing.
     pub(super) fn server_location_event(
         &mut self,
         input: &Entity<TextInput>,
         event: &TextInputEvent,
+        window_active: bool,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -586,7 +594,14 @@ impl SettingsWindow {
                 self.server_location.answered();
                 self.commit_server_location(cx);
             }
-            TextInputEvent::FocusLost => self.commit_server_location(cx),
+            // The person moved to another control, so the field writes and answers its shown
+            // failure. A window that lost focus to another app, another window or minimizing
+            // leaves a shown failure, and its draft, for the person to answer on returning.
+            TextInputEvent::FocusLost => {
+                if window_active || !self.server_location.holds_failure() {
+                    self.commit_server_location(cx);
+                }
+            }
             TextInputEvent::Cancelled => {
                 self.server_location.answered();
                 let state = &mut self.server_location;

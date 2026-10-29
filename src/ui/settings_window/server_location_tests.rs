@@ -519,6 +519,35 @@ mod presented {
         );
     }
 
+    /// Settings shows a failed change with the field still focused, and then loses focus to
+    /// another app. The person never responded, so nothing writes, the failure stays unseen and
+    /// its error stays shown.
+    #[gpui::test]
+    fn deactivating_the_window_should_leave_a_shown_failure_unanswered(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+
+        servers.cx.deactivate_window();
+        servers.cx.run_until_parked();
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert!(shown);
+        assert_eq!(edits.submitted().len(), 1, "nothing writes again");
+        assert_eq!(edits.unseen().len(), 1, "the failure is still unseen");
+        assert!(
+            says("Couldn\u{2019}t save this location.", servers.cx),
+            "the error is still shown"
+        );
+    }
+
     /// The person chose another server before the change was answered, so Settings never showed
     /// the failure. It stays unseen for the Workspace Window.
     #[gpui::test]
