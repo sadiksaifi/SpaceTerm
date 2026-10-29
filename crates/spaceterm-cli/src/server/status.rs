@@ -81,16 +81,19 @@ fn over_lane(
 
 /// An unreachable server is exit 5, with when this CLI last reached it.
 fn unreachable(server: ServerRef, failure: Failure) -> Reply {
-    Reply::new(
-        &Envelope::error(
-            COMMAND,
-            Some(server),
-            failure,
-            UnreachableData {
-                last_connected_at: None,
-            },
-        ),
-        String::new(),
+    Reply::new(&unreachable_envelope(server, failure, None), String::new())
+}
+
+pub(crate) fn unreachable_envelope(
+    server: ServerRef,
+    failure: Failure,
+    last_connected_at: Option<String>,
+) -> Envelope<UnreachableData> {
+    Envelope::error(
+        COMMAND,
+        Some(server),
+        failure,
+        UnreachableData { last_connected_at },
     )
 }
 
@@ -135,6 +138,18 @@ fn report(
     route: &RouteKey,
     recovered: Vec<crate::contract::RecoveredOperation>,
 ) -> Reply {
+    let (envelope, text) = envelope(server, status, held(context, route), recovered);
+    Reply::new(&envelope, text)
+}
+
+/// The `server.status` envelope and its text, from the lane's status and this CLI's held
+/// outcomes.
+pub(crate) fn envelope(
+    server: ServerRef,
+    status: &LaneStatus,
+    held_outcomes: Vec<HeldOutcomes>,
+    recovered: Vec<crate::contract::RecoveredOperation>,
+) -> (Envelope<ServerStatus>, String) {
     let data = ServerStatus {
         running: status.running,
         stopped: status.stopped,
@@ -171,12 +186,12 @@ fn report(
                 last_connected_at: v.last_connected_at.clone(),
             })
             .collect(),
-        held_outcomes: held(context, route),
+        held_outcomes,
         lane_major: status.lane_major,
     };
     let text = text(&server, &data);
-    Reply::new(
-        &super::with_recovered(Envelope::ok(COMMAND, Some(server), data), recovered),
+    (
+        super::with_recovered(Envelope::ok(COMMAND, Some(server), data), recovered),
         text,
     )
 }

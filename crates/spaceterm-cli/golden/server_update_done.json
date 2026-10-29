@@ -1,0 +1,27 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.update",
+  "status": "ok",
+  "server": {
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "operation": "0123456789abcdef0123456789abcdef",
+      "action": "update",
+      "state": "done",
+      "code": null,
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "version": {
+      "version": "0.8.0",
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "error": null,
+  "warnings": []
+}

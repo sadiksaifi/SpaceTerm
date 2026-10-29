@@ -18,6 +18,24 @@ pub struct UnpairEffects {
     pub device: DeviceRef,
 }
 
+/// The confirmation envelope of an unpair preview.
+pub(crate) fn preview_envelope(
+    server: crate::contract::ServerRef,
+    token: String,
+    expires_at: String,
+    device: DeviceRef,
+) -> Envelope<crate::contract::ConfirmationData<UnpairEffects>> {
+    Envelope::confirmation(
+        COMMAND,
+        Some(server),
+        Confirmation {
+            token,
+            expires_at,
+            effects: UnpairEffects { device },
+        },
+    )
+}
+
 /// Which paired devices `selector` names.
 pub fn select<'a>(devices: &'a [DeviceInfo], selector: &str) -> Result<&'a DeviceInfo, Failure> {
     let matches: Vec<&DeviceInfo> = match selector.strip_prefix("id:") {
@@ -116,18 +134,7 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
                     .unwrap_or_default()
             })
             .unwrap_or_default();
-        return Reply::new(
-            &Envelope::confirmation(
-                COMMAND,
-                Some(server),
-                Confirmation {
-                    token: current,
-                    expires_at,
-                    effects: UnpairEffects { device: named },
-                },
-            ),
-            text,
-        );
+        return Reply::new(&preview_envelope(server, current, expires_at, named), text);
     }
     let mut operation = [0; 32];
     if ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut operation).is_err() {

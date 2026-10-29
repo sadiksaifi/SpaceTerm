@@ -1,0 +1,33 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.update",
+  "status": "error",
+  "server": {
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "operation": "0123456789abcdef0123456789abcdef",
+      "action": "update",
+      "state": "unresolved",
+      "code": null,
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "version": {
+      "version": "0.8.0",
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "error": {
+    "code": "activation_unresolved",
+    "class": "unconfirmed",
+    "message": "SpaceTerm couldn’t confirm whether the server update finished.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}

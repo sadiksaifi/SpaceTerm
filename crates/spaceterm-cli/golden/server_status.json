@@ -1,0 +1,73 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.status",
+  "status": "ok",
+  "server": {
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "running": true,
+    "stopped": false,
+    "installed": true,
+    "automatic_start": true,
+    "linger": true,
+    "runtime": {
+      "version": "0.7.0",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "staged": [
+      {
+        "version": "0.7.1",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "activation": "settled",
+    "sessions": 2,
+    "network": {
+      "enabled": true,
+      "bind": "0.0.0.0:9231",
+      "listening": true,
+      "addresses": [
+        "192.0.2.10"
+      ]
+    },
+    "devices": [
+      {
+        "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+        "name": "Laptop",
+        "fingerprint": "ABCD-EFGH",
+        "last_connected_at": "2026-10-30T11:00:00Z"
+      }
+    ],
+    "held_outcomes": [
+      {
+        "identity": "agent-1",
+        "count": 3
+      }
+    ],
+    "lane_major": 1,
+    "recovered_operations": [
+      {
+        "operation": "fedcba9876543210fedcba9876543210",
+        "identity": "base",
+        "kind": "service",
+        "outcome": {
+          "state": "applied"
+        }
+      }
+    ]
+  },
+  "error": null,
+  "warnings": [
+    {
+      "code": "recovered_operation",
+      "message": "SpaceTerm settled an earlier command first. See data.recovered_operations.",
+      "details": {
+        "count": 1
+      }
+    }
+  ]
+}

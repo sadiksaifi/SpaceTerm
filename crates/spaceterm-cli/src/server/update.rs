@@ -8,8 +8,9 @@
 use super::lifecycle::{self, Settled};
 use super::{Context, Opened, Pending, Reply, Routed};
 use crate::contract::{
-    self, Code, Confirmation, Envelope, Failure, Receipt, ReceiptState, ServiceAction, UpdateCheck,
-    UpdateEffects, UpdateKind, UpdateOperation, Version, Warning, WarningCode, WarningDetails,
+    self, Code, Confirmation, Envelope, Failure, Receipt, ReceiptState, ServerRef, ServiceAction,
+    UpdateCheck, UpdateEffects, UpdateKind, UpdateOperation, Version, Warning, WarningCode,
+    WarningDetails,
 };
 use base64::Engine;
 use spaceterm_server::service::activation::ActivationPhase;
@@ -86,7 +87,16 @@ fn check_text(check: &UpdateCheck) -> String {
     text
 }
 
-fn lane_check(check: spaceterm_server::service::lane::LaneCheck) -> UpdateCheck {
+/// The envelope of `server update --check`.
+pub(crate) fn check_envelope(
+    server: ServerRef,
+    data: UpdateCheck,
+    recovered: Vec<contract::RecoveredOperation>,
+) -> Envelope<UpdateCheck> {
+    super::with_recovered(Envelope::ok(COMMAND, Some(server), data), recovered)
+}
+
+pub(crate) fn lane_check(check: spaceterm_server::service::lane::LaneCheck) -> UpdateCheck {
     UpdateCheck {
         approved: version(&check.approved),
         latest: check.latest.as_ref().map(version),
@@ -119,13 +129,7 @@ fn running(
             Ok(LaneReply::Check(check)) => {
                 let data = lane_check(check);
                 let text = check_text(&data);
-                Reply::new(
-                    &super::with_recovered(
-                        Envelope::ok(COMMAND, Some(server), data),
-                        opened.recovered,
-                    ),
-                    text,
-                )
+                Reply::new(&check_envelope(server, data, opened.recovered), text)
             }
             Ok(_) => fail(Failure::new(Code::ProtocolError), opened.recovered),
             Err(error) => fail(super::lane_failure(error), opened.recovered),
@@ -246,22 +250,42 @@ fn preview(
             Failure::new(Code::ConfirmationRequired),
         );
     }
+    let text = format!("{summary}Confirm with: spaceterm server update --confirm {token}\n");
+    Reply::new(
+        &preview_envelope(
+            routed.server,
+            token,
+            expires_at,
+            data,
+            effects.to_major,
+            opened.recovered,
+        ),
+        text,
+    )
+}
+
+/// The confirmation envelope of an update or return preview.
+pub(crate) fn preview_envelope(
+    server: ServerRef,
+    token: String,
+    expires_at: String,
+    effects: UpdateEffects,
+    to_major: Option<u16>,
+    recovered: Vec<contract::RecoveredOperation>,
+) -> Envelope<contract::ConfirmationData<UpdateEffects>> {
     let mut envelope = Envelope::confirmation(
         COMMAND,
-        Some(routed.server),
+        Some(server),
         Confirmation {
-            token: token.clone(),
+            token,
             expires_at,
-            effects: data,
+            effects,
         },
     );
-    if let Some(warning) = major_warning(effects.to_major) {
+    if let Some(warning) = major_warning(to_major) {
         envelope.warnings.push(warning);
     }
-    Reply::new(
-        &super::with_recovered(envelope, opened.recovered),
-        format!("{summary}Confirm with: spaceterm server update --confirm {token}\n"),
-    )
+    super::with_recovered(envelope, recovered)
 }
 
 /// After an update to another protocol major, work commands need a matching CLI.
@@ -340,8 +364,14 @@ fn execute(
         }
     };
     let Settled {
-        receipt, failure, ..
-    } = lifecycle::settle(ServiceAction::Update, outcome, pending);
+        receipt,
+        failure,
+        acknowledged,
+        ..
+    } = lifecycle::settle(ServiceAction::Update, outcome);
+    if acknowledged {
+        let _ = pending.remove(&receipt.operation);
+    }
     finish(routed, receipt, failure, Some(candidate), recovered)
 }
 
@@ -352,6 +382,24 @@ fn finish(
     version: Option<Version>,
     recovered: Vec<contract::RecoveredOperation>,
 ) -> Reply {
+    let text = match failure {
+        None => "Server updated.\n".to_owned(),
+        Some(_) => String::new(),
+    };
+    Reply::new(
+        &operation_envelope(routed.server, receipt, failure, version, recovered),
+        text,
+    )
+}
+
+/// The envelope of a confirmed update or return.
+pub(crate) fn operation_envelope(
+    server: ServerRef,
+    receipt: Receipt,
+    failure: Option<Failure>,
+    version: Option<Version>,
+    recovered: Vec<contract::RecoveredOperation>,
+) -> Envelope<UpdateOperation> {
     let data = UpdateOperation {
         operation: receipt.operation.clone(),
         version: version.unwrap_or(Version {
@@ -361,15 +409,11 @@ fn finish(
         }),
         receipt,
     };
-    let text = match failure {
-        None => "Server updated.\n".to_owned(),
-        Some(_) => String::new(),
-    };
     let envelope = match failure {
-        None => Envelope::ok(COMMAND, Some(routed.server), data),
-        Some(failure) => Envelope::error(COMMAND, Some(routed.server), failure, data),
+        None => Envelope::ok(COMMAND, Some(server), data),
+        Some(failure) => Envelope::error(COMMAND, Some(server), failure, data),
     };
-    Reply::new(&super::with_recovered(envelope, recovered), text)
+    super::with_recovered(envelope, recovered)
 }
 
 /// Sends a signed archive over the lane in order, then returns the staged installation.
@@ -472,7 +516,7 @@ fn stopped(
             Ok(check) => {
                 let data = lane_check(check);
                 let text = check_text(&data);
-                Reply::new(&Envelope::ok(COMMAND, Some(server), data), text)
+                Reply::new(&check_envelope(server, data, Vec::new()), text)
             }
             Err(error) => fail(contract::from_server_error(error)),
         };
@@ -577,15 +621,7 @@ fn offline_preview(routed: Routed, effects: UpdateEffects, token: String) -> Rep
         })
         .unwrap_or_default();
     Reply::new(
-        &Envelope::confirmation(
-            COMMAND,
-            Some(routed.server),
-            Confirmation {
-                token,
-                expires_at,
-                effects,
-            },
-        ),
+        &preview_envelope(routed.server, token, expires_at, effects, None, Vec::new()),
         text,
     )
 }

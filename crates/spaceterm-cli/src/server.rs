@@ -11,6 +11,9 @@ pub mod status;
 pub mod unpair;
 pub mod update;
 
+#[cfg(test)]
+mod golden_tests;
+
 use crate::args::{Global, ServerCommand};
 use crate::contract::{
     self, Code, Envelope, Failure, RecoveredIdentity, RecoveredKind, RecoveredOperation,

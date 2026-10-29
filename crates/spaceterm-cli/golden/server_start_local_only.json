@@ -1,0 +1,15 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.start",
+  "status": "error",
+  "server": null,
+  "data": {},
+  "error": {
+    "code": "local_only",
+    "class": "unavailable",
+    "message": "This command runs only on the server's own machine.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}

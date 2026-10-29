@@ -1,0 +1,29 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.restart",
+  "status": "error",
+  "server": {
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "operation": "0123456789abcdef0123456789abcdef",
+      "action": "restart",
+      "state": "not_performed",
+      "code": "operation_failed",
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "observed": "restarted"
+  },
+  "error": {
+    "code": "operation_failed",
+    "class": "failed",
+    "message": "The server did not perform the operation.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}
