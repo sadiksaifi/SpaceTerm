@@ -134,11 +134,21 @@ impl DevelopmentPaneHost {
             control: nonce().map_err(|_| Refusal::Failed)?,
             connection,
         };
+        let mut plan = LocalTerminalLaunchPlan::new(directory).without_client_effects();
+        if let (Some(context), Some(organization)) = (&self.session_context, &self.organization) {
+            plan = plan.in_session(crate::platform::shell_launch::SessionEnvironment {
+                identity: context.identity.clone(),
+                server: context.server,
+                pane: organization.pane,
+                session: lease.session,
+                cli: context.cli.clone(),
+            });
+        }
         let runtime = self
             .factory
             .start_runtime(
                 geometry(size),
-                LocalTerminalLaunchPlan::new(directory).without_client_effects(),
+                plan,
                 appearance(style, 1).map_err(|_| Refusal::Failed)?,
             )
             .map_err(|_| Refusal::Failed)?;

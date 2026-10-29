@@ -87,5 +87,5 @@ pub(crate) use server::screen_encoder;
 pub(crate) use server::testing as directory_testing;
 pub use server::{
     DevelopmentPaneHost, HostCommands, Observation, Observed, ScreenCapture, Served,
-    SharedWorkspaceHost,
+    ServerSessionContext, SharedWorkspaceHost,
 };

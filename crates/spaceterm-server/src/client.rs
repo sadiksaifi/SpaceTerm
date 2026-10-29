@@ -345,6 +345,20 @@ impl ServerConnection {
             self.client_id()?,
         )
     }
+    /// The journal writer of this handle's identity under `lock`, which the caller took on the
+    /// identity directory's `operations.lock`. A CLI holds that lock from sequence allocation
+    /// through acknowledgement.
+    pub fn shared_journal_locked(
+        &self,
+        lock: crate::storage::Lock,
+    ) -> Result<crate::hierarchy::ClientJournal, ServerError> {
+        crate::hierarchy::ClientJournal::open_locked(
+            self.client_directory()?,
+            lock,
+            self.server_id()?,
+            self.client_id()?,
+        )
+    }
     /// Opens the private arrangement without contacting or starting the server.
     pub fn client_view_store(&self) -> Result<crate::client_view::ClientViewStore, ServerError> {
         crate::client_view::ClientViewStore::open(

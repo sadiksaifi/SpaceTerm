@@ -1430,6 +1430,16 @@ impl ClientJournal {
         client: Id,
     ) -> Result<Self, ServerError> {
         let lock = directory.lock("operations.lock", true)?;
+        Self::open_locked(directory, lock, server, client)
+    }
+    /// Opens the journal under `lock`, which the caller already holds on `operations.lock` of
+    /// `directory`.
+    pub(crate) fn open_locked(
+        directory: crate::storage::Directory,
+        lock: crate::storage::Lock,
+        server: Id,
+        client: Id,
+    ) -> Result<Self, ServerError> {
         let record = directory
             .read_json::<JournalRecord>("operations.json")?
             .unwrap_or(JournalRecord {
@@ -1454,6 +1464,40 @@ impl ClientJournal {
     }
     pub fn pending(&self) -> Option<&ClientOperation> {
         self.record.pending.as_ref()
+    }
+    /// How many operations the journal in `directory` still holds, read without its lock: the
+    /// pending one and the last retired one, whose acknowledgement may not have arrived.
+    pub fn held(directory: &crate::storage::Directory) -> Result<u32, ServerError> {
+        Ok(directory
+            .read_json::<JournalRecord>("operations.json")?
+            .map_or(0, |record| {
+                u32::from(record.pending.is_some()) + u32::from(record.last.is_some())
+            }))
+    }
+    /// Drops the pending operation after the server said it recorded no such sequence, so it
+    /// never applied it. Nothing dispatches it again.
+    pub fn abandon(&mut self) -> Result<(), ServerError> {
+        if self.record.pending.take().is_none() {
+            return Ok(());
+        }
+        self.save()
+    }
+    /// Forgets the retired outcome of `sequence` once the server confirmed it forgot it too,
+    /// for a client that presents each outcome itself when it arrives.
+    pub fn settled(&mut self, sequence: u64) -> Result<(), ServerError> {
+        if self
+            .record
+            .last
+            .as_ref()
+            .is_none_or(|last| last.sequence != sequence)
+        {
+            return Ok(());
+        }
+        self.record.last = None;
+        self.record
+            .unseen
+            .retain(|unseen| unseen.sequence != sequence);
+        self.save()
     }
     pub fn last(&self) -> Option<&RetainedOutcome> {
         self.record.last.as_ref()

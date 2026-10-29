@@ -1,6 +1,11 @@
 export module spaceterm {
   export def --env install [] {
     if (($env.SPACETERM_SHELL_INTEGRATION_VERSION? | default "") != "1") { return }
+    # This runs after the user's configuration set PATH, so the server's own CLI goes first.
+    if "SPACETERM_CLI" in $env {
+      let dir = ($env.SPACETERM_CLI | path dirname)
+      $env.PATH = ($env.PATH | split row (char esep) | where {|entry| $entry != $dir } | prepend $dir)
+    }
     # The session's Prompt Owner marks this shell's own prompt markers; only hex is accepted.
     let owner = ($env.SPACETERM_PROMPT_OWNER? | default "")
     let owner = if ($owner =~ '^[0-9a-f]+$') { $";spaceterm=($owner)" } else { "" }

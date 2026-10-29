@@ -116,6 +116,15 @@ impl SharedWorkspaceHost {
             sync,
         ))
     }
+    /// Names this server to the CLI in each Terminal Session started from now on.
+    pub fn with_session_context(mut self, context: super::ServerSessionContext) -> Self {
+        let context = Arc::new(context);
+        for host in self.panes.values_mut() {
+            host.session_context = Some(Arc::clone(&context));
+        }
+        self.prototype.session_context = Some(context);
+        self
+    }
     /// A host with a sync worker of its own.
     #[cfg(test)]
     pub(super) fn new(prototype: DevelopmentPaneHost) -> Self {
@@ -426,6 +435,7 @@ impl SharedWorkspaceHost {
                 directories: super::directories::DirectoryOperations::default(),
                 names: Arc::clone(&self.prototype.names),
                 notifier: self.prototype.notifier.clone(),
+                session_context: self.prototype.session_context.clone(),
             };
             self.panes.insert(id, host);
         }

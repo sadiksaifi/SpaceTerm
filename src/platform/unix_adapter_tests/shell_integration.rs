@@ -5,8 +5,13 @@ use std::time::{Duration, Instant};
 
 /// The variables a SpaceTerm Terminal Session gives its shell. Tests run from a SpaceTerm
 /// terminal inherit them, which would mark every report with that terminal's prompt owner.
-const SESSION_VARIABLES: [&str; 15] = [
+const SESSION_VARIABLES: [&str; 20] = [
     "SPACETERM",
+    "SPACETERM_CLI",
+    "SPACETERM_IDENTITY",
+    "SPACETERM_PANE",
+    "SPACETERM_SERVER_ID",
+    "SPACETERM_SESSION",
     "SPACETERM_BASH_ENV",
     "SPACETERM_BASH_HOME",
     "SPACETERM_BASH_INJECT",
@@ -358,6 +363,113 @@ fn elvish_reports_reserved_and_unicode_directory() {
         database.as_os_str(),
     ]);
     assert_directory_report(command);
+}
+
+/// The CLI a fixture Session names, and the PATH its shell starts with. The CLI's directory
+/// is already on that PATH, last, as a login profile might leave it.
+const FIXTURE_CLI: &str = "/fixture cli/bin/spaceterm";
+const FIXTURE_PATH: &str = "/usr/bin:/bin:/fixture cli/bin";
+
+/// Runs `command`, whose script prints `PATH=` and the shell's PATH, in a fixture Session.
+/// Returns that PATH.
+fn session_path(mut command: Command, integration: bool) -> String {
+    command
+        .env("SPACETERM_CLI", FIXTURE_CLI)
+        .env("PATH", FIXTURE_PATH)
+        .env_remove("_SPACETERM_INTEGRATION_LOADED")
+        .stdin(Stdio::null());
+    if integration {
+        command.env("SPACETERM_SHELL_INTEGRATION_VERSION", "1");
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let start = stdout.rfind("PATH=").expect("the shell prints its PATH") + "PATH=".len();
+    stdout[start..]
+        .split(['\r', '\n', '\u{7}', '\u{1b}'])
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+/// Shell integration puts the Session's CLI first on PATH once, after the startup files ran,
+/// and leaves PATH alone when it is disabled.
+#[test]
+fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
+    let integration = resource_root().join("shell-integration");
+    let first = "/fixture cli/bin:/usr/bin:/bin";
+    let bash = |enabled| {
+        let mut command = session_free_command("/bin/bash");
+        command
+            .args([
+                "--noprofile",
+                "--norc",
+                "-ic",
+                r#"source "$1"; builtin printf 'PATH=%s\n' "$PATH""#,
+                "spaceterm",
+            ])
+            .arg(integration.join("bash/spaceterm.bash"));
+        session_path(command, enabled)
+    };
+    assert_eq!(bash(true), first);
+    assert_eq!(bash(false), FIXTURE_PATH);
+    let zsh = |enabled| {
+        let mut command = session_free_command("/bin/zsh");
+        command
+            .args([
+                "-dfi",
+                "-c",
+                r#"builtin source -- "$1"; (( $+functions[_spaceterm_cli_path] )) && _spaceterm_cli_path; builtin print -r -- "PATH=$PATH""#,
+                "spaceterm",
+            ])
+            .arg(integration.join("zsh/spaceterm-integration"));
+        session_path(command, enabled)
+    };
+    assert_eq!(zsh(true), first);
+    assert_eq!(zsh(false), FIXTURE_PATH);
+    if let Some(mut command) = installed_shell("fish") {
+        command
+            .args([
+                "--no-config",
+                "-ic",
+                r#"source "$argv[1]"; functions -q _spaceterm_cli_path; and _spaceterm_cli_path; printf 'PATH=%s\n' "$PATH""#,
+            ])
+            .arg(integration.join("fish/vendor_conf.d/spaceterm-shell-integration.fish"));
+        assert_eq!(session_path(command, true), first);
+    }
+    if let Some(mut command) = installed_shell("nu") {
+        command.args(["--no-config-file", "-c"]).arg(format!(
+            "source '{}'; use spaceterm install; install; print $\"PATH=($env.PATH | str join (char esep))\"",
+            integration
+                .join("nushell/vendor/autoload/spaceterm.nu")
+                .display()
+        ));
+        assert_eq!(session_path(command, true), first);
+    }
+    if let Some(shell) = installed_shell("elvish") {
+        let fixture = DirectoryFixture::new();
+        let rc = fixture.path().join("rc.elv");
+        std::fs::write(
+            &rc,
+            format!(
+                "use str; eval (slurp < '{}'); $edit:before-readline[-1]; echo PATH=(str:join : $paths); exit",
+                integration.join("elvish/lib/spaceterm-integration.elv").display()
+            ),
+        )
+        .unwrap();
+        let socket = fixture.path().join("sock");
+        let database = fixture.path().join("db");
+        let command = controlling_terminal_command(&[
+            shell.get_program(),
+            "-rc".as_ref(),
+            rc.as_os_str(),
+            "-sock".as_ref(),
+            socket.as_os_str(),
+            "-db".as_ref(),
+            database.as_os_str(),
+        ]);
+        assert_eq!(session_path(command, true), first);
+    }
 }
 
 /// Run `argv` with a controlling terminal through the host `script(1)`.

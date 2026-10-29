@@ -116,6 +116,16 @@ pub fn cli_state_root(identity: &str) -> Result<std::path::PathBuf, ServerError>
         .join("clients/cli"))
 }
 
+/// The nonsecret ID of the server `identity` on this account, read without contacting or
+/// starting it.
+pub fn local_server_id(identity: &str) -> Result<[u8; 32], ServerError> {
+    Ok(
+        storage::Directory::open(&host::Paths::for_identity(identity)?.data, false)?
+            .read()?
+            .server,
+    )
+}
+
 /// Runs an explicitly requested local server. No service registration or listener
 /// is installed by library construction or desktop launch.
 pub fn run_local(identity: &str) -> Result<(), ServerError> {
