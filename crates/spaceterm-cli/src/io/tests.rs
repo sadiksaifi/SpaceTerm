@@ -627,6 +627,87 @@ fn paste_then_enter_is_delivered() {
     assert!(observed.failure.is_none(), "{:?}", observed.failure);
 }
 
+/// A first call waits for a slow shell startup without retrying the command.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn first_run_waits_for_slow_zsh_startup() {
+    slow_startup("ZSH", "/bin/zsh", ".zshrc");
+}
+
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn first_run_waits_for_slow_bash_startup() {
+    slow_startup("BASH", "/opt/homebrew/bin/bash", ".bash_profile");
+}
+
+fn slow_startup(name: &str, fallback: &str, rc: &str) {
+    environment();
+    let original = std::env::var_os("SHELL").unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let shell = std::env::var(format!("SPACETERM_TEST_{name}")).unwrap_or_else(|_| {
+        if std::path::Path::new(fallback).is_file() {
+            fallback.into()
+        } else {
+            format!("/bin/{}", name.to_ascii_lowercase())
+        }
+    });
+    std::fs::write(home.join(rc), "sleep 2\n").unwrap();
+    // SAFETY: these native tests run serially, and this is set before starting a server.
+    unsafe {
+        std::env::set_var("SHELL", &shell);
+    }
+    let mut results = Vec::new();
+    for prestarted in [false, true] {
+        let mut server = Server::start();
+        let link = server.connect(1);
+        let (workspace, pane) = workspace(&link, 1);
+        let mut target = target(workspace, pane, false);
+        let started = Instant::now();
+        if prestarted {
+            let channel = super::channel::Channel::open(&link).unwrap();
+            let claimed = channel
+                .claim(
+                    &target,
+                    spaceterm_server::pane::AttachmentClaim::Select { explicit: true },
+                    None,
+                    Deadline::after(Some(Duration::from_secs(10))),
+                )
+                .unwrap();
+            let super::channel::Claimed::Attached(_) = claimed else {
+                panic!("the Tab starts its shell");
+            };
+            target.running = true;
+            channel.keep();
+        }
+        let done = run::run(
+            &link,
+            &mut || Ok(link.clone()),
+            &target,
+            &run_args("printf 'SLOW-%s\\n' STARTED"),
+            None,
+            &mut std::io::empty(),
+            &mut runs(),
+            Deadline::after(Some(Duration::from_secs(10))),
+        );
+        results.push((prestarted, done, started.elapsed()));
+    }
+    std::fs::remove_file(home.join(rc)).unwrap();
+    // SAFETY: the native tests run serially and both servers have stopped.
+    unsafe {
+        std::env::set_var("SHELL", &original);
+    }
+    for (prestarted, done, elapsed) in results {
+        assert!(
+            done.failure.is_none(),
+            "{name}, prestarted={prestarted}: {:?}",
+            done.failure
+        );
+        assert_eq!(done.data.as_ref().unwrap().run.started_shell, !prestarted);
+        assert!(elapsed >= Duration::from_secs(2));
+        assert!(output_text(&done).contains("SLOW-STARTED"));
+    }
+}
+
 /// A source whose epoch changes on the first snapshot's pages, then holds.
 struct Rewrapping {
     snapshots: u32,

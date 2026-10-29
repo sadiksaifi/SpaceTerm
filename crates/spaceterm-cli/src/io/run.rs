@@ -324,7 +324,8 @@ pub fn run(
         return Done::failed(failure);
     }
     let shown = channel.show();
-    let admitting = Instant::now();
+    let startup = deadline.or(CLAIM_TIMEOUT);
+    let mut paste_wait = None;
     let admitted = shown.and_then(|()| {
         loop {
             let reply = request(
@@ -337,16 +338,22 @@ pub fn run(
                 },
                 deadline,
             );
-            // Some shells mark their prompt before their line editor turns on bracketed
-            // paste. A refusal wrote nothing, so asking again is safe.
-            if matches!(
-                reply,
-                Ok(ReplyBody::Run(RunReply::Refused(
-                    RunRefusal::NoBracketedPaste
-                )))
-            ) && admitting.elapsed() < PASTE_MODE_WAIT
+            // Refusals write no input. A shell may still be reading startup files after
+            // Tab creation or this call started it. Once its first owner-marked prompt arrives,
+            // give its line editor a separate interval to enable bracketed paste.
+            let retry_until = match &reply {
+                Ok(ReplyBody::Run(RunReply::Refused(RunRefusal::NoIntegration))) => startup.until(),
+                Ok(ReplyBody::Run(RunReply::Refused(RunRefusal::NoBracketedPaste))) => {
+                    Some(*paste_wait.get_or_insert_with(|| Instant::now() + PASTE_MODE_WAIT))
+                }
+                _ => None,
+            };
+            if let Some(until) =
+                retry_until.filter(|until| Instant::now() < *until && !deadline.passed())
             {
-                std::thread::sleep(RESOLVE_INTERVAL / 10);
+                std::thread::sleep(
+                    (RESOLVE_INTERVAL / 10).min(until.saturating_duration_since(Instant::now())),
+                );
                 continue;
             }
             break reply;
