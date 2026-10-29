@@ -5,8 +5,8 @@
 //! flow, which survives the server's own stop.
 use super::{Context, Opened, Pending, Reply, Routed};
 use crate::contract::{
-    self, Code, Confirmation, Envelope, Failure, Observed, Receipt, ReceiptState, ServerStart,
-    ServiceAction, ServiceEffects, ServiceOperation,
+    self, Code, Confirmation, ConfirmationData, Envelope, Failure, Observed, Receipt, ReceiptState,
+    RecoveredOperation, ServerRef, ServerStart, ServiceAction, ServiceEffects, ServiceOperation,
 };
 use spaceterm_server::service::Service;
 use spaceterm_server::service::control::{Action as ControlAction, Controller, Wording};
@@ -179,19 +179,38 @@ fn preview(
         command.replace('.', " ")
     );
     Reply::new(
-        &super::with_recovered(
-            Envelope::confirmation(
-                command,
-                Some(routed.server),
-                Confirmation {
-                    token,
-                    expires_at,
-                    effects: service_effects(&effects),
-                },
-            ),
+        &preview_envelope(
+            command,
+            routed.server,
+            token,
+            expires_at,
+            &effects,
             opened.recovered,
         ),
         text,
+    )
+}
+
+/// The confirmation envelope of a Stop or Restart preview.
+pub(crate) fn preview_envelope(
+    command: &str,
+    server: ServerRef,
+    token: String,
+    expires_at: String,
+    effects: &LaneEffects,
+    recovered: Vec<RecoveredOperation>,
+) -> Envelope<ConfirmationData<ServiceEffects>> {
+    super::with_recovered(
+        Envelope::confirmation(
+            command,
+            Some(server),
+            Confirmation {
+                token,
+                expires_at,
+                effects: service_effects(effects),
+            },
+        ),
+        recovered,
     )
 }
 
@@ -245,7 +264,10 @@ fn execute(
         Kind::Stop => ServiceAction::Stop,
         Kind::Restart => ServiceAction::Restart,
     };
-    let settled = settle(action, outcome, pending);
+    let settled = settle(action, outcome);
+    if settled.acknowledged {
+        let _ = pending.remove(&settled.receipt.operation);
+    }
     let text = match (&settled.observed, settled.failure.as_ref()) {
         (Some(Observed::Shutdown), _) => format!(
             "Stop is in progress. Confirm on {} with: spaceterm server status\n",
@@ -255,16 +277,29 @@ fn execute(
         (_, None) => "Server stopped.\n".to_owned(),
         (_, Some(_)) => String::new(),
     };
+    Reply::new(
+        &operation_envelope(command, routed.server, settled, recovered),
+        text,
+    )
+}
+
+/// The envelope of a confirmed Stop or Restart, from its settled flow.
+pub(crate) fn operation_envelope(
+    command: &str,
+    server: ServerRef,
+    settled: Settled,
+    recovered: Vec<RecoveredOperation>,
+) -> Envelope<ServiceOperation> {
     let data = ServiceOperation {
         operation: settled.receipt.operation.clone(),
         receipt: settled.receipt,
         observed: settled.observed,
     };
     let envelope = match settled.failure {
-        None => Envelope::ok(command, Some(routed.server), data),
-        Some(failure) => Envelope::error(command, Some(routed.server), failure, data),
+        None => Envelope::ok(command, Some(server), data),
+        Some(failure) => Envelope::error(command, Some(server), failure, data),
     };
-    Reply::new(&super::with_recovered(envelope, recovered), text)
+    super::with_recovered(envelope, recovered)
 }
 
 /// A finished operation flow, as the contract reports it.
@@ -272,11 +307,12 @@ pub struct Settled {
     pub receipt: Receipt,
     pub observed: Option<Observed>,
     pub failure: Option<Failure>,
+    /// The flow acknowledged the receipt, so the operation is no longer pending.
+    pub acknowledged: bool,
 }
 
-/// Maps the flow's outcome to a receipt and a failure. A settled operation is acknowledged, so
-/// it is no longer pending.
-pub fn settle(action: ServiceAction, outcome: Outcome, pending: &Pending) -> Settled {
+/// Maps the flow's outcome to a receipt and a failure.
+pub fn settle(action: ServiceAction, outcome: Outcome) -> Settled {
     match outcome {
         Outcome::Shutdown { operation, boot } => Settled {
             receipt: Receipt {
@@ -288,9 +324,9 @@ pub fn settle(action: ServiceAction, outcome: Outcome, pending: &Pending) -> Set
             },
             observed: Some(Observed::Shutdown),
             failure: Some(Failure::new(Code::OutcomeUnconfirmed)),
+            acknowledged: false,
         },
         Outcome::Settled { receipt, boot } => {
-            let _ = pending.remove(&receipt.operation);
             let observed = (receipt.boot != boot).then_some(Observed::Restarted);
             let failure = match receipt.state {
                 LaneOperationState::Done => None,
@@ -308,6 +344,7 @@ pub fn settle(action: ServiceAction, outcome: Outcome, pending: &Pending) -> Set
                 receipt: receipt_of(&receipt),
                 observed,
                 failure,
+                acknowledged: true,
             }
         }
         Outcome::Unconfirmed {
@@ -324,6 +361,7 @@ pub fn settle(action: ServiceAction, outcome: Outcome, pending: &Pending) -> Set
             }),
             observed: None,
             failure: Some(Failure::new(Code::OutcomeUnconfirmed)),
+            acknowledged: false,
         },
     }
 }

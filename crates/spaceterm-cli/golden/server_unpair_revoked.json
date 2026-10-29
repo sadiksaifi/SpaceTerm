@@ -1,0 +1,18 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.unpair",
+  "status": "ok",
+  "server": {
+    "name": "local",
+    "route": "local",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "revoked": {
+      "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+      "name": "Laptop"
+    }
+  },
+  "error": null,
+  "warnings": []
+}

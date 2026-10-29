@@ -1,0 +1,29 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.stop",
+  "status": "error",
+  "server": {
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "operation": "0123456789abcdef0123456789abcdef",
+      "action": "stop",
+      "state": "launched",
+      "code": null,
+      "boot": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "observed": "shutdown"
+  },
+  "error": {
+    "code": "outcome_unconfirmed",
+    "class": "unconfirmed",
+    "message": "SpaceTerm couldn’t confirm the outcome.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}

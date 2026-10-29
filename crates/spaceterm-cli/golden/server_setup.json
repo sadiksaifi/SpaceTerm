@@ -1,0 +1,51 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.setup",
+  "status": "ok",
+  "server": {
+    "name": "local",
+    "route": "local",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "steps": [
+      {
+        "step": "install_service",
+        "result": "done"
+      },
+      {
+        "step": "linger",
+        "result": "already_done"
+      },
+      {
+        "step": "start",
+        "result": "done"
+      },
+      {
+        "step": "network",
+        "result": "done"
+      },
+      {
+        "step": "automatic_start",
+        "result": "skipped"
+      }
+    ],
+    "runtime": {
+      "version": "0.7.0",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "network": {
+      "enabled": true,
+      "bind": "0.0.0.0:9231",
+      "addresses": [
+        "192.0.2.10"
+      ]
+    },
+    "automatic_start": true,
+    "launcher": "linked",
+    "path_ok": true
+  },
+  "error": null,
+  "warnings": []
+}
