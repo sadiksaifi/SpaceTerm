@@ -717,3 +717,6 @@ fn pending_warning() -> Warning {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_tests;

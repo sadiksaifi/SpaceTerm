@@ -96,7 +96,10 @@ impl InteractionIo for Terminal {
             drop(hidden);
             result?
         } else {
-            read_line(&mut stdin.lock(), 8192, deadline, &self.interrupted)?
+            // StdinLock buffers ahead. Poll only an unbuffered duplicate, so bytes
+            // already read into a Rust buffer cannot make an open pipe appear silent.
+            let mut input = File::from(rustix::io::dup(&stdin).map_err(|_| Failure::new(Code::InteractionRequired))?);
+            read_line(&mut input, 8192, deadline, &self.interrupted)?
         };
         let text =
             std::str::from_utf8(&bytes).map_err(|_| Failure::new(Code::InvalidInvitation))?;
@@ -241,5 +244,30 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(failure.code, Code::Interrupted);
+    }
+}
+
+
+#[cfg(test)]
+mod pipe_tests {
+    use super::*;
+    #[test]
+    fn open_pipe_child() {
+        if std::env::var_os("SPACETERM_TEST_INVITATION_PIPE").is_none() { return; }
+        let mut terminal = Terminal::new(false).unwrap();
+        let value = terminal.invitation(Instant::now() + Duration::from_secs(1)).unwrap();
+        assert_eq!(value.as_str(), "spaceterm://pair/fixture");
+    }
+    #[test]
+    fn invitation_line_completes_while_its_pipe_stays_open() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "connection::terminal::pipe_tests::open_pipe_child"])
+            .env("SPACETERM_TEST_INVITATION_PIPE", "1")
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(b"spaceterm://pair/fixture\n").unwrap(); input.flush().unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success(), "the Invitation Link completes without pipe EOF");
+        drop(input);
     }
 }

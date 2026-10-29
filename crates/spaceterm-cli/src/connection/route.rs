@@ -10,12 +10,19 @@ use spaceterm_connections::{
     ConnectionStore, CredentialError, CredentialStore, Interaction, SavedConnection,
 };
 use spaceterm_server::{
-    CliRoute, ServerConnection,
+    CliRoute, ServerConnection, ServerError,
     direct::{self, DeviceCredential, DirectConnection, DirectConnector, DirectError},
     protocol::AgentName,
 };
 use std::sync::Arc;
 use std::time::Instant;
+
+pub struct AdmittedRoute {
+    pub connection: ServerConnection,
+    pub link: spaceterm_server::connection::link::ServerLink,
+    pub server: ServerRef,
+    pub recovered: Vec<crate::contract::RecoveredOperation>,
+}
 
 pub enum Route {
     Local,
@@ -159,10 +166,76 @@ impl Route {
         interaction: Interaction,
         deadline: Instant,
     ) -> Result<ServerConnection, Failure> {
+        self.server_connection(identity, agent, credentials, interaction, deadline)
+            .map_err(crate::contract::from_server_error)
+    }
+
+    /// Admit the selected route and settle its held outcomes before a passive command.
+    /// Mutating callers use `Editor::open`, which owns the writer lock and settlement.
+    pub fn admit(
+        &self,
+        identity: &str,
+        agent: Option<AgentName>,
+        credentials: &dyn CredentialProvider,
+        interaction: Interaction,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<AdmittedRoute, Failure> {
+        let connection =
+            self.connect(identity, agent.clone(), credentials, interaction, deadline)?;
+        let link = connection
+            .link_cancellable(&|| cancelled() || Instant::now() >= deadline)
+            .map_err(crate::contract::from_server_error)?;
+        let server = connection
+            .admitted_server_id()
+            .map_err(crate::contract::from_server_error)?;
+        if let Self::Paired(saved) = self
+            && saved.paired.pin.server != server
+        {
+            link.close();
+            return Err(Code::ServerIdentityChanged.into());
+        }
+        let state =
+            crate::state::CliState::open(identity).map_err(crate::contract::from_server_error)?;
+        let recovered = crate::journal::settle(
+            &state,
+            &self.key(),
+            crate::journal::Current {
+                agent: agent.as_ref(),
+                connection: &connection,
+                link: &link,
+                writer: None,
+            },
+            &mut |agent| {
+                self.server_connection(identity, agent.cloned(), credentials, interaction, deadline)
+            },
+            deadline,
+        )?;
+        Ok(AdmittedRoute {
+            connection,
+            link,
+            server: self.reference(&server),
+            recovered,
+        })
+    }
+
+    fn server_connection(
+        &self,
+        identity: &str,
+        agent: Option<AgentName>,
+        credentials: &dyn CredentialProvider,
+        interaction: Interaction,
+        deadline: Instant,
+    ) -> Result<ServerConnection, ServerError> {
         let route = match self {
             Self::Local => CliRoute::Local,
             Self::Paired(saved) => {
-                let credentials = credentials.open().map_err(super::credential_failure)?;
+                let credentials = credentials.open().map_err(|error| {
+                    ServerError::Direct(match error {
+                        CredentialError::InteractionRequired => DirectError::InteractionRequired,
+                        CredentialError::Unavailable => DirectError::CredentialUnavailable,
+                    })
+                })?;
                 let connector = Arc::new(Connector {
                     saved: saved.as_ref().clone(),
                     credentials,
@@ -177,7 +250,6 @@ impl Route {
             }
         };
         ServerConnection::for_cli(identity, route, agent)
-            .map_err(crate::contract::from_server_error)
     }
 }
 struct Connector {
