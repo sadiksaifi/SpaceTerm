@@ -43,15 +43,22 @@ pub fn run(
         Ok(pending) => pending,
         Err(failure) => return Reply::failure(COMMAND, Some(routed.server), failure),
     };
-    if routed.local {
-        // Settle an interrupted activation first. Recovery never repeats a dispatched step.
+    settle_first(routed.local, check, &mut || {
         let _ = Service::for_identity(context.identity).and_then(|v| v.recover_activation());
-    }
+    });
     let opened = super::open_lane(context, &routed.connection, &routed.route, &pending);
     match opened {
         Ok(opened) => running(context, routed, opened, &pending, check, files, token),
         Err(_) if routed.local => stopped(context, routed, check, files, token),
         Err(failure) => Reply::failure(COMMAND, Some(routed.server), failure),
+    }
+}
+
+/// An update on the server's own machine settles an interrupted activation first. Recovery
+/// never repeats a dispatched step. `--check` is passive, so it never recovers.
+fn settle_first(local: bool, check: bool, recover: &mut dyn FnMut()) {
+    if local && !check {
+        recover();
     }
 }
 
@@ -135,6 +142,44 @@ fn running(
             Err(error) => fail(super::lane_failure(error), opened.recovered),
         };
     }
+    // When the settled state allows return to the previous runtime, the return is the offered
+    // action instead of an update.
+    let probe = opened.session.request(
+        &LaneRequest::Preview {
+            action: LaneAction::Return,
+        },
+        deadline(),
+    );
+    match offered_return(probe) {
+        Ok(Some((token_now, expires_at, effects))) => {
+            let Some(to) = effects.to.as_ref().map(version) else {
+                return fail(Failure::new(Code::ProtocolError), opened.recovered);
+            };
+            return match token {
+                None => preview(
+                    context,
+                    routed,
+                    opened,
+                    pending,
+                    (LaneAction::Return, to),
+                    token_now,
+                    expires_at,
+                    &effects,
+                ),
+                Some(given) => execute(
+                    context,
+                    routed,
+                    opened,
+                    pending,
+                    LaneAction::Return,
+                    given.to_owned(),
+                    to,
+                ),
+            };
+        }
+        Ok(None) => {}
+        Err(failure) => return fail(failure, opened.recovered),
+    }
     // Stage the candidate. Local files stage directly on this machine; a remote server
     // receives them over the lane.
     let staged = match files {
@@ -193,6 +238,26 @@ fn running(
         token.to_owned(),
         candidate,
     )
+}
+
+/// The return a server offers, from its reply to `Preview { Return }`. `return_unavailable`
+/// means no return applies, so the update proceeds.
+fn offered_return(
+    reply: Result<LaneReply, spaceterm_server::ServerError>,
+) -> Result<Option<(String, String, LaneEffects)>, Failure> {
+    match reply {
+        Ok(LaneReply::Preview {
+            token,
+            expires_at,
+            effects,
+        }) if effects.kind == Some(LaneUpdateKind::Return) => {
+            Ok(Some((token, expires_at, effects)))
+        }
+        Ok(LaneReply::Error { code }) if code == "return_unavailable" => Ok(None),
+        Ok(LaneReply::Error { code }) => Err(contract::from_lane_code(&code)),
+        Ok(_) => Err(Failure::new(Code::ProtocolError)),
+        Err(error) => Err(contract::from_server_error(error)),
+    }
 }
 
 fn staged_version(reply: LaneReply) -> Result<Version, Failure> {
@@ -534,15 +599,20 @@ fn stopped(
             ends_sessions: 0,
             sessions: Vec::new(),
         };
-        let token_now = match approval.confirmation_token() {
-            Ok(token) => format!("c1-{token}"),
+        let observed = match approval.confirmation_token() {
+            Ok(observed) => observed,
             Err(error) => return fail(contract::from_server_error(error)),
         };
-        if token.is_some_and(|given| given != token_now) {
-            return fail(Failure::new(Code::Changed));
-        }
-        if !confirmed(context, &routed.server.name, &effects, &token_now, token) {
-            return offline_preview(routed, effects, token_now);
+        match confirmed(
+            context,
+            &routed.server.name,
+            &effects,
+            ("return", &observed),
+            token,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return offline_preview(routed, effects, ("return", &observed)),
+            Err(failure) => return fail(failure),
         }
         let to = effects.to.clone();
         return match service.return_to_previous(approval) {
@@ -570,15 +640,20 @@ fn stopped(
         ends_sessions: 0,
         sessions: Vec::new(),
     };
-    let token_now = match approval.confirmation_token() {
-        Ok(token) => format!("c1-{token}"),
+    let observed = match approval.confirmation_token() {
+        Ok(observed) => observed,
         Err(error) => return fail(contract::from_server_error(error)),
     };
-    if token.is_some_and(|given| given != token_now) {
-        return fail(Failure::new(Code::Changed));
-    }
-    if !confirmed(context, &routed.server.name, &effects, &token_now, token) {
-        return offline_preview(routed, effects, token_now);
+    match confirmed(
+        context,
+        &routed.server.name,
+        &effects,
+        ("update", &observed),
+        token,
+    ) {
+        Ok(true) => {}
+        Ok(false) => return offline_preview(routed, effects, ("update", &observed)),
+        Err(failure) => return fail(failure),
     }
     let to = effects.to.clone();
     match service.activate(approval) {
@@ -587,41 +662,52 @@ fn stopped(
     }
 }
 
-/// Whether the change is confirmed: by a matching `--confirm`, or by the person at a prompt.
-/// A token that no longer matches the observation is `changed`, which the preview reports.
+/// Whether the change is confirmed: by `--confirm` with a token for this exact observation
+/// that has not expired, or by the person at a prompt. Any other token is `changed`.
 fn confirmed(
     context: &Context<'_>,
     server: &str,
     effects: &UpdateEffects,
-    current: &str,
+    (purpose, observed): (&str, &str),
     given: Option<&str>,
-) -> bool {
+) -> Result<bool, Failure> {
     match given {
-        Some(given) => given == current,
-        // A stale token is refused by the caller as `changed`.
+        Some(given) => super::offline_token::verify(
+            purpose,
+            observed.as_bytes(),
+            given,
+            std::time::SystemTime::now(),
+        )
+        .map(|()| true),
         None if context.interactive() => {
             eprint!("{}", summary(server, effects));
-            super::confirm("Update Server")
+            Ok(super::confirm("Update Server"))
         }
-        None => false,
+        None => Ok(false),
     }
 }
 
-fn offline_preview(routed: Routed, effects: UpdateEffects, token: String) -> Reply {
+fn offline_preview(
+    routed: Routed,
+    effects: UpdateEffects,
+    (purpose, observed): (&str, &str),
+) -> Reply {
+    let issued =
+        super::offline_token::issue(purpose, observed.as_bytes(), std::time::SystemTime::now());
     let text = format!(
-        "{}Confirm with: spaceterm server update --confirm {token}\n",
-        summary(&routed.server.name, &effects)
+        "{}Confirm with: spaceterm server update --confirm {}\n",
+        summary(&routed.server.name, &effects),
+        issued.token
     );
-    let expires = std::time::SystemTime::now() + Duration::from_secs(600);
-    let expires_at = jiff::Timestamp::try_from(expires)
-        .map(|v| {
-            jiff::Timestamp::from_second(v.as_second())
-                .map(|v| v.to_string())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
     Reply::new(
-        &preview_envelope(routed.server, token, expires_at, effects, None, Vec::new()),
+        &preview_envelope(
+            routed.server,
+            issued.token,
+            issued.expires_at,
+            effects,
+            None,
+            Vec::new(),
+        ),
         text,
     )
 }
@@ -651,4 +737,66 @@ fn offline_finish(
         boot: String::new(),
     };
     finish(routed, receipt, failure, Some(to), Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_never_recovers_and_only_a_local_update_does() {
+        for (local, check, recovers) in [
+            (true, true, false),
+            (true, false, true),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            let mut recovered = false;
+            settle_first(local, check, &mut || recovered = true);
+            assert_eq!(recovered, recovers, "local {local}, check {check}");
+        }
+    }
+
+    fn effects(kind: LaneUpdateKind) -> LaneEffects {
+        LaneEffects {
+            ends_sessions: 0,
+            sessions: Vec::new(),
+            start_requires_machine: false,
+            from: None,
+            to: None,
+            kind: Some(kind),
+            to_major: None,
+        }
+    }
+
+    #[test]
+    fn a_running_server_offers_return_only_when_its_preview_is_a_return() {
+        let preview = |kind| {
+            Ok(LaneReply::Preview {
+                token: "c1-00".into(),
+                expires_at: "2026-10-30T12:10:00Z".into(),
+                effects: effects(kind),
+            })
+        };
+        assert!(matches!(
+            offered_return(preview(LaneUpdateKind::Return)),
+            Ok(Some((token, _, _))) if token == "c1-00"
+        ));
+        assert_eq!(
+            offered_return(Ok(LaneReply::Error {
+                code: "return_unavailable".into()
+            })),
+            Ok(None)
+        );
+        assert_eq!(
+            offered_return(Ok(LaneReply::Error {
+                code: "not_installed".into()
+            })),
+            Err(Failure::new(Code::NotInstalled))
+        );
+        assert_eq!(
+            offered_return(preview(LaneUpdateKind::Update)),
+            Err(Failure::new(Code::ProtocolError))
+        );
+    }
 }

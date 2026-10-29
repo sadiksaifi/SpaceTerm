@@ -11,6 +11,8 @@ use serde::Serialize;
 use spaceterm_server::direct::DeviceInfo;
 
 const COMMAND: &str = "server.unpair";
+/// What an unpair token confirms, so it confirms nothing else.
+const PURPOSE: &str = "unpair";
 
 /// `effects` of an unpair confirmation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -76,14 +78,12 @@ pub fn select<'a>(devices: &'a [DeviceInfo], selector: &str) -> Result<&'a Devic
     }
 }
 
-/// The token for revoking `device` on `server`.
-pub fn token(server: &str, device: &DeviceInfo) -> String {
-    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-    digest.update(b"spaceterm-cli-unpair-1\0");
-    digest.update(server.as_bytes());
-    digest.update(&device.pairing);
-    digest.update(&device.public_key);
-    format!("c1-{}", super::hex(digest.finish().as_ref()))
+/// What an unpair token binds: the exact server and pairing, and the device's key.
+pub fn observation(server: &str, device: &DeviceInfo) -> Vec<u8> {
+    let mut bytes = server.as_bytes().to_vec();
+    bytes.extend_from_slice(&device.pairing);
+    bytes.extend_from_slice(&device.public_key);
+    bytes
 }
 
 pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply {
@@ -108,32 +108,31 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
         Ok(device) => device,
         Err(failure) => return fail(failure),
     };
-    let current = token(&server.id, device);
+    let observed = observation(&server.id, device);
+    let now = std::time::SystemTime::now();
     let named = DeviceRef {
         id: super::hex(&device.pairing),
         name: device.name.as_str().to_owned(),
     };
     let confirmed = match given {
-        Some(given) if given == current => true,
-        Some(_) => return fail(Failure::new(Code::Changed)),
+        Some(given) => match super::offline_token::verify(PURPOSE, &observed, given, now) {
+            Ok(()) => true,
+            Err(failure) => return fail(failure),
+        },
         None if context.interactive() => super::confirm(&format!("Unpair {}?", named.name)),
         None => false,
     };
     if !confirmed {
+        let super::offline_token::Issued {
+            token: current,
+            expires_at,
+        } = super::offline_token::issue(PURPOSE, &observed, now);
         let text = format!(
             "Unpair {} (id:{})? It can no longer connect until it pairs again.\nConfirm with: spaceterm server unpair id:{} --confirm {current}\n",
             named.name,
             &named.id[..8],
             named.id
         );
-        let expires_at = jiff::Timestamp::now()
-            .checked_add(jiff::SignedDuration::from_mins(10))
-            .map(|v| {
-                jiff::Timestamp::from_second(v.as_second())
-                    .map(|v| v.to_string())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
         return Reply::new(&preview_envelope(server, current, expires_at, named), text);
     }
     let mut operation = [0; 32];

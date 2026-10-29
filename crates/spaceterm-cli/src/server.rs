@@ -5,6 +5,7 @@
 //! Setup, Start, pairing and Unpair stay on the server's own machine. While the server is
 //! stopped, local Status and Update read and change the service directly.
 pub mod lifecycle;
+pub mod offline_token;
 pub mod pair;
 pub mod setup;
 pub mod status;
@@ -565,11 +566,33 @@ pub fn confirm(question: &str) -> bool {
 
 /// One line from stdin, at most `limit` bytes. `None` on end of input, interrupt or overflow.
 pub fn read_line(limit: usize) -> Option<String> {
+    read_line_until(limit, None)
+}
+
+/// [`read_line`] that also gives up at `deadline`.
+pub fn read_line_until(limit: usize, deadline: Option<std::time::Instant>) -> Option<String> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
         if signal::interrupted() {
             return None;
+        }
+        if let Some(deadline) = deadline {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let mut poll = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // Wake at least every 200 ms, so an interrupt is noticed.
+            let wait = left.min(Duration::from_millis(200)).as_millis() as libc::c_int;
+            // SAFETY: one live pollfd for the duration of the call.
+            if unsafe { libc::poll(&mut poll, 1, wait) } <= 0 {
+                continue;
+            }
         }
         // SAFETY: reads at most one byte into a live buffer.
         let count = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };

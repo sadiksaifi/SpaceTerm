@@ -63,8 +63,9 @@ pub trait Person {
     fn show_link(&mut self, link: &str) -> Result<(), Failure>;
     /// Says something on stderr.
     fn say(&mut self, text: &str);
-    /// Reads the typed Comparison Code. `None` is end of input or an interrupt.
-    fn comparison_code(&mut self) -> Option<String>;
+    /// Reads the typed Comparison Code before `deadline`. `None` is end of input, an
+    /// interrupt or the deadline.
+    fn comparison_code(&mut self, deadline: Instant) -> Option<String>;
     fn interrupted(&self) -> bool;
     fn sleep(&mut self, duration: Duration);
 }
@@ -81,8 +82,8 @@ impl Person for Terminal {
     fn say(&mut self, text: &str) {
         let _ = write!(std::io::stderr().lock(), "{text}");
     }
-    fn comparison_code(&mut self) -> Option<String> {
-        super::read_line(CODE_LIMIT)
+    fn comparison_code(&mut self, deadline: Instant) -> Option<String> {
+        super::read_line_until(CODE_LIMIT, Some(deadline))
     }
     fn interrupted(&self) -> bool {
         signal::interrupted()
@@ -150,10 +151,13 @@ pub fn pair(
         "{} wants to pair. Type the Comparison Code it shows: ",
         claim.device_name.as_str()
     ));
-    let Some(typed) = person.comparison_code() else {
+    // The code is entered within the invitation's own lifetime.
+    let Some(typed) = person.comparison_code(deadline) else {
         let _ = server.reject(&claim.id);
         let code = if person.interrupted() {
             Code::Interrupted
+        } else if Instant::now() >= deadline {
+            Code::Timeout
         } else {
             Code::InteractionRequired
         };
@@ -168,6 +172,15 @@ pub fn pair(
         Ok(device) => Paired::Approved { device },
         Err(failure) => failed(failure),
     }
+}
+
+/// A successful pairing's reply. The Invitation Link was the command's only stdout line, so
+/// the reply adds nothing to stdout.
+fn approved(server: Option<crate::contract::ServerRef>) -> Reply {
+    Reply::new(
+        &Envelope::ok(COMMAND, server, contract::Empty {}),
+        String::new(),
+    )
 }
 
 pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
@@ -195,10 +208,10 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         address,
         context.timeout(LIFETIME),
     ) {
-        Paired::Approved { device } => Reply::new(
-            &Envelope::ok(COMMAND, server, contract::Empty {}),
-            format!("Paired {device}.\n"),
-        ),
+        Paired::Approved { device } => {
+            let _ = writeln!(std::io::stderr().lock(), "Paired {device}.");
+            approved(server)
+        }
         Paired::Failed { failure, withdrawn } => {
             let mut envelope = Envelope::error(COMMAND, server, failure, contract::Empty {});
             if withdrawn {
@@ -270,7 +283,7 @@ mod tests {
             Ok(())
         }
         fn say(&mut self, _: &str) {}
-        fn comparison_code(&mut self) -> Option<String> {
+        fn comparison_code(&mut self, _: Instant) -> Option<String> {
             self.code.clone()
         }
         fn interrupted(&self) -> bool {
@@ -345,6 +358,33 @@ mod tests {
             paired,
             Paired::Failed {
                 failure: Failure::new(Code::ComparisonMismatch),
+                withdrawn: true
+            }
+        );
+        assert_eq!(
+            *server.log.borrow(),
+            ["invite -", "claims", "reject", "withdraw"]
+        );
+    }
+
+    #[test]
+    fn a_successful_pairing_prints_nothing_more_on_stdout() {
+        let reply = approved(None);
+        assert!(reply.stdout.is_empty());
+        assert_eq!(reply.exit(), 0);
+    }
+
+    #[test]
+    fn a_code_not_entered_before_the_invitation_expires_rejects_and_withdraws() {
+        let server = Server {
+            claims: vec![claim()],
+            log: RefCell::default(),
+        };
+        // The claim arrives at the end of the invitation's lifetime, and no code follows.
+        assert_eq!(
+            pair(&server, &mut typist(None), None, Duration::ZERO),
+            Paired::Failed {
+                failure: Failure::new(Code::Timeout),
                 withdrawn: true
             }
         );
