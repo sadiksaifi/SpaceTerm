@@ -14,7 +14,9 @@ Installed Preflight exercises the persistent service lifecycle. `mise run prefli
 
 ## Controls without the desktop
 
-Install the headless CLI as described in [Install the command line](#install-the-command-line). Run `spaceterm server --help` for service controls. Development and Preflight use their own launcher names. The desktop executable has no service-command parser. macOS service setup requires a logged-in Aqua session. Linux service setup requires linger authorization.
+Install the headless CLI as described in [Install the command line](#install-the-command-line). Run `spaceterm server --help` for service controls. Development and Preflight use their own launcher names under [ADR 0012](adr/0012-derive-one-application-identity-from-the-build.md). The desktop executable has no service-command parser. macOS service setup requires a logged-in Aqua session. Linux service setup requires linger authorization.
+
+`mise run server:service status` builds the source CLI and reads the Development service. The task also accepts `setup`, `start`, `stop`, `restart` and `update`. Setup accepts `--network` and `--automatic-start`; a destructive preview supplies `--confirm TOKEN` for the repeated action. These commands administer installed service state separately from the foreground `development` run. [.mise.toml](../.mise.toml) owns the task's arguments; [the CLI command tree](../crates/spaceterm-cli/src/args.rs) owns the `spaceterm server …` grammar.
 
 ## Signed server artifacts
 
@@ -38,7 +40,7 @@ Setup rejects SSH executable or runtime configuration paths containing whitespac
 
 Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies the QUIC address with UDP port 9231. The optional Network Address disclosure accepts a DNS name or IP address and an optional UDP port. SSH aliases and ProxyJump can reach a machine without making its QUIC endpoint reachable; use the override when the client needs a different address. Network exposure requires approval of the reachable address and the server's listener. Installation and startup do not complete setup until credentials and the connection are saved, SSH resources close and QUIC admission succeeds. If setup fails, review its reported service and pairing effects before retrying.
 
-Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Try Again and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). Manage network exposure, invitations, other devices, End All Sessions, the native service and server updates on the server's own machine. Saved addresses are read-only; add the server again to use a different address.
+Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Try Again and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). The CLI can Stop, Restart and Update a running paired server through [the service lane](adr/0057-administer-servers-over-the-service-lane.md). Network exposure, invitations, unpairing other devices, End All Sessions, Start and setup stay on the server's own machine. Saved addresses are read-only; add the server again to use a different address. [ADR 0056](adr/0056-install-and-pair-servers-from-their-own-command-line.md) describes CLI enrollment and its address override.
 
 ### Reach one server over the LAN and a tailnet
 
@@ -49,7 +51,7 @@ A server listens at one of its addresses, or on all interfaces. All Interfaces b
 "$HOME/.local/bin/spaceterm-preflight" server setup --network all
 ```
 
-Run `spaceterm-preflight server status` to show where the server listens. It also takes `off`, an IP address, `IP:PORT`, or `[IPV6]:PORT`, and refuses an address the machine doesn't have. Widening from one address to all interfaces at the same port keeps connected devices. Any other change disconnects devices connected over the network; their pairings stay.
+Run `spaceterm-preflight server status` to show where the server listens. `server setup --network` also takes `off`, an IP address, `IP:PORT`, or `[IPV6]:PORT`, and refuses an address the machine doesn't have. Widening from one address to all interfaces at the same port keeps connected devices. Any other change disconnects devices connected over the network; their pairings stay.
 
 With all interfaces, add the server once per route, for example once by its LAN address and once by its MagicDNS name. SSH setup enrolls the address that client reached or its Network Address override, so it reaches the server over any route SSH reaches. An invitation link carries one address. Invite Device offers the server's addresses and starts with the one its routing table suggests; without that suggestion the server picks its first address that no container or virtual machine bridge holds. A device on a network the link's address doesn't reach can't use the link, and a saved address can't change, so add that device with SSH setup and the route's name instead.
 
@@ -62,13 +64,13 @@ curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/inst
 spaceterm server setup --network off
 ```
 
-For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. The launcher follows the approved runtime when one exists. Otherwise it selects the installation just retained. The installer preserves a launcher that belongs to another tool.
+For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `--identity spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
 
 ```sh
 curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall
 ```
 
-Uninstall previews any Terminal Sessions it would end. After confirmation, it stops and unregisters the service and removes only its managed launcher. Workspaces, paired devices and retained signed installations stay on disk. A noninteractive uninstall returns the preview token for `--confirm TOKEN`.
+Uninstall previews any Terminal Sessions it would end. Workspaces, paired devices and retained signed installations stay on disk. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. [ADR 0054](adr/0054-use-one-headless-executable.md) owns the installer's service and launcher removal.
 
 [Signing] Developer ID signing, hardened runtime, notarization and the installer's Developer ID requirement check are future work. Ed25519 authenticates the package and feed independently.
 
@@ -94,15 +96,13 @@ Consent, cancellation, credential and save-failure tests have separate function 
 
 ## Connections
 
-Each client holds one SpaceTerm Protocol connection per server: the account-local Unix socket, or QUIC for a paired server. Every Pane, edit, inventory read and Settings read of that client shares it. Two uses open a connection of their own: each open directory picker, so the server cancels its reads when the picker closes, and the check for running Terminal Sessions when the client quits. Pings on the live connection judge its health, so a client opens a new connection only after the previous one ends. [ADR 0050](adr/0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns the exchange. A server of another protocol major refuses admission with a typed incompatibility; replace both together.
+Each desktop client holds one work connection per server: the account-local Unix socket, or QUIC for a paired server. Every Pane, edit, inventory read and Settings read of that client shares it. Two uses open a connection of their own: each open directory picker, so the server cancels its reads when the picker closes, and the check for running Terminal Sessions when the client quits. Pings on the live connection judge its health, so a client opens a new connection only after the previous one ends. [ADR 0050](adr/0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns the exchange. A different work major refuses work admission; [the service lane](adr/0057-administer-servers-over-the-service-lane.md) remains available for CLI administration across that mismatch.
 
 ## Paired connections
 
-Saved QUIC routes and restricted unpair recovery live in `direct-device-connections.json` in private client data, outside the Settings Document. Routes saved over WSS, before QUIC, are dropped when the client loads that file; add those servers again. An unpair request still pending over WSS is dropped with its route and leaves a Servers notice; unpair that device again on the server's machine. Each pairing has a separate native credential. The account server keeps listener policy, trust and pairing grants in `direct.json`. Invitations are never retained. [ADR 0028](adr/0028-use-spaceterm-protocol-over-every-client-connection.md) owns enrollment and [ADR 0052](adr/0052-carry-paired-connections-over-quic.md) the transport; [ADR 0038](adr/0038-unpair-devices-without-blocking-local-connection-removal.md) owns removal and recovery.
+Desktop Saved Connections and restricted unpair recovery live in `direct-device-connections.json` in private client data, outside the Settings Document. [ADR 0058](adr/0058-derive-agent-identities-at-admission.md) owns the CLI's separate connection and journal layout. The account server keeps listener policy, trust and pairing grants in `direct.json`. Invitations are never retained. [ADR 0028](adr/0028-use-spaceterm-protocol-over-every-client-connection.md) owns enrollment and [ADR 0052](adr/0052-carry-paired-connections-over-quic.md) the transport; [ADR 0038](adr/0038-unpair-devices-without-blocking-local-connection-removal.md) owns removal and recovery.
 
-On macOS, Release and Development keep each credential in the login Keychain through the Security framework. The Keychain binds an item to the build that created it, because neither identity is signed by an Apple team. After an update or rebuild, the Keychain may ask for its password. The first connection attempt after launch shows that request; later automatic retries never ask, and Resume asks again.
-
-Preflight is ad hoc signed, so every build would ask. Preflight instead creates and reads its items by running `/usr/bin/security`, which every build can run without a prompt. The credentials stay in the login Keychain, but they lose per-application protection: any process running as your account can read them without a prompt. Pair Preflight only with servers whose terminal access you would grant to every program in your account. A pairing that an older Preflight build created asks once, at launch or on Resume, and "Always Allow" ends the prompts. [The Preflight store](../crates/spaceterm-connections/src/credentials/macos/security_tool.rs) explains the mechanism.
+[ADR 0004](adr/0004-resolve-application-directories-by-xdg-convention.md) owns native credential storage, the Preflight Keychain policy and CLI failures when access is unavailable. In the desktop, the first connection attempt after launch can request Keychain approval. Later automatic retries do not prompt; Resume explicitly requests access again.
 
 `mise run server:direct:build` prepares the two-host verification helper. Its help defines the exact idle Development scope for `server:direct:smoke`; executing the built helper preserves its signature. `server:direct:credentials:native:test` separately verifies and removes two randomly scoped native-store items. `mise run test:native:macos` verifies the Preflight store in a throwaway Keychain.
 
