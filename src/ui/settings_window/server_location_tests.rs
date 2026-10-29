@@ -414,6 +414,43 @@ mod presented {
         assert_eq!(edits.unseen().len(), 1);
     }
 
+    /// The failed reply arrives, and the person closes Settings before any frame draws its
+    /// error. Settings never showed the failure, so it hands it back unanswered.
+    #[gpui::test]
+    fn closing_before_the_error_draws_should_hand_the_failure_back(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        let window = servers.window.clone();
+        let handle = servers.cx.update(|window, _| window.window_handle());
+        // Settings notifies once it holds the reply. Observers run before the frame that would
+        // draw the error, as a close the person made just then does.
+        let closed = Rc::new(std::cell::Cell::new(false));
+        let closing = Rc::clone(&closed);
+        servers.cx.update(|_, cx| {
+            cx.observe(&window, move |settings, cx| {
+                let holding = settings.read(cx).server_location.unanswered.is_some();
+                if holding && !closing.replace(true) {
+                    settings.update(cx, |settings, cx| {
+                        settings
+                            .request_close(super::super::super::CloseIntent::Window(handle), cx);
+                    });
+                }
+            })
+            .detach();
+        });
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert!(closed.get(), "Settings held the failure, then closed");
+        assert_eq!(edits.unseen().len(), 1, "the failure is still unseen");
+    }
+
     /// The person chose another server before the change was answered, so Settings never showed
     /// the failure. It stays unseen for the Workspace Window.
     #[gpui::test]

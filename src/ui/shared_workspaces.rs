@@ -245,6 +245,11 @@ mod development {
             OutcomeTicket(Rc::downgrade(&self.answer))
         }
 
+        /// The sequence of the owned answer, once it has arrived.
+        pub(crate) fn sequence(&self) -> Option<u64> {
+            self.answer.get()
+        }
+
         /// Records that the person answered the surface showing the answer, so nothing presents
         /// it again.
         pub(crate) fn presented(&self) {

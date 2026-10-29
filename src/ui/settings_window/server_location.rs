@@ -252,6 +252,9 @@ pub(super) struct ServerLocation {
     unanswered: Option<crate::ui::shared_workspaces::OutcomeOwner>,
     /// Whether the latest render drew the Location row, so the person can see its failure.
     rendered: bool,
+    /// The sequence of the held failure once a render has drawn its error. Only then can the
+    /// person's response answer it.
+    displayed: Option<u64>,
 }
 
 impl ServerLocation {
@@ -283,6 +286,7 @@ impl ServerLocation {
             check: None,
             unanswered: None,
             rendered: false,
+            displayed: None,
         }
     }
 
@@ -297,15 +301,18 @@ impl ServerLocation {
         self.poll = None;
         self.check = None;
         self.unanswered = None;
+        self.displayed = None;
         self.show(Some(String::new()), cx);
         self.show_last_known(cx);
     }
 
-    /// The person responded to Settings while it showed a failed change. A failure the latest
-    /// render did not show goes back to the Workspace Window instead.
+    /// The person responded to Settings. That answers the held failure only if a render drew
+    /// its error. A failure whose error no render drew yet goes back to the Workspace Window.
     pub(super) fn answered(&mut self) {
+        let displayed = self.displayed.take();
         if let Some(answer) = self.unanswered.take()
-            && self.rendered
+            && answer.sequence().is_some()
+            && answer.sequence() == displayed
         {
             answer.presented();
         }
@@ -321,6 +328,7 @@ impl ServerLocation {
     pub(super) fn release_unless_rendered(&mut self) {
         if !self.rendered {
             self.unanswered = None;
+            self.displayed = None;
         }
     }
 
@@ -634,6 +642,8 @@ impl SettingsWindow {
                 // Settings shows a failure only while its row is on the page.
                 if shown && state.rendered {
                     state.unanswered = Some(answer);
+                    // The error counts as shown once a render draws it.
+                    state.displayed = None;
                     // The person may have scrolled the field away while the change was on its way.
                     settings.reveal_growing_row(SettingsRowId::ServerWorktreeLocation, cx);
                 }
@@ -663,6 +673,14 @@ impl SettingsWindow {
         let editable = model.editable();
         let invalid = model.problem.is_some();
         let message = model.message();
+        // This render draws the held failure's error under the field.
+        if message.is_some() {
+            self.server_location.displayed = self
+                .server_location
+                .unanswered
+                .as_ref()
+                .and_then(crate::ui::shared_workspaces::OutcomeOwner::sequence);
+        }
         let input = self.server_location.input.clone();
         input.update(cx, |input, cx| input.set_editable(editable, cx));
         let focus = input.read(cx).focus_handle();
