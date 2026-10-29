@@ -198,8 +198,13 @@ fn finish(
     Ok(outcome)
 }
 
-/// Acknowledges `sequence`, then asks for it again: requests on one connection are answered in
-/// order, so `Missing` proves the server applied the acknowledgement.
+/// How long [`acknowledge`] keeps asking whether the server applied an acknowledgement.
+const ACKNOWLEDGE_CONFIRMATION: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Acknowledges `sequence`, then asks for it until the server answers `Missing`, which proves it
+/// applied the acknowledgement. The link sends requests ahead of acknowledgements, so the first
+/// answers may still name the outcome. An acknowledgement not confirmed in time keeps the
+/// outcome for the next command, which acknowledges it again.
 fn acknowledge(
     journal: &mut ClientJournal,
     link: &ServerLink,
@@ -209,10 +214,18 @@ fn acknowledge(
     if link.acknowledge(sequence).is_err() {
         return Ok(());
     }
-    if let Some(Err(Refusal::Missing)) = request(link, Operation::Resolve { sequence }, deadline) {
-        journal.settled(sequence).map_err(from_server_error)?;
+    let until = deadline.min(Instant::now() + ACKNOWLEDGE_CONFIRMATION);
+    loop {
+        match request(link, Operation::Resolve { sequence }, until) {
+            Some(Err(Refusal::Missing)) => {
+                return journal.settled(sequence).map_err(from_server_error);
+            }
+            Some(Ok(ReplyBody::Outcome(_))) if Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => return Ok(()),
+        }
     }
-    Ok(())
 }
 
 /// Sends `operation` and waits for its reply until `deadline`. `None` means no reply arrived:

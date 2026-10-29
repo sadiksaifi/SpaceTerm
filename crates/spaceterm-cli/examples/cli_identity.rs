@@ -157,10 +157,7 @@ fn concurrently(first: &str, second: &str) -> Result<[(u128, u128); 2]> {
         }
         let text = String::from_utf8(output.stdout)?;
         let mut fields = text.split_whitespace().map(str::parse::<u128>);
-        *interval = (
-            fields.next().ok_or("start")??,
-            fields.next().ok_or("end")??,
-        );
+        *interval = (fields.next().ok_or("start")??, fields.next().ok_or("end")??);
     }
     Ok(intervals)
 }
@@ -204,7 +201,8 @@ fn parent() -> Result<()> {
     if base.refresh().is_ok() {
         return Err("Stop the Development server before this exercise.".into());
     }
-    let result = exercise(&base, &data);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| exercise(&base, &data)))
+        .unwrap_or_else(|_| Err("an expectation failed".into()));
     // SAFETY: raising SIGTERM in this process asks the in-process server to stop.
     unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
     std::thread::sleep(Duration::from_millis(500));
@@ -244,7 +242,8 @@ fn exercise(base: &ServerConnection, data: &std::path::Path) -> Result<()> {
         assert!(status.success(), "abandoned agent {index}");
     }
     let state = CliState::open(IDENTITY)?;
-    assert_eq!(state.held(&RouteKey::Local)?.len(), ABANDONED);
+    let held = state.held(&RouteKey::Local)?;
+    assert_eq!(held.len(), ABANDONED, "{held:?}");
     let link = connect(base)?;
     let deadline = Instant::now() + Duration::from_secs(60);
     let editor = Editor::open(
