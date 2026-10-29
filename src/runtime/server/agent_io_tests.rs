@@ -69,11 +69,17 @@ impl Drop for Home {
     }
 }
 
+/// The shell named `SPACETERM_TEST_<SHELL>`, such as `SPACETERM_TEST_FISH`, else the first one
+/// on PATH.
 fn installed(shell: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let found = std::env::split_paths(&path)
-        .map(|directory| directory.join(shell))
-        .find(|candidate| candidate.is_file());
+    let found = std::env::var_os(format!("SPACETERM_TEST_{}", shell.to_ascii_uppercase()))
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|directory| directory.join(shell))
+                .find(|candidate| candidate.is_file())
+        })
+        .filter(|path| path.is_file());
     if found.is_none() {
         eprintln!("{shell} is not installed; skipping its run checks");
     }
@@ -336,6 +342,10 @@ fn text(text: &str) -> InputEvent {
 /// Every installed integrated shell runs a quoted command verbatim and binds its exit status,
 /// and refuses a second run until it settles, typed input, and a running command.
 #[test]
+#[cfg_attr(
+    not(feature = "native-tests"),
+    ignore = "starts installed shells; run mise run cli:shells:native"
+)]
 fn integrated_shells_run_one_command_and_bind_its_status() {
     for name in ["zsh", "bash", "fish", "elvish", "nu"] {
         let Some(shell) = installed(name) else {
@@ -421,6 +431,10 @@ fn integrated_shells_run_one_command_and_bind_its_status() {
 
 /// A shell without SpaceTerm's prompt markers is never run in.
 #[test]
+#[cfg_attr(
+    not(feature = "native-tests"),
+    ignore = "starts installed shells; run mise run cli:shells:native"
+)]
 fn shells_without_prompt_markers_are_unsupported() {
     for name in ["sh", "dash"] {
         let Some(shell) = installed(name) else {
@@ -440,6 +454,10 @@ fn shells_without_prompt_markers_are_unsupported() {
 /// A silent read is a running command, a shell that exits ends its run, and a take over leaves
 /// the run following its command.
 #[test]
+#[cfg_attr(
+    not(feature = "native-tests"),
+    ignore = "starts installed shells; run mise run cli:shells:native"
+)]
 fn zsh_runs_settle_when_the_session_ends_or_control_moves() {
     let Some(shell) = installed("zsh") else {
         return;
@@ -507,6 +525,10 @@ fn zsh_runs_settle_when_the_session_ends_or_control_moves() {
 
 /// The shell's own `exit` ends its Session, and the run settles as ended.
 #[test]
+#[cfg_attr(
+    not(feature = "native-tests"),
+    ignore = "starts installed shells; run mise run cli:shells:native"
+)]
 fn a_run_that_exits_its_shell_settles_as_session_ended() {
     let Some(shell) = installed("zsh") else {
         return;

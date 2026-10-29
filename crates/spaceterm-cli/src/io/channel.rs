@@ -18,8 +18,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-/// The frame rate a command asks for. It reads screens, never animates them.
-const FRAME_RATE: u8 = 30;
+/// The frame rate a command declares: the lowest a client may.
+const FRAME_RATE: u8 = spaceterm_server::protocol::limits::FRAME_RATES[0];
 
 /// Events the link delivered, waiting for the command's thread.
 #[derive(Default)]
@@ -41,9 +41,10 @@ impl ChannelSink for Inbox {
 /// What one received event changed.
 #[derive(Debug)]
 pub(crate) enum Event {
-    /// A frame was applied. `input` is the highest Input serial its screen reflects.
-    Frame { input: u32 },
-    Progress { input: u32, output_bytes: u64 },
+    /// A frame was applied.
+    Frame,
+    /// Progress arrived without a frame.
+    Progress,
     Run(RunReceipt),
     Input {
         serial: u32,
@@ -75,8 +76,7 @@ impl Screen {
         }
         if let Some(geometry) = update.geometry {
             self.columns = geometry.columns;
-            self.rows
-                .resize_with(usize::from(geometry.rows), blank);
+            self.rows.resize_with(usize::from(geometry.rows), blank);
         }
         if let Some(modes) = update.modes {
             self.alternate = modes.alternate_screen;
@@ -292,7 +292,7 @@ impl Channel {
                 self.activity = Instant::now();
                 // A lost acknowledgement only pauses frames; the link reports its end.
                 let _ = self.handle().acknowledge(number);
-                Event::Frame { input: frame.input }
+                Event::Frame
             }
             ChannelEvent::Pane(PaneEvent::Effect(request)) => {
                 self.complete(&request);
@@ -309,10 +309,7 @@ impl Channel {
                     }
                     self.output_bytes = Some(output_bytes);
                 }
-                Event::Progress {
-                    input,
-                    output_bytes,
-                }
+                Event::Progress
             }
             ChannelEvent::Pane(PaneEvent::RunFinished(receipt)) => Event::Run(*receipt),
             ChannelEvent::Pane(PaneEvent::Input { serial, outcome }) => {
@@ -426,4 +423,16 @@ impl Channel {
             _ => Err(Failure::new(crate::contract::Code::ProtocolError)),
         }
     }
+}
+
+/// Whether this identity holds the grant a Take Over offer names, through an earlier
+/// attachment. Resuming it takes nothing from anyone.
+pub(crate) fn own_grant(takeover: &spaceterm_server::protocol::Takeover) -> bool {
+    matches!(
+        takeover.controller,
+        spaceterm_server::pane::control::Controller::Client {
+            this_client: true,
+            ..
+        }
+    )
 }

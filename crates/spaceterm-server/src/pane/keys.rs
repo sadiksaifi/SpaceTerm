@@ -73,7 +73,10 @@ pub fn named(name: &str) -> Result<Vec<Key>, UnknownKey> {
                 if let (Some(character), None) = (characters.next(), characters.next())
                     && !character.is_control()
                 {
-                    return Ok(vec![press(physical::ESCAPE, "escape"), text(&character.to_string())]);
+                    return Ok(vec![
+                        press(physical::ESCAPE, "escape"),
+                        text(&character.to_string()),
+                    ]);
                 }
             }
             return Err(UnknownKey);

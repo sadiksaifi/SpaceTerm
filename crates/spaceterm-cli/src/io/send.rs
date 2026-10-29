@@ -8,8 +8,8 @@ use super::keys;
 use super::{Deadline, Done, PaneTarget, controlled, link_failure, session_failure};
 use crate::args::SendArgs;
 use crate::contract::{
-    Code, ControlledReason, Delivery, Details, Failure, PaneSend, SessionStateName, UsageDetails,
-    UsageKind, from_server_error,
+    Code, ControlledReason, Delivery, Details, Failure, PaneRelease, PaneSend, SessionStateName,
+    UsageDetails, UsageKind, from_server_error,
 };
 use spaceterm_server::connection::link::ServerLink;
 use spaceterm_server::pane::{AttachmentClaim, FocusTarget, PasteOutcome};
@@ -86,7 +86,9 @@ pub(crate) fn claim_running(
         Claimed::Takeover(takeover) if takeover.session_ended.is_some() => {
             Err(session_failure(Code::SessionEnded, SessionStateName::Ended))
         }
-        Claimed::Takeover(_) if !take_over => Err(controlled(ControlledReason::Other)),
+        Claimed::Takeover(takeover) if !take_over && !channel::own_grant(&takeover) => {
+            Err(controlled(ControlledReason::Other))
+        }
         // A claim that did not attach closed its channel; Take Over uses a new one.
         Claimed::Takeover(takeover) => {
             let channel = Channel::open(link)?;
@@ -237,5 +239,58 @@ fn unconfirmed_or(failure: Failure) -> Failure {
         Failure::new(Code::InputUnconfirmed)
     } else {
         failure
+    }
+}
+
+/// `pane release`: gives up this identity's control of the Pane. It never takes over. A Pane
+/// another client controls stays as it is, and so does an unclaimed one: both report
+/// `released: false`.
+pub fn release(link: &ServerLink, target: &PaneTarget, deadline: Deadline) -> Done<PaneRelease> {
+    let deadline = deadline.or(DEFAULT_TIMEOUT);
+    let released = |released| PaneRelease {
+        target: target.steps.clone(),
+        released,
+    };
+    let release = |channel: Channel| {
+        let result = super::request(
+            link,
+            spaceterm_server::protocol::Operation::Release {
+                channel: channel.number(),
+            },
+            deadline,
+        );
+        // The released channel is closed; dropping it sends nothing more.
+        channel.keep();
+        result.map(|_| ())
+    };
+    let channel = match Channel::open(link) {
+        Ok(channel) => channel,
+        Err(failure) => return Done::failed(failure),
+    };
+    let claim = AttachmentClaim::Select { explicit: false };
+    let outcome = match channel.claim(target, claim, None, deadline) {
+        // A new attachment attaches at once only to an unclaimed Pane. Give it back.
+        Ok(Claimed::Attached(_)) => release(channel).map(|()| false),
+        // This identity's own grant is offered as Take Over; resuming it takes nothing.
+        Ok(Claimed::Takeover(takeover)) if channel::own_grant(&takeover) => {
+            let channel = match Channel::open(link) {
+                Ok(channel) => channel,
+                Err(failure) => return Done::failed(failure),
+            };
+            let claim = AttachmentClaim::TakeOver {
+                target: takeover.target,
+            };
+            match channel.claim(target, claim, None, deadline) {
+                Ok(Claimed::Attached(_)) => release(channel).map(|()| true),
+                Ok(_) => Ok(false),
+                Err(failure) => Err(failure),
+            }
+        }
+        Ok(_) => Ok(false),
+        Err(failure) => Err(failure),
+    };
+    match outcome {
+        Ok(done) => Done::ok(released(done), Vec::new()),
+        Err(failure) => Done::failed(failure),
     }
 }

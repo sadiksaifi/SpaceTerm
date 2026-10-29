@@ -29,7 +29,8 @@ pub struct PaneTarget {
     pub server: Id,
     pub workspace: Id,
     pub pane: Id,
-    /// Whether the inventory showed a running Terminal Session.
+    /// Whether a Terminal Session runs in the Pane, as `list` reports it. `pane run` reports
+    /// `started_shell` when it did not.
     pub running: bool,
     /// How targeting reached the Pane, for `data.target`.
     pub steps: Vec<TargetStep>,
@@ -132,7 +133,10 @@ pub(crate) fn session_failure(code: Code, state: SessionStateName) -> Failure {
 }
 
 pub(crate) fn controlled(reason: ControlledReason) -> Failure {
-    Failure::with(Code::Controlled, Details::Controlled(ControlledDetails { reason }))
+    Failure::with(
+        Code::Controlled,
+        Details::Controlled(ControlledDetails { reason }),
+    )
 }
 
 /// Sends one request and waits for its reply until `deadline`.

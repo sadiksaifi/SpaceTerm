@@ -492,6 +492,9 @@ pub(crate) struct MetadataTracker {
     progress_expiry: Option<Instant>,
     title_animation: TitleActivity,
     owned_prompt: OwnedPrompt,
+    /// Input written while the owning shell's command ran. The command may not read it, so
+    /// the next prompt's line editor may: the fresh prompt carries it.
+    typeahead: u64,
     run: Option<RunFollower>,
 }
 
@@ -548,6 +551,7 @@ impl MetadataTracker {
             progress_expiry: None,
             title_animation: TitleActivity::default(),
             owned_prompt: OwnedPrompt::default(),
+            typeahead: 0,
             run: None,
         }
     }
@@ -558,7 +562,12 @@ impl MetadataTracker {
 
     /// Counts input written to the PTY, so a run never pastes into a line someone typed.
     pub(crate) fn note_input(&mut self, bytes: usize) {
-        self.owned_prompt.input_bytes = self.owned_prompt.input_bytes.saturating_add(bytes as u64);
+        let counter = if self.owned_prompt.zone == Some(PromptZone::CommandOutput) {
+            &mut self.typeahead
+        } else {
+            &mut self.owned_prompt.input_bytes
+        };
+        *counter = counter.saturating_add(bytes as u64);
     }
 
     /// Records the markers a run admitted now follows, replacing those of an earlier run.
@@ -769,7 +778,7 @@ impl MetadataTracker {
                 if !fresh {
                     return;
                 }
-                self.owned_prompt.input_bytes = 0;
+                self.owned_prompt.input_bytes = std::mem::take(&mut self.typeahead);
                 Marker::PromptStart
             }
             ("B" | "I", _) => {
@@ -1582,6 +1591,99 @@ mod tests {
         tracker.apply_semantic_prompt("D;0", epoch);
 
         assert_eq!(&*tracker.snapshot().repository_directory, "/elsewhere");
+    }
+
+    /// A fresh prompt follows the owning shell's directory report; a redraw does not.
+    fn fresh_prompt(tracker: &mut MetadataTracker, now: Instant) {
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", now);
+    }
+
+    #[test]
+    fn only_a_fresh_owned_prompt_empties_the_input_line() {
+        let now = Instant::now();
+        let mut tracker = owned_local_tracker(now);
+        assert_eq!(tracker.owned_prompt().zone, None);
+        tracker.apply_semantic_prompt("A", now);
+        assert_eq!(
+            tracker.owned_prompt().zone,
+            None,
+            "an unowned prompt is not the shell's"
+        );
+
+        fresh_prompt(&mut tracker, now);
+        tracker.apply_semantic_prompt("B", now);
+        assert_eq!(
+            tracker.owned_prompt(),
+            OwnedPrompt {
+                zone: Some(PromptZone::CommandInput),
+                input_bytes: 0
+            }
+        );
+        tracker.note_input(2);
+        // A redraw, as zsh prints on resize, keeps what was typed.
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 2);
+        fresh_prompt(&mut tracker, now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 0);
+
+        // Input written while a command runs may reach the next prompt's line editor.
+        tracker.apply_semantic_prompt("C;spaceterm=0f1e", now);
+        assert_eq!(tracker.owned_prompt().zone, Some(PromptZone::CommandOutput));
+        tracker.note_input(3);
+        tracker.apply_semantic_prompt("D;0;spaceterm=0f1e", now);
+        fresh_prompt(&mut tracker, now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 3);
+        fresh_prompt(&mut tracker, now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 0);
+    }
+
+    #[test]
+    fn a_followed_run_records_owned_markers_until_its_finish() {
+        use spaceterm_server::pane::run::Marker;
+        let now = Instant::now();
+        let mut tracker = owned_local_tracker(now);
+        fresh_prompt(&mut tracker, now);
+        tracker.apply_semantic_prompt("C", now);
+        assert!(
+            tracker.take_run_markers().is_empty(),
+            "nothing is followed before a run"
+        );
+
+        fresh_prompt(&mut tracker, now);
+        tracker.follow_run();
+        tracker.apply_semantic_prompt("B", now);
+        tracker.apply_semantic_prompt("C;cmdline=echo%20a;spaceterm=0f1e", now);
+        tracker.apply_semantic_prompt("D;0", now);
+        tracker.apply_semantic_prompt("D;7;spaceterm=0f1e", now);
+        fresh_prompt(&mut tracker, now);
+        let markers: Vec<_> = tracker
+            .take_run_markers()
+            .into_iter()
+            .map(|marker| (marker.marker, marker.finished_commands))
+            .collect();
+        assert_eq!(
+            markers,
+            [
+                (
+                    Marker::CommandStart {
+                        cmdline: Some("echo a".into())
+                    },
+                    1
+                ),
+                (Marker::Unowned, 2),
+                (
+                    Marker::CommandFinished {
+                        exit_status: Some(7)
+                    },
+                    2
+                ),
+            ]
+        );
+        assert!(
+            tracker.take_run_markers().is_empty(),
+            "recording stopped at the finish"
+        );
     }
 
     #[test]

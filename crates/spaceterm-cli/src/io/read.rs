@@ -50,6 +50,9 @@ pub(crate) struct Snapshot {
     pub(crate) screen: Screen,
 }
 
+/// A page's first row, and each row's text and whether it soft-wraps.
+pub(crate) type PageRows = (u64, Vec<(String, bool)>);
+
 /// Where a capture reads from.
 pub(crate) trait Source {
     /// The current history and screen, frozen together.
@@ -62,7 +65,7 @@ pub(crate) trait Source {
         start: u64,
         rows: u16,
         format: Format,
-    ) -> Result<Option<(u64, Vec<(String, bool)>)>, Failure>;
+    ) -> Result<Option<PageRows>, Failure>;
 }
 
 /// What a capture read.
@@ -164,7 +167,6 @@ pub(crate) fn capture(
 
 /// Reads rows `start..end` in pages. Returns the first row read, the rows, and how many rows
 /// the server discarded while reading. `None` when the epoch ended.
-#[allow(clippy::type_complexity, reason = "one private reader")]
 fn read_rows(
     source: &mut impl Source,
     epoch: u64,
@@ -259,10 +261,11 @@ impl Source for Live<'_> {
             history: screen.history,
             screen: Screen {
                 rows: screen.render(format),
-                cursor: screen.cursor.map_or(
-                    CursorPosition { row: 0, column: 0 },
-                    |(row, column)| CursorPosition { row, column },
-                ),
+                cursor: screen
+                    .cursor
+                    .map_or(CursorPosition { row: 0, column: 0 }, |(row, column)| {
+                        CursorPosition { row, column }
+                    }),
                 size: ScreenSize {
                     columns: screen.columns,
                     rows: u16::try_from(screen.rows.len()).unwrap_or(u16::MAX),
@@ -278,7 +281,7 @@ impl Source for Live<'_> {
         start: u64,
         rows: u16,
         format: Format,
-    ) -> Result<Option<(u64, Vec<(String, bool)>)>, Failure> {
+    ) -> Result<Option<PageRows>, Failure> {
         let pending = self
             .channel
             .link()
@@ -588,10 +591,7 @@ fn await_condition(
             }
         } else {
             if history.total > scanned {
-                let mut source = Live {
-                    channel,
-                    deadline,
-                };
+                let mut source = Live { channel, deadline };
                 match read_rows(&mut source, history.epoch, scanned, history.total, format)? {
                     Some((first, rows, _)) => {
                         coalesced |= first > scanned;
@@ -631,7 +631,7 @@ fn await_condition(
         };
         match channel.next(wake)? {
             None if deadline.passed() => return Err(deadline.timeout()),
-            None | Some(Event::Frame { .. } | Event::Progress { .. }) => {}
+            None | Some(Event::Frame | Event::Progress) => {}
             Some(Event::Ended(_)) => return Err(Failure::new(Code::SessionChanged)),
             Some(Event::Closed(error)) => return Err(link_failure(error)),
             Some(_) => {}
