@@ -1129,6 +1129,12 @@ impl SharedWorkspaceHost {
     }
 }
 impl HostCommands for SharedWorkspaceHost {
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.panes
+            .values()
+            .filter_map(DevelopmentPaneHost::live_session)
+            .collect()
+    }
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
         self.retain_in(Box::new(store))
     }

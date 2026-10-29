@@ -610,7 +610,8 @@ mod tests {
                 &mut server,
                 &[7; 32],
                 "spaceterm-development",
-                Some([9; 32]),
+                Some(([9; 32], [8; 32])),
+                None,
             )
         });
         let name: ClientName = "Build Mac CLI agent-1".into();

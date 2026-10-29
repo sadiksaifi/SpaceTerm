@@ -105,6 +105,11 @@ pub trait PaneService: Send {
     }
     fn disconnected(&mut self, peer: &Peer);
     fn shutdown(&mut self) -> Result<(), ServerError>;
+    /// The live Terminal Sessions, which a Stop, Restart or Update ends. Reading them changes
+    /// nothing.
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
 }
 
 /// The host's direct-network administration, answering `Operation::Direct`. It runs on the sync

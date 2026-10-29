@@ -214,6 +214,7 @@ struct Local {
     server: [u8; 32],
     client: [u8; 32],
     name: crate::pane::control::ClientName,
+    agent: Option<crate::protocol::AgentName>,
 }
 
 impl Connector for Local {
@@ -224,7 +225,11 @@ impl Connector for Local {
         let mut stream = crate::host::connect(&self.paths)?;
         crate::protocol::admit_service_lane(
             &mut stream,
-            (&self.client, &self.name),
+            crate::protocol::Caller {
+                client: &self.client,
+                name: &self.name,
+                agent: self.agent.as_ref(),
+            },
             &self.server,
             &self.paths.identity,
         )?;
@@ -254,6 +259,7 @@ impl Lane {
                 server,
                 client,
                 name,
+                agent: None,
             }),
         })
     }

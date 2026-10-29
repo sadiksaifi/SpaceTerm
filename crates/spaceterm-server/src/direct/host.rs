@@ -1330,7 +1330,7 @@ pub(crate) fn serve(
         agent,
         name,
         ..
-    } = crate::protocol::admit_direct_server(&mut stream, &paired)?;
+    } = crate::protocol::admit_direct_server(&mut stream, &paired, environment.lane.as_ref())?;
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();

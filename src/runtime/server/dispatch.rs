@@ -270,6 +270,9 @@ impl DevelopmentPaneHost {
     }
 }
 impl HostCommands for DevelopmentPaneHost {
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.live_session().into_iter().collect()
+    }
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
         self.organization = store.read()?;
         self.store = Some(store);
@@ -420,6 +423,10 @@ pub trait HostCommands: Send {
     }
     /// The host is stopping; refuse every deferred reply still owed. See `PaneService::stopping`.
     fn stopping(&mut self) {}
+    /// The live Terminal Sessions. See `PaneService::sessions`.
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
     /// Records the Client Name an admitted client supplied, before any of its requests.
     fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
     /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
@@ -1274,6 +1281,9 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
         self.host.shutdown()
+    }
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.host.sessions()
     }
 }
 
