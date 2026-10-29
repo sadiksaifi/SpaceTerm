@@ -137,6 +137,9 @@ pub(crate) trait Preamble {
     fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), ServerError>;
     /// One frame of at most `max` bytes, without its length prefix.
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, ServerError>;
+    /// Admission proved the peer, so the transport may now hold frames as large as the
+    /// service lane's. A transport without its own flow control needs nothing.
+    fn admitted(&mut self) {}
 }
 
 /// Prefixes `bytes` with their length, the admission framing on every transport.
@@ -313,6 +316,7 @@ fn admit_server_transport(
     if hello.lane == Lane::Service {
         // The lane consumes the connection. The error tells the caller not to serve it further.
         let lane = lane.ok_or(ServerError::Unsupported)?;
+        stream.admitted();
         lane.serve(
             stream,
             crate::service::operations::Actor {
@@ -388,6 +392,7 @@ pub(crate) fn admit_service_lane(
     if offer.build != build || offer.server != *server || offer.client != caller.effective() {
         return Err(ServerError::AuthenticationRefused);
     }
+    stream.admitted();
     Ok(offer.server_major)
 }
 

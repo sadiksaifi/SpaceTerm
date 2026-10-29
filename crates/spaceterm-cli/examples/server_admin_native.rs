@@ -543,10 +543,13 @@ fn stop(options: &Options) -> Result<String> {
     options
         .machine_cli(&["server", "start"])?
         .expect(0, "local start")?;
-    options.await_running()?;
-    if !local {
-        let status = options.cli(&["server", "status"])?.expect(0, "status")?;
-        let settled = status.envelope["data"]["recovered_operations"]
+    // The first lane connection after the Start settles the Stop, so every status read while
+    // waiting for the server is checked.
+    let deadline = Instant::now() + RETURN;
+    let mut settled = local;
+    loop {
+        let ran = options.cli(&["server", "status"])?;
+        settled |= ran.envelope["data"]["recovered_operations"]
             .as_array()
             .is_some_and(|items| {
                 items.iter().any(|item| {
@@ -555,9 +558,16 @@ fn stop(options: &Options) -> Result<String> {
                         && item["outcome"]["state"] == "applied"
                 })
             });
-        if !settled {
-            return Err("the next lane connection did not settle the Stop".into());
+        if ran.exit == 0 && ran.envelope["data"]["running"] == true {
+            break;
         }
+        if Instant::now() >= deadline {
+            return Err("the server did not return".into());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    if !settled {
+        return Err("the next lane connection did not settle the Stop".into());
     }
     Ok("shutdown, then a local Start and a settled receipt".into())
 }
