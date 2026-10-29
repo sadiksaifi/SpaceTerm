@@ -65,6 +65,8 @@ pub struct SharedWorkspaceHost {
     repositories: super::repositories::ServerRepositories,
     state: State,
     panes: BTreeMap<Id, DevelopmentPaneHost>,
+    /// Distinct observer clients of each running Terminal Session, never retained.
+    observers: BTreeMap<Id, super::Observers>,
     /// Pane identities introduced in this server run, independent of their control grants.
     fresh_panes: BTreeSet<Id>,
     /// Retains organization off the lock. Absent until [`HostCommands::restore`].
@@ -148,6 +150,7 @@ impl SharedWorkspaceHost {
             repositories,
             state,
             panes: BTreeMap::new(),
+            observers: BTreeMap::new(),
             fresh_panes: BTreeSet::new(),
             journal: None,
             sync,
@@ -378,6 +381,37 @@ impl SharedWorkspaceHost {
     }
     fn inventory(&self) -> Inventory {
         let mut inventory = self.state.inventory.clone();
+        let names = self
+            .prototype
+            .names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for pane in inventory
+            .workspaces
+            .iter_mut()
+            .flat_map(|w| &mut w.tabs)
+            .flat_map(|t| &mut t.panes)
+        {
+            let observers = self
+                .panes
+                .get(&pane.id)
+                .and_then(|host| host.pane.as_ref())
+                .and_then(|live| self.observers.get(&live.lease.session));
+            pane.observers = observers.map_or_else(Default::default, |observers| {
+                let shown = observers
+                    .clients
+                    .iter()
+                    .take(spaceterm_server::hierarchy::MAX_OBSERVER_NAMES)
+                    .map(|client| names.name(*client))
+                    .collect::<Vec<_>>();
+                spaceterm_server::hierarchy::PaneObservers {
+                    others: u32::try_from(observers.clients.len() - shown.len())
+                        .unwrap_or(u32::MAX),
+                    names: shown,
+                }
+            });
+        }
+        drop(names);
         let sessions = inventory
             .workspaces
             .iter()
@@ -1425,6 +1459,8 @@ impl HostCommands for SharedWorkspaceHost {
             .observer_scrollback_page(session, read, reply)
     }
     fn observers(&mut self, observers: &BTreeMap<Id, super::Observers>) {
+        let changed = self.observers != *observers;
+        self.observers.clone_from(observers);
         for host in self.panes.values_mut() {
             if let Some(session) = host.pane.as_ref().map(|pane| pane.lease.session) {
                 host.set_observed(
@@ -1434,6 +1470,9 @@ impl HostCommands for SharedWorkspaceHost {
                         .is_some_and(|observers| observers.visible),
                 );
             }
+        }
+        if changed {
+            self.publish();
         }
     }
     fn take_settled_runs(&mut self) -> Vec<spaceterm_server::pane::run::Settled> {

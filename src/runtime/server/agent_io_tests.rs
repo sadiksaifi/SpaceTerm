@@ -919,6 +919,146 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
     served.shutdown().unwrap();
 }
 
+/// Observer names are pushed with inventory without changing control or retaining presence.
+#[test]
+fn observing_publishes_names_and_clears_them_on_release_and_disconnect() {
+    fn published(client: &Client) -> serde_json::Value {
+        let mut assembler = Assembler::default();
+        let mut inventory = None;
+        while let Some((frame, _)) = client.outbox.next_frame() {
+            let frame = protocol::RawFrame::parse(&frame).unwrap();
+            if let Some(ServerMessage::Inventory(revision)) = assembler.server(frame).unwrap() {
+                inventory = Some(serde_json::to_value(revision.inventory).unwrap());
+            }
+        }
+        inventory.expect("observer changes push inventory at once")["workspaces"][0]["tabs"][0]
+            ["panes"][0]["observers"].clone()
+    }
+    let mut shared = SharedWorkspaceHost::new(super::tests::host());
+    let workspace = create_shared(&mut shared, 1);
+    let pane = shared_inventory(&mut shared).workspaces[0].tabs[0].root_pane;
+    let mut served = Served::new(shared);
+    let person = Client::admit(&mut served, CONTROLLER, "Desktop");
+    let agent = Client::admit(&mut served, OBSERVER, "Build CLI");
+    assert!(matches!(
+        person.reply(
+            &mut served,
+            Operation::Claim(protocol::Claim {
+                channel: CHANNEL,
+                attachment: Attachment {
+                    workspace,
+                    generation: 1
+                },
+                pane,
+                claim: AttachmentClaim::Select { explicit: true },
+                size: Some(size()),
+                style: None,
+            })
+        ),
+        Ok(ReplyBody::Claim(ClaimReply::Attached { .. }))
+    ));
+    assert_eq!(
+        published(&person),
+        serde_json::json!({"names": [], "others": 0})
+    );
+    for channel in [Channel(2), Channel(3)] {
+        assert!(matches!(
+            agent.reply(
+                &mut served,
+                Operation::Observe {
+                    channel,
+                    pane,
+                    session: None,
+                }
+            ),
+            Ok(ReplyBody::Observe(protocol::ObserveReply::Observing { .. }))
+        ));
+        if channel == Channel(2) {
+            assert_eq!(
+                published(&person),
+                serde_json::json!({"names": ["Build CLI"], "others": 0})
+            );
+        }
+    }
+    agent
+        .reply(
+            &mut served,
+            Operation::Release {
+                channel: Channel(2),
+            },
+        )
+        .unwrap();
+    // One Client Identity with two channels is still one observer.
+    agent
+        .reply(
+            &mut served,
+            Operation::Release {
+                channel: Channel(3),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        published(&person),
+        serde_json::json!({"names": [], "others": 0})
+    );
+    agent
+        .reply(
+            &mut served,
+            Operation::Observe {
+                channel: Channel(4),
+                pane,
+                session: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        published(&person),
+        serde_json::json!({"names": ["Build CLI"], "others": 0})
+    );
+    served.disconnected(&OBSERVER);
+    assert_eq!(
+        published(&person),
+        serde_json::json!({"names": [], "others": 0})
+    );
+    let mut clients = Vec::new();
+    for id in 3..=7 {
+        let client = Client::admit(
+            &mut served,
+            Peer {
+                client: [id; 32],
+                connection: [id + 10; 32],
+                pairing: None,
+            },
+            &format!("Agent {id}"),
+        );
+        client
+            .reply(
+                &mut served,
+                Operation::Observe {
+                    channel: CHANNEL,
+                    pane,
+                    session: None,
+                },
+            )
+            .unwrap();
+        clients.push(client);
+    }
+    assert_eq!(
+        published(&person),
+        serde_json::json!({
+            "names": ["Agent 3", "Agent 4", "Agent 5"], "others": 2,
+        })
+    );
+    for client in clients {
+        served.disconnected(&client.peer);
+    }
+    assert_eq!(
+        published(&person),
+        serde_json::json!({"names": [], "others": 0})
+    );
+    served.shutdown().unwrap();
+}
+
 /// Each key name `pane send --key` accepts decodes to the terminal's own key.
 #[test]
 fn named_keys_decode_to_the_terminals_own_keys() {
