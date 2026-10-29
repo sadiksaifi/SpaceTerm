@@ -115,7 +115,7 @@ pub struct ServerConnection {
     computer: std::sync::Arc<dyn crate::computer_name::ComputerName>,
     direct: Option<std::sync::Arc<DirectRoute>>,
     /// Present for a CLI handle, which keeps its state under `clients/cli`.
-    cli: Option<CliIdentity>,
+    cli: Option<Arc<CliIdentity>>,
     shared: std::sync::Arc<SharedLink>,
     client_cache: std::sync::Arc<ClientCache>,
 }
@@ -184,6 +184,18 @@ impl ServerConnection {
             .get()
             .cloned()
             .ok_or(ServerError::AuthenticationRefused)
+    }
+
+    /// The server ID this handle admitted to, or bound to at construction for a paired route.
+    /// It is a nonsecret fence.
+    pub fn admitted_server_id(&self) -> Result<[u8; 32], ServerError> {
+        self.client_scope().map(|scope| scope.server)
+    }
+
+    /// The Client Identity the server admitted this handle as: for a CLI agent, the one derived
+    /// from the base identity. It is a nonsecret fence that grants nothing.
+    pub fn admitted_client_id(&self) -> Result<[u8; 32], ServerError> {
+        self.client_scope().map(|scope| scope.client)
     }
 
     fn scope_for(&self, client: [u8; 32], server: [u8; 32]) -> ClientScope {
@@ -439,13 +451,20 @@ impl ServerConnection {
         route: CliRoute,
         agent: Option<crate::protocol::AgentName>,
     ) -> Result<Self, ServerError> {
-        let mut handle = Self::for_identity(identity)?;
+        Self::for_identity(identity)?.into_cli(route, agent)
+    }
+    fn into_cli(
+        self,
+        route: CliRoute,
+        agent: Option<crate::protocol::AgentName>,
+    ) -> Result<Self, ServerError> {
+        let mut handle = self;
         handle.development = None;
         match route {
             CliRoute::Local => {
                 let cli = CliIdentity::new(None, agent);
                 handle.account = cli.account();
-                handle.cli = Some(cli);
+                handle.cli = Some(Arc::new(cli));
                 Ok(handle)
             }
             CliRoute::Paired {
@@ -453,7 +472,7 @@ impl ServerConnection {
                 paired,
                 connector,
             } => {
-                handle.cli = Some(CliIdentity::new(Some(&route), agent));
+                handle.cli = Some(Arc::new(CliIdentity::new(Some(&route), agent)));
                 handle.with_direct(route, paired, connector)
             }
         }
@@ -847,6 +866,68 @@ fn development_account(name: &str) -> Result<String, ServerError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A CLI agent keeps its state under `clients/cli`, presents its route's base identity, and
+    /// is admitted as the identity the server derives from it.
+    #[test]
+    fn a_cli_agent_is_admitted_as_its_derived_identity_and_stays_in_the_cli_namespace() {
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-cli-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        };
+        let server_id = Directory::open(&paths.data, true)
+            .unwrap()
+            .read_or_create()
+            .unwrap()
+            .server;
+        let agent: protocol::AgentName = "agent-1".parse().unwrap();
+        let base = ServerConnection::with_paths(paths.clone())
+            .unwrap()
+            .into_cli(CliRoute::Local, None)
+            .unwrap();
+        let handle = ServerConnection::with_paths(paths.clone())
+            .unwrap()
+            .into_cli(CliRoute::Local, Some(agent.clone()))
+            .unwrap();
+        let base_id = base.client_id().unwrap();
+        assert_eq!(handle.client_id().unwrap(), agent.client(&base_id));
+        assert!(handle.client_name().as_str().ends_with(" CLI agent-1"));
+        Directory::open(&paths.runtime, true).unwrap();
+        let listener = UnixListener::bind(paths.socket()).unwrap();
+        std::fs::set_permissions(paths.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let identity = paths.identity.clone();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            protocol::admit_server(&mut stream, &server_id, &identity).unwrap()
+        });
+        let link = handle.connect(Arc::new(|_: LinkEvent| {})).unwrap();
+        let admitted = peer.join().unwrap();
+        assert_eq!(admitted.client, agent.client(&base_id));
+        assert_eq!(admitted.agent, Some(agent));
+        assert_eq!(handle.admitted_client_id().unwrap(), admitted.client);
+        assert_eq!(handle.admitted_server_id().unwrap(), server_id);
+        link.close();
+        let clients = paths.data.join("clients");
+        assert!(clients.join("cli/routes/local/base/client.json").is_file());
+        assert!(clients.join("cli/routes/local/agents/agent-1").is_dir());
+        assert!(
+            !clients
+                .join("cli/routes/local/agents/agent-1/client.json")
+                .exists()
+        );
+        assert!(
+            !clients.join("desktop").exists(),
+            "the CLI never touches the desktop's state"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn local_status_admits_major_two_and_binds_the_scope_without_an_operation() {

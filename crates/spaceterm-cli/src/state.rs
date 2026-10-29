@@ -403,7 +403,7 @@ mod tests {
         let mut runs = state
             .runs(&RouteKey::Local, Some(&agent), Instant::now())
             .unwrap();
-        assert_eq!(runs.pending(), [run.clone()]);
+        assert_eq!(runs.pending(), std::slice::from_ref(&run));
         runs.remove(run.run).unwrap();
         drop(runs);
         assert!(state.held(&RouteKey::Local).unwrap().is_empty());

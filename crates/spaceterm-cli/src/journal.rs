@@ -1,11 +1,20 @@
 //! Workspace edits and their leftovers (section 9.2 and 9.3 of the CLI spec).
 //!
-//! [`mutate`] runs one edit under the identity's writer lock: it records the edit with the
-//! sequence the server allocated, dispatches it, waits for its outcome, retires it and
-//! acknowledges it. The acknowledgement is confirmed before the journal forgets the outcome, so
-//! an identity this CLI stops using never keeps an entry in the server's shared outcome table.
+//! A mutating command opens an [`Editor`]. It takes the identity's writer lock once, settles
+//! leftovers, and then runs each edit under that lock: it records the edit with the sequence the
+//! server allocated, dispatches it, waits for its outcome, retires it and acknowledges it. The
+//! acknowledgement is confirmed before the journal forgets the outcome, so an identity this CLI
+//! stops using never keeps an entry in the server's shared outcome table.
 //!
-//! [`settle`] runs after admission and before a command's own work. It resolves what an earlier
+//! ```ignore
+//! let mut editor = Editor::open(&state, RouteKey::Local, agent.as_ref(), &connection, &link,
+//!     &mut |agent| ServerConnection::for_cli(identity, CliRoute::Local, agent.cloned()), deadline)?;
+//! let applied = editor.mutate(Mutation::CreateTab { workspace, source, control }, deadline)?;
+//! // applied.target is the new Tab; editor.recovered() fills data.recovered_operations.
+//! ```
+//!
+//! A passive command calls [`settle`] instead. It runs after admission and before a command's
+//! own work. It resolves what an earlier
 //! command of any identity on the same route left behind: an edit whose reply was lost, an
 //! outcome whose acknowledgement may not have arrived, and run receipts. Nothing is dispatched
 //! again: a pending edit is only resolved, and a run only asked about.
@@ -21,12 +30,89 @@ use spaceterm_server::protocol::{AgentName, Operation, ReplyBody, RunReply, RunS
 use spaceterm_server::{ServerConnection, ServerError};
 use std::time::Instant;
 
-/// Runs `mutation` as this identity's next edit and returns its validated outcome. The caller
-/// maps the outcome with [`from_outcome`].
-///
-/// A reply that does not arrive by `deadline` leaves the edit in the journal and fails with
-/// `outcome_unconfirmed`. The next command of any identity on this route resolves it.
-pub fn mutate(
+/// One identity's Workspace edits on one server. It holds the identity's writer lock from
+/// before settlement until it drops, so every sequence it allocates is retired and acknowledged
+/// under that one lock.
+pub struct Editor<'a> {
+    connection: &'a ServerConnection,
+    link: &'a ServerLink,
+    writer: WriterGuard,
+    recovered: Vec<RecoveredOperation>,
+}
+
+/// An edit the server accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Applied {
+    /// What the edit created or changed, as `Outcome::Accepted` names it.
+    pub target: spaceterm_server::hierarchy::Id,
+    pub outcome: RetainedOutcome,
+}
+
+impl<'a> Editor<'a> {
+    /// Takes the writer lock of `agent`, or of the base identity, on `route`, waiting until
+    /// `deadline` before it fails with `identity_busy`. Then settles the leftovers of every
+    /// identity this CLI holds on `route`: `connection` and `link` serve this identity, and
+    /// `connect` opens a handle for each other one.
+    pub fn open(
+        state: &CliState,
+        route: RouteKey,
+        agent: Option<&AgentName>,
+        connection: &'a ServerConnection,
+        link: &'a ServerLink,
+        connect: &mut dyn FnMut(Option<&AgentName>) -> Result<ServerConnection, ServerError>,
+        deadline: Instant,
+    ) -> Result<Self, Failure> {
+        let mut writer = state
+            .writer(&route, agent, deadline)
+            .map_err(Failure::new)?;
+        let recovered = settle(
+            state,
+            &route,
+            Current {
+                agent,
+                connection,
+                link,
+                writer: Some(&mut writer),
+            },
+            connect,
+            deadline,
+        )?;
+        Ok(Self {
+            connection,
+            link,
+            writer,
+            recovered,
+        })
+    }
+
+    /// What settlement resolved, for `data.recovered_operations` and [`recovered_warning`].
+    pub fn recovered(&self) -> &[RecoveredOperation] {
+        &self.recovered
+    }
+
+    /// Runs `mutation` as this identity's next edit. An outcome other than `Accepted` maps
+    /// through [`from_outcome`], so `Conflict` is `conflict` and a Worktree failure its own code.
+    ///
+    /// A reply that does not arrive by `deadline` leaves the edit in the journal and fails with
+    /// `outcome_unconfirmed`. The next command of any identity on this route resolves it.
+    pub fn mutate(&mut self, mutation: Mutation, deadline: Instant) -> Result<Applied, Failure> {
+        let outcome = dispatch(
+            &mut self.writer,
+            self.connection,
+            self.link,
+            mutation,
+            deadline,
+        )?;
+        from_outcome(&outcome.outcome)?;
+        let Outcome::Accepted { target } = outcome.outcome else {
+            return Err(Failure::new(Code::OutcomeUnconfirmed));
+        };
+        Ok(Applied { target, outcome })
+    }
+}
+
+/// Runs `mutation` as this identity's next edit and returns its validated outcome.
+fn dispatch(
     writer: &mut WriterGuard,
     connection: &ServerConnection,
     link: &ServerLink,
@@ -53,7 +139,7 @@ pub fn mutate(
             // A refused edit may still have been recorded before an uncertain write. Only the
             // recorded outcome, or its absence, decides.
             return match resolve(journal, link, sequence, deadline)? {
-                Resolved::Outcome(outcome) => Ok(outcome),
+                Resolved::Outcome(outcome) => Ok(*outcome),
                 Resolved::Missing => Err(from_server_error(refusal.into())),
                 Resolved::Unknown => Err(Failure::new(Code::OutcomeUnconfirmed)),
             };
@@ -65,7 +151,7 @@ pub fn mutate(
 
 /// What the server recorded for a pending sequence.
 enum Resolved {
-    Outcome(RetainedOutcome),
+    Outcome(Box<RetainedOutcome>),
     /// The server recorded no such sequence, so it never applied it.
     Missing,
     /// The outcome waits for a Worktree write, or the server did not answer in time.
@@ -79,9 +165,9 @@ fn resolve(
     deadline: Instant,
 ) -> Result<Resolved, Failure> {
     match request(link, Operation::Resolve { sequence }, deadline) {
-        Some(Ok(ReplyBody::Outcome(outcome))) => {
-            Ok(Resolved::Outcome(finish(journal, link, outcome, deadline)?))
-        }
+        Some(Ok(ReplyBody::Outcome(outcome))) => Ok(Resolved::Outcome(Box::new(finish(
+            journal, link, outcome, deadline,
+        )?))),
         Some(Ok(_)) => Err(Failure::new(Code::ProtocolError)),
         Some(Err(Refusal::Missing)) => {
             journal.abandon().map_err(from_server_error)?;
@@ -144,8 +230,8 @@ fn request(
     }
 }
 
-/// The identity a command runs as, with its admitted link. A mutating command passes its
-/// writer, so settlement uses the lock it already holds.
+/// The identity a command runs as, with its admitted link. [`Editor::open`] passes its writer,
+/// so settlement uses the lock it already holds.
 pub struct Current<'a> {
     pub agent: Option<&'a AgentName>,
     pub connection: &'a ServerConnection,
