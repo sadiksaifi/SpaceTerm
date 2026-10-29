@@ -1141,7 +1141,7 @@ impl WorkspaceSidebar {
             // Every row holds a slot that grows it in, and draws the rows that left beside it,
             // each clipped to what showed of it, while their places close. Their faces take no
             // input and present no accessible element.
-            let departed = |rows: Vec<(&DepartedRow, Pixels)>| {
+            let departed = |rows: Vec<(Option<&DepartedRow>, Pixels)>| {
                 (!rows.is_empty()).then(|| {
                     div()
                         .w_full()
@@ -1153,15 +1153,17 @@ impl WorkspaceSidebar {
                                 .h(extent)
                                 .flex_shrink_0()
                                 .overflow_hidden()
-                                .child(self.render_group_row(
-                                    workspace_id,
-                                    departed.content(),
-                                    None,
-                                    sidebar.clone(),
-                                    window,
-                                    appearance,
-                                    cx,
-                                ))
+                                .children(departed.map(|departed| {
+                                    self.render_group_row(
+                                        workspace_id,
+                                        departed.content(),
+                                        None,
+                                        sidebar.clone(),
+                                        window,
+                                        appearance,
+                                        cx,
+                                    )
+                                }))
                         }))
                         .into_any_element()
                 })

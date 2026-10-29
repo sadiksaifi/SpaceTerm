@@ -175,3 +175,63 @@ fn removing_the_row_below_a_closing_gap_should_keep_both_rows_where_they_draw(
         "the rows that left must keep drawing where they drew"
     );
 }
+
+/// When time passes after the last frame and the row that carries a closing gap then leaves,
+/// the rows that left keep drawing where that frame drew them, so nothing jumps.
+#[gpui::test]
+fn removing_a_gaps_row_after_an_unpainted_moment_should_keep_the_rows_where_they_drew(
+    cx: &mut TestAppContext,
+) {
+    let (sidebar, cx) = sidebar(cx);
+    let rows = |ids: &[u64]| ids.iter().map(|id| worktree(*id, None)).collect::<Vec<_>>();
+    present(&sidebar, rows(&[1, 2, 3, 4]), cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    present(&sidebar, rows(&[1, 3, 4]), cx);
+    cx.executor().advance_clock(PRESENCE_DURATION / 8);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let (third, fourth) = (row(3, cx), row(4, cx));
+    cx.executor().advance_clock(PRESENCE_DURATION / 8);
+    present(&sidebar, rows(&[1, 4]), cx);
+    let leaving = closing(3, cx).expect("the row that left second must draw");
+
+    assert_eq!(
+        (leaving.top(), row(4, cx).top()),
+        (third.top(), fourth.top()),
+        "the rows must start from where the last frame drew them"
+    );
+}
+
+/// A row that returns while its old place still closes leaves that place empty, so a row that
+/// left after it, already clipped away, stays hidden.
+#[gpui::test]
+fn a_row_returning_into_a_closing_gap_should_keep_the_rows_after_it_hidden(
+    cx: &mut TestAppContext,
+) {
+    let (sidebar, cx) = sidebar(cx);
+    let rows = |ids: &[u64]| ids.iter().map(|id| worktree(*id, None)).collect::<Vec<_>>();
+    present(&sidebar, rows(&[1, 2, 3, 4]), cx);
+    finish_slides(cx);
+    let height = row(2, cx).size.height;
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    present(&sidebar, rows(&[1, 4]), cx);
+    cx.executor().advance_clock(PRESENCE_DURATION / 4);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let gap = row(4, cx).top() - row(1, cx).bottom();
+    present(&sidebar, rows(&[1, 2, 4]), cx);
+    let hidden = closing(3, cx);
+    let fourth = row(4, cx);
+
+    assert!(
+        gap < height,
+        "the gap must have closed past the first row for this test, got {gap:?}"
+    );
+    assert!(
+        hidden.is_none_or(|third| third.top() >= fourth.top()),
+        "the row that left second must stay clipped away, got {hidden:?} above {fourth:?}"
+    );
+}

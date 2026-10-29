@@ -860,13 +860,17 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         self.arrival = None;
         let now = now(cx);
         let motion = presence_motion(cx);
-        // An item that returns while its old place still closes draws only where it returns.
-        for gap in self
+        // An item that returns while its old place still closes draws only where it returns. Its
+        // old place stays empty, so what follows it in the gap keeps its position.
+        for leaving in self
             .leading_gaps
             .values_mut()
             .chain(self.trailing_gaps.values_mut())
+            .flat_map(|gap| gap.leaving.iter_mut())
         {
-            gap.leaving.retain(|leaving| !ids.contains(&leaving.id));
+            if leaving.id.is_some_and(|id| ids.contains(&id)) {
+                leaving.id = None;
+            }
         }
         for (position, id) in ids.iter().enumerate() {
             if known.contains(id) {
@@ -885,6 +889,9 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             .map(|position| items.bounds_for_item(position))
             .collect::<Option<Vec<_>>>()
             .filter(|bounds| bounds.len() == known.len());
+        // The bounds are the last frame's, so the gaps they hold, and what shows in them, are
+        // measured at that frame's time too.
+        let painted_at = self.refreshed_at.unwrap_or(now);
         // How many items this change already put before each carrier's older leading gap.
         let mut placed = HashMap::new();
         for (position, id) in known.iter().enumerate() {
@@ -900,22 +907,19 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 continue;
             };
             let extent = bounds[position].size.along(self.axis);
-            let painted = |gap: &Option<Gap<Id>>| {
-                self.refreshed_at
-                    .zip(gap.as_ref())
-                    .map_or(px(0.0), |(at, gap)| gap.at(at))
-            };
+            let painted =
+                |gap: &Option<Gap<Id>>| gap.as_ref().map_or(px(0.0), |gap| gap.at(painted_at));
             let face = (extent - painted(&lead) - painted(&trail)).max(px(0.0));
             let shown = |gap: Option<Gap<Id>>| {
                 gap.map_or_else(Vec::new, |gap| {
-                    let open = gap.at(now);
+                    let open = gap.at(painted_at);
                     shown_leaving(gap.leaving, open)
                 })
             };
             let leaving = shown(lead)
                 .into_iter()
                 .chain([Leaving {
-                    id: *id,
+                    id: Some(*id),
                     extent: face,
                 }])
                 .chain(shown(trail))
@@ -927,7 +931,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 (None, Some(previous)) => (self.trailing_gaps.remove(previous), *previous, false),
                 (None, None) => continue,
             };
-            let open = gap.as_ref().map_or(px(0.0), |gap| gap.at(now));
+            let open = gap.as_ref().map_or(px(0.0), |gap| gap.at(painted_at));
             let mut older = gap.map_or_else(Vec::new, |gap| shown_leaving(gap.leaving, open));
             // Items this change removes stand in order before an older leading gap, which is
             // nearer its carrier, and after an older trailing gap.
@@ -976,7 +980,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         self.leading_gaps
             .values()
             .chain(self.trailing_gaps.values())
-            .flat_map(|gap| gap.leaving.iter().map(|leaving| leaving.id))
+            .flat_map(|gap| gap.leaving.iter().filter_map(|leaving| leaving.id))
     }
 
     /// Lifts the item `id`, one of the strip's `ids` in presentation order. It keeps its place
@@ -1611,7 +1615,8 @@ struct Gap<Id> {
 /// it left, or what showed when the gap that held it joined another.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Leaving<Id> {
-    pub(crate) id: Id,
+    /// The item, or `None` once it returned to the strip, which leaves its place here empty.
+    pub(crate) id: Option<Id>,
     pub(crate) extent: Pixels,
 }
 

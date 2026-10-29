@@ -476,7 +476,8 @@ impl GroupMotion {
     }
 
     /// The rows that left from beside `row` and still draw in its closing gaps, before it and
-    /// after it, each with how much of it shows from its top.
+    /// after it, each with how much of it shows from its top. A place with no row to draw, as a
+    /// row that returned leaves, stays empty.
     #[expect(
         clippy::type_complexity,
         reason = "the rows on either side are the same list of departed rows and their extents"
@@ -484,14 +485,16 @@ impl GroupMotion {
     fn departed_beside(
         &self,
         row: GroupRow,
-    ) -> (Vec<(&DepartedRow, Pixels)>, Vec<(&DepartedRow, Pixels)>) {
+    ) -> (
+        Vec<(Option<&DepartedRow>, Pixels)>,
+        Vec<(Option<&DepartedRow>, Pixels)>,
+    ) {
         let (before, after) = self.rows.leaving_beside(row);
         let departed = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
             rows.iter()
-                .filter_map(|leaving| {
-                    self.departed
-                        .get(&leaving.id)
-                        .map(|departed| (departed, leaving.extent))
+                .map(|leaving| {
+                    let departed = leaving.id.and_then(|id| self.departed.get(&id));
+                    (departed, leaving.extent)
                 })
                 .collect::<Vec<_>>()
         };
