@@ -206,6 +206,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.sig",
             "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.sha256",
             "spaceterm-preflight/share/spaceterm/THIRD-PARTY-NOTICES.txt",
+            "spaceterm-preflight/share/spaceterm/shell-integration/elvish/rc.elv",
             "spaceterm-preflight/share/spaceterm/terminfo/x/xterm-spaceterm",
             f"spaceterm-preflight/share/applications/{identifier}.desktop",
             f"spaceterm-preflight/share/icons/hicolor/scalable/apps/{identifier}.svg",
@@ -215,6 +216,13 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         executable = members["spaceterm-preflight/bin/spaceterm-desktop"]
         self.assertEqual((executable.mode, executable.uid, executable.uname), (0o755, 0, ""))
         with tarfile.open(archive, "r:gz") as source:
+            rc = source.extractfile(
+                "spaceterm-preflight/share/spaceterm/shell-integration/elvish/rc.elv"
+            )
+            assert rc is not None
+            self.assertEqual(
+                rc.read(), (ROOT / "assets/shell-integration/elvish/rc.elv").read_bytes()
+            )
             packaged = source.extractfile(executable)
             assert packaged is not None
             self.assertEqual(packaged.read(), self.artifact.read_bytes())

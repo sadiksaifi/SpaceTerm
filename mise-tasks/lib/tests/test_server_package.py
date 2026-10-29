@@ -22,6 +22,21 @@ from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
 from tests.server_artifact_fixture import archive_tree
 
 
+class ResourcePolicyTests(unittest.TestCase):
+    def test_policy_matches_tracked_assets(self):
+        tracked = subprocess.run(
+            ["git", "ls-files", "assets/shell-integration", "assets/THIRD-PARTY-NOTICES.txt"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        self.assertCountEqual(
+            json.loads((ROOT / "packaging/server-resources.json").read_text()),
+            ["share/spaceterm/" + name.removeprefix("assets/") for name in tracked],
+        )
+
+
 class ServerArchiveTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
