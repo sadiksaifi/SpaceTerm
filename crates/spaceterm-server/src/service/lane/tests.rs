@@ -43,6 +43,7 @@ impl Supervisor for Running {
 struct Host {
     sessions: Mutex<Vec<Id>>,
     fenced: AtomicBool,
+    stopping: AtomicBool,
 }
 impl LaneHost for Host {
     fn fence(
@@ -56,6 +57,9 @@ impl LaneHost for Host {
     }
     fn release_fence(&self) {
         self.fenced.store(false, Ordering::SeqCst);
+    }
+    fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
     fn sessions(&self) -> Vec<Id> {
         self.sessions.lock().unwrap().clone()
@@ -562,6 +566,30 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
             &agent_actor,
         );
         assert_eq!(code(reply), "changed");
+    });
+}
+
+#[test]
+fn a_stopping_server_closes_a_polling_lane_connection() {
+    with_lane(|lane| {
+        let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = lane.host.clone();
+        let peer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let resolve =
+                br#"{"request":"resolve","operation":"00000000000000000000000000000000"}"#;
+            client.send(resolve, deadline).unwrap();
+            client.receive(MAX_FRAME, deadline).unwrap();
+            // The server starts stopping while the client keeps polling.
+            host.stopping.store(true, Ordering::SeqCst);
+            let _ = client.send(resolve, deadline);
+            client.receive(MAX_FRAME, deadline).is_err()
+        });
+        let started = Instant::now();
+        lane.lane.serve(&mut server, ACTOR).unwrap();
+        drop(server);
+        assert!(peer.join().unwrap(), "the client saw the connection close");
+        assert!(started.elapsed() < Duration::from_secs(5));
     });
 }
 
