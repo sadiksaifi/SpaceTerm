@@ -74,6 +74,22 @@ impl Reply {
         )
     }
 
+    pub fn routing_failure(
+        command: &str,
+        error: crate::connection::route::ResolutionError,
+    ) -> Self {
+        let data = error.operational_data();
+        Self::new(
+            &Envelope::error(
+                command,
+                error.server.map(|server| *server),
+                error.failure,
+                data,
+            ),
+            String::new(),
+        )
+    }
+
     pub fn exit(&self) -> u8 {
         self.exit
     }
@@ -223,26 +239,34 @@ impl Context<'_> {
 
     /// The server this command acts on, with its route. A remote target resolves through the
     /// CLI's Saved Connections.
-    pub fn routed(&self) -> Result<Routed, (Option<ServerRef>, Failure)> {
-        match self.target() {
-            Target::Local => {
-                let server = local_ref(self.identity).map_err(|failure| (None, failure))?;
-                Ok(Routed {
-                    connection: self.local_connection(),
-                    server,
-                    route: RouteKey::Local,
-                    local: true,
-                })
+    pub fn routed(&self) -> Result<Routed, crate::connection::route::ResolutionError> {
+        let routed = crate::connection::route::connect(
+            self.identity,
+            self.global,
+            self.global
+                .timeout
+                .map(|timeout| std::time::Instant::now() + timeout),
+        )?;
+        let server = match &routed.selected {
+            crate::connection::route::Route::Local => local_ref(self.identity)?,
+            crate::connection::route::Route::Paired(saved) => {
+                routed.selected.reference(&saved.paired.pin.server)
             }
-            Target::Remote(_) => Err((None, Failure::new(Code::Unsupported))),
-        }
+        };
+        Ok(Routed {
+            connection: Ok(routed.connection),
+            server,
+            route: routed.selected.key(),
+            local: routed.selected.is_local(),
+        })
     }
 
     /// Fails at once, before any network traffic, when the target is not this machine.
     pub fn require_local(&self) -> Result<(), Failure> {
-        match self.target() {
-            Target::Local => Ok(()),
-            Target::Remote(_) => Err(Failure::new(Code::LocalOnly)),
+        if crate::connection::route::selector(self.global)? == "local" {
+            Ok(())
+        } else {
+            Err(Failure::new(Code::LocalOnly))
         }
     }
 

@@ -20,7 +20,7 @@ pub fn run(context: &Context<'_>) -> Reply {
     if let super::Target::Remote(_) = context.target() {
         return match context.routed() {
             Ok(routed) => over_lane(context, &routed.connection, routed.server, routed.route),
-            Err((server, failure)) => Reply::failure(COMMAND, server, failure),
+            Err(error) => Reply::routing_failure(COMMAND, error),
         };
     }
     let server = match super::local_ref(context.identity) {

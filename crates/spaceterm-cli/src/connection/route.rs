@@ -11,9 +11,10 @@ use spaceterm_connections::{
 };
 use spaceterm_server::{
     CliRoute, ServerConnection, ServerError,
-    direct::{self, DeviceCredential, DirectConnection, DirectConnector, DirectError},
+    direct::{DeviceCredential, DirectConnection, DirectConnector, DirectError},
     protocol::AgentName,
 };
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,12 +31,14 @@ pub enum Route {
 }
 #[derive(Debug)]
 pub struct ResolutionError {
+    pub server: Option<Box<ServerRef>>,
     pub failure: Failure,
     pub data: CandidatesData,
 }
 impl From<Failure> for ResolutionError {
     fn from(failure: Failure) -> Self {
         Self {
+            server: None,
             failure,
             data: CandidatesData {
                 candidates: Vec::new(),
@@ -127,6 +130,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
                 })
                 .collect();
             Err(ResolutionError {
+                server: None,
                 failure: Failure::with(Code::AmbiguousTarget, Details::Target(details)),
                 data: CandidatesData { candidates },
             })
@@ -166,7 +170,7 @@ impl Route {
         interaction: Interaction,
         deadline: Instant,
     ) -> Result<ServerConnection, Failure> {
-        self.server_connection(identity, agent, credentials, interaction, deadline)
+        self.server_connection(identity, agent, credentials, interaction, Some(deadline))
             .map_err(crate::contract::from_server_error)
     }
 
@@ -207,7 +211,13 @@ impl Route {
                 writer: None,
             },
             &mut |agent| {
-                self.server_connection(identity, agent.cloned(), credentials, interaction, deadline)
+                self.server_connection(
+                    identity,
+                    agent.cloned(),
+                    credentials,
+                    interaction,
+                    Some(deadline),
+                )
             },
             deadline,
         )?;
@@ -225,7 +235,7 @@ impl Route {
         agent: Option<AgentName>,
         credentials: &dyn CredentialProvider,
         interaction: Interaction,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<ServerConnection, ServerError> {
         let route = match self {
             Self::Local => CliRoute::Local,
@@ -256,7 +266,7 @@ struct Connector {
     saved: SavedConnection,
     credentials: Arc<dyn CredentialStore>,
     interaction: Interaction,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 impl DirectConnector for Connector {
     fn connect(&self) -> Result<DirectConnection, DirectError> {
@@ -269,16 +279,29 @@ impl DirectConnector for Connector {
             })?
             .ok_or(DirectError::CredentialUnavailable)?;
         let credential = DeviceCredential::from_bytes(&secret)?;
-        direct::DirectConnection::connect_until(
-            &self.saved.endpoint,
-            &self.saved.paired,
-            &credential,
-            self.deadline,
-        )
+        match self.deadline {
+            Some(deadline) => DirectConnection::connect_until(
+                &self.saved.endpoint,
+                &self.saved.paired,
+                &credential,
+                deadline,
+            ),
+            None => {
+                DirectConnection::connect(&self.saved.endpoint, &self.saved.paired, &credential)
+            }
+        }
     }
 }
 
 pub fn from_global(global: &Global, identity: &str) -> Result<Route, ResolutionError> {
+    let selector = selector(global)?;
+    let store = ConnectionStore::new(
+        spaceterm_server::cli_state_root(identity).map_err(crate::contract::from_server_error)?,
+    );
+    resolve(&selector, &store)
+}
+
+pub fn selector(global: &Global) -> Result<String, Failure> {
     let environment = if global.server.is_none() {
         std::env::var_os("SPACETERM_SERVER")
     } else {
@@ -288,9 +311,73 @@ pub fn from_global(global: &Global, identity: &str) -> Result<Route, ResolutionE
         .as_ref()
         .map(|value| value.to_str().ok_or_else(|| usage("--server")))
         .transpose()?;
-    let selector = selected(global.server.as_deref(), environment)?;
-    let store = ConnectionStore::new(
-        spaceterm_server::cli_state_root(identity).map_err(crate::contract::from_server_error)?,
-    );
-    resolve(selector, &store)
+    selected(global.server.as_deref(), environment).map(str::to_owned)
+}
+
+pub struct RoutedConnection {
+    pub selected: Route,
+    pub connection: ServerConnection,
+    pub agent: Option<AgentName>,
+    pub interaction: Interaction,
+}
+
+/// Construct the selected transport without opening a work or service lane.
+/// An absent deadline leaves long service operations free to reconnect later.
+pub fn connect(
+    identity: &str,
+    global: &Global,
+    deadline: Option<Instant>,
+) -> Result<RoutedConnection, ResolutionError> {
+    let agent = if let Some(agent) = &global.agent {
+        Some(agent.clone())
+    } else {
+        std::env::var_os("SPACETERM_AS")
+            .map(|name| {
+                name.to_str()
+                    .and_then(|name| name.parse().ok())
+                    .ok_or_else(|| usage("--as"))
+            })
+            .transpose()?
+    };
+    let selected = from_global(global, identity)?;
+    let interaction = if global.json
+        || global.no_input
+        || !std::io::stdin().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
+        Interaction::Quiet
+    } else {
+        Interaction::Requested
+    };
+    let connection = selected
+        .server_connection(
+            identity,
+            agent.clone(),
+            &super::NativeCredentials(identity),
+            interaction,
+            deadline,
+        )
+        .map_err(|error| {
+            let mut error = ResolutionError::from(crate::contract::from_server_error(error));
+            if let Route::Paired(saved) = &selected {
+                error.server = Some(Box::new(selected.reference(&saved.paired.pin.server)));
+            }
+            error
+        })?;
+    Ok(RoutedConnection {
+        selected,
+        connection,
+        agent,
+        interaction,
+    })
+}
+
+impl ResolutionError {
+    pub fn operational_data(&self) -> serde_json::Value {
+        if self.data.candidates.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"candidates": self.data.candidates})
+        }
+    }
 }

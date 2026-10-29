@@ -199,6 +199,26 @@ fn native_client() {
                 "paired work mutation completed"
             );
             None
+        } else if line == "status" {
+            let cli = crate::args::Cli::try_parse_from([
+                "spaceterm",
+                "--server",
+                &name,
+                "--json",
+                "server",
+                "status",
+            ])
+            .unwrap();
+            let crate::args::Command::Server(command) = &cli.command else {
+                unreachable!()
+            };
+            let reply = crate::server::run(IDENTITY, &cli.global, command);
+            assert_eq!(
+                reply.write(true, false),
+                0,
+                "paired service lane status completed"
+            );
+            None
         } else if line == "list" {
             Some(execute(&ConnectionCommand::List, &global, IDENTITY))
         } else if line == "preview" {

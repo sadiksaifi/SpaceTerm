@@ -11,7 +11,6 @@ use crate::{
     args::{Cli, Command, WorktreeCommand},
     contract::*,
 };
-use spaceterm_connections::Interaction;
 use spaceterm_server::protocol::AgentName;
 use std::{
     io::{BufRead, IsTerminal, Read, Write},
@@ -35,30 +34,7 @@ fn selected(cli: &Cli) -> Output {
             String::new(),
         )
     };
-    let environment = if cli.global.server.is_none() {
-        std::env::var_os("SPACETERM_SERVER")
-    } else {
-        None
-    };
-    let environment = match environment
-        .as_ref()
-        .map(|value| {
-            value.to_str().ok_or_else(|| {
-                Failure::with(
-                    Code::InvalidArguments,
-                    Details::Usage(UsageDetails {
-                        argument: Some("--server".into()),
-                        kind: UsageKind::InvalidUtf8,
-                    }),
-                )
-            })
-        })
-        .transpose()
-    {
-        Ok(environment) => environment,
-        Err(failure) => return failed(failure),
-    };
-    let selector = match route::selected(cli.global.server.as_deref(), environment) {
+    let selector = match route::selector(&cli.global) {
         Ok(selector) => selector,
         Err(failure) => return failed(failure),
     };
@@ -66,48 +42,7 @@ fn selected(cli: &Cli) -> Output {
     if let Err(failure) = execute::validate(&cli.command, local) {
         return failed(failure);
     }
-    let agent = match cli
-        .global
-        .agent
-        .clone()
-        .map(Ok)
-        .or_else(|| {
-            std::env::var("SPACETERM_AS")
-                .ok()
-                .map(|a| a.parse::<AgentName>())
-        })
-        .transpose()
-    {
-        Ok(agent) => agent,
-        Err(_) => {
-            return failed(Failure::with(
-                Code::InvalidArguments,
-                Details::Usage(UsageDetails {
-                    argument: Some("--as".into()),
-                    kind: UsageKind::Other,
-                }),
-            ));
-        }
-    };
     let identity = env!("SPACETERM_SERVER_IDENTITY");
-    let selected = match route::from_global(&cli.global, identity) {
-        Ok(selected) => selected,
-        Err(error) => {
-            return Output::failed(
-                cli.command.path(),
-                None,
-                error.failure,
-                serde_json::json!({"candidates":error.data.candidates}),
-                String::new(),
-            );
-        }
-    };
-    let credentials = NativeCredentials(identity);
-    let interaction = if cli.global.json || cli.global.no_input || !std::io::stdin().is_terminal() {
-        Interaction::Quiet
-    } else {
-        Interaction::Requested
-    };
     let timeout = cli.global.timeout.unwrap_or_else(|| {
         if matches!(
             cli.command,
@@ -119,11 +54,25 @@ fn selected(cli: &Cli) -> Output {
         }
     });
     let deadline = Instant::now() + timeout;
-    let connection =
-        match selected.connect(identity, agent.clone(), &credentials, interaction, deadline) {
-            Ok(connection) => connection,
-            Err(failure) => return failed(failure),
-        };
+    let route::RoutedConnection {
+        selected,
+        connection,
+        agent,
+        interaction,
+    } = match route::connect(identity, &cli.global, Some(deadline)) {
+        Ok(routed) => routed,
+        Err(error) => {
+            let data = error.operational_data();
+            return Output::failed(
+                cli.command.path(),
+                error.server.map(|server| *server),
+                error.failure,
+                data,
+                String::new(),
+            );
+        }
+    };
+    let credentials = NativeCredentials(identity);
     let link = match connection.link_cancellable(&|| Instant::now() >= deadline) {
         Ok(link) => link,
         Err(e) => {
@@ -144,7 +93,7 @@ fn selected(cli: &Cli) -> Output {
             agent.cloned(),
             &credentials,
             interaction,
-            deadline,
+            Some(deadline),
         )
     };
     let mut journal = match dispatch::open(

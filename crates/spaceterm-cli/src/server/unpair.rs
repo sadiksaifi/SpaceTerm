@@ -92,7 +92,7 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
     }
     let routed = match context.routed() {
         Ok(routed) => routed,
-        Err((server, failure)) => return Reply::failure(COMMAND, server, failure),
+        Err(error) => return Reply::routing_failure(COMMAND, error),
     };
     let server = routed.server.clone();
     let fail = |failure: Failure| Reply::failure(COMMAND, Some(server.clone()), failure);

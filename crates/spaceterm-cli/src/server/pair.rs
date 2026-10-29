@@ -30,16 +30,9 @@ pub trait Invitations {
 
 impl Invitations for ServerConnection {
     fn invite(&self, advertise: Option<&str>) -> Result<(ClaimId, String, Duration), Failure> {
-        // Stage 0's management call takes an IP. A DNS name or a port is advertised once the
-        // direct host accepts any authority.
-        let address = match advertise {
-            None => None,
-            Some(text) => Some(
-                text.parse::<std::net::IpAddr>()
-                    .map_err(|_| Failure::new(Code::Unsupported))?,
-            ),
-        };
-        let invitation = self.invite_device(address).map_err(super::local_direct)?;
+        let invitation = self
+            .invite_device(advertise.map(str::to_owned))
+            .map_err(super::local_direct)?;
         Ok((
             invitation.id(),
             invitation.display_text().to_string(),
@@ -47,12 +40,8 @@ impl Invitations for ServerConnection {
         ))
     }
     fn claims(&self, invitation: &ClaimId) -> Result<Vec<PairingClaim>, Failure> {
-        Ok(self
-            .pairing_claims()
-            .map_err(super::local_direct)?
-            .into_iter()
-            .filter(|claim| claim.invitation_id == *invitation)
-            .collect())
+        self.pairing_claims(Some(*invitation))
+            .map_err(super::local_direct)
     }
     fn approve(&self, claim: &PairingClaim) -> Result<String, Failure> {
         self.approve_device(claim)
