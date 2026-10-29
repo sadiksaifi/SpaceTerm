@@ -354,6 +354,13 @@ impl Supervisor for UserService {
     fn prepare_start(&self) -> Result<(), ServerError> {
         self.linger()
     }
+    fn linger_authorized(&self) -> Result<Option<bool>, ServerError> {
+        match self.linger() {
+            Ok(()) => Ok(Some(true)),
+            Err(ServerError::AuthorizationRequired) => Ok(Some(false)),
+            Err(error) => Err(error),
+        }
+    }
     fn start(&self) -> Result<(), ServerError> {
         start_unit(&self.name, &self.registration().path(), |args| {
             self.systemctl(args)

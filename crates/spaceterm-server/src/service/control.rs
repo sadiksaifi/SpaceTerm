@@ -26,6 +26,11 @@ impl Confirmation {
         self.action
     }
 
+    /// Whether the server ran when this confirmation was prepared.
+    pub fn running(&self) -> bool {
+        self.running
+    }
+
     pub fn wording(&self) -> &Wording {
         &self.wording
     }
