@@ -1350,7 +1350,18 @@ mod edits {
 
     fn shared(inventory: Option<Inventory>) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(inventory));
-        let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        (reader(&edits), edits)
+    }
+
+    /// A reading of `edits` in a new process.
+    fn reader(edits: &Rc<ScriptedEdits>) -> SharedWorkspaces {
+        window(SharedEditSource::new(
+            Rc::clone(edits) as Rc<dyn SharedWorkspaceEdits>
+        ))
+    }
+
+    /// A Workspace Window's reading of `source`, which every window of one process shares.
+    fn window(source: SharedEditSource) -> SharedWorkspaces {
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
@@ -1363,7 +1374,7 @@ mod edits {
             ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
             &PaneConstruction::testing(),
         );
-        (SharedWorkspaces::new(source, sessions), edits)
+        SharedWorkspaces::new(source, sessions)
     }
 
     fn renamed(name: &str, version: u64) -> Inventory {
@@ -1530,6 +1541,135 @@ mod edits {
             SharedWorkspaceDraft::Name("Recovered".to_owned())
         );
         assert_eq!(conflict.authoritative.to_string(), "Theirs");
+    }
+
+    /// A Worktree removal that this client asked for and the server refused.
+    fn refused_removal() -> spaceterm_server::worktree::Operation {
+        spaceterm_server::worktree::Operation::Remove {
+            root: "/srv/app".into(),
+            path: "/srv/app-feature".into(),
+            boot: [8; 32],
+            confirmation: [9; 32],
+        }
+    }
+
+    /// A refused rename waits behind an open dialog while a later Worktree removal fails, and
+    /// the process ends before either is presented. The relaunched process presents both, and
+    /// neither reaches the person again after that.
+    #[test]
+    fn a_relaunch_should_present_each_unseen_answer_once_whatever_finished_after_it() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = first.poll();
+        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
+        let waiting = first.next_conflict().map(|(conflict, _)| conflict.draft);
+        edits.submit_for_recovery(Mutation::Worktree(refused_removal()));
+        edits.answer(Outcome::WorktreeFailed(
+            spaceterm_server::worktree::Error::Changed,
+        ));
+        first.poll();
+        drop(first);
+
+        let relaunched = Rc::new(edits.relaunched());
+        let mut second = reader(&relaunched);
+        let poll = second.poll();
+        bind(&mut second, poll.inventory.as_ref().expect("inventory"));
+        let reviewed = second.next_conflict().map(|(conflict, notice)| {
+            notice.acknowledge();
+            conflict.draft
+        });
+        let _ = second.take_conflict();
+        let alerted = second.next_worktree_failure().map(|(failure, notice)| {
+            notice.acknowledge();
+            failure.operation
+        });
+        let _ = second.take_worktree_failure();
+        drop(second);
+        let later = Rc::new(relaunched.relaunched());
+        let mut third = reader(&later);
+        let poll = third.poll();
+        bind(&mut third, poll.inventory.as_ref().expect("inventory"));
+
+        let mine = Some(SharedWorkspaceDraft::Name("Mine".to_owned()));
+        assert_eq!(waiting, mine, "draft review waits behind the dialog");
+        assert_eq!(reviewed, mine);
+        assert_eq!(alerted, Some(refused_removal()));
+        assert!(third.next_conflict().is_none());
+        assert!(third.next_worktree_failure().is_none());
+        assert!(later.unseen().is_empty());
+    }
+
+    /// Draft review that a window closed before it opened leaves the refused rename for the
+    /// next window, which presents it once.
+    #[test]
+    fn a_review_that_never_opened_should_reach_the_next_window() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = first.poll();
+        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
+        let queued = first.take_conflict().map(|conflict| conflict.draft);
+        let source = first.edits();
+        drop(first);
+
+        let mut reopened = window(source.clone());
+        let poll = reopened.poll();
+        bind(&mut reopened, poll.inventory.as_ref().expect("inventory"));
+        let reviewed = reopened.next_conflict().map(|(conflict, notice)| {
+            notice.acknowledge();
+            conflict.draft
+        });
+        let _ = reopened.take_conflict();
+        drop(reopened);
+        let mut later = window(source);
+        let poll = later.poll();
+        bind(&mut later, poll.inventory.as_ref().expect("inventory"));
+
+        let mine = Some(SharedWorkspaceDraft::Name("Mine".to_owned()));
+        assert_eq!(queued, mine);
+        assert_eq!(reviewed, mine);
+        assert!(later.next_conflict().is_none());
+    }
+
+    /// A paired route disconnects after its draft review was admitted and before it opened. The
+    /// review's presentation reaches the reconnected route, so it never presents the draft again.
+    #[test]
+    fn a_presentation_while_disconnected_should_reach_the_reconnected_route() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = first.poll();
+        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
+        let (_, notice) = first.next_conflict().expect("draft review");
+        let _ = first.take_conflict();
+        let source = first.edits();
+        source.replace_transport(Rc::new(super::super::UnavailableEdits::default()));
+        notice.acknowledge();
+        source.replace_transport(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        drop(first);
+
+        let mut reopened = window(source);
+        let poll = reopened.poll();
+        bind(&mut reopened, poll.inventory.as_ref().expect("inventory"));
+
+        assert!(edits.unseen().is_empty());
+        assert!(reopened.next_conflict().is_none());
     }
 
     #[test]

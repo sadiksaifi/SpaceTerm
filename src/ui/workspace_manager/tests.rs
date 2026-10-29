@@ -11776,36 +11776,15 @@ mod shared_repositories {
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
         edits.set_worktree_writes(true);
         let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
-        let penguin = super::named_route("penguin");
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
-            ),
-            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-        );
         cx.update(|window, cx| {
             crate::ui::server_worktrees::testing::present_direct(
-                penguin,
+                super::named_route("penguin"),
                 Rc::clone(&edits),
                 Arc::clone(&reads),
                 cx,
             );
             manager.update(cx, |manager, cx| {
-                let key = manager.present_server_workspaces(
-                    ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
-                        route: penguin,
-                        name: "penguin".into(),
-                    }),
-                    SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                    SharedPaneSessions::with_opener(
-                        ScriptedPanes::new(session_factory) as Rc<_>,
-                        &PaneConstruction::testing(),
-                    ),
-                    window,
-                    cx,
-                );
-                manager.sync_shared_workspaces(key, window, cx);
+                present_penguin(manager, &edits, window, cx);
             });
         });
         cx.run_until_parked();
@@ -11829,6 +11808,89 @@ mod shared_repositories {
             reads,
             cx,
         )
+    }
+
+    /// Presents penguin's Workspaces in `manager`'s window, read through `edits`. Penguin's writer
+    /// queues through the window's interactions, as a connected route's does.
+    fn present_penguin(
+        manager: &mut WorkspaceManager,
+        edits: &Rc<ScriptedEdits>,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceManager>,
+    ) {
+        let penguin = super::named_route("penguin");
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed(),
+            ),
+            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+        );
+        let source = SharedEditSource::new(Rc::clone(edits) as Rc<_>);
+        let key = manager.present_server_workspaces(
+            ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                route: penguin,
+                name: "penguin".into(),
+            }),
+            source.clone(),
+            SharedPaneSessions::with_opener(
+                ScriptedPanes::new(session_factory) as Rc<_>,
+                &PaneConstruction::testing(),
+            ),
+            window,
+            cx,
+        );
+        crate::ui::server_worktrees::Client::adopt_source(&penguin, source, cx);
+        manager.sync_shared_workspaces(key, window, cx);
+    }
+
+    /// Closes `cx`'s window, as Cmd+Q does while SpaceTerm keeps running.
+    fn close_window(cx: &mut VisualTestContext) {
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    /// A Workspace Window SpaceTerm opens over `edits`, as after Cmd+Q closed the last one, or
+    /// in a relaunched process when `edits` is [`ScriptedEdits::relaunched`].
+    fn reopened_window(edits: &Rc<ScriptedEdits>, cx: &VisualTestContext) -> VisualTestContext {
+        let mut app = cx.cx.clone();
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                .with_fallback_title("zsh"),
+        );
+        let handle = app.add_window(|window, cx| {
+            new_desktop_manager(
+                session_factory,
+                std::env::temp_dir(),
+                workspace_adapters(),
+                SidebarState::Expanded,
+                window,
+                cx,
+            )
+        });
+        let edits = Rc::clone(edits);
+        handle
+            .update(&mut app, |manager, window, cx| {
+                present_penguin(manager, &edits, window, cx);
+            })
+            .expect("the reopened window is open");
+        let reopened = VisualTestContext::from_window(handle.into(), &app);
+        reopened.run_until_parked();
+        reopened
+    }
+
+    /// Whether the window shows the alert for a failed Worktree operation nobody else presented.
+    fn alerts_worktree_failure(cx: &mut VisualTestContext) -> bool {
+        cx.run_until_parked();
+        cx.debug_bounds("modal-action-server-worktree-operation-failed-ok")
+            .is_some()
+    }
+
+    /// Whether the form shows `error` for its Create.
+    fn form_reports(error: &str, cx: &mut VisualTestContext) -> bool {
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .find_text(error)
+            .is_some()
     }
 
     /// A paired server's Workspace offers New Worktree and Remove Worktree, because that server
@@ -11955,6 +12017,11 @@ mod shared_repositories {
 
     /// Opens the New Worktree form for penguin's Workspace and asks git for `topic/new`.
     fn create_shared_worktree(harness: &Harness, cx: &mut VisualTestContext) {
+        create_named_worktree(harness, "topic/new", cx);
+    }
+
+    /// Opens the New Worktree form for penguin's Workspace and types `branch`.
+    fn open_worktree_form(harness: &Harness, branch: &str, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
@@ -11963,9 +12030,32 @@ mod shared_repositories {
         });
         cx.run_until_parked();
         click("new-worktree-name", cx);
-        cx.simulate_input("topic/new");
+        cx.simulate_input(branch);
         cx.run_until_parked();
+    }
+
+    /// Opens the New Worktree form for penguin's Workspace and asks git for `branch`.
+    fn create_named_worktree(harness: &Harness, branch: &str, cx: &mut VisualTestContext) {
+        open_worktree_form(harness, branch, cx);
         click("modal-action-new-worktree-create", cx);
+    }
+
+    /// Starts a Create in a form that the person then cancels while the connection is lost. The
+    /// Create stays in flight with no form waiting for it.
+    fn create_and_abandon(
+        harness: &Harness,
+        edits: &ScriptedEdits,
+        branch: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        create_named_worktree(harness, branch, cx);
+        edits.set_connected(false);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        click("modal-action-new-worktree-cancel", cx);
+        edits.set_connected(true);
+        cx.run_until_parked();
     }
 
     /// Answers the form's Create, which reads the answer on its next poll.
@@ -11996,6 +12086,186 @@ mod shared_repositories {
                 .any(|node| node["aria"]["value"] == "Branch name already exists."),
             "the name field reports the taken branch"
         );
+    }
+
+    /// The form presents its own failed Create. Neither the window, a window reopened after
+    /// Cmd+Q, nor a relaunched process presents it again.
+    #[gpui::test]
+    fn a_failure_the_form_presented_should_never_alert(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_shared_worktree(&harness, cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        let reported = form_reports("Branch name already exists.", cx);
+        click("modal-action-new-worktree-cancel", cx);
+        let alerted = alerts_worktree_failure(cx);
+
+        close_window(cx);
+        let mut reopened = reopened_window(&edits, cx);
+        let reopened_alerts = alerts_worktree_failure(&mut reopened);
+        close_window(&mut reopened);
+        let mut relaunched = reopened_window(&Rc::new(edits.relaunched()), &reopened);
+
+        assert!(reported, "the form reports the taken branch");
+        assert!(!alerted);
+        assert!(!reopened_alerts, "a reopened window presents nothing");
+        assert!(
+            !alerts_worktree_failure(&mut relaunched),
+            "a relaunched process presents nothing"
+        );
+        assert!(edits.unseen().is_empty());
+    }
+
+    /// The process ends after git's answer arrived but before the form presented it. The
+    /// relaunched process alerts once, and never again after that.
+    #[gpui::test]
+    fn an_answer_a_crash_interrupted_should_alert_once_after_the_relaunch(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_shared_worktree(&harness, cx);
+        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(
+            spaceterm_server::worktree::Error::BranchExists,
+        ));
+        let relaunched = Rc::new(edits.relaunched());
+        close_window(cx);
+
+        let mut first = reopened_window(&relaunched, cx);
+        let alerted = alerts_worktree_failure(&mut first);
+        click(
+            "modal-action-server-worktree-operation-failed-ok",
+            &mut first,
+        );
+        close_window(&mut first);
+        let mut reopened = reopened_window(&relaunched, &first);
+        let reopened_alerts = alerts_worktree_failure(&mut reopened);
+        close_window(&mut reopened);
+        let mut later = reopened_window(&Rc::new(relaunched.relaunched()), &reopened);
+
+        assert!(
+            alerted,
+            "the relaunched process presents the unseen failure"
+        );
+        assert!(!reopened_alerts, "a presented failure never returns");
+        assert!(!alerts_worktree_failure(&mut later));
+    }
+
+    /// A Create whose form closed is still in flight when a second form asks for another. Both
+    /// fail: the open form presents its own, and the window alerts the other once that form
+    /// closes.
+    #[gpui::test]
+    fn two_failed_creates_should_each_reach_the_person_once(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_and_abandon(&harness, &edits, "topic/one", cx);
+        create_named_worktree(&harness, "topic/two", cx);
+
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        let reported = form_reports("Branch name already exists.", cx);
+        let alerted_behind_the_form = alerts_worktree_failure(cx);
+        click("modal-action-new-worktree-cancel", cx);
+        let alerted = alerts_worktree_failure(cx);
+        let names_the_first = spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .in_order()
+            .iter()
+            .any(|node| node["aria"].to_string().contains("topic-one"));
+
+        assert_eq!(
+            edits.submitted().len(),
+            2,
+            "both Creates reached the server"
+        );
+        assert!(reported, "the open form presents its own Create's failure");
+        assert!(!alerted_behind_the_form, "the alert waits behind the form");
+        assert!(alerted, "the window alerts the Create whose form closed");
+        assert!(names_the_first);
+        click("modal-action-server-worktree-operation-failed-ok", cx);
+        assert!(edits.unseen().is_empty());
+    }
+
+    /// An alert still queued behind a dialog when Cmd+Q closes the window has not been seen.
+    /// The reopened window presents it once.
+    #[gpui::test]
+    fn a_queued_alert_should_survive_cmd_q_and_appear_once(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_and_abandon(&harness, &edits, "topic/one", cx);
+        open_worktree_form(&harness, "topic/two", cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
+        let queued = !alerts_worktree_failure(cx) && edits.unseen().len() == 1;
+
+        close_window(cx);
+        let mut reopened = reopened_window(&edits, cx);
+        let alerted = alerts_worktree_failure(&mut reopened);
+        click(
+            "modal-action-server-worktree-operation-failed-ok",
+            &mut reopened,
+        );
+        close_window(&mut reopened);
+        let mut again = reopened_window(&edits, &reopened);
+        let alerted_again = alerts_worktree_failure(&mut again);
+        close_window(&mut again);
+        let mut relaunched = reopened_window(&Rc::new(edits.relaunched()), &again);
+
+        assert!(queued, "the alert waits behind the open form");
+        assert!(alerted, "the reopened window presents the queued failure");
+        assert!(!alerted_again);
+        assert!(!alerts_worktree_failure(&mut relaunched));
+    }
+
+    /// The server stopped before it could confirm a Create. The form closes and the window asks
+    /// the person to check the Worktree, once.
+    #[gpui::test]
+    fn an_interrupted_create_should_ask_for_a_check_once(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_shared_worktree(&harness, cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Interrupted, cx);
+        let form_closed = cx
+            .debug_bounds("modal-action-new-worktree-create")
+            .is_none();
+        let asked = cx
+            .debug_bounds("modal-action-server-worktree-interrupted-ok")
+            .is_some();
+        click("modal-action-server-worktree-interrupted-ok", cx);
+        close_window(cx);
+        let mut reopened = reopened_window(&edits, cx);
+        reopened.run_until_parked();
+
+        assert!(form_closed);
+        assert!(asked, "the window asks the person to check the Worktree");
+        assert!(
+            reopened
+                .debug_bounds("modal-action-server-worktree-interrupted-ok")
+                .is_none()
+        );
+        assert!(edits.unseen().is_empty());
+    }
+
+    /// The form presents a failure, the person retries at the same location, then cancels
+    /// while the connection is lost. The retry's own failure alerts once.
+    #[gpui::test]
+    fn a_retry_whose_form_closed_should_alert_its_own_failure_once(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_shared_worktree(&harness, cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        click("modal-action-new-worktree-create", cx);
+        edits.set_connected(false);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        click("modal-action-new-worktree-cancel", cx);
+        edits.set_connected(true);
+
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Branch, cx);
+        let alerted = alerts_worktree_failure(cx);
+        click("modal-action-server-worktree-operation-failed-ok", cx);
+        close_window(cx);
+        let mut reopened = reopened_window(&edits, cx);
+
+        let submitted = edits.submitted();
+        assert_eq!(submitted.len(), 2);
+        assert_eq!(
+            submitted[0], submitted[1],
+            "the retry asks for the same location"
+        );
+        assert!(alerted, "the retry's failure reaches the person");
+        assert!(!alerts_worktree_failure(&mut reopened));
     }
 
     /// The server reads Git for a Workspace nobody is looking at, and a new reading reaches its

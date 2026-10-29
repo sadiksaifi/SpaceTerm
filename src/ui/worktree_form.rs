@@ -52,6 +52,10 @@ pub(crate) trait WorktreeFormBackend {
         branch: WorktreeBranch,
         cx: &mut App,
     ) -> Task<Result<PathBuf, WorktreeCreateError>>;
+    /// The form presented the answer to its last Create, so nothing presents it again.
+    fn presented(&self) {}
+    /// The form will not present the answer to its last Create, so the Workspace Window does.
+    fn release(&self) {}
 }
 
 /// Checks whether a new directory may go at a path.
@@ -74,7 +78,6 @@ pub(crate) struct WorktreeFormContext {
 pub(crate) enum WorktreeFormEvent {
     /// Git created the Worktree at this directory.
     Created(PathBuf),
-    Interrupted(PathBuf),
     Cancelled,
 }
 
@@ -151,7 +154,6 @@ pub(crate) struct WorktreeForm {
     pending: bool,
     generation: u64,
     pending_path: Option<PathBuf>,
-    interrupted_path: Option<PathBuf>,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
     _status: Task<()>,
@@ -205,7 +207,6 @@ impl WorktreeForm {
             pending: false,
             generation: 0,
             pending_path: None,
-            interrupted_path: None,
             pending_cancel: None,
             _branches: Task::ready(()),
             _status: Task::ready(()),
@@ -570,12 +571,12 @@ impl WorktreeForm {
         }
         self.set_enabled(false, cx);
         let generation = self.generation;
-        let task = self.backend.create(path.clone(), branch, cx);
+        let task = self.backend.create(path, branch, cx);
         cx.notify();
         cx.spawn(async move |form, cx| {
             let result = task.await;
             let Ok(Some(settlement)) = form.update(cx, |form, cx| {
-                form.settle_create(generation, result, completion, path, cx)
+                form.settle_create(generation, result, completion, cx)
             }) else {
                 return;
             };
@@ -584,37 +585,35 @@ impl WorktreeForm {
         .detach();
     }
 
-    pub(crate) fn interrupted_path(&self) -> Option<&std::path::Path> {
-        self.interrupted_path.as_deref()
-    }
-
     fn settle_create(
         &mut self,
         generation: u64,
         result: Result<PathBuf, WorktreeCreateError>,
         primary: DialogPendingCompletion,
-        attempted_path: PathBuf,
         cx: &mut Context<Self>,
     ) -> Option<Settlement> {
+        // A form that closed while waiting released the answer then.
         if !self.open || !self.pending || self.generation != generation {
             return None;
         }
+        // The form closes, and the Workspace Window asks the person to check the Worktree.
         if result
             == Err(WorktreeCreateError::Server(
                 spaceterm_server::worktree::Error::Interrupted,
             ))
         {
             self.pending_path = None;
-            self.interrupted_path = Some(attempted_path.clone());
-            cx.emit(WorktreeFormEvent::Interrupted(attempted_path));
+            self.backend.release();
             return Some(Settlement::Success { primary });
         }
         if let Ok(path) = result {
             self.pending_path = Some(path);
+            self.backend.release();
             return Some(Settlement::Success { primary });
         }
         self.pending = false;
         self.pending_path = None;
+        self.backend.presented();
         self.set_enabled(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
             Err(WorktreeCreateError::NotSubmitted(reason)) => (None,reason.into()),
@@ -658,6 +657,10 @@ impl WorktreeForm {
     fn finish_dialog(&mut self, outcome: DialogOutcome<FormAction>, cx: &mut Context<Self>) {
         if !self.open {
             return;
+        }
+        // A Create still waiting for its answer leaves that answer to the Workspace Window.
+        if self.pending {
+            self.backend.release();
         }
         self.open = false;
         self.pending = false;

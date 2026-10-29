@@ -35,12 +35,15 @@ trait EditServer: Send + 'static {
     fn subscribe(&self, sink: Weak<dyn LinkSink>);
 }
 
-/// This client's durable record of the Original Operation in flight and the last one retired.
+/// This client's durable record of the Original Operation in flight, the last one retired, and
+/// the retired outcomes it has not presented yet.
 trait EditJournal {
     fn pending(&self) -> Option<&ClientOperation>;
     fn last(&self) -> Option<&RetainedOutcome>;
+    fn unseen(&self) -> &[RetainedOutcome];
     fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError>;
     fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError>;
+    fn presented(&mut self, sequence: u64) -> Result<(), ServerError>;
 }
 
 impl EditServer for ServerConnection {
@@ -66,11 +69,17 @@ impl EditJournal for ClientJournal {
     fn last(&self) -> Option<&RetainedOutcome> {
         ClientJournal::last(self)
     }
+    fn unseen(&self) -> &[RetainedOutcome] {
+        ClientJournal::unseen(self)
+    }
     fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
         ClientJournal::submit(self, sequence, mutation)
     }
     fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
         ClientJournal::retire(self, result)
+    }
+    fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
+        ClientJournal::presented(self, sequence)
     }
 }
 
@@ -84,6 +93,8 @@ enum Event {
     Released,
     /// The person asked to reconnect now instead of after the reconnect delay.
     Retry,
+    /// A surface presented the outcome of this operation.
+    Presented(u64),
     /// The client is gone.
     Stop,
 }
@@ -121,10 +132,26 @@ pub(crate) struct SharedWorkspaceSnapshot {
     pub pending_operation: Option<Mutation>,
     pub rejected: Option<Mutation>,
     pub outcome: Option<RetainedOutcome>,
+    /// Retired outcomes no surface has presented yet, oldest first, from this run or an earlier
+    /// one. Readers present each once from here.
+    pub unseen: Vec<RetainedOutcome>,
+    /// Presented outcomes the journal has not recorded yet. They never return to `unseen`.
+    pub presenting: Vec<u64>,
     pub error: Option<ServerError>,
     /// How many connection attempts have failed, so a reader can tell that an attempt it asked
     /// for has finished.
     pub failed_attempts: u64,
+}
+impl SharedWorkspaceSnapshot {
+    /// Publishes the journal's unseen outcomes, except those already presented.
+    fn unseen_from(&mut self, journal: &impl EditJournal) {
+        self.unseen = journal
+            .unseen()
+            .iter()
+            .filter(|unseen| !self.presenting.contains(&unseen.sequence))
+            .cloned()
+            .collect();
+    }
 }
 pub(crate) struct SharedWorkspaceClient {
     snapshot: Arc<PublishedSnapshot>,
@@ -190,6 +217,8 @@ impl SharedWorkspaceClient {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            unseen: Vec::new(),
+            presenting: Vec::new(),
             error: None,
             failed_attempts: 0,
         }));
@@ -240,6 +269,17 @@ impl SharedWorkspaceClient {
     /// Reconnects now when the connection is down. A connected client ignores it.
     pub(crate) fn retry(&self) {
         let _ = self.commands.send(Event::Retry);
+    }
+    /// Records that a surface presented the outcome of `sequence`, so no reader in this process
+    /// or a later one presents it again.
+    pub(crate) fn presented(&self, sequence: u64) {
+        self.snapshot.publish(|state| {
+            state.unseen.retain(|unseen| unseen.sequence != sequence);
+            if !state.presenting.contains(&sequence) {
+                state.presenting.push(sequence);
+            }
+        });
+        let _ = self.commands.send(Event::Presented(sequence));
     }
     /// Coalesced change hints, including an initial hint. Read `snapshot` after each wake.
     /// Dropping the receiver unsubscribes; closed senders are pruned on publication or subscription.
@@ -336,6 +376,7 @@ fn finish(
             snapshot.inventory = Some(revision.inventory.clone());
         }
         snapshot.outcome = Some(result.clone());
+        snapshot.unseen_from(&*journal);
     });
     link.acknowledge(pending.sequence)?;
     Ok(FinishedOperation {
@@ -382,6 +423,18 @@ fn run(
             if let Some(last) = journal.last() {
                 link.acknowledge(last.sequence)?;
             }
+            // Presentations reported while no journal was open are recorded before readers see
+            // the journal's unseen outcomes.
+            let presenting = state
+                .value
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .presenting
+                .clone();
+            for sequence in presenting {
+                journal.presented(sequence)?;
+                state.publish(|s| s.presenting.retain(|presenting| *presenting != sequence));
+            }
             state.publish(|s| {
                 // Protocol major 3 servers write Worktrees and end all Sessions.
                 s.worktree_writes = true;
@@ -412,6 +465,7 @@ fn run(
                 s.connected = true;
                 s.error = None;
                 s.outcome = finished.outcome;
+                s.unseen_from(&journal);
                 s.pending = false;
                 s.pending_operation = None;
                 active = None;
@@ -447,6 +501,12 @@ fn run(
                     }
                     Ok(Event::Released) => attachments.release_pending(&link)?,
                     Ok(Event::Retry) => {}
+                    Ok(Event::Presented(sequence)) => {
+                        journal.presented(sequence)?;
+                        state.publish(|s| {
+                            s.presenting.retain(|presenting| *presenting != sequence);
+                        });
+                    }
                     Ok(Event::Stop) | Err(_) => return Ok(()),
                 }
             }
@@ -467,6 +527,19 @@ fn run(
                 Ok(Event::Edit(mutation)) => reject(&state, mutation),
                 Ok(Event::Link) => wakes.link.store(false, Ordering::Release),
                 Ok(Event::Released) => {}
+                // The journal needs no connection. A presentation it cannot record yet is
+                // recorded on the next connection.
+                Ok(Event::Presented(sequence)) => {
+                    if server
+                        .journal()
+                        .and_then(|mut journal| journal.presented(sequence))
+                        .is_ok()
+                    {
+                        state.publish(|s| {
+                            s.presenting.retain(|presenting| *presenting != sequence);
+                        });
+                    }
+                }
                 Ok(Event::Retry) => break,
                 Ok(Event::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
@@ -498,6 +571,8 @@ mod tests {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            unseen: Vec::new(),
+            presenting: Vec::new(),
             error: None,
             failed_attempts: 0,
         }));
@@ -539,6 +614,8 @@ mod tests {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            unseen: Vec::new(),
+            presenting: Vec::new(),
             error: None,
             failed_attempts: 0,
         }));
@@ -595,6 +672,7 @@ mod tests {
         pub(super) struct Record {
             pub pending: Option<ClientOperation>,
             pub last: Option<RetainedOutcome>,
+            pub unseen: Vec<RetainedOutcome>,
         }
 
         /// A journal that keeps its record in memory, shared with the test.
@@ -610,6 +688,20 @@ mod tests {
             fn last(&self) -> Option<&RetainedOutcome> {
                 self.record.last.as_ref()
             }
+            fn unseen(&self) -> &[RetainedOutcome] {
+                &self.record.unseen
+            }
+            fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
+                self.record
+                    .unseen
+                    .retain(|unseen| unseen.sequence != sequence);
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .unseen
+                    .retain(|unseen| unseen.sequence != sequence);
+                Ok(())
+            }
             fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
                 let operation = ClientOperation { sequence, mutation };
                 self.record.pending = Some(operation.clone());
@@ -619,8 +711,12 @@ mod tests {
             fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
                 self.record.pending = None;
                 self.record.last = Some(result.clone());
+                if result.outcome.needs_presentation() {
+                    self.record.unseen.push(result.clone());
+                }
                 let mut shared = self.shared.lock().unwrap();
                 shared.pending = None;
+                shared.unseen.clone_from(&self.record.unseen);
                 shared.last = Some(result);
                 Ok(())
             }
@@ -744,6 +840,7 @@ mod tests {
                     record: Record {
                         pending: shared.pending.clone(),
                         last: shared.last.clone(),
+                        unseen: shared.unseen.clone(),
                     },
                     shared: Arc::clone(&self.journal),
                 })
@@ -778,6 +875,94 @@ mod tests {
             Ok(ReplyBody::Outcome(outcome)) => outcome,
             _ => panic!("creation unavailable"),
         }
+    }
+
+    /// Submits `mutation` through `edits` and waits for its answer.
+    fn edit(edits: &SharedWorkspaceClient, mutation: Mutation) -> RetainedOutcome {
+        eventually("the client accepts the edit", || {
+            edits.submit(mutation.clone())
+        });
+        let mut answer = None;
+        eventually("the edit is answered", || {
+            let snapshot = edits.snapshot();
+            answer = snapshot
+                .outcome
+                .filter(|outcome| !snapshot.pending && outcome.mutation == mutation);
+            answer.is_some()
+        });
+        answer.expect("answered")
+    }
+
+    /// A rename the server refused waits for draft review while later edits retire. The process
+    /// ends before anything presents it, so the next one presents both refusals, and a
+    /// presented one never returns.
+    #[test]
+    fn unseen_outcomes_should_survive_later_edits_and_a_relaunch_until_presented() {
+        let client = [7; 32];
+        let server = served::Server::new(client);
+        let ignore: Arc<dyn LinkSink> = Arc::new(|_: LinkEvent| {});
+        let edits = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        eventually("the client connects", || edits.snapshot().connected);
+        let created = edit(
+            &edits,
+            Mutation::CreateWorkspace {
+                name: "Kept".into(),
+                directory: None,
+            },
+        );
+        let spaceterm_server::hierarchy::Outcome::Accepted { target } = created.outcome else {
+            panic!("the Workspace is created");
+        };
+        let rename = |name: &str| Mutation::RenameWorkspace {
+            workspace: target,
+            version: 0,
+            name: name.into(),
+        };
+        let (other, _) = server.connect([8; 32], Arc::clone(&ignore));
+        let (_, revision) = other.next_inventory(0).unwrap();
+        other
+            .request(Operation::Mutate {
+                sequence: revision.next_sequence,
+                mutation: rename("Theirs"),
+            })
+            .unwrap()
+            .wait()
+            .unwrap();
+        let conflict = edit(&edits, rename("Mine"));
+        let missing = edit(
+            &edits,
+            Mutation::CreateTab {
+                workspace: [9; 32],
+                source: None,
+            },
+        );
+        let published = edits.snapshot().unseen;
+        drop(edits);
+
+        let relaunched = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        eventually("the relaunched client connects", || {
+            relaunched.snapshot().connected
+        });
+        let recovered = relaunched.snapshot().unseen;
+        relaunched.presented(conflict.sequence);
+        eventually("the presentation is recorded", || {
+            server.journal.lock().unwrap().unseen.len() == 1
+        });
+        drop(relaunched);
+        let later = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        eventually("the later client connects", || later.snapshot().connected);
+
+        assert_eq!(
+            conflict.outcome,
+            spaceterm_server::hierarchy::Outcome::Conflict
+        );
+        assert_eq!(
+            missing.outcome,
+            spaceterm_server::hierarchy::Outcome::Missing
+        );
+        assert_eq!(published, vec![conflict.clone(), missing.clone()]);
+        assert_eq!(recovered, vec![conflict, missing.clone()]);
+        assert_eq!(later.snapshot().unseen, vec![missing]);
     }
 
     #[test]

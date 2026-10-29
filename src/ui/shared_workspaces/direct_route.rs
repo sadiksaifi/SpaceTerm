@@ -119,6 +119,8 @@ impl SharedWorkspaceEdits for UnavailableEdits {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            unseen: Vec::new(),
+            presenting: Vec::new(),
             error: Some(spaceterm_server::ServerError::Direct(
                 spaceterm_server::direct::DirectError::Transport,
             )),

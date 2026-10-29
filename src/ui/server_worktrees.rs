@@ -5,7 +5,9 @@ use crate::{
         server_session::{ControlRoute, PaneControlRegistry},
         shared_workspace::SharedWorkspaceClient,
     },
-    ui::shared_workspaces::{SharedEditSource, SharedRefusalReason, SharedWorkspaceEdits},
+    ui::shared_workspaces::{
+        OutcomeOwner, OutcomeTicket, SharedEditSource, SharedRefusalReason, SharedWorkspaceEdits,
+    },
 };
 use gpui::{App, AppContext as _, Global, Task};
 use spaceterm_server::{
@@ -173,16 +175,31 @@ impl Client {
         operation: Operation,
         cx: &mut App,
     ) -> Task<Result<RetainedOutcome, WriteError>> {
-        write(self.source.clone(), operation, cx)
+        write(self.source.clone(), operation, None, cx)
+    }
+    /// Like [`Self::write`], for a surface that presents the answer itself while `owner` lives.
+    pub(crate) fn write_owned(
+        &self,
+        operation: Operation,
+        owner: OutcomeTicket,
+        cx: &mut App,
+    ) -> Task<Result<RetainedOutcome, WriteError>> {
+        write(self.source.clone(), operation, Some(owner), cx)
     }
 }
 fn write(
     source: SharedEditSource,
     operation: Operation,
+    owner: Option<OutcomeTicket>,
     cx: &mut App,
 ) -> Task<Result<RetainedOutcome, WriteError>> {
     source.snapshot();
-    let completion = match source.submit_waiting(Mutation::Worktree(operation)) {
+    let mutation = Mutation::Worktree(operation);
+    let submitted = match owner {
+        Some(owner) => source.submit_owned(mutation, owner),
+        None => source.submit_waiting(mutation),
+    };
+    let completion = match submitted {
         Ok(completion) => completion,
         Err(reason) => return Task::ready(Err(WriteError::Refused(reason))),
     };
@@ -220,6 +237,8 @@ pub(crate) struct FormBackend {
     pub branches: crate::worktrees::git::BranchList,
     /// The other computer whose server runs Git, or `None` for this computer's.
     pub machine: Option<String>,
+    /// The last Create's answer, which the form presents itself unless it releases it.
+    pub owner: std::cell::RefCell<Option<OutcomeOwner>>,
 }
 impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
     fn server(&self) -> bool {
@@ -243,6 +262,9 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
         let client = self.client.clone();
         let root = self.root.clone();
         let workspace = self.workspace;
+        let owner = client.source.owner();
+        let ticket = owner.ticket();
+        *self.owner.borrow_mut() = Some(owner);
         // The owning server checks the final location; the desktop never probes its filesystem.
         let read = client.read(
             Read::Location {
@@ -261,13 +283,14 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
             };
             let completed = cx
                 .update(|cx| {
-                    client.write(
+                    client.write_owned(
                         Operation::Create {
                             workspace,
                             root,
                             path: path.clone(),
                             branch,
                         },
+                        ticket,
                         cx,
                     )
                 })
@@ -290,6 +313,14 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                 })
                 .unwrap_or(path))
         })
+    }
+    fn presented(&self) {
+        if let Some(owner) = self.owner.borrow_mut().take() {
+            owner.presented();
+        }
+    }
+    fn release(&self) {
+        drop(self.owner.borrow_mut().take());
     }
 }
 
@@ -493,7 +524,7 @@ mod tests {
             version: 1,
             template: "~/second/{branch}".into(),
         };
-        let first_task = cx.update(|cx| write(source.clone(), first.clone(), cx));
+        let first_task = cx.update(|cx| write(source.clone(), first.clone(), None, cx));
         let recorded = replies.clone();
         cx.spawn(async move |_| {
             let reply = first_task.await;
@@ -504,7 +535,7 @@ mod tests {
         edits.answer(Outcome::Accepted { target: [1; 32] });
         // The Workspace poll sees A before its sleeping waiter does. B may now submit.
         source.snapshot();
-        let second_task = cx.update(|cx| write(source.clone(), second.clone(), cx));
+        let second_task = cx.update(|cx| write(source.clone(), second.clone(), None, cx));
         let recorded = replies.clone();
         cx.spawn(async move |_| {
             let reply = second_task.await;
