@@ -150,6 +150,11 @@ pub enum ProvisionCommand {
     Retain {
         installation: PathBuf,
     },
+    /// Remove the account service and only its managed CLI launcher.
+    Uninstall {
+        #[arg(long, value_name = "TOKEN")]
+        confirm: Option<String>,
+    },
     SshDiscover,
     SshDirectStatus,
     SshDirectPrepare {
