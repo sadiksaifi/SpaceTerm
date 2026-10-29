@@ -22,6 +22,10 @@ fn main() -> ExitCode {
         Err(error) => return usage(&argv, &error),
     };
     let command = cli.command.path();
+    #[cfg(target_os = "macos")]
+    if let Err(error) = resolve_launcher() {
+        return finish(command, cli.global.json, contract::from_server_error(error));
+    }
     if let args::Command::Connection(command) = &cli.command {
         let result = spaceterm_cli::connection::execute(
             command,
@@ -193,6 +197,24 @@ fn remote(cli: &Cli) -> bool {
         .clone()
         .or_else(|| std::env::var("SPACETERM_SERVER").ok())
         .is_some_and(|value| value != "local")
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_launcher() -> Result<(), ServerError> {
+    use std::os::unix::process::CommandExt;
+    let executable = std::env::current_exe().map_err(|_| ServerError::StartupFailed)?;
+    let resolved = executable
+        .canonicalize()
+        .map_err(|_| ServerError::StartupFailed)?;
+    if resolved != executable {
+        // macOS reports the symlink used to launch the image. Re-execution makes resource
+        // lookup and Session context use the retained executable's installation directory.
+        let _ = std::process::Command::new(resolved)
+            .args(std::env::args_os().skip(1))
+            .exec();
+        return Err(ServerError::StartupFailed);
+    }
+    Ok(())
 }
 
 fn run_server(service: bool, owned: bool) -> Result<(), ServerError> {

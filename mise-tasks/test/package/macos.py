@@ -354,6 +354,24 @@ class CurrentServerPackageTests(unittest.TestCase):
             )
             self.assertEqual((destination / "artifact.tar.gz").read_bytes(), archive.read_bytes())
             self.assertEqual((destination / "artifact.sig").read_bytes(), signature.read_bytes())
+            verified = Path(temporary) / "verified"
+            verified.mkdir()
+            tree, _, _ = server_package.verified_copy(
+                archive, signature, verified, None, identity="spaceterm-preflight"
+            )
+            launcher = Path(temporary) / "bin/spaceterm"
+            launcher.parent.mkdir()
+            launcher.symlink_to(tree / "bin/spaceterm")
+            result = subprocess.run(
+                [launcher, "server", "provision", "check"],
+                env={},
+                cwd=tree,
+                capture_output=True,
+                timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, b"Server checks passed.\n")
+            self.assertEqual(result.stderr, b"")
 
 
 if __name__ == "__main__":
