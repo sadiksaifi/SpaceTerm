@@ -59,6 +59,10 @@ impl Home {
             u64::from_ne_bytes(nonce().unwrap()[..8].try_into().unwrap())
         ));
         std::fs::create_dir(&path).unwrap();
+        // Elvish loads library modules only when its rc file uses them.
+        let elvish = path.join(".config/elvish");
+        std::fs::create_dir_all(&elvish).unwrap();
+        std::fs::write(elvish.join("rc.elv"), "use spaceterm-integration\n").unwrap();
         Self(path)
     }
 }
@@ -238,9 +242,12 @@ impl Bench {
         let deadline = Instant::now() + wait;
         loop {
             match self.run(run, command) {
-                RunReply::Refused(RunRefusal::NoIntegration | RunRefusal::NotAtPrompt)
-                    if Instant::now() < deadline =>
-                {
+                // A shell may mark its prompt before its line editor turns on bracketed paste.
+                RunReply::Refused(
+                    RunRefusal::NoIntegration
+                    | RunRefusal::NotAtPrompt
+                    | RunRefusal::NoBracketedPaste,
+                ) if Instant::now() < deadline => {
                     self.pump();
                     std::thread::sleep(Duration::from_millis(20));
                 }

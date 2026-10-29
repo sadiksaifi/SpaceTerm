@@ -492,8 +492,10 @@ pub(crate) struct MetadataTracker {
     progress_expiry: Option<Instant>,
     title_animation: TitleActivity,
     owned_prompt: OwnedPrompt,
-    /// Input written while the owning shell's command ran. The command may not read it, so
-    /// the next prompt's line editor may: the fresh prompt carries it.
+    /// Whether the owning shell finished its command and has not drawn its prompt yet.
+    finishing: bool,
+    /// Input written while finishing. Only the next prompt's line editor can read it, so the
+    /// fresh prompt carries it.
     typeahead: u64,
     run: Option<RunFollower>,
 }
@@ -551,6 +553,7 @@ impl MetadataTracker {
             progress_expiry: None,
             title_animation: TitleActivity::default(),
             owned_prompt: OwnedPrompt::default(),
+            finishing: false,
             typeahead: 0,
             run: None,
         }
@@ -562,7 +565,7 @@ impl MetadataTracker {
 
     /// Counts input written to the PTY, so a run never pastes into a line someone typed.
     pub(crate) fn note_input(&mut self, bytes: usize) {
-        let counter = if self.owned_prompt.zone == Some(PromptZone::CommandOutput) {
+        let counter = if self.finishing {
             &mut self.typeahead
         } else {
             &mut self.owned_prompt.input_bytes
@@ -778,6 +781,7 @@ impl MetadataTracker {
                 if !fresh {
                     return;
                 }
+                self.finishing = false;
                 self.owned_prompt.input_bytes = std::mem::take(&mut self.typeahead);
                 Marker::PromptStart
             }
@@ -797,6 +801,7 @@ impl MetadataTracker {
             }
             ("D", Some(_)) => {
                 self.owned_prompt.zone = Some(PromptZone::CommandOutput);
+                self.finishing = true;
                 Marker::CommandFinished {
                     exit_status: exit_status(fields),
                 }
@@ -1627,11 +1632,13 @@ mod tests {
         fresh_prompt(&mut tracker, now);
         assert_eq!(tracker.owned_prompt().input_bytes, 0);
 
-        // Input written while a command runs may reach the next prompt's line editor.
+        // Input a running command may read is the command's. Input written after the command
+        // finished, before the prompt, can reach only the next prompt's line editor.
         tracker.apply_semantic_prompt("C;spaceterm=0f1e", now);
         assert_eq!(tracker.owned_prompt().zone, Some(PromptZone::CommandOutput));
-        tracker.note_input(3);
+        tracker.note_input(5);
         tracker.apply_semantic_prompt("D;0;spaceterm=0f1e", now);
+        tracker.note_input(3);
         fresh_prompt(&mut tracker, now);
         assert_eq!(tracker.owned_prompt().input_bytes, 3);
         fresh_prompt(&mut tracker, now);

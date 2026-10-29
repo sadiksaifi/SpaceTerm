@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 const CLAIM_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long output waits for the frame that shows the finish.
 const SCREEN_SETTLE: Duration = Duration::from_secs(1);
+/// How long a run waits for a fresh prompt's line editor to turn on bracketed paste.
+const PASTE_MODE_WAIT: Duration = Duration::from_secs(1);
 /// How often a lost reply is resolved again.
 const RESOLVE_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -327,17 +329,33 @@ pub fn run(
         return Done::failed(failure);
     }
     let shown = channel.show();
+    let admitting = Instant::now();
     let admitted = shown.and_then(|()| {
-        request(
-            link,
-            Operation::Run {
-                channel: channel.number(),
-                run,
-                command,
-                session: lease.session,
-            },
-            deadline,
-        )
+        loop {
+            let reply = request(
+                link,
+                Operation::Run {
+                    channel: channel.number(),
+                    run,
+                    command: command.clone(),
+                    session: lease.session,
+                },
+                deadline,
+            );
+            // Some shells mark their prompt before their line editor turns on bracketed
+            // paste. A refusal wrote nothing, so asking again is safe.
+            if matches!(
+                reply,
+                Ok(ReplyBody::Run(RunReply::Refused(
+                    RunRefusal::NoBracketedPaste
+                )))
+            ) && admitting.elapsed() < PASTE_MODE_WAIT
+            {
+                std::thread::sleep(RESOLVE_INTERVAL / 10);
+                continue;
+            }
+            break reply;
+        }
     });
     let start = match admitted {
         Ok(ReplyBody::Run(RunReply::Admitted { start })) => Some(start),
