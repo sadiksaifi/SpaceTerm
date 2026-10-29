@@ -13744,6 +13744,118 @@ mod shared_repositories {
         );
     }
 
+    /// The selection leaves a Worktree row from the rect it was painted at in the last frame,
+    /// at that rect's height, even when the row has moved since because a gap above it closes.
+    #[gpui::test]
+    fn the_selection_should_leave_a_worktree_row_from_its_painted_rect(cx: &mut TestAppContext) {
+        let mut initial = relisted(published(1, "main", true), 1, |records| {
+            records.push(record(EXTRA_ROOT, "extra", false));
+        });
+        let tabs = &mut initial.workspaces[0].tabs;
+        tabs[1].worktree = Some(EXTRA_ROOT.into());
+        tabs[1].panes = vec![pane(FEATURE_PANE, EXTRA_ROOT)];
+        let (harness, cx) = harness(cx, initial);
+        new_desktop_workspace(cx);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        finish_slides(cx);
+        let extra = harness
+            .row(cx)
+            .worktrees
+            .expect("the Worktree rows")
+            .rows()
+            .find(|row| row.name.as_ref() == "app-extra")
+            .map(|row| row.worktree_id)
+            .expect("the extra Worktree row");
+        click(worktree_row(harness.shared, extra, cx), cx);
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .update(cx, |manager, cx| manager.toggle_sidebar_focus(window, cx));
+        });
+        finish_slides(cx);
+        animate(cx);
+        let mut without_feature = relisted(published(1, "main", true), 2, |records| {
+            records.retain(|record| record.root != std::path::Path::new(FEATURE_ROOT));
+            records.push(record(EXTRA_ROOT, "extra", false));
+        });
+        let tabs = &mut without_feature.workspaces[0].tabs;
+        tabs[1].worktree = Some(EXTRA_ROOT.into());
+        tabs[1].panes = vec![pane(FEATURE_PANE, EXTRA_ROOT)];
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        };
+
+        harness.publish(without_feature, cx);
+        for _ in 0..10 {
+            frame(cx);
+        }
+        let painted = bounds_of(
+            format!("worktree-row-{}-{extra}-selection", harness.shared.get()),
+            cx,
+        );
+        cx.simulate_keystrokes("left");
+        cx.run_until_parked();
+        let leaving = bounds_of(
+            format!("workspace-row-selection-{}", harness.shared.get()),
+            cx,
+        );
+        finish_slides(cx);
+        let landed = bounds_of(
+            format!("workspace-row-selection-{}", harness.shared.get()),
+            cx,
+        );
+
+        assert_eq!(
+            leaving, painted,
+            "the selection must leave from the rect the row painted it at"
+        );
+        assert!(
+            landed.size.height < painted.size.height,
+            "the selection must settle at the Workspace row's height, got {landed:?}"
+        );
+    }
+
+    /// With Reduce Motion on, each step of a Root Tab following into another repository shows
+    /// its final layout at once. The server publishes the steps apart, so each is a layout.
+    #[gpui::test]
+    fn reduce_motion_should_show_each_step_of_a_root_tab_following_at_rest(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        finish_slides(cx);
+        let layout = |cx: &mut VisualTestContext| {
+            (
+                group_bounds(harness.shared, cx),
+                cx.debug_bounds("worktree-former-repository-app"),
+            )
+        };
+
+        let mut steps = Vec::new();
+        for inventory in [
+            moved_to_orbit(2, "/srv/app/src"),
+            followed_into_orbit_with_worktrees(3),
+        ] {
+            harness.publish(inventory, cx);
+            let at_once = layout(cx);
+            finish_slides(cx);
+            steps.push((at_once, layout(cx)));
+        }
+
+        for (at_once, at_rest) in steps {
+            assert_eq!(
+                at_once, at_rest,
+                "each step must show its final layout at once"
+            );
+        }
+    }
+
     /// When every Worktree row is replaced, as when a Root Tab follows into a repository with
     /// several Worktrees, the rows that leave keep drawing below the Workspace row while their
     /// place closes, take no clicks, and are not announced.

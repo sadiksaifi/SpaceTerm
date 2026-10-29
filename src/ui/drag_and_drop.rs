@@ -77,6 +77,9 @@ pub(crate) struct ReorderableStrip<Id, Row = ()> {
     selected: Option<(Id, Row)>,
     /// How far the selected row stood from its item's start along the strip in the last frame.
     selected_inset: Pixels,
+    /// Where the owner saw the selection drawn along the strip in the last frame, until the next
+    /// selection change starts from there.
+    drawn_selection: Option<Pixels>,
     /// The selection moving to the selected row.
     flight: Option<Flight<Id, Row>>,
     /// How far the strip was scrolled along its axis in the last frame.
@@ -326,6 +329,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             laid_out: HashMap::new(),
             selected: None,
             selected_inset: px(0.0),
+            drawn_selection: None,
             flight: None,
             scrolled: px(0.0),
             overflowing: false,
@@ -625,7 +629,9 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             } else {
                 SELECTION_DURATION
             };
-            let from = previous.and_then(|previous| self.selection_start(previous, now));
+            let drawn = self.drawn_selection.take();
+            let from =
+                previous.and_then(|previous| drawn.or_else(|| self.selection_start(previous, now)));
             let to = selected.and_then(|(selected, _)| {
                 Some(self.settled_start(selected, now)? + self.slid(selected, now) + inset)
             });
@@ -644,6 +650,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 });
         }
         self.selected_inset = inset;
+        self.drawn_selection = None;
         self.begin_arrival(now, cx);
         self.follow_arrival(now);
         if self.flight.as_ref().is_some_and(|flight| {
@@ -859,7 +866,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             .values_mut()
             .chain(self.trailing_gaps.values_mut())
         {
-            gap.leaving.retain(|leaving| !ids.contains(leaving));
+            gap.leaving.retain(|leaving| !ids.contains(&leaving.id));
         }
         for (position, id) in ids.iter().enumerate() {
             if known.contains(id) {
@@ -885,18 +892,33 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 continue;
             }
             self.entering.remove(id);
-            // The slot's bounds hold its own closing gaps, and the items that left from them.
+            // The slot's bounds hold its own closing gaps, and the items that left from them,
+            // which keep what they show of themselves as their place joins this one.
             let lead = self.leading_gaps.remove(id);
             let trail = self.trailing_gaps.remove(id);
             let Some(bounds) = bounds.as_ref() else {
                 continue;
             };
             let extent = bounds[position].size.along(self.axis);
-            let leaving = lead
+            let painted = |gap: &Option<Gap<Id>>| {
+                self.refreshed_at
+                    .zip(gap.as_ref())
+                    .map_or(px(0.0), |(at, gap)| gap.at(at))
+            };
+            let face = (extent - painted(&lead) - painted(&trail)).max(px(0.0));
+            let shown = |gap: Option<Gap<Id>>| {
+                gap.map_or_else(Vec::new, |gap| {
+                    let open = gap.at(now);
+                    shown_leaving(gap.leaving, open)
+                })
+            };
+            let leaving = shown(lead)
                 .into_iter()
-                .flat_map(|gap| gap.leaving)
-                .chain([*id])
-                .chain(trail.into_iter().flat_map(|gap| gap.leaving))
+                .chain([Leaving {
+                    id: *id,
+                    extent: face,
+                }])
+                .chain(shown(trail))
                 .collect::<Vec<_>>();
             let next = known[position + 1..].iter().find(|id| ids.contains(id));
             let previous = known[..position].iter().rev().find(|id| ids.contains(id));
@@ -906,11 +928,12 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 (None, None) => continue,
             };
             let open = gap.as_ref().map_or(px(0.0), |gap| gap.at(now));
-            let mut older = gap.map_or_else(Vec::new, |gap| gap.leaving);
+            let mut older = gap.map_or_else(Vec::new, |gap| shown_leaving(gap.leaving, open));
             // Items this change removes stand in order before an older leading gap, which is
             // nearer its carrier, and after an older trailing gap.
             if leading {
                 let at = placed.entry(carrier).or_insert(0);
+                *at = (*at).min(older.len());
                 let count = leaving.len();
                 older.splice(*at..*at, leaving);
                 *at += count;
@@ -935,8 +958,11 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
 
     /// The removed items whose place still closes before the item `id`, and after it, in
     /// presentation order.
-    pub(crate) fn leaving_beside(&self, id: Id) -> (&[Id], &[Id]) {
-        fn leaving<'a, Id: Eq + Hash>(gaps: &'a HashMap<Id, Gap<Id>>, id: &Id) -> &'a [Id] {
+    pub(crate) fn leaving_beside(&self, id: Id) -> (&[Leaving<Id>], &[Leaving<Id>]) {
+        fn leaving<'a, Id: Eq + Hash>(
+            gaps: &'a HashMap<Id, Gap<Id>>,
+            id: &Id,
+        ) -> &'a [Leaving<Id>] {
             gaps.get(id).map_or(&[], |gap| gap.leaving.as_slice())
         }
         (
@@ -950,7 +976,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         self.leading_gaps
             .values()
             .chain(self.trailing_gaps.values())
-            .flat_map(|gap| gap.leaving.iter().copied())
+            .flat_map(|gap| gap.leaving.iter().map(|leaving| leaving.id))
     }
 
     /// Lifts the item `id`, one of the strip's `ids` in presentation order. It keeps its place
@@ -1141,6 +1167,22 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 .get(&id)
                 .map_or(px(0.0), |gap| gap.at(now)),
         }
+    }
+
+    /// Records where the selection was drawn along the strip in the last frame, as its owner
+    /// measured the painted selection, so a selection that leaves on the next refresh starts
+    /// exactly there. Call it before [`Self::follow_row_selection`].
+    pub(crate) fn drew_selection_at(&mut self, start: Pixels) {
+        self.drawn_selection = Some(start);
+    }
+
+    /// How much of the selection's move to the row `row` of the item `id` remains, from 1 as it
+    /// leaves to 0 once it arrives.
+    pub(crate) fn row_selection_remaining(&self, id: Id, row: Row, cx: &App) -> f32 {
+        self.flight
+            .as_ref()
+            .filter(|flight| flight.id == id && flight.row == row && self.lift.is_none())
+            .map_or(0.0, |flight| 1.0 - flight.ease.at(now(cx)))
     }
 
     /// How far the selection drawn at the row `row` of the item `id` stands from that row while it
@@ -1562,7 +1604,28 @@ struct Gap<Id> {
     ease: Ease,
     /// The removed items whose place the gap holds, in presentation order, which a strip may
     /// draw in it while it closes.
-    leaving: Vec<Id>,
+    leaving: Vec<Leaving<Id>>,
+}
+
+/// A removed item a closing gap holds, and how much of it shows from its start: all of it when
+/// it left, or what showed when the gap that held it joined another.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Leaving<Id> {
+    pub(crate) id: Id,
+    pub(crate) extent: Pixels,
+}
+
+/// What of `leaving`, drawn one after another from a gap's start, shows in `open` of it.
+fn shown_leaving<Id>(leaving: Vec<Leaving<Id>>, open: Pixels) -> Vec<Leaving<Id>> {
+    let mut remaining = open;
+    leaving
+        .into_iter()
+        .filter_map(|leaving| {
+            let extent = leaving.extent.min(remaining);
+            remaining -= extent;
+            (extent > px(0.0)).then_some(Leaving { extent, ..leaving })
+        })
+        .collect()
 }
 
 impl<Id> Gap<Id> {

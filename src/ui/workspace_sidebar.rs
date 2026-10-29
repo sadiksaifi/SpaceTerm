@@ -1,5 +1,7 @@
 //! Workspace sidebar presentation and transient interaction lifecycle.
 //! Workspace policy stays with the application; the sidebar emits typed requests.
+#[cfg(test)]
+mod motion_tests;
 mod text;
 mod view;
 
@@ -474,12 +476,23 @@ impl GroupMotion {
     }
 
     /// The rows that left from beside `row` and still draw in its closing gaps, before it and
-    /// after it.
-    fn departed_beside(&self, row: GroupRow) -> (Vec<&DepartedRow>, Vec<&DepartedRow>) {
+    /// after it, each with how much of it shows from its top.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the rows on either side are the same list of departed rows and their extents"
+    )]
+    fn departed_beside(
+        &self,
+        row: GroupRow,
+    ) -> (Vec<(&DepartedRow, Pixels)>, Vec<(&DepartedRow, Pixels)>) {
         let (before, after) = self.rows.leaving_beside(row);
-        let departed = |rows: &[GroupRow]| {
+        let departed = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
             rows.iter()
-                .filter_map(|row| self.departed.get(row))
+                .filter_map(|leaving| {
+                    self.departed
+                        .get(&leaving.id)
+                        .map(|departed| (departed, leaving.extent))
+                })
                 .collect::<Vec<_>>()
         };
         (departed(before), departed(after))
@@ -556,6 +569,14 @@ pub(super) struct WorkspaceSidebar {
     workspace_reorder: ReorderableStrip<WorkspaceId, Option<WorktreeId>>,
     /// How each Workspace group moves as its Worktree rows disclose, come, and go.
     groups: std::collections::HashMap<WorkspaceId, GroupMotion>,
+    /// The row that carried the selection in the last frame, where its chip was painted along the
+    /// list, and how tall the chip was.
+    painted_selection: Option<(SidebarRowKey, Pixels, Pixels)>,
+    /// The row that carried the selection at the last render.
+    selected: Option<SidebarRowKey>,
+    /// The row the selection is moving to, and how much taller than that row's chip the chip it
+    /// left was, so the moving chip starts at the size it was drawn.
+    selection_lengthening: Option<(SidebarRowKey, Pixels)>,
     /// How the sidebar moves as it shows and hides.
     motion: SidebarMotion,
     /// How the current frame presents the sidebar.
@@ -628,6 +649,9 @@ impl WorkspaceSidebar {
             suppress_pointer_until_release: false,
             workspace_reorder: ReorderableStrip::new(gpui::Axis::Vertical),
             groups: std::collections::HashMap::new(),
+            painted_selection: None,
+            selected: None,
+            selection_lengthening: None,
             motion: SidebarMotion::new(visible),
             frame: SidebarFrame {
                 reveal: if visible { 1.0 } else { 0.0 },
@@ -1227,7 +1251,22 @@ impl Render for WorkspaceSidebar {
         }
         self.present_groups(window, cx);
         let appearance = super::appearance::chrome(cx);
-        let selected = self.selected_key().map(|key| {
+        // A selection that moves starts from the rect its chip was painted at, whatever moved
+        // under it since.
+        let selected_key = self.selected_key();
+        if selected_key != self.selected {
+            self.selection_lengthening = None;
+            if let (Some(previous), Some(next)) = (self.selected, selected_key)
+                && let Some((painted, start, height)) = self.painted_selection
+                && painted == previous
+            {
+                self.workspace_reorder.drew_selection_at(start);
+                self.selection_lengthening =
+                    Some((next, height - self.chip_height(next, appearance)));
+            }
+            self.selected = selected_key;
+        }
+        let selected = selected_key.map(|key| {
             let row = match key {
                 SidebarRowKey::Workspace(_) => None,
                 SidebarRowKey::Worktree(_, worktree_id) => Some(worktree_id),
