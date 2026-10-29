@@ -1615,6 +1615,9 @@ pub struct List {
 pub struct WorkspaceChange {
     pub target: Vec<TargetStep>,
     pub workspace: Ref,
+    /// Present for Workspace creation, from its server-created Root Pane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
     pub revision: u64,
 }
 
@@ -1646,6 +1649,7 @@ pub struct CreatedPane {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Created {
     pub target: Vec<TargetStep>,
+    pub directory: String,
     pub tab: Ref,
     pub pane: CreatedPane,
     pub source_pane: Option<String>,
@@ -1656,6 +1660,9 @@ pub struct Created {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WorktreeCreate {
     pub target: Vec<TargetStep>,
+    pub directory: String,
+    /// Worktree Create opens one creator-controlled Tab on the server.
+    pub control: CreatedControl,
     pub worktree: WorktreeRef,
     pub tab: Option<Ref>,
 }

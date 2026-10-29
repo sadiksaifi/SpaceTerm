@@ -1,31 +1,11 @@
 //! Establish server-owned membership before reviewing a close that would empty a Workspace.
 
-use std::path::Path;
-
 use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Mutation, Outcome};
-use spaceterm_server::repository::{WorktreeHead, WorktreeInventory};
 use spaceterm_server::worktree::Operation;
 use spaceterm_ui::{Alert, AlertIntent, ModalAction, ModalActionRole, ModalId};
 
 use super::*;
 use crate::close_confirmation::CloseTarget;
-
-/// Git's Main Worktree wins when usable; its remaining listed Worktrees keep Git's order.
-pub(in crate::ui::workspace_manager) fn destination<'a>(
-    inventory: &'a WorktreeInventory,
-    target: &Path,
-) -> Option<&'a Path> {
-    let usable = |record: &&spaceterm_server::repository::WorktreeRecord| {
-        record.root != target && !record.missing && record.head != WorktreeHead::Bare
-    };
-    inventory
-        .worktrees
-        .iter()
-        .filter(usable)
-        .find(|record| record.root == inventory.main_root)
-        .or_else(|| inventory.worktrees.iter().find(usable))
-        .map(|record| record.root.as_path())
-}
 
 impl WorkspaceManager {
     /// Fallback creation must not use the ordinary accepted-creation activation path.
@@ -75,16 +55,21 @@ impl WorkspaceManager {
         let Some(anchor) = authoritative.tabs.iter().find(|entry| entry.id == tab) else {
             return false;
         };
-        if authoritative.tabs.iter().any(|entry| {
-            entry.worktree != anchor.worktree
-                || entry.worktree_repository != anchor.worktree_repository
-        }) {
-            return false;
-        }
         let Some(path) = anchor.worktree.clone() else {
             return false;
         };
         let repository = anchor.worktree_repository.clone();
+        let candidate = shared.latest_inventory().and_then(|inventory| {
+            let repositories = inventory.repositories.as_ref()?;
+            spaceterm_server::organize::worktree_close_plan(inventory, repositories, workspace, tab)
+                .ok()
+        });
+        if candidate
+            .as_ref()
+            .is_some_and(|plan| plan.fallback.is_none())
+        {
+            return false;
+        }
         if !shared.editability().available() {
             Self::show_shared_refusal(
                 "establish a Tab outside the Worktree",
@@ -94,14 +79,13 @@ impl WorkspaceManager {
             );
             return true;
         }
-        let candidate = self.shared_inventory(workspace_id).and_then(|inventory| {
-            Some((
-                inventory.main_root.clone(),
-                destination(inventory, &path)?.to_path_buf(),
-            ))
-        });
-        let Some((root, outside)) =
-            candidate.filter(|_| self.owner_writes_worktrees(workspace_id, cx))
+        let Some(Operation::OpenTab {
+            root,
+            path: outside,
+            ..
+        }) = candidate
+            .and_then(|plan| plan.fallback)
+            .filter(|_| self.owner_writes_worktrees(workspace_id, cx))
         else {
             Self::worktree_fallback_failed(
                 "Open a Tab in another available Worktree before closing these Tabs.",
