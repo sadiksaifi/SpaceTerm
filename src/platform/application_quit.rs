@@ -55,13 +55,33 @@ impl StatusAreaName {
     }
 }
 
-/// The warning for an actual client exit. Installed builds make Quit the default answer;
-/// destructive Development exits focus Cancel.
+/// The warning for an actual client exit, or the notice that it can't be checked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuitPrompt {
     pub(crate) title: String,
     pub(crate) detail: String,
-    pub(crate) destructive: bool,
+    pub(crate) buttons: QuitButtons,
+}
+
+/// The answers a quit warning offers, in button order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QuitButtons {
+    /// An installed build's Quit is the default answer.
+    Quit,
+    /// A Development quit ends Terminal Sessions, so focus rests on the safe Cancel and Return
+    /// quits nothing.
+    DestructiveQuit,
+    /// The client can't check what quitting ends, so it offers only Cancel.
+    CancelOnly,
+}
+
+impl QuitButtons {
+    pub(crate) const fn answers(self) -> &'static [QuitAnswer] {
+        match self {
+            Self::Quit | Self::DestructiveQuit => &[QuitAnswer::Quit, QuitAnswer::Cancel],
+            Self::CancelOnly => &[QuitAnswer::Cancel],
+        }
+    }
 }
 
 /// The person's answer to the quit warning.
@@ -72,7 +92,12 @@ pub(crate) enum QuitAnswer {
 }
 
 impl QuitAnswer {
-    pub(crate) const CANCEL_LABEL: &str = "Cancel";
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Quit => "Quit",
+            Self::Cancel => "Cancel",
+        }
+    }
 }
 
 /// Presents the quit warning through GPUI's prompt for this window.
@@ -81,25 +106,26 @@ pub(crate) fn present_window_quit(
     window: &mut Window,
     cx: &mut App,
 ) -> Task<Option<QuitAnswer>> {
+    let answers = prompt.buttons.answers();
+    let buttons = answers
+        .iter()
+        .map(|answer| match answer {
+            QuitAnswer::Quit => PromptButton::ok(answer.label()),
+            QuitAnswer::Cancel => PromptButton::cancel(answer.label()),
+        })
+        .collect::<Vec<_>>();
     let answer = window.prompt(
-        if prompt.destructive {
-            PromptLevel::Critical
-        } else {
-            PromptLevel::Info
+        match prompt.buttons {
+            QuitButtons::Quit => PromptLevel::Info,
+            QuitButtons::DestructiveQuit => PromptLevel::Critical,
+            QuitButtons::CancelOnly => PromptLevel::Warning,
         },
         &prompt.title,
         Some(&prompt.detail),
-        &[
-            PromptButton::ok("Quit"),
-            PromptButton::cancel(QuitAnswer::CANCEL_LABEL),
-        ],
+        &buttons,
         cx,
     );
-    cx.spawn(async move |_| match answer.await.ok()? {
-        0 => Some(QuitAnswer::Quit),
-        1 => Some(QuitAnswer::Cancel),
-        _ => None,
-    })
+    cx.spawn(async move |_| answers.get(answer.await.ok()?).copied())
 }
 
 #[cfg_attr(
@@ -194,6 +220,18 @@ pub(crate) trait ApplicationQuitAdapter {
         present_window_quit(prompt, window, cx)
     }
 
+    /// Asks the quit warning by itself while the client has no window, with the same answers
+    /// and keys as [`Self::present_confirmation`]. Any answer but Quit hides the client,
+    /// returning focus to the app the person was using. Returns `None` when this host shows the
+    /// warning only in a window.
+    fn present_windowless_confirmation(
+        &self,
+        _prompt: &QuitPrompt,
+        _cx: &mut App,
+    ) -> Option<Task<Option<QuitAnswer>>> {
+        None
+    }
+
     /// Asks the application to exit through the quit policy.
     fn request_quit(&self, cx: &mut App);
 
@@ -212,13 +250,51 @@ pub(crate) mod testing {
         handler: RefCell<Option<ApplicationQuitHandler>>,
         requests: Rc<Cell<usize>>,
         confirmations: Rc<Cell<usize>>,
+        /// Warnings asked by themselves, oldest first, each with the channel that answers it.
+        /// `None` for a host that shows the warning only in a window.
+        windowless: Option<RefCell<Vec<WindowlessPrompt>>>,
     }
+
+    type WindowlessPrompt = (QuitPrompt, async_channel::Sender<QuitAnswer>);
 
     impl RecordingApplicationQuitAdapter {
         pub(crate) fn with_last_window_policy(policy: LastWindowPolicy) -> Self {
             Self {
                 last_window: Some(policy),
                 ..Self::default()
+            }
+        }
+
+        /// A host that asks the warning by itself while the client has no window.
+        pub(crate) fn presenting_windowless(policy: LastWindowPolicy) -> Self {
+            Self {
+                last_window: Some(policy),
+                windowless: Some(RefCell::default()),
+                ..Self::default()
+            }
+        }
+
+        /// The warnings asked by themselves that remain unanswered.
+        pub(crate) fn windowless_prompts(&self) -> Vec<QuitPrompt> {
+            self.windowless.as_ref().map_or_else(Vec::new, |prompts| {
+                prompts
+                    .borrow()
+                    .iter()
+                    .map(|(prompt, _)| prompt.clone())
+                    .collect()
+            })
+        }
+
+        /// Answers the oldest warning asked by itself. `None` ends it without an answer.
+        pub(crate) fn answer_windowless(&self, answer: Option<QuitAnswer>) {
+            let (_, answered) = self
+                .windowless
+                .as_ref()
+                .expect("this host asks only in a window")
+                .borrow_mut()
+                .remove(0);
+            if let Some(answer) = answer {
+                answered.try_send(answer).unwrap();
             }
         }
 
@@ -256,6 +332,19 @@ pub(crate) mod testing {
             }
             *installed = Some(handler);
             Ok(())
+        }
+
+        fn present_windowless_confirmation(
+            &self,
+            prompt: &QuitPrompt,
+            cx: &mut App,
+        ) -> Option<Task<Option<QuitAnswer>>> {
+            let (answered, answer) = async_channel::bounded(1);
+            self.windowless
+                .as_ref()?
+                .borrow_mut()
+                .push((prompt.clone(), answered));
+            Some(cx.spawn(async move |_| answer.recv().await.ok()))
         }
 
         fn request_quit(&self, cx: &mut App) {
