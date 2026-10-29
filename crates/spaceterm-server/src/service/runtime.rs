@@ -88,7 +88,7 @@ impl Service {
         let signature = source(&installation.join("artifact.sig"), 64)?;
         authenticate(&archive, &signature, &self.identity)?;
         let info = contents(&archive, &self.identity, |_, _, _, _| Ok(()))?;
-        info.require_compatibility(crate::protocol::MAJOR, &["workspace_policy"])?;
+        info.require_compatibility(Some(crate::protocol::MAJOR), &["workspace_policy"])?;
         let retained = retain(
             &self.paths.data.join("installations"),
             &self.identity,
