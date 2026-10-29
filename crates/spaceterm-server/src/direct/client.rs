@@ -98,7 +98,8 @@ pub(super) fn exchange_on(
     if challenge.pin != *pin {
         return Err(DirectError::WrongServer);
     }
-    if challenge.major != crate::protocol::MAJOR {
+    // Major 4 froze authentication for the service lane. Work admission checks its own major.
+    if challenge.major < 4 {
         return Err(DirectError::IncompatibleProtocol);
     }
     if ClientName::from(challenge.server_name.as_str()).as_str() != challenge.server_name {

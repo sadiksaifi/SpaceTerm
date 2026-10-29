@@ -3971,3 +3971,82 @@ fn an_expired_client_deadline_sends_no_authentication() {
     ));
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
+
+#[test]
+fn authentication_accepts_a_signed_future_work_major_for_service_admission() {
+    struct Exchange {
+        frames: std::collections::VecDeque<serde_json::Value>,
+        sent: usize,
+    }
+    impl client::Messages for Exchange {
+        fn send(&mut self, _: &impl serde::Serialize) -> Result<(), DirectError> {
+            self.sent += 1;
+            Ok(())
+        }
+        fn receive<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, DirectError> {
+            serde_json::from_value(self.frames.pop_front().unwrap())
+                .map_err(|_| DirectError::InvalidRequest)
+        }
+    }
+    let server = DeviceCredential::generate().unwrap();
+    let credential = DeviceCredential::generate().unwrap();
+    let pin = ServerPin {
+        server: [1; 32],
+        public_key: crypto::public(server.expose_bytes()).unwrap(),
+        certificate: [2; 32],
+        build: "Development".into(),
+    };
+    for (major, tampered, expected) in [
+        (crate::protocol::MAJOR + 1, false, None),
+        (
+            crate::protocol::MAJOR + 1,
+            true,
+            Some(DirectError::AuthenticationRefused),
+        ),
+        (3, false, Some(DirectError::IncompatibleProtocol)),
+    ] {
+        let mut challenge = wire::Challenge {
+            major,
+            pin: pin.clone(),
+            nonce: [3; 32],
+            generation: [4; 32],
+            server_name: "Test".into(),
+            proof: Vec::new(),
+        };
+        challenge.proof = crypto::sign(
+            server.expose_bytes(),
+            &wire::transcript(
+                "server",
+                &pin,
+                &challenge.nonce,
+                &(major, &challenge.server_name, &challenge.generation),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        if tampered {
+            challenge.major += 1;
+        }
+        let mut exchange = Exchange {
+            frames: [
+                serde_json::to_value(challenge).unwrap(),
+                serde_json::to_value(Ok::<_, DirectError>(wire::Answer::Enrollment(None))).unwrap(),
+            ]
+            .into(),
+            sent: 0,
+        };
+        let result = client::exchange_on(
+            &mut exchange,
+            &pin,
+            &credential,
+            wire::Action::Finish {
+                claim: [5; 32],
+                key: crypto::public(credential.expose_bytes()).unwrap(),
+            },
+            None,
+            None,
+        );
+        assert_eq!(result.err(), expected);
+        assert_eq!(exchange.sent, usize::from(expected.is_none()));
+    }
+}
