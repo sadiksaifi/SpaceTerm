@@ -254,17 +254,19 @@ fn target(
         .inventory
         .placement(pane)
         .ok_or_else(|| fail(Failure::new(Code::NotFound)))?;
-    let running = snapshot.inventory.close.as_ref().is_some_and(|close| {
+    let session = snapshot.inventory.close.as_ref().and_then(|close| {
         close
             .sessions
             .iter()
-            .any(|session| session.id == pane && session.session.is_some())
+            .find(|session| session.id == pane)
+            .and_then(|session| session.session)
     });
     Ok(PaneTarget {
         server,
         workspace: placement.workspace,
         pane,
-        running,
+        running: session.is_some(),
+        session,
         steps: scope::target_steps(&snapshot, &resolved),
     })
 }

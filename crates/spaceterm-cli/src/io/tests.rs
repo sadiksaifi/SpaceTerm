@@ -161,6 +161,7 @@ fn target(workspace: Id, pane: Id, running: bool) -> PaneTarget {
         workspace,
         pane,
         running,
+        session: None,
         steps: Vec::new(),
     }
 }
@@ -290,7 +291,10 @@ fn run_read_and_page_through_scrollback() {
         "{}",
         output_text(&done)
     );
-    assert!(runs.pending().is_empty(), "a settled run is retired");
+    assert!(
+        runs.pending().unwrap().is_empty(),
+        "a settled run is retired"
+    );
 
     let target = PaneTarget {
         running: true,
@@ -553,6 +557,162 @@ fn observe_controlled_panes_and_end_sessions() {
     );
 }
 
+/// Forward pages spend their byte budget on history when the screen is omitted.
+#[test]
+fn forward_pages_reclaim_the_omitted_screen_budget() {
+    struct LargeScreen(Rewrapping);
+    impl Source for LargeScreen {
+        fn snapshot(&mut self, format: Format) -> Result<Snapshot, Failure> {
+            let mut snapshot = self.0.snapshot(format)?;
+            snapshot.screen.rows = vec!["screen exceeds the page budget".into()];
+            Ok(snapshot)
+        }
+        fn page(
+            &mut self,
+            epoch: u64,
+            start: u64,
+            rows: u16,
+            format: Format,
+        ) -> Result<Option<read::PageRows>, Failure> {
+            self.0.page(epoch, start, rows, format)
+        }
+    }
+    for (limit, budget, expected) in [(2, 3, 1), (2, 6, 2), (10, 6, 3)] {
+        let mut source = LargeScreen(Rewrapping { snapshots: 1 });
+        let captured = read::capture(
+            &mut source,
+            Mode::After {
+                row: 0,
+                rows: limit,
+            },
+            None,
+            budget,
+            Format::Text,
+        )
+        .unwrap();
+        assert_eq!(captured.rows.len(), expected);
+        assert_eq!(captured.after, expected as u64);
+        assert!(captured.truncated);
+        assert!(captured.screen.is_none());
+    }
+}
+
+/// A paste followed by Enter executes the command and confirms Enter's serial.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn paste_then_enter_is_delivered() {
+    let mut server = Server::start();
+    let link = server.connect(1);
+    let (workspace, pane) = workspace(&link, 1);
+    let target = target(workspace, pane, false);
+    let ready = run_at_prompt(&link, &target, "true", &mut runs());
+    assert!(ready.failure.is_none(), "{:?}", ready.failure);
+    let target = PaneTarget {
+        running: true,
+        ..target
+    };
+    let sent = send::send(
+        &link,
+        &target,
+        &send_args(&["printf 'PASTE-%s\\n' EXECUTED", "--paste", "--enter"]),
+        &mut std::io::empty(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(sent.failure.is_none(), "{:?}", sent.failure);
+    let delivery = sent.data.unwrap().input;
+    assert!(delivery.delivered);
+    assert_eq!(delivery.serial, 3, "focus, paste, then Enter");
+    let observed = read::read(
+        &link,
+        &target,
+        &read_args(&["--wait-for", "PASTE-EXECUTED"]),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(observed.failure.is_none(), "{:?}", observed.failure);
+}
+
+/// A first call waits for a slow shell startup without retrying the command.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn first_run_waits_for_slow_zsh_startup() {
+    slow_startup("ZSH", "/bin/zsh", ".zshrc");
+}
+
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn first_run_waits_for_slow_bash_startup() {
+    slow_startup("BASH", "/opt/homebrew/bin/bash", ".bash_profile");
+}
+
+fn slow_startup(name: &str, fallback: &str, rc: &str) {
+    environment();
+    let original = std::env::var_os("SHELL").unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let shell = std::env::var(format!("SPACETERM_TEST_{name}")).unwrap_or_else(|_| {
+        if std::path::Path::new(fallback).is_file() {
+            fallback.into()
+        } else {
+            format!("/bin/{}", name.to_ascii_lowercase())
+        }
+    });
+    std::fs::write(home.join(rc), "sleep 2\n").unwrap();
+    // SAFETY: these native tests run serially, and this is set before starting a server.
+    unsafe {
+        std::env::set_var("SHELL", &shell);
+    }
+    let mut results = Vec::new();
+    for prestarted in [false, true] {
+        let mut server = Server::start();
+        let link = server.connect(1);
+        let (workspace, pane) = workspace(&link, 1);
+        let mut target = target(workspace, pane, false);
+        let started = Instant::now();
+        if prestarted {
+            let channel = super::channel::Channel::open(&link).unwrap();
+            let claimed = channel
+                .claim(
+                    &target,
+                    spaceterm_server::pane::AttachmentClaim::Select { explicit: true },
+                    None,
+                    Deadline::after(Some(Duration::from_secs(10))),
+                )
+                .unwrap();
+            let super::channel::Claimed::Attached(lease) = claimed else {
+                panic!("the Tab starts its shell");
+            };
+            target.running = true;
+            target.session = Some(lease.session);
+            channel.keep();
+        }
+        let done = run::run(
+            &link,
+            &mut || Ok(link.clone()),
+            &target,
+            &run_args("printf 'SLOW-%s\\n' STARTED"),
+            None,
+            &mut std::io::empty(),
+            &mut runs(),
+            Deadline::after(Some(Duration::from_secs(10))),
+        );
+        results.push((prestarted, done, started.elapsed()));
+    }
+    std::fs::remove_file(home.join(rc)).unwrap();
+    // SAFETY: the native tests run serially and both servers have stopped.
+    unsafe {
+        std::env::set_var("SHELL", &original);
+    }
+    for (prestarted, done, elapsed) in results {
+        assert!(
+            done.failure.is_none(),
+            "{name}, prestarted={prestarted}: {:?}",
+            done.failure
+        );
+        assert_eq!(done.data.as_ref().unwrap().run.started_shell, !prestarted);
+        assert!(elapsed >= Duration::from_secs(2));
+        assert!(output_text(&done).contains("SLOW-STARTED"));
+    }
+}
+
 /// A source whose epoch changes on the first snapshot's pages, then holds.
 struct Rewrapping {
     snapshots: u32,
@@ -780,7 +940,7 @@ fn runs_refuse_typed_input_and_survive_take_over_and_lost_links() {
         .filter(|row| row.trim() == "ONCE-42")
         .count();
     assert_eq!(printed, 1, "the command is never sent again");
-    assert!(runs.pending().is_empty());
+    assert!(runs.pending().unwrap().is_empty());
 
     // Another client takes over while the command runs.
     let taker = person.clone();
@@ -930,7 +1090,7 @@ fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
     );
     assert_eq!(refused.failure.unwrap().code, Code::NotAtPrompt);
     assert!(
-        second_runs.pending().is_empty(),
+        second_runs.pending().unwrap().is_empty(),
         "a refused call leaves no run journal"
     );
     let sent = send::send(
@@ -956,4 +1116,59 @@ fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
     let output = super::start::rows_text(observed.data.unwrap().rows.as_ref().unwrap());
     assert!(output.contains("FIRST-sentinel"), "{output}");
     assert!(!output.contains("SECOND-EXECUTED"), "{output}");
+}
+
+/// A stale fence cannot take control or start a replacement Terminal Session.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn stale_session_fences_leave_control_and_ended_sessions_unchanged() {
+    let mut server = Server::start();
+    let person = server.connect(1);
+    let agent = server.connect(2);
+    let (workspace, pane) = workspace(&person, 1);
+    let target = target(workspace, pane, false);
+    let ready = run_at_prompt(&person, &target, "true", &mut runs());
+    assert!(ready.failure.is_none(), "{:?}", ready.failure);
+    let target = PaneTarget {
+        running: true,
+        session: Some([7; 32]),
+        ..target
+    };
+    let sent = send::send(
+        &agent,
+        &target,
+        &send_args(&["x", "--take-over", "--session", "eeeeeeee"]),
+        &mut std::io::empty(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(sent.failure.unwrap().code, Code::SessionChanged);
+    let still_owned = run_at_prompt(&person, &target, "true", &mut runs());
+    assert!(still_owned.failure.is_none(), "{:?}", still_owned.failure);
+    let ended = run_at_prompt(&person, &target, "exit 4", &mut runs());
+    assert_eq!(ended.failure.unwrap().code, Code::SessionEnded);
+    let target = PaneTarget {
+        running: false,
+        session: None,
+        ..target
+    };
+    let mut args = run_args("true");
+    args.session = crate::scope::IdPrefix::parse("eeeeeeee");
+    let refused = run::run(
+        &agent,
+        &mut || Ok(agent.clone()),
+        &target,
+        &args,
+        None,
+        &mut std::io::empty(),
+        &mut runs(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(refused.failure.unwrap().code, Code::SessionChanged);
+    let observed = read::read(
+        &person,
+        &target,
+        &read_args(&[]),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(observed.failure.unwrap().code, Code::SessionEnded);
 }

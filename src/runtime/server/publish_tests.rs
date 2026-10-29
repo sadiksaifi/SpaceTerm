@@ -966,3 +966,33 @@ mod wakes {
         }
     }
 }
+
+#[test]
+fn input_progress_newer_than_a_screen_is_delivered_with_it() {
+    let outbox = outbox();
+    let mut publication = Publication::bind(&outbox, CHANNEL).unwrap();
+    outbox.view(CHANNEL, true);
+    publication.view(true);
+    let observation = || Observation {
+        screen: Some(capture(1, "pasted text", 1)),
+        effects: Vec::new(),
+        line: pane::LineState::default(),
+        accessibility: None,
+        progress: crate::terminal::session::Progress {
+            input: 2,
+            output_bytes: 11,
+        },
+    };
+    assert!(publication.publish(Observed::Live(observation())));
+    let messages = drain(&outbox);
+    assert_eq!(frames(&messages)[0].input, 1);
+    assert!(events(messages).iter().any(|event| matches!(
+        event,
+        PaneEvent::Progress {
+            input: 2,
+            output_bytes: 11
+        }
+    )));
+    assert!(publication.publish(Observed::Live(observation())));
+    assert!(drain(&outbox).is_empty(), "unchanged progress is sent once");
+}

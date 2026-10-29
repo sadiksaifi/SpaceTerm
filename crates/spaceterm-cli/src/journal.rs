@@ -22,6 +22,7 @@ use crate::contract::{
     Code, Failure, RecoveredIdentity, RecoveredKind, RecoveredOperation, RecoveredOutcome,
     RecoveredState, Warning, WarningCode, WarningDetails, from_outcome, from_server_error,
 };
+use crate::io::run::settled;
 use crate::state::{CliState, RouteKey, Runs, WriterGuard};
 use spaceterm_server::connection::link::{RequestError, ServerLink};
 use spaceterm_server::hierarchy::{ClientJournal, Mutation, Outcome, RetainedOutcome};
@@ -352,13 +353,12 @@ fn settle_identity(
         }
     }
     // A live command owns its run receipts. Settlement skips them until that command exits.
-    if let Some(mut runs) = state.try_runs(route, agent).map_err(Failure::new)? {
-        for item in settle_runs(&mut runs, link, deadline)? {
-            recovered.push(RecoveredOperation {
-                identity: identity.clone(),
-                ..item
-            });
-        }
+    let mut runs = state.runs(route, agent, deadline).map_err(Failure::new)?;
+    for item in settle_runs(&mut runs, link, deadline)? {
+        recovered.push(RecoveredOperation {
+            identity: identity.clone(),
+            ..item
+        });
     }
     Ok(recovered)
 }
@@ -401,7 +401,14 @@ fn settle_runs(
     deadline: Instant,
 ) -> Result<Vec<RecoveredOperation>, Failure> {
     let mut recovered = Vec::new();
-    for pending in runs.pending().to_vec() {
+    for pending in runs.pending()? {
+        let Some(_live) = runs.try_run(pending.run)? else {
+            continue;
+        };
+        // Another settler may have removed it between the snapshot and this run's lock.
+        if !runs.pending()?.iter().any(|item| item.run == pending.run) {
+            continue;
+        }
         let operation = hex(&pending.run.0);
         let outcome = match request(link, Operation::RunStatus { run: pending.run }, deadline) {
             Some(Ok(ReplyBody::Run(RunReply::Receipt(receipt))))
@@ -433,10 +440,6 @@ fn settle_runs(
         });
     }
     Ok(recovered)
-}
-
-fn settled(state: RunState) -> bool {
-    !matches!(state, RunState::Admitted | RunState::Running)
 }
 
 /// A settled run's receipt. Any bound exit status means the command ran.

@@ -26,7 +26,7 @@ const GENERATION: u64 = 1;
 /// What one `pane send` types.
 enum Typing {
     Keys(Vec<spaceterm_server::pane::Key>),
-    Paste(String),
+    Paste(String, Vec<spaceterm_server::pane::Key>),
 }
 
 fn usage(argument: &str) -> Failure {
@@ -57,7 +57,12 @@ fn typing(args: &SendArgs, stdin: &mut dyn Read) -> Result<Typing, Failure> {
             Some(text) => text.to_owned(),
             None => return Err(usage("<TEXT>")),
         };
-        return Ok(Typing::Paste(text));
+        let enter = if args.enter {
+            keys::parse(&["Enter".into()])?
+        } else {
+            Vec::new()
+        };
+        return Ok(Typing::Paste(text, enter));
     }
     let mut typed = args.text.as_deref().map(keys::typed).unwrap_or_default();
     typed.extend(keys::parse(&args.keys)?);
@@ -132,6 +137,9 @@ pub fn send(
         Ok(typing) => typing,
         Err(failure) => return Done::failed(failure),
     };
+    if let Err(failure) = super::fence(target, args.session.as_ref()) {
+        return Done::failed(failure);
+    }
     let (mut channel, lease) =
         match claim_running(link, target, args.take_over, args.size, deadline) {
             Ok(claimed) => claimed,
@@ -173,6 +181,7 @@ fn deliver(
     let mut last = handle
         .input(GENERATION, vec![InputEvent::Focus(FocusTarget::Terminal)])
         .map_err(|error| (0, link_failure(error)))?;
+    let mut after_paste = Vec::new();
     let pasting = match typing {
         Typing::Keys(keys) => {
             for batch in keys::batches(keys) {
@@ -182,7 +191,8 @@ fn deliver(
             }
             false
         }
-        Typing::Paste(text) => {
+        Typing::Paste(text, enter) => {
+            after_paste = enter;
             last = handle
                 .paste(GENERATION, &text)
                 .map_err(|error| (last, unconfirmed_or(link_failure(error))))?;
@@ -192,7 +202,19 @@ fn deliver(
     let mut paste_settled = !pasting;
     loop {
         if paste_settled && channel.input >= last {
-            return Ok(last);
+            if after_paste.is_empty() {
+                return Ok(last);
+            }
+            last = channel
+                .handle()
+                .input(
+                    GENERATION,
+                    std::mem::take(&mut after_paste)
+                        .into_iter()
+                        .map(InputEvent::Key)
+                        .collect(),
+                )
+                .map_err(|error| (last, unconfirmed_or(link_failure(error))))?;
         }
         match channel.next(deadline).map_err(|failure| (last, failure))? {
             None => return Err((last, deadline.timeout())),

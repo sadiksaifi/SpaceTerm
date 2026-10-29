@@ -121,6 +121,7 @@ struct Bench {
     assembler: Assembler,
     rows: Vec<String>,
     receipts: Vec<RunReceipt>,
+    replies: Vec<Result<ReplyBody, Refusal>>,
     serial: u32,
     _home: Home,
 }
@@ -153,6 +154,7 @@ impl Bench {
             assembler: Assembler::default(),
             rows: Vec::new(),
             receipts: Vec::new(),
+            replies: Vec::new(),
             serial: 0,
             _home: home,
         };
@@ -193,9 +195,27 @@ impl Bench {
     }
 
     fn reply(&mut self, peer: &Peer, operation: Operation) -> Result<ReplyBody, Refusal> {
-        match self.served.request(peer, RequestId(1), operation) {
-            Dispatch::Reply(result) => *result,
-            _ => panic!("the operation replies at once"),
+        let id = RequestId(1);
+        if !matches!(operation, Operation::Run { .. }) {
+            return match self.served.request(peer, id, operation) {
+                Dispatch::Reply(result) => *result,
+                _ => panic!("the operation replies at once"),
+            };
+        }
+        self.outbox.begin(id).unwrap();
+        match self.served.request(peer, id, operation) {
+            Dispatch::Reply(result) => self.outbox.reply_or_refuse(id, *result).unwrap(),
+            Dispatch::Deferred => {}
+            Dispatch::After(_) => panic!("no disk work in this fixture"),
+        }
+        let until = Instant::now() + DEADLINE;
+        loop {
+            self.pump();
+            if let Some(reply) = self.replies.pop() {
+                return reply;
+            }
+            assert!(Instant::now() < until, "the worker answers admission");
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -280,6 +300,7 @@ impl Bench {
                     }
                     self.outbox.acknowledge(frame.channel, frame.frame).unwrap();
                 }
+                Some(ServerMessage::Reply(reply)) => self.replies.push(reply.result),
                 Some(ServerMessage::Pane(message)) => {
                     if let PaneEvent::RunFinished(receipt) = message.event {
                         self.receipts.push(*receipt);
