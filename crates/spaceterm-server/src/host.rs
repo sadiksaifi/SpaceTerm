@@ -564,10 +564,15 @@ fn serve_runtime_ready(
         stop: Arc::clone(&stop),
         fence: Arc::clone(&fence),
     });
-    panes.restore(crate::organization::OrganizationStore(Directory::open(
-        &paths.data,
-        false,
-    )?))?;
+    {
+        // A Git write can outlive a crashed server through its inherited lock. Restore only
+        // after that original child exits, before publishing an endpoint or admitting work.
+        let _writes = data.lock("worktree.lock", false)?;
+        panes.restore(crate::organization::OrganizationStore(Directory::open(
+            &paths.data,
+            false,
+        )?))?;
+    }
     panes.ticker(Arc::clone(&stop.wake));
     let socket = paths.socket();
     if let Some(identity) = runtime.socket_identity(c"s")? {

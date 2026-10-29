@@ -581,6 +581,19 @@ impl ServerConnection {
     pub fn link(&self) -> Result<ServerLink, ServerError> {
         self.link_with(None)
     }
+    /// Closes the shared connection, including links retained by this handle's clones.
+    /// The route owner must disable its connector before disconnecting to prevent reconnects.
+    pub fn disconnect(&self) {
+        let link = self
+            .shared
+            .link
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(link) = link {
+            link.close();
+        }
+    }
     /// [`Self::link`] for a worker that may stop while admission waits for a Restart or Update.
     /// `cancelled` ends that wait with ServiceBusy.
     pub fn link_cancellable(
@@ -1100,6 +1113,11 @@ mod tests {
         );
         assert!(answers(&server.clone().link().unwrap()));
         assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        server.clone().disconnect();
+        assert_eq!(
+            third.health(),
+            Health::Closed(crate::connection::link::LinkError::Closed)
+        );
         // A paired route's Reconnect creates a new handle. Its first link must not share a
         // generation with an earlier handle's first link, or facts read over that link stay.
         let other = ServerConnection::with_paths(paths.clone()).unwrap();

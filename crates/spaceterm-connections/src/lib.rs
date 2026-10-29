@@ -415,18 +415,19 @@ impl DirectConnections {
     /// live link is dropped and a new connection, with a new socket and admission, replaces it.
     pub fn connect(&self, id: &DirectRouteId) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut disconnected = None;
         let Some(saved) = state.document.routes.iter_mut().find(|r| &r.route.id == id) else {
             return;
         };
         saved.active = true;
         if let Some(route) = state.routes.get_mut(id) {
-            if route.server.is_some() {
+            if let Some(server) = route.server.take() {
                 // The old link's connector stays disabled; the worker follows the new link.
                 route
                     .gate
                     .store(false, std::sync::atomic::Ordering::Release);
+                disconnected = Some(server);
                 route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                route.server = None;
                 route.health = None;
             }
             route.gate.store(true, std::sync::atomic::Ordering::Release);
@@ -435,6 +436,9 @@ impl DirectConnections {
         }
         self.0.save(&mut state);
         drop(state);
+        if let Some(server) = disconnected {
+            server.disconnect();
+        }
         self.start_worker();
         self.0.notify();
     }
@@ -445,6 +449,7 @@ impl DirectConnections {
 
     pub fn disconnect(&self, id: &DirectRouteId) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut disconnected = None;
         let Some(saved) = state.document.routes.iter_mut().find(|r| &r.route.id == id) else {
             return;
         };
@@ -453,16 +458,19 @@ impl DirectConnections {
             route
                 .gate
                 .store(false, std::sync::atomic::Ordering::Release);
+            disconnected = route.server.take();
             // Old connectors stay disabled even if the person reconnects before an
             // in-flight attempt returns. Its result belongs to the previous gate.
             route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
             // The next connection is a new link, which the worker follows afresh.
-            route.server = None;
             route.health = None;
             route.status = DirectRouteStatus::Disconnected;
         }
         self.0.save(&mut state);
         drop(state);
+        if let Some(server) = disconnected {
+            server.disconnect();
+        }
         self.0.notify();
     }
 
@@ -504,6 +512,7 @@ impl DirectConnections {
     /// Failed retention leaves the request in memory and authorizes no network effect.
     pub fn cancel_join(&self, id: JoinId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let server = state.routes.get(&id).and_then(|route| route.server.clone());
         if let Some(join) = state.joins.get_mut(&id) {
             join.cancelled = true;
             join.status = JoinStatus::Rejected;
@@ -540,7 +549,11 @@ impl DirectConnections {
                 Ok(())
             }
         };
+        let removed = !state.routes.contains_key(&id);
         drop(state);
+        if removed && let Some(server) = server {
+            server.disconnect();
+        }
         self.start_worker();
         self.0.notify();
         result
@@ -591,9 +604,13 @@ impl DirectConnections {
 
     pub fn unpair(&self, id: &DirectRouteId, target: PairingId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let server = state.routes.get(id).and_then(|route| route.server.clone());
         let result = self.unpair_locked(&mut state, id, target);
         let removed = !state.document.routes.iter().any(|r| &r.route.id == id);
         drop(state);
+        if removed && let Some(server) = server {
+            server.disconnect();
+        }
         if removed
             && let Some(cleanup) = self
                 .0
