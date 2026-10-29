@@ -11,8 +11,8 @@ use gpui::{
 use spaceterm_ui::{
     ComboBox, ComboBoxCopy, ComboBoxItem, Dialog, DialogCloseDecision, DialogInitialFocus,
     DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId,
-    SegmentedControl, SegmentedOption, TextInput, TextInputEscapeBehavior, TextInputEvent,
-    TextInputReturnBehavior, TextInputVariant,
+    ProgressRing, ProgressSize, ProgressState, SegmentedControl, SegmentedOption, TextInput,
+    TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
 };
 
 use super::appearance::{ChromeAppearance, gpui_color};
@@ -28,6 +28,9 @@ const CREATE_ACTION_SELECTOR: &str = "new-worktree-create";
 const CANCEL_ACTION_SELECTOR: &str = "new-worktree-cancel";
 pub(crate) const BRANCHES_FAILED: &str = "Couldn\u{2019}t read this repository\u{2019}s branches.";
 const CREATE_FAILED: &str = "Git couldn\u{2019}t create the Worktree.";
+const CREATING: &str = "Creating Worktree\u{2026}";
+const CONNECTION_LOST: &str = "Connection lost. SpaceTerm checks the result when it reconnects.";
+const LOADING_BRANCHES: &str = "Loading Branches\u{2026}";
 
 /// Runs the dialog's git work for one repository.
 pub(crate) trait WorktreeFormBackend {
@@ -837,41 +840,75 @@ impl Render for WorktreeForm {
                             .child(note)
                     })),
             )
-            .when(self.pending && self.backend.server(), |body| {
-                let status = if self.backend.connected() {
-                    "Creating Worktree…"
-                } else {
-                    "Connection lost. SpaceTerm checks the result when it reconnects."
-                };
-                body.child(
-                    div()
-                        .id("new-worktree-status")
-                        .debug_selector(|| "new-worktree-status".to_owned())
-                        .role(accesskit::Role::Label)
-                        .aria_value(status)
-                        .child(status),
-                )
-            })
-            .when_some(
-                self.backend_error
-                    .clone()
-                    .or_else(|| self.branches_failed.then(|| BRANCHES_FAILED.into())),
-                |body, error| {
-                    body.child(
-                        div()
-                            .id("new-worktree-error")
-                            .role(accesskit::Role::Label)
-                            .aria_value(error.clone())
-                            .debug_selector(|| "new-worktree-error".to_owned())
-                            .text_color(gpui_color(colors.error))
-                            .child(error),
-                    )
-                },
-            )
+            .child(self.status_slot(&appearance))
     }
 }
 
 impl WorktreeForm {
+    /// Creation's progress, or else the error, in one slot that keeps a line's height so the
+    /// dialog keeps its size while either comes and goes.
+    fn status_slot(&self, appearance: &ChromeAppearance) -> impl IntoElement {
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
+        let status: Option<SharedString> = self.pending.then(|| {
+            if self.backend.connected() {
+                CREATING
+            } else {
+                CONNECTION_LOST
+            }
+            .into()
+        });
+        let error: Option<SharedString> = self
+            .backend_error
+            .clone()
+            .or_else(|| self.branches_failed.then(|| BRANCHES_FAILED.into()));
+        div()
+            .id("new-worktree-status-slot")
+            .debug_selector(|| "new-worktree-status-slot".to_owned())
+            .min_h(appearance.typography.style(TextRole::Body).line_height)
+            .flex()
+            .flex_col()
+            .justify_center()
+            .when_some(status.clone().or_else(|| error.clone()), |slot, message| {
+                // The slot's message is one live status, so assistive technology announces it.
+                slot.role(accesskit::Role::Group)
+                    .a11y_synthetic_children(move |builder| {
+                        let mut node = accesskit::Node::new(accesskit::Role::Status);
+                        node.set_label(message.as_ref());
+                        node.set_value(message.as_ref());
+                        node.set_live(accesskit::Live::Polite);
+                        if let Some(bounds) = builder.parent_node().bounds() {
+                            node.set_bounds(bounds);
+                        }
+                        builder.push_child(builder.synthetic_node_id("status"), node);
+                    })
+            })
+            .map(|slot| match (status, error) {
+                (Some(status), _) => slot.child(
+                    div()
+                        .debug_selector(|| "new-worktree-status".to_owned())
+                        .flex()
+                        .items_center()
+                        .gap(appearance.spacing(6.0))
+                        .child(
+                            ProgressRing::new(
+                                "new-worktree-progress",
+                                CREATING,
+                                ProgressState::Indeterminate,
+                            )
+                            .size(ProgressSize::Compact),
+                        )
+                        .child(div().flex_1().min_w_0().child(status)),
+                ),
+                (None, Some(error)) => slot.child(
+                    div()
+                        .debug_selector(|| "new-worktree-error".to_owned())
+                        .text_color(gpui_color(colors.error))
+                        .child(error),
+                ),
+                (None, None) => slot,
+            })
+    }
+
     fn base_items(&self) -> Vec<ComboBoxItem<Choice>> {
         let Some(branches) = &self.branches else {
             return Vec::new();
@@ -957,8 +994,9 @@ impl WorktreeForm {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         let owner = cx.weak_entity();
         let error = self.visible_error(FormField::Branch, cx);
-        let prompt = if self.branches.is_none() {
-            "Loading Branches\u{2026}"
+        let loading = self.branches.is_none();
+        let prompt = if loading {
+            LOADING_BRANCHES
         } else if items.is_empty() {
             "No Branches"
         } else {
@@ -968,14 +1006,31 @@ impl WorktreeForm {
             .flex()
             .flex_col()
             .gap(appearance.spacing(6.0))
-            .child(div().text_color(gpui_color(colors.text_muted)).child(label))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(appearance.spacing(6.0))
+                    .text_color(gpui_color(colors.text_muted))
+                    .child(label)
+                    .when(loading, |label| {
+                        label.child(
+                            ProgressRing::new(
+                                "new-worktree-branches-progress",
+                                LOADING_BRANCHES,
+                                ProgressState::Indeterminate,
+                            )
+                            .size(ProgressSize::Compact),
+                        )
+                    }),
+            )
             .child(
                 ComboBox::new("new-worktree-branch", label, selected, prompt, items)
                     .full_width(true)
-                    .busy(self.branches.is_none())
+                    .busy(loading)
                     .copy(
                         ComboBoxCopy::new("Filter branches", "Search")
-                            .busy_status("Loading Branches\u{2026}")
+                            .busy_status(LOADING_BRANCHES)
                             .empty_status("No branches.")
                             .no_match("No branches match"),
                     )
@@ -1121,10 +1176,11 @@ fn input_field(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use spaceterm_ui::ModalLayer;
+    use spaceterm_ui::a11y_testing::A11yTree;
 
     use super::*;
 
@@ -1134,10 +1190,27 @@ mod tests {
     struct ScriptedBackend {
         results: RefCell<Vec<Result<(), WorktreeCreateError>>>,
         created: RefCell<Vec<(PathBuf, WorktreeBranch)>>,
+        /// Runs git on a server, whose connection can be lost.
+        server: bool,
+        disconnected: Cell<bool>,
+        /// Holds git's answers until the test sends them.
+        held_branches: Option<async_channel::Receiver<Option<BranchList>>>,
+        held_create: Option<async_channel::Receiver<Result<(), WorktreeCreateError>>>,
     }
 
     impl WorktreeFormBackend for ScriptedBackend {
-        fn branches(&self, _: &mut App) -> Task<Option<BranchList>> {
+        fn server(&self) -> bool {
+            self.server
+        }
+
+        fn connected(&self) -> bool {
+            !self.disconnected.get()
+        }
+
+        fn branches(&self, cx: &mut App) -> Task<Option<BranchList>> {
+            if let Some(held) = self.held_branches.clone() {
+                return cx.background_spawn(async move { held.recv().await.ok().flatten() });
+            }
             Task::ready(Some(BranchList {
                 local: vec!["main".into(), "fix/typo".into(), "feature/login".into()],
                 remote: vec!["origin/main".into(), "origin/release/v2".into()],
@@ -1148,9 +1221,17 @@ mod tests {
             &self,
             path: PathBuf,
             branch: WorktreeBranch,
-            _: &mut App,
+            cx: &mut App,
         ) -> Task<Result<PathBuf, WorktreeCreateError>> {
             self.created.borrow_mut().push((path.clone(), branch));
+            if let Some(held) = self.held_create.clone() {
+                return cx.background_spawn(async move {
+                    held.recv()
+                        .await
+                        .unwrap_or(Err(WorktreeCreateError::Failed))
+                        .map(|()| path)
+                });
+            }
             Task::ready(
                 self.results
                     .borrow_mut()
@@ -1253,11 +1334,248 @@ mod tests {
     }
 
     fn create(cx: &mut VisualTestContext) {
-        let bounds = cx
-            .debug_bounds("modal-action-new-worktree-create")
-            .expect("the Create action");
+        click("modal-action-new-worktree-create", cx);
+    }
+
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds(selector).expect("the control is rendered");
         cx.simulate_click(bounds.center(), Modifiers::none());
         cx.run_until_parked();
+    }
+
+    /// What assistive technology reads of creation's progress: the spinners' names, the
+    /// announced status, and whether Create and the branch name can still be used.
+    #[derive(Debug, PartialEq)]
+    struct Progress {
+        spinners: Vec<String>,
+        status: Option<String>,
+        create_disabled: bool,
+        name_editable: bool,
+    }
+
+    fn progress(cx: &mut VisualTestContext) -> Progress {
+        let tree = A11yTree::read(cx);
+        let text = |value: &serde_json::Value| value.as_str().map(str::to_owned);
+        Progress {
+            spinners: tree
+                .with_role("ProgressIndicator")
+                .into_iter()
+                .filter(|node| tree.exposed(node))
+                .filter_map(|node| text(&node["aria"]["label"]))
+                .collect(),
+            status: tree
+                .with_role("Status")
+                .first()
+                .and_then(|node| text(&node["aria"]["value"])),
+            create_disabled: tree.node("Create")["aria"]["disabled"] == true,
+            name_editable: tree.node("Branch name")["aria"]["read_only"].is_null(),
+        }
+    }
+
+    fn creating(status: &str) -> Progress {
+        Progress {
+            spinners: vec![CREATING.to_owned()],
+            status: Some(status.to_owned()),
+            create_disabled: true,
+            name_editable: false,
+        }
+    }
+
+    /// A Create whose git runs until the test answers it.
+    struct Held {
+        backend: Rc<ScriptedBackend>,
+        answer: async_channel::Sender<Result<(), WorktreeCreateError>>,
+        form: Entity<WorktreeForm>,
+        events: Events,
+    }
+
+    /// Starts a Create that git holds, pressing Create twice.
+    fn create_and_hold(server: bool, cx: &mut TestAppContext) -> (Held, &mut VisualTestContext) {
+        let (answer, held) = async_channel::bounded(1);
+        let backend = Rc::new(ScriptedBackend {
+            server,
+            held_create: Some(held),
+            ..ScriptedBackend::default()
+        });
+        let (form, events, cx) = form_window(Rc::clone(&backend), true, cx);
+        type_into(&form, FormField::Name, "fresh", cx);
+        create(cx);
+        create(cx);
+        let held = Held {
+            backend,
+            answer,
+            form,
+            events,
+        };
+        (held, cx)
+    }
+
+    fn creating_should_show_a_spinner_until_git_creates_the_worktree(
+        server: bool,
+        cx: &mut TestAppContext,
+    ) {
+        let (held, cx) = create_and_hold(server, cx);
+        let pending = progress(cx);
+        let attempts = held.backend.created.borrow().len();
+
+        held.answer.try_send(Ok(())).expect("git is waiting");
+        cx.run_until_parked();
+
+        assert_eq!(pending, creating(CREATING));
+        assert_eq!(attempts, 1, "a second Create runs no second git");
+        assert_eq!(
+            *held.events.borrow(),
+            [WorktreeFormEvent::Created(PathBuf::from(
+                "/Users/person/.worktrees/app/fresh"
+            ))]
+        );
+        assert!(!held.form.read_with(cx, |form, _| form.is_open()));
+    }
+
+    #[gpui::test]
+    fn creating_locally_should_show_a_spinner_until_git_creates_the_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        creating_should_show_a_spinner_until_git_creates_the_worktree(false, cx);
+    }
+
+    #[gpui::test]
+    fn creating_on_a_server_should_show_a_spinner_until_git_creates_the_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        creating_should_show_a_spinner_until_git_creates_the_worktree(true, cx);
+    }
+
+    fn a_failed_create_should_replace_the_spinner_with_its_error(
+        server: bool,
+        cx: &mut TestAppContext,
+    ) {
+        let (held, cx) = create_and_hold(server, cx);
+        let pending = progress(cx);
+
+        held.answer
+            .try_send(Err(WorktreeCreateError::Failed))
+            .expect("git is waiting");
+        cx.run_until_parked();
+
+        assert_eq!(pending, creating(CREATING));
+        assert_eq!(
+            progress(cx),
+            Progress {
+                spinners: Vec::new(),
+                status: Some(CREATE_FAILED.to_owned()),
+                create_disabled: false,
+                name_editable: true,
+            }
+        );
+        assert!(held.events.borrow().is_empty());
+        assert!(held.form.read_with(cx, |form, _| form.is_open()));
+    }
+
+    #[gpui::test]
+    fn a_failed_local_create_should_replace_the_spinner_with_its_error(cx: &mut TestAppContext) {
+        a_failed_create_should_replace_the_spinner_with_its_error(false, cx);
+    }
+
+    #[gpui::test]
+    fn a_failed_server_create_should_replace_the_spinner_with_its_error(cx: &mut TestAppContext) {
+        a_failed_create_should_replace_the_spinner_with_its_error(true, cx);
+    }
+
+    #[gpui::test]
+    fn the_status_and_its_error_should_leave_the_actions_in_place(cx: &mut TestAppContext) {
+        let (result, held) = async_channel::bounded(1);
+        let backend = Rc::new(ScriptedBackend {
+            held_create: Some(held),
+            ..ScriptedBackend::default()
+        });
+        let (form, _, cx) = form_window(backend, true, cx);
+        type_into(&form, FormField::Name, "fresh", cx);
+        let position = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("modal-action-new-worktree-create")
+                .expect("the Create action")
+                .origin
+        };
+        let idle = position(cx);
+
+        create(cx);
+        let pending = position(cx);
+        result
+            .try_send(Err(WorktreeCreateError::Failed))
+            .expect("git is waiting");
+        cx.run_until_parked();
+
+        assert_eq!((pending, position(cx)), (idle, idle));
+    }
+
+    #[gpui::test]
+    fn losing_the_connection_should_keep_the_spinner_and_let_cancel_close(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(true, cx);
+
+        held.backend.disconnected.set(true);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(150));
+        cx.run_until_parked();
+        let lost = progress(cx);
+        click("modal-action-new-worktree-cancel", cx);
+
+        assert_eq!(lost, creating(CONNECTION_LOST));
+        assert_eq!(*held.events.borrow(), [WorktreeFormEvent::Cancelled]);
+        assert!(!held.form.read_with(cx, |form, _| form.is_open()));
+    }
+
+    fn cancel_should_wait_for_the_started_create(server: bool, cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(server, cx);
+
+        click("modal-action-new-worktree-cancel", cx);
+        let waiting = (
+            progress(cx),
+            held.form.read_with(cx, |form, _| form.is_open()),
+        );
+        held.answer.try_send(Ok(())).expect("git is waiting");
+        cx.run_until_parked();
+
+        assert_eq!(waiting, (creating(CREATING), true));
+        assert_eq!(
+            *held.events.borrow(),
+            [WorktreeFormEvent::Created(PathBuf::from(
+                "/Users/person/.worktrees/app/fresh"
+            ))]
+        );
+    }
+
+    #[gpui::test]
+    fn cancel_should_wait_for_a_started_local_create(cx: &mut TestAppContext) {
+        cancel_should_wait_for_the_started_create(false, cx);
+    }
+
+    #[gpui::test]
+    fn cancel_should_wait_for_a_started_server_create(cx: &mut TestAppContext) {
+        cancel_should_wait_for_the_started_create(true, cx);
+    }
+
+    #[gpui::test]
+    fn the_branch_field_should_show_its_branches_loading(cx: &mut TestAppContext) {
+        let (branches, held) = async_channel::bounded(1);
+        let backend = Rc::new(ScriptedBackend {
+            held_branches: Some(held),
+            ..ScriptedBackend::default()
+        });
+        let (_, _, cx) = form_window(backend, true, cx);
+        let loading = progress(cx).spinners;
+
+        branches
+            .try_send(Some(BranchList {
+                local: vec!["main".into()],
+                remote: Vec::new(),
+            }))
+            .expect("git is reading branches");
+        cx.run_until_parked();
+
+        assert_eq!(
+            (loading, progress(cx).spinners),
+            (vec![LOADING_BRANCHES.to_owned()], Vec::new())
+        );
     }
 
     #[gpui::test]
