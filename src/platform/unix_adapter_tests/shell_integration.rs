@@ -392,6 +392,18 @@ fn session_path(mut command: Command, integration: bool) -> String {
         .to_owned()
 }
 
+/// `name`'s absolute path on the test's own PATH, since a fixture Session replaces PATH. `None`
+/// skips the shell when it is not installed.
+fn installed_shell_path(name: &str) -> Option<std::path::PathBuf> {
+    let found = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file());
+    if found.is_none() {
+        eprintln!("{name} is not installed; skipping its PATH check");
+    }
+    found
+}
+
 /// Shell integration puts the Session's CLI first on PATH once, after the startup files ran,
 /// and leaves PATH alone when it is disabled.
 #[test]
@@ -427,7 +439,8 @@ fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
     };
     assert_eq!(zsh(true), first);
     assert_eq!(zsh(false), FIXTURE_PATH);
-    if let Some(mut command) = installed_shell("fish") {
+    if let Some(fish) = installed_shell_path("fish") {
+        let mut command = session_free_command(fish);
         command
             .args([
                 "--no-config",
@@ -437,7 +450,8 @@ fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
             .arg(integration.join("fish/vendor_conf.d/spaceterm-shell-integration.fish"));
         assert_eq!(session_path(command, true), first);
     }
-    if let Some(mut command) = installed_shell("nu") {
+    if let Some(nu) = installed_shell_path("nu") {
+        let mut command = session_free_command(nu);
         command.args(["--no-config-file", "-c"]).arg(format!(
             "source '{}'; use spaceterm install; install; print $\"PATH=($env.PATH | str join (char esep))\"",
             integration
@@ -446,7 +460,7 @@ fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
         ));
         assert_eq!(session_path(command, true), first);
     }
-    if let Some(shell) = installed_shell("elvish") {
+    if let Some(elvish) = installed_shell_path("elvish") {
         let fixture = DirectoryFixture::new();
         let rc = fixture.path().join("rc.elv");
         std::fs::write(
@@ -460,7 +474,7 @@ fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
         let socket = fixture.path().join("sock");
         let database = fixture.path().join("db");
         let command = controlling_terminal_command(&[
-            shell.get_program(),
+            elvish.as_os_str(),
             "-rc".as_ref(),
             rc.as_os_str(),
             "-sock".as_ref(),
