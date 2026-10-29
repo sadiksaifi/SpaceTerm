@@ -12137,6 +12137,7 @@ mod shared_repositories {
         assert_eq!(
             edits.submitted(),
             [Mutation::Worktree(Operation::Create {
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
                 workspace: WORKSPACE,
                 root: MAIN_ROOT.into(),
                 path: "/srv/home/topic-new".into(),
@@ -12379,6 +12380,7 @@ mod shared_repositories {
         let (_, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         edits.submit_for_recovery(spaceterm_server::hierarchy::Mutation::Worktree(
             Operation::Create {
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
                 workspace: WORKSPACE,
                 root: MAIN_ROOT.into(),
                 path: "/srv/home/topic-unanswered".into(),

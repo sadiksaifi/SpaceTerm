@@ -343,6 +343,7 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                 .update(|cx| {
                     client.write_owned(
                         Operation::Create {
+                            control: spaceterm_server::hierarchy::CreateControl::Creator,
                             workspace,
                             root,
                             path: path.clone(),

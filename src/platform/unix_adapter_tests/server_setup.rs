@@ -301,6 +301,7 @@ fn native_server_owned_work(
                 server,
                 &connection,
                 Mutation::Worktree(Operation::Create {
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                     workspace,
                     root: path.clone(),
                     path: worktree.clone(),

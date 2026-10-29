@@ -121,6 +121,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     let path = fixture.0.join("created");
     let operation = Operation::Create {
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
         workspace,
         root: fixture.0.clone(),
         path: path.clone(),
@@ -203,6 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     fixture.git(&["config", "filter.wait.smudge", &filter])?;
     let sequence = inventory(&first)?.1;
     let mutation = Mutation::Worktree(Operation::Create {
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
         workspace,
         root: fixture.0.clone(),
         path: path.clone(),
@@ -282,6 +284,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stopped_path = fixture.0.join("stopped");
     let sequence = inventory(&first)?.1;
     let mutation = Mutation::Worktree(Operation::Create {
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
         workspace,
         root: fixture.0.clone(),
         path: stopped_path.clone(),

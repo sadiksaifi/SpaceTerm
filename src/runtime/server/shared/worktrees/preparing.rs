@@ -136,6 +136,7 @@ pub(super) fn prepare(
             root,
             path,
             branch,
+            ..
         } => {
             if !inventory.workspaces.iter().any(|w| w.id == workspace) {
                 return Err(Error::Missing);
