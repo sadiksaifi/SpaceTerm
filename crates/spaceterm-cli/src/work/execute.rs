@@ -123,7 +123,7 @@ pub fn run(
         route: route.into(),
         id: hex(&journal.server_id()),
     };
-    let recovered = match journal.resolve_leftovers() {
+    let mut recovered = match journal.resolve_leftovers() {
         Ok(recovered) => recovered,
         Err(failure) => {
             return Output::failed(
@@ -136,6 +136,7 @@ pub fn run(
         }
     };
     let result = execute(command, global, env, journal, reader, &server);
+    recovered.extend_from_slice(journal.recovered());
     let mut output = match result {
         Ok(output) => output,
         Err(error) => error.output(path, server),
