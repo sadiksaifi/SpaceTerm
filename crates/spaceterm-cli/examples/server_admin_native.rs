@@ -865,15 +865,17 @@ fn pair_checks(cli: &str) -> Result<String> {
             return Err(format!("{arguments:?} did not exit 3").into());
         }
     }
-    let (link, exit, withdrawn) =
-        pair_on_pty(cli, &["server", "pair", "--address", "203.0.113.5"])?;
-    let invitation = spaceterm_server::direct::Invitation::parse(&link)
-        .map_err(|_| "the first line is no Invitation Link")?;
-    if !invitation.endpoint().contains("203.0.113.5") {
-        return Err("the link does not advertise --address".into());
-    }
-    if exit != 130 || !withdrawn {
-        return Err(format!("Ctrl-C exited {exit} and withdrew: {withdrawn}").into());
+    // An IP, and a DNS name with a port, as a NAT or cloud machine advertises itself.
+    for address in ["203.0.113.5", "build.example.test:9300"] {
+        let (link, exit, withdrawn) = pair_on_pty(cli, &["server", "pair", "--address", address])?;
+        let invitation = spaceterm_server::direct::Invitation::parse(&link)
+            .map_err(|_| "the first line is no Invitation Link")?;
+        if !invitation.endpoint().contains(address) {
+            return Err(format!("the link does not advertise {address}").into());
+        }
+        if exit != 130 || !withdrawn {
+            return Err(format!("Ctrl-C exited {exit} and withdrew: {withdrawn}").into());
+        }
     }
     Ok("no invitation without a terminal; --address advertised; Ctrl-C withdraws".into())
 }

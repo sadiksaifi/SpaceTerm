@@ -17,7 +17,7 @@ const COMMAND: &str = "server.status";
 const LIMIT: Duration = Duration::from_secs(30);
 
 pub fn run(context: &Context<'_>) -> Reply {
-    if let super::Target::Remote(_) = context.target() {
+    if !context.is_local() {
         return match context.routed() {
             Ok(routed) => over_lane(context, &routed.connection, routed.server, routed.route),
             Err(error) => Reply::routing_failure(COMMAND, error),
@@ -61,7 +61,8 @@ fn over_lane(
     } = match opened {
         Ok(opened) => opened,
         Err(failure) if failure.code == Code::Unreachable || failure.code == Code::NotRunning => {
-            return unreachable(server, failure);
+            let last = super::last_connected(context, &route);
+            return Reply::new(&unreachable_envelope(server, failure, last), String::new());
         }
         Err(failure) => return Reply::failure(COMMAND, Some(server), failure),
     };
@@ -80,10 +81,6 @@ fn over_lane(
 }
 
 /// An unreachable server is exit 5, with when this CLI last reached it.
-fn unreachable(server: ServerRef, failure: Failure) -> Reply {
-    Reply::new(&unreachable_envelope(server, failure, None), String::new())
-}
-
 pub(crate) fn unreachable_envelope(
     server: ServerRef,
     failure: Failure,

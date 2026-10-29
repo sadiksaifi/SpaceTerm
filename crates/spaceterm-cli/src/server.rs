@@ -194,28 +194,11 @@ pub struct Context<'a> {
     pub global: &'a Global,
 }
 
-/// Which server a command acts on.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
-    Local,
-    /// A Saved Connection name or `id:ROUTE`.
-    Remote(String),
-}
-
 impl Context<'_> {
-    /// `--server`, else `SPACETERM_SERVER`, else `local`.
-    pub fn target(&self) -> Target {
-        let named = self
-            .global
-            .server
-            .clone()
-            .or_else(|| std::env::var("SPACETERM_SERVER").ok())
-            .filter(|name| !name.is_empty());
-        match named {
-            None => Target::Local,
-            Some(name) if name == "local" => Target::Local,
-            Some(name) => Target::Remote(name),
-        }
+    /// Whether the command acts on this machine's own server: `--server`, else
+    /// `SPACETERM_SERVER`, else `local`, with the same rule work commands use.
+    pub fn is_local(&self) -> bool {
+        crate::connection::route::selector(self.global).is_ok_and(|selected| selected == "local")
     }
 
     /// Whether the person can answer a prompt: a terminal on stdin and stderr, and neither
@@ -441,11 +424,46 @@ pub fn open_lane(
         }
     }
     recovered.extend(settle_journals(context, connection, route));
+    remember_connected(context, route);
     Ok(Opened {
         lane,
         session,
         recovered,
     })
+}
+
+/// Where the route records when this CLI last reached its server's lane. Any identity of the
+/// route counts, so the record lives with the base identity.
+const LAST_CONNECTED: &str = "last-connected.json";
+const LAST_CONNECTED_FILE: &std::ffi::CStr = c"last-connected.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LastConnected {
+    /// Seconds since the Unix epoch.
+    at: u64,
+}
+
+fn remember_connected(context: &Context<'_>, route: &RouteKey) {
+    let Ok(directory) =
+        CliState::open(context.identity).and_then(|state| state.identity_dir(route, None))
+    else {
+        return;
+    };
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |v| v.as_secs());
+    let _ = directory.write_json(LAST_CONNECTED_FILE, &LastConnected { at });
+}
+
+/// When this CLI last reached the route's lane, as RFC 3339, if it ever did.
+pub fn last_connected(context: &Context<'_>, route: &RouteKey) -> Option<String> {
+    let directory = CliState::open(context.identity)
+        .and_then(|state| state.identity_dir(route, None))
+        .ok()?;
+    let record: LastConnected = directory.read_json(LAST_CONNECTED).ok()??;
+    jiff::Timestamp::from_second(i64::try_from(record.at).ok()?)
+        .ok()
+        .map(|v| v.to_string())
 }
 
 /// Settles the Workspace edit journals and runs this CLI holds for the route. They need the
