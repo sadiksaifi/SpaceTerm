@@ -197,19 +197,12 @@ fn remote(cli: &Cli) -> bool {
 
 fn run_server(service: bool, owned: bool) -> Result<(), ServerError> {
     check::resources()?;
-    let panes = if service {
-        spaceterm_server::panes(|sync| {
-            Ok(spaceterm::runtime::Served::new(
-                spaceterm::runtime::SharedWorkspaceHost::account_service(sync)?,
-            ))
-        })
-    } else {
-        spaceterm_server::panes(|sync| {
-            Ok(spaceterm::runtime::Served::new(
-                spaceterm::runtime::SharedWorkspaceHost::local(sync)?,
-            ))
-        })
-    };
+    let panes = spaceterm_server::panes(|sync| {
+        Ok(spaceterm::runtime::Served::new(
+            spaceterm::runtime::SharedWorkspaceHost::account_service(sync)?
+                .with_session_context(spaceterm::runtime::ServerSessionContext::current(IDENTITY)?),
+        ))
+    });
     if service {
         spaceterm_server::service::run(IDENTITY, panes)
     } else if owned {
