@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 const CAPACITY: usize = 32;
 type Reply = async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>;
+/// Where a surface that presents its own answer learns that answer's sequence.
+type Owner = std::rc::Weak<std::cell::Cell<Option<u64>>>;
 
 struct Edit {
     mutation: Mutation,
@@ -16,6 +18,7 @@ struct Edit {
     dispatched: bool,
     projected: bool,
     reply: Option<Reply>,
+    owner: Option<Owner>,
 }
 
 #[derive(Clone, Copy)]
@@ -65,6 +68,7 @@ impl PendingEdits {
         &mut self,
         mut mutation: Mutation,
         reply: Option<Reply>,
+        owner: Option<Owner>,
     ) -> Result<(), SharedRefusalReason> {
         if self.full() {
             return Err(SharedRefusalReason::Pending);
@@ -109,6 +113,7 @@ impl PendingEdits {
             dispatched: false,
             projected: false,
             reply,
+            owner,
         });
         Ok(())
     }
@@ -201,7 +206,10 @@ impl PendingEdits {
         }
     }
 
-    pub fn observe(&mut self, snapshot: &SharedWorkspaceSnapshot) {
+    /// Settles the dispatched edit an answer belongs to. Returns the sequences of answers a live
+    /// owner presents itself.
+    pub fn observe(&mut self, snapshot: &SharedWorkspaceSnapshot) -> Vec<u64> {
+        let mut owned = Vec::new();
         if let Some(outcome) = snapshot
             .outcome
             .as_ref()
@@ -217,6 +225,10 @@ impl PendingEdits {
                 self.observed = Some(outcome.sequence);
                 let mut edit = self.edits.pop_front().expect("matched the front operation");
                 let awaited = edit.reply.is_some();
+                if let Some(owner) = edit.owner.take().and_then(|owner| owner.upgrade()) {
+                    owner.set(Some(outcome.sequence));
+                    owned.push(outcome.sequence);
+                }
                 if let Some(reply) = edit.reply.take() {
                     let _ = reply.try_send(Ok(outcome.clone()));
                 }
@@ -265,6 +277,7 @@ impl PendingEdits {
         if !snapshot.connected {
             self.disconnect();
         }
+        owned
     }
 
     fn resolve(&mut self, ids: Creation, target: Id, inventory: &Inventory) {

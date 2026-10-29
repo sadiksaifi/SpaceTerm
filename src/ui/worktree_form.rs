@@ -10,9 +10,10 @@ use gpui::{
 };
 use spaceterm_ui::{
     ComboBox, ComboBoxCopy, ComboBoxItem, Dialog, DialogCloseDecision, DialogInitialFocus,
-    DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId,
-    ProgressRing, ProgressSize, ProgressState, SegmentedControl, SegmentedOption, TextInput,
-    TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
+    DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole,
+    ModalCloseReason, ModalId, ProgressRing, ProgressSize, ProgressState, SegmentedControl,
+    SegmentedOption, TextInput, TextInputChangeSource, TextInputEscapeBehavior, TextInputEvent,
+    TextInputReturnBehavior, TextInputVariant,
 };
 
 use super::appearance::{ChromeAppearance, gpui_color};
@@ -52,6 +53,11 @@ pub(crate) trait WorktreeFormBackend {
         branch: WorktreeBranch,
         cx: &mut App,
     ) -> Task<Result<PathBuf, WorktreeCreateError>>;
+    /// The person answered the form after it showed the answer to its last Create, so nothing
+    /// presents it again.
+    fn presented(&self) {}
+    /// The form will not present the answer to its last Create, so the Workspace Window does.
+    fn release(&self) {}
 }
 
 /// Checks whether a new directory may go at a path.
@@ -74,7 +80,6 @@ pub(crate) struct WorktreeFormContext {
 pub(crate) enum WorktreeFormEvent {
     /// Git created the Worktree at this directory.
     Created(PathBuf),
-    Interrupted(PathBuf),
     Cancelled,
 }
 
@@ -151,7 +156,14 @@ pub(crate) struct WorktreeForm {
     pending: bool,
     generation: u64,
     pending_path: Option<PathBuf>,
-    interrupted_path: Option<PathBuf>,
+    /// Whether the form shows an answer the person has not responded to yet.
+    unanswered: bool,
+    /// Counts the failures the form has shown, naming the one it shows now. The backend, not
+    /// the form, owns that failure's outcome.
+    failure: u64,
+    /// The shown failure once a render has drawn its error. Only then can the person's response
+    /// answer it.
+    displayed: crate::ui::shared_workspaces::DrawnAnswer,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
     _status: Task<()>,
@@ -177,7 +189,10 @@ impl WorktreeForm {
         );
         for (field, input) in [(FormField::Name, &name), (FormField::Location, &location)] {
             cx.subscribe(input, move |form, _, event: &TextInputEvent, cx| {
-                if let TextInputEvent::ValueChanged(_) = event {
+                if let TextInputEvent::ValueChanged(change) = event {
+                    if change.source() != TextInputChangeSource::Programmatic {
+                        form.answered();
+                    }
                     form.input_changed(field, cx);
                 }
             })
@@ -205,7 +220,9 @@ impl WorktreeForm {
             pending: false,
             generation: 0,
             pending_path: None,
-            interrupted_path: None,
+            unanswered: false,
+            failure: 0,
+            displayed: crate::ui::shared_workspaces::DrawnAnswer::default(),
             pending_cancel: None,
             _branches: Task::ready(()),
             _status: Task::ready(()),
@@ -312,7 +329,21 @@ impl WorktreeForm {
         self.revalidate(cx);
     }
 
+    /// The person acted in the form after it showed an answer. That counts as seeing it only if
+    /// a render drew its error; an earlier action leaves it to the Workspace Window.
+    fn answered(&mut self) {
+        if std::mem::take(&mut self.unanswered) {
+            if self.displayed.answers(Some(self.failure)) {
+                self.backend.presented();
+            } else {
+                self.backend.release();
+            }
+        }
+        self.displayed.forget();
+    }
+
     fn set_source(&mut self, source: BranchSource, cx: &mut Context<Self>) {
+        self.answered();
         if self.pending || self.source == source {
             return;
         }
@@ -333,6 +364,7 @@ impl WorktreeForm {
     }
 
     fn choose(&mut self, field: FormField, choice: Choice, cx: &mut Context<Self>) {
+        self.answered();
         match (field, choice) {
             (FormField::Branch, Choice::Base(base)) => self.base = Some(base),
             (FormField::Branch, Choice::Existing(name)) => self.existing = Some(name),
@@ -484,6 +516,7 @@ impl WorktreeForm {
         window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> DialogCloseDecision {
+        self.answered();
         match action {
             FormAction::Cancel
                 if self.pending && self.backend.server() && !self.backend.connected() =>
@@ -570,12 +603,12 @@ impl WorktreeForm {
         }
         self.set_enabled(false, cx);
         let generation = self.generation;
-        let task = self.backend.create(path.clone(), branch, cx);
+        let task = self.backend.create(path, branch, cx);
         cx.notify();
         cx.spawn(async move |form, cx| {
             let result = task.await;
             let Ok(Some(settlement)) = form.update(cx, |form, cx| {
-                form.settle_create(generation, result, completion, path, cx)
+                form.settle_create(generation, result, completion, cx)
             }) else {
                 return;
             };
@@ -584,33 +617,30 @@ impl WorktreeForm {
         .detach();
     }
 
-    pub(crate) fn interrupted_path(&self) -> Option<&std::path::Path> {
-        self.interrupted_path.as_deref()
-    }
-
     fn settle_create(
         &mut self,
         generation: u64,
         result: Result<PathBuf, WorktreeCreateError>,
         primary: DialogPendingCompletion,
-        attempted_path: PathBuf,
         cx: &mut Context<Self>,
     ) -> Option<Settlement> {
+        // A form that closed while waiting released the answer then.
         if !self.open || !self.pending || self.generation != generation {
             return None;
         }
+        // The form closes, and the Workspace Window asks the person to check the Worktree.
         if result
             == Err(WorktreeCreateError::Server(
                 spaceterm_server::worktree::Error::Interrupted,
             ))
         {
             self.pending_path = None;
-            self.interrupted_path = Some(attempted_path.clone());
-            cx.emit(WorktreeFormEvent::Interrupted(attempted_path));
+            self.backend.release();
             return Some(Settlement::Success { primary });
         }
         if let Ok(path) = result {
             self.pending_path = Some(path);
+            self.backend.release();
             return Some(Settlement::Success { primary });
         }
         self.pending = false;
@@ -647,6 +677,10 @@ impl WorktreeForm {
             Some(FormField::Location) => self.errors.location = Some(message),
             None => self.backend_error = Some(message),
         }
+        // The answer counts as seen once a render draws it and the person then responds.
+        self.failure = self.failure.wrapping_add(1);
+        self.unanswered = true;
+        self.displayed.forget();
         cx.notify();
         Some(Settlement::Failure {
             primary,
@@ -659,6 +693,17 @@ impl WorktreeForm {
         if !self.open {
             return;
         }
+        // Escape is the person's response to a shown answer. Closing any other way, or before
+        // the answer arrived, leaves it to the Workspace Window.
+        if matches!(
+            outcome,
+            DialogOutcome::Completed { .. } | DialogOutcome::Dismissed(ModalCloseReason::Cancelled)
+        ) {
+            self.answered();
+        }
+        self.unanswered = false;
+        self.displayed.forget();
+        self.backend.release();
         self.open = false;
         self.pending = false;
         self.pending_cancel = None;
@@ -736,6 +781,10 @@ impl Settlement {
 
 impl Render for WorktreeForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // This render draws the shown failure's error.
+        if self.unanswered {
+            self.displayed.drawn(Some(self.failure));
+        }
         let appearance = super::appearance::shared_chrome(cx);
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         let owner = cx.weak_entity();
@@ -1199,6 +1248,10 @@ mod tests {
         /// Holds git's answers until the test sends them.
         held_branches: Option<async_channel::Receiver<Option<BranchList>>>,
         held_create: Option<async_channel::Receiver<Result<(), WorktreeCreateError>>>,
+        /// How many times the form recorded its answer as seen.
+        presentations: Cell<usize>,
+        /// How many times the form left its answer to the Workspace Window.
+        releases: Cell<usize>,
     }
 
     impl WorktreeFormBackend for ScriptedBackend {
@@ -1242,6 +1295,14 @@ mod tests {
                     .unwrap_or(Ok(()))
                     .map(|()| path),
             )
+        }
+
+        fn presented(&self) {
+            self.presentations.set(self.presentations.get() + 1);
+        }
+
+        fn release(&self) {
+            self.releases.set(self.releases.get() + 1);
         }
     }
 
@@ -1475,6 +1536,63 @@ mod tests {
         );
         assert!(held.events.borrow().is_empty());
         assert!(held.form.read_with(cx, |form, _| form.is_open()));
+    }
+
+    /// The form's error counts as seen only once the person acts in the form after it appeared,
+    /// here by editing a field.
+    #[gpui::test]
+    fn an_error_should_count_as_seen_when_the_person_next_edits(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(true, cx);
+        held.answer
+            .try_send(Err(WorktreeCreateError::BranchExists))
+            .expect("git is waiting");
+        cx.run_until_parked();
+        let before = held.backend.presentations.get();
+
+        click("new-worktree-name", cx);
+        cx.simulate_input("r");
+        cx.run_until_parked();
+
+        assert_eq!(before, 0, "showing the error alone records nothing");
+        assert_eq!(held.backend.presentations.get(), 1);
+    }
+
+    /// The person presses Escape after the Create fails and before any render draws its error.
+    /// The form never showed that failure, so it leaves it to the Workspace Window.
+    #[gpui::test]
+    fn escape_before_the_error_draws_should_leave_the_failure_unanswered(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(true, cx);
+        let form = held.form.clone();
+        // The form notifies once it holds the failure. Observers run before the frame that would
+        // draw the error, as an Escape the person pressed just then does.
+        let escaped = Rc::new(Cell::new(false));
+        let escaping = Rc::clone(&escaped);
+        cx.update(|_, cx| {
+            cx.observe(&form, move |form, cx| {
+                if form.read(cx).unanswered && !escaping.replace(true) {
+                    form.update(cx, |form, cx| {
+                        form.finish_dialog(
+                            DialogOutcome::Dismissed(ModalCloseReason::Cancelled),
+                            cx,
+                        );
+                    });
+                }
+            })
+            .detach();
+        });
+        let releases_before = held.backend.releases.get();
+
+        held.answer
+            .try_send(Err(WorktreeCreateError::BranchExists))
+            .expect("git is waiting");
+        cx.run_until_parked();
+
+        assert!(escaped.get(), "the form held the failure, then closed");
+        assert_eq!(held.backend.presentations.get(), 0, "nothing was answered");
+        assert!(
+            held.backend.releases.get() > releases_before,
+            "the failure goes to the Workspace Window"
+        );
     }
 
     #[gpui::test]

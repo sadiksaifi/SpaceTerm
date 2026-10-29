@@ -17,9 +17,9 @@ use spaceterm_server::hierarchy::{
 
 use super::development::testing::{ScriptedEdits, ScriptedPanes};
 use super::development::{
-    SharedEditSource, SharedEditability, SharedPaneOpener, SharedPaneSessions, SharedRefusalReason,
-    SharedSubmission, SharedTabs, SharedWorkspaceDraft, SharedWorkspaceEdits, SharedWorkspaceFacts,
-    SharedWorkspaceField, SharedWorkspacePlan, SharedWorkspaces,
+    SharedEditSource, SharedEditability, SharedPaneOpener, SharedPaneSessions, SharedRefusal,
+    SharedRefusalReason, SharedSubmission, SharedTabs, SharedWorkspaceDraft, SharedWorkspaceEdits,
+    SharedWorkspaceFacts, SharedWorkspaceField, SharedWorkspacePlan, SharedWorkspaces,
 };
 use crate::terminal::server_session::DevelopmentPaneStatus;
 use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
@@ -1350,7 +1350,18 @@ mod edits {
 
     fn shared(inventory: Option<Inventory>) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(inventory));
-        let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        (reader(&edits), edits)
+    }
+
+    /// A reading of `edits` in a new process.
+    fn reader(edits: &Rc<ScriptedEdits>) -> SharedWorkspaces {
+        window(SharedEditSource::new(
+            Rc::clone(edits) as Rc<dyn SharedWorkspaceEdits>
+        ))
+    }
+
+    /// A Workspace Window's reading of `source`, which every window of one process shares.
+    fn window(source: SharedEditSource) -> SharedWorkspaces {
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
@@ -1363,7 +1374,7 @@ mod edits {
             ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
             &PaneConstruction::testing(),
         );
-        (SharedWorkspaces::new(source, sessions), edits)
+        SharedWorkspaces::new(source, sessions)
     }
 
     fn renamed(name: &str, version: u64) -> Inventory {
@@ -1530,6 +1541,359 @@ mod edits {
             SharedWorkspaceDraft::Name("Recovered".to_owned())
         );
         assert_eq!(conflict.authoritative.to_string(), "Theirs");
+    }
+
+    /// A Worktree removal that this client asked for and the server refused.
+    fn refused_removal() -> spaceterm_server::worktree::Operation {
+        spaceterm_server::worktree::Operation::Remove {
+            root: "/srv/app".into(),
+            path: "/srv/app-feature".into(),
+            boot: [8; 32],
+            confirmation: [9; 32],
+        }
+    }
+
+    /// A refused rename waits behind an open dialog while a later Worktree removal fails, and
+    /// the process ends before either is presented. The relaunched process presents both, and
+    /// neither reaches the person again after that.
+    #[test]
+    fn a_relaunch_should_present_each_unseen_answer_once_whatever_finished_after_it() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = first.poll();
+        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
+        let waiting = first.next_conflict().map(|(conflict, _)| conflict.draft);
+        edits.submit_for_recovery(Mutation::Worktree(refused_removal()));
+        edits.answer(Outcome::WorktreeFailed(
+            spaceterm_server::worktree::Error::Changed,
+        ));
+        first.poll();
+        drop(first);
+
+        let relaunched = Rc::new(edits.relaunched());
+        let mut second = reader(&relaunched);
+        let poll = second.poll();
+        bind(&mut second, poll.inventory.as_ref().expect("inventory"));
+        let reviewed = second.next_conflict().map(|(conflict, notice)| {
+            notice.acknowledge();
+            conflict.draft
+        });
+        let _ = second.take_conflict();
+        let alerted = second.next_worktree_failure().map(|(failure, notice)| {
+            notice.acknowledge();
+            failure.operation
+        });
+        let _ = second.take_worktree_failure();
+        drop(second);
+        let later = Rc::new(relaunched.relaunched());
+        let mut third = reader(&later);
+        let poll = third.poll();
+        bind(&mut third, poll.inventory.as_ref().expect("inventory"));
+
+        let mine = Some(SharedWorkspaceDraft::Name("Mine".to_owned()));
+        assert_eq!(waiting, mine, "draft review waits behind the dialog");
+        assert_eq!(reviewed, mine);
+        assert_eq!(alerted, Some(refused_removal()));
+        assert!(third.next_conflict().is_none());
+        assert!(third.next_worktree_failure().is_none());
+        assert!(later.unseen().is_empty());
+    }
+
+    /// Draft review that a window closed before it opened leaves the refused rename for the
+    /// next window, which presents it once.
+    #[test]
+    fn a_review_that_never_opened_should_reach_the_next_window() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = first.poll();
+        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
+        let queued = first.take_conflict().map(|conflict| conflict.draft);
+        let source = first.edits();
+        drop(first);
+
+        let mut reopened = window(source.clone());
+        let poll = reopened.poll();
+        bind(&mut reopened, poll.inventory.as_ref().expect("inventory"));
+        let reviewed = reopened.next_conflict().map(|(conflict, notice)| {
+            notice.acknowledge();
+            conflict.draft
+        });
+        let _ = reopened.take_conflict();
+        drop(reopened);
+        let mut later = window(source);
+        let poll = later.poll();
+        bind(&mut later, poll.inventory.as_ref().expect("inventory"));
+
+        let mine = Some(SharedWorkspaceDraft::Name("Mine".to_owned()));
+        assert_eq!(queued, mine);
+        assert_eq!(reviewed, mine);
+        assert!(later.next_conflict().is_none());
+    }
+
+    /// A paired route disconnects after its draft review was admitted and before the person
+    /// answered it. The answer reaches the reconnected route, so it never presents the draft
+    /// again.
+    #[test]
+    fn a_presentation_while_disconnected_should_reach_the_reconnected_route() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = first.poll();
+        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
+        let (_, notice) = first.next_conflict().expect("draft review");
+        let _ = first.take_conflict();
+        let source = first.edits();
+        source.replace_transport(Rc::new(super::super::UnavailableEdits::default()));
+        notice.acknowledge();
+        source.replace_transport(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        drop(first);
+
+        let mut reopened = window(source);
+        let poll = reopened.poll();
+        bind(&mut reopened, poll.inventory.as_ref().expect("inventory"));
+
+        assert!(edits.unseen().is_empty());
+        assert!(reopened.next_conflict().is_none());
+    }
+
+    const JOURNAL_SERVER: Id = [61; 32];
+    const JOURNAL_CLIENT: Id = [62; 32];
+    const ROUTE: [u8; 32] = [63; 32];
+
+    /// A route's journal in a directory of its own, opened with the same lock the route's
+    /// storage takes.
+    struct JournalAt(PathBuf);
+
+    impl JournalAt {
+        fn open(&self) -> spaceterm_server::hierarchy::ClientJournal {
+            spaceterm_server::hierarchy::ClientJournal::open_in(
+                &self.0,
+                JOURNAL_SERVER,
+                JOURNAL_CLIENT,
+            )
+            .expect("the journal opens")
+        }
+    }
+
+    impl Drop for JournalAt {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl super::super::PresentationRecord for JournalAt {
+        fn presented(&self, sequence: u64) -> Result<(), spaceterm_server::ServerError> {
+            spaceterm_server::hierarchy::ClientJournal::open_in(
+                &self.0,
+                JOURNAL_SERVER,
+                JOURNAL_CLIENT,
+            )?
+            .presented(sequence)
+        }
+
+        fn forgotten_presented(&self, total: u64) -> Result<(), spaceterm_server::ServerError> {
+            spaceterm_server::hierarchy::ClientJournal::open_in(
+                &self.0,
+                JOURNAL_SERVER,
+                JOURNAL_CLIENT,
+            )?
+            .forgotten_presented(total)
+        }
+    }
+
+    /// A journal holding one refused rename, with the lock the route's previous edit loop holds
+    /// until it exits.
+    fn held_journal() -> (
+        std::sync::Arc<JournalAt>,
+        spaceterm_server::hierarchy::ClientJournal,
+    ) {
+        let mut name = [0; 8];
+        getrandom::fill(&mut name).expect("random");
+        let journal = std::sync::Arc::new(JournalAt(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("a temporary directory")
+                .join(format!("st-presented-{:x}", u64::from_be_bytes(name))),
+        ));
+        let mut held = journal.open();
+        let refused = Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        };
+        held.submit(5, refused.clone()).expect("submitted");
+        held.retire(spaceterm_server::hierarchy::RetainedOutcome {
+            sequence: 5,
+            mutation: refused,
+            outcome: Outcome::Conflict,
+        })
+        .expect("retired");
+        (journal, held)
+    }
+
+    /// A disconnected route's Workspace Window presenting through `journal`.
+    fn disconnected(
+        journal: &std::sync::Arc<JournalAt>,
+        retries: &super::super::PresentationRetries,
+    ) -> SharedEditSource {
+        SharedEditSource::new(Rc::new(super::super::UnavailableEdits::recording(
+            ROUTE,
+            std::sync::Arc::clone(journal) as std::sync::Arc<dyn super::super::PresentationRecord>,
+            retries.clone(),
+        )))
+    }
+
+    /// The person answers draft review on a disconnected route while its previous edit loop
+    /// still holds the journal, then closes the window. The answer is written once that loop
+    /// lets the journal go, and nothing keeps retrying after that.
+    #[test]
+    fn a_contended_journal_should_record_an_answer_after_the_window_closed() {
+        let (journal, held) = held_journal();
+        let retries = super::super::PresentationRetries::default();
+        let source = disconnected(&journal, &retries);
+
+        source.presented(5);
+        drop(source);
+        let waiting = !retries.is_empty();
+        drop(held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !retries.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the answer is written"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(waiting, "the held journal refused the first write");
+        assert!(journal.open().unseen().is_empty());
+    }
+
+    /// The route connects again while an answer still waits for its journal. The new connection
+    /// takes it, because its own edit loop holds that journal from then on.
+    #[test]
+    fn a_waiting_answer_should_go_to_the_next_connection() {
+        let (journal, held) = held_journal();
+        let retries = super::super::PresentationRetries::default();
+        let source = disconnected(&journal, &retries);
+        source.presented(5);
+        drop(source);
+
+        let taken = retries.take(&ROUTE);
+        drop(held);
+
+        assert_eq!(
+            taken,
+            Some(super::super::direct_route::WaitingPresentations {
+                sequences: vec![5],
+                forgotten: 0,
+            })
+        );
+        assert!(retries.is_empty());
+    }
+
+    /// A relaunch recovers a rename the server refused after another client removed its
+    /// Workspace. The person learns that the change could not be applied, once.
+    #[test]
+    fn a_recovered_conflict_for_a_removed_workspace_should_present_its_refusal() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Mine".to_owned(),
+        });
+        let mut removed = root_only();
+        removed.revision = 2;
+        removed.workspaces.clear();
+        edits.set_inventory(removed);
+        edits.answer(Outcome::Conflict);
+
+        shared.poll();
+        let unseen_before = edits.unseen().len();
+        let refusal = shared.next_refusal().map(|(refusal, notice)| {
+            notice.acknowledge();
+            refusal
+        });
+        let _ = shared.take_refusal();
+
+        assert_eq!(
+            unseen_before, 1,
+            "nothing is presented until the refusal is"
+        );
+        assert_eq!(refusal, Some(SharedRefusal::Missing));
+        assert!(edits.unseen().is_empty());
+    }
+
+    /// Two edits are refused for different reasons. Each reason reaches the person, and each
+    /// notice records only the outcomes it stands for.
+    #[test]
+    fn refusals_for_different_reasons_should_each_be_presented() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        let missing_tab = Mutation::CreateTab {
+            workspace: [9; 32],
+            source: None,
+        };
+        edits.submit_for_recovery(missing_tab.clone());
+        edits.answer(Outcome::Missing);
+        edits.submit_for_recovery(missing_tab);
+        edits.answer(Outcome::Limit);
+
+        shared.poll();
+        let first = shared.next_refusal().map(|(refusal, notice)| {
+            notice.acknowledge();
+            refusal
+        });
+        let _ = shared.take_refusal();
+        let unseen_between = edits.unseen().len();
+        let second = shared.next_refusal().map(|(refusal, notice)| {
+            notice.acknowledge();
+            refusal
+        });
+        let _ = shared.take_refusal();
+
+        assert_eq!(first, Some(SharedRefusal::Missing));
+        assert_eq!(unseen_between, 1, "the Limit refusal is still unseen");
+        assert_eq!(second, Some(SharedRefusal::Limit));
+        assert!(edits.unseen().is_empty());
+        assert!(shared.next_refusal().is_none());
+    }
+
+    /// The journal forgot unseen outcomes beyond its bound. One notice says so, and once a
+    /// window has shown it, no later window shows it again.
+    #[test]
+    fn forgotten_outcomes_should_be_noticed_once() {
+        let (mut first, edits) = shared(Some(root_only()));
+        edits.forget(2);
+        first.poll();
+        let noticed = first.next_forgotten().map(|notice| notice.acknowledge());
+        let _ = first.take_forgotten();
+        drop(first);
+        let mut later = reader(&edits);
+        later.poll();
+
+        assert!(
+            noticed.is_some(),
+            "the window says some outcomes went unseen"
+        );
+        assert_eq!(edits.forgotten_unsaid(), 0);
+        assert!(later.next_forgotten().is_none());
     }
 
     #[test]

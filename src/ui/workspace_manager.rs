@@ -3056,29 +3056,44 @@ impl WorkspaceManager {
         if let Some(accepted) = poll.accepted {
             self.open_accepted_shared(key, &accepted, window, cx);
         }
+        // Each answer below stays with this reading until its alert is admitted, and counts as
+        // presented once the person answers that alert.
         if !spaceterm_ui::window_modal_is_open(window, cx)
-            && let Some(conflict) = self
+            && let Some((conflict, notice)) = self
                 .shared
                 .get(key)
                 .and_then(super::shared_workspaces::SharedWorkspaces::next_conflict)
-            && self.present_shared_conflict(conflict, window, cx)
+            && self.present_shared_conflict(conflict, &notice, window, cx)
             && let Some(shared) = self.shared.get_mut(key)
         {
             let _ = shared.take_conflict();
         }
-        if let Some(refusal) = self
+        while let Some((refusal, notice)) = self
             .shared
-            .get_mut(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::take_refusal)
+            .get(key)
+            .and_then(super::shared_workspaces::SharedWorkspaces::next_refusal)
+            && self.present_shared_refusal(refusal, Some(&notice), window, cx)
+            && let Some(shared) = self.shared.get_mut(key)
         {
-            self.present_shared_refusal(refusal, window, cx);
+            let _ = shared.take_refusal();
         }
-        if let Some((server_target, local)) = self
+        if let Some(notice) = self
             .shared
-            .get_mut(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::take_stale_close)
+            .get(key)
+            .and_then(super::shared_workspaces::SharedWorkspaces::next_forgotten)
+            && self.present_forgotten_outcomes(&notice, window, cx)
+            && let Some(shared) = self.shared.get_mut(key)
         {
-            self.present_stale_shared_close(server_target, local, window, cx);
+            let _ = shared.take_forgotten();
+        }
+        while let Some((server_target, local, notice)) = self
+            .shared
+            .get(key)
+            .and_then(super::shared_workspaces::SharedWorkspaces::next_stale_close)
+            && self.present_stale_shared_close(server_target, local, Some(&notice), window, cx)
+            && let Some(shared) = self.shared.get_mut(key)
+        {
+            let _ = shared.take_stale_close();
         }
         self.revalidate_shared_close(key, window, cx);
         if !spaceterm_ui::window_modal_is_open(window, cx)
@@ -3102,22 +3117,22 @@ impl WorkspaceManager {
         self.continue_server_directory(window, cx);
         // New Workspace chosen with no Workspace Window open waits for this reading.
         self.create_pending_workspace(key, window, cx);
-        if let Some((operation, error)) = self
+        // A form presents its own Create's answer, so a failure reaches here only when no
+        // surface that asked for it presents it.
+        while let Some((failure, notice)) = self
             .shared
-            .get_mut(key)
-            .and_then(|s| s.take_worktree_failure())
+            .get(key)
+            .and_then(super::shared_workspaces::SharedWorkspaces::next_worktree_failure)
+            && self.server_worktree_operation_failure(
+                &failure.operation,
+                failure.error,
+                &notice,
+                window,
+                cx,
+            )
+            && let Some(shared) = self.shared.get_mut(key)
         {
-            use spaceterm_server::worktree::Operation;
-            let presented = match &operation {
-                Operation::Create { path, .. } => {
-                    self.worktree_creation_failure_presented(path, error, cx)
-                }
-                Operation::SetLocation { .. } => true,
-                Operation::Remove { .. } | Operation::OpenTab { .. } => false,
-            };
-            if !presented {
-                self.server_worktree_operation_failure(&operation, error, window, cx);
-            }
+            let _ = shared.take_worktree_failure();
         }
         self.save_shared_arrangements(cx);
         self.report_client_view_error(window, cx);
@@ -3720,6 +3735,7 @@ impl WorkspaceManager {
             Err(SharedCloseUnavailable::Missing) => {
                 self.present_shared_refusal(
                     super::shared_workspaces::SharedRefusal::Missing,
+                    None,
                     window,
                     cx,
                 );
@@ -3817,6 +3833,7 @@ impl WorkspaceManager {
                     manager.settle_shared_close(generation, target, confirmed, window, cx);
                 });
             },
+            |_, _| {},
             window,
             cx,
         );
@@ -4012,6 +4029,7 @@ impl WorkspaceManager {
                     review.approval.changed_title(),
                     Some(target),
                     held_keyboard,
+                    None,
                     window,
                     cx,
                 );
@@ -4056,13 +4074,16 @@ impl WorkspaceManager {
             SharedCloseState::Missing => {
                 self.present_shared_close_missing(&review.approval, window, cx);
             }
-            _ => self.present_shared_close_changed(
-                review.approval.changed_title(),
-                Some(review.target),
-                held_keyboard,
-                window,
-                cx,
-            ),
+            _ => {
+                self.present_shared_close_changed(
+                    review.approval.changed_title(),
+                    Some(review.target),
+                    held_keyboard,
+                    None,
+                    window,
+                    cx,
+                );
+            }
         }
     }
 
@@ -4070,14 +4091,17 @@ impl WorkspaceManager {
     /// was closed. Review opens a fresh confirmation of what the server holds now; nothing asks
     /// again on its own. Review keeps `held_keyboard`, whether the closing Workspace held the
     /// keyboard when the person asked, so the approved fresh close moves it as the first would.
+    /// Returns whether the alert was admitted. `notice` records the presentation of an unseen
+    /// outcome.
     fn present_shared_close_changed(
         &mut self,
         title: &'static str,
         target: Option<CloseTarget>,
         held_keyboard: bool,
+        notice: Option<&super::shared_workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let message = if target.is_some() {
             "Nothing was closed. Review the updated Terminal Sessions before closing."
         } else {
@@ -4103,6 +4127,7 @@ impl WorkspaceManager {
         ));
         let manager = cx.weak_entity();
         let window_handle = window.window_handle();
+        let lifecycle = notice.map(|notice| notice.lifecycle());
         let alert = Alert::new(
             ModalId::new("shared-close-changed"),
             title,
@@ -4132,12 +4157,18 @@ impl WorkspaceManager {
                     });
                 });
             },
+            move |event, cx| {
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event, cx);
+                }
+            },
             window,
             cx,
         );
-        if let Err(error) = result {
+        if let Err(error) = &result {
             eprintln!("failed to present the changed shared close: {error}");
         }
+        result.is_ok()
     }
 
     /// Presents a notice about an earlier operation's outcome, or the confirmation its Review
@@ -4147,6 +4178,7 @@ impl WorkspaceManager {
         &mut self,
         alert: Alert<A>,
         on_result: impl FnOnce(AlertOutcome<A>, &mut App) + 'static,
+        on_lifecycle: impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<spaceterm_ui::ModalPresentationHandle, spaceterm_ui::ModalPresentationError> {
@@ -4154,21 +4186,27 @@ impl WorkspaceManager {
         let held = sidebar.update(cx, |sidebar, _| sidebar.hold_rename_for_modal(window));
         let release = sidebar.downgrade();
         let window_handle = window.window_handle();
-        let result = alert.present(window, cx, move |outcome, cx| {
-            if held {
-                let _ = window_handle.update(cx, |_, window, _| {
-                    // The modal returns focus as it next draws, so the hold ends after that frame.
-                    window.on_next_frame(move |window, _| {
-                        window.on_next_frame(move |window, cx| {
-                            let _ = release.update(cx, |sidebar, cx| {
-                                sidebar.release_rename_hold(window, cx);
+        let result = alert.present_with_lifecycle(
+            window,
+            cx,
+            move |outcome, cx| {
+                if held {
+                    let _ = window_handle.update(cx, |_, window, _| {
+                        // The modal returns focus as it next draws, so the hold ends after that
+                        // frame.
+                        window.on_next_frame(move |window, _| {
+                            window.on_next_frame(move |window, cx| {
+                                let _ = release.update(cx, |sidebar, cx| {
+                                    sidebar.release_rename_hold(window, cx);
+                                });
                             });
                         });
                     });
-                });
-            }
-            on_result(outcome, cx);
-        });
+                }
+                on_result(outcome, cx);
+            },
+            on_lifecycle,
+        );
         if held && result.is_err() {
             sidebar.update(cx, |sidebar, cx| sidebar.release_rename_hold(window, cx));
         }
@@ -4177,13 +4215,15 @@ impl WorkspaceManager {
 
     /// Presents a close the server refused because what it would end changed first. Review is
     /// offered only to the process that asked, and only while its target is still here.
+    /// Returns whether the alert was admitted.
     fn present_stale_shared_close(
         &mut self,
         server_target: spaceterm_server::hierarchy::CloseTarget,
         local: Option<CloseTarget>,
+        notice: Option<&super::shared_workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let local =
             local.filter(|local| self.shared_close_target(*local, cx) == Some(server_target));
         // The refused close already moved the keyboard, so a Review keeps what holds it now.
@@ -4195,9 +4235,10 @@ impl WorkspaceManager {
             super::shared_workspaces::shared_close_changed_title(server_target),
             local,
             held_keyboard,
+            notice,
             window,
             cx,
-        );
+        )
     }
 
     /// Explains that another client already removed what a close confirmation named.
@@ -4220,7 +4261,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Informational);
-        let _ = self.present_keeping_sidebar_rename(alert, |_, _| {}, window, cx);
+        let _ = self.present_keeping_sidebar_rename(alert, |_, _| {}, |_, _| {}, window, cx);
     }
 
     /// Presents a refused same-field edit: the server's value, the draft it rejected, and the
@@ -4228,6 +4269,7 @@ impl WorkspaceManager {
     fn present_shared_conflict(
         &mut self,
         conflict: super::shared_workspaces::SharedWorkspaceConflict,
+        notice: &super::shared_workspaces::OutcomeNotice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -4283,6 +4325,7 @@ impl WorkspaceManager {
                     });
                 });
             },
+            notice.lifecycle(),
             window,
             cx,
         );
@@ -4312,12 +4355,14 @@ impl WorkspaceManager {
     }
 
     /// Presents a shared edit the server refused for a reason no retry repairs.
+    /// Returns whether the alert was admitted.
     fn present_shared_refusal(
         &mut self,
         refusal: super::shared_workspaces::SharedRefusal,
+        notice: Option<&super::shared_workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let alert = Alert::new(
             ModalId::new("shared-workspace-refused"),
             "Change not applied",
@@ -4331,7 +4376,49 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning);
-        let _ = self.present_keeping_sidebar_rename(alert, |_, _| {}, window, cx);
+        let lifecycle = notice.map(|notice| notice.lifecycle());
+        self.present_keeping_sidebar_rename(
+            alert,
+            |_, _| {},
+            move |event, cx| {
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event, cx);
+                }
+            },
+            window,
+            cx,
+        )
+        .is_ok()
+    }
+
+    /// Says that more refused changes and failed Worktree operations went unseen than this client
+    /// keeps. Returns whether the alert was admitted.
+    fn present_forgotten_outcomes(
+        &mut self,
+        notice: &super::shared_workspaces::OutcomeNotice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let alert = Alert::new(
+            ModalId::new("shared-outcomes-forgotten"),
+            "Some Results Weren\u{2019}t Shown",
+            "Some Results Weren\u{2019}t Shown",
+            format!(
+                "More than {} changes or Worktree operations failed before SpaceTerm could show \
+                 them, and the earliest are no longer available. Review your Workspaces and \
+                 Worktrees.",
+                spaceterm_server::hierarchy::UNSEEN_OUTCOMES
+            ),
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                "shared-outcomes-forgotten-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning);
+        self.present_keeping_sidebar_rename(alert, |_, _| {}, notice.lifecycle(), window, cx)
+            .is_ok()
     }
 
     /// Explains a shared edit this client could not submit. Nothing was sent, and nothing waits.

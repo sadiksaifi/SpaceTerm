@@ -246,6 +246,15 @@ pub(super) struct ServerLocation {
     git_answered: bool,
     /// The owning server's check of the text being typed. Replacing it cancels the earlier one.
     check: Option<Task<()>>,
+    /// A failed change the section shows, until the person edits the location, chooses another
+    /// server or closes Settings. Settings going away any other way, or no longer showing the
+    /// row, leaves it to the Workspace Window.
+    unanswered: Option<crate::ui::shared_workspaces::OutcomeOwner>,
+    /// Whether the latest render drew the Location row, so the person can see its failure.
+    rendered: bool,
+    /// The held failure's sequence once a render has drawn its error. Only then can the
+    /// person's response answer it.
+    displayed: crate::ui::shared_workspaces::DrawnAnswer,
 }
 
 impl ServerLocation {
@@ -260,8 +269,8 @@ impl ServerLocation {
         let events = cx.subscribe_in(
             &input,
             window,
-            |settings, input, event: &TextInputEvent, _, cx| {
-                settings.server_location_event(input, event, cx);
+            |settings, input, event: &TextInputEvent, window, cx| {
+                settings.server_location_event(input, event, window.is_window_active(), cx);
             },
         );
         Self {
@@ -275,6 +284,9 @@ impl ServerLocation {
             poll: None,
             git_answered: false,
             check: None,
+            unanswered: None,
+            rendered: false,
+            displayed: crate::ui::shared_workspaces::DrawnAnswer::default(),
         }
     }
 
@@ -288,8 +300,40 @@ impl ServerLocation {
         self.client = None;
         self.poll = None;
         self.check = None;
+        self.unanswered = None;
+        self.displayed.forget();
         self.show(Some(String::new()), cx);
         self.show_last_known(cx);
+    }
+
+    /// The person responded to Settings. That answers the held failure only if a render drew
+    /// its error. A failure whose error no render drew yet goes back to the Workspace Window.
+    pub(super) fn answered(&mut self) {
+        if let Some(answer) = self.unanswered.take()
+            && self.displayed.answers(answer.sequence())
+        {
+            answer.presented();
+        }
+        self.displayed.forget();
+    }
+
+    /// Whether the section holds a failure the person has not answered.
+    pub(super) fn holds_failure(&self) -> bool {
+        self.unanswered.is_some()
+    }
+
+    /// A render starts. Unless it draws the Location row, the person can't see its failure.
+    pub(super) fn render_begins(&mut self) {
+        self.rendered = false;
+    }
+
+    /// Hands a failure back to the Workspace Window once the row it shows in is gone, as when
+    /// the person moves to another section or a search leaves the row out.
+    pub(super) fn release_unless_rendered(&mut self) {
+        if !self.rendered {
+            self.unanswered = None;
+            self.displayed.forget();
+        }
     }
 
     /// Shows the selected server's last-known facts wherever the server hasn't answered itself
@@ -351,6 +395,9 @@ impl ServerLocation {
         self.client = None;
         self.poll = None;
         self.check = None;
+        // The failure's message goes with the connection, unanswered.
+        self.unanswered = None;
+        self.displayed.forget();
         let text = self.model.disconnected();
         self.show(text, cx);
     }
@@ -496,6 +543,8 @@ impl SettingsWindow {
     }
 
     pub(super) fn reset_server_location(&mut self, cx: &mut Context<Self>) {
+        // Reset is the person's response to the row, including its shown failure.
+        self.server_location.answered();
         let template = Settings::default().template;
         let state = &mut self.server_location;
         state.check = None;
@@ -504,14 +553,20 @@ impl SettingsWindow {
         self.commit_server_location(cx);
     }
 
+    /// `window_active` tells focus the person moved within Settings from focus the window lost
+    /// to another app or window, or to minimizing.
     pub(super) fn server_location_event(
         &mut self,
         input: &Entity<TextInput>,
         event: &TextInputEvent,
+        window_active: bool,
         cx: &mut Context<Self>,
     ) {
         match event {
-            TextInputEvent::ValueChanged(_) => {
+            TextInputEvent::ValueChanged(change) => {
+                if change.source() != spaceterm_ui::TextInputChangeSource::Programmatic {
+                    self.server_location.answered();
+                }
                 let text = input.read(cx).value().to_owned();
                 let state = &mut self.server_location;
                 let check = state.model.edited(&text);
@@ -534,10 +589,21 @@ impl SettingsWindow {
                 });
                 cx.notify();
             }
-            TextInputEvent::Submitted | TextInputEvent::FocusLost => {
-                self.commit_server_location(cx)
+            // Enter is the person's response to a shown failure, whether or not it writes.
+            TextInputEvent::Submitted => {
+                self.server_location.answered();
+                self.commit_server_location(cx);
+            }
+            // The person moved to another control, so the field writes and answers its shown
+            // failure. A window that lost focus to another app, another window or minimizing
+            // leaves a shown failure, and its draft, for the person to answer on returning.
+            TextInputEvent::FocusLost => {
+                if window_active || !self.server_location.holds_failure() {
+                    self.commit_server_location(cx);
+                }
             }
             TextInputEvent::Cancelled => {
+                self.server_location.answered();
                 let state = &mut self.server_location;
                 state.check = None;
                 let text = state.model.cancelled();
@@ -557,12 +623,17 @@ impl SettingsWindow {
         let Some(write) = state.model.commit() else {
             return;
         };
+        // Writing again replaces the shown failure. The person caused it, by Enter, Reset or
+        // leaving the field, so the failure is answered first rather than handed back.
+        state.answered();
         let generation = state.generation;
         let operation = Operation::SetLocation {
             version: write.version,
             template: write.template.clone(),
         };
-        let written = client.write(operation, cx);
+        // Settings presents its own change's answer while it shows this server.
+        let answer = client.source.owner();
+        let written = client.write_owned(operation, answer.ticket(), cx);
         cx.spawn(async move |settings, cx| {
             let result = written.await.and_then(crate::ui::server_worktrees::result);
             let current = if result == Err(WriteError::Server(Error::Changed)) {
@@ -580,11 +651,27 @@ impl SettingsWindow {
                 if state.generation != generation {
                     return;
                 }
+                // A template problem shows only while the field still holds the written text.
+                let shown = match &result {
+                    Err(WriteError::Server(Error::Template(_))) => {
+                        state.model.draft == write.template
+                    }
+                    Err(WriteError::Server(_)) => true,
+                    _ => false,
+                };
                 if state.model.committed(write, result) {
                     let text = state.model.changed_elsewhere(current);
                     state.show(text, cx);
                 }
                 state.retain(cx);
+                // Settings shows a failure only while its row is on the page.
+                if shown && state.rendered {
+                    state.unanswered = Some(answer);
+                    // The error counts as shown once a render draws it.
+                    state.displayed.forget();
+                    // The person may have scrolled the field away while the change was on its way.
+                    settings.reveal_growing_row(SettingsRowId::ServerWorktreeLocation, cx);
+                }
                 cx.notify();
             });
         })
@@ -606,10 +693,20 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.server_location.rendered = true;
         let model = &self.server_location.model;
         let editable = model.editable();
         let invalid = model.problem.is_some();
         let message = model.message();
+        // This render draws the held failure's error under the field.
+        if message.is_some() {
+            let sequence = self
+                .server_location
+                .unanswered
+                .as_ref()
+                .and_then(crate::ui::shared_workspaces::OutcomeOwner::sequence);
+            self.server_location.displayed.drawn(sequence);
+        }
         let input = self.server_location.input.clone();
         input.update(cx, |input, cx| input.set_editable(editable, cx));
         let focus = input.read(cx).focus_handle();

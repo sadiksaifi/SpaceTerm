@@ -20,13 +20,13 @@
 //!
 pub(crate) use development::ArrangementUnavailable;
 pub(crate) use development::{
-    DirectServer, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
-    SharedCloseIntent, SharedCloseReview, SharedCloseState, SharedCloseUnavailable,
-    SharedEditSource, SharedPaneOpener, SharedPaneSessions, SharedPaneSubscription, SharedPanes,
-    SharedRefusal, SharedRefusalReason, SharedRemoval, SharedRowStatus, SharedSubmission,
-    SharedTabs, SharedWorkspaceConflict, SharedWorkspaceEdits, SharedWorkspaceFacts,
-    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
-    shared_close_changed_title,
+    DirectServer, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, SharedAcceptance,
+    SharedAttachmentFailure, SharedCloseApproval, SharedCloseIntent, SharedCloseReview,
+    SharedCloseState, SharedCloseUnavailable, SharedEditSource, SharedPaneOpener,
+    SharedPaneSessions, SharedPaneSubscription, SharedPanes, SharedRefusal, SharedRefusalReason,
+    SharedRemoval, SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
+    SharedWorkspaceEdits, SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan,
+    SharedWorkspaces, presenting_window, shared_close_changed_title,
 };
 #[cfg(test)]
 pub(crate) use development::{WorkspaceOwner, testing};
@@ -46,10 +46,12 @@ mod pending;
 
 #[path = "shared_workspaces/direct_route.rs"]
 mod direct_route;
-pub(crate) use direct_route::{DirectRoutePanes, UnavailableEdits};
+pub(crate) use direct_route::{
+    DirectRoutePanes, PresentationRecord, PresentationRetries, UnavailableEdits,
+};
 
 mod development {
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -128,6 +130,13 @@ mod development {
 
         /// Reconnects now, rather than after the reconnect delay, while the connection is down.
         fn retry(&self) {}
+
+        /// Records that a surface presented the outcome of `sequence`. The snapshot no longer
+        /// lists it as unseen, in this process or a later one.
+        fn presented(&self, _sequence: u64) {}
+
+        /// Records that a surface said the first `total` forgotten outcomes went unseen.
+        fn forgotten_presented(&self, _total: u64) {}
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
@@ -154,6 +163,45 @@ mod development {
         fn retry(&self) {
             Self::retry(self);
         }
+
+        fn presented(&self, sequence: u64) {
+            Self::presented(self, sequence);
+        }
+
+        fn forgotten_presented(&self, total: u64) {
+            Self::forgotten_presented(self, total);
+        }
+    }
+
+    /// Stands for the notice that the bound forgot some unseen outcomes, where a held or handed
+    /// sequence is expected. The server never assigns this sequence.
+    const FORGOTTEN: u64 = u64::MAX;
+
+    /// An alert's lifecycle observer. When the person answers the alert, with any of its actions
+    /// or Escape, `answered` runs. When it closes any other way, as with its window, `unanswered`
+    /// runs instead. When the alert reports neither, both drop.
+    fn when_answered(
+        answered: impl FnOnce() + 'static,
+        unanswered: impl FnOnce() + 'static,
+    ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static {
+        type Outcomes = Option<(Box<dyn FnOnce()>, Box<dyn FnOnce()>)>;
+        let pending: Rc<std::cell::RefCell<Outcomes>> = Rc::new(std::cell::RefCell::new(Some((
+            Box::new(answered),
+            Box::new(unanswered),
+        ))));
+        move |event, _| {
+            let spaceterm_ui::ModalLifecycleEvent::Closed(_, reason) = event else {
+                return;
+            };
+            let taken = pending.borrow_mut().take();
+            if let Some((answered, unanswered)) = taken {
+                match reason {
+                    spaceterm_ui::ModalCloseReason::Action
+                    | spaceterm_ui::ModalCloseReason::Cancelled => answered(),
+                    _ => unanswered(),
+                }
+            }
+        }
     }
 
     /// Connected interaction intent is bounded and ordered here. The transport journals only
@@ -173,6 +221,128 @@ mod development {
         standing_in: Rc<std::cell::Cell<bool>>,
         pending: Rc<std::cell::RefCell<super::pending::PendingEdits>>,
         subscribers: Rc<std::cell::RefCell<Vec<async_channel::Sender<()>>>>,
+        /// Unseen outcomes a surface holds to present, so no other surface presents them too.
+        held: Rc<std::cell::RefCell<BTreeSet<u64>>>,
+        /// The latest presented outcomes, newest last, and the forgotten total a surface said
+        /// went unseen. A replacement transport records them too.
+        acknowledged: Rc<std::cell::RefCell<VecDeque<u64>>>,
+        forgotten_acknowledged: Rc<std::cell::Cell<u64>>,
+    }
+
+    /// A surface that presents the answer to its own edit, as the New Worktree form presents
+    /// its Create's. Until it presents that answer or drops this, no other surface presents it;
+    /// dropping it unpresented leaves the answer to the Workspace Window.
+    pub(crate) struct OutcomeOwner {
+        source: SharedEditSource,
+        answer: Rc<std::cell::Cell<Option<u64>>>,
+    }
+
+    /// Where [`SharedEditSource::submit_owned`] tells an [`OutcomeOwner`] its answer.
+    pub(crate) struct OutcomeTicket(std::rc::Weak<std::cell::Cell<Option<u64>>>);
+
+    impl OutcomeOwner {
+        pub(crate) fn ticket(&self) -> OutcomeTicket {
+            OutcomeTicket(Rc::downgrade(&self.answer))
+        }
+
+        /// The sequence of the owned answer, once it has arrived.
+        pub(crate) fn sequence(&self) -> Option<u64> {
+            self.answer.get()
+        }
+
+        /// Records that the person answered the surface showing the answer, so nothing presents
+        /// it again.
+        pub(crate) fn presented(&self) {
+            if let Some(sequence) = self.answer.take() {
+                self.source.presented(sequence);
+            }
+        }
+
+        /// The observer of the owner's own alert, which records the answer once the person
+        /// answers the alert. An alert closed any other way, or never admitted, leaves the
+        /// answer to the Workspace Window.
+        pub(crate) fn lifecycle(
+            self,
+        ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static + use<> {
+            when_answered(move || self.presented(), || {})
+        }
+    }
+
+    /// Whether the person's response answers what a surface shows. It does only once a render
+    /// drew that very answer, which [`Self::drawn`] records by the answer's key.
+    #[derive(Default)]
+    pub(crate) struct DrawnAnswer(Option<u64>);
+
+    impl DrawnAnswer {
+        /// A render drew the answer `key` names.
+        pub(crate) fn drawn(&mut self, key: Option<u64>) {
+            self.0 = key;
+        }
+
+        /// The person responded while the surface held the answer `key` names. Returns whether
+        /// a render had drawn that answer, so the response answers it.
+        pub(crate) fn answers(&mut self, key: Option<u64>) -> bool {
+            let drawn = self.0.take();
+            key.is_some() && key == drawn
+        }
+
+        /// The surface gave its answer up, or holds a new one no render has drawn yet.
+        pub(crate) fn forget(&mut self) {
+            self.0 = None;
+        }
+    }
+
+    impl Drop for OutcomeOwner {
+        fn drop(&mut self) {
+            if let Some(sequence) = self.answer.take() {
+                self.source.release(sequence);
+            }
+        }
+    }
+
+    /// The unseen outcomes one alert presents. The person's answer to the alert records them as
+    /// seen; an alert closed any other way leaves them for the next presentation.
+    #[derive(Clone)]
+    pub(crate) struct OutcomeNotice {
+        source: SharedEditSource,
+        sequences: Rc<[u64]>,
+        /// The forgotten total, for the notice that says how many outcomes went unseen.
+        forgotten: Option<u64>,
+        /// The reading's outcomes handed to alerts the person has not answered yet.
+        handed: Rc<std::cell::RefCell<BTreeSet<u64>>>,
+    }
+
+    impl OutcomeNotice {
+        /// The alert's lifecycle observer.
+        pub(crate) fn lifecycle(
+            &self,
+        ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static + use<> {
+            let answered = self.clone();
+            let unanswered = self.clone();
+            when_answered(move || answered.acknowledge(), move || unanswered.release())
+        }
+
+        /// Records the outcomes as seen. Call it only for the person's answer.
+        pub(crate) fn acknowledge(&self) {
+            for sequence in self.sequences.iter() {
+                self.handed.borrow_mut().remove(sequence);
+                self.source.presented(*sequence);
+            }
+            if let Some(total) = self.forgotten {
+                self.handed.borrow_mut().remove(&FORGOTTEN);
+                self.source.forgotten_presented(total);
+            }
+        }
+
+        /// Leaves the outcomes unseen for the next reading.
+        fn release(&self) {
+            let forgotten = self.forgotten.map(|_| FORGOTTEN);
+            for sequence in self.sequences.iter().copied().chain(forgotten) {
+                if self.handed.borrow_mut().remove(&sequence) {
+                    self.source.release(sequence);
+                }
+            }
+        }
     }
 
     pub(crate) struct SharedEditNotifications {
@@ -212,6 +382,54 @@ mod development {
                     super::pending::PendingEdits::default(),
                 )),
                 subscribers: Rc::default(),
+                held: Rc::default(),
+                acknowledged: Rc::default(),
+                forgotten_acknowledged: Rc::default(),
+            }
+        }
+
+        /// Holds an unseen outcome for one surface to present. Returns false when another
+        /// surface holds it already or presented it.
+        fn hold(&self, sequence: u64) -> bool {
+            (sequence == FORGOTTEN || !self.acknowledged.borrow().contains(&sequence))
+                && self.held.borrow_mut().insert(sequence)
+        }
+
+        /// Records that a surface said the first `total` forgotten outcomes went unseen.
+        fn forgotten_presented(&self, total: u64) {
+            self.held.borrow_mut().remove(&FORGOTTEN);
+            self.forgotten_acknowledged
+                .set(self.forgotten_acknowledged.get().max(total));
+            self.transport().forgotten_presented(total);
+        }
+
+        /// Gives up a held outcome unpresented, so a reader presents it.
+        pub(crate) fn release(&self, sequence: u64) {
+            if self.held.borrow_mut().remove(&sequence) {
+                self.hint();
+            }
+        }
+
+        /// Records that a surface presented the outcome of `sequence`.
+        pub(crate) fn presented(&self, sequence: u64) {
+            self.held.borrow_mut().remove(&sequence);
+            {
+                let mut acknowledged = self.acknowledged.borrow_mut();
+                if !acknowledged.contains(&sequence) {
+                    if acknowledged.len() >= spaceterm_server::hierarchy::UNSEEN_OUTCOMES {
+                        acknowledged.pop_front();
+                    }
+                    acknowledged.push_back(sequence);
+                }
+            }
+            self.transport().presented(sequence);
+        }
+
+        /// An owner for the answer to one edit, which [`Self::submit_owned`] asks for.
+        pub(crate) fn owner(&self) -> OutcomeOwner {
+            OutcomeOwner {
+                source: self.clone(),
+                answer: Rc::default(),
             }
         }
 
@@ -230,6 +448,12 @@ mod development {
         /// reads, and every follower hears of the change.
         pub(crate) fn replace_transport(&self, edits: Rc<dyn SharedWorkspaceEdits>) {
             self.generation.set(self.generation.get().wrapping_add(1));
+            for sequence in self.acknowledged.borrow().iter() {
+                edits.presented(*sequence);
+            }
+            if self.forgotten_acknowledged.get() != 0 {
+                edits.forgotten_presented(self.forgotten_acknowledged.get());
+            }
             *self.edits.borrow_mut() = edits;
             self.snapshot();
             self.hint();
@@ -262,7 +486,7 @@ mod development {
         }
 
         pub(crate) fn submit(&self, mutation: Mutation) -> SharedSubmission {
-            match self.enqueue(mutation, None) {
+            match self.enqueue(mutation, None, None) {
                 Ok(()) => SharedSubmission::Submitted,
                 Err(reason) => SharedSubmission::Refused(reason),
             }
@@ -272,6 +496,7 @@ mod development {
             &self,
             mutation: Mutation,
             reply: Option<async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>>,
+            owner: Option<std::rc::Weak<std::cell::Cell<Option<u64>>>>,
         ) -> Result<(), SharedRefusalReason> {
             self.snapshot();
             let editability = self.editability();
@@ -281,7 +506,7 @@ mod development {
             if !mutation.is_bounded() {
                 return Err(SharedRefusalReason::Value);
             }
-            self.pending.borrow_mut().push(mutation, reply)?;
+            self.pending.borrow_mut().push(mutation, reply, owner)?;
             self.dispatch();
             self.subscribers.borrow_mut().retain(|sender| {
                 !matches!(
@@ -301,7 +526,22 @@ mod development {
             SharedRefusalReason,
         > {
             let (reply, receiver) = async_channel::bounded(1);
-            self.enqueue(mutation, Some(reply))?;
+            self.enqueue(mutation, Some(reply), None)?;
+            Ok(receiver)
+        }
+
+        /// Like [`Self::submit_waiting`], for a surface that presents the answer itself while
+        /// `owner` lives.
+        pub(crate) fn submit_owned(
+            &self,
+            mutation: Mutation,
+            owner: OutcomeTicket,
+        ) -> Result<
+            async_channel::Receiver<Result<RetainedOutcome, SharedRefusalReason>>,
+            SharedRefusalReason,
+        > {
+            let (reply, receiver) = async_channel::bounded(1);
+            self.enqueue(mutation, Some(reply), Some(owner.0))?;
             Ok(receiver)
         }
 
@@ -333,7 +573,10 @@ mod development {
                 snapshot.inventory.clone_from(&self.stand_in.borrow());
             }
             self.standing_in.set(standing_in);
-            self.pending.borrow_mut().observe(&snapshot);
+            let owned = self.pending.borrow_mut().observe(&snapshot);
+            for sequence in owned {
+                self.hold(sequence);
+            }
             self.dispatch();
             (snapshot, standing_in)
         }
@@ -1367,15 +1610,17 @@ mod development {
         failed_attempts: u64,
         pending: bool,
         pending_operation: Option<Mutation>,
-        /// The sequence of the last outcome this client presented, so one answer is read once.
-        consumed: Option<u64>,
         /// Unread refused edits, each retaining its own draft and authoritative snapshot.
         conflicts: VecDeque<PendingConflict>,
-        refusal: Option<SharedRefusal>,
-        worktree_failure: Option<(
-            spaceterm_server::worktree::Operation,
-            spaceterm_server::worktree::Error,
-        )>,
+        /// Refusals still to present, each with the unseen outcomes it stands for. Outcomes
+        /// refused for the same reason share one notice.
+        refusals: VecDeque<(SharedRefusal, Vec<u64>)>,
+        /// The forgotten total the notice that some outcomes went unseen would record.
+        forgotten: Option<u64>,
+        /// Failed Worktree operations no surface has presented yet.
+        worktree_failures: VecDeque<WorktreeFailure>,
+        /// Outcomes this reading handed to alerts the person has not answered yet.
+        handed: Rc<std::cell::RefCell<BTreeSet<u64>>>,
         /// The inventory the server published last, including the live Session facts a close
         /// confirmation reads. Those facts can change without a new membership revision.
         latest: Option<Inventory>,
@@ -1385,8 +1630,9 @@ mod development {
         review: Option<SharedCloseReview>,
         /// The close this process submitted, and the local target a fresh review would reopen.
         submitted_close: Option<(ServerCloseTarget, CloseTarget)>,
-        /// A close the server refused because what it would end changed after the confirmation.
-        stale_close: Option<ServerCloseTarget>,
+        /// Closes the server refused because what they would end changed after the
+        /// confirmation, each with its outcome's sequence.
+        stale_closes: VecDeque<(ServerCloseTarget, u64)>,
         attachments: spaceterm_server::attachments::Attachments,
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
         saved_views: Option<spaceterm_server::client_view::ClientView>,
@@ -1407,6 +1653,8 @@ mod development {
     /// belongs to. An answer recovered after a relaunch arrives before any local Workspace exists,
     /// so the draft waits for the projection rather than being dropped.
     struct PendingConflict {
+        /// The sequence of the refusal, which draft review presents.
+        sequence: u64,
         workspace: Id,
         field: SharedWorkspaceField,
         reviewed_version: u64,
@@ -1416,12 +1664,43 @@ mod development {
         authoritative: SharedString,
     }
 
+    /// A failed Worktree operation the Workspace Window presents, unless the surface that asked
+    /// for it does.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct WorktreeFailure {
+        pub(crate) sequence: u64,
+        pub(crate) operation: spaceterm_server::worktree::Operation,
+        pub(crate) error: spaceterm_server::worktree::Error,
+    }
+
     impl Drop for SharedWorkspaces {
         fn drop(&mut self) {
             self.edits
                 .pending
                 .borrow_mut()
                 .release_conflicts(self.conflicts.len());
+            // What this window never presented stays unseen for the next window.
+            let sequences: Vec<u64> = self
+                .conflicts
+                .iter()
+                .map(|conflict| conflict.sequence)
+                .chain(
+                    self.refusals
+                        .iter()
+                        .flat_map(|(_, refused)| refused.iter().copied()),
+                )
+                .chain(self.forgotten.map(|_| FORGOTTEN))
+                .chain(self.stale_closes.iter().map(|(_, sequence)| *sequence))
+                .chain(
+                    self.worktree_failures
+                        .iter()
+                        .map(|failure| failure.sequence),
+                )
+                .chain(std::mem::take(&mut *self.handed.borrow_mut()))
+                .collect();
+            for sequence in sequences {
+                self.edits.release(sequence);
+            }
         }
     }
 
@@ -1439,15 +1718,16 @@ mod development {
                 failed_attempts: 0,
                 pending: false,
                 pending_operation: None,
-                consumed: None,
                 conflicts: VecDeque::new(),
-                refusal: None,
-                worktree_failure: None,
+                refusals: VecDeque::new(),
+                forgotten: None,
+                worktree_failures: VecDeque::new(),
+                handed: Rc::default(),
                 latest: None,
                 repositories: super::SharedRepositories::default(),
                 review: None,
                 submitted_close: None,
-                stale_close: None,
+                stale_closes: VecDeque::new(),
                 attachments: spaceterm_server::attachments::Attachments::memory(),
                 retained_views: None,
                 saved_views: None,
@@ -2015,20 +2295,54 @@ mod development {
             submission
         }
 
-        /// A close the server refused as stale, once, with the local target this process asked
-        /// to close when it is the one that asked. A recovered answer names no local target.
-        pub(crate) fn take_worktree_failure(
-            &mut self,
-        ) -> Option<(
-            spaceterm_server::worktree::Operation,
-            spaceterm_server::worktree::Error,
-        )> {
-            self.worktree_failure.take()
+        /// The oldest failed Worktree operation still to present, and its alert's presentation.
+        /// It stays until [`Self::take_worktree_failure`].
+        pub(crate) fn next_worktree_failure(&self) -> Option<(WorktreeFailure, OutcomeNotice)> {
+            let failure = self.worktree_failures.front()?.clone();
+            let notice = self.notice([failure.sequence]);
+            Some((failure, notice))
+        }
+        pub(crate) fn take_worktree_failure(&mut self) -> Option<WorktreeFailure> {
+            let failure = self.worktree_failures.pop_front()?;
+            self.hand(failure.sequence);
+            Some(failure)
+        }
+
+        /// Records that an admitted alert presents `sequence` until the person answers it.
+        fn hand(&self, sequence: u64) {
+            if sequence == FORGOTTEN || !self.edits.acknowledged.borrow().contains(&sequence) {
+                self.handed.borrow_mut().insert(sequence);
+            }
+        }
+
+        /// The alert presentation of these unseen outcomes.
+        fn notice(&self, sequences: impl Into<Rc<[u64]>>) -> OutcomeNotice {
+            OutcomeNotice {
+                source: self.edits.clone(),
+                sequences: sequences.into(),
+                forgotten: None,
+                handed: Rc::clone(&self.handed),
+            }
+        }
+
+        /// The oldest close the server refused as stale, with the local target this process
+        /// asked to close when it is the one that asked, and its alert's presentation. A
+        /// recovered answer names no local target. It stays until [`Self::take_stale_close`].
+        pub(crate) fn next_stale_close(
+            &self,
+        ) -> Option<(ServerCloseTarget, Option<CloseTarget>, OutcomeNotice)> {
+            let (target, sequence) = *self.stale_closes.front()?;
+            let local = self
+                .submitted_close
+                .filter(|(submitted, _)| *submitted == target)
+                .map(|(_, local)| local);
+            Some((target, local, self.notice([sequence])))
         }
         pub(crate) fn take_stale_close(
             &mut self,
         ) -> Option<(ServerCloseTarget, Option<CloseTarget>)> {
-            let target = self.stale_close.take()?;
+            let (target, sequence) = self.stale_closes.pop_front()?;
+            self.hand(sequence);
             let local = self
                 .submitted_close
                 .take()
@@ -2083,21 +2397,26 @@ mod development {
                 .position(|pending| self.local(pending.workspace).is_some())
         }
 
-        /// Leaves ownership and admission capacity here until the notice is admitted.
-        pub(crate) fn next_conflict(&self) -> Option<SharedWorkspaceConflict> {
+        /// Leaves ownership and admission capacity here until the notice is admitted. Draft
+        /// review's presentation records it.
+        pub(crate) fn next_conflict(&self) -> Option<(SharedWorkspaceConflict, OutcomeNotice)> {
             let pending = &self.conflicts[self.presentable_conflict_index()?];
-            Some(SharedWorkspaceConflict {
-                workspace: self.local(pending.workspace)?,
-                field: pending.field,
-                reviewed_version: pending.reviewed_version,
-                draft: pending.draft.clone(),
-                authoritative: pending.authoritative.clone(),
-            })
+            Some((
+                SharedWorkspaceConflict {
+                    workspace: self.local(pending.workspace)?,
+                    field: pending.field,
+                    reviewed_version: pending.reviewed_version,
+                    draft: pending.draft.clone(),
+                    authoritative: pending.authoritative.clone(),
+                },
+                self.notice([pending.sequence]),
+            ))
         }
 
         pub(crate) fn take_conflict(&mut self) -> Option<SharedWorkspaceConflict> {
             let index = self.presentable_conflict_index()?;
             let pending = self.conflicts.remove(index)?;
+            self.hand(pending.sequence);
             let workspace = self.local(pending.workspace)?;
             self.edits.pending.borrow_mut().release_conflicts(1);
             Some(SharedWorkspaceConflict {
@@ -2109,8 +2428,32 @@ mod development {
             })
         }
 
+        /// The oldest refusal to present, and its alert's presentation of exactly the outcomes
+        /// it stands for. It stays until [`Self::take_refusal`].
+        pub(crate) fn next_refusal(&self) -> Option<(SharedRefusal, OutcomeNotice)> {
+            let (refusal, refused) = self.refusals.front()?;
+            Some((*refusal, self.notice(refused.as_slice())))
+        }
         pub(crate) fn take_refusal(&mut self) -> Option<SharedRefusal> {
-            self.refusal.take()
+            let (refusal, refused) = self.refusals.pop_front()?;
+            for sequence in refused {
+                self.hand(sequence);
+            }
+            Some(refusal)
+        }
+
+        /// The notice that the bound forgot some outcomes nobody saw. It stays until
+        /// [`Self::take_forgotten`].
+        pub(crate) fn next_forgotten(&self) -> Option<OutcomeNotice> {
+            Some(OutcomeNotice {
+                forgotten: Some(self.forgotten?),
+                ..self.notice([])
+            })
+        }
+        pub(crate) fn take_forgotten(&mut self) -> Option<u64> {
+            let total = self.forgotten.take()?;
+            self.hand(FORGOTTEN);
+            Some(total)
         }
 
         pub(crate) const fn connection_error(&self) -> Option<spaceterm_server::ServerError> {
@@ -2144,7 +2487,8 @@ mod development {
 
         /// Reads the server's answer and its inventory together, and reports both.
         ///
-        /// One answer is read once. An answer recovered after a relaunch still reports the draft
+        /// Each unseen answer is taken by one surface and presented once, across windows and
+        /// relaunches. An answer recovered after a relaunch still reports the draft
         /// it rejected, because that draft is a person's work; only an answer this process asked
         /// for reports an acceptance the window may act on, so a publication from another client
         /// never moves the Active Workspace, Tab, or Pane.
@@ -2191,7 +2535,12 @@ mod development {
             }
             let completed = self.edits.pending.borrow_mut().take_completions();
             for completion in completed {
-                self.consumed = Some(completion.outcome.sequence);
+                // An answer some surface already holds is presented there.
+                if completion.outcome.outcome.needs_presentation()
+                    && !self.edits.hold(completion.outcome.sequence)
+                {
+                    continue;
+                }
                 // Attachment authority records only server identities, never provisional ones.
                 if let RetainedOutcome {
                     mutation: Mutation::CreateWorkspace { .. },
@@ -2211,7 +2560,14 @@ mod development {
                 poll.changed = true;
             }
             if std::mem::take(&mut self.edits.pending.borrow_mut().disconnected) {
-                self.refusal = Some(SharedRefusal::Disconnected);
+                if !self
+                    .refusals
+                    .iter()
+                    .any(|(refusal, _)| *refusal == SharedRefusal::Disconnected)
+                {
+                    self.refusals
+                        .push_back((SharedRefusal::Disconnected, Vec::new()));
+                }
                 poll.changed = true;
             }
             self.pending_operation
@@ -2228,16 +2584,29 @@ mod development {
                 self.pending = snapshot.pending;
                 poll.changed = true;
             }
-            if let Some(outcome) = snapshot
-                .outcome
-                .as_ref()
-                .filter(|outcome| self.consumed != Some(outcome.sequence))
-            {
-                self.consumed = Some(outcome.sequence);
-                // The answer and the authoritative values come from one snapshot, so a conflict
-                // never names a value an accepted edit has already replaced.
-                self.settle(outcome, snapshot.inventory.as_ref(), false, &mut poll);
-                poll.changed = true;
+            // Each unseen answer is presented once, from this run or an earlier one, by the
+            // surface that holds it. The server's own inventory names what a draft review shows.
+            if !standing_in && snapshot.inventory.is_some() {
+                // The bound forgot some outcomes nobody saw. One notice says so.
+                if self.forgotten.is_none()
+                    && snapshot.forgotten
+                        > snapshot
+                            .forgotten_presented
+                            .max(self.edits.forgotten_acknowledged.get())
+                    && self.edits.hold(FORGOTTEN)
+                {
+                    self.forgotten = Some(snapshot.forgotten);
+                    poll.changed = true;
+                }
+                for outcome in &snapshot.unseen {
+                    if !self.edits.hold(outcome.sequence) {
+                        continue;
+                    }
+                    // The answer and the authoritative values come from one snapshot, so a
+                    // conflict never names a value an accepted edit has already replaced.
+                    self.settle(outcome, snapshot.inventory.as_ref(), false, &mut poll);
+                    poll.changed = true;
+                }
             }
             // Live Session facts and Pane directories change without a membership revision, so
             // the latest reading is kept whether or not membership changed, and repaints the rows
@@ -2269,17 +2638,26 @@ mod development {
             if let Some(inventory) = &snapshot.inventory {
                 // A batch can contain an older conflict for a Workspace removed by its latest
                 // publication. Keep every other draft and release only the missing targets.
-                let before = self.conflicts.len();
+                let mut removed = Vec::new();
                 self.conflicts.retain(|pending| {
-                    inventory
+                    let kept = inventory
                         .workspaces
                         .iter()
-                        .any(|w| w.id == pending.workspace)
+                        .any(|w| w.id == pending.workspace);
+                    if !kept {
+                        removed.push(pending.sequence);
+                    }
+                    kept
                 });
-                let removed = before - self.conflicts.len();
-                if removed != 0 {
-                    self.edits.pending.borrow_mut().release_conflicts(removed);
-                    self.refusal = Some(SharedRefusal::Missing);
+                if !removed.is_empty() {
+                    self.edits
+                        .pending
+                        .borrow_mut()
+                        .release_conflicts(removed.len());
+                    // The Missing refusal presents what happened to each draft.
+                    for sequence in removed {
+                        self.refuse(SharedRefusal::Missing, sequence);
+                    }
                     poll.changed = true;
                 }
             }
@@ -2309,7 +2687,9 @@ mod development {
             poll
         }
 
-        /// Presents one answer the server gave, against the inventory of the same snapshot.
+        /// Presents one answer the server gave, against the inventory of the same snapshot. An
+        /// answer that needs presenting is held for this window; one with nothing to present is
+        /// recorded as presented.
         fn settle(
             &mut self,
             outcome: &RetainedOutcome,
@@ -2317,13 +2697,19 @@ mod development {
             own: bool,
             poll: &mut SharedPoll,
         ) {
+            let sequence = outcome.sequence;
             match outcome.outcome {
                 Outcome::Pending => {}
-                Outcome::WorktreeFailed(error) => {
-                    if let Mutation::Worktree(operation) = &outcome.mutation {
-                        self.worktree_failure = Some((operation.clone(), error));
+                Outcome::WorktreeFailed(error) => match &outcome.mutation {
+                    Mutation::Worktree(operation) => {
+                        self.worktree_failures.push_back(WorktreeFailure {
+                            sequence,
+                            operation: operation.clone(),
+                            error,
+                        });
                     }
-                }
+                    _ => self.edits.presented(sequence),
+                },
                 // An accepted change reaches every client through the inventory, which names the
                 // server's own identities rather than a reply this client could have lost. The
                 // client that asked for a creation also opens it, once.
@@ -2336,30 +2722,51 @@ mod development {
                     }
                 }
                 Outcome::Conflict => {
-                    if let Some(conflict) = inventory
-                        .and_then(|inventory| Self::conflicted(&outcome.mutation, inventory))
-                    {
+                    if let Some(conflict) = inventory.and_then(|inventory| {
+                        Self::conflicted(&outcome.mutation, inventory, sequence)
+                    }) {
                         // Moving a completion into review keeps its place in the shared bound.
                         self.edits.pending.borrow_mut().retain_conflict();
                         self.conflicts.push_back(conflict);
+                    } else {
+                        // Another client removed the Workspace before this client could name
+                        // it, as a relaunch can find. The draft has nowhere to go.
+                        self.refuse(SharedRefusal::Missing, sequence);
                     }
                 }
-                Outcome::Missing => self.refusal = Some(SharedRefusal::Missing),
-                Outcome::Invalid => self.refusal = Some(SharedRefusal::Invalid),
-                Outcome::Limit => self.refusal = Some(SharedRefusal::Limit),
+                Outcome::Missing => self.refuse(SharedRefusal::Missing, sequence),
+                Outcome::Invalid => self.refuse(SharedRefusal::Invalid, sequence),
+                Outcome::Limit => self.refuse(SharedRefusal::Limit, sequence),
                 // What the close would end changed after a person approved it. Ending the new
                 // Sessions needs a fresh review, so nothing asks again on its own.
-                Outcome::StaleConfirmation => {
-                    if let Mutation::Close { target, .. } = &outcome.mutation {
-                        self.stale_close = Some(*target);
+                Outcome::StaleConfirmation => match &outcome.mutation {
+                    Mutation::Close { target, .. } => {
+                        self.stale_closes.push_back((*target, sequence));
                     }
-                }
+                    _ => self.edits.presented(sequence),
+                },
+            }
+        }
+
+        /// Queues `refusal` for `sequence`, beside earlier outcomes refused for the same reason.
+        fn refuse(&mut self, refusal: SharedRefusal, sequence: u64) {
+            match self
+                .refusals
+                .iter_mut()
+                .find(|(queued, _)| *queued == refusal)
+            {
+                Some((_, refused)) => refused.push(sequence),
+                None => self.refusals.push_back((refusal, vec![sequence])),
             }
         }
 
         /// The draft one refused same-field edit kept, beside the value the server holds in the
         /// snapshot that carried the refusal.
-        fn conflicted(mutation: &Mutation, inventory: &Inventory) -> Option<PendingConflict> {
+        fn conflicted(
+            mutation: &Mutation,
+            inventory: &Inventory,
+            sequence: u64,
+        ) -> Option<PendingConflict> {
             let authority = |server: Id| {
                 inventory
                     .workspaces
@@ -2370,6 +2777,7 @@ mod development {
                 Mutation::RenameWorkspace {
                     workspace, name, ..
                 } => Some(PendingConflict {
+                    sequence,
                     workspace: *workspace,
                     field: SharedWorkspaceField::Name,
                     reviewed_version: authority(*workspace)?.name_version,
@@ -2381,6 +2789,7 @@ mod development {
                     directory,
                     ..
                 } => Some(PendingConflict {
+                    sequence,
                     workspace: *workspace,
                     field: SharedWorkspaceField::PinnedDirectory,
                     reviewed_version: authority(*workspace)?.pin_version,
@@ -2507,8 +2916,16 @@ mod development {
             let submission = self.edits.submit(mutation);
             if submission == SharedSubmission::Submitted {
                 self.pending = true;
-                self.refusal = None;
-                self.stale_close = None;
+                // A new answer replaces these notices; what they would present stays unseen.
+                let sequences: Vec<u64> = self
+                    .refusals
+                    .drain(..)
+                    .flat_map(|(_, refused)| refused)
+                    .chain(self.stale_closes.drain(..).map(|(_, sequence)| sequence))
+                    .collect();
+                for sequence in sequences {
+                    self.edits.release(sequence);
+                }
                 self.submitted_close = None;
             }
             submission
@@ -3132,6 +3549,10 @@ mod development {
                         pending_operation: None,
                         rejected: None,
                         outcome: None,
+                        unseen: Vec::new(),
+                        presenting: Vec::new(),
+                        forgotten: 0,
+                        forgotten_presented: 0,
                         error: None,
                         failed_attempts: 0,
                     }),
@@ -3192,16 +3613,53 @@ mod development {
                     .cloned()
                     .expect("an answered edit must have been submitted");
                 let mut sequence = self.sequence.lock().expect("sequence");
+                let answer = RetainedOutcome {
+                    sequence: *sequence,
+                    mutation,
+                    outcome,
+                };
                 self.publish(|snapshot| {
                     snapshot.pending = false;
                     snapshot.pending_operation = None;
-                    snapshot.outcome = Some(RetainedOutcome {
-                        sequence: *sequence,
-                        mutation,
-                        outcome,
-                    });
+                    if answer.outcome.needs_presentation() {
+                        snapshot.unseen.push(answer.clone());
+                    }
+                    snapshot.outcome = Some(answer);
                 });
                 *sequence += 1;
+            }
+
+            /// The same server's writer in a relaunched process, which reads this one's journal:
+            /// the last answer and every answer nobody presented.
+            pub(crate) fn relaunched(&self) -> Self {
+                let snapshot = self.snapshot.lock().expect("snapshot").clone();
+                let relaunched = Self::new(snapshot.inventory.clone());
+                relaunched.publish(|fresh| {
+                    fresh.worktree_writes = snapshot.worktree_writes;
+                    fresh.outcome = snapshot.outcome;
+                    fresh.unseen = snapshot.unseen;
+                    fresh.forgotten = snapshot.forgotten;
+                    fresh.forgotten_presented = snapshot.forgotten_presented;
+                });
+                *relaunched.sequence.lock().expect("sequence") =
+                    *self.sequence.lock().expect("sequence");
+                relaunched
+            }
+
+            /// The answers no surface has presented yet.
+            pub(crate) fn unseen(&self) -> Vec<RetainedOutcome> {
+                self.snapshot.lock().expect("snapshot").unseen.clone()
+            }
+
+            /// The journal's bound forgets `count` more unseen answers.
+            pub(crate) fn forget(&self, count: u64) {
+                self.publish(|snapshot| snapshot.forgotten += count);
+            }
+
+            /// How many forgotten answers a surface has not said went unseen.
+            pub(crate) fn forgotten_unsaid(&self) -> u64 {
+                let snapshot = self.snapshot.lock().expect("snapshot");
+                snapshot.forgotten - snapshot.forgotten_presented
             }
 
             pub(crate) fn submitted(&self) -> Vec<Mutation> {
@@ -3253,6 +3711,20 @@ mod development {
             fn retry(&self) {
                 self.retries
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            fn presented(&self, sequence: u64) {
+                self.publish(|snapshot| {
+                    snapshot.unseen.retain(|unseen| unseen.sequence != sequence);
+                });
+            }
+
+            fn forgotten_presented(&self, total: u64) {
+                self.publish(|snapshot| {
+                    snapshot.forgotten_presented = snapshot
+                        .forgotten_presented
+                        .max(total.min(snapshot.forgotten));
+                });
             }
         }
     }

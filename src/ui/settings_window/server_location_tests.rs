@@ -324,6 +324,253 @@ mod presented {
         );
     }
 
+    /// Whether the detail pane shows all of `selector`.
+    fn in_view(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let detail = cx.debug_bounds("settings-detail").expect("the detail pane");
+        cx.debug_bounds(selector).is_some_and(|bounds| {
+            bounds.top() >= detail.top() && bounds.bottom() <= detail.bottom()
+        })
+    }
+
+    /// A failed change arrives while the person has scrolled its field out of view. Settings
+    /// scrolls the error into view, and it counts as seen only once the person edits the
+    /// location again.
+    #[gpui::test]
+    fn a_scrolled_away_failure_should_scroll_into_view_and_wait_for_the_person(
+        cx: &mut TestAppContext,
+    ) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        servers.cx.simulate_resize(gpui::size(
+            gpui::px(super::super::super::WINDOW_WIDTH),
+            gpui::px(240.0),
+        ));
+        servers.cx.run_until_parked();
+        let window = servers.window.clone();
+        servers.cx.update(|_, cx| {
+            window.update(cx, |settings, _| {
+                let farthest = settings.scroll.max_offset().y;
+                let field = settings.row_bounds.borrow()[&SettingsRowId::ServerWorktreeLocation];
+                let viewport = settings.scroll.bounds();
+                // Away from the field, in whichever direction the pane can scroll it out.
+                let away = if field.top() - viewport.top() > farthest / 2.0 {
+                    gpui::px(0.0)
+                } else {
+                    -farthest
+                };
+                settings.scroll.set_offset(gpui::point(gpui::px(0.0), away));
+            });
+        });
+        let hidden = !in_view("settings-server-worktree-location-frame", servers.cx);
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let revealed = in_view("settings-server-worktree-location-message", servers.cx);
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+        let unseen_while_shown = edits.unseen().len();
+        type_location("~/again/{branch}", servers.cx);
+
+        assert!(hidden, "the field starts out of view");
+        assert!(shown);
+        assert!(revealed, "the error scrolls into view");
+        assert_eq!(unseen_while_shown, 1, "showing the error records nothing");
+        assert!(edits.unseen().is_empty(), "editing the location answers it");
+    }
+
+    /// The person moves from Git to another section before the change fails, then closes
+    /// Settings. Settings never showed the failure, so closing it records nothing and the
+    /// failure stays unseen for the Workspace Window.
+    #[gpui::test]
+    fn a_failure_that_arrives_on_another_section_should_stay_unseen_after_closing(
+        cx: &mut TestAppContext,
+    ) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        click("settings-navigation-settings-section-interface", servers.cx);
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let window = servers.window.clone();
+        servers.cx.update(|window_context, cx| {
+            let handle = window_context.window_handle();
+            window.update(cx, |settings, cx| {
+                settings.request_close(super::super::super::CloseIntent::Window(handle), cx);
+            });
+        });
+        servers.cx.run_until_parked();
+
+        assert_eq!(edits.unseen().len(), 1);
+    }
+
+    /// The failed reply arrives, and the person closes Settings before any frame draws its
+    /// error. Settings never showed the failure, so it hands it back unanswered.
+    #[gpui::test]
+    fn closing_before_the_error_draws_should_hand_the_failure_back(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        let window = servers.window.clone();
+        let handle = servers.cx.update(|window, _| window.window_handle());
+        // Settings notifies once it holds the reply. Observers run before the frame that would
+        // draw the error, as a close the person made just then does.
+        let closed = Rc::new(std::cell::Cell::new(false));
+        let closing = Rc::clone(&closed);
+        servers.cx.update(|_, cx| {
+            cx.observe(&window, move |settings, cx| {
+                let holding = settings.read(cx).server_location.unanswered.is_some();
+                if holding && !closing.replace(true) {
+                    settings.update(cx, |settings, cx| {
+                        settings
+                            .request_close(super::super::super::CloseIntent::Window(handle), cx);
+                    });
+                }
+            })
+            .detach();
+        });
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert!(closed.get(), "Settings held the failure, then closed");
+        assert_eq!(edits.unseen().len(), 1, "the failure is still unseen");
+    }
+
+    /// Settings shows a failed change, and the person resets the location. Reset is their
+    /// response, so the failure counts as seen and never returns.
+    #[gpui::test]
+    fn reset_should_answer_a_shown_failure(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+
+        click("settings-row-server-worktree-location-reset", servers.cx);
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::Accepted { target: [0; 32] });
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert!(shown);
+        assert_eq!(
+            edits.submitted().len(),
+            2,
+            "Reset writes the default location"
+        );
+        assert!(
+            edits.unseen().is_empty(),
+            "Reset answered the shown failure"
+        );
+    }
+
+    /// Settings shows a failed change, and the person presses Enter to write the same location
+    /// again. Enter answers the first failure. The retry's failure stays unseen until the
+    /// person answers it too.
+    #[gpui::test]
+    fn enter_should_answer_a_shown_failure_before_retrying(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let first = edits.unseen();
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let after_retry = edits.unseen();
+
+        assert!(shown);
+        assert_eq!(first.len(), 1);
+        assert_eq!(edits.submitted().len(), 2, "Enter wrote the location again");
+        assert_eq!(
+            after_retry
+                .iter()
+                .map(|unseen| unseen.sequence)
+                .collect::<Vec<_>>(),
+            vec![first[0].sequence + 1],
+            "only the retry's failure is still unseen"
+        );
+    }
+
+    /// Settings shows a failed change with the field still focused, and then loses focus to
+    /// another app. The person never responded, so nothing writes, the failure stays unseen and
+    /// its error stays shown.
+    #[gpui::test]
+    fn deactivating_the_window_should_leave_a_shown_failure_unanswered(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+
+        servers.cx.deactivate_window();
+        servers.cx.run_until_parked();
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert!(shown);
+        assert_eq!(edits.submitted().len(), 1, "nothing writes again");
+        assert_eq!(edits.unseen().len(), 1, "the failure is still unseen");
+        assert!(
+            says("Couldn\u{2019}t save this location.", servers.cx),
+            "the error is still shown"
+        );
+    }
+
+    /// The person chose another server before the change was answered, so Settings never showed
+    /// the failure. It stays unseen for the Workspace Window.
+    #[gpui::test]
+    fn a_failure_for_a_server_settings_left_should_stay_unseen(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        servers.cx.update(|_, cx| {
+            servers.window.update(cx, |settings, cx| {
+                settings.server_location.choose(None, cx);
+            });
+        });
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert_eq!(edits.unseen().len(), 1);
+    }
+
     #[gpui::test]
     fn a_server_that_is_not_connected_shows_its_last_known_git_settings(cx: &mut TestAppContext) {
         // As after a relaunch: the record keeps what penguin last answered, and nothing

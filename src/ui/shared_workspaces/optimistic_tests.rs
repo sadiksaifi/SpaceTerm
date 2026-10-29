@@ -14,6 +14,8 @@ struct Delivery {
     snapshot: SharedWorkspaceSnapshot,
     original: Option<(u64, Mutation)>,
     dispatched: Vec<Mutation>,
+    /// Answers a surface presented, which the client journal never lists again.
+    presented: Vec<u64>,
 }
 /// Hints its readers after each change, as the real client does.
 struct DelayedServer(RefCell<Delivery>, crate::terminal::changes::Changes);
@@ -39,11 +41,16 @@ impl DelayedServer {
                     pending_operation: None,
                     rejected: None,
                     outcome: None,
+                    unseen: Vec::new(),
+                    presenting: Vec::new(),
+                    forgotten: 0,
+                    forgotten_presented: 0,
                     error: None,
                     failed_attempts: 0,
                 },
                 original: None,
                 dispatched: Vec::new(),
+                presented: Vec::new(),
             }),
             crate::terminal::changes::Changes::default(),
         ))
@@ -80,6 +87,17 @@ impl DelayedServer {
         let inventory = live_inventory(&delivery.server);
         delivery.server.inventory.close.clone_from(&inventory.close);
         delivery.snapshot.inventory = Some(inventory);
+        // The client journal keeps an answer it must present until a surface presents it.
+        if result.outcome.needs_presentation()
+            && !delivery.presented.contains(&sequence)
+            && !delivery
+                .snapshot
+                .unseen
+                .iter()
+                .any(|u| u.sequence == sequence)
+        {
+            delivery.snapshot.unseen.push(result.clone());
+        }
         delivery.snapshot.outcome = Some(result.clone());
         if acknowledge {
             delivery.server.acknowledge(DEVICE, sequence).unwrap();
@@ -188,6 +206,13 @@ impl SharedWorkspaceEdits for DelayedServer {
     }
     fn subscribe(&self) -> async_channel::Receiver<()> {
         self.1.subscribe()
+    }
+    fn presented(&self, sequence: u64) {
+        let mut delivery = self.0.borrow_mut();
+        delivery.presented.push(sequence);
+        delivery.snapshot.unseen.retain(|u| u.sequence != sequence);
+        drop(delivery);
+        self.1.publish();
     }
 }
 

@@ -18,8 +18,7 @@ use crate::direct_connections::{
 };
 use crate::ui::ServerTarget;
 use crate::ui::shared_workspaces::{
-    DirectRoutePanes, DirectServer, SharedEditSource, SharedPaneOpener, SharedPaneSessions,
-    UnavailableEdits,
+    DirectRoutePanes, DirectServer, SharedPaneOpener, SharedPaneSessions, UnavailableEdits,
 };
 
 /// One presented paired route: its binding, its Pane opener and the connection both follow.
@@ -27,6 +26,8 @@ pub(super) struct DirectRoute {
     key: ServerKey,
     panes: Rc<DirectRoutePanes>,
     server: Option<spaceterm_server::ServerConnection>,
+    /// The transport while the route has no connection.
+    unavailable: Rc<dyn Fn() -> UnavailableEdits>,
 }
 
 /// The paired routes one Workspace Window presents, by route, and the revision of what each
@@ -222,7 +223,9 @@ impl WorkspaceManager {
             Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
             &self.pane_construction,
         );
-        let edits = SharedEditSource::new(Rc::new(UnavailableEdits::default()));
+        let unavailable = crate::ui::server_worktrees::disconnected_transport(route, cx);
+        // Settings and every window present the route through its one source.
+        let edits = crate::ui::server_worktrees::Client::route_source(route, cx);
         let key = self.present_server_workspaces(
             ServerOrigin::Direct(direct),
             edits,
@@ -236,6 +239,7 @@ impl WorkspaceManager {
                 key,
                 panes,
                 server: None,
+                unavailable,
             },
         );
         Some(key)
@@ -291,14 +295,7 @@ impl WorkspaceManager {
                 None
             }
         };
-        let connected = connection.is_some();
         self.follow_direct_route(route, connection);
-        if connected
-            && let Some(key) = self.direct_routes.0.get(route).map(|route| route.key)
-            && let Some(source) = self.shared.get(key).map(|shared| shared.edits())
-        {
-            crate::ui::server_worktrees::Client::adopt_source(route, source, cx);
-        }
     }
 
     /// Points one presented route at a connection's transport and Pane opener, or at what it
@@ -326,7 +323,7 @@ impl WorkspaceManager {
             None => {
                 followed.panes.retain_titles(shared.unavailable_titles());
                 followed.panes.follow(None);
-                shared.replace_transport(Rc::new(UnavailableEdits::default()));
+                shared.replace_transport(Rc::new((followed.unavailable)()));
             }
         }
     }

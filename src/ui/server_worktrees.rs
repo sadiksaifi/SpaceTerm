@@ -5,7 +5,10 @@ use crate::{
         server_session::{ControlRoute, PaneControlRegistry},
         shared_workspace::SharedWorkspaceClient,
     },
-    ui::shared_workspaces::{SharedEditSource, SharedRefusalReason, SharedWorkspaceEdits},
+    ui::shared_workspaces::{
+        OutcomeOwner, OutcomeTicket, SharedEditSource, SharedRefusalReason, SharedWorkspaceEdits,
+        UnavailableEdits,
+    },
 };
 use gpui::{App, AppContext as _, Global, Task};
 use spaceterm_server::{
@@ -47,6 +50,35 @@ pub(crate) struct Client {
     reads: Arc<dyn WorktreeReads>,
 }
 impl Global for Client {}
+
+/// One edit source per paired route, which Settings and every Workspace Window share across the
+/// route's connections. An answer one of them holds is then never presented by another.
+#[derive(Default)]
+struct DirectSources(
+    std::collections::HashMap<crate::direct_connections::DirectRouteId, SharedEditSource>,
+);
+impl Global for DirectSources {}
+
+/// The transport of `route` without a connection. It records presentations in the route's own
+/// client storage, or keeps them in the application's retries until it can.
+pub(crate) fn disconnected_transport(
+    route: crate::direct_connections::DirectRouteId,
+    cx: &mut App,
+) -> Rc<dyn Fn() -> UnavailableEdits> {
+    let storage =
+        crate::ui::direct_servers::installed(cx).and_then(|direct| direct.storage(&route));
+    let retries = cx
+        .default_global::<crate::ui::shared_workspaces::PresentationRetries>()
+        .clone();
+    Rc::new(move || match &storage {
+        Some(storage) => UnavailableEdits::recording(
+            route,
+            Arc::new(storage.clone()) as Arc<dyn crate::ui::shared_workspaces::PresentationRecord>,
+            retries.clone(),
+        ),
+        None => UnavailableEdits::default(),
+    })
+}
 
 /// The presented paired servers' writers, by route.
 #[derive(Default)]
@@ -104,11 +136,26 @@ impl Client {
             server.clone(),
             std::sync::Arc::clone(&controls),
         ));
+        // Presentations the route's journal refused while it had no connection are recorded by
+        // this connection's edit loop, which holds that journal now.
+        if let Some(waiting) = cx
+            .try_global::<crate::ui::shared_workspaces::PresentationRetries>()
+            .and_then(|retries| retries.take(&route))
+        {
+            for sequence in waiting.sequences {
+                edits.presented(sequence);
+            }
+            if waiting.forgotten != 0 {
+                edits.forgotten_presented(waiting.forgotten);
+            }
+        }
+        let source = Self::route_source(route, cx);
+        source.replace_transport(edits.clone());
         let client = Self {
             reads: Arc::new(server.clone()),
             server,
             controls,
-            source: SharedEditSource::new(edits.clone()),
+            source,
             edits,
         };
         cx.default_global::<DirectClients>()
@@ -139,23 +186,36 @@ impl Client {
     pub(crate) fn transport(&self) -> Rc<dyn SharedWorkspaceEdits> {
         Rc::clone(&self.edits)
     }
-    /// Makes `source`, the Workspace Window's interactions for `route`, the writer's source, so
-    /// the window and Settings queue their edits to this connection in one order.
-    pub(crate) fn adopt_source(
-        route: &crate::direct_connections::DirectRouteId,
-        source: SharedEditSource,
+    /// The edit source of `route`, which Settings and every Workspace Window share, so they
+    /// queue edits in one order and hold each unseen answer in one place. It follows the
+    /// route's connection, and outlives its connections and windows.
+    pub(crate) fn route_source(
+        route: crate::direct_connections::DirectRouteId,
         cx: &mut App,
-    ) {
-        if cx.has_global::<DirectClients>()
-            && let Some(client) = cx.global_mut::<DirectClients>().0.get_mut(route)
+    ) -> SharedEditSource {
+        if let Some(source) = cx
+            .try_global::<DirectSources>()
+            .and_then(|sources| sources.0.get(&route))
         {
-            client.source = source;
+            return source.clone();
         }
+        let source = SharedEditSource::new(Rc::new(disconnected_transport(route, cx)()));
+        cx.default_global::<DirectSources>()
+            .0
+            .insert(route, source.clone());
+        source
     }
-    /// Drops a withdrawn paired server's writer.
+    /// Drops a withdrawn paired server's writer. The route's source stops using it.
     pub(crate) fn forget_direct(route: &crate::direct_connections::DirectRouteId, cx: &mut App) {
         if cx.has_global::<DirectClients>() {
             cx.global_mut::<DirectClients>().0.remove(route);
+        }
+        if let Some(source) = cx
+            .try_global::<DirectSources>()
+            .and_then(|sources| sources.0.get(route))
+            .cloned()
+        {
+            source.replace_transport(Rc::new(disconnected_transport(*route, cx)()));
         }
     }
     pub(crate) fn supports_worktree_writes(&self) -> bool {
@@ -173,16 +233,31 @@ impl Client {
         operation: Operation,
         cx: &mut App,
     ) -> Task<Result<RetainedOutcome, WriteError>> {
-        write(self.source.clone(), operation, cx)
+        write(self.source.clone(), operation, None, cx)
+    }
+    /// Like [`Self::write`], for a surface that presents the answer itself while `owner` lives.
+    pub(crate) fn write_owned(
+        &self,
+        operation: Operation,
+        owner: OutcomeTicket,
+        cx: &mut App,
+    ) -> Task<Result<RetainedOutcome, WriteError>> {
+        write(self.source.clone(), operation, Some(owner), cx)
     }
 }
 fn write(
     source: SharedEditSource,
     operation: Operation,
+    owner: Option<OutcomeTicket>,
     cx: &mut App,
 ) -> Task<Result<RetainedOutcome, WriteError>> {
     source.snapshot();
-    let completion = match source.submit_waiting(Mutation::Worktree(operation)) {
+    let mutation = Mutation::Worktree(operation);
+    let submitted = match owner {
+        Some(owner) => source.submit_owned(mutation, owner),
+        None => source.submit_waiting(mutation),
+    };
+    let completion = match submitted {
         Ok(completion) => completion,
         Err(reason) => return Task::ready(Err(WriteError::Refused(reason))),
     };
@@ -220,6 +295,8 @@ pub(crate) struct FormBackend {
     pub branches: crate::worktrees::git::BranchList,
     /// The other computer whose server runs Git, or `None` for this computer's.
     pub machine: Option<String>,
+    /// The last Create's answer, which the form presents itself unless it releases it.
+    pub owner: std::cell::RefCell<Option<OutcomeOwner>>,
 }
 impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
     fn server(&self) -> bool {
@@ -243,6 +320,9 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
         let client = self.client.clone();
         let root = self.root.clone();
         let workspace = self.workspace;
+        let owner = client.source.owner();
+        let ticket = owner.ticket();
+        *self.owner.borrow_mut() = Some(owner);
         // The owning server checks the final location; the desktop never probes its filesystem.
         let read = client.read(
             Read::Location {
@@ -261,13 +341,14 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
             };
             let completed = cx
                 .update(|cx| {
-                    client.write(
+                    client.write_owned(
                         Operation::Create {
                             workspace,
                             root,
                             path: path.clone(),
                             branch,
                         },
+                        ticket,
                         cx,
                     )
                 })
@@ -290,6 +371,14 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                 })
                 .unwrap_or(path))
         })
+    }
+    fn presented(&self) {
+        if let Some(owner) = self.owner.borrow_mut().take() {
+            owner.presented();
+        }
+    }
+    fn release(&self) {
+        drop(self.owner.borrow_mut().take());
     }
 }
 
@@ -418,6 +507,16 @@ pub(crate) mod testing {
         cx.set_global(client);
     }
 
+    /// Forgets every paired route's writer and source, as a relaunched process starts.
+    pub(crate) fn forget_routes(cx: &mut App) {
+        if cx.has_global::<DirectSources>() {
+            cx.remove_global::<DirectSources>();
+        }
+        if cx.has_global::<DirectClients>() {
+            cx.remove_global::<DirectClients>();
+        }
+    }
+
     /// Registers a presented paired server's writer, as the Workspace Window does when it
     /// presents that server.
     pub(crate) fn present_direct(
@@ -433,10 +532,12 @@ pub(crate) mod testing {
                 ServerConnection::for_identity("spaceterm-development")
                     .expect("the development identity resolves")
             });
+        let source = Client::route_source(route, cx);
+        source.replace_transport(edits.clone());
         let client = Client {
             server,
             controls: Arc::default(),
-            source: SharedEditSource::new(edits.clone()),
+            source,
             edits,
             reads,
         };
@@ -493,7 +594,7 @@ mod tests {
             version: 1,
             template: "~/second/{branch}".into(),
         };
-        let first_task = cx.update(|cx| write(source.clone(), first.clone(), cx));
+        let first_task = cx.update(|cx| write(source.clone(), first.clone(), None, cx));
         let recorded = replies.clone();
         cx.spawn(async move |_| {
             let reply = first_task.await;
@@ -504,7 +605,7 @@ mod tests {
         edits.answer(Outcome::Accepted { target: [1; 32] });
         // The Workspace poll sees A before its sleeping waiter does. B may now submit.
         source.snapshot();
-        let second_task = cx.update(|cx| write(source.clone(), second.clone(), cx));
+        let second_task = cx.update(|cx| write(source.clone(), second.clone(), None, cx));
         let recorded = replies.clone();
         cx.spawn(async move |_| {
             let reply = second_task.await;

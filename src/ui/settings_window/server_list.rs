@@ -260,6 +260,8 @@ impl SettingsWindow {
         server: ServerChoice,
         cx: &mut Context<Self>,
     ) {
+        // Choosing a server is the person's response to the shown one's failed change.
+        self.server_location.answered();
         self.selected_server = Some(server.clone());
         self.search_selected_server = None;
         server_selection::select(server.key(), cx);

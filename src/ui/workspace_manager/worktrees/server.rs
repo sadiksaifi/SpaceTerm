@@ -6,7 +6,7 @@ use gpui::AppContext as _;
 use super::*;
 use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::ui::server_worktrees::{Client, FormBackend, WriteError};
-use crate::ui::shared_workspaces::SharedSubmission;
+use crate::ui::shared_workspaces::{OutcomeNotice, SharedSubmission};
 use crate::ui::worktree_form::{LocationProbe, WorktreeFormContext, WorktreeFormEvent};
 use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 use spaceterm_server::hierarchy::Mutation;
@@ -126,6 +126,7 @@ impl WorkspaceManager {
                     workspace,
                     branches,
                     machine,
+                    owner: std::cell::RefCell::default(),
                 });
                 let probe: LocationProbe =
                     Rc::new(|_| Ok(crate::platform::local_filesystem::NewDirectoryTarget::Free));
@@ -134,18 +135,6 @@ impl WorkspaceManager {
                     &form,
                     window,
                     move |manager, _, event: &WorktreeFormEvent, window, cx| {
-                        if let WorktreeFormEvent::Interrupted(path) = event {
-                            let path = path.clone();
-                            let handle = window.window_handle();
-                            let owner = cx.weak_entity();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    let _ = owner.update(cx, |m, cx| {
-                                        m.server_worktree_interrupted(true, &path, window, cx)
-                                    });
-                                });
-                            });
-                        }
                         if let WorktreeFormEvent::Created(path) = event {
                             let revision =
                                 client.source.snapshot().inventory.map_or(0, |i| i.revision);
@@ -357,6 +346,7 @@ impl WorkspaceManager {
                             manager.server_worktree_failure(
                                 &format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}"),
                                 error,
+                                None,
                                 None,
                                 window,
                                 cx,
@@ -572,18 +562,21 @@ impl WorkspaceManager {
                     Error::Changed
                 },
                 Some((review.workspace, review.worktree)),
+                None,
                 window,
                 cx,
             );
         }
     }
+    /// Returns whether the alert was admitted.
     pub(in crate::ui::workspace_manager) fn server_worktree_interrupted(
         &mut self,
         creating: bool,
         path: &std::path::Path,
+        notice: &OutcomeNotice,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let name = sanitize_for_display(&directory_name(path), MAXIMUM_NAME_CHARS);
         let (title, action) = if creating {
             ("Check Worktree Creation", "New Worktree")
@@ -593,7 +586,7 @@ impl WorkspaceManager {
         let message = format!(
             "The server stopped before SpaceTerm could confirm the result. Check \u{201C}{name}\u{201D} in the sidebar before choosing {action} again."
         );
-        let _ = Alert::new(
+        Alert::new(
             ModalId::new("server-worktree-interrupted"),
             title,
             title,
@@ -606,26 +599,29 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present(window, cx, |_, _| {});
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
+        .is_ok()
     }
+    /// Presents a failed Worktree operation no other surface presented. Returns whether it was
+    /// presented or its alert admitted; `notice` records the presentation.
     pub(in crate::ui::workspace_manager) fn server_worktree_operation_failure(
         &mut self,
         operation: &Operation,
         error: Error,
+        notice: &OutcomeNotice,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if self.is_worktree_close_fallback(&Mutation::Worktree(operation.clone())) {
-            return;
-        }
+    ) -> bool {
         let (path, creating) = match operation {
             Operation::Create { path, .. } => (path, true),
             Operation::Remove { path, .. } | Operation::OpenTab { path, .. } => (path, false),
-            Operation::SetLocation { .. } => return,
+            // Settings presents its own change unless it closed or moved to another server.
+            Operation::SetLocation { .. } => {
+                return self.server_location_failure(error, notice, window, cx);
+            }
         };
         if error == Error::Interrupted && !matches!(operation, Operation::OpenTab { .. }) {
-            self.server_worktree_interrupted(creating, path, window, cx);
-            return;
+            return self.server_worktree_interrupted(creating, path, notice, window, cx);
         }
         let name = sanitize_for_display(&directory_name(path), MAXIMUM_NAME_CHARS);
         if matches!(operation, Operation::Remove { .. }) {
@@ -638,14 +634,14 @@ impl WorkspaceManager {
                             .then_some((id, row.worktree_id))
                     })
             });
-            self.server_worktree_failure(
+            return self.server_worktree_failure(
                 &format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}"),
                 error,
                 review,
+                Some(notice),
                 window,
                 cx,
             );
-            return;
         }
         let (title, message) = if creating {
             let reason = match error {
@@ -694,7 +690,7 @@ impl WorkspaceManager {
                 reason.to_owned(),
             )
         };
-        let _ = Alert::new(
+        Alert::new(
             ModalId::new("server-worktree-operation-failed"),
             title.clone(),
             title,
@@ -707,16 +703,58 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present(window, cx, |_, _| {});
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
+        .is_ok()
     }
+    /// A New Worktree Location change that Settings did not present. Returns whether the alert
+    /// was admitted.
+    fn server_location_failure(
+        &mut self,
+        error: Error,
+        notice: &OutcomeNotice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let message = match error {
+            Error::Template(
+                spaceterm_server::worktree::path_template::WorktreePathTemplateError::NotWritable,
+            ) => {
+                "The New Worktree Location directory is not writable. Choose another directory in Settings > Git."
+            }
+            Error::Template(_) => "Correct New Worktree Location in Settings > Git.",
+            Error::Changed => {
+                "Another device changed New Worktree Location first. Review it in Settings > Git."
+            }
+            _ => "Review New Worktree Location in Settings > Git.",
+        };
+        let title = "Couldn\u{2019}t Change New Worktree Location";
+        Alert::new(
+            ModalId::new("server-worktree-location-failed"),
+            title,
+            title,
+            message,
+            vec![ModalAction::new(
+                false,
+                "OK",
+                ModalActionRole::Cancel,
+                "server-worktree-location-failed-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
+        .is_ok()
+    }
+    /// Returns whether the alert was admitted. `notice` records the presentation of an unseen
+    /// outcome.
     pub(in crate::ui::workspace_manager) fn server_worktree_failure(
         &mut self,
         title: &str,
         error: Error,
         review: Option<(WorkspaceId, WorktreeId)>,
+        notice: Option<&OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let title = if error == Error::Interrupted {
             "Check the Worktree"
         } else {
@@ -769,7 +807,8 @@ impl WorkspaceManager {
         ));
         let owner = cx.weak_entity();
         let handle = window.window_handle();
-        let _ = Alert::new(
+        let lifecycle = notice.map(|notice| notice.lifecycle());
+        Alert::new(
             ModalId::new("worktree-removal-changed"),
             if error == Error::Missing {
                 "Worktree Already Removed".into()
@@ -789,21 +828,31 @@ impl WorkspaceManager {
         } else {
             AlertIntent::Warning
         })
-        .present(window, cx, move |outcome, cx| {
-            if matches!(
-                outcome,
-                AlertOutcome::Activated {
-                    action_id: true,
-                    ..
-                }
-            ) && let Some((workspace, worktree)) = review
-            {
-                let _ = handle.update(cx, |_, window, cx| {
-                    let _ = owner.update(cx, |m, cx| {
-                        m.request_server_worktree_removal(workspace, worktree, window, cx)
+        .present_with_lifecycle(
+            window,
+            cx,
+            move |outcome, cx| {
+                if matches!(
+                    outcome,
+                    AlertOutcome::Activated {
+                        action_id: true,
+                        ..
+                    }
+                ) && let Some((workspace, worktree)) = review
+                {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = owner.update(cx, |m, cx| {
+                            m.request_server_worktree_removal(workspace, worktree, window, cx)
+                        });
                     });
-                });
-            }
-        });
+                }
+            },
+            move |event, cx| {
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event, cx);
+                }
+            },
+        )
+        .is_ok()
     }
 }

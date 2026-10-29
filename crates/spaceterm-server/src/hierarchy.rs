@@ -318,6 +318,13 @@ pub enum Outcome {
     Limit,
     StaleConfirmation,
 }
+impl Outcome {
+    /// Whether the client that asked must present this answer itself. An accepted change
+    /// reaches every client through the inventory, and a pending one has no answer yet.
+    pub const fn needs_presentation(&self) -> bool {
+        !matches!(self, Self::Pending | Self::Accepted { .. })
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetainedOutcome {
     pub sequence: u64,
@@ -1303,6 +1310,10 @@ pub struct ClientOperation {
     pub sequence: u64,
     pub mutation: Mutation,
 }
+/// How many retired outcomes the client keeps until it presents them. Beyond this, the oldest
+/// is forgotten, and the client counts it so it can say that some went unseen.
+#[cfg(feature = "client")]
+pub const UNSEEN_OUTCOMES: usize = 32;
 #[cfg(feature = "client")]
 #[derive(Default, Serialize, Deserialize)]
 struct JournalRecord {
@@ -1310,6 +1321,16 @@ struct JournalRecord {
     client: Id,
     pending: Option<ClientOperation>,
     last: Option<RetainedOutcome>,
+    /// Retired outcomes the client has not presented yet, oldest first. This is the client's
+    /// own record; the server's acknowledgement retires an outcome independently.
+    #[serde(default)]
+    unseen: Vec<RetainedOutcome>,
+    /// How many unseen outcomes the bound ever forgot, and how many of those the client has
+    /// said went unseen. Both only grow, so recording a presentation again changes nothing.
+    #[serde(default)]
+    forgotten: u64,
+    #[serde(default)]
+    forgotten_presented: u64,
 }
 /// Pending shared edits live outside Settings and are fenced to their original authority.
 #[cfg(feature = "client")]
@@ -1342,11 +1363,47 @@ impl ClientJournal {
             record,
         })
     }
+    /// Opens the journal kept in `path`, with the same lock a client's journal takes, for a
+    /// test that holds it the way a live edit loop does.
+    #[cfg(feature = "test-support")]
+    pub fn open_in(path: &Path, server: Id, client: Id) -> Result<Self, ServerError> {
+        Self::open(crate::storage::Directory::open(path, true)?, server, client)
+    }
     pub fn pending(&self) -> Option<&ClientOperation> {
         self.record.pending.as_ref()
     }
     pub fn last(&self) -> Option<&RetainedOutcome> {
         self.record.last.as_ref()
+    }
+    /// Retired outcomes the client has not presented yet, oldest first.
+    pub fn unseen(&self) -> &[RetainedOutcome] {
+        &self.record.unseen
+    }
+    /// How many unseen outcomes the bound forgot in total, and how many of those the client has
+    /// said went unseen.
+    pub fn forgotten(&self) -> (u64, u64) {
+        (self.record.forgotten, self.record.forgotten_presented)
+    }
+    /// Records that the client said the first `total` forgotten outcomes went unseen.
+    pub fn forgotten_presented(&mut self, total: u64) -> Result<(), ServerError> {
+        let total = total.min(self.record.forgotten);
+        if total <= self.record.forgotten_presented {
+            return Ok(());
+        }
+        self.record.forgotten_presented = total;
+        self.save()
+    }
+    /// Records that the client presented the outcome of `sequence`, so it is never presented
+    /// again. A sequence that is not unseen changes nothing.
+    pub fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
+        let before = self.record.unseen.len();
+        self.record
+            .unseen
+            .retain(|unseen| unseen.sequence != sequence);
+        if self.record.unseen.len() == before {
+            return Ok(());
+        }
+        self.save()
     }
     pub fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
         if self.record.pending.is_some() {
@@ -1357,11 +1414,19 @@ impl ClientJournal {
     }
     /// Retires the pending operation with its validated outcome in one write. Acknowledge the
     /// outcome to the server only after this succeeds; [`Self::last`] keeps it to acknowledge
-    /// again after a reconnect.
+    /// again after a reconnect. An outcome the client must present also stays in
+    /// [`Self::unseen`] until [`Self::presented`], whatever retires after it.
     pub fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
         let pending = self.record.pending.as_ref().ok_or(ServerError::Protocol)?;
         if pending.sequence != result.sequence || pending.mutation != result.mutation {
             return Err(ServerError::Protocol);
+        }
+        if result.outcome.needs_presentation() {
+            if self.record.unseen.len() >= UNSEEN_OUTCOMES {
+                self.record.unseen.remove(0);
+                self.record.forgotten = self.record.forgotten.saturating_add(1);
+            }
+            self.record.unseen.push(result.clone());
         }
         self.record.last = Some(result);
         self.record.pending = None;
@@ -2604,5 +2669,134 @@ mod tests {
             Outcome::Missing
         );
         assert!(restored.inventory.workspaces.is_empty());
+    }
+
+    #[cfg(feature = "client")]
+    mod journal {
+        use super::*;
+
+        const SERVER: Id = [1; 32];
+        const CLIENT: Id = [2; 32];
+
+        /// A private directory for one client's journal, removed when the test ends.
+        struct Root(PathBuf);
+        impl Root {
+            fn new() -> Self {
+                Self(std::env::temp_dir().canonicalize().unwrap().join(format!(
+                    "st-journal-{:x}",
+                    u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+                )))
+            }
+            fn open(&self) -> ClientJournal {
+                let directory = crate::storage::Directory::open(&self.0, true).unwrap();
+                ClientJournal::open(directory, SERVER, CLIENT).unwrap()
+            }
+        }
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn rename(name: &str) -> Mutation {
+            Mutation::RenameWorkspace {
+                workspace: [3; 32],
+                version: 0,
+                name: name.into(),
+            }
+        }
+
+        fn settle(journal: &mut ClientJournal, sequence: u64, outcome: Outcome) -> RetainedOutcome {
+            let mutation = rename(&format!("Draft {sequence}"));
+            journal.submit(sequence, mutation.clone()).unwrap();
+            let retained = RetainedOutcome {
+                sequence,
+                mutation,
+                outcome,
+            };
+            journal.retire(retained.clone()).unwrap();
+            retained
+        }
+
+        /// A refused rename waits behind a dialog while a later operation retires. Both survive a
+        /// relaunch until the client presents each, and a presented one never returns.
+        #[test]
+        fn a_later_operation_should_keep_an_earlier_unseen_outcome_across_a_relaunch() {
+            let root = Root::new();
+            let mut journal = root.open();
+            let conflict = settle(&mut journal, 1, Outcome::Conflict);
+            settle(&mut journal, 2, Outcome::Accepted { target: [4; 32] });
+            let failed = settle(
+                &mut journal,
+                3,
+                Outcome::WorktreeFailed(crate::worktree::Error::Location),
+            );
+            drop(journal);
+
+            let mut relaunched = root.open();
+            let recovered = relaunched.unseen().to_vec();
+            relaunched.presented(failed.sequence).unwrap();
+            drop(relaunched);
+            let later = root.open();
+
+            assert_eq!(recovered, vec![conflict.clone(), failed]);
+            assert_eq!(later.unseen(), [conflict]);
+            assert_eq!(
+                later.last().map(|last| last.sequence),
+                Some(3),
+                "the transport acknowledgement still follows the last retired operation"
+            );
+        }
+
+        #[test]
+        fn unseen_outcomes_should_be_bounded_by_counting_the_ones_forgotten() {
+            let root = Root::new();
+            let mut journal = root.open();
+            let total = UNSEEN_OUTCOMES as u64 + 2;
+            for sequence in 1..=total {
+                settle(&mut journal, sequence, Outcome::Invalid);
+            }
+
+            drop(journal);
+            let mut relaunched = root.open();
+            let kept: Vec<u64> = relaunched
+                .unseen()
+                .iter()
+                .map(|unseen| unseen.sequence)
+                .collect();
+            let forgotten = relaunched.forgotten();
+            relaunched.forgotten_presented(2).unwrap();
+            settle(&mut relaunched, total + 1, Outcome::Invalid);
+            drop(relaunched);
+
+            assert_eq!(kept, (3..=total).collect::<Vec<_>>());
+            assert_eq!(forgotten, (2, 0), "the relaunch can say two went unseen");
+            assert_eq!(
+                root.open().forgotten(),
+                (3, 2),
+                "only the one forgotten after that notice still needs one"
+            );
+        }
+
+        /// A journal written before the client recorded unseen outcomes still opens, with none.
+        #[test]
+        fn a_journal_without_unseen_outcomes_should_open_with_none() {
+            let root = Root::new();
+            drop(root.open());
+            let directory = crate::storage::Directory::open(&root.0, false).unwrap();
+            directory
+                .write_json(
+                    c"operations.json",
+                    &serde_json::json!({
+                        "server": SERVER,
+                        "client": CLIENT,
+                        "pending": null,
+                        "last": null,
+                    }),
+                )
+                .unwrap();
+
+            assert!(root.open().unseen().is_empty());
+        }
     }
 }

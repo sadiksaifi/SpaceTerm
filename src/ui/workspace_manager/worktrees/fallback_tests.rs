@@ -190,6 +190,51 @@ fn worktree_fallback_failure_keeps_every_existing_tab(cx: &mut TestAppContext) {
     );
 }
 
+/// The fallback's own alert waits behind another one when the window closes, so nobody saw
+/// the failure. The reopened window presents it.
+#[gpui::test]
+fn a_fallback_failure_whose_alert_never_drew_should_reach_the_next_window(
+    cx: &mut TestAppContext,
+) {
+    let initial = only_feature();
+    let (harness, _, _, cx) = paired_harness(cx, initial.clone());
+    request(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |_, cx| {
+            Alert::new(
+                ModalId::new("blocking-alert"),
+                "Blocking",
+                "Blocking",
+                "Another alert is open.",
+                vec![ModalAction::new(
+                    (),
+                    "OK",
+                    ModalActionRole::Cancel,
+                    "blocking-alert-ok",
+                )],
+            )
+            .present(window, cx, |_, _| {})
+            .expect("the blocking alert opens");
+        });
+    });
+    harness
+        .edits
+        .answer(Outcome::WorktreeFailed(Error::Location));
+    sync(&harness, initial, cx);
+    let queued = harness.edits.unseen().len();
+    close_window(cx);
+    let mut reopened = reopened_window(&harness.edits, cx);
+    reopened.run_until_parked();
+
+    assert_eq!(queued, 1, "the queued fallback alert has not presented the failure");
+    assert!(
+        reopened
+            .debug_bounds("modal-action-server-worktree-operation-failed-ok")
+            .is_some(),
+        "the reopened window presents it"
+    );
+}
+
 #[gpui::test]
 fn worktree_fallback_requires_accepted_membership_even_when_a_tab_is_published(
     cx: &mut TestAppContext,
