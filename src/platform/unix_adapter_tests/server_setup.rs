@@ -1238,6 +1238,33 @@ fn setup_with_approvals(
 }
 
 #[test]
+fn disconnecting_a_saved_route_closes_its_retained_server_handle() {
+    use spaceterm_server::connection::link::{Health, LinkError, LinkEvent, ServerLink};
+
+    let (connections, routes) = spaceterm_connections::tests::connected_routes(&["Setup"]);
+    let route = routes[0];
+    let server = connections.server(&route).unwrap();
+    let link = ServerLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), Instant::now());
+    server.adopt(link.clone());
+    assert!(server.refresh().is_ok());
+    let pending = link
+        .request(spaceterm_server::protocol::Operation::Direct(
+            spaceterm_server::direct::Management::Status,
+        ))
+        .unwrap();
+
+    connections.disconnect(&route);
+
+    assert_eq!(link.health(), Health::Closed(LinkError::Closed));
+    assert!(pending.wait().is_err());
+    assert!(server.refresh().is_err());
+    assert_eq!(
+        connections.status(&route),
+        Some(DirectRouteStatus::Disconnected)
+    );
+}
+
+#[test]
 #[ignore = "requires compiled and installed Preflight; one SSH authentication spans approved setup, then QUIC owns work, reconnect and exact pairing cleanup"]
 fn native_server_setup_acceptance() {
     let mut fixture = NativeFixture::new("accept", configured_catalog(), false);
