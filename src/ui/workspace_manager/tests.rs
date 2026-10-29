@@ -12237,8 +12237,78 @@ mod shared_repositories {
         assert!(edits.unseen().is_empty());
     }
 
+    /// The person never answers an alert before Cmd+Q closes its window and SpaceTerm relaunches,
+    /// so the failure shows again, once.
+    #[gpui::test]
+    fn an_unanswered_alert_should_show_again_after_a_relaunch(cx: &mut TestAppContext) {
+        use spaceterm_server::worktree::{Branch, BranchName, Operation};
+
+        let (_, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        edits.submit_for_recovery(spaceterm_server::hierarchy::Mutation::Worktree(
+            Operation::Create {
+                workspace: WORKSPACE,
+                root: MAIN_ROOT.into(),
+                path: "/srv/home/topic-unanswered".into(),
+                branch: Branch::New {
+                    name: "topic/unanswered".into(),
+                    base: BranchName::Local("main".into()),
+                },
+            },
+        ));
+        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(
+            spaceterm_server::worktree::Error::BranchExists,
+        ));
+        let opened = alerts_worktree_failure(cx);
+        close_window(cx);
+        let relaunched = Rc::new(edits.relaunched());
+
+        let mut first = reopened_window(&relaunched, cx);
+        let shown_again = alerts_worktree_failure(&mut first);
+        click(
+            "modal-action-server-worktree-operation-failed-ok",
+            &mut first,
+        );
+        close_window(&mut first);
+        let mut later = reopened_window(&Rc::new(relaunched.relaunched()), &first);
+
+        assert!(opened, "the alert opened");
+        assert!(shown_again, "an unanswered alert was never seen");
+        assert!(
+            !alerts_worktree_failure(&mut later),
+            "an answered alert never returns"
+        );
+    }
+
+    /// The form shows its failure, but the window closes before the person responds to the form.
+    /// The failure was never answered, so the next window alerts it once.
+    #[gpui::test]
+    fn a_form_closed_without_a_response_should_hand_its_failure_back(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_shared_worktree(&harness, cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        let reported = form_reports("Branch name already exists.", cx);
+
+        close_window(cx);
+        let mut reopened = reopened_window(&edits, cx);
+        let alerted = alerts_worktree_failure(&mut reopened);
+        click(
+            "modal-action-server-worktree-operation-failed-ok",
+            &mut reopened,
+        );
+        close_window(&mut reopened);
+        let mut again = reopened_window(&edits, &reopened);
+
+        assert!(reported, "the form showed the failure");
+        assert!(
+            alerted,
+            "the next window presents what the person never answered"
+        );
+        assert!(!alerts_worktree_failure(&mut again));
+    }
+
     /// A New Worktree Location change fails after Settings closed or moved to another server, so
-    /// Settings never showed it. The window alerts it once, and records it after drawing that.
+    /// Settings never showed it. The window alerts it once, and records it once the person
+    /// answers that alert.
     #[gpui::test]
     fn a_location_failure_settings_never_showed_should_alert_once(cx: &mut TestAppContext) {
         let (_, edits, _, cx) = paired_harness(cx, published(1, "main", true));

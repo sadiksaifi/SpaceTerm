@@ -273,9 +273,6 @@ pub(crate) struct WorkspaceManager {
     update_control: Entity<super::updates::UpdateControl>,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     close_empty_after_shared_removal: bool,
-    /// Work that waits until a frame of this window has drawn, such as recording that an alert
-    /// presented an answer.
-    after_paint: super::after_paint::AfterPaint,
     close_confirmation: CloseConfirmation,
     /// Whether the Workspace a shared close names held the keyboard when the person asked for
     /// it. It is kept by confirmation generation, and a Review hands it to the fresh confirmation,
@@ -415,7 +412,6 @@ impl WorkspaceManager {
             update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
             pending_final_tab_closes: BTreeSet::new(),
             close_empty_after_shared_removal: false,
-            after_paint: super::after_paint::AfterPaint::default(),
             close_confirmation: CloseConfirmation::default(),
             shared_close_keyboard: SharedCloseKeyboard::default(),
             modal_reread: None,
@@ -3061,7 +3057,7 @@ impl WorkspaceManager {
             self.open_accepted_shared(key, &accepted, window, cx);
         }
         // Each answer below stays with this reading until its alert is admitted, and counts as
-        // presented once that alert opens.
+        // presented once the person answers that alert.
         if !spaceterm_ui::window_modal_is_open(window, cx)
             && let Some((conflict, notice)) = self
                 .shared
@@ -4131,7 +4127,7 @@ impl WorkspaceManager {
         ));
         let manager = cx.weak_entity();
         let window_handle = window.window_handle();
-        let lifecycle = notice.map(|notice| notice.lifecycle(&self.after_paint));
+        let lifecycle = notice.map(|notice| notice.lifecycle());
         let alert = Alert::new(
             ModalId::new("shared-close-changed"),
             title,
@@ -4329,7 +4325,7 @@ impl WorkspaceManager {
                     });
                 });
             },
-            notice.lifecycle(&self.after_paint),
+            notice.lifecycle(),
             window,
             cx,
         );
@@ -4380,7 +4376,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning);
-        let lifecycle = notice.map(|notice| notice.lifecycle(&self.after_paint));
+        let lifecycle = notice.map(|notice| notice.lifecycle());
         self.present_keeping_sidebar_rename(
             alert,
             |_, _| {},
@@ -4421,14 +4417,8 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning);
-        self.present_keeping_sidebar_rename(
-            alert,
-            |_, _| {},
-            notice.lifecycle(&self.after_paint),
-            window,
-            cx,
-        )
-        .is_ok()
+        self.present_keeping_sidebar_rename(alert, |_, _| {}, notice.lifecycle(), window, cx)
+            .is_ok()
     }
 
     /// Explains a shared edit this client could not submit. Nothing was sent, and nothing waits.
@@ -5172,8 +5162,7 @@ impl WorkspaceManager {
             .inset_0()
             .children(self.pin_picker.iter().cloned())
             .children(self.active_directory_recovery(cx))
-            .children(super::application_commands::overlay(window, cx))
-            .child(self.after_paint.hook());
+            .children(super::application_commands::overlay(window, cx));
         ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
     }
 }

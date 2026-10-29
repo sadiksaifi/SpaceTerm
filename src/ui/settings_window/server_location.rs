@@ -246,9 +246,10 @@ pub(super) struct ServerLocation {
     git_answered: bool,
     /// The owning server's check of the text being typed. Replacing it cancels the earlier one.
     check: Option<Task<()>>,
-    /// Records a failed change as presented once a frame has drawn its message. Choosing
-    /// another server, or closing Settings first, leaves it to the Workspace Window.
-    shown: crate::ui::after_paint::AfterPaint,
+    /// A failed change the section shows, until the person edits the location, chooses another
+    /// server or closes Settings. Settings going away any other way leaves it to the Workspace
+    /// Window.
+    unanswered: Option<crate::ui::shared_workspaces::OutcomeOwner>,
 }
 
 impl ServerLocation {
@@ -278,7 +279,7 @@ impl ServerLocation {
             poll: None,
             git_answered: false,
             check: None,
-            shown: crate::ui::after_paint::AfterPaint::default(),
+            unanswered: None,
         }
     }
 
@@ -292,9 +293,16 @@ impl ServerLocation {
         self.client = None;
         self.poll = None;
         self.check = None;
-        self.shown.clear();
+        self.unanswered = None;
         self.show(Some(String::new()), cx);
         self.show_last_known(cx);
+    }
+
+    /// The person responded to the section after it showed a failed change.
+    pub(super) fn answered(&mut self) {
+        if let Some(answer) = self.unanswered.take() {
+            answer.presented();
+        }
     }
 
     /// Shows the selected server's last-known facts wherever the server hasn't answered itself
@@ -516,7 +524,10 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TextInputEvent::ValueChanged(_) => {
+            TextInputEvent::ValueChanged(change) => {
+                if change.source() != spaceterm_ui::TextInputChangeSource::Programmatic {
+                    self.server_location.answered();
+                }
                 let text = input.read(cx).value().to_owned();
                 let state = &mut self.server_location;
                 let check = state.model.edited(&text);
@@ -543,6 +554,7 @@ impl SettingsWindow {
                 self.commit_server_location(cx)
             }
             TextInputEvent::Cancelled => {
+                self.server_location.answered();
                 let state = &mut self.server_location;
                 state.check = None;
                 let text = state.model.cancelled();
@@ -599,10 +611,12 @@ impl SettingsWindow {
                     let text = state.model.changed_elsewhere(current);
                     state.show(text, cx);
                 }
-                if shown {
-                    state.shown.push(move |_| answer.presented());
-                }
                 state.retain(cx);
+                if shown {
+                    state.unanswered = Some(answer);
+                    // The person may have scrolled the field away while the change was on its way.
+                    settings.reveal_growing_row(SettingsRowId::ServerWorktreeLocation, cx);
+                }
                 cx.notify();
             });
         })
@@ -628,7 +642,6 @@ impl SettingsWindow {
         let editable = model.editable();
         let invalid = model.problem.is_some();
         let message = model.message();
-        let shown = self.server_location.shown.clone();
         let input = self.server_location.input.clone();
         input.update(cx, |input, cx| input.set_editable(editable, cx));
         let focus = input.read(cx).focus_handle();
@@ -681,7 +694,6 @@ impl SettingsWindow {
                             .into(),
                         SharedString::new_static(message),
                     ))
-                    .child(shown.hook())
             }))
             .into_any_element()
     }

@@ -324,10 +324,23 @@ mod presented {
         );
     }
 
-    /// Settings presents its own failed change, and records it once a frame has drawn the
-    /// message, so no window presents it again.
+    /// Whether the detail pane shows all of `selector`.
+    fn in_view(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let detail = cx.debug_bounds("settings-detail").expect("the detail pane");
+        cx.debug_bounds(selector).is_some_and(|bounds| {
+            bounds.top() >= detail.top() && bounds.bottom() <= detail.bottom()
+        })
+    }
+
+    /// A failed change arrives while the person has scrolled its field out of view. Settings
+    /// scrolls the error into view, and it counts as seen only once the person edits the
+    /// location again.
     #[gpui::test]
-    fn a_failure_settings_shows_should_count_as_presented(cx: &mut TestAppContext) {
+    fn a_scrolled_away_failure_should_scroll_into_view_and_wait_for_the_person(
+        cx: &mut TestAppContext,
+    ) {
         let reads = ScriptedReads::new(SAVED);
         let (servers, edits) = present_penguin(reads, cx);
         settle(servers.cx, |cx| location_field(cx) == SAVED);
@@ -335,12 +348,40 @@ mod presented {
         wait(Duration::from_secs(1), servers.cx);
         servers.cx.simulate_keystrokes("enter");
         servers.cx.run_until_parked();
+        servers.cx.simulate_resize(gpui::size(
+            gpui::px(super::super::super::WINDOW_WIDTH),
+            gpui::px(240.0),
+        ));
+        servers.cx.run_until_parked();
+        let window = servers.window.clone();
+        servers.cx.update(|_, cx| {
+            window.update(cx, |settings, _| {
+                let farthest = settings.scroll.max_offset().y;
+                let field = settings.row_bounds.borrow()[&SettingsRowId::ServerWorktreeLocation];
+                let viewport = settings.scroll.bounds();
+                // Away from the field, in whichever direction the pane can scroll it out.
+                let away = if field.top() - viewport.top() > farthest / 2.0 {
+                    gpui::px(0.0)
+                } else {
+                    -farthest
+                };
+                settings.scroll.set_offset(gpui::point(gpui::px(0.0), away));
+            });
+        });
+        let hidden = !in_view("settings-server-worktree-location-frame", servers.cx);
 
         edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
         wait(Duration::from_millis(100), servers.cx);
+        let revealed = in_view("settings-server-worktree-location-message", servers.cx);
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+        let unseen_while_shown = edits.unseen().len();
+        type_location("~/again/{branch}", servers.cx);
 
-        assert!(says("Couldn\u{2019}t save this location.", servers.cx));
-        assert!(edits.unseen().is_empty());
+        assert!(hidden, "the field starts out of view");
+        assert!(shown);
+        assert!(revealed, "the error scrolls into view");
+        assert_eq!(unseen_while_shown, 1, "showing the error records nothing");
+        assert!(edits.unseen().is_empty(), "editing the location answers it");
     }
 
     /// The person chose another server before the change was answered, so Settings never showed

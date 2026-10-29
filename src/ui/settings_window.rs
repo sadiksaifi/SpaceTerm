@@ -252,6 +252,26 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     }
 }
 
+/// Scrolls `scroll` the least distance that shows all of `bounds`, or its top when it is taller
+/// than the viewport. Returns whether the offset changed.
+fn reveal(scroll: &ScrollHandle, bounds: Bounds<Pixels>) -> bool {
+    let viewport = scroll.bounds();
+    let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
+        viewport.top() - bounds.top()
+    } else if bounds.bottom() > viewport.bottom() {
+        viewport.bottom() - bounds.bottom()
+    } else {
+        return false;
+    };
+    let offset = scroll.offset();
+    let lowest = -scroll.max_offset().y;
+    scroll.set_offset(gpui::point(
+        offset.x,
+        (offset.y + shift).clamp(lowest, px(0.0)),
+    ));
+    true
+}
+
 /// Opens Settings on Servers with `target`'s server selected. Selecting reads nothing from that
 /// server.
 pub(crate) fn open_server_settings(target: crate::ui::ServerTarget, cx: &mut App) {
@@ -387,6 +407,8 @@ pub(crate) struct SettingsWindow {
     /// Where each row of the presented section was laid out in the latest frame, so keyboard focus
     /// reaching a row outside the viewport can scroll it into view.
     row_bounds: Rc<RefCell<HashMap<SettingsRowId, Bounds<Pixels>>>>,
+    /// A row to scroll into view again once the next frame lays it out, for a row that grew.
+    reveal_after_layout: Rc<std::cell::Cell<Option<SettingsRowId>>>,
     focus_handle: FocusHandle,
     navigation: SidebarNavigation,
     window_movement: WindowMovement,
@@ -766,6 +788,7 @@ impl SettingsWindow {
             active_section: SettingsSectionId::Interface,
             revealed: None,
             row_bounds: Rc::default(),
+            reveal_after_layout: Rc::default(),
             focus_handle,
             navigation,
             window_movement,
@@ -845,6 +868,10 @@ impl SettingsWindow {
     }
 
     fn request_close(&mut self, intent: CloseIntent, cx: &mut Context<Self>) {
+        // Closing the window is the person's response to what it shows. Quitting is not.
+        if matches!(intent, CloseIntent::Window(_)) {
+            self.server_location.answered();
+        }
         if !matches!(
             self.close_after_save.as_ref(),
             Some(CloseIntent::Application(_))
@@ -918,20 +945,20 @@ impl SettingsWindow {
         let Some(bounds) = self.row_bounds.borrow().get(&row).copied() else {
             return;
         };
-        let viewport = self.scroll.bounds();
-        let shift = if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
-            viewport.top() - bounds.top()
-        } else if bounds.bottom() > viewport.bottom() {
-            viewport.bottom() - bounds.bottom()
-        } else {
-            return;
-        };
-        let offset = self.scroll.offset();
-        let lowest = -self.scroll.max_offset().y;
-        self.scroll.set_offset(gpui::point(
-            offset.x,
-            (offset.y + shift).clamp(lowest, px(0.0)),
-        ));
+        if reveal(&self.scroll, bounds) {
+            cx.notify();
+        }
+    }
+
+    /// Scrolls `row` into view now and again after the next layout, for a row that is about to
+    /// grow, such as one that starts showing an error.
+    pub(in crate::ui::settings_window) fn reveal_growing_row(
+        &mut self,
+        row: SettingsRowId,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll_row_into_view(row, cx);
+        self.reveal_after_layout.set(Some(row));
         cx.notify();
     }
 
@@ -1419,12 +1446,23 @@ impl SettingsWindow {
                     _ => None,
                 };
                 let row_bounds = Rc::clone(&self.row_bounds);
+                let reveal_after_layout = Rc::clone(&self.reveal_after_layout);
+                let scroll = self.scroll.clone();
                 FormGroup::new(group_selector(section, title), heading, members)
                     .footnote(footnote)
-                    .on_rows_prepainted(move |bounds, _, _| {
+                    .on_rows_prepainted(move |bounds, window, _| {
+                        let revealed = reveal_after_layout
+                            .get()
+                            .and_then(|row| Some(bounds[ids.iter().position(|id| *id == row)?]));
                         row_bounds
                             .borrow_mut()
                             .extend(ids.iter().copied().zip(bounds));
+                        if let Some(bounds) = revealed {
+                            reveal_after_layout.set(None);
+                            if reveal(&scroll, bounds) {
+                                window.refresh();
+                            }
+                        }
                     })
                     .render(settings)
                     .into_any_element()

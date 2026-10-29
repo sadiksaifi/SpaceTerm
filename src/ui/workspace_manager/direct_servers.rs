@@ -9,6 +9,7 @@
 
 use std::cmp::Ordering;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{App, Context, SharedString, Window};
 
@@ -27,18 +28,26 @@ pub(super) struct DirectRoute {
     key: ServerKey,
     panes: Rc<DirectRoutePanes>,
     server: Option<spaceterm_server::ServerConnection>,
-    /// The route's own client storage, where its presentations are recorded while it has no
-    /// connection.
-    storage: Option<Rc<dyn crate::ui::shared_workspaces::PresentationRecord>>,
+    /// The transport while the route has no connection.
+    unavailable: Rc<dyn Fn() -> UnavailableEdits>,
 }
 
-impl DirectRoute {
-    /// The transport while the route has no connection.
-    fn unavailable(&self) -> UnavailableEdits {
-        self.storage
-            .clone()
-            .map_or_else(UnavailableEdits::default, UnavailableEdits::recording)
-    }
+/// The transport of `route` without a connection. It records presentations in the route's own
+/// client storage, or keeps them in `retries` until it can.
+fn unavailable(route: DirectRouteId, cx: &mut App) -> Rc<dyn Fn() -> UnavailableEdits> {
+    let storage =
+        crate::ui::direct_servers::installed(cx).and_then(|direct| direct.storage(&route));
+    let retries = cx
+        .default_global::<crate::ui::shared_workspaces::PresentationRetries>()
+        .clone();
+    Rc::new(move || match &storage {
+        Some(storage) => UnavailableEdits::recording(
+            route,
+            Arc::new(storage.clone()) as Arc<dyn crate::ui::shared_workspaces::PresentationRecord>,
+            retries.clone(),
+        ),
+        None => UnavailableEdits::default(),
+    })
 }
 
 /// The paired routes one Workspace Window presents, by route, and the revision of what each
@@ -234,16 +243,8 @@ impl WorkspaceManager {
             Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
             &self.pane_construction,
         );
-        let storage = crate::ui::direct_servers::installed(cx)
-            .and_then(|direct| direct.storage(&route))
-            .map(|storage| {
-                Rc::new(storage) as Rc<dyn crate::ui::shared_workspaces::PresentationRecord>
-            });
-        let edits = SharedEditSource::new(Rc::new(
-            storage
-                .clone()
-                .map_or_else(UnavailableEdits::default, UnavailableEdits::recording),
-        ));
+        let unavailable = unavailable(route, cx);
+        let edits = SharedEditSource::new(Rc::new(unavailable()));
         let key = self.present_server_workspaces(
             ServerOrigin::Direct(direct),
             edits,
@@ -257,7 +258,7 @@ impl WorkspaceManager {
                 key,
                 panes,
                 server: None,
-                storage,
+                unavailable,
             },
         );
         Some(key)
@@ -348,7 +349,7 @@ impl WorkspaceManager {
             None => {
                 followed.panes.retain_titles(shared.unavailable_titles());
                 followed.panes.follow(None);
-                shared.replace_transport(Rc::new(followed.unavailable()));
+                shared.replace_transport(Rc::new((followed.unavailable)()));
             }
         }
     }

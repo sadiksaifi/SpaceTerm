@@ -106,6 +106,19 @@ impl Client {
             server.clone(),
             std::sync::Arc::clone(&controls),
         ));
+        // Presentations the route's journal refused while it had no connection are recorded by
+        // this connection's edit loop, which holds that journal now.
+        if let Some(waiting) = cx
+            .try_global::<crate::ui::shared_workspaces::PresentationRetries>()
+            .and_then(|retries| retries.take(&route))
+        {
+            for sequence in waiting.sequences {
+                edits.presented(sequence);
+            }
+            if waiting.forgotten != 0 {
+                edits.forgotten_presented(waiting.forgotten);
+            }
+        }
         let client = Self {
             reads: Arc::new(server.clone()),
             server,

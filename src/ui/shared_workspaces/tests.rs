@@ -1553,96 +1553,6 @@ mod edits {
         }
     }
 
-    /// A window that presents alerts and records how many outcomes were unseen in the first frame
-    /// that drew one.
-    struct AlertProbe {
-        painted: crate::ui::after_paint::AfterPaint,
-        edits: Rc<ScriptedEdits>,
-        first_drawn: Rc<std::cell::Cell<Option<usize>>>,
-    }
-
-    impl gpui::Render for AlertProbe {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            _: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            use gpui::{ParentElement as _, Styled as _};
-            let edits = Rc::clone(&self.edits);
-            let first_drawn = Rc::clone(&self.first_drawn);
-            let probe = gpui::canvas(
-                |_, _, _| {},
-                move |_, (), window, cx| {
-                    if spaceterm_ui::window_modal_is_open(window, cx) && first_drawn.get().is_none()
-                    {
-                        first_drawn.set(Some(edits.unseen().len()));
-                    }
-                },
-            );
-            spaceterm_ui::ModalLayer::new(
-                gpui::div()
-                    .size_full()
-                    .child(probe)
-                    .child(self.painted.hook()),
-            )
-        }
-    }
-
-    /// An alert's outcome counts as presented only after a frame has drawn the open alert, so a
-    /// crash before that frame leaves it unseen.
-    #[gpui::test]
-    fn an_alert_should_count_as_presented_only_after_a_frame_draws_it(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let (mut shared, edits) = shared(Some(root_only()));
-        edits.submit_for_recovery(Mutation::Worktree(refused_removal()));
-        edits.answer(Outcome::WorktreeFailed(
-            spaceterm_server::worktree::Error::Changed,
-        ));
-        shared.poll();
-        let (_, notice) = shared
-            .next_worktree_failure()
-            .expect("a failure to present");
-        let painted = crate::ui::after_paint::AfterPaint::default();
-        let first_drawn: Rc<std::cell::Cell<Option<usize>>> = Rc::default();
-        let probe = AlertProbe {
-            painted: painted.clone(),
-            edits: Rc::clone(&edits),
-            first_drawn: Rc::clone(&first_drawn),
-        };
-        let (root, cx) = cx.add_window_view(|_, _| probe);
-        cx.update(|window, cx| {
-            root.update(cx, |_, cx| {
-                spaceterm_ui::Alert::new(
-                    spaceterm_ui::ModalId::new("probe-alert"),
-                    "Couldn\u{2019}t Remove",
-                    "Couldn\u{2019}t Remove",
-                    "Nothing was removed.",
-                    vec![spaceterm_ui::ModalAction::new(
-                        (),
-                        "OK",
-                        spaceterm_ui::ModalActionRole::Cancel,
-                        "probe-alert-ok",
-                    )],
-                )
-                .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&painted))
-                .expect("the alert is admitted");
-            });
-        });
-        let _ = shared.take_worktree_failure();
-        cx.run_until_parked();
-
-        assert_eq!(
-            first_drawn.get(),
-            Some(1),
-            "the outcome is still unseen in the frame that first draws the alert"
-        );
-        assert!(
-            edits.unseen().is_empty(),
-            "it is presented after that frame"
-        );
-    }
-
     /// A refused rename waits behind an open dialog while a later Worktree removal fails, and
     /// the process ends before either is presented. The relaunched process presents both, and
     /// neither reaches the person again after that.
@@ -1732,8 +1642,9 @@ mod edits {
         assert!(later.next_conflict().is_none());
     }
 
-    /// A paired route disconnects after its draft review was admitted and before it opened. The
-    /// review's presentation reaches the reconnected route, so it never presents the draft again.
+    /// A paired route disconnects after its draft review was admitted and before the person
+    /// answered it. The answer reaches the reconnected route, so it never presents the draft
+    /// again.
     #[test]
     fn a_presentation_while_disconnected_should_reach_the_reconnected_route() {
         let (mut first, edits) = shared(Some(root_only()));
@@ -1762,53 +1673,140 @@ mod edits {
         assert!(reopened.next_conflict().is_none());
     }
 
-    /// Records a disconnected route's presentations where its journal would.
-    struct Journal(Rc<ScriptedEdits>);
+    const JOURNAL_SERVER: Id = [61; 32];
+    const JOURNAL_CLIENT: Id = [62; 32];
+    const ROUTE: [u8; 32] = [63; 32];
 
-    impl super::super::PresentationRecord for Journal {
-        fn presented(&self, sequence: u64) {
-            SharedWorkspaceEdits::presented(&*self.0, sequence);
-        }
+    /// A route's journal in a directory of its own, opened with the same lock the route's
+    /// storage takes.
+    struct JournalAt(PathBuf);
 
-        fn forgotten_presented(&self, total: u64) {
-            SharedWorkspaceEdits::forgotten_presented(&*self.0, total);
+    impl JournalAt {
+        fn open(&self) -> spaceterm_server::hierarchy::ClientJournal {
+            spaceterm_server::hierarchy::ClientJournal::open_in(
+                &self.0,
+                JOURNAL_SERVER,
+                JOURNAL_CLIENT,
+            )
+            .expect("the journal opens")
         }
     }
 
-    /// Draft review opens and draws while a paired route has no connection, and the person then
-    /// closes the window. The reopened window's route reconnects and never presents the draft
-    /// again.
-    #[test]
-    fn a_presentation_while_disconnected_should_outlive_the_window() {
-        let (mut first, edits) = shared(Some(root_only()));
-        edits.submit_for_recovery(Mutation::RenameWorkspace {
+    impl Drop for JournalAt {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl super::super::PresentationRecord for JournalAt {
+        fn presented(&self, sequence: u64) -> Result<(), spaceterm_server::ServerError> {
+            spaceterm_server::hierarchy::ClientJournal::open_in(
+                &self.0,
+                JOURNAL_SERVER,
+                JOURNAL_CLIENT,
+            )?
+            .presented(sequence)
+        }
+
+        fn forgotten_presented(&self, total: u64) -> Result<(), spaceterm_server::ServerError> {
+            spaceterm_server::hierarchy::ClientJournal::open_in(
+                &self.0,
+                JOURNAL_SERVER,
+                JOURNAL_CLIENT,
+            )?
+            .forgotten_presented(total)
+        }
+    }
+
+    /// A journal holding one refused rename, with the lock the route's previous edit loop holds
+    /// until it exits.
+    fn held_journal() -> (
+        std::sync::Arc<JournalAt>,
+        spaceterm_server::hierarchy::ClientJournal,
+    ) {
+        let mut name = [0; 8];
+        getrandom::fill(&mut name).expect("random");
+        let journal = std::sync::Arc::new(JournalAt(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("a temporary directory")
+                .join(format!("st-presented-{:x}", u64::from_be_bytes(name))),
+        ));
+        let mut held = journal.open();
+        let refused = Mutation::RenameWorkspace {
             workspace: WORKSPACE,
             version: 0,
             name: "Mine".to_owned(),
-        });
-        edits.set_inventory(renamed("Theirs", 1));
-        edits.answer(Outcome::Conflict);
-        let poll = first.poll();
-        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
-        let (_, notice) = first.next_conflict().expect("draft review");
-        let _ = first.take_conflict();
-        let disconnected = || {
-            Rc::new(super::super::UnavailableEdits::recording(Rc::new(Journal(
-                Rc::clone(&edits),
-            )))) as Rc<dyn SharedWorkspaceEdits>
         };
-        first.edits().replace_transport(disconnected());
-        notice.acknowledge();
-        drop(first);
+        held.submit(5, refused.clone()).expect("submitted");
+        held.retire(spaceterm_server::hierarchy::RetainedOutcome {
+            sequence: 5,
+            mutation: refused,
+            outcome: Outcome::Conflict,
+        })
+        .expect("retired");
+        (journal, held)
+    }
 
-        let reopened = SharedEditSource::new(disconnected());
-        let mut second = window(reopened.clone());
-        reopened.replace_transport(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
-        let poll = second.poll();
-        bind(&mut second, poll.inventory.as_ref().expect("inventory"));
+    /// A disconnected route's Workspace Window presenting through `journal`.
+    fn disconnected(
+        journal: &std::sync::Arc<JournalAt>,
+        retries: &super::super::PresentationRetries,
+    ) -> SharedEditSource {
+        SharedEditSource::new(Rc::new(super::super::UnavailableEdits::recording(
+            ROUTE,
+            std::sync::Arc::clone(journal) as std::sync::Arc<dyn super::super::PresentationRecord>,
+            retries.clone(),
+        )))
+    }
 
-        assert!(edits.unseen().is_empty());
-        assert!(second.next_conflict().is_none());
+    /// The person answers draft review on a disconnected route while its previous edit loop
+    /// still holds the journal, then closes the window. The answer is written once that loop
+    /// lets the journal go, and nothing keeps retrying after that.
+    #[test]
+    fn a_contended_journal_should_record_an_answer_after_the_window_closed() {
+        let (journal, held) = held_journal();
+        let retries = super::super::PresentationRetries::default();
+        let source = disconnected(&journal, &retries);
+
+        source.presented(5);
+        drop(source);
+        let waiting = !retries.is_empty();
+        drop(held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !retries.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the answer is written"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(waiting, "the held journal refused the first write");
+        assert!(journal.open().unseen().is_empty());
+    }
+
+    /// The route connects again while an answer still waits for its journal. The new connection
+    /// takes it, because its own edit loop holds that journal from then on.
+    #[test]
+    fn a_waiting_answer_should_go_to_the_next_connection() {
+        let (journal, held) = held_journal();
+        let retries = super::super::PresentationRetries::default();
+        let source = disconnected(&journal, &retries);
+        source.presented(5);
+        drop(source);
+
+        let taken = retries.take(&ROUTE);
+        drop(held);
+
+        assert_eq!(
+            taken,
+            Some(super::super::direct_route::WaitingPresentations {
+                sequences: vec![5],
+                forgotten: 0,
+            })
+        );
+        assert!(retries.is_empty());
     }
 
     /// A relaunch recovers a rename the server refused after another client removed its

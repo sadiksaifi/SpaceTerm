@@ -10,9 +10,10 @@ use gpui::{
 };
 use spaceterm_ui::{
     ComboBox, ComboBoxCopy, ComboBoxItem, Dialog, DialogCloseDecision, DialogInitialFocus,
-    DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole, ModalId,
-    ProgressRing, ProgressSize, ProgressState, SegmentedControl, SegmentedOption, TextInput,
-    TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior, TextInputVariant,
+    DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction, ModalActionRole,
+    ModalCloseReason, ModalId, ProgressRing, ProgressSize, ProgressState, SegmentedControl,
+    SegmentedOption, TextInput, TextInputChangeSource, TextInputEscapeBehavior, TextInputEvent,
+    TextInputReturnBehavior, TextInputVariant,
 };
 
 use super::appearance::{ChromeAppearance, gpui_color};
@@ -52,7 +53,8 @@ pub(crate) trait WorktreeFormBackend {
         branch: WorktreeBranch,
         cx: &mut App,
     ) -> Task<Result<PathBuf, WorktreeCreateError>>;
-    /// A frame drew the form's answer to its last Create, so nothing presents it again.
+    /// The person answered the form after it showed the answer to its last Create, so nothing
+    /// presents it again.
     fn presented(&self) {}
     /// The form will not present the answer to its last Create, so the Workspace Window does.
     fn release(&self) {}
@@ -154,8 +156,8 @@ pub(crate) struct WorktreeForm {
     pending: bool,
     generation: u64,
     pending_path: Option<PathBuf>,
-    /// Records the shown answer once a frame has drawn it.
-    shown: super::after_paint::AfterPaint,
+    /// Whether the form shows an answer the person has not responded to yet.
+    unanswered: bool,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
     _status: Task<()>,
@@ -181,7 +183,10 @@ impl WorktreeForm {
         );
         for (field, input) in [(FormField::Name, &name), (FormField::Location, &location)] {
             cx.subscribe(input, move |form, _, event: &TextInputEvent, cx| {
-                if let TextInputEvent::ValueChanged(_) = event {
+                if let TextInputEvent::ValueChanged(change) = event {
+                    if change.source() != TextInputChangeSource::Programmatic {
+                        form.answered();
+                    }
                     form.input_changed(field, cx);
                 }
             })
@@ -209,7 +214,7 @@ impl WorktreeForm {
             pending: false,
             generation: 0,
             pending_path: None,
-            shown: super::after_paint::AfterPaint::default(),
+            unanswered: false,
             pending_cancel: None,
             _branches: Task::ready(()),
             _status: Task::ready(()),
@@ -316,7 +321,15 @@ impl WorktreeForm {
         self.revalidate(cx);
     }
 
+    /// The person acted in the form after it showed an answer, which counts as seeing it.
+    fn answered(&mut self) {
+        if std::mem::take(&mut self.unanswered) {
+            self.backend.presented();
+        }
+    }
+
     fn set_source(&mut self, source: BranchSource, cx: &mut Context<Self>) {
+        self.answered();
         if self.pending || self.source == source {
             return;
         }
@@ -337,6 +350,7 @@ impl WorktreeForm {
     }
 
     fn choose(&mut self, field: FormField, choice: Choice, cx: &mut Context<Self>) {
+        self.answered();
         match (field, choice) {
             (FormField::Branch, Choice::Base(base)) => self.base = Some(base),
             (FormField::Branch, Choice::Existing(name)) => self.existing = Some(name),
@@ -488,6 +502,7 @@ impl WorktreeForm {
         window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> DialogCloseDecision {
+        self.answered();
         match action {
             FormAction::Cancel
                 if self.pending && self.backend.server() && !self.backend.connected() =>
@@ -648,9 +663,8 @@ impl WorktreeForm {
             Some(FormField::Location) => self.errors.location = Some(message),
             None => self.backend_error = Some(message),
         }
-        // The answer counts as presented once a frame has drawn the error.
-        let backend = Rc::clone(&self.backend);
-        self.shown.push(move |_| backend.presented());
+        // The answer counts as seen once the person responds to the form.
+        self.unanswered = true;
         cx.notify();
         Some(Settlement::Failure {
             primary,
@@ -663,8 +677,15 @@ impl WorktreeForm {
         if !self.open {
             return;
         }
-        // An answer no frame has drawn yet, or one still on its way, is the Workspace Window's.
-        self.shown.clear();
+        // Escape is the person's response to a shown answer. Closing any other way, or before
+        // the answer arrived, leaves it to the Workspace Window.
+        if matches!(
+            outcome,
+            DialogOutcome::Completed { .. } | DialogOutcome::Dismissed(ModalCloseReason::Cancelled)
+        ) {
+            self.answered();
+        }
+        self.unanswered = false;
         self.backend.release();
         self.open = false;
         self.pending = false;
@@ -851,7 +872,6 @@ impl Render for WorktreeForm {
                     })),
             )
             .child(self.status_slot(&appearance))
-            .child(self.shown.hook())
     }
 }
 
@@ -1207,11 +1227,8 @@ mod tests {
         /// Holds git's answers until the test sends them.
         held_branches: Option<async_channel::Receiver<Option<BranchList>>>,
         held_create: Option<async_channel::Receiver<Result<(), WorktreeCreateError>>>,
-        /// Whether a frame has drawn the taken-branch error, which the test window records.
-        drawn_error: Rc<Cell<bool>>,
-        /// For each time the form recorded its answer as presented, whether a frame had drawn
-        /// the error by then.
-        presentations: RefCell<Vec<bool>>,
+        /// How many times the form recorded its answer as seen.
+        presentations: Cell<usize>,
     }
 
     impl WorktreeFormBackend for ScriptedBackend {
@@ -1258,30 +1275,17 @@ mod tests {
         }
 
         fn presented(&self) {
-            self.presentations.borrow_mut().push(self.drawn_error.get());
+            self.presentations.set(self.presentations.get() + 1);
         }
     }
 
     struct Harness {
         form: Entity<WorktreeForm>,
-        drawn_error: Rc<Cell<bool>>,
     }
 
     impl Render for Harness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            // Painted in every frame that draws the form, so it sees what that frame shows.
-            let form = self.form.clone();
-            let drawn_error = Rc::clone(&self.drawn_error);
-            let probe = gpui::canvas(
-                |_, _, _| {},
-                move |_, (), _, cx| {
-                    let form = form.read(cx);
-                    if form.errors.name.as_deref() == Some("Branch name already exists.") {
-                        drawn_error.set(true);
-                    }
-                },
-            );
-            ModalLayer::new(div().size_full().child(probe))
+            ModalLayer::new(div().size_full())
         }
     }
 
@@ -1296,7 +1300,6 @@ mod tests {
             .expect("UI initialization should succeed");
         let events: Events = Rc::default();
         let captured = Rc::clone(&events);
-        let drawn_error = Rc::clone(&backend.drawn_error);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let context = WorktreeFormContext {
                 repository_name: "app".into(),
@@ -1322,7 +1325,7 @@ mod tests {
                 captured.borrow_mut().push(event.clone());
             })
             .detach();
-            Harness { form, drawn_error }
+            Harness { form }
         });
         let form = harness.read_with(cx, |harness, _| harness.form.clone());
         cx.update(|window, cx| {
@@ -1508,20 +1511,23 @@ mod tests {
         assert!(held.form.read_with(cx, |form, _| form.is_open()));
     }
 
-    /// The form records its answer as presented only after a frame has drawn the error, so a
-    /// crash before that frame leaves the answer unseen.
+    /// The form's error counts as seen only once the person acts in the form after it appeared,
+    /// here by editing a field.
     #[gpui::test]
-    fn the_answer_should_count_as_presented_only_after_a_frame_draws_the_error(
-        cx: &mut TestAppContext,
-    ) {
+    fn an_error_should_count_as_seen_when_the_person_next_edits(cx: &mut TestAppContext) {
         let (held, cx) = create_and_hold(true, cx);
-
         held.answer
             .try_send(Err(WorktreeCreateError::BranchExists))
             .expect("git is waiting");
         cx.run_until_parked();
+        let before = held.backend.presentations.get();
 
-        assert_eq!(*held.backend.presentations.borrow(), [true]);
+        click("new-worktree-name", cx);
+        cx.simulate_input("r");
+        cx.run_until_parked();
+
+        assert_eq!(before, 0, "showing the error alone records nothing");
+        assert_eq!(held.backend.presentations.get(), 1);
     }
 
     #[gpui::test]

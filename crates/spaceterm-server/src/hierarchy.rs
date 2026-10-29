@@ -1363,6 +1363,12 @@ impl ClientJournal {
             record,
         })
     }
+    /// Opens the journal kept in `path`, with the same lock a client's journal takes, for a
+    /// test that holds it the way a live edit loop does.
+    #[cfg(feature = "test-support")]
+    pub fn open_in(path: &Path, server: Id, client: Id) -> Result<Self, ServerError> {
+        Self::open(crate::storage::Directory::open(path, true)?, server, client)
+    }
     pub fn pending(&self) -> Option<&ClientOperation> {
         self.record.pending.as_ref()
     }

@@ -46,7 +46,9 @@ mod pending;
 
 #[path = "shared_workspaces/direct_route.rs"]
 mod direct_route;
-pub(crate) use direct_route::{DirectRoutePanes, PresentationRecord, UnavailableEdits};
+pub(crate) use direct_route::{
+    DirectRoutePanes, PresentationRecord, PresentationRetries, UnavailableEdits,
+};
 
 mod development {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -70,7 +72,6 @@ mod development {
     use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
     use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
-    use crate::ui::after_paint::AfterPaint;
     use crate::ui::pane_lifecycle::PaneConstruction;
     use crate::ui::server_pane::{ServerPaneConnection, ServerPaneView};
 
@@ -176,36 +177,30 @@ mod development {
     /// sequence is expected. The server never assigns this sequence.
     const FORGOTTEN: u64 = u64::MAX;
 
-    /// An alert's lifecycle observer. Once a frame has drawn the open alert, `shown` runs. If the
-    /// alert closes first, `unshown` runs instead. When the alert reports neither, both drop.
-    fn when_drawn(
-        painted: AfterPaint,
-        shown: impl FnOnce() + 'static,
-        unshown: impl FnOnce() + 'static,
+    /// An alert's lifecycle observer. When the person answers the alert, with any of its actions
+    /// or Escape, `answered` runs. When it closes any other way, as with its window, `unanswered`
+    /// runs instead. When the alert reports neither, both drop.
+    fn when_answered(
+        answered: impl FnOnce() + 'static,
+        unanswered: impl FnOnce() + 'static,
     ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static {
         type Outcomes = Option<(Box<dyn FnOnce()>, Box<dyn FnOnce()>)>;
         let pending: Rc<std::cell::RefCell<Outcomes>> = Rc::new(std::cell::RefCell::new(Some((
-            Box::new(shown),
-            Box::new(unshown),
+            Box::new(answered),
+            Box::new(unanswered),
         ))));
-        move |event, cx| match event {
-            spaceterm_ui::ModalLifecycleEvent::Opened(_) => {
-                let pending = Rc::clone(&pending);
-                painted.push(move |_| {
-                    let taken = pending.borrow_mut().take();
-                    if let Some((shown, _)) = taken {
-                        shown();
-                    }
-                });
-                cx.refresh_windows();
-            }
-            spaceterm_ui::ModalLifecycleEvent::Closed(..) => {
-                let taken = pending.borrow_mut().take();
-                if let Some((_, unshown)) = taken {
-                    unshown();
+        move |event, _| {
+            let spaceterm_ui::ModalLifecycleEvent::Closed(_, reason) = event else {
+                return;
+            };
+            let taken = pending.borrow_mut().take();
+            if let Some((answered, unanswered)) = taken {
+                match reason {
+                    spaceterm_ui::ModalCloseReason::Action
+                    | spaceterm_ui::ModalCloseReason::Cancelled => answered(),
+                    _ => unanswered(),
                 }
             }
-            _ => {}
         }
     }
 
@@ -250,22 +245,21 @@ mod development {
             OutcomeTicket(Rc::downgrade(&self.answer))
         }
 
-        /// Records that the owner presented its answer, so nothing presents it again. Call it
-        /// only once a frame has drawn that answer.
+        /// Records that the person answered the surface showing the answer, so nothing presents
+        /// it again.
         pub(crate) fn presented(&self) {
             if let Some(sequence) = self.answer.take() {
                 self.source.presented(sequence);
             }
         }
 
-        /// The observer of the owner's own alert, which presents its answer once a frame drew
-        /// it. An alert that closes first, or is never admitted, leaves the answer to the
-        /// Workspace Window.
+        /// The observer of the owner's own alert, which records the answer once the person
+        /// answers the alert. An alert closed any other way, or never admitted, leaves the
+        /// answer to the Workspace Window.
         pub(crate) fn lifecycle(
             self,
-            painted: &AfterPaint,
         ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static + use<> {
-            when_drawn(painted.clone(), move || self.presented(), || {})
+            when_answered(move || self.presented(), || {})
         }
     }
 
@@ -277,34 +271,29 @@ mod development {
         }
     }
 
-    /// The unseen outcomes one alert presents. A frame that drew the open alert records their
-    /// presentation; an alert that closes before that leaves them for the next presentation.
+    /// The unseen outcomes one alert presents. The person's answer to the alert records them as
+    /// seen; an alert closed any other way leaves them for the next presentation.
     #[derive(Clone)]
     pub(crate) struct OutcomeNotice {
         source: SharedEditSource,
         sequences: Rc<[u64]>,
         /// The forgotten total, for the notice that says how many outcomes went unseen.
         forgotten: Option<u64>,
-        /// The reading's outcomes handed to alerts that have not been drawn or closed yet.
+        /// The reading's outcomes handed to alerts the person has not answered yet.
         handed: Rc<std::cell::RefCell<BTreeSet<u64>>>,
     }
 
     impl OutcomeNotice {
-        /// The alert's lifecycle observer. `painted` is the window's, whose frames draw it.
+        /// The alert's lifecycle observer.
         pub(crate) fn lifecycle(
             &self,
-            painted: &AfterPaint,
         ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static + use<> {
-            let shown = self.clone();
-            let unshown = self.clone();
-            when_drawn(
-                painted.clone(),
-                move || shown.acknowledge(),
-                move || unshown.release(),
-            )
+            let answered = self.clone();
+            let unanswered = self.clone();
+            when_answered(move || answered.acknowledge(), move || unanswered.release())
         }
 
-        /// Records the presentation now. Call it only once a frame has drawn the alert.
+        /// Records the outcomes as seen. Call it only for the person's answer.
         pub(crate) fn acknowledge(&self) {
             for sequence in self.sequences.iter() {
                 self.handed.borrow_mut().remove(sequence);
@@ -1601,7 +1590,7 @@ mod development {
         forgotten: Option<u64>,
         /// Failed Worktree operations no surface has presented yet.
         worktree_failures: VecDeque<WorktreeFailure>,
-        /// Outcomes this reading handed to alerts that have not opened yet.
+        /// Outcomes this reading handed to alerts the person has not answered yet.
         handed: Rc<std::cell::RefCell<BTreeSet<u64>>>,
         /// The inventory the server published last, including the live Session facts a close
         /// confirmation reads. Those facts can change without a new membership revision.
@@ -2290,7 +2279,7 @@ mod development {
             Some(failure)
         }
 
-        /// Records that an admitted alert presents `sequence` once a frame draws it.
+        /// Records that an admitted alert presents `sequence` until the person answers it.
         fn hand(&self, sequence: u64) {
             if sequence == FORGOTTEN || !self.edits.acknowledged.borrow().contains(&sequence) {
                 self.handed.borrow_mut().insert(sequence);

@@ -599,7 +599,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&self.after_paint))
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
         .is_ok()
     }
     /// Presents a failed Worktree operation no other surface presented. Returns whether it was
@@ -703,7 +703,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&self.after_paint))
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
         .is_ok()
     }
     /// A New Worktree Location change that Settings did not present. Returns whether the alert
@@ -741,7 +741,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning)
-        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle(&self.after_paint))
+        .present_with_lifecycle(window, cx, |_, _| {}, notice.lifecycle())
         .is_ok()
     }
     /// Returns whether the alert was admitted. `notice` records the presentation of an unseen
@@ -807,7 +807,7 @@ impl WorkspaceManager {
         ));
         let owner = cx.weak_entity();
         let handle = window.window_handle();
-        let lifecycle = notice.map(|notice| notice.lifecycle(&self.after_paint));
+        let lifecycle = notice.map(|notice| notice.lifecycle());
         Alert::new(
             ModalId::new("worktree-removal-changed"),
             if error == Error::Missing {

@@ -119,8 +119,8 @@ impl WorkspaceManager {
             root: root.clone(),
             path: outside.clone(),
         });
-        // The fallback presents its own failure, so the window presents it only if that alert
-        // never draws.
+        // The fallback presents its own failure, so the window presents it only if the person
+        // never answers that alert.
         let answer = shared.edits().owner();
         let completion = match shared
             .edits()
@@ -160,7 +160,7 @@ impl WorkspaceManager {
                     return;
                 };
                 let Outcome::Accepted { target: accepted } = outcome.outcome else {
-                    let lifecycle = answer.lifecycle(&manager.after_paint);
+                    let lifecycle = answer.lifecycle();
                     Self::worktree_fallback_failed_with(
                         "SpaceTerm couldn\u{2019}t open a Tab outside this Worktree.",
                         lifecycle,
