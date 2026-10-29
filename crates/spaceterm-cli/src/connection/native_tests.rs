@@ -1,5 +1,6 @@
 //! Explicit native fixtures. The owner runs only in Penguin's isolated mount namespace.
 use super::*;
+use clap::Parser;
 use spaceterm_server::{
     ServerConnection,
     direct::{Invitation, NetworkPolicy},
@@ -174,7 +175,31 @@ fn native_client() {
     emit(serde_json::json!({"admitted":true, "route":base.server.route}));
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
-        let output = if line == "list" {
+        let output = if line == "work" {
+            let cli = crate::args::Cli::try_parse_from([
+                "spaceterm",
+                "--server",
+                &name,
+                "--json",
+                "workspace",
+                "create",
+                "cli722-e-work",
+            ])
+            .unwrap();
+            let output = crate::work::start::start(&cli).expect("work command dispatched");
+            assert_eq!(
+                output.write(
+                    true,
+                    false,
+                    false,
+                    &mut std::io::stdout().lock(),
+                    &mut std::io::stderr().lock()
+                ),
+                0,
+                "paired work mutation completed"
+            );
+            None
+        } else if line == "list" {
             Some(execute(&ConnectionCommand::List, &global, IDENTITY))
         } else if line == "preview" {
             Some(execute(

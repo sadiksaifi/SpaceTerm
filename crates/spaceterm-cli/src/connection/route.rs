@@ -219,7 +219,7 @@ impl Route {
         })
     }
 
-    fn server_connection(
+    pub(crate) fn server_connection(
         &self,
         identity: &str,
         agent: Option<AgentName>,
