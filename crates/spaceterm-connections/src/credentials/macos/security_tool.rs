@@ -133,6 +133,9 @@ fn run(arguments: &[&str]) -> Result<Zeroizing<Vec<u8>>, Failure> {
 }
 
 impl CredentialStore for SecurityTool {
+    fn kind(&self) -> crate::credentials::StoreKind {
+        crate::credentials::StoreKind::Keychain
+    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -160,7 +163,7 @@ impl CredentialStore for SecurityTool {
     }
 
     fn insert(&self, key: &[u8; 32], secret: &[u8]) -> Result<(), CredentialError> {
-        let (_, keychain) = self.keychain(Interaction::Requested)?;
+        let (_, keychain) = self.keychain(Interaction::Quiet)?;
         // Interactive mode reads the command from standard input, so the secret never appears
         // in this process's arguments. Without -U, an existing item is never replaced.
         let mut command = Zeroizing::new(String::new());

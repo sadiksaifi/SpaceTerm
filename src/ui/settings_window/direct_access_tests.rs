@@ -26,7 +26,7 @@ use super::{
     REMOVE_CONFIRM_SELECTOR, TURN_OFF_CONFIRM_SELECTOR,
 };
 use crate::appearance::Appearance;
-use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairState};
+use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairProgress};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::server_connection::ServerError;
@@ -1176,7 +1176,7 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
     let resume = format!("{notice}-resume");
     // The offline server never confirms, and SpaceTerm keeps trying quietly.
     settle(cx, |cx| {
-        state(&direct) == Some(UnpairState::Unconfirmed) && open(&dismiss, cx)
+        state(&direct) == Some(UnpairProgress::Unconfirmed) && open(&dismiss, cx)
     });
     click(&dismiss, cx);
     assert!(
@@ -1192,7 +1192,7 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
     // The key the request was made with now needs the person's permission.
     credentials.set_locked(true);
     settle(cx, |cx| {
-        state(&direct) == Some(UnpairState::NeedsInteraction) && open(&resume, cx)
+        state(&direct) == Some(UnpairProgress::NeedsInteraction) && open(&resume, cx)
     });
 
     assert!(
@@ -1203,7 +1203,7 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
     credentials.set_locked(false);
     click(&resume, cx);
     settle(cx, |_| {
-        state(&direct) != Some(UnpairState::NeedsInteraction)
+        state(&direct) != Some(UnpairProgress::NeedsInteraction)
     });
     settle(cx, |cx| !open(&notice, cx));
 }
@@ -1229,14 +1229,14 @@ fn hiding_an_unpair_that_waits_for_the_person_hides_it_here_and_cancels_nothing(
     click(MENU_SELECTOR, cx);
     click("settings-server-unpair", cx);
     click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
-    settle(cx, |_| state(&direct) == Some(UnpairState::Unconfirmed));
+    settle(cx, |_| state(&direct) == Some(UnpairProgress::Unconfirmed));
     let notice = unpair_notice(&direct);
     let dismiss = format!("{notice}-dismiss");
     let resume = format!("{notice}-resume");
     // The key the request was made with now needs the person's permission.
     credentials.set_locked(true);
     settle(cx, |cx| {
-        state(&direct) == Some(UnpairState::NeedsInteraction) && open(&resume, cx)
+        state(&direct) == Some(UnpairProgress::NeedsInteraction) && open(&resume, cx)
     });
 
     click(&dismiss, cx);
@@ -1247,7 +1247,7 @@ fn hiding_an_unpair_that_waits_for_the_person_hides_it_here_and_cancels_nothing(
     );
     assert_eq!(
         state(&direct),
-        Some(UnpairState::NeedsInteraction),
+        Some(UnpairProgress::NeedsInteraction),
         "the request still waits for the person, uncancelled"
     );
 }

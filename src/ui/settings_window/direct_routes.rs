@@ -15,7 +15,8 @@ use spaceterm_ui::{
 use super::SettingsWindow;
 use super::server_list::ServerChoice;
 use crate::direct_connections::{
-    DirectConnections, DirectRouteId, DirectRouteStatus, PendingUnpair, RefusalReason, UnpairState,
+    DirectConnections, DirectRouteId, DirectRouteStatus, PendingUnpair, RefusalReason,
+    UnpairProgress,
 };
 use crate::ui::direct_access::AccessFailure;
 use crate::ui::direct_servers::{DirectServerAction, UnpairAction};
@@ -210,7 +211,9 @@ impl SettingsWindow {
             .map(|rows| rows.connections.pending_unpairs())
             .unwrap_or_default()
             .into_iter()
-            .filter(|pending| !pending.dismissed || pending.state == UnpairState::NeedsInteraction)
+            .filter(|pending| {
+                !pending.dismissed || pending.state == UnpairProgress::NeedsInteraction
+            })
             .collect()
     }
 

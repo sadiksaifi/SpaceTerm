@@ -120,11 +120,7 @@ impl DirectConnections {
 
     /// Invitation parsing is local. All network and native credential work belongs to
     /// the requested join's worker, and the invitation is never retained in a record.
-    pub(crate) fn join(
-        &self,
-        text: Zeroizing<String>,
-        name: ClientName,
-    ) -> Result<JoinId, DirectError> {
+    pub fn join(&self, text: Zeroizing<String>, name: ClientName) -> Result<JoinId, DirectError> {
         let invitation = direct::Invitation::parse(&text)?;
         if invitation.server_pin().build != self.0.identity {
             return Err(DirectError::WrongServer);
@@ -349,7 +345,7 @@ fn work(owner: &Arc<Inner>) -> Option<Instant> {
             })
             .chain(state.document.pending.iter().filter_map(|record| {
                 let retry = state.pending.get(&record.operation)?;
-                (retry.state != UnpairState::NeedsInteraction
+                (retry.state != UnpairProgress::NeedsInteraction
                     && !state.recovery_jobs.contains(&record.operation)
                     && (!matches!(record.authority, Authority::Enrollment { .. })
                         || record.cancel_requested))
@@ -389,7 +385,7 @@ fn work(owner: &Arc<Inner>) -> Option<Instant> {
             .filter_map(|record| {
                 let retry = state.pending.get(&record.operation)?;
                 (retry.due <= now
-                    && retry.state != UnpairState::NeedsInteraction
+                    && retry.state != UnpairProgress::NeedsInteraction
                     && !state.recovery_jobs.contains(&record.operation)
                     && (!matches!(record.authority, Authority::Enrollment { .. })
                         || record.cancel_requested))
@@ -669,7 +665,7 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
             if let Some(retry) = state.pending.get_mut(&pending.operation)
                 && retry.due == due
             {
-                retry.state = UnpairState::Retrying;
+                retry.state = UnpairProgress::Retrying;
                 retry.delay();
             }
         }
@@ -678,9 +674,9 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
                 && retry.due == due
             {
                 retry.state = if error == DirectError::InteractionRequired {
-                    UnpairState::NeedsInteraction
+                    UnpairProgress::NeedsInteraction
                 } else {
-                    UnpairState::Unconfirmed
+                    UnpairProgress::Unconfirmed
                 };
                 retry.delay();
             }
@@ -953,15 +949,13 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
 pub(super) mod enrollment_tests {
     use super::super::tests::{Answer, Credentials, MemoryRecords, Network};
     use super::*;
-    use crate::platform::app_directories::AppDirectoryEnvironment;
-    use crate::platform::app_paths::AppPaths;
-    use crate::platform::secure_filesystem::SecureCommitOutcome;
-    use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
-
+    use crate::records::PrivateRecords;
+    use crate::tests::RecordingFile;
     /// The server accepts each original before its first reply is lost at the network boundary.
     struct EnrollmentNetwork {
         lost: EnrollmentStage,
@@ -1127,10 +1121,7 @@ pub(super) mod enrollment_tests {
         }
     }
 
-    pub(crate) fn retryable_join(
-        label: &str,
-        stage: EnrollmentStage,
-    ) -> (DirectConnections, JoinId) {
+    pub fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConnections, JoinId) {
         let fixture = LiveJoin::new(label, stage);
         (fixture.owner, fixture.id)
     }
@@ -1316,8 +1307,7 @@ pub(super) mod enrollment_tests {
 
     struct EnrollmentFixture {
         owner: DirectConnections,
-        paths: Arc<AppPaths>,
-        filesystem: Arc<RecordingFilesystem>,
+        filesystem: Arc<RecordingFile>,
         credentials: Arc<Credentials>,
         network: Arc<Network>,
         saved: SavedRoute,
@@ -1325,19 +1315,7 @@ pub(super) mod enrollment_tests {
 
     impl EnrollmentFixture {
         fn new(label: &str) -> Self {
-            let filesystem = Arc::new(RecordingFilesystem::default());
-            let paths = Arc::new(
-                resolve_app_paths(
-                    &AppDirectoryEnvironment {
-                        home: Some("/home/test".into()),
-                        ..Default::default()
-                    },
-                    Some("/runtime".into()),
-                    200,
-                    filesystem.clone(),
-                )
-                .unwrap(),
-            );
+            let filesystem = Arc::new(RecordingFile::default());
             let credentials = Arc::new(Credentials::default());
             let network = Network::new(Answer::Lost);
             let mut saved = super::super::tests::saved(1, 5);
@@ -1351,7 +1329,7 @@ pub(super) mod enrollment_tests {
             credentials.locked.store(true, Ordering::Release);
             let owner = DirectConnections::new(
                 "spaceterm-development",
-                Arc::new(PrivateRecords::new(paths.clone())),
+                Arc::new(PrivateRecords::new(filesystem.clone())),
                 credentials.clone(),
                 network.clone(),
             );
@@ -1382,7 +1360,6 @@ pub(super) mod enrollment_tests {
             }
             Self {
                 owner,
-                paths,
                 filesystem,
                 credentials,
                 network,
@@ -1393,7 +1370,7 @@ pub(super) mod enrollment_tests {
         fn relaunch(&self) -> DirectConnections {
             let owner = DirectConnections::new(
                 "spaceterm-development",
-                Arc::new(PrivateRecords::new(self.paths.clone())),
+                Arc::new(PrivateRecords::new(Arc::new(self.filesystem.reopen()))),
                 self.credentials.clone(),
                 self.network.clone(),
             );
@@ -1402,20 +1379,18 @@ pub(super) mod enrollment_tests {
         }
     }
 
-    pub(crate) fn uncertain_join(label: &str) -> (DirectConnections, JoinId, DirectRouteId) {
+    pub fn uncertain_join(label: &str) -> (DirectConnections, JoinId, DirectRouteId) {
         let fixture = EnrollmentFixture::new(label);
-        fixture.filesystem.files.lock().unwrap().commit_outcome =
-            Some(SecureCommitOutcome::CommittedButUnsynced);
+        fixture.filesystem.files.lock().unwrap().commit_outcome = Some(Durability::Uncertain);
         let id = fixture.saved.route.id;
         complete_enrollment(&fixture.owner, id, fixture.saved);
         fixture.owner.start_worker();
         (fixture.owner, id, id)
     }
 
-    pub(crate) fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
+    pub fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
         let fixture = EnrollmentFixture::new(label);
-        fixture.filesystem.files.lock().unwrap().commit_error =
-            Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+        fixture.filesystem.files.lock().unwrap().commit_error = Some(());
         let id = fixture.saved.route.id;
         complete_enrollment(&fixture.owner, id, fixture.saved);
         fixture.owner.start_worker();
@@ -1424,7 +1399,7 @@ pub(super) mod enrollment_tests {
 
     #[test]
     fn cancel_after_enrollment_completion_removes_the_route_and_retains_exact_revocation() {
-        for outcome in [None, Some(SecureCommitOutcome::CommittedButUnsynced)] {
+        for outcome in [None, Some(Durability::Uncertain)] {
             let fixture = EnrollmentFixture::new("Server 1");
             fixture.filesystem.files.lock().unwrap().commit_outcome = outcome;
             let id = fixture.saved.route.id;
@@ -1475,8 +1450,7 @@ pub(super) mod enrollment_tests {
             let id = fixture.saved.route.id;
             complete_enrollment(&fixture.owner, id, fixture.saved.clone());
             if retention_fails {
-                fixture.filesystem.files.lock().unwrap().prepare_error =
-                    Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+                fixture.filesystem.files.lock().unwrap().prepare_error = Some(());
             }
             let expected = if retention_fails {
                 Err(DirectError::StorageUnavailable)
@@ -1530,8 +1504,7 @@ pub(super) mod enrollment_tests {
     #[test]
     fn published_enrollment_with_uncertain_sync_is_never_reported_as_failed() {
         let fixture = EnrollmentFixture::new("Server 1");
-        fixture.filesystem.files.lock().unwrap().commit_outcome =
-            Some(SecureCommitOutcome::CommittedButUnsynced);
+        fixture.filesystem.files.lock().unwrap().commit_outcome = Some(Durability::Uncertain);
         let id = fixture.saved.route.id;
 
         complete_enrollment(&fixture.owner, id, fixture.saved.clone());
@@ -1571,8 +1544,7 @@ pub(super) mod enrollment_tests {
     #[test]
     fn a_failed_pairing_save_keeps_restricted_cleanup_across_relaunch() {
         let fixture = EnrollmentFixture::new("Server 1");
-        fixture.filesystem.files.lock().unwrap().prepare_error =
-            Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+        fixture.filesystem.files.lock().unwrap().prepare_error = Some(());
         let id = fixture.saved.route.id;
 
         complete_enrollment(&fixture.owner, id, fixture.saved.clone());
@@ -1607,8 +1579,7 @@ pub(super) mod enrollment_tests {
     #[test]
     fn indeterminate_publication_does_not_claim_failure_or_automatically_withdraw() {
         let fixture = EnrollmentFixture::new("Server 1");
-        fixture.filesystem.files.lock().unwrap().commit_error =
-            Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+        fixture.filesystem.files.lock().unwrap().commit_error = Some(());
         let id = fixture.saved.route.id;
 
         complete_enrollment(&fixture.owner, id, fixture.saved.clone());
@@ -1653,8 +1624,7 @@ pub(super) mod enrollment_tests {
     fn uncertain_request_retention_cannot_authorize_a_network_effect() {
         let fixture = EnrollmentFixture::new("Server 1");
         fixture.credentials.locked.store(false, Ordering::Release);
-        fixture.filesystem.files.lock().unwrap().commit_outcome =
-            Some(SecureCommitOutcome::CommittedButUnsynced);
+        fixture.filesystem.files.lock().unwrap().commit_outcome = Some(Durability::Uncertain);
         let (pending, due) = {
             let mut state = fixture.owner.0.state.lock().unwrap();
             state.document.pending[0].cancel_requested = true;
@@ -1691,8 +1661,7 @@ pub(super) mod enrollment_tests {
                 state.pending[&fixture.saved.route.id].due,
             )
         };
-        fixture.filesystem.files.lock().unwrap().commit_outcome =
-            Some(SecureCommitOutcome::CommittedButUnsynced);
+        fixture.filesystem.files.lock().unwrap().commit_outcome = Some(Durability::Uncertain);
 
         recover(&fixture.owner.0, pending, Interaction::Quiet, due);
 

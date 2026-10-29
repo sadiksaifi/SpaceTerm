@@ -11,7 +11,7 @@ use gpui::{App, Global, Task};
 
 use crate::direct_connections::{
     DirectConnections, DirectRouteStatus, PendingUnpair, RefusalReason, UnavailableReason,
-    UnpairState,
+    UnpairProgress,
 };
 use crate::ui::sidebar_window::form::CaptionTone;
 
@@ -297,25 +297,25 @@ pub(crate) fn present_unpair(pending: &PendingUnpair) -> (String, &'static [Unpa
         format!("SpaceTerm is still confirming that \u{201C}{server}\u{201D} unpaired the device.")
     };
     let (next, actions): (&str, &'static [UnpairAction]) = match pending.state {
-        UnpairState::Retrying => ("", &[UnpairAction::Dismiss]),
+        UnpairProgress::Retrying => ("", &[UnpairAction::Dismiss]),
         // Only Resume continues it, so it can't be dismissed out of reach.
-        UnpairState::NeedsInteraction => (
+        UnpairProgress::NeedsInteraction => (
             "Choose Resume to allow SpaceTerm to use the key needed to finish this request.",
             &[UnpairAction::Resume],
         ),
-        UnpairState::Unconfirmed if pending.server_confirmed => (
+        UnpairProgress::Unconfirmed if pending.server_confirmed => (
             "Choose Resume to try again.",
             &[UnpairAction::Resume, UnpairAction::Dismiss],
         ),
-        UnpairState::Unconfirmed => (
+        UnpairProgress::Unconfirmed => (
             "Choose Resume to check again.",
             &[UnpairAction::Resume, UnpairAction::Dismiss],
         ),
     };
     let explanation = match pending.state {
-        UnpairState::Retrying => subject,
-        UnpairState::NeedsInteraction => next.to_owned(),
-        UnpairState::Unconfirmed => format!("{subject} {next}"),
+        UnpairProgress::Retrying => subject,
+        UnpairProgress::NeedsInteraction => next.to_owned(),
+        UnpairProgress::Unconfirmed => format!("{subject} {next}"),
     };
     (explanation, actions)
 }
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(heard.get(), 1, "a released subscription hears nothing more");
     }
 
-    fn pending(state: UnpairState) -> PendingUnpair {
+    fn pending(state: UnpairProgress) -> PendingUnpair {
         PendingUnpair {
             key: [1; 32],
             server_label: "studio".to_owned(),
@@ -380,21 +380,21 @@ mod tests {
 
     #[test]
     fn a_quiet_retry_offers_no_step_that_could_ask_for_a_credential() {
-        let (_, actions) = present_unpair(&pending(UnpairState::Retrying));
+        let (_, actions) = present_unpair(&pending(UnpairProgress::Retrying));
 
         assert_eq!(actions, &[UnpairAction::Dismiss]);
     }
 
     #[test]
     fn an_unpair_that_needs_the_person_offers_only_resume() {
-        let (_, actions) = present_unpair(&pending(UnpairState::NeedsInteraction));
+        let (_, actions) = present_unpair(&pending(UnpairProgress::NeedsInteraction));
 
         assert_eq!(actions, &[UnpairAction::Resume]);
     }
 
     #[test]
     fn an_abandoned_revocation_asks_to_unpair_again_and_offers_only_dismiss() {
-        let mut abandoned = pending(UnpairState::Unconfirmed);
+        let mut abandoned = pending(UnpairProgress::Unconfirmed);
         abandoned.abandoned = true;
         let (explanation, actions) = present_unpair(&abandoned);
 
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn an_unconfirmed_unpair_names_the_resume_action_it_offers() {
-        let (explanation, actions) = present_unpair(&pending(UnpairState::Unconfirmed));
+        let (explanation, actions) = present_unpair(&pending(UnpairProgress::Unconfirmed));
 
         assert_eq!(actions, &[UnpairAction::Resume, UnpairAction::Dismiss]);
         assert!(
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn an_offline_self_unpair_says_removal_here_is_done_and_revocation_is_not_confirmed() {
-        let (explanation, _) = present_unpair(&pending(UnpairState::Unconfirmed));
+        let (explanation, _) = present_unpair(&pending(UnpairProgress::Unconfirmed));
 
         assert!(explanation.starts_with("Removed."), "{explanation}");
         assert!(
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn a_confirmed_revocation_reports_only_the_key_cleanup_left() {
-        let mut confirmed = pending(UnpairState::Retrying);
+        let mut confirmed = pending(UnpairProgress::Retrying);
         confirmed.server_confirmed = true;
 
         let (explanation, _) = present_unpair(&confirmed);
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn an_unconfirmed_key_cleanup_names_the_resume_action_it_offers() {
-        let mut confirmed = pending(UnpairState::Unconfirmed);
+        let mut confirmed = pending(UnpairProgress::Unconfirmed);
         confirmed.server_confirmed = true;
 
         let (explanation, actions) = present_unpair(&confirmed);

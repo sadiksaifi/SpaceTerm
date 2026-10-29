@@ -12,7 +12,7 @@ use gpui::{AnyElement, Context, ElementId, SharedString, accesskit, div, px};
 use spaceterm_ui::{Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName};
 
 use super::SettingsWindow;
-use crate::direct_connections::{PendingUnpair, UnpairState};
+use crate::direct_connections::{PendingUnpair, UnpairProgress};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
@@ -57,26 +57,26 @@ pub(super) fn unpair_message(pending: &PendingUnpair) -> String {
     ) {
         (true, _, state) => {
             let next = match state {
-                UnpairState::NeedsInteraction => "Choose Resume to continue cancelling.",
-                UnpairState::Retrying => "It will retry automatically.",
-                UnpairState::Unconfirmed => "Choose Try Again to continue cancelling.",
+                UnpairProgress::NeedsInteraction => "Choose Resume to continue cancelling.",
+                UnpairProgress::Retrying => "It will retry automatically.",
+                UnpairProgress::Unconfirmed => "Choose Try Again to continue cancelling.",
             };
             format!("SpaceTerm is cancelling the unfinished pairing with {server}. {next}")
         }
-        (false, true, UnpairState::NeedsInteraction) => {
+        (false, true, UnpairProgress::NeedsInteraction) => {
             format!("Choose Resume to finish unpairing from {server}.")
         }
-        (false, true, UnpairState::Retrying) => format!("Finishing unpairing from {server}…"),
-        (false, true, UnpairState::Unconfirmed) => {
+        (false, true, UnpairProgress::Retrying) => format!("Finishing unpairing from {server}…"),
+        (false, true, UnpairProgress::Unconfirmed) => {
             format!("Choose Try Again to finish unpairing from {server}.")
         }
-        (false, false, UnpairState::NeedsInteraction) => {
+        (false, false, UnpairProgress::NeedsInteraction) => {
             format!("Unpair from {server} isn\u{2019}t confirmed. Choose Resume.")
         }
-        (false, false, UnpairState::Retrying) => {
+        (false, false, UnpairProgress::Retrying) => {
             format!("Unpair from {server} isn\u{2019}t confirmed yet.")
         }
-        (false, false, UnpairState::Unconfirmed) => {
+        (false, false, UnpairProgress::Unconfirmed) => {
             format!("Unpair from {server} isn\u{2019}t confirmed. Choose Try Again.")
         }
     }
@@ -97,7 +97,7 @@ impl SettingsWindow {
                 .filter(|action| **action == UnpairAction::Resume)
                 .map(|action| {
                     let label = match pending.state {
-                        UnpairState::Unconfirmed => "Try Again",
+                        UnpairProgress::Unconfirmed => "Try Again",
                         _ => action.label(),
                     };
                     (label, NoticeStep::Unpair(pending.clone(), *action))
@@ -266,7 +266,7 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    fn pending(state: UnpairState) -> PendingUnpair {
+    fn pending(state: UnpairProgress) -> PendingUnpair {
         PendingUnpair {
             key: [1; 32],
             server_label: "Studio".to_owned(),
@@ -282,14 +282,14 @@ mod tests {
     #[test]
     fn an_unconfirmed_unpair_names_the_server_and_keeps_trying() {
         assert_eq!(
-            unpair_message(&pending(UnpairState::Retrying)),
+            unpair_message(&pending(UnpairProgress::Retrying)),
             "Unpair from Studio isn\u{2019}t confirmed yet."
         );
     }
 
     #[test]
     fn a_confirmed_unpair_reports_only_the_key_cleanup_left() {
-        let mut confirmed = pending(UnpairState::Retrying);
+        let mut confirmed = pending(UnpairProgress::Retrying);
         confirmed.server_confirmed = true;
 
         let message = unpair_message(&confirmed);

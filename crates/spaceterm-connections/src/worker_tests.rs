@@ -10,7 +10,7 @@ use super::*;
 #[derive(Default)]
 struct MemoryRecords(Mutex<Document>);
 impl Records for MemoryRecords {
-    fn load(&self) -> Result<Document, ()> {
+    fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, document: &Document) -> Result<Durability, SaveError> {
@@ -22,6 +22,9 @@ impl Records for MemoryRecords {
 #[derive(Default)]
 struct Credentials(Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>);
 impl CredentialStore for Credentials {
+    fn kind(&self) -> crate::StoreKind {
+        crate::StoreKind::Keychain
+    }
     fn read(
         &self,
         key: &[u8; 32],
