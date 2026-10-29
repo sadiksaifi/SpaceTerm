@@ -136,6 +136,13 @@ pub fn plan_shell_integration(
                 xdg_root,
             ));
             environment.push((OsString::from("XDG_DATA_DIRS"), xdg));
+            if kind == ShellKind::Elvish {
+                let rc = resource_root.join("shell-integration/elvish/rc.elv");
+                if !rc.is_file() {
+                    return empty_plan(ShellIntegrationStatus::MissingResources);
+                }
+                arguments.extend([OsString::from("-rc"), rc.into_os_string()]);
+            }
             if kind == ShellKind::Nushell {
                 arguments.extend([
                     OsString::from("--execute"),
@@ -353,6 +360,15 @@ mod tests {
         assert_eq!(
             elvish.status,
             ShellIntegrationStatus::Applied(ShellKind::Elvish)
+        );
+        assert_eq!(
+            elvish.arguments,
+            [
+                OsString::from("-rc"),
+                resources
+                    .join("shell-integration/elvish/rc.elv")
+                    .into_os_string(),
+            ]
         );
         assert!(elvish.environment.iter().any(|(name, value)| {
             name == "XDG_DATA_DIRS"

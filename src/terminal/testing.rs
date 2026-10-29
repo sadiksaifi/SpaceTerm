@@ -19,6 +19,7 @@ impl ShellResourcesFixture {
         for relative in [
             "bash/spaceterm.bash",
             "elvish/lib/spaceterm-integration.elv",
+            "elvish/rc.elv",
             "fish/vendor_conf.d/spaceterm-shell-integration.fish",
             "nushell/vendor/autoload/spaceterm.nu",
             "zsh/.zshenv",
