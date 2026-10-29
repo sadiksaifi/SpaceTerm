@@ -749,6 +749,13 @@ impl TabManager {
         )
     }
 
+    /// The server identity of the Active Tab's Focused Pane, when the server owns it.
+    #[cfg(test)]
+    pub(crate) fn focused_server_pane(&self, cx: &App) -> Option<spaceterm_server::hierarchy::Id> {
+        let view = self.tabs.active_tab().read(cx);
+        view.shared_server_pane(view.focused_pane_id())
+    }
+
     /// Whether a Tab of this strip holds the server Pane `pane`.
     pub(crate) fn presents_shared_pane(
         &self,
