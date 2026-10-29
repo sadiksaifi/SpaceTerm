@@ -55,14 +55,6 @@ pub(super) fn valid_build(build: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
-fn exchange(
-    endpoint: &str,
-    pin: &ServerPin,
-    credential: &DeviceCredential,
-    action: wire::Action,
-) -> Result<(QuicStream, wire::Answer), DirectError> {
-    exchange_checked(endpoint, pin, credential, action, None, None)
-}
 fn exchange_checked(
     endpoint: &str,
     pin: &ServerPin,
@@ -70,10 +62,16 @@ fn exchange_checked(
     action: wire::Action,
     expected_name: Option<&str>,
     exchanges: Option<&mut Vec<[u8; 32]>>,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(QuicStream, wire::Answer), DirectError> {
-    let mut stream = quic::dial(endpoint, pin, credential)?;
+    let deadline = Some(
+        deadline
+            .unwrap_or_else(|| std::time::Instant::now() + quic::HANDSHAKE_LIMIT)
+            .min(std::time::Instant::now() + quic::HANDSHAKE_LIMIT),
+    );
+    let mut stream = quic::dial_until(endpoint, pin, credential, deadline)?;
     let answer = exchange_on(
-        &mut stream,
+        &mut quic::DeadlineMessages::new(&mut stream, deadline),
         pin,
         credential,
         action,
@@ -144,14 +142,18 @@ pub(super) fn connect(
     endpoint: &str,
     paired: &PairedDevice,
     credential: &DeviceCredential,
+    deadline: Option<std::time::Instant>,
 ) -> Result<DirectConnection, DirectError> {
-    let (stream, answer) = exchange(
+    let (stream, answer) = exchange_checked(
         endpoint,
         &paired.pin,
         credential,
         wire::Action::Connect {
             paired: paired.clone(),
         },
+        None,
+        None,
+        deadline,
     )?;
     if !matches!(answer, wire::Answer::Connected) {
         return Err(DirectError::AuthenticationRefused);
@@ -180,6 +182,7 @@ pub(super) fn prepare(
         prepared: Some((invitation.payload.clone(), name)),
         admitted: None,
         exchanges: Vec::new(),
+        deadline: None,
     })
 }
 pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, DirectError> {
@@ -199,6 +202,7 @@ pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, Dire
         },
         Some(&invitation.server_name),
         Some(&mut enrollment.exchanges),
+        enrollment.deadline,
     )?;
     match answer {
         wire::Answer::Claim(claim)
@@ -228,7 +232,7 @@ pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, Dire
     }
 }
 pub(super) fn finish(enrollment: &Enrollment) -> Result<Option<PairedDevice>, DirectError> {
-    let (_, answer) = exchange(
+    let (_, answer) = exchange_checked(
         &enrollment.endpoint,
         &enrollment.pin,
         &enrollment.credential,
@@ -236,6 +240,9 @@ pub(super) fn finish(enrollment: &Enrollment) -> Result<Option<PairedDevice>, Di
             claim: enrollment.claim,
             key: crypto::public(enrollment.credential.expose_bytes())?,
         },
+        None,
+        None,
+        enrollment.deadline,
     )?;
     match answer {
         wire::Answer::Enrollment(paired) => Ok(paired),
@@ -248,8 +255,9 @@ pub(super) fn revoke(
     credential: &DeviceCredential,
     operation: OperationId,
     target: PairingId,
+    deadline: Option<std::time::Instant>,
 ) -> Result<RevocationReceipt, DirectError> {
-    let (_, answer) = exchange(
+    let (_, answer) = exchange_checked(
         endpoint,
         &actor.pin,
         credential,
@@ -258,6 +266,9 @@ pub(super) fn revoke(
             operation,
             target,
         },
+        None,
+        None,
+        deadline,
     )?;
     match answer {
         wire::Answer::Revoked(receipt)
@@ -271,7 +282,7 @@ pub(super) fn revoke(
     }
 }
 pub(super) fn cancel(enrollment: &Enrollment) -> Result<Option<RevocationReceipt>, DirectError> {
-    let (_, answer) = exchange(
+    let (_, answer) = exchange_checked(
         &enrollment.endpoint,
         &enrollment.pin,
         &enrollment.credential,
@@ -279,6 +290,9 @@ pub(super) fn cancel(enrollment: &Enrollment) -> Result<Option<RevocationReceipt
             claim: enrollment.claim,
             key: crypto::public(enrollment.credential.expose_bytes())?,
         },
+        None,
+        None,
+        enrollment.deadline,
     )?;
     match answer {
         wire::Answer::Cancelled(receipt) => Ok(receipt),
