@@ -142,7 +142,9 @@ fn native_effects(pane: &Pane) -> Result<(), Box<dyn Error>> {
         "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
     )?;
     let request = await_effect(pane, 3)?;
-    assert!(matches!(request.effect, Effect::ClipboardRead { .. }));
+    if !matches!(request.effect, Effect::ClipboardRead { .. }) {
+        return Err(format!("expected ClipboardRead, received {:?}", request.effect).into());
+    }
     pane.effect_done(3, request.id, Completion::Text("abc".into()))?;
     await_marker(pane, "1b5d35323b633b59574a6a07")?;
     command(
@@ -182,13 +184,16 @@ fn native_effects(pane: &Pane) -> Result<(), Box<dyn Error>> {
 
 /// Waits for the next native effect request the server pushes under focus generation
 /// `generation`. As the desktop does, it drops a request raised under another generation, such as
-/// the shell integration's report of an earlier command.
+/// the shell integration's report of an earlier command. Command Finished is consumed separately
+/// from native requests, including when it shares the current focus generation.
 fn await_effect(pane: &Pane, generation: u64) -> Result<effects::Request, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let wait = deadline.saturating_duration_since(Instant::now());
         let request = pane.await_effect(wait)?.ok_or("native effect timed out")?;
-        if request.generation == generation {
+        if request.generation == generation
+            && !matches!(request.effect, effects::Effect::CommandFinished { .. })
+        {
             return Ok(request);
         }
     }
@@ -201,7 +206,7 @@ fn attached(claimed: Claimed, failure: &'static str) -> Result<Pane, Box<dyn Err
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "3".into())
+        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
         .parse()?;
     let first = ServerConnection::for_development_client("input-first", major)?;
     let second = ServerConnection::for_development_client("input-second", major)?;

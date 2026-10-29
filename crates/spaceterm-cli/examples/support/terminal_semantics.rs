@@ -299,7 +299,7 @@ fn semantics(pane: &Pane, until: Instant) -> Result<accessibility::Snapshot> {
         }
     }
 }
-/// The caller owns the Pane. Every route of protocol major 3 carries Scrollback pages,
+/// The caller owns the Pane. Every route of protocol major 4 carries Scrollback pages,
 /// accessibility and graphics. No terminal content, remote path or native error is returned as evidence.
 pub fn exercise(pane: &Pane) -> Result<Report> {
     let script = "stty -echo; python3 -c 'import base64,sys; w=sys.stdout.write; w(\"\\033[3J\\033[2J\\033[H\"); [w(\"ST-NATIVE-%05d\\n\"%i) for i in range(5000)]; d=base64.b64encode(bytes([255,0,0,255])*320*240).decode(); [w(\"\\033_G\"+(\"a=T,f=32,s=320,v=240,i=541,q=2,\" if i==0 else \"\")+\"m=%d;\"%int(i+4096<len(d))+d[i:i+4096]+\"\\033\\\\\") for i in range(0,len(d),4096)]; w(\"\\nST-SEMANTICS-DONE\\n\"); sys.stdout.flush()'";
