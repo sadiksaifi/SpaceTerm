@@ -274,12 +274,14 @@ enum Finish {
 }
 
 /// `pane run`. `connect` opens a new link when the reply or the run's channel is lost.
+/// `directory` is `--directory`, resolved by the route's path rules.
 #[allow(clippy::too_many_arguments, reason = "one command's whole context")]
 pub fn run(
     link: &ServerLink,
     connect: &mut dyn FnMut() -> Result<ServerLink, Failure>,
     target: &PaneTarget,
     args: &RunArgs,
+    directory: Option<PathBuf>,
     stdin: &mut dyn BufRead,
     runs: &mut Runs,
     deadline: Deadline,
@@ -287,13 +289,6 @@ pub fn run(
     let command = match command_line(&args.command, stdin) {
         Ok(command) => command,
         Err(failure) => return Done::failed(failure),
-    };
-    let directory = match &args.directory {
-        Some(directory) if directory.is_relative() => match std::env::current_dir() {
-            Ok(current) => Some(current.join(directory)),
-            Err(_) => return Done::failed(usage("--directory")),
-        },
-        directory => directory.clone(),
     };
     let claimed = match claim(link, target, args, directory, deadline.or(CLAIM_TIMEOUT)) {
         Ok(claimed) => claimed,
