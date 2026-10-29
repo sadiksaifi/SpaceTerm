@@ -1135,3 +1135,41 @@ fn named_keys_decode_to_the_terminals_own_keys() {
     let control = decode_key(named("C-c").unwrap().remove(0)).unwrap();
     assert!(control.modifiers.control);
 }
+
+/// Zsh's correction changes the command the shell starts, so the original run is unconfirmed.
+#[test]
+#[cfg_attr(
+    not(feature = "native-tests"),
+    ignore = "starts installed shells; run mise run cli:shells:native"
+)]
+fn zsh_autocorrect_reports_cmdline_mismatch() {
+    let Some(shell) = installed("zsh") else {
+        return;
+    };
+    let mut bench = Bench::new(&shell);
+    assert!(matches!(
+        bench.run_at_prompt(1,
+            "function spaceterm_correct_target() { print CORRECTED-$((40+2)); }; SPROMPT='CLI-'CORRECTION'? '; setopt CORRECT"),
+        RunReply::Admitted { .. }
+    ));
+    assert!(matches!(
+        bench.await_receipt().state,
+        RunState::Finished {
+            exit_status: Some(0),
+            ..
+        }
+    ));
+    assert!(matches!(
+        bench.run_at_prompt(2, "spaceterm_correct_targte"),
+        RunReply::Admitted { .. }
+    ));
+    bench.await_row("CLI-CORRECTION?");
+    bench.input(vec![text("y")]);
+    let receipt = bench.await_receipt();
+    assert_eq!(receipt.run, RunId([2; 16]));
+    assert_eq!(
+        receipt.state,
+        RunState::Unconfirmed(RunDoubt::CmdlineMismatch)
+    );
+    bench.await_row("CORRECTED-42");
+}
