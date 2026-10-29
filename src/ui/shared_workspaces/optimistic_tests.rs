@@ -39,7 +39,6 @@ impl DelayedServer {
                     pending_operation: None,
                     rejected: None,
                     outcome: None,
-                    presented: None,
                     error: None,
                     failed_attempts: 0,
                 },

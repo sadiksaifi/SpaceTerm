@@ -1350,12 +1350,7 @@ mod edits {
 
     fn shared(inventory: Option<Inventory>) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(inventory));
-        (reader(&edits), edits)
-    }
-
-    /// A reading of `edits`, as each Workspace Window and each process makes its own.
-    fn reader(edits: &Rc<ScriptedEdits>) -> SharedWorkspaces {
-        let source = SharedEditSource::new(Rc::clone(edits) as Rc<dyn SharedWorkspaceEdits>);
+        let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
         let session_factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
@@ -1368,7 +1363,7 @@ mod edits {
             ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
             &PaneConstruction::testing(),
         );
-        SharedWorkspaces::new(source, sessions)
+        (SharedWorkspaces::new(source, sessions), edits)
     }
 
     fn renamed(name: &str, version: u64) -> Inventory {
@@ -1535,32 +1530,6 @@ mod edits {
             SharedWorkspaceDraft::Name("Recovered".to_owned())
         );
         assert_eq!(conflict.authoritative.to_string(), "Theirs");
-    }
-
-    #[test]
-    fn a_reviewed_conflict_should_never_reach_review_again() {
-        // A relaunch recovers a refused rename, and a later window or process reads it again.
-        let (mut first, edits) = shared(Some(root_only()));
-        edits.submit_for_recovery(Mutation::RenameWorkspace {
-            workspace: WORKSPACE,
-            version: 0,
-            name: "Recovered".to_owned(),
-        });
-        edits.set_inventory(renamed("Theirs", 1));
-        edits.answer(Outcome::Conflict);
-        let poll = first.poll();
-        bind(&mut first, poll.inventory.as_ref().expect("inventory"));
-        let reviewed = first.take_conflict().map(|conflict| conflict.draft);
-
-        let mut later = reader(&edits);
-        let poll = later.poll();
-        bind(&mut later, poll.inventory.as_ref().expect("inventory"));
-
-        assert_eq!(
-            reviewed,
-            Some(SharedWorkspaceDraft::Name("Recovered".to_owned()))
-        );
-        assert!(later.take_conflict().is_none());
     }
 
     #[test]

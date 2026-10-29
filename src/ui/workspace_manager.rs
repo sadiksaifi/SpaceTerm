@@ -3102,30 +3102,21 @@ impl WorkspaceManager {
         self.continue_server_directory(window, cx);
         // New Workspace chosen with no Workspace Window open waits for this reading.
         self.create_pending_workspace(key, window, cx);
-        // Each failed Worktree operation is presented once: by the form that waits for it, or
-        // else here. A form that closed before its answer arrived leaves it to the window.
-        let creating = self.worktree_form_creating(cx);
-        if let Some(shared) = self.shared.get_mut(key)
-            && shared.worktree_failure().is_some_and(|failure| {
-                !(creating
-                    && matches!(
-                        failure.operation,
-                        spaceterm_server::worktree::Operation::Create { .. }
-                    ))
-            })
-            && let Some(failure) = shared.take_worktree_failure()
+        if let Some((operation, error)) = self
+            .shared
+            .get_mut(key)
+            .and_then(|s| s.take_worktree_failure())
         {
             use spaceterm_server::worktree::Operation;
-            let presented = shared.was_presented(failure.sequence)
-                || matches!(failure.operation, Operation::SetLocation { .. });
-            shared.presented(failure.sequence);
+            let presented = match &operation {
+                Operation::Create { path, .. } => {
+                    self.worktree_creation_failure_presented(path, error, cx)
+                }
+                Operation::SetLocation { .. } => true,
+                Operation::Remove { .. } | Operation::OpenTab { .. } => false,
+            };
             if !presented {
-                self.server_worktree_operation_failure(
-                    &failure.operation,
-                    failure.error,
-                    window,
-                    cx,
-                );
+                self.server_worktree_operation_failure(&operation, error, window, cx);
             }
         }
         self.save_shared_arrangements(cx);

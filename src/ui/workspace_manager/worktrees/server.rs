@@ -126,7 +126,6 @@ impl WorkspaceManager {
                     workspace,
                     branches,
                     machine,
-                    answered: Rc::default(),
                 });
                 let probe: LocationProbe =
                     Rc::new(|_| Ok(crate::platform::local_filesystem::NewDirectoryTarget::Free));

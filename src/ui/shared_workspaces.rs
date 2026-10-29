@@ -128,10 +128,6 @@ mod development {
 
         /// Reconnects now, rather than after the reconnect delay, while the connection is down.
         fn retry(&self) {}
-
-        /// Records that the outcome of `sequence` was presented. The snapshot reports it from now
-        /// on, and the outcome is never presented again, in this process or a later one.
-        fn presented(&self, _sequence: u64) {}
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
@@ -157,10 +153,6 @@ mod development {
 
         fn retry(&self) {
             Self::retry(self);
-        }
-
-        fn presented(&self, sequence: u64) {
-            Self::presented(self, sequence);
         }
     }
 
@@ -226,16 +218,6 @@ mod development {
         /// Asks the transport to reconnect now.
         pub(crate) fn retry(&self) {
             self.transport().retry();
-        }
-
-        /// Records that the outcome of `sequence` was presented, so no reader presents it again.
-        pub(crate) fn presented(&self, sequence: u64) {
-            self.transport().presented(sequence);
-        }
-
-        /// Whether a reader already presented the outcome of `sequence`.
-        pub(crate) fn was_presented(&self, sequence: u64) -> bool {
-            self.transport().snapshot().presented == Some(sequence)
         }
 
         /// The transport this source submits to now.
@@ -1390,8 +1372,10 @@ mod development {
         /// Unread refused edits, each retaining its own draft and authoritative snapshot.
         conflicts: VecDeque<PendingConflict>,
         refusal: Option<SharedRefusal>,
-        /// A failed Worktree operation nobody has presented yet, by its outcome's sequence.
-        worktree_failure: Option<WorktreeFailure>,
+        worktree_failure: Option<(
+            spaceterm_server::worktree::Operation,
+            spaceterm_server::worktree::Error,
+        )>,
         /// The inventory the server published last, including the live Session facts a close
         /// confirmation reads. Those facts can change without a new membership revision.
         latest: Option<Inventory>,
@@ -1422,17 +1406,7 @@ mod development {
     /// A refused same-field edit whose draft is kept until this client can name the Workspace it
     /// belongs to. An answer recovered after a relaunch arrives before any local Workspace exists,
     /// so the draft waits for the projection rather than being dropped.
-    /// A failed Worktree operation, which the form that asked for it or the window presents.
-    #[derive(Clone)]
-    pub(crate) struct WorktreeFailure {
-        pub(crate) sequence: u64,
-        pub(crate) operation: spaceterm_server::worktree::Operation,
-        pub(crate) error: spaceterm_server::worktree::Error,
-    }
-
     struct PendingConflict {
-        /// The sequence of the refusal's outcome, acknowledged once review presents it.
-        sequence: u64,
         workspace: Id,
         field: SharedWorkspaceField,
         reviewed_version: u64,
@@ -2041,24 +2015,16 @@ mod development {
             submission
         }
 
-        /// The failed Worktree operation still to present, which stays until someone takes it.
-        pub(crate) fn worktree_failure(&self) -> Option<&WorktreeFailure> {
-            self.worktree_failure.as_ref()
-        }
-        pub(crate) fn take_worktree_failure(&mut self) -> Option<WorktreeFailure> {
-            self.worktree_failure.take()
-        }
-        /// Whether the form or the window already presented the outcome of `sequence`.
-        pub(crate) fn was_presented(&self, sequence: u64) -> bool {
-            self.edits.was_presented(sequence)
-        }
-        /// Records that the outcome of `sequence` was presented, so no reader presents it again.
-        pub(crate) fn presented(&self, sequence: u64) {
-            self.edits.presented(sequence);
-        }
-
         /// A close the server refused as stale, once, with the local target this process asked
         /// to close when it is the one that asked. A recovered answer names no local target.
+        pub(crate) fn take_worktree_failure(
+            &mut self,
+        ) -> Option<(
+            spaceterm_server::worktree::Operation,
+            spaceterm_server::worktree::Error,
+        )> {
+            self.worktree_failure.take()
+        }
         pub(crate) fn take_stale_close(
             &mut self,
         ) -> Option<(ServerCloseTarget, Option<CloseTarget>)> {
@@ -2134,7 +2100,6 @@ mod development {
             let pending = self.conflicts.remove(index)?;
             let workspace = self.local(pending.workspace)?;
             self.edits.pending.borrow_mut().release_conflicts(1);
-            self.edits.presented(pending.sequence);
             Some(SharedWorkspaceConflict {
                 workspace,
                 field: pending.field,
@@ -2263,10 +2228,11 @@ mod development {
                 self.pending = snapshot.pending;
                 poll.changed = true;
             }
-            if let Some(outcome) = snapshot.outcome.as_ref().filter(|outcome| {
-                self.consumed != Some(outcome.sequence)
-                    && snapshot.presented != Some(outcome.sequence)
-            }) {
+            if let Some(outcome) = snapshot
+                .outcome
+                .as_ref()
+                .filter(|outcome| self.consumed != Some(outcome.sequence))
+            {
                 self.consumed = Some(outcome.sequence);
                 // The answer and the authoritative values come from one snapshot, so a conflict
                 // never names a value an accepted edit has already replaced.
@@ -2304,17 +2270,11 @@ mod development {
                 // A batch can contain an older conflict for a Workspace removed by its latest
                 // publication. Keep every other draft and release only the missing targets.
                 let before = self.conflicts.len();
-                let edits = &self.edits;
                 self.conflicts.retain(|pending| {
-                    let kept = inventory
+                    inventory
                         .workspaces
                         .iter()
-                        .any(|w| w.id == pending.workspace);
-                    // The Missing refusal below presents what happened to the draft.
-                    if !kept {
-                        edits.presented(pending.sequence);
-                    }
-                    kept
+                        .any(|w| w.id == pending.workspace)
                 });
                 let removed = before - self.conflicts.len();
                 if removed != 0 {
@@ -2357,19 +2317,11 @@ mod development {
             own: bool,
             poll: &mut SharedPoll,
         ) {
-            // Settling presents most answers. A queued draft review and a Worktree failure
-            // acknowledge their presentation themselves, once someone shows them.
-            let mut presented = true;
             match outcome.outcome {
-                Outcome::Pending => presented = false,
+                Outcome::Pending => {}
                 Outcome::WorktreeFailed(error) => {
                     if let Mutation::Worktree(operation) = &outcome.mutation {
-                        self.worktree_failure = Some(WorktreeFailure {
-                            sequence: outcome.sequence,
-                            operation: operation.clone(),
-                            error,
-                        });
-                        presented = false;
+                        self.worktree_failure = Some((operation.clone(), error));
                     }
                 }
                 // An accepted change reaches every client through the inventory, which names the
@@ -2384,13 +2336,12 @@ mod development {
                     }
                 }
                 Outcome::Conflict => {
-                    if let Some(conflict) = inventory.and_then(|inventory| {
-                        Self::conflicted(&outcome.mutation, inventory, outcome.sequence)
-                    }) {
+                    if let Some(conflict) = inventory
+                        .and_then(|inventory| Self::conflicted(&outcome.mutation, inventory))
+                    {
                         // Moving a completion into review keeps its place in the shared bound.
                         self.edits.pending.borrow_mut().retain_conflict();
                         self.conflicts.push_back(conflict);
-                        presented = false;
                     }
                 }
                 Outcome::Missing => self.refusal = Some(SharedRefusal::Missing),
@@ -2404,18 +2355,11 @@ mod development {
                     }
                 }
             }
-            if presented {
-                self.edits.presented(outcome.sequence);
-            }
         }
 
         /// The draft one refused same-field edit kept, beside the value the server holds in the
         /// snapshot that carried the refusal.
-        fn conflicted(
-            mutation: &Mutation,
-            inventory: &Inventory,
-            sequence: u64,
-        ) -> Option<PendingConflict> {
+        fn conflicted(mutation: &Mutation, inventory: &Inventory) -> Option<PendingConflict> {
             let authority = |server: Id| {
                 inventory
                     .workspaces
@@ -2426,7 +2370,6 @@ mod development {
                 Mutation::RenameWorkspace {
                     workspace, name, ..
                 } => Some(PendingConflict {
-                    sequence,
                     workspace: *workspace,
                     field: SharedWorkspaceField::Name,
                     reviewed_version: authority(*workspace)?.name_version,
@@ -2438,7 +2381,6 @@ mod development {
                     directory,
                     ..
                 } => Some(PendingConflict {
-                    sequence,
                     workspace: *workspace,
                     field: SharedWorkspaceField::PinnedDirectory,
                     reviewed_version: authority(*workspace)?.pin_version,
@@ -3190,7 +3132,6 @@ mod development {
                         pending_operation: None,
                         rejected: None,
                         outcome: None,
-                        presented: None,
                         error: None,
                         failed_attempts: 0,
                     }),
@@ -3312,12 +3253,6 @@ mod development {
             fn retry(&self) {
                 self.retries
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-
-            fn presented(&self, sequence: u64) {
-                self.publish(|snapshot| {
-                    snapshot.presented = snapshot.presented.max(Some(sequence));
-                });
             }
         }
     }

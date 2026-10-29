@@ -26,12 +26,18 @@ pub(super) struct SidebarWorktrees {
 }
 
 impl WorkspaceManager {
-    /// Whether the New Worktree form waits for git, so it presents the answer itself.
-    pub(super) fn worktree_form_creating(&self, cx: &App) -> bool {
-        self.sidebar_worktrees
-            .form
-            .as_ref()
-            .is_some_and(|form| form.read(cx).is_creating())
+    pub(super) fn worktree_creation_failure_presented(
+        &self,
+        path: &std::path::Path,
+        error: spaceterm_server::worktree::Error,
+        cx: &App,
+    ) -> bool {
+        self.sidebar_worktrees.form.as_ref().is_some_and(|form| {
+            let form = form.read(cx);
+            form.is_open()
+                || (error == spaceterm_server::worktree::Error::Interrupted
+                    && form.interrupted_path() == Some(path))
+        })
     }
     /// Shows the Tabs outside every Worktree, which an expanded Workspace row stands for once its
     /// Workspace has left a repository. Returns whether the Active Tab changed.
