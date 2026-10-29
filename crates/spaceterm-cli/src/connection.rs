@@ -114,7 +114,7 @@ impl CommandOutput {
             &text,
             "",
             mode,
-            crate::interrupt::finish(),
+            crate::interrupt::finish(self.exit),
             output,
             errors,
         )

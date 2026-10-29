@@ -259,7 +259,7 @@ fn complete<D: serde::Serialize>(cli: &Cli, envelope: Envelope<D>, text: &str) -
         &format!("{text}\n"),
         "",
         (&cli.global).into(),
-        spaceterm_cli::interrupt::finish(),
+        spaceterm_cli::interrupt::finish(envelope.exit()),
         &mut std::io::stdout().lock(),
         &mut std::io::stderr().lock(),
     ))
@@ -325,15 +325,16 @@ fn partial_path(argv: &[OsString]) -> String {
     path.join(".")
 }
 fn finish(command: &str, json: bool, failure: Failure) -> ExitCode {
+    let envelope = Envelope::error(command, None, failure, Empty {});
     ExitCode::from(contract::render(
-        &Envelope::error(command, None, failure, Empty {}),
+        &envelope,
         "",
         "",
         contract::Mode {
             json,
             ..contract::Mode::default()
         },
-        spaceterm_cli::interrupt::finish(),
+        spaceterm_cli::interrupt::finish(envelope.exit()),
         &mut std::io::stdout().lock(),
         &mut std::io::stderr().lock(),
     ))

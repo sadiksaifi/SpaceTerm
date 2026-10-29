@@ -40,6 +40,13 @@ struct TerminalSessionLaunch {
     restricted: bool,
 }
 
+pub(super) struct StartedPty {
+    owner: NativePtyOwner,
+    terminal_name: &'static str,
+    restricted: bool,
+    integration_expected: bool,
+}
+
 impl TerminalSessionLaunch {
     fn local(
         planner: ShellLaunchPlanner,
@@ -239,9 +246,15 @@ impl TerminalRuntime {
                     close_handle.confirm_unstarted();
                 })?;
                 let terminal_name = prepared.terminal_name();
+                let integration_expected = prepared.integration_expected();
                 let owner =
                     NativePtyOwner::start(factory.as_ref(), prepared, size, output, close_handle)?;
-                Ok((owner, terminal_name, launch.restricted))
+                Ok(StartedPty {
+                    owner,
+                    terminal_name,
+                    restricted: launch.restricted,
+                    integration_expected,
+                })
             },
         )
     }
@@ -271,8 +284,12 @@ impl TerminalRuntime {
             LocalFilesystemAuthority::testing(),
             test_terminal_appearance_update(),
             move |size, output, close_handle| {
-                start_native_pty(size, output, close_handle)
-                    .map(|owner| (owner, identity::TERM_FALLBACK, false))
+                start_native_pty(size, output, close_handle).map(|owner| StartedPty {
+                    owner,
+                    terminal_name: identity::TERM_FALLBACK,
+                    restricted: false,
+                    integration_expected: false,
+                })
             },
         )
         .map(|(runtime, subscription)| (runtime, subscription.events, subscription.accessibility))
@@ -288,10 +305,8 @@ impl TerminalRuntime {
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
             &NativePtyCloseHandle,
-        ) -> Result<
-            (NativePtyOwner, &'static str, bool),
-            NativePtyStartupFailure,
-        > + Send
+        ) -> Result<StartedPty, NativePtyStartupFailure>
+        + Send
         + 'static,
     ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         let (command_tx, command_rx) = mpsc::channel();
@@ -319,7 +334,7 @@ impl TerminalRuntime {
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
                 let _completion = WorkerEventLifetime(worker_events.clone());
-                let (native_pty, terminal_name, restricted) = match start_native_pty(
+                let StartedPty { owner: native_pty, terminal_name, restricted, integration_expected } = match start_native_pty(
                     pty_size(geometry),
                     native_pty_output,
                     &worker_native_pty_close,
@@ -352,6 +367,7 @@ impl TerminalRuntime {
                         fallback_title,
                         terminal_name,
                         restricted,
+                        integration_expected,
                         local_filesystem,
                         initial_appearance,
                     },

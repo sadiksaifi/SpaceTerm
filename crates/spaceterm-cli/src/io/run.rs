@@ -177,7 +177,7 @@ fn refusal(refusal: RunRefusal) -> Failure {
         RunRefusal::NotAtPrompt | RunRefusal::InputPending | RunRefusal::RunPending => {
             Failure::new(Code::NotAtPrompt)
         }
-        RunRefusal::NoIntegration => unsupported(UnsupportedSessionReason::NoIntegration),
+        RunRefusal::NoIntegration { .. } => unsupported(UnsupportedSessionReason::NoIntegration),
         RunRefusal::NoBracketedPaste => unsupported(UnsupportedSessionReason::NoBracketedPaste),
         RunRefusal::SessionChanged => Failure::new(Code::SessionChanged),
         RunRefusal::Capacity => Failure::new(Code::Capacity),
@@ -337,6 +337,7 @@ pub fn run(
     let mut paste_wait = None;
     let admitted = shown.and_then(|()| {
         loop {
+            crate::interrupt::dispatch()?;
             let reply = request(
                 link,
                 Operation::Run {
@@ -351,7 +352,9 @@ pub fn run(
             // Tab creation or this call started it. Once its first owner-marked prompt arrives,
             // give its line editor a separate interval to enable bracketed paste.
             let retry_until = match &reply {
-                Ok(ReplyBody::Run(RunReply::Refused(RunRefusal::NoIntegration))) => startup.until(),
+                Ok(ReplyBody::Run(RunReply::Refused(RunRefusal::NoIntegration {
+                    first_prompt_pending: true,
+                }))) => startup.until(),
                 Ok(ReplyBody::Run(RunReply::Refused(RunRefusal::NoBracketedPaste))) => {
                     Some(*paste_wait.get_or_insert_with(|| Instant::now() + PASTE_MODE_WAIT))
                 }

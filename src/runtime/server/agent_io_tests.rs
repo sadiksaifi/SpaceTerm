@@ -263,7 +263,7 @@ impl Bench {
             match self.run(run, command) {
                 // A shell may mark its prompt before its line editor turns on bracketed paste.
                 RunReply::Refused(
-                    RunRefusal::NoIntegration
+                    RunRefusal::NoIntegration { .. }
                     | RunRefusal::NotAtPrompt
                     | RunRefusal::NoBracketedPaste,
                 ) if Instant::now() < deadline => {
@@ -386,7 +386,9 @@ fn integrated_shells_run_one_command_and_bind_its_status() {
             assert!(
                 matches!(
                     reply,
-                    RunReply::Refused(RunRefusal::NoBracketedPaste | RunRefusal::NoIntegration)
+                    RunReply::Refused(
+                        RunRefusal::NoBracketedPaste | RunRefusal::NoIntegration { .. }
+                    )
                 ),
                 "an old bash is unsupported, not {reply:?}"
             );
@@ -512,7 +514,9 @@ fn shells_without_prompt_markers_are_unsupported() {
         bench.await_row("READY");
         assert_eq!(
             bench.run(1, "true"),
-            RunReply::Refused(RunRefusal::NoIntegration),
+            RunReply::Refused(RunRefusal::NoIntegration {
+                first_prompt_pending: false
+            }),
             "{name}"
         );
     }

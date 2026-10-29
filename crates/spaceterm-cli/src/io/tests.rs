@@ -644,6 +644,55 @@ fn first_run_waits_for_slow_bash_startup() {
     slow_startup("BASH", "/opt/homebrew/bin/bash", ".bash_profile");
 }
 
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn unsupported_shells_and_disabled_integration_fail_without_startup_wait() {
+    environment();
+    let original = std::env::var_os("SHELL").unwrap();
+    let integration = std::env::var_os("SPACETERM_SHELL_INTEGRATION");
+    let mut results = Vec::new();
+    for (shell, mode) in [("/bin/dash".to_owned(), "on"), (shell(), "off")] {
+        if !std::path::Path::new(&shell).is_file() {
+            continue;
+        }
+        // SAFETY: these native tests run serially, before each server captures its launch plan.
+        unsafe {
+            std::env::set_var("SHELL", shell);
+            std::env::set_var("SPACETERM_SHELL_INTEGRATION", mode);
+        }
+        let mut server = Server::start();
+        let link = server.connect(1);
+        let (workspace, pane) = workspace(&link, 1);
+        let started = Instant::now();
+        let done = run::run(
+            &link,
+            &mut || Ok(link.clone()),
+            &target(workspace, pane, false),
+            &run_args("printf SHOULD_NOT_RUN"),
+            None,
+            &mut std::io::empty(),
+            &mut runs(),
+            Deadline::after(Some(Duration::from_secs(3))),
+        );
+        results.push((done, started.elapsed()));
+    }
+    // SAFETY: each server has stopped and these tests run serially.
+    unsafe {
+        std::env::set_var("SHELL", original);
+        match integration {
+            Some(value) => std::env::set_var("SPACETERM_SHELL_INTEGRATION", value),
+            None => std::env::remove_var("SPACETERM_SHELL_INTEGRATION"),
+        }
+    }
+    for (done, elapsed) in results {
+        assert_eq!(done.failure.unwrap().code, Code::UnsupportedSession);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "unsupported Session waited {elapsed:?}"
+        );
+    }
+}
+
 fn slow_startup(name: &str, fallback: &str, rc: &str) {
     environment();
     let original = std::env::var_os("SHELL").unwrap();

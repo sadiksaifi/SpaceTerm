@@ -86,7 +86,7 @@ impl Reply {
             &self.stdout,
             "",
             mode,
-            crate::interrupt::finish(),
+            crate::interrupt::finish(self.envelope.exit()),
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )

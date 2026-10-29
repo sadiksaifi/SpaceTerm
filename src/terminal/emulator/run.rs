@@ -18,6 +18,10 @@ pub(crate) struct AdmittedRun {
 }
 
 impl TerminalEmulator {
+    pub(crate) fn expect_integration(&mut self, expected: bool) {
+        self.integration_expected = expected;
+    }
+
     /// Counts input written to the PTY since the owning shell's last fresh prompt.
     pub(crate) fn note_input(&mut self, bytes: usize) {
         self.metadata.note_input(bytes);
@@ -29,7 +33,11 @@ impl TerminalEmulator {
     pub(crate) fn admit_run(&mut self, command: &str) -> Result<AdmittedRun, RunRefusal> {
         let prompt = self.metadata.owned_prompt();
         match prompt.zone {
-            None => return Err(RunRefusal::NoIntegration),
+            None => {
+                return Err(RunRefusal::NoIntegration {
+                    first_prompt_pending: self.integration_expected,
+                });
+            }
             Some(PromptZone::Prompt | PromptZone::CommandInput) => {}
             Some(_) => return Err(RunRefusal::NotAtPrompt),
         }

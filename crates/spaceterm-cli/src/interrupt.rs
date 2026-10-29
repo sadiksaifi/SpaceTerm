@@ -9,7 +9,7 @@
 //! A command that never called [`install`], such as a unit test, is never interrupted.
 use crate::contract::{self, Code, Empty, Envelope, Failure, Mode};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long a command keeps resolving what it dispatched after `SIGINT`.
@@ -23,14 +23,14 @@ struct Phase {
     dispatched: bool,
     /// Live [`Cooperation`]s: code that withdraws what it opened when interrupted.
     cooperating: u32,
-    /// The final result is being written, so the handler leaves output to it.
-    finishing: bool,
+    /// The final result's exit status while output is being written.
+    finishing: Option<u8>,
     interrupted: Option<Instant>,
 }
 
 static PHASE: Mutex<Option<Phase>> = Mutex::new(None);
-/// Set by the signal itself, so a waiting loop can read it without the lock.
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// Counted by the signal itself, so dispatch and output cancellation need no handler-thread wake.
+static INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
 
 fn phase() -> std::sync::MutexGuard<'static, Option<Phase>> {
     PHASE.lock().unwrap_or_else(|e| e.into_inner())
@@ -39,6 +39,14 @@ fn phase() -> std::sync::MutexGuard<'static, Option<Phase>> {
 /// Takes over `SIGINT` for the command at `command`, before any effect.
 pub fn install(command: &str, mode: Mode) -> Result<(), Failure> {
     let storage = || Failure::new(Code::StorageUnavailable);
+    // SAFETY: the signal callback only increments a static atomic. Dispatch observes SIGINT
+    // even before the interrupt thread wakes to process it.
+    unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGINT, || {
+            INTERRUPTS.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+    .map_err(|_| storage())?;
     let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT])
         .map_err(|_| storage())?;
     *phase() = Some(Phase {
@@ -46,14 +54,26 @@ pub fn install(command: &str, mode: Mode) -> Result<(), Failure> {
         mode,
         dispatched: false,
         cooperating: 0,
-        finishing: false,
+        finishing: None,
         interrupted: None,
     });
     std::thread::Builder::new()
         .name("spaceterm-interrupt".into())
         .spawn(move || {
-            for _ in signals.forever() {
-                interrupted_now();
+            loop {
+                for _ in signals.pending() {
+                    interrupted_now();
+                }
+                let guard = phase();
+                if let Some(phase) = guard.as_ref()
+                    && let Some(exit) = phase.finishing
+                    && (INTERRUPTS.load(Ordering::SeqCst) > 1
+                        || phase.interrupted.is_some_and(|at| at.elapsed() >= GRACE))
+                {
+                    exit_output(exit);
+                }
+                drop(guard);
+                std::thread::sleep(TICK);
             }
         })
         .map_err(|_| storage())?;
@@ -61,13 +81,19 @@ pub fn install(command: &str, mode: Mode) -> Result<(), Failure> {
 }
 
 fn interrupted_now() {
-    INTERRUPTED.store(true, Ordering::SeqCst);
     let mut guard = phase();
     let Some(phase) = guard.as_mut() else {
         return;
     };
-    phase.interrupted.get_or_insert_with(Instant::now);
-    if phase.dispatched || phase.cooperating > 0 || phase.finishing {
+    let repeated = INTERRUPTS.load(Ordering::SeqCst) > 1;
+    let at = *phase.interrupted.get_or_insert_with(Instant::now);
+    if let Some(exit) = phase.finishing {
+        if repeated || at.elapsed() >= GRACE {
+            exit_output(exit);
+        }
+        return;
+    }
+    if phase.dispatched || phase.cooperating > 0 {
         return;
     }
     // Nothing was dispatched, so nothing needs resolving. The lock stays held, so no effect
@@ -96,23 +122,48 @@ fn interrupted_now() {
     } else {
         let _ = write_all(libc::STDERR_FILENO, &stderr);
     }
-    std::process::exit(i32::from(exit));
+    exit_process(exit);
 }
 
 fn write_all(fd: libc::c_int, mut bytes: &[u8]) -> std::io::Result<()> {
-    while !bytes.is_empty() {
-        // SAFETY: writes at most `bytes.len()` bytes from a live buffer.
-        let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
-        if count < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        bytes = &bytes[count as usize..];
+    // The emergency writer cannot wait for a reader. Restore the inherited flags afterward:
+    // the parent can still share this open file description after the CLI exits.
+    // SAFETY: fcntl acts only on the supplied standard descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    Ok(())
+    let written = (|| {
+        let until = Instant::now() + TICK;
+        while !bytes.is_empty() {
+            // SAFETY: writes at most `bytes.len()` bytes from a live buffer.
+            let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            if count < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted && Instant::now() < until {
+                    continue;
+                }
+                return Err(error);
+            }
+            if count == 0 || Instant::now() >= until {
+                break;
+            }
+            bytes = &bytes[count as usize..];
+        }
+        Ok(())
+    })();
+    // SAFETY: fd remains live and flags came from this descriptor before the bounded write.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    written
+}
+
+fn exit_output(exit: u8) -> ! {
+    exit_process(if exit == 7 { 7 } else { 130 });
+}
+
+fn exit_process(exit: u8) -> ! {
+    // SAFETY: output cancellation must not run exit cleanup that could wait for stdout's lock.
+    unsafe { libc::_exit(i32::from(exit)) }
 }
 
 /// Marks the command's first effect, before it is sent. Fails with `interrupted` if `SIGINT`
@@ -120,7 +171,7 @@ fn write_all(fd: libc::c_int, mut bytes: &[u8]) -> std::io::Result<()> {
 pub fn dispatch() -> Result<(), Failure> {
     let mut guard = phase();
     if let Some(phase) = guard.as_mut() {
-        if phase.interrupted.is_some() {
+        if interrupted() {
             return Err(Failure::new(Code::Interrupted));
         }
         phase.dispatched = true;
@@ -144,7 +195,7 @@ impl Drop for Cooperation {
 pub fn cooperate() -> Result<Cooperation, Failure> {
     let mut guard = phase();
     if let Some(phase) = guard.as_mut() {
-        if phase.interrupted.is_some() {
+        if interrupted() {
             return Err(Failure::new(Code::Interrupted));
         }
         phase.cooperating += 1;
@@ -154,7 +205,7 @@ pub fn cooperate() -> Result<Cooperation, Failure> {
 
 /// Whether `SIGINT` arrived.
 pub fn interrupted() -> bool {
-    INTERRUPTED.load(Ordering::SeqCst)
+    INTERRUPTS.load(Ordering::SeqCst) > 0
 }
 
 /// When an interrupted command must stop resolving: [`GRACE`] after `SIGINT`.
@@ -178,10 +229,10 @@ pub const TICK: Duration = Duration::from_millis(100);
 
 /// Marks the final result as being written, and reports whether `SIGINT` arrived, which
 /// [`crate::contract::render`] then reports. Every command calls it once, as it renders.
-pub fn finish() -> bool {
+pub fn finish(exit: u8) -> bool {
     let mut guard = phase();
     if let Some(phase) = guard.as_mut() {
-        phase.finishing = true;
+        phase.finishing = Some(exit);
     }
     interrupted()
 }
