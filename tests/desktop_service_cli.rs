@@ -1,4 +1,4 @@
-//! The desktop executable's service-control fallback, run where no window system exists.
+//! The desktop executable rejects service controls before graphical startup.
 #![cfg(feature = "desktop")]
 
 use std::process::Command;
@@ -11,7 +11,7 @@ fn desktop() -> Command {
 }
 
 #[test]
-fn help_lists_the_service_commands_without_starting_the_client() {
+fn help_has_no_service_commands_and_does_not_start_the_client() {
     let output = desktop().arg("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
@@ -21,7 +21,7 @@ fn help_lists_the_service_commands_without_starting_the_client() {
         "service-stop",
         "service-restart",
     ] {
-        assert!(help.contains(command), "help names {command}");
+        assert!(!help.contains(command), "help omits {command}");
     }
 }
 
@@ -31,7 +31,10 @@ fn service_commands_refuse_another_build_identity_before_any_account_access() {
         .args(["service-status", "another-identity"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, b"Invalid arguments. See --help.\n");
+    assert_eq!(
+        output.stderr,
+        b"Invalid arguments. Use spaceterm server --help.\n"
+    );
 }
