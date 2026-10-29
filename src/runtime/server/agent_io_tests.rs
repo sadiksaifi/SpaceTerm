@@ -475,6 +475,15 @@ fn zsh_runs_settle_when_the_session_ends_or_control_moves() {
         RunReply::Admitted { .. }
     ));
     bench.await_receipt();
+    // The receipt arrives with the finish; input before the next prompt would be typeahead.
+    let prompted = Instant::now() + DEADLINE;
+    while matches!(bench.run(9, "true"), RunReply::Refused(RunRefusal::NotAtPrompt)) {
+        assert!(Instant::now() < prompted, "the prompt never returned");
+        bench.pump();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    bench.await_receipt();
+    std::thread::sleep(Duration::from_millis(300));
     bench.input(vec![text("read -s secret\r")]);
     let deadline = Instant::now() + DEADLINE;
     loop {
