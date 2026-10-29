@@ -433,6 +433,7 @@ description = "Test agent terminal I/O: observation, cursors, waits, send and ru
 run = [
     "cargo test -p spaceterm-cli --lib --locked -- io:: --include-ignored --test-threads=1",
     "cargo test -p spaceterm-cli --test io_concurrency --locked -- --ignored --test-threads=1",
+    "cargo test -p spaceterm-cli --test interrupt --locked -- --ignored --test-threads=1",
     "cargo test -p spaceterm-server --features client --lib --locked -- pane::run pane::keys",
     "cargo test -p spaceterm --lib --all-features --locked -- agent_io_tests::observing agent_io_tests::named_keys terminal::metadata terminal::session::subscriptions",
 ]
