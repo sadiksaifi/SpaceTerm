@@ -1436,13 +1436,19 @@ mod development {
             let Some(source) = self.server_pane(source) else {
                 return SharedSubmission::Refused(SharedRefusalReason::Value);
             };
-            self.edits.submit(Mutation::SplitPane {
-                workspace: self.edits.canonical(self.workspace),
-                tab: self.edits.canonical(self.tab),
-                source,
+            let Some(inventory) = self.edits.presentation_inventory() else {
+                return SharedSubmission::Refused(SharedRefusalReason::Value);
+            };
+            match spaceterm_server::organize::split(
+                &inventory,
+                self.edits.canonical(self.tab),
+                Some(source),
                 axis,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
-            })
+                spaceterm_server::hierarchy::CreateControl::Creator,
+            ) {
+                Ok(mutation) => self.edits.submit(mutation),
+                Err(_) => SharedSubmission::Refused(SharedRefusalReason::Value),
+            }
         }
     }
 
@@ -1542,32 +1548,23 @@ mod development {
 
         /// Asks the server for another Tab in this Workspace.
         pub(crate) fn create_tab(&self, source: Id) -> SharedSubmission {
-            let inventory = self.edits.presentation_inventory();
-            let tab = inventory
-                .as_ref()
-                .and_then(|i| i.workspaces.iter().find(|w| w.id == self.workspace()))
-                .and_then(|w| {
-                    w.tabs
-                        .iter()
-                        .find(|t| t.panes.iter().any(|p| p.id == source))
-                });
-            let mutation =
-                match tab.and_then(|t| t.worktree_repository.as_ref().zip(t.worktree.as_ref())) {
-                    Some((root, path)) => {
-                        Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
-                            workspace: self.workspace(),
-                            root: root.clone(),
-                            path: path.clone(),
-                            source: Some(source),
-                            control: spaceterm_server::hierarchy::CreateControl::Creator,
-                        })
-                    }
-                    None => Mutation::CreateTab {
-                        workspace: self.workspace(),
-                        source: Some(source),
-                        control: spaceterm_server::hierarchy::CreateControl::Creator,
-                    },
-                };
+            let Some(inventory) = self.edits.presentation_inventory() else {
+                return SharedSubmission::Refused(SharedRefusalReason::Value);
+            };
+            let plan = spaceterm_server::organize::new_tab(
+                &inventory,
+                self.workspace(),
+                Some(source),
+                None,
+                spaceterm_server::hierarchy::CreateControl::Creator,
+            );
+            let mutation = match plan {
+                Ok(spaceterm_server::organize::NewTab::Mutation(mutation)) => mutation,
+                Ok(spaceterm_server::organize::NewTab::Worktree(operation)) => {
+                    Mutation::Worktree(operation)
+                }
+                Err(_) => return SharedSubmission::Refused(SharedRefusalReason::Value),
+            };
             self.edits.submit(mutation)
         }
     }

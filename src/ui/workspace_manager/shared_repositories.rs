@@ -440,7 +440,7 @@ mod development {
                         && (manager.has_tabs_besides(&manager.worktree_tab_ids(id))
                             || (worktree_writes
                                 && inventory.is_some_and(|inventory| {
-                                    super::super::worktrees::fallback::destination(
+                                    spaceterm_server::organize::fallback_destination(
                                         inventory,
                                         &record.root,
                                     )
