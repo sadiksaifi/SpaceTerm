@@ -418,6 +418,16 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 description = "Test local server account admission and private storage"
 run = "cargo test --package spaceterm-server --package spaceterm-cli --package spaceterm-directories --all-features --locked"
 
+[tasks."cli:identity:test"]
+description = "Test CLI identities, creation control and journals, then exercise them against a fresh Development server"
+run = [
+    "cargo test -p spaceterm-cli --lib --locked -- state:: journal::",
+    "cargo test -p spaceterm-server --features client --lib --locked -- admission:: control:: hierarchy:: a_cli_agent revocation_closes",
+    "cargo test -p spaceterm --lib --all-features --locked -- create_control_tests shared_repositories::reveal shell_launch::",
+    "cargo test -p spaceterm --lib --features native-tests --locked -- each_shell_puts_the_session_cli_first",
+    "cargo run -p spaceterm-cli --example cli_identity --locked",
+]
+
 [tasks."cli:scope:test"]
 description = "Test CLI targeting, labels, organization and the work commands"
 run = [
