@@ -41,11 +41,13 @@ _Avoid_: Window, Terminal Session
 
 ## Server architecture vocabulary
 
-Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients present that work over account-local IPC or paired QUIC connections.
+Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients control, observe and present that work over account-local IPC or paired QUIC connections.
 
 **SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
 
-**SpaceTerm Client**: An application that presents and controls SpaceTerm Server state.
+**SpaceTerm Client**: An application that controls, observes or presents SpaceTerm Server state.
+
+**SpaceTerm CLI**: The headless `spaceterm` program that runs a SpaceTerm Server or acts as a command-line SpaceTerm Client.
 
 **Workspace Window**: A desktop SpaceTerm Client's single main Operating-System Window presenting its Workspace Attachments.
 
@@ -61,6 +63,8 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **SpaceTerm Protocol**: The versioned exchange of server state, terminal presentation, and client operations between a SpaceTerm Client and a SpaceTerm Server over one multiplexed connection, on which the server pushes changes as they happen.
 
+**Service lane**: The admission-time exchange for server administration, independent of the work protocol major, over an authenticated account-local or paired connection.
+
 **SSH Setup**: Temporary OpenSSH provisioning inside Add Server that prepares a SpaceTerm Server and enrolls the client for paired QUIC access.
 
 **Start Server**: The explicit action that starts a SpaceTerm Server.
@@ -73,9 +77,9 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **End All Sessions**: The action that ends every live Terminal Session on one SpaceTerm Server while retaining the running server and its Workspace organization.
 
-**Server Candidate**: A signed SpaceTerm Server build a SpaceTerm Client holds for one application identity and machine, verified before it is staged or activated.
+**Server Candidate**: A signed SpaceTerm Server build for one application identity and machine, verified before it is staged or activated.
 
-**Update Server**: The account-local journey that stages a Server Candidate and activates it after confirmation, ending that server's Terminal Sessions.
+**Update Server**: The action that stages a Server Candidate and activates it after confirmation, ending that server's Terminal Sessions.
 
 **Original Operation**: An explicit operation a SpaceTerm Client submitted to a SpaceTerm Server, bound to its admitted connection, application, server, client and operation identities until its outcome is validated and acknowledged.
 
@@ -83,7 +87,9 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Client Identity**: A stable nonsecret identifier distinguishing one SpaceTerm Client's views, attachments, Pane control and operations.
 
-**Client Name**: The person-readable name a SpaceTerm Client supplies when it connects, such as its computer's name, which other clients see while it is a Controlling Client. It grants no authority.
+**Agent Name**: A reusable name supplied at admission to derive an agent's Client Identity from its base Client Identity.
+
+**Client Name**: The person-readable name a SpaceTerm Client supplies when it connects, such as its computer's name, which other clients see while it controls or observes a Pane. It grants no authority.
 
 **Account-local Connection**: A connection authorized by the operating system as belonging to the SpaceTerm Server's owning account.
 
@@ -101,7 +107,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Unpair Pending**: An Unpair Device request whose server-side revocation is awaiting confirmation, independently of completed local connection removal.
 
-**Saved Connection**: A paired QUIC connection a SpaceTerm Client keeps in its Servers Settings Section, together with whether it should stay connected.
+**Saved Connection**: A paired QUIC route a SpaceTerm Client retains with its pinned server identity and credential reference. The desktop also retains whether it should stay connected.
 
 **Client Settings**: Preferences used by a SpaceTerm Client on its own device.
 
@@ -111,9 +117,11 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Controlling Client**: The SpaceTerm Client with authority to supply terminal input and terminal dimensions to a Pane.
 
+**Observation**: A channel that reads a Pane's terminal presentation and Scrollback without control or native effects.
+
 **Take Over**: The action that replaces a Pane's Controlling Client.
 
-**Takeover Screen**: The Pane presentation shown to a SpaceTerm Client that is not a Pane's Controlling Client, unless the Pane's Terminal Session ended. It names the Controlling Client, or says that no client controls the Pane.
+**Takeover Screen**: The Pane presentation shown to a desktop SpaceTerm Client that is not a Pane's Controlling Client, unless the Pane's Terminal Session ended. It names the Controlling Client, or says that no client controls the Pane.
 
 ## Settings
 
@@ -220,6 +228,8 @@ _Avoid_: session, terminal
 **Scrollback Cache**: The Scrollback rows a SpaceTerm Client holds for one Pane, over which it scrolls, selects, and runs Terminal Find.
 
 **Line Mode**: Whether a Terminal Session's PTY collects lines, echoes input and turns signal keys into signals, and whether the shell owns its foreground, as the SpaceTerm Server last read them.
+
+**Run**: One command admitted against an exact Terminal Session and shell prompt, with a server receipt that correlates its dispatch and completion.
 
 **Predictive Echo**: A SpaceTerm Client drawing printable keys typed at the shell's line editor before the SpaceTerm Server's echo arrives, marked until a frame confirms them.
 _Avoid_: local echo, speculative echo

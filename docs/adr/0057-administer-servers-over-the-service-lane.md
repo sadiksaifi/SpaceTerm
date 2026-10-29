@@ -1,0 +1,13 @@
+# Administer servers over the service lane
+
+Status, Stop, Restart and Update use a service lane on the authenticated account-local or paired connection. [ADR 0027](0027-trust-paired-clients-equally.md) owns authority and machine-only actions. The lane uses bounded length-prefixed JSON through the admission preamble, independently of the work protocol major. An incompatible work client can therefore update a server and settle the same operation after reconnecting. This is one lane on the existing transport. [ADR 0035](0035-negotiate-one-protocol-major.md) owns its version policy.
+
+A passive status or update check reads facts without activation recovery. Unreachability does not establish that a server is stopped; any last-known connection time is explicitly dated. Update delivery uses a signed target feed fetched by the server or a paired upload. The server verifies the candidate under [ADR 0040](0040-keep-one-server-runtime-version-active.md).
+
+A preview binds an actor, action, boot, installation, candidate and exact affected Terminal Session set. The server retains a bounded registry of random tokens with ten-minute expiry. Admission revalidates those observations under the hierarchy lock and fences new Session starts. It durably records the operation before acknowledging dispatch. Repeating the operation ID resolves that record and never repeats the action.
+
+The approved runtime launches a transient helper outside the server service's process tree: a collected systemd user unit on Linux, or `posix_spawn` with `POSIX_SPAWN_SETSID` on macOS. It inherits no server sockets or lock descriptors. It reads only its admitted record, takes the account's service lock, and runs the same native operation as a local caller. No permanent helper is installed.
+
+The durable ledger records admission, launch, execution and the terminal outcome. Startup recovery marks an admitted operation that never launched as not performed. Interrupted Update resolves through activation recovery; an unprovable Stop or Restart stays unresolved. A changed boot alone is not a generic success receipt. Unacknowledged records remain until the same actor acknowledges them or its pairing is revoked. The ledger refuses new admissions at capacity instead of expiring records by age.
+
+Restart and Update reconnect over the lane and resolve their receipt before reporting completion. Stop returns exit 7 with shutdown observed because losing the connection cannot prove native cleanup. A later connection after local Start settles that receipt. [ADR 0034](0034-confirm-server-update-restarts-and-explain-incompatibility.md) owns activation confirmation, cross-major candidates and return to a previous runtime.
