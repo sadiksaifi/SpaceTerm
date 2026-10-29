@@ -8,6 +8,7 @@
     "id": "0909090909090909090909090909090909090909090909090909090909090909"
   },
   "data": {
+    "directory": "/server/chosen",
     "pane": {
       "control": "self",
       "directory": "/server/chosen",

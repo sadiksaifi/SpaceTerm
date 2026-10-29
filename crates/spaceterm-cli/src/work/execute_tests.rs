@@ -147,7 +147,8 @@ fn workspace_creation_reports_the_server_chosen_directory_after_journal_acknowle
     created.tabs[0].id = id(45);
     created.tabs[0].root_pane = id(46);
     created.tabs[0].panes[0].id = id(46);
-    created.tabs[0].panes[0].starting_directory = "/server/home/new".into();
+    created.tabs[0].panes[0].starting_directory = "/server/chosen/new".into();
+    created.pinned_directory = Some("/server/chosen/new".into());
     updated.workspaces.push(created);
     updated.revision = 8;
     let script = Rc::new(RefCell::new(Script {
@@ -162,6 +163,7 @@ fn workspace_creation_reports_the_server_chosen_directory_after_journal_acknowle
     );
     assert_eq!(output.envelope.exit(), 0);
     assert_golden("work_workspace_created", &output.envelope);
+    assert_eq!(output.envelope.data.body["directory"], "/server/chosen/new");
     let script = script.borrow();
     assert_eq!(
         script.events,
@@ -474,6 +476,7 @@ fn tab_and_split_creation_report_server_directories_and_stable_root_sources() {
             output.envelope.data.body["pane"]["directory"],
             "/server/chosen"
         );
+        assert_eq!(output.envelope.data.body["directory"], "/server/chosen");
         assert_eq!(output.envelope.data.body["source_pane"], hex(&id(23)));
         assert_golden(
             if split {
@@ -589,6 +592,11 @@ fn worktree_creation_uses_the_main_branch_and_opens_exactly_one_tab() {
             output.envelope.data.body["worktree"]["path"],
             "/server/canonical/feature-new"
         );
+        assert_eq!(
+            output.envelope.data.body["directory"],
+            "/server/canonical/feature-new"
+        );
+        assert_eq!(output.envelope.data.body["control"], "self");
         assert_eq!(output.envelope.data.body["tab"]["id"], hex(&id(40)));
         assert_eq!(script.borrow().sent.len(), 1);
         assert!(

@@ -332,15 +332,25 @@ fn execute(
             let data = WorkspaceChange {
                 target: steps.clone(),
                 workspace: workspace_ref(workspace),
+                directory: Some(
+                    workspace
+                        .tabs
+                        .iter()
+                        .find(|t| t.id == workspace.root_tab)
+                        .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane))
+                        .ok_or(Code::ProtocolError)?
+                        .starting_directory
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 revision: updated.inventory.revision,
             };
-            Ok(Output::ok(
-                path,
-                server.clone(),
-                data,
-                format!("Created Workspace id:{}\n", hex(&id)),
-                &steps,
-            ))
+            let text = format!(
+                "Created Workspace id:{}\nDirectory: {}\n",
+                hex(&id),
+                data.directory.as_deref().ok_or(Code::ProtocolError)?
+            );
+            Ok(Output::ok(path, server.clone(), data, text, &steps))
         }
         Command::Workspace(WorkspaceCommand::Rename { new_name, .. }) => {
             let plan = workspace::rename(&initial, &args, current.as_ref(), new_name.clone())?;
@@ -359,6 +369,7 @@ fn execute(
                 WorkspaceChange {
                     target: steps.clone(),
                     workspace: workspace_ref(workspace),
+                    directory: None,
                     revision: updated.inventory.revision,
                 },
                 format!("Renamed Workspace id:{}\n", hex(&id)),
@@ -419,6 +430,7 @@ fn execute(
             };
             let data = Created {
                 target: steps.clone(),
+                directory: pane.starting_directory.to_string_lossy().into_owned(),
                 tab: tab_ref(tab),
                 pane: CreatedPane {
                     id: hex(&pane.id),
@@ -439,7 +451,11 @@ fn execute(
                 path,
                 server.clone(),
                 data,
-                format!("Created Pane id:{}\n", hex(&pane.id)),
+                format!(
+                    "Created Pane id:{}\nDirectory: {}\n",
+                    hex(&pane.id),
+                    pane.starting_directory.to_string_lossy()
+                ),
                 &steps,
             ))
         }
@@ -637,6 +653,15 @@ fn execute(
             });
             let data = WorktreeCreate {
                 target: steps.clone(),
+                directory: tab
+                    .panes
+                    .iter()
+                    .find(|p| p.id == tab.root_pane)
+                    .ok_or(Code::ProtocolError)?
+                    .starting_directory
+                    .to_string_lossy()
+                    .into_owned(),
+                control: CreatedControl::Own,
                 worktree: WorktreeRef {
                     path: actual_path.to_string_lossy().into_owned(),
                     branch: Some(branch),
@@ -645,13 +670,12 @@ fn execute(
                 },
                 tab: Some(tab_ref(tab)),
             };
-            Ok(Output::ok(
-                path,
-                server.clone(),
-                data,
-                "Created Worktree.\n".into(),
-                &steps,
-            ))
+            let text = format!(
+                "Created Worktree.\nDirectory: {}\nCreated Tab id:{}\nControl: self\n",
+                data.directory,
+                hex(&tab.id)
+            );
+            Ok(Output::ok(path, server.clone(), data, text, &steps))
         }
         Command::Worktree(WorktreeCommand::Remove { confirm, .. }) => {
             let (target, root, tree) = worktree::remove(&initial, &args, current.as_ref())?;
