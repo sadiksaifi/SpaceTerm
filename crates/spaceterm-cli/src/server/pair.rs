@@ -310,7 +310,12 @@ mod tests {
             log: RefCell::default(),
         };
         let mut person = typist(Some(format!(" {} ", claim().comparison_code())));
-        let paired = pair(&server, &mut person, Some("203.0.113.5"), LIFETIME);
+        let paired = pair(
+            &server,
+            &mut person,
+            Some("build.example.test:9300"),
+            LIFETIME,
+        );
         assert_eq!(
             paired,
             Paired::Approved {
@@ -320,7 +325,7 @@ mod tests {
         assert_eq!(person.link.as_deref(), Some("spaceterm://invite"));
         assert_eq!(
             *server.log.borrow(),
-            ["invite 203.0.113.5", "claims", "approve"]
+            ["invite build.example.test:9300", "claims", "approve"]
         );
     }
 
