@@ -1479,25 +1479,21 @@ impl TerminalPane {
         let command = running
             .map(|command| sanitize_title(&command.line))
             .filter(|line| !line.is_empty());
-        let (label, glyph) = if metadata.title.provenance == TitleProvenance::TerminalControl {
-            let label = sanitize_title(&metadata.title.value);
-            // Only explicit Terminal-controlled titles may donate their leading glyph. Commands
-            // and fallbacks are opaque activity labels, even when their first word is symbolic.
-            let reported = super::terminal_status::reported_title(&label);
-            (
-                reported.words.to_owned(),
-                metadata
-                    .title_glyph
-                    .resolve(reported.glyph)
-                    .map(|glyph| SharedString::from(glyph.to_owned())),
-            )
-        } else if let Some(command) = command {
-            (command, None)
+        let label = spaceterm_server::labels::activity(
+            &metadata.title.value,
+            metadata.title.provenance == TitleProvenance::TerminalControl,
+            command.as_deref(),
+            &normalized_pane_title(&metadata.shell_name, &self.fallback_title),
+        );
+        let glyph = if metadata.title.provenance == TitleProvenance::TerminalControl {
+            let title = sanitize_title(&metadata.title.value);
+            let reported = super::terminal_status::reported_title(&title);
+            metadata
+                .title_glyph
+                .resolve(reported.glyph)
+                .map(|glyph| SharedString::from(glyph.to_owned()))
         } else {
-            (
-                normalized_pane_title(&metadata.shell_name, &self.fallback_title),
-                None,
-            )
+            None
         };
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
@@ -5913,20 +5909,7 @@ fn short_hostname(host: &str) -> &str {
         .unwrap_or(host)
 }
 
-/// Abbreviates a displayed directory against the home of its own Local or Remote side.
-fn compact_home_directory(directory: &str, home: Option<&str>) -> String {
-    let Some(home) = home
-        .map(|home| home.trim_end_matches('/'))
-        .filter(|home| !home.is_empty() && directory.starts_with(home))
-    else {
-        return directory.to_owned();
-    };
-    match &directory[home.len()..] {
-        "" | "/" => "~".to_owned(),
-        rest if rest.starts_with('/') => format!("~{rest}"),
-        _ => directory.to_owned(),
-    }
-}
+use spaceterm_server::labels::compact_home_directory;
 
 fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {
     let reported = reported_title

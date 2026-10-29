@@ -3756,20 +3756,21 @@ pub(crate) struct TabIdentity {
 
 impl TabIdentity {
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
-        // A caption without a label has no directory, and its `name` is already what the Terminal
-        // Session is doing. Otherwise `name` is the directory leaf and `label` the activity.
-        let (activity, place) = if caption.label.is_empty() {
-            (caption.name, gpui::SharedString::default())
+        let (activity, directory) = if caption.label.is_empty() {
+            (caption.name.as_ref(), "")
         } else {
-            (caption.label, caption.name)
+            (caption.label.as_ref(), caption.name.as_ref())
         };
-        let activity = if activity.is_empty() { title } else { activity };
-        // Saying the same word twice adds nothing, so the activity keeps it.
-        let place = if place == activity {
-            gpui::SharedString::default()
-        } else {
-            place
-        };
+        let label = spaceterm_server::labels::Label::from_parts(
+            if activity.is_empty() {
+                title.as_ref()
+            } else {
+                activity
+            },
+            directory,
+        );
+        let place = label.place().to_owned().into();
+        let activity = label.activity.into();
         Self {
             remote: caption.origin.remote,
             progress: caption.progress,
