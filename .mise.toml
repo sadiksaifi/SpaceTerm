@@ -515,6 +515,10 @@ run = [
   "cargo run --package spaceterm-cli --features client --example terminal_input --locked -- 4",
 ]
 
+[tasks."server:admin:native"]
+description = "Verify Preflight administration from Mac to Penguin and from Penguin to Mac"
+run = 'cargo run -p spaceterm-cli --example server_admin_native --locked -- "$@"'
+
 [tasks."server:workspace:smoke"]
 description = "Exercise retained Development work through server kill and shutdown with protocol major 4"
 run = [
