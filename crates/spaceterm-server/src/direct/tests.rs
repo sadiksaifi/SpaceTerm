@@ -1084,6 +1084,100 @@ fn only_a_fully_admitted_device_updates_its_retained_last_connection_time() {
 }
 
 #[test]
+fn a_paired_device_reaches_the_service_lane_as_its_own_pairing() {
+    use crate::protocol::Preamble;
+    use crate::service::lane::{LaneReply, LaneRequest, MAX_FRAME};
+    use crate::service::operations::{Action, Actor, Ledger, OperationId, Record, State};
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let endpoint = fixture.endpoint();
+    let lane = crate::service::lane::tests::serving(&fixture.paths);
+    // One outcome of this pairing and one of another, as earlier operations left them.
+    let mut ledger =
+        Ledger::in_directory(crate::storage::Directory::open(&fixture.paths.data, false).unwrap());
+    for (id, pairing) in [(1, paired.pairing), (2, [3; 32])] {
+        let operation = OperationId([id; 16]);
+        ledger
+            .admit(Record {
+                id: operation,
+                actor: Actor {
+                    pairing: Some(pairing),
+                    client: paired.client,
+                },
+                server: paired.pin.server,
+                boot: [0; 32],
+                action: Action::Stop,
+                observation_digest: [0; 32],
+                candidate: None,
+                state: State::Admitted,
+                updated_at: 0,
+            })
+            .unwrap();
+        ledger.mark(&operation, State::Done).unwrap();
+    }
+    let state = Arc::clone(&fixture.state);
+    let mut environment = fixture.environment(service(Refusing));
+    environment.lane = Some(lane);
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let accepted = state.lock().unwrap().accept();
+            if let Some((stream, generation)) = accepted {
+                let (waker, wake) = Waker::new().unwrap();
+                return host::serve(stream, generation, state, &environment, waker, wake);
+            }
+            assert!(Instant::now() < deadline, "QUIC accept deadline");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    });
+    let connection = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
+    let name: ClientName = "Laptop CLI".into();
+    let mut stream = connection
+        .admit_service_lane(crate::protocol::Caller {
+            client: &paired.client,
+            name: &name,
+            agent: None,
+        })
+        .unwrap();
+    let mut call = |request: LaneRequest| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        Preamble::send(
+            stream.as_mut(),
+            &serde_json::to_vec(&request).unwrap(),
+            deadline,
+        )
+        .unwrap();
+        serde_json::from_slice::<LaneReply>(
+            &Preamble::receive(stream.as_mut(), MAX_FRAME, deadline).unwrap(),
+        )
+        .unwrap()
+    };
+    let own = OperationId([1; 16]).to_string();
+    assert!(matches!(
+        call(LaneRequest::Resolve {
+            operation: own.clone()
+        }),
+        LaneReply::Receipt(_)
+    ));
+    assert_eq!(
+        call(LaneRequest::Acknowledge { operation: own }),
+        LaneReply::Acknowledged
+    );
+    assert_eq!(
+        call(LaneRequest::Acknowledge {
+            operation: OperationId([2; 16]).to_string()
+        }),
+        LaneReply::Error {
+            code: "authentication_refused".into()
+        }
+    );
+    drop(stream);
+    assert_eq!(server.join().unwrap(), Err(ServerError::Unsupported));
+}
+
+#[test]
 fn quic_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity() {
     let fixture = Fixture::new();
     fixture.enable();

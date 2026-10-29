@@ -18,6 +18,16 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return usage(&argv, &error),
     };
+    if let args::Command::Server(command) = &cli.command
+        && !matches!(
+            command,
+            args::ServerCommand::Run { .. } | args::ServerCommand::Provision(_)
+        )
+    {
+        let reply =
+            spaceterm_cli::server::run(env!("SPACETERM_SERVER_IDENTITY"), &cli.global, command);
+        return ExitCode::from(reply.write(cli.global.json, cli.global.quiet));
+    }
     if let Some(output) = spaceterm_cli::work::start::start(&cli) {
         return ExitCode::from(output.write(
             cli.global.json,

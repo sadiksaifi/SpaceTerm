@@ -433,6 +433,8 @@ pub enum Refusal {
     DirectoryUnavailable,
     StorageUnavailable,
     Capacity,
+    /// A service operation is about to end every Terminal Session, so none may start.
+    ServiceBusy,
 }
 impl From<Refusal> for ServerError {
     fn from(value: Refusal) -> Self {
@@ -446,6 +448,7 @@ impl From<Refusal> for ServerError {
             Refusal::DirectoryUnavailable => Self::DirectoryUnavailable,
             Refusal::StorageUnavailable => Self::StorageUnavailable,
             Refusal::CleanupUnresolved => Self::CleanupUnresolved,
+            Refusal::ServiceBusy => Self::ServiceBusy,
         }
     }
 }

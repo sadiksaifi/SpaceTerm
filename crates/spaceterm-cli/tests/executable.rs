@@ -33,15 +33,7 @@ fn help_shows_the_visible_tree_without_hidden_commands() {
 #[test]
 fn every_command_exits_through_the_contract() {
     for (args, command) in [
-        (&["server", "setup"][..], "server.setup"),
-        (&["server", "pair"], "server.pair"),
-        (&["server", "status"], "server.status"),
-        (&["server", "start"], "server.start"),
-        (&["server", "stop"], "server.stop"),
-        (&["server", "restart"], "server.restart"),
-        (&["server", "update"], "server.update"),
-        (&["server", "unpair", "id:9c1d44e0"], "server.unpair"),
-        (&["server", "run"], "server.run"),
+        (&["server", "run"][..], "server.run"),
         (&["server", "provision", "build-info"], "server.provision"),
         (&["connection", "add"], "connection.add"),
         (&["connection", "list"], "connection.list"),
@@ -61,6 +53,8 @@ fn every_command_exits_through_the_contract() {
         (&["worktree", "create", "feature-y"], "worktree.create"),
         (&["worktree", "remove"], "worktree.remove"),
         (&["completion", "zsh"], "completion"),
+        // The server commands Stream F implements are covered by its own tests, and running them
+        // here would act on this account's server.
     ] {
         let output = spaceterm(&[args, &["--json"]].concat());
         assert_eq!(output.status.code(), Some(5), "{args:?}");

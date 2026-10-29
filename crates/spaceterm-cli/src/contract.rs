@@ -163,6 +163,8 @@ impl Serialize for RecoveredIdentity {
 pub enum RecoveredKind {
     Mutation,
     Run,
+    /// A Stop, Restart or Update the service lane admitted.
+    Service,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

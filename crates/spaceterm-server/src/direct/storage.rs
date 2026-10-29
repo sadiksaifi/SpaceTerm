@@ -245,3 +245,23 @@ impl Store {
         })
     }
 }
+
+/// The Network Access policy, its exposure and the unrevoked paired devices of a stopped
+/// server, read without creating or changing its state. A server that never stored direct
+/// state has no policy and no devices.
+pub(crate) fn observe(
+    paths: &Paths,
+) -> Result<(Option<NetworkPolicy>, bool, Vec<DeviceInfo>), crate::ServerError> {
+    let directory = Directory::open(&paths.data, false)?;
+    let _lock = directory.lock("direct.lock", false)?;
+    let Some(record) = directory.read_json::<Record>("direct.json")? else {
+        return Ok((None, false, Vec::new()));
+    };
+    let devices = record
+        .devices
+        .iter()
+        .filter(|device| !device.revoked)
+        .map(|device| device.info.clone())
+        .collect();
+    Ok((record.policy.clone(), record.enabled, devices))
+}

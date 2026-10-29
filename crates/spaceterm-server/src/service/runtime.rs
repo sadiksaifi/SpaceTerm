@@ -51,7 +51,7 @@ pub fn verify_candidate_bytes(
         signature,
         expected_sha256,
         target,
-        required_major,
+        Some(required_major),
         required_capabilities,
     )
     .map(Into::into)
@@ -74,7 +74,7 @@ impl Service {
             signature,
             expected_sha256,
             target,
-            required_major,
+            Some(required_major),
             required_capabilities,
         )?;
         Ok(info.into())
@@ -131,7 +131,7 @@ impl Service {
             archive,
             signature,
             expected_sha256,
-            required_major,
+            Some(required_major),
             required_capabilities,
         )?;
         Ok(info.into())
@@ -160,7 +160,27 @@ impl Service {
             archive,
             signature,
             expected_sha256,
-            required_major,
+            Some(required_major),
+            required_capabilities,
+        )
+    }
+
+    /// Verify and retain a candidate of any protocol major for remote administration, which
+    /// reaches the server over the version-stable service lane.
+    pub fn stage_candidate(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        expected_sha256: &str,
+        required_capabilities: &[&str],
+    ) -> Result<RetainedInstallation, ServerError> {
+        provision_candidate(
+            &self.paths.data.join("installations"),
+            &self.identity,
+            archive,
+            signature,
+            expected_sha256,
+            None,
             required_capabilities,
         )
     }
@@ -217,7 +237,11 @@ fn public_key(identity: &str) -> Result<Vec<u8>, ServerError> {
         .decode(key.trim())
         .map_err(|_| ServerError::RuntimeUnavailable)
 }
-fn authenticate(bytes: &[u8], signature: &[u8], identity: &str) -> Result<(), ServerError> {
+pub(super) fn authenticate(
+    bytes: &[u8],
+    signature: &[u8],
+    identity: &str,
+) -> Result<(), ServerError> {
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key(identity)?)
         .verify(bytes, signature)
         .map_err(|_| ServerError::RuntimeUnavailable)
@@ -226,24 +250,21 @@ pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
     verify_installation(path, identity, None)
 }
 
-/// Recheck authenticated retained declarations at activation admission and dispatch.
+/// Recheck authenticated retained declarations at activation admission and dispatch. Any
+/// protocol major activates: the candidate's own build information must be self-consistent and
+/// native, and the service lane reaches it across majors.
 pub(super) fn verify_candidate_installation(
     path: &Path,
     identity: &str,
-    required_major: u16,
     required_capabilities: &[&str],
 ) -> Result<(), ServerError> {
-    verify_installation(
-        path,
-        identity,
-        Some((required_major, required_capabilities)),
-    )
+    verify_installation(path, identity, Some((None, required_capabilities)))
 }
 
 fn verify_installation(
     path: &Path,
     identity: &str,
-    candidate_requirements: Option<(u16, &[&str])>,
+    candidate_requirements: Option<(Option<u16>, &[&str])>,
 ) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
     let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
@@ -354,12 +375,13 @@ impl From<Build> for CandidateMetadata {
     }
 }
 impl Build {
+    /// `None` accepts any protocol major.
     fn require_compatibility(
         &self,
-        required_major: u16,
+        required_major: Option<u16>,
         required_capabilities: &[&str],
     ) -> Result<(), ServerError> {
-        if self.protocol_major != required_major {
+        if required_major.is_some_and(|major| self.protocol_major != major) {
             return Err(ServerError::IncompatibleProtocol);
         }
         if required_capabilities
@@ -662,7 +684,7 @@ fn provision_candidate(
     archive: &Path,
     signature: &Path,
     expected_sha256: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<RetainedInstallation, ServerError> {
     let (bytes, signature, info) = candidate(
@@ -681,7 +703,7 @@ fn candidate(
     archive: &Path,
     signature: &Path,
     expected_sha256: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     candidate_for_target(
@@ -700,7 +722,7 @@ fn candidate_for_target(
     signature: &Path,
     expected_sha256: &str,
     target: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     let bytes = source(archive, MAX_ARCHIVE)?;
@@ -723,7 +745,7 @@ fn verified_candidate_build(
     signature: &[u8],
     expected_sha256: &str,
     target: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<Build, ServerError> {
     if archive.len() as u64 > MAX_ARCHIVE || signature.len() > 64 {

@@ -245,6 +245,13 @@ fn nonce() -> Result<[u8; 32], ServerError> {
     Ok(bytes)
 }
 impl DevelopmentPaneHost {
+    /// This Pane's running Terminal Session, if one has not ended.
+    pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
+        self.pane
+            .as_ref()
+            .filter(|pane| !pane.ended)
+            .map(|pane| pane.lease.session)
+    }
     pub fn new(
         factory: NativeTerminalSessionFactory,
         directory: ValidatedLocalDirectory,

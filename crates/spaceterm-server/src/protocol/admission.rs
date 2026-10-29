@@ -246,9 +246,10 @@ pub(crate) fn admit_server(
     stream: &mut UnixStream,
     server: &[u8; 32],
     build: &str,
+    lane: Option<&std::sync::Arc<crate::service::lane::LaneServer>>,
 ) -> Result<Admitted, ServerError> {
     crate::host::check_peer(stream)?;
-    admit_server_transport(stream, server, build, None)
+    admit_server_transport(stream, server, build, None, lane)
 }
 
 /// Only the paired host calls this after pinned-server and enrolled-device proof validation.
@@ -256,12 +257,14 @@ pub(crate) fn admit_server(
 pub(crate) fn admit_direct_server(
     stream: &mut dyn Preamble,
     paired: &crate::direct::PairedDevice,
+    lane: Option<&std::sync::Arc<crate::service::lane::LaneServer>>,
 ) -> Result<Admitted, ServerError> {
     admit_server_transport(
         stream,
         &paired.pin.server,
         &paired.pin.build,
-        Some(paired.client),
+        Some((paired.client, paired.pairing)),
+        lane,
     )
 }
 
@@ -269,8 +272,10 @@ fn admit_server_transport(
     stream: &mut dyn Preamble,
     server: &[u8; 32],
     build: &str,
-    expected_client: Option<[u8; 32]>,
+    paired: Option<([u8; 32], crate::direct::PairingId)>,
+    lane: Option<&std::sync::Arc<crate::service::lane::LaneServer>>,
 ) -> Result<Admitted, ServerError> {
+    let expected_client = paired.map(|(client, _)| client);
     let mut wire = Wire::new(stream);
     let hello: Hello = wire.read()?;
     if hello.build != build
@@ -306,7 +311,15 @@ fn admit_server_transport(
         client,
     })?;
     if hello.lane == Lane::Service {
-        crate::service::lane::serve(stream)?;
+        // The lane consumes the connection. The error tells the caller not to serve it further.
+        let lane = lane.ok_or(ServerError::Unsupported)?;
+        lane.serve(
+            stream,
+            crate::service::operations::Actor {
+                pairing: paired.map(|(_, pairing)| pairing),
+                client,
+            },
+        )?;
         return Err(ServerError::Unsupported);
     }
     if selected == 0 {
@@ -347,6 +360,35 @@ impl Caller<'_> {
         self.agent
             .map_or(*self.client, |agent| agent.client(self.client))
     }
+}
+
+/// Admits a service-lane connection as `caller`. The lane is answered whatever the work majors
+/// of the two peers, so this returns the server's work major for the caller to compare.
+#[cfg_attr(
+    not(feature = "client"),
+    allow(dead_code, reason = "the CLI's server commands open the service lane")
+)]
+pub(crate) fn admit_service_lane(
+    stream: &mut dyn Preamble,
+    caller: Caller<'_>,
+    server: &[u8; 32],
+    build: &str,
+) -> Result<u16, ServerError> {
+    let mut wire = Wire::new(stream);
+    wire.write(&Hello {
+        versions: vec![MAJOR],
+        build: build.to_owned(),
+        server: *server,
+        client: *caller.client,
+        name: caller.name.clone(),
+        agent: caller.agent.cloned(),
+        lane: Lane::Service,
+    })?;
+    let offer: Offer = wire.read()?;
+    if offer.build != build || offer.server != *server || offer.client != caller.effective() {
+        return Err(ServerError::AuthenticationRefused);
+    }
+    Ok(offer.server_major)
 }
 
 #[cfg_attr(
@@ -407,7 +449,7 @@ mod tests {
             let (mut client, mut server) = UnixStream::pair().unwrap();
             let accepted = versions.contains(&MAJOR);
             let thread = std::thread::spawn(move || {
-                admit_server(&mut server, &[7; 32], "spaceterm-development")
+                admit_server(&mut server, &[7; 32], "spaceterm-development", None)
             });
             let result = admit_client(
                 &mut client,
@@ -435,7 +477,7 @@ mod tests {
         for (build, id) in [("spaceterm", [7; 32]), ("spaceterm-development", [8; 32])] {
             let (mut client, mut server) = UnixStream::pair().unwrap();
             let thread = std::thread::spawn(move || {
-                admit_server(&mut server, &[7; 32], "spaceterm-development")
+                admit_server(&mut server, &[7; 32], "spaceterm-development", None)
             });
             assert!(
                 admit_client(
@@ -487,7 +529,7 @@ mod tests {
         let (mut client, mut server) = UnixStream::pair().unwrap();
         client.write_all(&u32::MAX.to_be_bytes()).unwrap();
         assert_eq!(
-            admit_server(&mut server, &[7; 32], "spaceterm-development"),
+            admit_server(&mut server, &[7; 32], "spaceterm-development", None),
             Err(ServerError::Protocol)
         );
     }
@@ -512,7 +554,7 @@ mod tests {
         assert_ne!(derived, other.client(&[9; 32]));
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let thread = std::thread::spawn(move || {
-            admit_server(&mut server, &[7; 32], "spaceterm-development")
+            admit_server(&mut server, &[7; 32], "spaceterm-development", None)
         });
         let name: ClientName = "Build Mac CLI agent-1".into();
         admit_client(
@@ -537,7 +579,7 @@ mod tests {
         let agent: AgentName = "agent-1".parse().unwrap();
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let thread = std::thread::spawn(move || {
-            admit_server(&mut server, &[7; 32], "spaceterm-development")
+            admit_server(&mut server, &[7; 32], "spaceterm-development", None)
         });
         let name: ClientName = "Build Mac".into();
         assert!(
@@ -568,7 +610,8 @@ mod tests {
                 &mut server,
                 &[7; 32],
                 "spaceterm-development",
-                Some([9; 32]),
+                Some(([9; 32], [8; 32])),
+                None,
             )
         });
         let name: ClientName = "Build Mac CLI agent-1".into();

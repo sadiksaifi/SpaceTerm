@@ -766,6 +766,26 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
+    /// This handle's service lane, which answers across protocol majors. Opening it never starts
+    /// a server.
+    pub fn service_lane(&self) -> Result<crate::service::lane::client::Lane, ServerError> {
+        if let Some(direct) = &self.direct {
+            self.client_directory()?;
+            return Ok(crate::service::lane::client::Lane::paired(
+                std::sync::Arc::clone(&direct.connector),
+                direct.paired.clone(),
+                self.client_name(),
+                self.agent().cloned(),
+            ));
+        }
+        Ok(crate::service::lane::client::Lane::local(
+            self.paths.clone(),
+            self.server_id()?,
+            self.base_client_id()?,
+            self.client_name(),
+            self.agent().cloned(),
+        ))
+    }
     pub fn direct_status(&self) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {
         match self.direct_manage(crate::direct::Management::Status)? {
             crate::direct::ManagementReply::Status(status) => Ok(status),
@@ -905,7 +925,7 @@ mod tests {
         let identity = paths.identity.clone();
         let peer = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            protocol::admit_server(&mut stream, &server_id, &identity).unwrap()
+            protocol::admit_server(&mut stream, &server_id, &identity, None).unwrap()
         });
         let link = handle.connect(Arc::new(|_: LinkEvent| {})).unwrap();
         let admitted = peer.join().unwrap();
@@ -950,7 +970,7 @@ mod tests {
         let pin = server.server_id().unwrap();
         let peer = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            protocol::admit_server(&mut stream, &pin, &paths.identity).unwrap();
+            protocol::admit_server(&mut stream, &pin, &paths.identity, None).unwrap();
             stream.set_nonblocking(false).unwrap();
             let mut received = Vec::new();
             std::io::Read::read_to_end(&mut stream, &mut received).unwrap();
@@ -1010,7 +1030,7 @@ mod tests {
                     let identity = identity.clone();
                     std::thread::spawn(move || {
                         let protocol::Admitted { client, name, .. } =
-                            protocol::admit_server(&mut stream, &pin, &identity).unwrap();
+                            protocol::admit_server(&mut stream, &pin, &identity, None).unwrap();
                         let (sync, _) = crate::connection::sync::SyncWorker::spawn().unwrap();
                         let environment = host::Environment::for_tests(
                             crate::direct::tests::service(crate::direct::tests::Refusing),

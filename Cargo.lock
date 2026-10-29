@@ -6174,6 +6174,7 @@ dependencies = [
  "jiff",
  "libc",
  "postcard",
+ "ring",
  "serde",
  "serde_json",
  "spaceterm",
@@ -6205,6 +6206,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "flate2",
+ "jiff",
  "libc",
  "noq-proto",
  "noq-udp",
@@ -6219,6 +6221,7 @@ dependencies = [
  "spaceterm-directories",
  "tar",
  "thiserror 2.0.19",
+ "ureq",
  "zeroize",
 ]
 

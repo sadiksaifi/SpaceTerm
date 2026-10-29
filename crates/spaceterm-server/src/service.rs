@@ -2,8 +2,10 @@
 pub mod activation;
 mod command;
 pub mod control;
+pub mod feed;
 pub mod helper;
 pub mod lane;
+pub mod lane_codes;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -11,6 +13,7 @@ mod macos;
 pub mod operations;
 mod registration;
 mod runtime;
+pub mod tokens;
 pub use runtime::{CandidateMetadata, verify_candidate_bytes};
 
 use crate::{
@@ -152,6 +155,10 @@ trait Supervisor: Send + Sync {
     fn enable_linger(&self, _authorization: LingerAuthorization) -> Result<(), ServerError> {
         Err(ServerError::Unsupported)
     }
+    /// Whether boot startup is authorized, where the service manager has that notion.
+    fn linger_authorized(&self) -> Result<Option<bool>, ServerError> {
+        Ok(None)
+    }
 }
 
 impl Service {
@@ -160,7 +167,12 @@ impl Service {
         self.supervisor.startup()
     }
     pub fn for_identity(identity: &str) -> Result<Self, ServerError> {
-        let paths = Paths::for_identity(identity)?;
+        Self::for_paths(Paths::for_identity(identity)?)
+    }
+    /// The service of the account whose server state lives at `paths`.
+    pub(crate) fn for_paths(paths: Paths) -> Result<Self, ServerError> {
+        let identity = paths.identity.clone();
+        let identity = identity.as_str();
         #[cfg(target_os = "macos")]
         let supervisor = std::sync::Arc::new(macos::LaunchAgent::new(&paths, identity)?);
         #[cfg(target_os = "linux")]
@@ -173,6 +185,19 @@ impl Service {
             identity,
             supervisor,
         }
+    }
+    /// Where this account's signed installations are retained.
+    pub fn installations_directory(&self) -> PathBuf {
+        self.paths.data.join("installations")
+    }
+    /// The owning account's home, from its account record rather than the environment.
+    pub fn account_home(&self) -> Option<PathBuf> {
+        self.paths.data.ancestors().nth(4).map(Path::to_owned)
+    }
+    /// Whether Linux boot startup is authorized for this account. `None` where startup follows
+    /// login instead. This never requests authorization.
+    pub fn linger(&self) -> Result<Option<bool>, ServerError> {
+        self.supervisor.linger_authorized()
     }
     /// Explicitly authorize Linux boot startup for this account. This does not start a server.
     pub fn enable_linger(&self, authorization: LingerAuthorization) -> Result<(), ServerError> {

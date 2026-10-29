@@ -250,6 +250,8 @@ pub(crate) struct Environment {
     pub(crate) sync: SyncWorker,
     pub(crate) management: Option<Arc<dyn DirectManagement>>,
     pub(crate) stop: Arc<Stop>,
+    /// Answers service-lane connections. `None` refuses them as unsupported.
+    pub(crate) lane: Option<Arc<crate::service::lane::LaneServer>>,
 }
 
 #[cfg(test)]
@@ -265,6 +267,7 @@ impl Environment {
                 Arc::new(HostDirect {
                     state,
                     panes: Arc::clone(&panes),
+                    ledger: None,
                 }) as Arc<dyn DirectManagement>
             }),
             panes,
@@ -273,6 +276,7 @@ impl Environment {
                 stopping: AtomicBool::new(false),
                 wake: Arc::new(|| {}),
             }),
+            lane: None,
         }
     }
 }
@@ -283,6 +287,8 @@ struct HostService {
     inner: Box<dyn PaneService>,
     paths: Paths,
     stop: Arc<Stop>,
+    /// The membership fence: set while an admitted service operation is unsettled.
+    fence: Arc<AtomicBool>,
 }
 impl PaneService for HostService {
     fn restore(
@@ -297,7 +303,15 @@ impl PaneService for HostService {
     fn revoked(&mut self, client: [u8; 32]) {
         self.inner.revoked(client)
     }
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.inner.sessions()
+    }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        // The fence and its check share this service's lock, so no Session starts between an
+        // admitted operation's observation and its outcome.
+        if self.fence.load(Ordering::Acquire) && matches!(operation, Operation::Claim(_)) {
+            return Dispatch::reply(Err(Refusal::ServiceBusy));
+        }
         let shutdown = matches!(operation, Operation::Shutdown);
         if shutdown && crate::service::retain_stop(&self.paths).is_err() {
             return Dispatch::reply(Err(Refusal::StorageUnavailable));
@@ -365,6 +379,8 @@ impl PaneService for NoPanes {
 struct HostDirect {
     state: crate::direct::host::Shared,
     panes: SharedPaneService,
+    /// The data directory whose service-operation ledger a revocation updates.
+    ledger: Option<std::path::PathBuf>,
 }
 impl DirectManagement for HostDirect {
     fn manage(
@@ -379,6 +395,14 @@ impl DirectManagement for HostDirect {
             .unwrap_or_else(|e| e.into_inner())
             .manage(actor, request);
         let (reply, retired) = result?;
+        // Revoking a pairing forgets its service-operation outcomes too.
+        if let crate::direct::ManagementReply::Revoked(receipt) = &reply
+            && let Some(ledger) = &self.ledger
+            && let Ok(data) = Directory::open(ledger, false)
+        {
+            let _ = crate::service::operations::Ledger::in_directory(data)
+                .forget_pairing(&receipt.target);
+        }
         if !retired.is_empty() {
             let mut panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
             for client in retired {
@@ -386,6 +410,83 @@ impl DirectManagement for HostDirect {
             }
         }
         Ok(reply)
+    }
+}
+
+/// The lane's view of this host: its Terminal Sessions, its membership fence and its paired
+/// devices.
+struct HostLane {
+    panes: SharedPaneService,
+    fence: Arc<AtomicBool>,
+    direct: Option<crate::direct::host::Shared>,
+}
+impl HostLane {
+    fn manage(
+        &self,
+        request: crate::direct::Management,
+    ) -> Result<Option<crate::direct::ManagementReply>, ServerError> {
+        let Some(state) = &self.direct else {
+            return Ok(None);
+        };
+        let (reply, _) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .manage(None, request)?;
+        Ok(Some(reply))
+    }
+}
+impl crate::service::lane::LaneHost for HostLane {
+    fn fence(
+        &self,
+        admit: &mut dyn FnMut(&[[u8; 32]]) -> Result<(), ServerError>,
+    ) -> Result<(), ServerError> {
+        let panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        admit(&panes.sessions())?;
+        self.fence.store(true, Ordering::Release);
+        Ok(())
+    }
+    fn release_fence(&self) {
+        let _panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        self.fence.store(false, Ordering::Release);
+    }
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.panes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sessions()
+    }
+    fn devices(&self) -> Result<Vec<crate::service::lane::LaneDevice>, ServerError> {
+        let Some(crate::direct::ManagementReply::Devices(devices)) =
+            self.manage(crate::direct::Management::Devices)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(devices.iter().map(crate::service::lane::device).collect())
+    }
+    fn network(&self) -> Result<crate::service::lane::LaneNetwork, ServerError> {
+        let off = crate::service::lane::LaneNetwork {
+            enabled: false,
+            bind: None,
+            listening: false,
+            addresses: Vec::new(),
+        };
+        let Some(crate::direct::ManagementReply::Status(status)) =
+            self.manage(crate::direct::Management::Status)?
+        else {
+            return Ok(off);
+        };
+        Ok(crate::service::lane::LaneNetwork {
+            enabled: status.enabled,
+            bind: status.policy.as_ref().map(|policy| policy.bind.to_string()),
+            listening: matches!(
+                status.listener,
+                crate::direct::ListenerState::Listening { .. }
+            ),
+            addresses: status
+                .network_addresses
+                .map(|addresses| addresses.available)
+                .unwrap_or_default(),
+        })
     }
 }
 
@@ -456,10 +557,12 @@ fn serve_runtime_ready(
         Some(build) => build(sync.clone())?,
         None => Box::new(NoPanes),
     };
+    let fence = Arc::new(AtomicBool::new(false));
     let mut panes: Box<dyn PaneService> = Box::new(HostService {
         inner,
         paths: paths.clone(),
         stop: Arc::clone(&stop),
+        fence: Arc::clone(&fence),
     });
     panes.restore(crate::organization::OrganizationStore(Directory::open(
         &paths.data,
@@ -511,6 +614,17 @@ fn serve_runtime_ready(
             .unwrap_or_else(|e| e.into_inner())
             .set_wake(Arc::clone(&stop.wake));
     }
+    // The lane settles what an earlier run left in the service-operation ledger before any
+    // connection is accepted. A server without service state answers no lane.
+    let lane = crate::service::lane::LaneServer::start(
+        paths,
+        Arc::new(HostLane {
+            panes: Arc::clone(&panes),
+            fence,
+            direct: direct.clone(),
+        }),
+    )
+    .ok();
     let environment = Environment {
         panes: Arc::clone(&panes),
         sync: sync.clone(),
@@ -518,9 +632,11 @@ fn serve_runtime_ready(
             Arc::new(HostDirect {
                 state: Arc::clone(state),
                 panes: Arc::clone(&panes),
+                ledger: Some(paths.data.clone()),
             }) as Arc<dyn DirectManagement>
         }),
         stop: Arc::clone(&stop),
+        lane,
     };
     SIGNAL_WAKE.store(ring.as_raw_fd(), Ordering::Release);
     let readiness = ready();
@@ -779,7 +895,7 @@ fn serve_local(
     environment: &Environment,
 ) -> Result<(), ServerError> {
     let protocol::Admitted { client, name, .. } =
-        protocol::admit_server(&mut stream, &server, identity)?;
+        protocol::admit_server(&mut stream, &server, identity, environment.lane.as_ref())?;
     let peer = Peer {
         client,
         connection: protocol::random()?,
@@ -1190,6 +1306,7 @@ mod tests {
         ));
         let restored = Arc::new(AtomicBool::new(false));
         let mut host: Box<dyn PaneService> = Box::new(HostService {
+            fence: Arc::default(),
             inner: Box::new(Restoring(Arc::clone(&restored))),
             paths: Paths {
                 identity: "spaceterm-development".into(),
