@@ -2,7 +2,7 @@
 //!
 //! The item lives in the client process beside its windows. Close All Windows leaves it in the
 //! menu bar, and only its Quit, or the system's own termination, exits the client.
-use super::macos_alert::{AlertSeverity, application_alert, run_modal_alert};
+use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
 use crate::status_menu::{
     self,
     model::{Command, Item, Presentation, State},
@@ -104,6 +104,7 @@ struct StatusItem {
     worker: Worker,
     sender: Sender,
     state: Cell<State>,
+    activation: AlertActivation,
     item: Retained<NSStatusItem>,
     rows: Rows,
     // Retains the target and menu delegate for the item's lifetime.
@@ -172,6 +173,7 @@ impl StatusItem {
             worker,
             sender,
             state: Cell::new(State::default()),
+            activation: AlertActivation::FORCEFUL,
             item,
             rows,
             _target: target,
@@ -325,10 +327,15 @@ impl StatusItem {
             Some(confirmation.confirm_label()),
             self.mtm,
         );
-        present(alert, cx.windows().is_empty(), move |approved| {
-            let _ =
-                sender.send_blocking(Message::Decided(command, approved.then_some(confirmation)));
-        });
+        present(
+            alert,
+            self.activation,
+            cx.windows().is_empty(),
+            move |approved| {
+                let _ = sender
+                    .send_blocking(Message::Decided(command, approved.then_some(confirmation)));
+            },
+        );
     }
 
     fn report(&self, command: Command, error: ServerError, cx: &App) {
@@ -339,7 +346,7 @@ impl StatusItem {
         };
         let message = format!("The {} server couldn\u{2019}t {operation}.", self.name);
         let alert = server_alert(&message, &error.to_string(), None, self.mtm);
-        present(alert, cx.windows().is_empty(), |_| {});
+        present(alert, self.activation, cx.windows().is_empty(), |_| {});
     }
 }
 
@@ -379,10 +386,11 @@ fn server_alert(
 
 /// Shows `alert` one at a time and passes `answered` whether the person chose a confirmation's
 /// destructive button. The alert runs its own modal loop, so it starts from the run loop rather
-/// than inside the application's event handling. A windowless client hides afterwards, returning
-/// focus to the app the person was using.
+/// than inside the application's event handling. It takes the keyboard through `activation`
+/// first. A windowless client hides afterwards, returning focus to the app the person was using.
 fn present(
     alert: Retained<NSAlert>,
+    activation: AlertActivation,
     windowless: bool,
     answered: impl FnOnce(bool) + Send + 'static,
 ) {
@@ -399,9 +407,8 @@ fn present(
         // A confirmation offers Cancel and its destructive button; a report offers only OK.
         let confirming = alert.buttons().count() > 1;
         let application = NSApplication::sharedApplication(mtm);
-        application.activate();
         let escape = confirming.then(cancel_on_escape).flatten();
-        let response = run_modal_alert(alert, bind_server_keys);
+        let response = run_modal_alert(alert, activation, bind_server_keys);
         if let Some(escape) = escape {
             // SAFETY: The monitor came from addLocalMonitorForEventsMatchingMask and is removed
             // once.
@@ -518,7 +525,8 @@ impl MenuTarget {
 #[cfg(all(test, feature = "native-tests"))]
 pub(in crate::platform) mod tests {
     use super::super::macos_alert::testing::{
-        Answering, answer_inside_modal_loop, expected_keys, settle_pending_checks,
+        Answering, RECORDED_ACTIVATION, answer_inside_modal_loop, expected_keys,
+        settle_pending_checks,
     };
     use super::*;
 
@@ -532,10 +540,23 @@ pub(in crate::platform) mod tests {
         &'static [(Answering, Option<bool>)],
     );
 
-    const ANSWER_CASES: [AnswerCase; 2] = [
+    const ANSWER_CASES: [AnswerCase; 3] = [
         (
             Some("Stop Server"),
             &[("Cancel", "\r"), ("Stop Server", "")],
+            0,
+            &[
+                (Answering::Click(0), Some(false)),
+                (Answering::Click(1), Some(true)),
+                (Answering::Key("\r", 36), Some(false)),
+                (Answering::Key(" ", 49), Some(false)),
+                (Answering::PostedKey("\u{1b}", 53), Some(false)),
+                (Answering::Stop, Some(false)),
+            ],
+        ),
+        (
+            Some("Restart Server"),
+            &[("Cancel", "\r"), ("Restart Server", "")],
             0,
             &[
                 (Answering::Click(0), Some(false)),
@@ -558,11 +579,13 @@ pub(in crate::platform) mod tests {
         ),
     ];
 
-    /// Presents the Stop confirmation and a failure report as the status item does: queued on the
-    /// main queue, with the test driving the run loop until the alert returns. Inside each
-    /// alert's modal loop the test answers it by a click or a key. The alert stays transparent
-    /// and the test process cannot be activated, so nothing appears on screen or takes focus.
-    pub(in crate::platform) fn server_alerts_bind_return_inside_their_modal_loop() {
+    /// Presents the Stop and Restart confirmations and a failure report as the status item does:
+    /// queued on the main queue, with the test driving the run loop until the alert returns. Each
+    /// alert asks for the keyboard before its modal loop starts. The test records that request
+    /// instead of activating, so the test process never takes the keyboard. Inside each alert's
+    /// modal loop the test answers it by a click or a key. The alert stays transparent, so
+    /// nothing appears on screen.
+    pub(in crate::platform) fn server_alerts_take_the_keyboard_and_bind_their_keys() {
         let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
         for (destructive, keys, focused, answers) in ANSWER_CASES {
             for &(answering, expected) in answers {
@@ -575,11 +598,16 @@ pub(in crate::platform) mod tests {
                 alert.window().setAlphaValue(0.0);
                 let (answered, approvals) = std::sync::mpsc::channel();
                 let asking = answer_inside_modal_loop(&alert, answering, || {
-                    present(alert.clone(), false, move |approved| {
+                    present(alert.clone(), RECORDED_ACTIVATION, false, move |approved| {
                         let _ = answered.send(approved);
                     });
                 });
                 assert!(asking.modal, "the alert runs its own modal loop");
+                assert_eq!(
+                    asking.activations,
+                    [true],
+                    "the alert asks once for the keyboard, before its modal loop starts"
+                );
                 assert!(!asking.active, "asking never activates the test process");
                 assert_eq!(
                     asking.laid_out,

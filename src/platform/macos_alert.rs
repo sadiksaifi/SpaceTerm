@@ -40,13 +40,30 @@ pub(super) fn application_alert(
     alert
 }
 
-/// Runs `alert` app-modally until it ends and returns its response. Starting the modal loop lays
-/// the alert out and clears the Return its buttons were given. The window also takes its initial
-/// first responder from the main queue, which serves nothing else while the caller is itself a
-/// main-queue block. So once the loop has started, a block served in the loop's own run loop mode
-/// focuses the initial first responder and calls `bind_keys`.
+/// How the client takes the keyboard before it shows an alert by itself.
+#[derive(Clone, Copy)]
+pub(super) struct AlertActivation(fn(&NSApplication));
+
+impl AlertActivation {
+    /// Activates the client even while another app is frontmost, as GPUI's `cx.activate(true)`
+    /// does. The frontmost app can decline the cooperative `activate()`, and the window server
+    /// then sends every key to that app, so the alert never becomes key. The activation policy
+    /// does not change.
+    pub(super) const FORCEFUL: Self = Self(|application| {
+        #[allow(deprecated)]
+        application.activateIgnoringOtherApps(true);
+    });
+}
+
+/// Activates the client through `activation`, then runs `alert` app-modally until it ends and
+/// returns its response. Starting the modal loop lays the alert out and clears the Return its
+/// buttons were given. The window also takes its initial first responder from the main queue,
+/// which serves nothing else while the caller is itself a main-queue block. So once the loop has
+/// started, a block served in the loop's own run loop mode focuses the initial first responder
+/// and calls `bind_keys`.
 pub(super) fn run_modal_alert(
     alert: &NSAlert,
+    activation: AlertActivation,
     bind_keys: impl Fn(&NSAlert) + Send + 'static,
 ) -> NSModalResponse {
     let running = MainThreadBound::new(alert.retain(), alert.mtm());
@@ -67,6 +84,7 @@ pub(super) fn run_modal_alert(
         NSRunLoop::currentRunLoop()
             .performInModes_block(&NSArray::from_slice(&[NSModalPanelRunLoopMode]), &started);
     }
+    (activation.0)(&NSApplication::sharedApplication(alert.mtm()));
     alert.runModal()
 }
 
@@ -103,6 +121,18 @@ pub(super) mod testing {
         Stop,
     }
 
+    thread_local! {
+        /// Each activation recorded since the last alert, and whether no modal loop had started.
+        static ACTIVATIONS: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Records each activation request instead of activating, so the test process never takes
+    /// the keyboard from the app in front.
+    pub(crate) const RECORDED_ACTIVATION: AlertActivation = AlertActivation(|application| {
+        let before_modal = application.modalWindow().is_none();
+        ACTIVATIONS.with(|activations| activations.borrow_mut().push(before_modal));
+    });
+
     /// What the test saw inside one alert's modal loop.
     pub(crate) struct Asking {
         pub(crate) modal: bool,
@@ -112,6 +142,9 @@ pub(super) mod testing {
         pub(crate) laid_out: (Vec<(String, String)>, Option<usize>),
         /// The answer left the alert open, so the test stopped its modal loop.
         pub(crate) left_open: bool,
+        /// Each activation [`RECORDED_ACTIVATION`] recorded for the alert, and whether it came
+        /// before the alert's modal loop started.
+        pub(crate) activations: Vec<bool>,
     }
 
     /// Answers `alert` from inside the modal loop that `present` queues on the main queue. The
@@ -142,6 +175,7 @@ pub(super) mod testing {
                 policy: application.activationPolicy(),
                 laid_out: laid_out(&inside),
                 left_open: false,
+                activations: Vec::new(),
             });
             match answering {
                 // SAFETY: The button is live on the main thread, and a nil sender is allowed.
@@ -165,6 +199,7 @@ pub(super) mod testing {
                 wake_modal_loop(&application);
             });
         });
+        ACTIVATIONS.with(|activations| activations.borrow_mut().clear());
         present();
         let returned = Rc::new(Cell::new(false));
         let returning = MainThreadBound::new(Rc::clone(&returned), mtm);
@@ -177,7 +212,9 @@ pub(super) mod testing {
         while !returned.get() {
             NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
         }
-        asking.borrow_mut().take().expect("the alert asks")
+        let mut asking = asking.borrow_mut().take().expect("the alert asks");
+        asking.activations = ACTIVATIONS.with(|activations| activations.take());
+        asking
     }
 
     /// Lets a later check find its alert already ended.

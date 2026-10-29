@@ -18,7 +18,7 @@ use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
     ApplicationQuitRequest, QuitAnswer, QuitButtons, QuitPrompt, present_window_quit,
 };
-use super::macos_alert::{AlertSeverity, application_alert, run_modal_alert};
+use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
 const NS_TERMINATE_NOW: NSInteger = 1;
@@ -84,12 +84,14 @@ impl QuitStateHolder {
 
 pub(crate) struct MacosApplicationQuitAdapter {
     state: Rc<ApplicationQuitState>,
+    activation: AlertActivation,
 }
 
 impl MacosApplicationQuitAdapter {
     pub(crate) fn new() -> Self {
         Self {
             state: Rc::new(ApplicationQuitState::new()),
+            activation: AlertActivation::FORCEFUL,
         }
     }
 
@@ -160,7 +162,12 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         cx: &mut gpui::App,
     ) -> Option<gpui::Task<Option<QuitAnswer>>> {
         let mtm = MainThreadMarker::new()?;
-        let answers = ask_by_itself(quit_alert(prompt, mtm), prompt.buttons, mtm);
+        let answers = ask_by_itself(
+            quit_alert(prompt, mtm),
+            prompt.buttons,
+            self.activation,
+            mtm,
+        );
         Some(cx.spawn(async move |_| answers.recv().await.ok()))
     }
 
@@ -250,12 +257,15 @@ fn begin_quit_sheet(
 }
 
 /// Runs `alert` by itself and returns the channel that receives its one answer. The alert runs
-/// its own modal loop, so it starts from the main queue rather than inside GPUI's update. Any
+/// its own modal loop, so it starts from the main queue rather than inside GPUI's update. It
+/// takes the keyboard through `activation` first, because the menu bar item leaves another app
+/// in front. Any
 /// answer but Quit hides the client, which returns focus to the previous app. A modal loop that
 /// ends without a button answers nothing.
 fn ask_by_itself(
     alert: Retained<NSAlert>,
     buttons: QuitButtons,
+    activation: AlertActivation,
     mtm: MainThreadMarker,
 ) -> async_channel::Receiver<QuitAnswer> {
     let (answered, answers) = async_channel::bounded(1);
@@ -265,8 +275,7 @@ fn ask_by_itself(
             return;
         };
         let application = NSApplication::sharedApplication(mtm);
-        application.activate();
-        let response = run_modal_alert(alert.get(mtm), move |alert| {
+        let response = run_modal_alert(alert.get(mtm), activation, move |alert| {
             bind_quit_keys(alert, buttons);
         });
         let answer = quit_answer(response, buttons);
@@ -433,7 +442,8 @@ pub(in crate::platform) mod tests {
     use objc2::ClassType;
 
     use super::super::macos_alert::testing::{
-        Answering, answer_inside_modal_loop, expected_keys, laid_out, press, settle_pending_checks,
+        Answering, RECORDED_ACTIVATION, answer_inside_modal_loop, expected_keys, laid_out, press,
+        settle_pending_checks,
     };
     use super::*;
 
@@ -628,10 +638,11 @@ pub(in crate::platform) mod tests {
 
     /// Asks with each warning through the windowless path a client with no window takes: the
     /// adapter queues the warning on the main queue, and the test drives the run loop until it
-    /// returns. Inside the warning's modal loop the test answers it by a click or a key. The
-    /// warning stays transparent and the test process cannot be activated, so nothing appears on
-    /// screen or takes focus.
-    pub(in crate::platform) fn windowless_quit_warning_binds_its_keys_inside_its_modal_loop() {
+    /// returns. The warning asks for the keyboard before its modal loop starts. The test records
+    /// that request instead of activating, so the test process never takes the keyboard. Inside
+    /// the warning's modal loop the test answers it by a click or a key. The warning stays
+    /// transparent, so nothing appears on screen.
+    pub(in crate::platform) fn windowless_quit_warning_takes_the_keyboard_and_binds_its_keys() {
         let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
         let application = NSApplication::sharedApplication(mtm);
         let policy = application.activationPolicy();
@@ -643,10 +654,20 @@ pub(in crate::platform) mod tests {
                 alert.window().setAlphaValue(0.0);
                 let mut answers = None;
                 let asking = answer_inside_modal_loop(&alert, answering, || {
-                    answers = Some(ask_by_itself(alert.clone(), buttons, mtm));
+                    answers = Some(ask_by_itself(
+                        alert.clone(),
+                        buttons,
+                        RECORDED_ACTIVATION,
+                        mtm,
+                    ));
                 });
                 let answer = answers.and_then(|answers| answers.try_recv().ok());
                 assert!(asking.modal, "the warning runs its own modal loop");
+                assert_eq!(
+                    asking.activations,
+                    [true],
+                    "the warning asks once for the keyboard, before its modal loop starts"
+                );
                 assert!(asking.alone, "the warning shows no other window");
                 assert!(!asking.active, "asking never activates the test process");
                 assert_eq!(asking.policy, policy, "asking keeps the activation policy");
