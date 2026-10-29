@@ -501,8 +501,40 @@ pub trait HostCommands: Send {
     ) -> Result<(), Refusal> {
         Err(Refusal::Unsupported)
     }
+    /// Writes one command at the prompt of the Terminal Session the request's lease controls,
+    /// as `Operation::Run` describes.
+    fn run(&mut self, _request: RunRequest) -> Result<protocol::RunReply, Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// The receipt `device` holds for `run`. It never writes the run's command again.
+    fn run_status(
+        &mut self,
+        _device: [u8; 32],
+        _run: protocol::RunId,
+    ) -> Result<protocol::RunReply, Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// Retires a settled receipt of `device`.
+    fn run_acknowledge(&mut self, _device: [u8; 32], _run: protocol::RunId) -> Result<(), Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// Receipts that settled since the last call, each with the channel that admitted it.
+    fn take_settled_runs(&mut self) -> Vec<spaceterm_server::pane::run::Settled> {
+        Vec::new()
+    }
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
+}
+
+/// A run to admit, as `Operation::Run` names it on a channel.
+pub struct RunRequest {
+    pub device: [u8; 32],
+    pub connection: [u8; 32],
+    pub lease: pane::Lease,
+    pub channel: protocol::Channel,
+    pub run: protocol::RunId,
+    pub command: String,
+    pub session: [u8; 32],
 }
 
 /// How soon a host's timed work runs again while it waits on another thread for a journal or Git
@@ -652,6 +684,11 @@ impl<H: HostCommands> Served<H> {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn host(&self) -> &H {
+        &self.host
+    }
+
     /// Rings the bell when an observation drained a change that only the host's timed work
     /// pushes, so the host's next tick carries it.
     fn ring_for_observed_change(&mut self) {
@@ -704,6 +741,19 @@ impl<H: HostCommands> Served<H> {
             .collect();
         for (connection, channel) in bound {
             self.publish_channel(connection, channel);
+        }
+    }
+
+    /// Sends each settled run's receipt to the channel that admitted it. A channel that closed
+    /// meanwhile no longer needs it; its client resolves the run with `RunStatus`.
+    fn deliver_runs(&mut self) {
+        for settled in self.host.take_settled_runs() {
+            if let Some(connection) = self.connections.get(&settled.connection) {
+                let _ = connection.outbox.pane(
+                    settled.channel,
+                    PaneEvent::RunFinished(Box::new(settled.receipt)),
+                );
+            }
         }
     }
 
@@ -1169,6 +1219,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         let dispatch = self.dispatch(peer, id, operation);
+        self.deliver_runs();
         // A claim, close, release or edit may have ended another channel's binding.
         self.bell.ring();
         dispatch
@@ -1231,6 +1282,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         for channel in channels {
             self.publish_channel(peer.connection, channel);
         }
+        self.deliver_runs();
         self.ring_for_observed_change();
     }
     /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
@@ -1245,6 +1297,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
             self.host.rung();
         }
         let host = self.host.tick(now);
+        self.deliver_runs();
         self.sweep();
         self.ring_for_observed_change();
         self.answer_reads();
@@ -1381,12 +1434,34 @@ impl<H: HostCommands> Served<H> {
             Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
             // Scrollback pages reply from the terminal worker. Direct-network administration never
             // reaches the service, and the connection refuses observers and runs.
-            Operation::ScrollbackPage { .. }
-            | Operation::Direct(_)
-            | Operation::Observe { .. }
-            | Operation::Run { .. }
-            | Operation::RunStatus { .. }
-            | Operation::RunAcknowledge { .. } => Err(Refusal::Unsupported),
+            Operation::ScrollbackPage { .. } | Operation::Direct(_) | Operation::Observe { .. } => {
+                Err(Refusal::Unsupported)
+            }
+            Operation::Run {
+                channel,
+                run,
+                command,
+                session,
+            } => self.lease(peer, channel).and_then(|lease| {
+                self.host
+                    .run(RunRequest {
+                        device: peer.client,
+                        connection: peer.connection,
+                        lease,
+                        channel,
+                        run,
+                        command,
+                        session,
+                    })
+                    .map(ReplyBody::Run)
+            }),
+            Operation::RunStatus { run } => {
+                self.host.run_status(peer.client, run).map(ReplyBody::Run)
+            }
+            Operation::RunAcknowledge { run } => self
+                .host
+                .run_acknowledge(peer.client, run)
+                .map(|()| ReplyBody::Done),
         })
     }
 

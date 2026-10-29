@@ -33,6 +33,7 @@ fn live(screen: Option<ScreenCapture>) -> Observed {
         effects: Vec::new(),
         line: pane::LineState::default(),
         accessibility: None,
+        progress: Default::default(),
     })
 }
 
@@ -247,6 +248,7 @@ fn line_states_and_effects_are_sent_as_they_change() {
             effects,
             line,
             accessibility: None,
+            progress: Default::default(),
         }));
     }
 
@@ -272,6 +274,7 @@ fn an_accessibility_revision_travels_as_an_event_only_without_a_new_screen() {
             effects: Vec::new(),
             line: pane::LineState::default(),
             accessibility: Some(revision),
+            progress: Default::default(),
         })
     };
 

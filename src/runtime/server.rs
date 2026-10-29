@@ -116,7 +116,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod directory_tests;
 mod dispatch;
-pub use dispatch::{HostCommands, HostRead, Served, SettledRead};
+pub use dispatch::{HostCommands, HostRead, RunRequest, Served, SettledRead};
 pub use publish::{Observation, Observed};
 pub use screen_encoder::ScreenCapture;
 #[cfg(test)]
@@ -140,6 +140,8 @@ mod repositories;
 #[cfg(test)]
 #[path = "server/repository_tests.rs"]
 mod repository_tests;
+#[cfg(test)]
+mod run_tests;
 mod screen;
 pub(crate) mod screen_encoder;
 #[cfg(test)]

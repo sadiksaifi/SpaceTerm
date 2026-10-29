@@ -1573,6 +1573,7 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
             osc52_filter: Osc52Filter::default(),
             permission_requests: PermissionRequestFilter::default(),
             clipboard: WorkerClipboard::default(),
+            progress: Default::default(),
         };
         let output = [b"\x1b[?1004h".as_slice(), operation, b"\x1b[5n"].concat();
 
@@ -1615,6 +1616,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
 
     assert!(worker.feed_test_output(vec![
@@ -1682,6 +1684,7 @@ fn permission_request_worker() -> PermissionRequestWorker {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     PermissionRequestWorker {
         worker,
@@ -1785,6 +1788,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
 
     // Output after idle publishes at once, and one batch of reads makes one screen.
@@ -1829,6 +1833,7 @@ fn a_published_screen_reports_the_input_serial_written_before_its_capture() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
 
     assert!(worker.write_pty(b"a"));
@@ -1869,6 +1874,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     continue_output_burst(&mut worker);
 
@@ -1934,6 +1940,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker.schedules.request_presentation();
     worker.schedules.update_accessibility(true);
@@ -1986,6 +1993,7 @@ fn queued_input_runs_before_due_scrollback_compression() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     let activity = worker.emulator.compression_activity().unwrap();
     worker
@@ -2032,6 +2040,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
@@ -2102,6 +2111,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker.schedules.set_presentable(false, Instant::now());
 
@@ -2170,6 +2180,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker
         .schedules
@@ -2227,6 +2238,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             osc52_filter: Osc52Filter::default(),
             permission_requests: PermissionRequestFilter::default(),
             clipboard: WorkerClipboard::default(),
+            progress: Default::default(),
         };
         worker
             .schedules
@@ -2302,6 +2314,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker.emulator.feed(b"seed");
     assert!(worker.publish_screen());
@@ -2367,6 +2380,7 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker.emulator.feed(b"visible state");
     assert!(worker.publish_screen());
@@ -2429,6 +2443,7 @@ fn closed_screen_lane_skips_snapshot_and_accessibility_without_stopping_runtime(
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker.emulator.feed(b"unobserved");
     let generation = worker.emulator.presentation_generation();
@@ -2466,6 +2481,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
@@ -2529,6 +2545,7 @@ fn queued_reader_commands_should_not_extend_the_prompt_redraw_cap() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker
         .emulator
@@ -2620,6 +2637,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             osc52_filter: Osc52Filter::default(),
             permission_requests: PermissionRequestFilter::default(),
             clipboard: WorkerClipboard::default(),
+            progress: Default::default(),
         };
         assert!(worker.publish_screen());
         let _ = receiver.try_recv().unwrap();
@@ -2706,6 +2724,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
 
     assert!(worker.feed_test_output(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
@@ -2746,6 +2765,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
 
     assert!(worker.publish_screen());
@@ -2797,6 +2817,7 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
 
     assert!(worker.process_command(Command::SetPresentable(false)));
@@ -2850,6 +2871,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
 
     assert!(worker.publish_screen());
@@ -2894,6 +2916,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
@@ -4050,6 +4073,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker.emulator.feed("a😀b".as_bytes());
     let _ = worker.emulator.snapshot().unwrap();
@@ -4174,6 +4198,7 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
                 osc52_filter: Osc52Filter::default(),
                 permission_requests: PermissionRequestFilter::default(),
                 clipboard: WorkerClipboard::default(),
+                progress: Default::default(),
             };
             worker.emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[?1004h");
             let pointer = |phase, position, modifiers, generation| {
@@ -4264,6 +4289,7 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
             osc52_filter: Osc52Filter::default(),
             permission_requests: PermissionRequestFilter::default(),
             clipboard: WorkerClipboard::default(),
+            progress: Default::default(),
         };
         for row in 0..40 {
             worker.emulator.feed(format!("row {row:02}\r\n").as_bytes());
@@ -4452,6 +4478,7 @@ fn clipboard_worker() -> (
             osc52_filter: Osc52Filter::default(),
             permission_requests: PermissionRequestFilter::default(),
             clipboard,
+            progress: Default::default(),
         },
         records,
         requests,
@@ -5079,6 +5106,7 @@ fn a_hidden_session_reports_retitles_at_most_once_per_interval() {
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
     };
     worker.schedules.fix_clock(start);
     assert!(worker.process_command(Command::SetPresentable(false)));

@@ -34,6 +34,9 @@ pub struct Observation {
     /// A changed accessibility revision. A presented screen carries it; otherwise it travels as
     /// a Pane event.
     pub(crate) accessibility: Option<u64>,
+    /// The Input serial the PTY accepted and the output it read. A change travels as a Pane
+    /// event when no screen does.
+    pub(crate) progress: crate::terminal::session::Progress,
 }
 
 /// A captured screen waiting for credit. It owns its snapshot and is encoded on the I/O thread.
@@ -66,6 +69,8 @@ pub(super) struct Publication {
     presented: Option<u64>,
     /// The line state last sent. A new channel receives the current one first.
     line: Option<pane::LineState>,
+    /// The progress last carried by a screen or a Pane event.
+    progress: crate::terminal::session::Progress,
 }
 
 impl Publication {
@@ -81,6 +86,7 @@ impl Publication {
             encoder: Arc::default(),
             presented: None,
             line: None,
+            progress: Default::default(),
         })
     }
 
@@ -115,6 +121,7 @@ impl Publication {
             effects,
             line,
             accessibility,
+            progress,
         } = observation;
         let mut open = true;
         for request in effects {
@@ -135,6 +142,14 @@ impl Publication {
             && carried == Ok(false)
         {
             open &= self.event(PaneEvent::Accessibility { revision });
+        }
+        // A presented screen is the progress its client sees; only progress without one is
+        // reported, at most once per publication.
+        if std::mem::replace(&mut self.progress, progress) != progress && carried == Ok(false) {
+            open &= self.event(PaneEvent::Progress {
+                input: progress.input,
+                output_bytes: progress.output_bytes,
+            });
         }
         open
     }
@@ -217,6 +232,7 @@ impl OwnedPane {
             effects,
             line: self.subscription.line(),
             accessibility: self.accessibility.take_changed_revision(),
+            progress: self.subscription.progress(),
         }
     }
 
