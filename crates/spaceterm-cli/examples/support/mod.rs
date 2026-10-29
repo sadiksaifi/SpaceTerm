@@ -547,11 +547,13 @@ impl Pane {
         let mut rows = Vec::new();
         let mut start = history.oldest;
         while start < history.total {
+            // Output may continue while pages arrive. Stop at the captured screen's boundary.
+            let remaining = u16::try_from(history.total - start).unwrap_or(u16::MAX);
             let ReplyBody::Page(page) = self.request(Operation::ScrollbackPage {
                 channel: self.channel(),
                 epoch: history.epoch,
                 start,
-                rows: MAX_PAGE_ROWS,
+                rows: remaining.min(MAX_PAGE_ROWS),
             })?
             else {
                 return Err(ServerError::Protocol);
