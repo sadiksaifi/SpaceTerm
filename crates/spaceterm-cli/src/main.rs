@@ -18,6 +18,21 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return usage(&argv, &error),
     };
+    if let args::Command::Connection(command) = &cli.command {
+        let result = spaceterm_cli::connection::execute(
+            command,
+            &cli.global,
+            env!("SPACETERM_SERVER_IDENTITY"),
+        );
+        return ExitCode::from(result.render(
+            &cli.global,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ));
+    }
+    if let Err(failure) = validate_route(&cli) {
+        return finish(cli.command.path(), cli.global.json, failure);
+    }
     if let args::Command::Server(command) = &cli.command
         && !matches!(
             command,
@@ -42,6 +57,31 @@ fn main() -> ExitCode {
         cli.global.json,
         Failure::new(Code::Unsupported),
     )
+}
+
+fn validate_route(cli: &Cli) -> Result<(), Failure> {
+    let environment = if cli.global.server.is_none() {
+        std::env::var_os("SPACETERM_SERVER")
+    } else {
+        None
+    };
+    let environment = environment
+        .as_ref()
+        .map(|value| {
+            value.to_str().ok_or_else(|| {
+                Failure::with(
+                    Code::InvalidArguments,
+                    Details::Usage(contract::UsageDetails {
+                        argument: Some("--server".into()),
+                        kind: contract::UsageKind::InvalidUtf8,
+                    }),
+                )
+            })
+        })
+        .transpose()?;
+    let selector =
+        spaceterm_cli::connection::route::selected(cli.global.server.as_deref(), environment)?;
+    spaceterm_cli::connection::route::validate_command(&cli.command, selector)
 }
 
 /// Help and version print normally. Every other parse error is a bounded usage failure.

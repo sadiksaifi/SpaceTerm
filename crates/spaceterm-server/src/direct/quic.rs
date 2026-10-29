@@ -16,8 +16,26 @@ use std::time::{Duration, Instant};
 
 pub(super) const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
 
-impl client::Messages for QuicStream {
+pub(super) struct DeadlineMessages<'a> {
+    stream: &'a mut QuicStream,
+    deadline: Option<Instant>,
+}
+impl<'a> DeadlineMessages<'a> {
+    pub(super) fn new(stream: &'a mut QuicStream, deadline: Option<Instant>) -> Self {
+        Self { stream, deadline }
+    }
+    fn until(&self) -> Instant {
+        self.deadline.map_or_else(
+            || Instant::now() + HANDSHAKE_LIMIT,
+            |deadline| deadline.min(Instant::now() + HANDSHAKE_LIMIT),
+        )
+    }
+}
+impl client::Messages for DeadlineMessages<'_> {
     fn send(&mut self, value: &impl Serialize) -> Result<(), DirectError> {
+        if Instant::now() >= self.until() {
+            return Err(DirectError::Transport);
+        }
         let bytes = zeroize::Zeroizing::new(
             serde_json::to_vec(value).map_err(|_| DirectError::InvalidRequest)?,
         );
@@ -25,15 +43,28 @@ impl client::Messages for QuicStream {
             return Err(DirectError::Capacity);
         }
         let frame = zeroize::Zeroizing::new(crate::protocol::prefixed(&bytes));
-        self.send_bytes(&frame, Instant::now() + HANDSHAKE_LIMIT)
+        self.stream
+            .send_bytes(&frame, self.until())
             .map_err(transport)
     }
     fn receive<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, DirectError> {
+        if Instant::now() >= self.until() {
+            return Err(DirectError::Transport);
+        }
         let bytes = zeroize::Zeroizing::new(
-            self.receive_prefixed(wire::MAX_AUTH_FRAME, Instant::now() + HANDSHAKE_LIMIT)
+            self.stream
+                .receive_prefixed(wire::MAX_AUTH_FRAME, self.until())
                 .map_err(transport)?,
         );
         serde_json::from_slice(&bytes).map_err(|_| DirectError::InvalidRequest)
+    }
+}
+impl client::Messages for QuicStream {
+    fn send(&mut self, value: &impl Serialize) -> Result<(), DirectError> {
+        DeadlineMessages::new(self, None).send(value)
+    }
+    fn receive<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, DirectError> {
+        DeadlineMessages::new(self, None).receive()
     }
 }
 
@@ -258,13 +289,20 @@ impl rustls::client::danger::ServerCertVerifier for Pinned {
 
 /// Dials the endpoint's address and port in UDP, verifies the pinned certificate, and opens the
 /// L0 stream on which the pairing exchange runs.
-pub(super) fn dial(
+pub(super) fn dial_until(
     endpoint: &str,
     pin: &ServerPin,
     credential: &DeviceCredential,
+    deadline: Option<Instant>,
 ) -> Result<QuicStream, DirectError> {
     let address = Endpoint::from_url(endpoint)?;
-    let deadline = Instant::now() + HANDSHAKE_LIMIT;
+    let deadline = deadline.map_or_else(
+        || Instant::now() + HANDSHAKE_LIMIT,
+        |deadline| deadline.min(Instant::now() + HANDSHAKE_LIMIT),
+    );
+    if Instant::now() >= deadline {
+        return Err(DirectError::Transport);
+    }
     let addresses = address.resolve(deadline)?;
     let seen = Arc::new(Verification::default());
     let config = client_config(pin, credential, Arc::clone(&seen))?;

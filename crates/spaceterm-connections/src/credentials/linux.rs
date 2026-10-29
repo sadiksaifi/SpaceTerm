@@ -130,7 +130,7 @@ impl SecretService {
             &service,
             &collection_path,
             COLLECTION_INTERFACE,
-            Interaction::Requested,
+            Interaction::Quiet,
         )
         .await?;
         let session = open_session(&service).await?;
@@ -155,7 +155,7 @@ impl SecretService {
                 .await
                 .map_err(classify)?;
             if prompt.as_str() != "/" {
-                let result = run_prompt(&connection, &prompt, Interaction::Requested).await?;
+                let result = run_prompt(&connection, &prompt, Interaction::Quiet).await?;
                 let item =
                     OwnedObjectPath::try_from(result).map_err(|_| CredentialError::Unavailable)?;
                 if item.as_str() == "/" {
@@ -194,6 +194,9 @@ impl SecretService {
 }
 
 impl CredentialStore for SecretService {
+    fn kind(&self) -> crate::credentials::StoreKind {
+        crate::credentials::StoreKind::SecretService
+    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -346,4 +349,20 @@ fn classify(error: zbus::Error) -> CredentialError {
         }
         _ => CredentialError::Unavailable,
     }
+}
+
+pub(super) fn available() -> Result<(), CredentialError> {
+    pollster::block_on(async {
+        let connection = connect().await?;
+        let service = proxy(&connection, SERVICE_PATH, SERVICE_INTERFACE).await?;
+        let collection: OwnedObjectPath = service
+            .call("ReadAlias", &("default",))
+            .await
+            .map_err(classify)?;
+        if collection.as_str() == "/" {
+            Err(CredentialError::Unavailable)
+        } else {
+            Ok(())
+        }
+    })
 }

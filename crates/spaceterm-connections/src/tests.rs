@@ -5,21 +5,21 @@ use super::credentials::CredentialError;
 use super::worker::DirectNetwork;
 use super::*;
 
-pub(crate) fn uncertain_join(label: &str) -> (DirectConnections, JoinId, DirectRouteId) {
+pub fn uncertain_join(label: &str) -> (DirectConnections, JoinId, DirectRouteId) {
     super::worker::enrollment_tests::uncertain_join(label)
 }
 
-pub(crate) fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
+pub fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
     super::worker::enrollment_tests::unconfirmed_join(label)
 }
 
-pub(crate) fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConnections, JoinId) {
+pub fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConnections, JoinId) {
     super::worker::enrollment_tests::retryable_join(label, stage)
 }
 
 /// An unjoined registry for the real Add Server journey. The network boundary returns
 /// a fixed exchange comparison ("000007") and waits for the person's cancellation.
-pub(crate) fn waiting_invitation(
+pub fn waiting_invitation(
     label: &str,
 ) -> (DirectConnections, Zeroizing<String>, direct::ComparisonCode) {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -122,7 +122,7 @@ impl DirectNetwork for WaitingNetwork {
 #[derive(Default)]
 pub(super) struct MemoryRecords(Mutex<Document>, AtomicBool);
 impl Records for MemoryRecords {
-    fn load(&self) -> Result<Document, ()> {
+    fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, document: &Document) -> Result<Durability, SaveError> {
@@ -141,6 +141,9 @@ pub(super) struct Credentials {
     pub(super) locked: AtomicBool,
 }
 impl CredentialStore for Credentials {
+    fn kind(&self) -> crate::StoreKind {
+        crate::StoreKind::Keychain
+    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -254,7 +257,7 @@ impl DirectNetwork for Network {
     }
 }
 
-pub(super) fn saved(id: u8, key: u8) -> SavedRoute {
+pub fn saved(id: u8, key: u8) -> SavedRoute {
     SavedRoute {
         route: DirectRoute {
             id: [id; 32],
@@ -310,8 +313,8 @@ fn fixture(
 fn an_empty_saved_inventory_is_distinct_from_one_that_could_not_be_read() {
     struct Inventory(Option<Document>);
     impl Records for Inventory {
-        fn load(&self) -> Result<Document, ()> {
-            self.0.clone().ok_or(())
+        fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
+            self.0.clone().ok_or(DirectError::StorageUnavailable)
         }
         fn save(&self, _: &Document) -> Result<Durability, SaveError> {
             panic!("inventory observation must not write records")
@@ -333,38 +336,36 @@ fn an_empty_saved_inventory_is_distinct_from_one_that_could_not_be_read() {
 }
 
 /// A real retained registry with unavailable network I/O for UI journey tests.
-pub(crate) fn offline(label: &str) -> (DirectConnections, DirectRouteId) {
+pub fn offline(label: &str) -> (DirectConnections, DirectRouteId) {
     let (connections, id, _) = offline_with_lock(label);
     (connections, id)
 }
 
-pub(crate) struct CredentialLock(Arc<Credentials>);
+pub struct CredentialLock(Arc<Credentials>);
 
 impl CredentialLock {
-    pub(crate) fn set_locked(&self, locked: bool) {
+    pub fn set_locked(&self, locked: bool) {
         self.0.locked.store(locked, Ordering::Release);
     }
 }
 
 /// Whether the offline fixture's records can be saved.
-pub(crate) struct RecordsStorage(Arc<MemoryRecords>);
+pub struct RecordsStorage(Arc<MemoryRecords>);
 
 impl RecordsStorage {
-    pub(crate) fn set_failing(&self, failing: bool) {
+    pub fn set_failing(&self, failing: bool) {
         self.0.1.store(failing, Ordering::Release);
     }
 }
 
 /// The offline fixture with control over whether its records save.
-pub(crate) fn offline_with_storage(
-    label: &str,
-) -> (DirectConnections, DirectRouteId, RecordsStorage) {
+pub fn offline_with_storage(label: &str) -> (DirectConnections, DirectRouteId, RecordsStorage) {
     let (connections, id, _, records) = offline_fixture(label);
     (connections, id, RecordsStorage(records))
 }
 
 /// The offline fixture with control over its own in-memory credential boundary.
-pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteId, CredentialLock) {
+pub fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteId, CredentialLock) {
     let (connections, id, lock, _) = offline_fixture(label);
     (connections, id, lock)
 }
@@ -373,13 +374,13 @@ pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteI
 /// Seeds retained routes and handles without starting native maintenance workers, because the
 /// scripted writers answer protocol operations and the handles cannot reach a native server.
 /// Registry mutations still use DirectConnections.
-pub(crate) fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
+pub fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
     connected_fixture(labels, None)
 }
 
 /// Connected saved routes that all reach the server `server`, as an earlier pairing and a newer
 /// one to the same computer do.
-pub(crate) fn connected_routes_to_one_server(
+pub fn connected_routes_to_one_server(
     labels: &[&str],
     server: [u8; 32],
 ) -> (DirectConnections, Vec<DirectRouteId>) {
@@ -483,9 +484,7 @@ fn connected_fixture(
 
 /// Disconnected saved routes for picker tests, with no connection intent that could start a
 /// native route job and wake GPUI's deterministic scheduler.
-pub(crate) fn disconnected_routes_at(
-    routes: &[(&str, &str)],
-) -> (DirectConnections, Vec<DirectRouteId>) {
+pub fn disconnected_routes_at(routes: &[(&str, &str)]) -> (DirectConnections, Vec<DirectRouteId>) {
     let routes: Vec<_> = routes
         .iter()
         .map(|(label, endpoint)| (*label, Some(*endpoint)))
@@ -673,7 +672,7 @@ fn an_unrelated_revocation_receipt_never_completes_removal_or_retires_credential
         connections
             .pending_unpairs()
             .first()
-            .is_some_and(|p| p.state == UnpairState::Unconfirmed)
+            .is_some_and(|p| p.state == UnpairProgress::Unconfirmed)
     });
     assert!(!network.calls.lock().unwrap().is_empty());
     assert!(credentials.values.lock().unwrap().contains_key(&[5; 32]));
@@ -703,7 +702,7 @@ fn locked_native_storage_pauses_quiet_recovery_until_explicit_resume() {
     let (connections, records, credentials, _) = fixture(vec![saved(1, 5)], Answer::Lost);
     credentials.locked.store(true, Ordering::Release);
     connections.unpair_self(&[1; 32]).unwrap();
-    await_condition(|| connections.pending_unpairs()[0].state == UnpairState::NeedsInteraction);
+    await_condition(|| connections.pending_unpairs()[0].state == UnpairProgress::NeedsInteraction);
     drop(connections);
     let network = Network::new(Answer::Exact);
     let reopened = DirectConnections::new(
@@ -713,7 +712,7 @@ fn locked_native_storage_pauses_quiet_recovery_until_explicit_resume() {
         network.clone(),
     );
     reopened.resume_retained();
-    await_condition(|| reopened.pending_unpairs()[0].state == UnpairState::NeedsInteraction);
+    await_condition(|| reopened.pending_unpairs()[0].state == UnpairProgress::NeedsInteraction);
     assert!(network.calls.lock().unwrap().is_empty());
     assert_eq!(
         credentials.reads.lock().unwrap().last(),
@@ -1021,4 +1020,67 @@ fn removing_a_route_should_discard_what_it_retained() {
     assert_eq!(after_disconnect, Vec::<DirectRouteId>::new());
     assert_eq!(*removed.lock().unwrap(), vec![routes[0]]);
     assert!(connections.route(&routes[0]).is_none());
+}
+
+#[derive(Default)]
+pub(crate) struct CancellationToken(std::sync::atomic::AtomicBool);
+impl CancellationToken {
+    pub(crate) fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+impl crate::setup::Cancellation for CancellationToken {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// File-boundary fixture: a publication failure grants no later write authority.
+#[derive(Default)]
+pub(crate) struct RecordingFile {
+    pub files: Arc<Mutex<FileState>>,
+    blocked: std::sync::atomic::AtomicBool,
+}
+#[derive(Default)]
+pub(crate) struct FileState {
+    bytes: Option<Vec<u8>>,
+    pub commit_outcome: Option<Durability>,
+    pub commit_error: Option<()>,
+    pub prepare_error: Option<()>,
+}
+impl RecordingFile {
+    pub fn reopen(&self) -> Self {
+        Self {
+            files: self.files.clone(),
+            blocked: Default::default(),
+        }
+    }
+}
+impl records::RecordFile for RecordingFile {
+    fn read(
+        &self,
+        accept: &mut dyn FnMut(&[u8]) -> Result<(), spaceterm_server::direct::DirectError>,
+    ) -> Result<(), spaceterm_server::direct::DirectError> {
+        self.blocked.store(true, Ordering::Release);
+        if let Some(bytes) = &self.files.lock().unwrap().bytes {
+            accept(bytes)?;
+        }
+        self.blocked.store(false, Ordering::Release);
+        Ok(())
+    }
+    fn commit(&self, bytes: &[u8]) -> Result<Durability, SaveError> {
+        let mut files = self.files.lock().unwrap();
+        if self.blocked.load(Ordering::Acquire) {
+            return Err(SaveError::PublicationIndeterminate);
+        }
+        if files.prepare_error.is_some() {
+            return Err(SaveError::NotPublished);
+        }
+        if files.commit_error.is_some() {
+            self.blocked.store(true, Ordering::Release);
+            return Err(SaveError::PublicationIndeterminate);
+        }
+        files.bytes = Some(bytes.to_vec());
+        Ok(files.commit_outcome.unwrap_or(Durability::Synchronized))
+    }
 }

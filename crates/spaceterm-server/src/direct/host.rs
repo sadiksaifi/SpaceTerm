@@ -696,34 +696,22 @@ impl State {
                 ManagementReply::Status(self.status())
             }
             Management::Invite { advertise } => {
-                let address = advertise
-                    .as_deref()
-                    .map(str::parse::<std::net::IpAddr>)
-                    .transpose()
-                    .map_err(|_| DirectError::InvalidAddress)?;
                 let status = self.status();
-                let endpoint = match status.listener {
-                    // A listener on every interface advertises one concrete address: the one
-                    // the owner chose among the available ones, otherwise its own choice.
-                    ListenerState::Listening { addr } if addr.ip().is_unspecified() => {
-                        let snapshot = network::snapshot(self.network.as_ref())?;
-                        let advertised = match address {
-                            Some(address) => Some(address)
-                                .filter(|address| snapshot.addresses.available.contains(address)),
-                            None => snapshot.advertised(),
-                        }
-                        .ok_or(DirectError::InvalidAddress)?;
-                        std::net::SocketAddr::new(advertised, addr.port())
-                    }
-                    ListenerState::Listening { addr } => {
-                        if address.is_some_and(|address| address != addr.ip()) {
-                            return Err(DirectError::InvalidAddress);
-                        }
-                        addr
-                    }
-                    _ => return Err(DirectError::Disabled),
+                let ListenerState::Listening { addr } = status.listener else {
+                    return Err(DirectError::Disabled);
                 };
-                let endpoint = format!("quic://{endpoint}");
+                let endpoint = if let Some(authority) = advertise {
+                    super::Endpoint::parse(&authority)?.url()
+                } else {
+                    let address = if addr.ip().is_unspecified() {
+                        network::snapshot(self.network.as_ref())?
+                            .advertised()
+                            .ok_or(DirectError::InvalidAddress)?
+                    } else {
+                        addr.ip()
+                    };
+                    format!("quic://{}", std::net::SocketAddr::new(address, addr.port()))
+                };
                 if self.invitations.len() >= MAX_PENDING {
                     return Err(DirectError::Capacity);
                 }

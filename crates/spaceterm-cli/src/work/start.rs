@@ -1,16 +1,17 @@
-//! Process entry for work commands. Route adapters may call `run_connected` for a paired
-//! connection; the account-local entry never constructs a credential store.
+//! Process entry for work commands over the selected account-local or paired route.
+//! Account-local commands never construct a native credential store.
 use super::{
     backend::Connected,
     dispatch,
     execute::{self, Environment},
     output::Output,
 };
+use crate::connection::{NativeCredentials, route};
 use crate::{
     args::{Cli, Command, WorktreeCommand},
     contract::*,
 };
-use spaceterm_server::{CliRoute, ServerConnection, protocol::AgentName};
+use spaceterm_server::protocol::AgentName;
 use std::{
     io::{BufRead, IsTerminal, Read, Write},
     time::{Duration, Instant},
@@ -20,10 +21,10 @@ pub fn start(cli: &Cli) -> Option<Output> {
     if !execute::handles(&cli.command) {
         return None;
     }
-    Some(local(cli))
+    Some(selected(cli))
 }
 
-fn local(cli: &Cli) -> Output {
+fn selected(cli: &Cli) -> Output {
     let failed = |failure| {
         Output::failed(
             cli.command.path(),
@@ -33,49 +34,15 @@ fn local(cli: &Cli) -> Output {
             String::new(),
         )
     };
-    let server = cli
-        .global
-        .server
-        .clone()
-        .or_else(|| std::env::var("SPACETERM_SERVER").ok())
-        .unwrap_or_else(|| "local".into());
-    let local = server == "local";
+    let selector = match route::selector(&cli.global) {
+        Ok(selector) => selector,
+        Err(failure) => return failed(failure),
+    };
+    let local = selector == "local";
     if let Err(failure) = execute::validate(&cli.command, local) {
         return failed(failure);
     }
-    let agent = match cli
-        .global
-        .agent
-        .clone()
-        .map(Ok)
-        .or_else(|| {
-            std::env::var("SPACETERM_AS")
-                .ok()
-                .map(|a| a.parse::<AgentName>())
-        })
-        .transpose()
-    {
-        Ok(agent) => agent,
-        Err(_) => {
-            return failed(Failure::with(
-                Code::InvalidArguments,
-                Details::Usage(UsageDetails {
-                    argument: Some("--as".into()),
-                    kind: UsageKind::Other,
-                }),
-            ));
-        }
-    };
-    // Saved Connection routing belongs to stream E. Paired callers enter through
-    // run_connected with E's admitted connection and the same dispatch boundary.
-    if !local {
-        return failed(Failure::new(Code::Unsupported));
-    }
     let identity = env!("SPACETERM_SERVER_IDENTITY");
-    let connection = match ServerConnection::for_cli(identity, CliRoute::Local, agent.clone()) {
-        Ok(c) => c,
-        Err(e) => return failed(from_server_error(e)),
-    };
     let timeout = cli.global.timeout.unwrap_or_else(|| {
         if matches!(
             cli.command,
@@ -87,6 +54,25 @@ fn local(cli: &Cli) -> Output {
         }
     });
     let deadline = Instant::now() + timeout;
+    let route::RoutedConnection {
+        selected,
+        connection,
+        agent,
+        interaction,
+    } = match route::connect(identity, &cli.global, Some(deadline)) {
+        Ok(routed) => routed,
+        Err(error) => {
+            let data = error.operational_data();
+            return Output::failed(
+                cli.command.path(),
+                error.server.map(|server| *server),
+                error.failure,
+                data,
+                String::new(),
+            );
+        }
+    };
+    let credentials = NativeCredentials(identity);
     let link = match connection.link_cancellable(&|| Instant::now() >= deadline) {
         Ok(link) => link,
         Err(e) => {
@@ -97,15 +83,25 @@ fn local(cli: &Cli) -> Output {
             });
         }
     };
+    let server = match connection.admitted_server_id() {
+        Ok(server) => selected.reference(&server),
+        Err(error) => return failed(from_server_error(error)),
+    };
     let mut connect = |agent: Option<&AgentName>| {
-        ServerConnection::for_cli(identity, CliRoute::Local, agent.cloned())
+        selected.server_connection(
+            identity,
+            agent.cloned(),
+            &credentials,
+            interaction,
+            Some(deadline),
+        )
     };
     let mut journal = match dispatch::open(
         &connection,
         &link,
         &dispatch::Configuration {
             identity,
-            route: crate::state::RouteKey::Local,
+            route: selected.key(),
             agent: agent.as_ref(),
             deadline,
             mutating: !matches!(cli.command, Command::List(_)),
@@ -125,8 +121,8 @@ fn local(cli: &Cli) -> Output {
         &Route {
             identity,
             local,
-            name: &server,
-            route: "local",
+            name: &server.name,
+            route: &server.route,
             agent: agent.is_some(),
         },
         &mut *journal,

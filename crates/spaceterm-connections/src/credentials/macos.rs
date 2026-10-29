@@ -76,6 +76,9 @@ impl Keychain {
 }
 
 impl CredentialStore for Keychain {
+    fn kind(&self) -> crate::credentials::StoreKind {
+        crate::credentials::StoreKind::Keychain
+    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -116,6 +119,7 @@ impl CredentialStore for Keychain {
         let _lock = INTERACTION
             .lock()
             .map_err(|_| CredentialError::Unavailable)?;
+        let _quiet = QuietGuard::new(Interaction::Quiet)?;
         let mut item = ItemAddOptions::new(ItemAddValue::Data {
             class: ItemClass::generic_password(),
             data: CFData::from_buffer(secret),

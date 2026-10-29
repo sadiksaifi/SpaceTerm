@@ -1222,7 +1222,7 @@ fn an_unadmitted_peer_cannot_send_a_message_larger_than_the_authentication_bound
         stream.receive::<serde_json::Value>()
     });
     let credential = DeviceCredential::generate().unwrap();
-    let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+    let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
     let oversized = (wire::MAX_AUTH_FRAME as u32 + 1).to_be_bytes();
     let deadline = Instant::now() + Duration::from_secs(5);
     stream.send_bytes(&oversized, deadline).unwrap();
@@ -1278,7 +1278,7 @@ fn the_quic_carrier_moves_frames_larger_than_its_buffers_in_order() {
         }
     });
     let credential = DeviceCredential::generate().unwrap();
-    let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+    let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
     assert_eq!(stream.receive::<String>().unwrap(), "open");
     let mut carrier = stream.into_carrier();
     let mut received = Vec::new();
@@ -2623,7 +2623,7 @@ mod quic_connections {
         let paired = fixture.enroll(&credential);
         let other = DeviceCredential::generate().unwrap();
         let server = fixture.serve_next_with(service(Refusing));
-        let mut stream = quic::dial(&fixture.endpoint(), &paired.pin, &other).unwrap();
+        let mut stream = quic::dial_until(&fixture.endpoint(), &paired.pin, &other, None).unwrap();
         let answer = client::exchange_on(
             &mut stream,
             &paired.pin,
@@ -2770,7 +2770,7 @@ mod quic_connections {
             // Dropping the stream closes the connection.
         });
         let credential = DeviceCredential::generate().unwrap();
-        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
         server.join().unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         assert_eq!(stream.receive::<String>().unwrap(), "answer");
@@ -2808,7 +2808,7 @@ mod quic_connections {
             );
         });
         let credential = DeviceCredential::generate().unwrap();
-        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         let mut carrier = stream.into_carrier();
         let frames = receive_frames(&mut carrier, 2, Instant::now() + Duration::from_secs(10));
@@ -2837,7 +2837,7 @@ mod quic_connections {
                 .collect::<Vec<_>>()
         });
         let credential = DeviceCredential::generate().unwrap();
-        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         let mut carrier = stream.into_carrier();
         send_frames(
@@ -2867,7 +2867,7 @@ mod quic_connections {
         paired: &PairedDevice,
         credential: &DeviceCredential,
     ) -> crate::connection::quic::QuicCarrier {
-        let mut stream = quic::dial(endpoint, &paired.pin, credential).unwrap();
+        let mut stream = quic::dial_until(endpoint, &paired.pin, credential, None).unwrap();
         let answer = client::exchange_on(
             &mut stream,
             &paired.pin,
@@ -3058,7 +3058,7 @@ mod quic_connections {
             accepted.send(&"open").unwrap();
             accepted
         });
-        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         drop(server.join().unwrap());
     }
@@ -3157,7 +3157,7 @@ mod quic_connections {
             turns
         });
         let credential = DeviceCredential::generate().unwrap();
-        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         let mut carrier = stream.into_carrier();
         let received = receive_frames(
@@ -3211,7 +3211,7 @@ mod quic_connections {
             (offers, control, carrier)
         });
         let credential = DeviceCredential::generate().unwrap();
-        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        let mut stream = quic::dial_until(&endpoint, &pin, &credential, None).unwrap();
         assert_eq!(stream.receive::<String>().unwrap(), "open");
         // The client never reads, so L2 runs out of credit.
         let (offers, control, carrier) = server.join().unwrap();
@@ -3232,7 +3232,7 @@ mod quic_connections {
                 let (endpoint, pin) = (endpoint.clone(), pin.clone());
                 std::thread::spawn(move || {
                     let credential = DeviceCredential::generate().unwrap();
-                    let _ = quic::dial(&endpoint, &pin, &credential);
+                    let _ = quic::dial_until(&endpoint, &pin, &credential, None);
                 })
             })
             .collect();
@@ -3247,7 +3247,7 @@ mod quic_connections {
         }
         let credential = DeviceCredential::generate().unwrap();
         let started = Instant::now();
-        assert!(quic::dial(&endpoint, &pin, &credential).is_err());
+        assert!(quic::dial_until(&endpoint, &pin, &credential, None).is_err());
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(listener.waiting(), 32);
         drop(listener);
@@ -3880,5 +3880,173 @@ mod quic_connections {
         );
         drop(link);
         let _ = server.join().unwrap();
+    }
+}
+
+#[test]
+fn claim_polling_is_scoped_to_the_exact_invitation() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let first = fixture.invite();
+    let second = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let first_claim = fixture.claim(&first, &credential);
+    let second_claim = fixture.claim(&second, &credential);
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims {
+            invitation: Some(first.id()),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(claims, vec![first_claim]);
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims {
+            invitation: Some(second.id()),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(claims, vec![second_claim]);
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims {
+            invitation: Some([0; 32]),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(claims.is_empty());
+}
+
+#[test]
+fn cancellation_receipts_are_bound_to_the_original_claim_and_created_pairing() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let claim = fixture.claim(&invitation, &credential);
+    fixture
+        .management(Management::Approve(claim.clone()))
+        .unwrap();
+    let mut enrollment = Enrollment::resume(
+        invitation.endpoint(),
+        invitation.server_pin().clone(),
+        claim.id,
+        &credential,
+    )
+    .unwrap();
+    let server = fixture.serve_next();
+    let receipt = enrollment.cancel().unwrap().unwrap();
+    server.join().unwrap().unwrap();
+    assert_eq!(enrollment.validate_cancellation(&receipt), Ok(()));
+    let mut changed = receipt;
+    changed.operation = [0; 32];
+    assert_eq!(
+        enrollment.validate_cancellation(&changed),
+        Err(DirectError::Substituted)
+    );
+}
+
+#[test]
+fn an_expired_client_deadline_sends_no_authentication() {
+    let credential = DeviceCredential::generate().unwrap();
+    let pin = ServerPin {
+        build: "spaceterm-development".into(),
+        server: [1; 32],
+        public_key: [2; 32],
+        certificate: [3; 32],
+    };
+    let paired = PairedDevice {
+        pin,
+        pairing: [4; 32],
+        client: [5; 32],
+    };
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        DirectConnection::connect_until("quic://127.0.0.1:9", &paired, &credential, started),
+        Err(DirectError::Transport)
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn authentication_accepts_a_signed_future_work_major_for_service_admission() {
+    struct Exchange {
+        frames: std::collections::VecDeque<serde_json::Value>,
+        sent: usize,
+    }
+    impl client::Messages for Exchange {
+        fn send(&mut self, _: &impl serde::Serialize) -> Result<(), DirectError> {
+            self.sent += 1;
+            Ok(())
+        }
+        fn receive<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, DirectError> {
+            serde_json::from_value(self.frames.pop_front().unwrap())
+                .map_err(|_| DirectError::InvalidRequest)
+        }
+    }
+    let server = DeviceCredential::generate().unwrap();
+    let credential = DeviceCredential::generate().unwrap();
+    let pin = ServerPin {
+        server: [1; 32],
+        public_key: crypto::public(server.expose_bytes()).unwrap(),
+        certificate: [2; 32],
+        build: "Development".into(),
+    };
+    for (major, tampered, expected) in [
+        (crate::protocol::MAJOR + 1, false, None),
+        (
+            crate::protocol::MAJOR + 1,
+            true,
+            Some(DirectError::AuthenticationRefused),
+        ),
+        (3, false, Some(DirectError::IncompatibleProtocol)),
+    ] {
+        let mut challenge = wire::Challenge {
+            major,
+            pin: pin.clone(),
+            nonce: [3; 32],
+            generation: [4; 32],
+            server_name: "Test".into(),
+            proof: Vec::new(),
+        };
+        challenge.proof = crypto::sign(
+            server.expose_bytes(),
+            &wire::transcript(
+                "server",
+                &pin,
+                &challenge.nonce,
+                &(major, &challenge.server_name, &challenge.generation),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        if tampered {
+            challenge.major += 1;
+        }
+        let mut exchange = Exchange {
+            frames: [
+                serde_json::to_value(challenge).unwrap(),
+                serde_json::to_value(Ok::<_, DirectError>(wire::Answer::Enrollment(None))).unwrap(),
+            ]
+            .into(),
+            sent: 0,
+        };
+        let result = client::exchange_on(
+            &mut exchange,
+            &pin,
+            &credential,
+            wire::Action::Finish {
+                claim: [5; 32],
+                key: crypto::public(credential.expose_bytes()).unwrap(),
+            },
+            None,
+            None,
+        );
+        assert_eq!(result.err(), expected);
+        assert_eq!(exchange.sent, usize::from(expected.is_none()));
     }
 }

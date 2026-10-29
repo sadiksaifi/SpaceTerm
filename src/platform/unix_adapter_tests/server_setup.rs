@@ -688,7 +688,7 @@ struct ObservedCredentials {
 impl ObservedCredentials {
     fn new(fail_insert: bool) -> Arc<Self> {
         Arc::new(Self {
-            store: crate::direct_connections::credentials::native(identity()),
+            store: crate::direct_connections::credentials::native(identity()).unwrap(),
             keys: Mutex::default(),
             inserts: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
@@ -697,6 +697,9 @@ impl ObservedCredentials {
     }
 }
 impl CredentialStore for ObservedCredentials {
+    fn kind(&self) -> spaceterm_connections::StoreKind {
+        self.store.kind()
+    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -773,7 +776,11 @@ impl NativeFixture {
         let credentials = ObservedCredentials::new(fail_credentials);
         let direct = DirectConnections::with_credentials(
             identity(),
-            Arc::clone(&paths),
+            Arc::new(spaceterm_connections::records::PrivateRecords::new(
+                Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
+                    Arc::clone(&paths),
+                )),
+            )),
             credentials.clone(),
         );
         direct.resume_retained();
@@ -1366,7 +1373,11 @@ fn native_server_setup_acceptance() {
     fixture.direct.disconnect(&route);
     let relaunched = DirectConnections::with_credentials(
         identity(),
-        Arc::clone(&fixture.paths),
+        Arc::new(spaceterm_connections::records::PrivateRecords::new(
+            Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
+                Arc::clone(&fixture.paths),
+            )),
+        )),
         fixture.credentials.clone(),
     );
     relaunched.resume_retained();

@@ -160,7 +160,17 @@ impl DirectAccessControl for ServerConnection {
     }
 
     fn invite(&self, address: Option<std::net::IpAddr>) -> Result<OpenInvitation, AccessFailure> {
-        self.invite_device(address)
+        let advertise = if let Some(address) = address {
+            let status = self.direct_status().map_err(classify)?;
+            let spaceterm_server::direct::ListenerState::Listening { addr } = status.listener
+            else {
+                return Err(classify(spaceterm_server::direct::DirectError::Disabled));
+            };
+            Some(std::net::SocketAddr::new(address, addr.port()).to_string())
+        } else {
+            None
+        };
+        self.invite_device(advertise)
             .map(open_invitation)
             .map_err(classify)
     }
@@ -170,7 +180,7 @@ impl DirectAccessControl for ServerConnection {
     }
 
     fn claims(&self) -> Result<Vec<Claim>, AccessFailure> {
-        self.pairing_claims()
+        self.pairing_claims(None)
             .map(|claims| claims.into_iter().map(claim).collect())
             .map_err(classify)
     }

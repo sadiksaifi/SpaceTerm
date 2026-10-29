@@ -115,7 +115,7 @@ impl Owner {
     /// Approves the pending claim from `device` on an invitation this owner issued. Returns
     /// false when no such claim exists.
     pub fn approve(&self, device: &str) -> Result<bool> {
-        for claim in at("claims", self.server.pairing_claims())? {
+        for claim in at("claims", self.server.pairing_claims(None))? {
             if claim.device_name.as_str() == device
                 && self.issued.borrow().contains(&claim.invitation_id)
             {

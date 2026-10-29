@@ -78,7 +78,7 @@ pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -
     let command = kind.command();
     let routed = match context.routed() {
         Ok(routed) => routed,
-        Err((server, failure)) => return Reply::failure(command, server, failure),
+        Err(error) => return Reply::routing_failure(command, error),
     };
     let pending = match Pending::open(context, &routed.route) {
         Ok(pending) => pending,

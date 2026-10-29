@@ -1,0 +1,12 @@
+{
+  "command": "connection.remove",
+  "data": {
+    "removed": "penguin",
+    "revocation": "confirmed"
+  },
+  "error": null,
+  "schema": "spaceterm.cli.v1",
+  "server": null,
+  "status": "ok",
+  "warnings": []
+}

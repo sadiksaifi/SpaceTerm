@@ -1,14 +1,18 @@
 //! Transfers temporary setup authority into a saved paired connection.
 use super::*;
-use crate::cancellation::CancellationToken;
+pub trait Cancellation {
+    fn is_cancelled(&self) -> bool;
+}
+#[cfg(test)]
+use crate::tests::CancellationToken;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 impl SetupEnrollment {
-    pub(crate) fn operation(&self) -> JoinId {
+    pub fn operation(&self) -> JoinId {
         self.operation
     }
 
-    pub(crate) fn public_key(&self) -> [u8; 32] {
+    pub fn public_key(&self) -> [u8; 32] {
         self.public_key
     }
 }
@@ -23,7 +27,7 @@ impl Drop for SetupEnrollment {
 
 impl DirectConnections {
     /// Runs on the setup worker before admitting the SSH enrollment operation.
-    pub(crate) fn prepare_setup(
+    pub fn prepare_setup(
         &self,
         endpoint: String,
         pin: direct::ServerPin,
@@ -88,12 +92,12 @@ impl DirectConnections {
     }
 
     /// The caller closes every SSH resource before entering this QUIC admission step.
-    pub(crate) fn complete_setup(
+    pub fn complete_setup(
         &self,
         prepared: &SetupEnrollment,
         paired: PairedDevice,
         label: String,
-        cancellation: &CancellationToken,
+        cancellation: &dyn Cancellation,
     ) -> Result<DirectRouteId, DirectError> {
         if !Arc::ptr_eq(&self.0, &prepared.owner.0) || paired.pin != prepared.pin {
             return Err(DirectError::WrongServer);
@@ -228,10 +232,7 @@ impl DirectConnections {
 
     /// Accepts the owning setup's validated account-local receipt for this exact claim.
     /// The caller verifies the receipt's server pin and operation before calling.
-    pub(crate) fn confirm_setup_cancelled(
-        &self,
-        prepared: &SetupEnrollment,
-    ) -> Result<(), DirectError> {
+    pub fn confirm_setup_cancelled(&self, prepared: &SetupEnrollment) -> Result<(), DirectError> {
         if !Arc::ptr_eq(&self.0, &prepared.owner.0) {
             return Err(DirectError::WrongServer);
         }
@@ -266,7 +267,7 @@ impl DirectConnections {
         }
     }
 
-    pub(crate) fn cancel_setup(&self, prepared: &SetupEnrollment) -> Result<(), DirectError> {
+    pub fn cancel_setup(&self, prepared: &SetupEnrollment) -> Result<(), DirectError> {
         if !Arc::ptr_eq(&self.0, &prepared.owner.0) {
             return Err(DirectError::WrongServer);
         }
@@ -361,7 +362,7 @@ mod tests {
     }
 
     impl Records for PublicationRecords {
-        fn load(&self) -> Result<Document, ()> {
+        fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
             Ok(self.document.lock().unwrap().clone())
         }
 
@@ -424,6 +425,9 @@ mod tests {
             release: Mutex<std::sync::mpsc::Receiver<()>>,
         }
         impl CredentialStore for WaitingCredentials {
+            fn kind(&self) -> crate::StoreKind {
+                crate::StoreKind::Keychain
+            }
             fn read(
                 &self,
                 key: &[u8; 32],

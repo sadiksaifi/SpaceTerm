@@ -496,7 +496,7 @@ mod exercise {
             for invitation in &self.invitations {
                 api(self.owner.withdraw_invitation(*invitation))?;
             }
-            for claim in api(self.owner.pairing_claims())? {
+            for claim in api(self.owner.pairing_claims(None))? {
                 if self.claims.contains(&claim.id) {
                     api(self.owner.reject_device(claim.id))?;
                 }
@@ -549,7 +549,7 @@ mod exercise {
             send(&mut peer.input, invitation.display_text().as_bytes())?;
             let response = receive_json(&mut peer.output)?;
             let claim_id: Id = api(serde_json::from_value(response["claim"].clone()))?;
-            let claims = api(self.owner.pairing_claims())?;
+            let claims = api(self.owner.pairing_claims(None))?;
             require(
                 claims.len() == 1 && claims[0].id == claim_id,
                 "exact claim retry created duplicate or concurrent owner claims",
@@ -631,7 +631,7 @@ mod exercise {
             !initial.enabled
                 && initial.listener == ListenerState::Off
                 && api(owner.paired_devices())?.is_empty()
-                && api(owner.pairing_claims())?.is_empty(),
+                && api(owner.pairing_claims(None))?.is_empty(),
             "scope guard refused: exposure, paired devices or pending claims already exist",
         )?;
         let policy = api(NetworkPolicy::new(bind))?;

@@ -39,6 +39,9 @@ impl AskPassAttemptFactory for NoPrompt {
 
 struct NoCredentials;
 impl CredentialStore for NoCredentials {
+    fn kind(&self) -> spaceterm_connections::StoreKind {
+        spaceterm_connections::StoreKind::SecretService
+    }
     fn read(
         &self,
         _: &[u8; 32],
@@ -280,7 +283,11 @@ impl Fixture {
         );
         let direct = DirectConnections::with_credentials(
             identity(),
-            Arc::clone(&paths),
+            Arc::new(spaceterm_connections::records::PrivateRecords::new(
+                Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
+                    Arc::clone(&paths),
+                )),
+            )),
             Arc::new(NoCredentials),
         );
         let adapter = ProcessAdapter {

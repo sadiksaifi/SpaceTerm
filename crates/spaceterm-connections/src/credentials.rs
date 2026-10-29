@@ -10,18 +10,25 @@ mod linux;
 mod macos;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Interaction {
+pub enum Interaction {
     Quiet,
     Requested,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CredentialError {
+pub enum CredentialError {
     InteractionRequired,
     Unavailable,
 }
 
-pub(crate) trait CredentialStore: Send + Sync {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreKind {
+    Keychain,
+    SecretService,
+}
+
+pub trait CredentialStore: Send + Sync {
+    fn kind(&self) -> StoreKind;
     fn read(
         &self,
         key: &[u8; 32],
@@ -33,27 +40,30 @@ pub(crate) trait CredentialStore: Send + Sync {
     fn remove(&self, key: &[u8; 32], interaction: Interaction) -> Result<(), CredentialError>;
 }
 
-pub(crate) fn native(identity: &str) -> Arc<dyn CredentialStore> {
+pub fn native(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialError> {
     if !matches!(
         identity,
         "spaceterm" | "spaceterm-preflight" | "spaceterm-development"
     ) {
-        return Arc::new(Unavailable);
+        return Err(CredentialError::Unavailable);
     }
     #[cfg(target_os = "macos")]
     {
         // Preflight is ad hoc signed. Its credentials must outlive each build's code identity.
         if identity == "spaceterm-preflight" {
-            return Arc::new(macos::SecurityTool::new(identity));
+            return Ok(Arc::new(macos::SecurityTool::new(identity)));
         }
-        Arc::new(macos::Keychain::new(identity))
+        Ok(Arc::new(macos::Keychain::new(identity)))
     }
     #[cfg(target_os = "linux")]
     {
-        Arc::new(linux::SecretService::new(identity))
+        {
+            linux::available()?;
+            Ok(Arc::new(linux::SecretService::new(identity)))
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    Arc::new(Unavailable)
+    Err(CredentialError::Unavailable)
 }
 
 fn account(key: &[u8; 32]) -> String {
@@ -71,9 +81,19 @@ fn hex(bytes: &[u8], text: &mut String) {
     }
 }
 
-struct Unavailable;
+pub struct Unavailable;
 
 impl CredentialStore for Unavailable {
+    fn kind(&self) -> StoreKind {
+        #[cfg(target_os = "macos")]
+        {
+            StoreKind::Keychain
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            StoreKind::SecretService
+        }
+    }
     fn read(
         &self,
         _: &[u8; 32],
@@ -99,7 +119,7 @@ mod native_tests {
     #[ignore = "writes two randomly scoped Development native credential items; requires explicit authorization"]
     fn unix_native_store_refuses_replacement_and_preserves_other_pairings()
     -> Result<(), CredentialError> {
-        refuses_replacement_and_preserves_other_pairings(native("spaceterm-development").as_ref())
+        refuses_replacement_and_preserves_other_pairings(native("spaceterm-development")?.as_ref())
     }
 
     pub(super) fn refuses_replacement_and_preserves_other_pairings(

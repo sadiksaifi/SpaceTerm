@@ -676,7 +676,7 @@ run = "target/debug/examples/direct_devices --bind {{usage.bind | quote}} --expe
 
 [tasks."server:direct:credentials:native:test"]
 description = "Verify two disposable native credential items without replacing another pairing"
-run = "cargo test --package spaceterm --lib --all-features --locked -- direct_connections::credentials::native_tests::unix_native_store_refuses_replacement_and_preserves_other_pairings --ignored --exact"
+run = "cargo test --package spaceterm-connections --lib --all-features --locked -- credentials::native_tests::unix_native_store_refuses_replacement_and_preserves_other_pairings --ignored --exact"
 
 [tasks."server:direct:control:test"]
 description = "Verify revocation releases only the retired device's Pane control and preserves terminal work"
