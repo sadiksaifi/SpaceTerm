@@ -318,6 +318,7 @@ mod tests {
     #[test]
     fn local_launch_prepares_every_supported_shell_and_preserves_login_order() {
         let resources = crate::terminal::testing::ShellResourcesFixture::new();
+        let elvish_rc = resources.path().join("shell-integration/elvish/rc.elv");
         let inherited = ShellEnvironment {
             xdg_data_dirs: Some("/custom/share".into()),
             zdotdir: Some("/private/zsh config".into()),
@@ -325,7 +326,11 @@ mod tests {
         };
         for (shell, kind, arguments) in [
             ("/opt/bin/bash", ShellKind::Bash, vec!["--posix", "-l"]),
-            ("/opt/bin/elvish", ShellKind::Elvish, vec!["-l"]),
+            (
+                "/opt/bin/elvish",
+                ShellKind::Elvish,
+                vec!["-rc", elvish_rc.to_str().unwrap(), "-l"],
+            ),
             (
                 "/opt/bin/fish",
                 ShellKind::Fish,

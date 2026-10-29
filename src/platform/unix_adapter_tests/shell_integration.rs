@@ -461,28 +461,67 @@ fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
         assert_eq!(session_path(command, true), first);
     }
     if let Some(elvish) = installed_shell_path("elvish") {
-        let fixture = DirectoryFixture::new();
-        let rc = fixture.path().join("rc.elv");
-        std::fs::write(
-            &rc,
-            format!(
-                "use str; eval (slurp < '{}'); $edit:before-readline[-1]; echo PATH=(str:join : $paths); exit",
-                integration.join("elvish/lib/spaceterm-integration.elv").display()
-            ),
-        )
-        .unwrap();
-        let socket = fixture.path().join("sock");
-        let database = fixture.path().join("db");
-        let command = controlling_terminal_command(&[
-            elvish.as_os_str(),
-            "-rc".as_ref(),
-            rc.as_os_str(),
-            "-sock".as_ref(),
-            socket.as_os_str(),
-            "-db".as_ref(),
-            database.as_os_str(),
-        ]);
-        assert_eq!(session_path(command, true), first);
+        use crate::platform::shell_integration::{ShellEnvironment, ShellIntegrationMode};
+        use crate::platform::shell_launch::ShellLaunchPlanner;
+
+        for enabled in [true, false] {
+            for config in [None, Some("custom config हैलो")] {
+                let fixture = DirectoryFixture::new();
+                let config_root = config
+                    .map(|directory| fixture.path().join(directory))
+                    .unwrap_or_else(|| fixture.path().join(".config"));
+                let rc = config_root.join("elvish/rc.elv");
+                std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
+                // User startup changes PATH and defines a function used at the first prompt.
+                // It never loads SpaceTerm's integration.
+                std::fs::write(
+                    &rc,
+                    r#"use ./user-config
+set-env PATH '/usr/bin:/bin:/fixture cli/bin'
+fn user-path { user-config:show-path }
+set edit:before-readline = (conj $edit:before-readline { user-path; exit })
+"#,
+                )
+                .unwrap();
+                std::fs::write(
+                    config_root.join("elvish/user-config.elv"),
+                    "use str\nfn show-path { echo PATH=(str:join : $paths) }\n",
+                )
+                .unwrap();
+                let mode = if enabled {
+                    ShellIntegrationMode::Automatic
+                } else {
+                    ShellIntegrationMode::Disabled
+                };
+                let launch = ShellLaunchPlanner::for_test(elvish.clone(), resource_root())
+                    .with_environment(mode, ShellEnvironment::default())
+                    .local(fixture.path())
+                    .unwrap();
+                let socket = fixture.path().join("sock");
+                let database = fixture.path().join("db");
+                let mut argv = vec![launch.executable()];
+                argv.extend(launch.arguments().iter().map(std::ffi::OsString::as_os_str));
+                argv.extend([
+                    "-sock".as_ref(),
+                    socket.as_os_str(),
+                    "-db".as_ref(),
+                    database.as_os_str(),
+                ]);
+                let mut command = controlling_terminal_command(&argv);
+                command
+                    .env_remove("XDG_CONFIG_HOME")
+                    .env("HOME", fixture.path())
+                    .envs(launch.environment().iter().cloned());
+                if config.is_some() {
+                    command.env("XDG_CONFIG_HOME", &config_root);
+                }
+                assert_eq!(
+                    session_path(command, enabled),
+                    if enabled { first } else { FIXTURE_PATH },
+                    "Elvish integration={enabled}, config={config:?}",
+                );
+            }
+        }
     }
 }
 

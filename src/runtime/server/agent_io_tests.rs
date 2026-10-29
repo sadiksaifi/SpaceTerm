@@ -59,10 +59,6 @@ impl Home {
             u64::from_ne_bytes(nonce().unwrap()[..8].try_into().unwrap())
         ));
         std::fs::create_dir(&path).unwrap();
-        // Elvish loads library modules only when its rc file uses them.
-        let elvish = path.join(".config/elvish");
-        std::fs::create_dir_all(&elvish).unwrap();
-        std::fs::write(elvish.join("rc.elv"), "use spaceterm-integration\n").unwrap();
         Self(path)
     }
 }
@@ -131,7 +127,10 @@ struct Bench {
 
 impl Bench {
     fn new(shell: &std::path::Path) -> Self {
-        let home = Home::new();
+        Self::with_home(shell, Home::new())
+    }
+
+    fn with_home(shell: &std::path::Path, home: Home) -> Self {
         let mut shared = SharedWorkspaceHost::new(integrated_host(shell, &home));
         let workspace = create_shared(&mut shared, 1);
         let pane = shared_inventory(&mut shared)
@@ -434,6 +433,45 @@ fn integrated_shells_run_one_command_and_bind_its_status() {
             "{name}: typed input is never run over"
         );
     }
+}
+
+/// The real launch keeps the user's rc definitions available to commands in the REPL.
+#[test]
+#[cfg_attr(
+    not(feature = "native-tests"),
+    ignore = "starts installed shells; run mise run cli:shells:native"
+)]
+fn elvish_launch_preserves_user_rc_definitions_and_relative_imports() {
+    let Some(shell) = installed("elvish") else {
+        return;
+    };
+    let home = Home::new();
+    let config = home.0.join(".config/elvish");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("rc.elv"),
+        "use ./user-config\nvar message = USER-RC-LOADED\nfn user-command { echo $message; user-config:report }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config.join("user-config.elv"),
+        "fn report { echo RELATIVE-IMPORT-LOADED }\n",
+    )
+    .unwrap();
+    let mut bench = Bench::with_home(&shell, home);
+    assert!(matches!(
+        bench.run_at_prompt(1, "user-command"),
+        RunReply::Admitted { .. }
+    ));
+    assert!(matches!(
+        bench.await_receipt().state,
+        RunState::Finished {
+            exit_status: Some(0),
+            ..
+        }
+    ));
+    bench.await_row("USER-RC-LOADED");
+    bench.await_row("RELATIVE-IMPORT-LOADED");
 }
 
 /// A shell without SpaceTerm's prompt markers is never run in.
