@@ -2,7 +2,7 @@
 
 A server's own `spaceterm server pair` creates the Invitation Link. The desktop's Add Server and the command line's `spaceterm connection add` consume it with the same outcomes. SSH Setup remains an optional desktop method that installs and enrolls a server through OpenSSH. Application-menu, command-palette and operating-system invitation shortcuts open Add Server. [ADR 0056](0056-install-and-pair-servers-from-their-own-command-line.md) owns the server-side command-line flow.
 
-`server pair --address HOST[:PORT]` sets the invitation's advertised authority. It accepts a DNS name or any IP with an optional port and is not restricted to local interfaces, so NAT and cloud public addresses work.
+`Management::Invite { advertise }` accepts a validated `HOST[:PORT]` as the invitation's advertised authority. It accepts DNS names and IP addresses independently of the listener's bind address and local interfaces, so NAT and cloud public addresses work. `Management::Claims { invitation }` scopes pending-claim reads to a supplied invitation ID.
 
 SSH Setup uses [OpenSSH authority](0003-use-openssh-for-server-setup.md) temporarily to discover the approved account installation, offer verified installation when missing, obtain required operating-system consent, explicitly start the server, configure reachable QUIC exposure and enroll the client. Reversing deliberate Stop requires explicit startup authorization inside setup. Incompatibility leaves the installation intact for administration on its own machine.
 
