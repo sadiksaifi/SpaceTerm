@@ -321,6 +321,7 @@ pub struct Icon {
     source: IconSource,
     size: Pixels,
     tint: Option<Rgba>,
+    rotation: gpui::Radians,
     #[cfg(test)]
     tint_observer: Option<Arc<std::sync::Mutex<Vec<Hsla>>>>,
 }
@@ -332,6 +333,7 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: Some(tint),
+            rotation: gpui::radians(0.0),
             #[cfg(test)]
             tint_observer: None,
         }
@@ -343,6 +345,7 @@ impl Icon {
             source: IconSource::Lucide(name),
             size,
             tint: None,
+            rotation: gpui::radians(0.0),
             #[cfg(test)]
             tint_observer: None,
         }
@@ -355,9 +358,17 @@ impl Icon {
             source: IconSource::Custom(name),
             size,
             tint: Some(tint),
+            rotation: gpui::radians(0.0),
             #[cfg(test)]
             tint_observer: None,
         }
+    }
+
+    /// Turns the artwork clockwise by `angle` about its center, as a disclosure chevron turns. A
+    /// glyph drawn from the icon font, outside the bundled artwork sizes, stays upright.
+    pub fn rotated(mut self, angle: gpui::Radians) -> Self {
+        self.rotation = angle;
+        self
     }
 
     #[cfg(test)]
@@ -375,6 +386,7 @@ impl RenderOnce for Icon {
                 Some(path) => icon_svg(
                     path,
                     artwork_size,
+                    self.rotation,
                     IconTint {
                         explicit: self.tint,
                         #[cfg(test)]
@@ -397,6 +409,7 @@ impl RenderOnce for Icon {
             IconSource::Custom(name) => icon_svg(
                 name.path().into(),
                 artwork_size,
+                self.rotation,
                 IconTint {
                     explicit: self.tint,
                     #[cfg(test)]
@@ -435,21 +448,30 @@ impl IconTint {
     }
 }
 
-fn icon_svg(path: SharedString, size: Pixels, tint: IconTint) -> impl IntoElement {
+fn icon_svg(
+    path: SharedString,
+    size: Pixels,
+    rotation: gpui::Radians,
+    tint: IconTint,
+) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, (), window, cx| {
             let tint = tint.resolve(window);
+            // The same turn about the artwork's center as GPUI's Svg transformation.
+            let center = bounds.center();
+            let transformation = if rotation.0 == 0.0 {
+                gpui::TransformationMatrix::default()
+            } else {
+                gpui::TransformationMatrix::unit()
+                    .translate(center.scale(window.scale_factor()))
+                    .rotate(rotation)
+                    .translate(center.scale(-window.scale_factor()))
+            };
             // Like GPUI's Svg element, an asset or raster failure omits the glyph. Canvas has no
             // error channel through which to return a recoverable paint failure.
-            let _paint = window.paint_svg(
-                bounds,
-                path,
-                Default::default(),
-                Default::default(),
-                tint,
-                cx,
-            );
+            let _paint =
+                window.paint_svg(bounds, path, Default::default(), transformation, tint, cx);
         },
     )
     .size(size)

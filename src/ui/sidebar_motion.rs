@@ -13,22 +13,29 @@ use super::drag_and_drop::{Ease, PRESENCE_DURATION, now, presence_motion};
 /// during motion eases from where the sidebar was drawn.
 #[derive(Debug)]
 pub(crate) struct SidebarMotion {
-    /// Whether the last frame showed the sidebar.
+    reveal: Reveal,
+    /// Whether the next change of visibility comes from an operation that announced it.
+    expected: bool,
+}
+
+/// How far a part of the sidebar is revealed, easing toward whether it is shown. A change during
+/// motion eases from where the part was drawn, and reduced motion ends the motion.
+#[derive(Debug)]
+pub(crate) struct Reveal {
+    /// Whether the last frame showed the part.
     shown: bool,
     /// The reveal the last frame drew.
     drawn: f32,
     /// The reveal the current motion started from, and its ease.
     motion: Option<(f32, Ease)>,
-    /// Whether the next change of visibility comes from an operation that announced it.
-    expected: bool,
 }
 
-/// How one frame presents the sidebar.
+/// How one frame presents the sidebar, or a part of it that shows and hides.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SidebarFrame {
-    /// How much of the sidebar shows, from 0 when hidden to 1 when shown.
+    /// How much of it shows, from 0 when hidden to 1 when shown.
     pub(crate) reveal: f32,
-    /// Whether the sidebar is still moving.
+    /// Whether it is still moving.
     pub(crate) moving: bool,
 }
 
@@ -46,9 +53,7 @@ impl SidebarFrame {
 impl SidebarMotion {
     pub(crate) fn new(shown: bool) -> Self {
         Self {
-            shown,
-            drawn: if shown { 1.0 } else { 0.0 },
-            motion: None,
+            reveal: Reveal::new(shown),
             expected: false,
         }
     }
@@ -70,9 +75,31 @@ impl SidebarMotion {
         motion: spaceterm_ui::ControlMotion,
     ) -> SidebarFrame {
         let expected = std::mem::take(&mut self.expected);
+        self.reveal.present_at(shown, expected, now, motion)
+    }
+}
+
+impl Reveal {
+    pub(crate) fn new(shown: bool) -> Self {
+        Self {
+            shown,
+            drawn: if shown { 1.0 } else { 0.0 },
+            motion: None,
+        }
+    }
+
+    /// The frame that presents the part `shown` or hidden. A change moves the part only when it
+    /// `animates`; otherwise the frame presents it at rest.
+    pub(crate) fn present_at(
+        &mut self,
+        shown: bool,
+        animates: bool,
+        now: Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) -> SidebarFrame {
         if shown != self.shown {
             self.shown = shown;
-            self.motion = expected.then(|| (self.drawn, Ease::new(PRESENCE_DURATION, now, motion)));
+            self.motion = animates.then(|| (self.drawn, Ease::new(PRESENCE_DURATION, now, motion)));
         }
         // Motion reduced during a change ends it.
         if motion == spaceterm_ui::ControlMotion::Reduced {

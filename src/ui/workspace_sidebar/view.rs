@@ -3,7 +3,7 @@ use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::drag_and_drop::{LIFTED_OPACITY, drag_release_observer, lift_shadow};
+use crate::ui::drag_and_drop::{ItemMotion, LIFTED_OPACITY, drag_release_observer, lift_shadow};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use gpui::accesskit;
 use spaceterm_ui::{ContextMenuTarget, HoverFade};
@@ -22,6 +22,26 @@ pub(super) struct RowFade {
     level: f32,
     /// Each disclosed Worktree row's hover, in list order.
     worktrees: Vec<RowFade>,
+}
+
+/// How far a Workspace row discloses its Worktree rows this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct RowDisclosure {
+    /// From 0 with the Worktree rows hidden to 1 with them disclosed.
+    pub(super) disclosed: f32,
+    /// How far the chevron shows, from 0 without a Worktree section to 1 with one.
+    pub(super) chevron: f32,
+}
+
+impl RowDisclosure {
+    /// A row at rest with `section`.
+    pub(super) fn at_rest(section: Option<&WorktreeSection>) -> Self {
+        let frame = GroupFrame::at_rest(section);
+        Self {
+            disclosed: frame.disclosed.reveal,
+            chevron: frame.disclosing.reveal,
+        }
+    }
 }
 
 const DISCLOSURE_WIDTH: f32 = 16.0;
@@ -198,6 +218,45 @@ fn single_line_row_height(appearance: &crate::ui::appearance::ChromeAppearance) 
     )
 }
 
+/// The height of a Workspace row `disclosed` of the way from collapsed to expanded.
+fn workspace_row_height(
+    appearance: &crate::ui::appearance::ChromeAppearance,
+    disclosed: f32,
+) -> Pixels {
+    let (collapsed, expanded) = (row_height(appearance), single_line_row_height(appearance));
+    if disclosed <= 0.0 {
+        collapsed
+    } else if disclosed >= 1.0 {
+        expanded
+    } else {
+        collapsed + (expanded - collapsed) * disclosed
+    }
+}
+
+/// The height of a former repository's label.
+fn former_repository_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
+    appearance.spacing(FORMER_REPOSITORY_ROW_HEIGHT)
+}
+
+/// How much taller line 2 makes a row, with the gap above it.
+fn detail_line_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
+    appearance.typography.style(TextRole::Secondary).line_height
+        + appearance.spacing(SIDEBAR_ROW_DETAIL_LINE_PADDING + SIDEBAR_ROW_LINE_GAP)
+}
+
+/// The height of a Worktree section's rows once each has grown in.
+fn worktree_rows_height(
+    section: &WorktreeSection,
+    appearance: &crate::ui::appearance::ChromeAppearance,
+) -> Pixels {
+    worktree_group_rows(section)
+        .map(|row| match row {
+            GroupRow::FormerRepository(_) => former_repository_height(appearance),
+            GroupRow::Workspace | GroupRow::Worktree(_) => row_height(appearance),
+        })
+        .fold(px(0.0), |height, row| height + row)
+}
+
 fn row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
     let content_height = appearance
         .typography
@@ -276,13 +335,14 @@ impl WorkspaceSidebar {
     /// claims no pointer input because it lies over every drop target.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one row render step needs its model, role, hover, owner, presentation, and host geometry"
+        reason = "one row render step needs its model, role, hover, disclosure, owner, presentation, and host geometry"
     )]
     pub(super) fn render_workspace_row(
         &self,
         row: WorkspaceRowViewModel,
         role: RowRole,
         hover: RowHover,
+        disclosure: RowDisclosure,
         sidebar: WeakEntity<Self>,
         presentation: &crate::desktop_profile::DesktopPresentation,
         window: &Window,
@@ -330,6 +390,10 @@ impl WorkspaceSidebar {
         // its one line leaves each directory and branch to the Worktree rows below it.
         let disclosing = expanded.is_some();
         let single_line = expanded == Some(true);
+        // Between collapsed and expanded, line 2 fades as the row's height eases between one and
+        // two lines, and line 1 moves between the centers of each.
+        let RowDisclosure { disclosed, chevron } = disclosure;
+        let shows_detail = disclosed < 1.0;
         // A collapsed row stands for its Active Worktree, so its menu removes that Worktree.
         let collapsed_worktree = worktrees
             .as_ref()
@@ -489,33 +553,38 @@ impl WorkspaceSidebar {
         // The chevron, and the "+" of an expanded row, trail the name on line 1, so line 2 runs
         // to the row's end like a row without Worktrees. A collapsed row offers New Worktree from
         // its menu.
-        let trailing = expanded.map(|expanded| {
-            div()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .when(
-                    expanded && creates_worktrees && !lifted && !renaming,
-                    |trailing| {
-                        trailing.child(new_worktree_button(
-                            workspace_id,
-                            // The button keeps its place while hidden, so the row never shifts.
-                            if selected { 1.0 } else { hover },
-                            sidebar.clone(),
-                            shared.as_ref().is_none_or(|s| s.edits),
-                            appearance,
-                        ))
-                    },
-                )
-                .child(self.render_disclosure(
-                    workspace_id,
-                    expanded,
-                    !lifted,
-                    row_colors.row_icon,
-                    sidebar.clone(),
-                    appearance,
-                ))
-        });
+        // A row whose Worktree section left keeps its fading chevron, which no longer acts.
+        let trailing = expanded
+            .or((chevron > 0.0).then_some(false))
+            .map(|shown_expanded| {
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .when(
+                        shown_expanded && creates_worktrees && !lifted && !renaming,
+                        |trailing| {
+                            trailing.child(new_worktree_button(
+                                workspace_id,
+                                // The button keeps its place while hidden, so the row never
+                                // shifts.
+                                (if selected { 1.0 } else { hover }) * disclosed,
+                                sidebar.clone(),
+                                shared.as_ref().is_none_or(|s| s.edits),
+                                appearance,
+                            ))
+                        },
+                    )
+                    .child(self.render_disclosure(
+                        workspace_id,
+                        expanded,
+                        disclosure,
+                        !lifted,
+                        row_colors.row_icon,
+                        sidebar.clone(),
+                        appearance,
+                    ))
+            });
         let row_content = div()
             .id((element_name, workspace_id.get()))
             .debug_selector(move || {
@@ -527,11 +596,7 @@ impl WorkspaceSidebar {
             })
             .relative()
             .w_full()
-            .h(if single_line {
-                single_line_row_height(appearance)
-            } else {
-                row_height(appearance)
-            })
+            .h(workspace_row_height(appearance, disclosed))
             .flex_shrink_0()
             .pl(row_padding_leading)
             .pr(row_padding_trailing)
@@ -551,9 +616,12 @@ impl WorkspaceSidebar {
                 } else if lifted {
                     chip.render(selector, hover)
                 } else {
-                    let motion = self.workspace_reorder.motion(workspace_id, cx);
-                    chip.displaced(motion.selection_offset)
-                        .render(selector, hover)
+                    chip.displaced(self.workspace_reorder.row_selection_offset(
+                        workspace_id,
+                        None,
+                        cx,
+                    ))
+                    .render(selector, hover)
                 }
             })
             .when(!lifted, |row| {
@@ -618,6 +686,11 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_col()
                     .gap(appearance.spacing(SIDEBAR_ROW_LINE_GAP))
+                    // The margin moves line 1 from where two lines center it toward where one
+                    // line centers it, as the row loses line 2's room.
+                    .when(shows_detail && disclosed > 0.0, |lines| {
+                        lines.mt(detail_line_height(appearance) * disclosed)
+                    })
                     .child(
                         div()
                             .flex()
@@ -632,8 +705,8 @@ impl WorkspaceSidebar {
                             )))
                             .children(trailing),
                     )
-                    .when(!single_line, |lines| {
-                        lines.child(text::detail(
+                    .when(shows_detail, |lines| {
+                        let detail = text::detail(
                             detail,
                             repository.map(|badge| text::RowRepository {
                                 badge,
@@ -644,7 +717,12 @@ impl WorkspaceSidebar {
                             detail_selector,
                             workspace_id.get(),
                             row_text_appearance,
-                        ))
+                        );
+                        if disclosed > 0.0 {
+                            lines.child(div().opacity(1.0 - disclosed).child(detail))
+                        } else {
+                            lines.child(detail)
+                        }
                     }),
             )
             // Rows rest on the continuous base surface without separators. The hover and selection
@@ -715,6 +793,32 @@ impl WorkspaceSidebar {
                 },
             ))
             .into_any_element()
+    }
+
+    /// How far the row `key` stands from the start of its Workspace group this frame.
+    pub(super) fn row_inset(
+        &self,
+        key: SidebarRowKey,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+    ) -> Pixels {
+        let SidebarRowKey::Worktree(workspace_id, worktree_id) = key else {
+            return px(0.0);
+        };
+        let Some(group) = self.groups.get(&workspace_id) else {
+            return px(0.0);
+        };
+        let Some(section) = group.section.as_ref() else {
+            return px(0.0);
+        };
+        let mut inset = workspace_row_height(appearance, group.frame.disclosed.reveal);
+        for row in worktree_group_rows(section) {
+            inset += match row {
+                GroupRow::Worktree(id) if id == worktree_id => break,
+                GroupRow::FormerRepository(_) => former_repository_height(appearance),
+                GroupRow::Workspace | GroupRow::Worktree(_) => row_height(appearance),
+            };
+        }
+        inset
     }
 
     /// Outlines the row whose menu is open. A secondary click leaves the selection where it was,
@@ -885,7 +989,19 @@ impl WorkspaceSidebar {
         // drag previews stay indexed by Workspace.
         for (row, fade) in self.rows.iter().zip(hovers) {
             let workspace_id = row.workspace_id;
-            let disclosed = row.worktrees.as_ref().filter(|section| section.expanded);
+            let group = self.groups.get(&workspace_id);
+            let frame = group.map_or_else(
+                || GroupFrame::at_rest(row.worktrees.as_ref()),
+                |group| group.frame,
+            );
+            // Worktree rows that are closing still draw, from the section the group last
+            // presented, but take no input and are not announced.
+            let open = row.worktrees.as_ref().filter(|section| section.expanded);
+            let drawn = row
+                .worktrees
+                .as_ref()
+                .or(group.and_then(|group| group.section.as_ref()))
+                .filter(|_| frame.draws_worktrees());
             let parent = self.render_workspace_row(
                 row.clone(),
                 RowRole::InList,
@@ -893,31 +1009,73 @@ impl WorkspaceSidebar {
                     level: fade.level,
                     tracker: Some(fade.fade),
                 },
+                RowDisclosure {
+                    disclosed: frame.disclosed.reveal,
+                    chevron: frame.disclosing.reveal,
+                },
                 sidebar.clone(),
                 presentation,
                 window,
                 appearance,
                 cx,
             );
-            let (worktree_keys, children): (Vec<_>, Vec<_>) = disclosed
+            let worktree_rows = drawn
                 .map(|section| {
                     self.render_worktrees(
                         workspace_id,
                         section,
-                        fade.worktrees,
+                        open.is_some().then_some(fade.worktrees),
                         sidebar.clone(),
                         window,
                         appearance,
                         cx,
                     )
                 })
-                .unwrap_or_default()
-                .into_iter()
-                .unzip();
+                .unwrap_or_default();
             let keys: Vec<Option<SidebarRowKey>> =
                 std::iter::once(Some(SidebarRowKey::Workspace(workspace_id)))
-                    .chain(worktree_keys)
+                    .chain(worktree_rows.iter().map(|(row, _)| match row {
+                        GroupRow::Worktree(worktree_id) => {
+                            Some(SidebarRowKey::Worktree(workspace_id, *worktree_id))
+                        }
+                        GroupRow::Workspace | GroupRow::FormerRepository(_) => None,
+                    }))
                     .collect();
+            // Each Worktree row and label holds a slot that grows it in and closes the gap it
+            // leaves, inside the group.
+            let children = worktree_rows.into_iter().map(|(child, element)| {
+                let measure_sidebar = sidebar.clone();
+                let motion =
+                    group.map_or_else(ItemMotion::default, |group| group.rows.motion(child, cx));
+                let slot = motion.frame_slot(
+                    gpui::Axis::Vertical,
+                    div().w_full().flex_shrink_0(),
+                    move |size, cx| {
+                        let _ = measure_sidebar.update(cx, |sidebar, _| {
+                            if let Some(group) = sidebar.groups.get_mut(&workspace_id) {
+                                group.rows.measure(child, size);
+                            }
+                        });
+                    },
+                );
+                if open.is_some() {
+                    slot.child(element).into_any_element()
+                } else {
+                    slot.id(SharedString::from(format!(
+                        "worktree-closing-{}-{child:?}",
+                        workspace_id.get()
+                    )))
+                    .aria_hidden(true)
+                    .child(element)
+                    .into_any_element()
+                }
+            });
+            // While the Worktree rows disclose or close, the group shows as much of them as the
+            // motion has reached, and the groups below follow its height.
+            let disclosing_height = drawn.filter(|_| frame.disclosed.moving).map(|section| {
+                workspace_row_height(appearance, frame.disclosed.reveal)
+                    + worktree_rows_height(section, appearance) * frame.disclosed.reveal
+            });
             let measure_sidebar = sidebar.clone();
             let grow_sidebar = sidebar.clone();
             let motion = self.workspace_reorder.motion(workspace_id, cx);
@@ -933,27 +1091,30 @@ impl WorkspaceSidebar {
                     });
                 },
             );
-            list = list.child(
-                slot.child(
-                    div()
-                        .on_children_prepainted(move |bounds, _, cx| {
-                            let _ = measure_sidebar.update(cx, |sidebar, _| {
-                                sidebar.record_row_spans(workspace_id, &keys, &bounds);
-                            });
-                        })
-                        .id(("workspace-group", workspace_id.get()))
-                        .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
-                        .relative()
-                        .left(motion.offset.x)
-                        .top(motion.offset.y)
-                        .opacity(motion.opacity())
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .child(parent)
-                        .children(children),
-                ),
-            );
+            // The group's scroll handle tracks its rows, which leaves the prepaint listener none,
+            // so the listener reads them from the handle.
+            let group_element = div()
+                .on_children_prepainted(move |_, _, cx| {
+                    let _ = measure_sidebar.update(cx, |sidebar, _| {
+                        sidebar.record_row_spans(workspace_id, &keys);
+                    });
+                })
+                .id(("workspace-group", workspace_id.get()))
+                .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
+                .relative()
+                .left(motion.offset.x)
+                .top(motion.offset.y)
+                .opacity(motion.opacity())
+                .w_full()
+                .flex()
+                .flex_col()
+                .when_some(disclosing_height, |group, height| {
+                    group.h(height).overflow_hidden()
+                })
+                .when_some(group, |element, group| element.track_scroll(&group.items))
+                .child(parent)
+                .children(children);
+            list = list.child(slot.child(group_element));
         }
 
         let scrollbar = self.scrollbar.clone();
@@ -1178,25 +1339,36 @@ impl RenderOnce for SidebarResizeHandle {
 }
 
 impl WorkspaceSidebar {
-    /// The trailing chevron that shows or hides a git Workspace's Worktrees. The lifted copy of
-    /// a dragged row draws it without taking input.
+    /// The trailing chevron that shows or hides a git Workspace's Worktrees, `expanded` or not,
+    /// or `None` once the Workspace has no Worktree section. It turns as the rows disclose and
+    /// fades as the section comes and goes. The lifted copy of a dragged row, and a row whose
+    /// section left, draw it without taking input.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one chevron render step needs its state, motion, owner, and host geometry"
+    )]
     fn render_disclosure(
         &self,
         workspace_id: WorkspaceId,
-        expanded: bool,
+        expanded: Option<bool>,
+        disclosure: RowDisclosure,
         interactive: bool,
         color: Color,
         sidebar: WeakEntity<Self>,
         appearance: &crate::ui::appearance::ChromeAppearance,
     ) -> AnyElement {
-        let icon = div().text_color(gpui_color(color)).child(Icon::inherited(
-            if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            },
-            appearance.icons.metrics(IconRole::Caption).glyph_size,
-        ));
+        let RowDisclosure { disclosed, chevron } = disclosure;
+        let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
+        let glyph = if disclosed >= 1.0 {
+            Icon::inherited(IconName::ChevronDown, glyph_size)
+        } else {
+            Icon::inherited(IconName::ChevronRight, glyph_size)
+                .rotated(gpui::radians(std::f32::consts::FRAC_PI_2 * disclosed))
+        };
+        let icon = div()
+            .text_color(gpui_color(color))
+            .when(chevron < 1.0, |icon| icon.opacity(chevron))
+            .child(glyph);
         let column = div()
             .id(("workspace-disclosure", workspace_id.get()))
             .w(appearance.spacing(DISCLOSURE_WIDTH))
@@ -1205,9 +1377,9 @@ impl WorkspaceSidebar {
             .flex()
             .items_center()
             .justify_center();
-        if !interactive {
+        let Some(expanded) = expanded.filter(|_| interactive) else {
             return column.child(icon).into_any_element();
-        }
+        };
         column
             .debug_selector(move || {
                 format!(
@@ -1228,7 +1400,8 @@ impl WorkspaceSidebar {
             .into_any_element()
     }
 
-    /// A git Workspace's disclosed Worktree rows, and a label above each former repository's.
+    /// A git Workspace's disclosed Worktree rows, and a label above each former repository's,
+    /// each with the row it is. Rows without `fades` are closing, so they take no input.
     #[expect(
         clippy::too_many_arguments,
         reason = "one group render step needs its section, hovers, owner, and host geometry"
@@ -1237,19 +1410,20 @@ impl WorkspaceSidebar {
         &self,
         workspace_id: WorkspaceId,
         section: &WorktreeSection,
-        fades: Vec<RowFade>,
+        fades: Option<Vec<RowFade>>,
         sidebar: WeakEntity<Self>,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
         cx: &App,
-    ) -> Vec<(Option<SidebarRowKey>, AnyElement)> {
-        let mut fades = fades.into_iter();
+    ) -> Vec<(GroupRow, AnyElement)> {
+        let open = fades.is_some();
+        let mut fades = fades.into_iter().flatten();
         let mut elements = Vec::new();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
         for group in &section.groups {
-            if let Some(name) = &group.former_repository {
+            if let (Some(name), Some(first)) = (&group.former_repository, group.rows.first()) {
                 elements.push((
-                    None,
+                    GroupRow::FormerRepository(first.worktree_id),
                     div()
                         .debug_selector({
                             let name = name.clone();
@@ -1257,7 +1431,7 @@ impl WorkspaceSidebar {
                         })
                         .relative()
                         .w_full()
-                        .h(appearance.spacing(FORMER_REPOSITORY_ROW_HEIGHT))
+                        .h(former_repository_height(appearance))
                         .flex_shrink_0()
                         .flex()
                         .items_end()
@@ -1272,11 +1446,12 @@ impl WorkspaceSidebar {
             }
             let size = group.rows.len();
             for (index, worktree) in group.rows.iter().enumerate() {
-                let Some(fade) = fades.next() else {
+                let fade = fades.next();
+                if open && fade.is_none() {
                     break;
-                };
+                }
                 elements.push((
-                    Some(SidebarRowKey::Worktree(workspace_id, worktree.worktree_id)),
+                    GroupRow::Worktree(worktree.worktree_id),
                     self.render_worktree_row(
                         workspace_id,
                         worktree,
@@ -1302,7 +1477,7 @@ impl WorkspaceSidebar {
         workspace_id: WorkspaceId,
         worktree: &WorktreeRowViewModel,
         (position, size): (usize, usize),
-        fade: RowFade,
+        fade: Option<RowFade>,
         sidebar: WeakEntity<Self>,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
@@ -1312,10 +1487,18 @@ impl WorkspaceSidebar {
         let key = SidebarRowKey::Worktree(workspace_id, worktree_id);
         let selected = self.selected_key() == Some(key);
         let emphasized = appearance.active && self.has_visible_focus(window);
-        let hover = if appearance.active { fade.level } else { 0.0 };
+        let hover = match &fade {
+            Some(fade) if appearance.active => fade.level,
+            _ => 0.0,
+        };
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
-        let chip = self.outline_menu_target(chip, key, appearance);
-        let openable = worktree.openable();
+        let chip = self.outline_menu_target(chip, key, appearance).displaced(
+            self.workspace_reorder
+                .row_selection_offset(workspace_id, Some(worktree_id), cx),
+        );
+        // A closing row draws its face alone, which takes no input.
+        let closing = fade.is_none();
+        let openable = worktree.openable() && !closing;
         // A Worktree with no Tabs reads as secondary until it is opened.
         let title_color = if worktree.has_tabs && !worktree.missing {
             row_colors.row_foreground
@@ -1403,6 +1586,13 @@ impl WorkspaceSidebar {
             crate::ui::workspace_frame::base_surface(&appearance.colors)
         });
         let id = SharedString::from(selector.clone());
+        let state = if closing {
+            "closing"
+        } else if selected {
+            "selected"
+        } else {
+            "unselected"
+        };
         let click_sidebar = sidebar.clone();
         let press_sidebar = sidebar.clone();
         let menu_sidebar = sidebar;
@@ -1411,12 +1601,7 @@ impl WorkspaceSidebar {
             .id(id)
             .debug_selector({
                 let selector = selector.clone();
-                move || {
-                    format!(
-                        "{selector}-{}",
-                        if selected { "selected" } else { "unselected" }
-                    )
-                }
+                move || format!("{selector}-{state}")
             })
             .relative()
             .w_full()
@@ -1506,7 +1691,10 @@ impl WorkspaceSidebar {
                         text_appearance,
                     )),
             )
-            .child(fade.fade.tracker());
+            .when_some(fade, |row, fade| row.child(fade.fade.tracker()));
+        if closing {
+            return row.into_any_element();
+        }
         let row = Tooltip::new(
             SharedString::from(format!("{selector}-tooltip")),
             if worktree.main {

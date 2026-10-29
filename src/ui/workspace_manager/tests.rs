@@ -11671,6 +11671,8 @@ mod shared_repositories {
         manager: Entity<WorkspaceManager>,
         edits: Rc<ScriptedEdits>,
         shared: WorkspaceId,
+        /// What the desktop's own Terminal Sessions were asked.
+        sessions: TestTerminalSessionRecords,
     }
 
     impl Harness {
@@ -11713,7 +11715,7 @@ mod shared_repositories {
     }
 
     fn harness(cx: &mut TestAppContext, initial: Inventory) -> (Harness, &mut VisualTestContext) {
-        let (manager, _records, cx) = workspace_manager(cx);
+        let (manager, sessions, cx) = workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             Rc::new(
@@ -11753,6 +11755,7 @@ mod shared_repositories {
                 manager,
                 edits,
                 shared,
+                sessions,
             },
             cx,
         )
@@ -11769,7 +11772,7 @@ mod shared_repositories {
         Arc<crate::ui::server_worktrees::testing::ScriptedReads>,
         &mut VisualTestContext,
     ) {
-        let (manager, _records, cx) = workspace_manager(cx);
+        let (manager, sessions, cx) = workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
         edits.set_worktree_writes(true);
         let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
@@ -11820,6 +11823,7 @@ mod shared_repositories {
                 manager,
                 edits: Rc::clone(&edits),
                 shared,
+                sessions,
             },
             edits,
             reads,
@@ -12980,6 +12984,641 @@ mod shared_repositories {
         assert!(
             active_terminal_has_input_focus(&harness.manager, cx),
             "Escape returns typing to the Pane"
+        );
+    }
+
+    /// Turns on the motion of rows that come, go, and move, as a test that inspects it needs.
+    fn animate(cx: &mut VisualTestContext) {
+        cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    }
+
+    /// Turns on Reduce Motion, as the person's system setting does.
+    fn reduce_motion(cx: &mut VisualTestContext) {
+        cx.update(|_, cx| cx.remove_global::<crate::ui::drag_and_drop::AnimatePresence>());
+    }
+
+    /// Draws the frame a quarter of the way through a row's growth after the last one.
+    fn quarter_frame(cx: &mut VisualTestContext) {
+        cx.executor()
+            .advance_clock(crate::ui::drag_and_drop::PRESENCE_DURATION / 4);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+
+    fn bounds_of(selector: String, cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
+        cx.debug_bounds(selector.clone().leak())
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+    }
+
+    /// The Workspace row of `workspace_id`, which reads as active or not.
+    fn workspace_row_bounds(
+        workspace_id: WorkspaceId,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Bounds<Pixels> {
+        let id = workspace_id.get();
+        cx.debug_bounds(format!("workspace-row-{id}-active").leak())
+            .or_else(|| cx.debug_bounds(format!("workspace-row-{id}-inactive").leak()))
+            .unwrap_or_else(|| panic!("the row of Workspace {id} was not rendered"))
+    }
+
+    fn group_bounds(workspace_id: WorkspaceId, cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
+        bounds_of(format!("workspace-group-{}", workspace_id.get()), cx)
+    }
+
+    fn workspace_chip(
+        workspace_id: WorkspaceId,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Point<Pixels> {
+        bounds_of(
+            format!("workspace-row-selection-{}", workspace_id.get()),
+            cx,
+        )
+        .origin
+    }
+
+    fn worktree_chip(
+        workspace_id: WorkspaceId,
+        worktree_id: crate::domain::WorktreeId,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Point<Pixels> {
+        bounds_of(
+            format!(
+                "worktree-row-{}-{worktree_id}-selection",
+                workspace_id.get()
+            ),
+            cx,
+        )
+        .origin
+    }
+
+    fn worktrees_disclosed(harness: &Harness, cx: &mut VisualTestContext) -> f32 {
+        harness
+            .manager
+            .read_with(cx, |manager, cx| {
+                manager.sidebar.read(cx).worktrees_disclosed(harness.shared)
+            })
+            .expect("the shared Workspace's group")
+    }
+
+    fn resizes(sessions: &TestTerminalSessionRecords) -> usize {
+        sessions
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
+    }
+
+    /// `inventory` with each listing changed by `change`, at Git facts revision `revision`.
+    fn relisted(
+        mut inventory: Inventory,
+        revision: u64,
+        change: impl Fn(&mut Vec<WorktreeRecord>),
+    ) -> Inventory {
+        if let Some(snapshot) = &mut inventory.repositories {
+            snapshot.revision = revision;
+            for facts in &mut snapshot.directories {
+                if let Some(worktrees) = &mut facts.worktrees {
+                    change(&mut worktrees.worktrees);
+                }
+            }
+        }
+        inventory
+    }
+
+    /// The shared Workspace with only its Main Worktree and its Root Tab, so it has no Worktree
+    /// section, at organization revision `revision`.
+    fn single_worktree(revision: u64) -> Inventory {
+        let mut inventory = published(revision, "main", false);
+        inventory.revision = revision;
+        inventory.workspaces[0]
+            .tabs
+            .retain(|tab| tab.id == ROOT_TAB);
+        inventory
+    }
+
+    #[gpui::test]
+    fn selecting_another_worktree_should_move_the_selection_from_the_old_row(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        let (main, feature) = worktree_ids(&harness, cx);
+        finish_slides(cx);
+        animate(cx);
+        let workspace = harness.shared;
+        let selection = worktree_chip(workspace, main, cx);
+        let main_row = bounds_of(worktree_row(workspace, main, cx).to_owned(), cx);
+        let feature_row = bounds_of(worktree_row(workspace, feature, cx).to_owned(), cx);
+
+        click(worktree_row(workspace, feature, cx), cx);
+        let leaving = worktree_chip(workspace, feature, cx);
+        finish_slides(cx);
+        let landed = worktree_chip(workspace, feature, cx);
+
+        assert_eq!(
+            (leaving, landed),
+            (
+                selection,
+                selection + (feature_row.origin - main_row.origin)
+            ),
+            "the selection must leave from the old Worktree row and land on the new one"
+        );
+    }
+
+    #[gpui::test]
+    fn the_keyboard_should_move_the_selection_between_a_workspace_and_its_worktree_rows(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        let (main, _) = worktree_ids(&harness, cx);
+        let sidebar_focus = harness
+            .manager
+            .read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
+        cx.update(|window, cx| sidebar_focus.focus(window, cx));
+        finish_slides(cx);
+        animate(cx);
+        let workspace = harness.shared;
+        let child = worktree_chip(workspace, main, cx);
+
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        let rising = workspace_chip(workspace, cx);
+        finish_slides(cx);
+        let parent = workspace_chip(workspace, cx);
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        let falling = worktree_chip(workspace, main, cx);
+        finish_slides(cx);
+
+        assert_eq!(
+            (rising, falling, worktree_chip(workspace, main, cx)),
+            (child, parent, child),
+            "the selection must leave the Worktree row for its Workspace row and come back"
+        );
+    }
+
+    #[gpui::test]
+    fn selecting_a_worktree_in_another_workspace_should_move_the_selection_from_the_old_row(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        let (main, feature) = worktree_ids(&harness, cx);
+        finish_slides(cx);
+        animate(cx);
+        let desktop = WorkspaceId::new(1);
+        let workspace = harness.shared;
+        let worktree = worktree_chip(workspace, main, cx);
+
+        click("workspace-row-1-inactive", cx);
+        let to_workspace = workspace_chip(desktop, cx);
+        finish_slides(cx);
+        let desktop_selection = workspace_chip(desktop, cx);
+        click(worktree_row(workspace, feature, cx), cx);
+        let to_worktree = worktree_chip(workspace, feature, cx);
+
+        assert_eq!(
+            (to_workspace, to_worktree),
+            (worktree, desktop_selection),
+            "the selection must leave a Worktree row for another Workspace, and come back"
+        );
+    }
+
+    /// A Workspace that discloses its Worktree rows first appears at rest. Collapsing it moves the
+    /// row's height, its Worktree rows, its chevron and the rows below in one motion that a second
+    /// click reverses from where it stands, while the Terminal beside the sidebar keeps its size.
+    #[gpui::test]
+    fn collapsing_a_workspace_should_move_its_worktree_rows_and_the_rows_below_in_one_motion(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        let first_frame = worktrees_disclosed(&harness, cx);
+        new_desktop_workspace(cx);
+        finish_slides(cx);
+        let id = harness.shared.get();
+        let below = WorkspaceId::new(id + 1);
+        let (main, _) = worktree_ids(&harness, cx);
+        let expanded = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+            workspace_row_bounds(below, cx),
+        );
+        let resized = resizes(&harness.sessions);
+
+        click(format!("workspace-disclosure-{id}-expanded").leak(), cx);
+        let leaving = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+            workspace_row_bounds(below, cx),
+        );
+        quarter_frame(cx);
+        let closing = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+            workspace_row_bounds(below, cx),
+        );
+        let turning = worktrees_disclosed(&harness, cx);
+        let closing_row = cx
+            .debug_bounds(format!("worktree-row-{id}-{main}-closing").leak())
+            .is_some();
+        let announced = spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .with_role("TreeItem")
+            .iter()
+            .any(|item| item["aria"]["label"] == "app-feature");
+        click(format!("workspace-disclosure-{id}-collapsed").leak(), cx);
+        let reversed = workspace_row_bounds(harness.shared, cx);
+        quarter_frame(cx);
+        let reopening = workspace_row_bounds(harness.shared, cx);
+        finish_slides(cx);
+        let reopened = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+            workspace_row_bounds(below, cx),
+        );
+
+        assert_eq!(first_frame, 1.0, "a group must first appear at rest");
+        assert_eq!(
+            leaving, expanded,
+            "collapsing must start from the expanded group"
+        );
+        let between =
+            |value: Pixels, from: Pixels, to: Pixels| value > from.min(to) && value < from.max(to);
+        let collapsed_height = closing.0.size.height.max(expanded.0.size.height);
+        assert!(
+            closing.0.size.height > expanded.0.size.height
+                && between(closing.1.size.height, px(0.0), expanded.1.size.height)
+                && between(
+                    closing.2.top(),
+                    expanded.2.top() - expanded.1.size.height,
+                    expanded.2.top()
+                ),
+            "the row must grow toward two lines while its Worktree rows close and the rows below \
+             follow, got {closing:?} from {expanded:?}"
+        );
+        assert!(
+            turning > 0.0 && turning < 1.0 && closing_row && !announced,
+            "the chevron must be turning ({turning}), and the closing rows drawn ({closing_row}) \
+             but not announced ({announced})"
+        );
+        assert_eq!(
+            reversed, closing.0,
+            "a second click must reverse from where the row stands"
+        );
+        assert!(
+            reopening.size.height < closing.0.size.height
+                && reopening.size.height < collapsed_height,
+            "the reversed motion must head back to one line, got {reopening:?}"
+        );
+        assert_eq!(reopened, expanded, "the group must settle expanded again");
+        assert_eq!(
+            resizes(&harness.sessions),
+            resized,
+            "disclosure must not resize a Terminal Session"
+        );
+    }
+
+    #[gpui::test]
+    fn worktree_rows_that_come_and_go_should_grow_in_and_close_in_place(cx: &mut TestAppContext) {
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        finish_slides(cx);
+        animate(cx);
+        let rest = group_bounds(harness.shared, cx).size.height;
+        let extra = |records: &mut Vec<WorktreeRecord>| {
+            records.push(record(EXTRA_ROOT, "extra", false));
+        };
+
+        harness.publish(relisted(published(1, "main", true), 2, extra), cx);
+        let arriving = group_bounds(harness.shared, cx).size.height;
+        quarter_frame(cx);
+        let growing = group_bounds(harness.shared, cx).size.height;
+        finish_slides(cx);
+        let grown = group_bounds(harness.shared, cx).size.height;
+        harness.publish(relisted(published(1, "main", true), 3, |_| {}), cx);
+        let leaving = group_bounds(harness.shared, cx).size.height;
+        quarter_frame(cx);
+        let closing = group_bounds(harness.shared, cx).size.height;
+        finish_slides(cx);
+        let closed = group_bounds(harness.shared, cx).size.height;
+
+        assert_eq!(
+            (arriving, leaving, closed),
+            (rest, grown, rest),
+            "a Worktree row must start growing from nothing and leave a gap that closes"
+        );
+        assert!(
+            growing > rest && growing < grown && closing > rest && closing < grown,
+            "the group must grow from {rest:?} to {grown:?} and back, got {growing:?} and \
+             {closing:?}"
+        );
+    }
+
+    /// A Worktree whose directory goes missing, or whose Tabs close, keeps its row in place. The
+    /// selection leaves the row whose Tabs closed for the Tab that remains.
+    #[gpui::test]
+    fn a_worktree_row_that_changes_state_should_stay_in_place(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        let (main, feature) = worktree_ids(&harness, cx);
+        let workspace = harness.shared;
+        click(worktree_row(workspace, feature, cx), cx);
+        finish_slides(cx);
+        animate(cx);
+        let rest = group_bounds(workspace, cx);
+        let row = bounds_of(worktree_row(workspace, feature, cx).to_owned(), cx);
+        let selection = worktree_chip(workspace, feature, cx);
+        let missing = |records: &mut Vec<WorktreeRecord>| {
+            for record in records.iter_mut() {
+                record.missing |= record.root == std::path::Path::new(FEATURE_ROOT);
+            }
+        };
+
+        harness.publish(relisted(published(1, "main", true), 2, missing), cx);
+        let gone = (
+            group_bounds(workspace, cx),
+            bounds_of(worktree_row(workspace, feature, cx).to_owned(), cx),
+        );
+        let mut closed = published(3, "main", true);
+        closed.revision = 2;
+        closed.workspaces[0].tabs.retain(|tab| tab.id == ROOT_TAB);
+        harness.publish(closed, cx);
+        let emptied = (
+            group_bounds(workspace, cx),
+            bounds_of(worktree_row(workspace, feature, cx).to_owned(), cx),
+        );
+        let leaving = worktree_chip(workspace, main, cx);
+        finish_slides(cx);
+
+        let no_tabs = harness
+            .row(cx)
+            .worktrees
+            .expect("the Worktree rows")
+            .rows()
+            .any(|row| row.worktree_id == feature && !row.has_tabs && !row.missing);
+        assert!(no_tabs, "the Worktree must be left without Tabs");
+        assert_eq!(
+            (gone, emptied, group_bounds(workspace, cx)),
+            ((rest, row), (rest, row), rest),
+            "a row that only changes state must not close or move"
+        );
+        assert_eq!(
+            leaving, selection,
+            "the selection must leave the row whose Tabs closed"
+        );
+    }
+
+    #[gpui::test]
+    fn a_second_worktree_should_disclose_the_section_in_place(cx: &mut TestAppContext) {
+        let (harness, cx) = harness(cx, single_worktree(1));
+        finish_slides(cx);
+        animate(cx);
+        let alone = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+        );
+        let mut listed = published(2, "main", true);
+        listed.revision = 2;
+        listed.workspaces[0].tabs.retain(|tab| tab.id == ROOT_TAB);
+
+        harness.publish(listed, cx);
+        let appearing = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+        );
+        quarter_frame(cx);
+        let disclosing = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+        );
+        finish_slides(cx);
+        let disclosed = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+        );
+        harness.publish(single_worktree(3), cx);
+        let leaving = (
+            workspace_row_bounds(harness.shared, cx),
+            group_bounds(harness.shared, cx),
+        );
+        quarter_frame(cx);
+        let closing = group_bounds(harness.shared, cx);
+        finish_slides(cx);
+
+        assert_eq!(
+            (appearing, leaving),
+            (alone, disclosed),
+            "the section must appear and leave from the group as it stood"
+        );
+        assert!(
+            disclosing.0.size.height < alone.0.size.height
+                && disclosing.0.size.height > disclosed.0.size.height
+                && disclosing.1.size.height > alone.1.size.height
+                && disclosing.1.size.height < disclosed.1.size.height,
+            "the row must ease to one line as the Worktree rows disclose, got {disclosing:?} \
+             between {alone:?} and {disclosed:?}"
+        );
+        assert!(
+            closing.size.height > alone.1.size.height
+                && closing.size.height < disclosed.1.size.height,
+            "the section must close in place, got {closing:?}"
+        );
+        assert_eq!(
+            (
+                workspace_row_bounds(harness.shared, cx),
+                group_bounds(harness.shared, cx)
+            ),
+            alone
+        );
+    }
+
+    #[gpui::test]
+    fn a_former_repository_label_should_grow_in_with_its_worktree_rows(cx: &mut TestAppContext) {
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        finish_slides(cx);
+        animate(cx);
+        let rest = group_bounds(harness.shared, cx).size.height;
+
+        harness.publish(moved_to_orbit(2, "/srv/app/src"), cx);
+        let arriving = group_bounds(harness.shared, cx).size.height;
+        quarter_frame(cx);
+        let growing = group_bounds(harness.shared, cx).size.height;
+        finish_slides(cx);
+        let label = cx
+            .debug_bounds("worktree-former-repository-app")
+            .expect("the former repository's label");
+        let grown = group_bounds(harness.shared, cx).size.height;
+
+        assert_eq!(
+            arriving, rest,
+            "the label and the Root Tab's new Worktree must grow from nothing"
+        );
+        assert!(
+            growing > rest && growing < grown && grown - rest == label.size.height,
+            "the group must grow by the label from {rest:?} to {grown:?}, got {growing:?}"
+        );
+    }
+
+    /// The Tab strip of another Worktree starts from the strip it replaces, as another
+    /// Workspace's does.
+    #[gpui::test]
+    fn switching_to_a_worktree_with_more_tabs_should_start_its_tab_strip_from_the_old_one(
+        cx: &mut TestAppContext,
+    ) {
+        let mut initial = published(1, "main", true);
+        let mut second = initial.workspaces[0].tabs[1].clone();
+        second.id = [70; 32];
+        second.root_pane = [71; 32];
+        second.panes[0].id = second.root_pane;
+        initial.workspaces[0].tabs.push(second);
+        let (harness, cx) = harness(cx, initial);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        finish_slides(cx);
+        animate(cx);
+        let (_, feature) = worktree_ids(&harness, cx);
+        let (_, tabs) = active_tab_manager(&harness.manager, cx);
+        let tab_chip = |cx: &mut VisualTestContext| {
+            let active = tabs.read_with(cx, |tabs, cx| {
+                tabs.active_tab_view().read(cx).tab_id().get()
+            });
+            bounds_of(format!("tab-item-{active}-chip"), cx).origin
+        };
+        let end = |cx: &mut VisualTestContext| bounds_of("create-tab-button".to_owned(), cx).origin;
+        let selection = tab_chip(cx);
+        let create = end(cx);
+
+        click(worktree_row(harness.shared, feature, cx), cx);
+        let (leaving, growing) = (tab_chip(cx), end(cx));
+        finish_slides(cx);
+        let grown = end(cx);
+
+        assert_eq!(
+            tabs.read_with(cx, |tabs, _| tabs.worktree_tab_ids(feature).len()),
+            2
+        );
+        assert_eq!(
+            (leaving, growing),
+            (selection, create),
+            "the selection must leave from the old active Tab, and the strip's end from the old end"
+        );
+        assert!(
+            create.x < grown.x,
+            "the Tab the old strip lacked must grow in, got {grown:?} from {create:?}"
+        );
+    }
+
+    /// With Reduce Motion on, a Worktree change shows its final layout at once, and turning it
+    /// on during a change ends every motion in the sidebar.
+    #[gpui::test]
+    fn reduce_motion_should_show_each_sidebar_change_at_rest(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        let (main, feature) = worktree_ids(&harness, cx);
+        let id = harness.shared.get();
+        finish_slides(cx);
+        let expanded = group_bounds(harness.shared, cx);
+        let feature_selection = {
+            click(worktree_row(harness.shared, feature, cx), cx);
+            let at_once = worktree_chip(harness.shared, feature, cx);
+            finish_slides(cx);
+            (at_once, worktree_chip(harness.shared, feature, cx))
+        };
+        click(format!("workspace-disclosure-{id}-expanded").leak(), cx);
+        let collapsed_at_once = group_bounds(harness.shared, cx);
+        finish_slides(cx);
+        let collapsed = group_bounds(harness.shared, cx);
+        click("workspace-row-1-inactive", cx);
+        finish_slides(cx);
+
+        animate(cx);
+        click(format!("workspace-disclosure-{id}-collapsed").leak(), cx);
+        click(format!("workspace-row-{id}-inactive").leak(), cx);
+        quarter_frame(cx);
+        let moving = (
+            group_bounds(harness.shared, cx),
+            worktree_chip(harness.shared, feature, cx),
+        );
+        reduce_motion(cx);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let reduced = (
+            group_bounds(harness.shared, cx),
+            worktree_chip(harness.shared, feature, cx),
+        );
+
+        assert_eq!(feature_selection.0, feature_selection.1);
+        assert_eq!(collapsed_at_once, collapsed);
+        assert_ne!(
+            moving,
+            (expanded, feature_selection.1),
+            "the group and the selection must still be moving"
+        );
+        assert_eq!(
+            reduced,
+            (expanded, feature_selection.1),
+            "turning on Reduce Motion must end every motion at once"
+        );
+        let _ = main;
+    }
+
+    /// A Workspace at the bottom of an overflowing list keeps the Worktree row it selects in view
+    /// as its rows disclose.
+    #[gpui::test]
+    fn disclosing_worktree_rows_at_the_bottom_of_the_list_should_keep_the_selection_in_view(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        for _ in 0..24 {
+            new_desktop_workspace(cx);
+        }
+        let last = harness
+            .manager
+            .read_with(cx, |manager, _| manager.workspaces.len() - 1);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.set_worktrees_expanded(harness.shared, false);
+                manager.handle_sidebar_event(
+                    SidebarEvent::Move {
+                        workspace_id: harness.shared,
+                        position: last,
+                    },
+                    window,
+                    cx,
+                );
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        redraw(cx);
+        cx.update(|_, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.reveal_workspace(harness.shared, cx)
+                });
+            });
+        });
+        finish_slides(cx);
+        redraw(cx);
+        let (main, _) = worktree_ids(&harness, cx);
+        let collapsed = workspace_row_bounds(harness.shared, cx);
+        animate(cx);
+
+        click(
+            format!("workspace-disclosure-{}-collapsed", harness.shared.get()).leak(),
+            cx,
+        );
+        finish_slides(cx);
+        redraw(cx);
+        let viewport = cx.debug_bounds("workspace-list").unwrap();
+        let row = bounds_of(worktree_row(harness.shared, main, cx).to_owned(), cx);
+        let expanded = workspace_row_bounds(harness.shared, cx);
+
+        assert!(
+            collapsed.top() + expanded.size.height + row.size.height > viewport.bottom(),
+            "the disclosed row must reach below the list for this test, got {collapsed:?} in \
+             {viewport:?}"
+        );
+        assert!(
+            row.top() >= viewport.top() && row.bottom() <= viewport.bottom(),
+            "the selected Worktree row must stay in view, got {row:?} in {viewport:?}"
         );
     }
 
