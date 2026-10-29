@@ -60,6 +60,15 @@ _spaceterm_before_command() {
     builtin printf '\e]133;C;cmdline=%s%s\a' "$(_spaceterm_encode "$1")" "$_spaceterm_owner"
     _spaceterm_command_active=1
 }
+# The startup files run after this one and may set PATH, so the server's own CLI goes first at
+# the first prompt.
+_spaceterm_cli_path() {
+    add-zsh-hook -d precmd _spaceterm_cli_path
+    [[ -n "${SPACETERM_CLI:-}" ]] || return 0
+    builtin local dir="${SPACETERM_CLI:h}"
+    path=("$dir" "${(@)path:#${(b)dir}}")
+}
+add-zsh-hook precmd _spaceterm_cli_path
 add-zsh-hook chpwd _spaceterm_report_directory
 add-zsh-hook precmd _spaceterm_before_prompt
 add-zsh-hook preexec _spaceterm_before_command

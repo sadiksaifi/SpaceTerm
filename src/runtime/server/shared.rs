@@ -1,8 +1,8 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
 use spaceterm_server::hierarchy::{
-    CloseInventory, ConfirmedControl, ConfirmedPane, Id, Inventory, Mutation, Outcome,
-    RetainedOutcome, State,
+    CloseInventory, ConfirmedControl, ConfirmedPane, CreateControl, Id, Inventory, Mutation,
+    Outcome, RetainedOutcome, State,
 };
 use spaceterm_server::protocol::PaneEvent;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +11,9 @@ use std::time::Instant;
 #[cfg(test)]
 #[path = "shared/close_control_tests.rs"]
 mod close_control_tests;
+#[cfg(test)]
+#[path = "shared/create_control_tests.rs"]
+mod create_control_tests;
 mod edits;
 mod journal;
 mod publication;
@@ -112,6 +115,15 @@ impl SharedWorkspaceHost {
             DevelopmentPaneHost::local_with_pty_factory(crate::platform::service_pty_factory())?,
             sync,
         ))
+    }
+    /// Names this server to the CLI in each Terminal Session started from now on.
+    pub fn with_session_context(mut self, context: super::ServerSessionContext) -> Self {
+        let context = Arc::new(context);
+        for host in self.panes.values_mut() {
+            host.session_context = Some(Arc::clone(&context));
+        }
+        self.prototype.session_context = Some(context);
+        self
     }
     /// A host with a sync worker of its own.
     #[cfg(test)]
@@ -423,6 +435,7 @@ impl SharedWorkspaceHost {
                 directories: super::directories::DirectoryOperations::default(),
                 names: Arc::clone(&self.prototype.names),
                 notifier: self.prototype.notifier.clone(),
+                session_context: self.prototype.session_context.clone(),
             };
             self.panes.insert(id, host);
         }
@@ -599,10 +612,45 @@ impl SharedWorkspaceHost {
             .outcome(device, sequence)
             .ok_or(Refusal::Failed)?
             .clone();
+        let revision = self.commit(next)?;
+        self.reveal(&outcome);
         Ok(Answer::Outcome {
             outcome: Box::new(outcome),
-            revision: self.commit(next)?,
+            revision,
         })
+    }
+    /// Sends `Effect::Reveal` for work created for an origin Pane's Controlling Client, on the
+    /// origin Pane's channel only. The client decides whether to show it.
+    fn reveal(&mut self, record: &RetainedOutcome) {
+        let Some(CreateControl::OriginController { pane: origin }) =
+            record.mutation.create_control()
+        else {
+            return;
+        };
+        let Outcome::Accepted { target } = record.outcome else {
+            return;
+        };
+        let Some(placement) = self.state.inventory.placement(target) else {
+            return;
+        };
+        // The created Pane's controller is the origin's, revalidated at commit.
+        let Some(controller) = self
+            .state
+            .pane(placement.pane)
+            .and_then(|(_, _, pane)| pane.creator)
+        else {
+            return;
+        };
+        if let Some(host) = self.panes.get_mut(&origin) {
+            host.send_server_effect(
+                controller,
+                pane::effects::Effect::Reveal(Box::new(pane::effects::Reveal {
+                    workspace: placement.workspace,
+                    tab: placement.tab,
+                    pane: placement.pane,
+                })),
+            );
+        }
     }
     /// The recorded outcome of an Original Operation.
     fn resolve(&mut self, device: Id, sequence: u64) -> Result<Answer, Refusal> {

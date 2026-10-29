@@ -43,8 +43,8 @@ use crate::close_confirmation::{
 };
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    PinnedDirectory, RemoteConnectionPhase, ValidatedLocalDirectory, WorkspaceCollection,
-    WorkspaceEntry, WorkspaceError, WorkspaceId,
+    PaneId, PinnedDirectory, RemoteConnectionPhase, TabId, ValidatedLocalDirectory,
+    WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::window_movement::{
@@ -240,6 +240,21 @@ impl ServerDirectoryMatch {
     }
 }
 
+/// How long a Reveal waits for its server to publish what it shows.
+const REVEAL_LIFETIME: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A Reveal from a Focused Pane, waiting for its server's publication.
+#[derive(Clone, Copy)]
+struct PendingReveal {
+    key: ServerKey,
+    /// The origin Pane's Workspace.
+    workspace_id: WorkspaceId,
+    /// Where navigation in that Workspace stood when the Reveal arrived.
+    navigation: (u64, TabId, u64),
+    target: spaceterm_server::hierarchy::Placement,
+    deadline: std::time::Instant,
+}
+
 pub(crate) struct WorkspaceManager {
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
@@ -272,6 +287,8 @@ pub(crate) struct WorkspaceManager {
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
+    /// A Reveal that waits for its server to publish what it shows.
+    pending_reveal: Option<PendingReveal>,
     close_empty_after_shared_removal: bool,
     close_confirmation: CloseConfirmation,
     /// Whether the Workspace a shared close names held the keyboard when the person asked for
@@ -411,6 +428,7 @@ impl WorkspaceManager {
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
             pending_final_tab_closes: BTreeSet::new(),
+            pending_reveal: None,
             close_empty_after_shared_removal: false,
             close_confirmation: CloseConfirmation::default(),
             shared_close_keyboard: SharedCloseKeyboard::default(),
@@ -494,6 +512,19 @@ impl WorkspaceManager {
                             );
                         });
                     }
+                }
+                TabManagerEvent::RevealRequested {
+                    tab_id,
+                    origin,
+                    target,
+                } => {
+                    workspace_manager.request_reveal(
+                        workspace_id,
+                        (*tab_id, *origin),
+                        *target,
+                        window,
+                        cx,
+                    );
                 }
                 TabManagerEvent::PresentationChanged => {
                     // A shared Workspace's directory is the server's, and the sidebar shows what
@@ -3056,6 +3087,7 @@ impl WorkspaceManager {
         if let Some(accepted) = poll.accepted {
             self.open_accepted_shared(key, &accepted, window, cx);
         }
+        self.present_reveal(window, cx);
         // Each answer below stays with this reading until its alert is admitted, and counts as
         // presented once the person answers that alert.
         if !spaceterm_ui::window_modal_is_open(window, cx)
@@ -4551,6 +4583,89 @@ impl WorkspaceManager {
             // starts it, so nothing here moves the keyboard or starts a shell.
             Mutation::EndAllSessions { .. } => {}
         }
+    }
+
+    /// Records a Reveal from the Focused Pane `origin` of the Active Workspace, and shows it once
+    /// its server publishes the target. A Reveal from any other Pane is dropped.
+    fn request_reveal(
+        &mut self,
+        workspace_id: WorkspaceId,
+        origin: (TabId, PaneId),
+        target: spaceterm_server::hierarchy::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspaces
+            .active_workspace()
+            .filter(|workspace| workspace.id() == workspace_id)
+        else {
+            return;
+        };
+        let manager = workspace.payload().read(cx);
+        if manager.active_terminal_identity(cx) != origin {
+            return;
+        }
+        let navigation = manager.navigation(cx);
+        let Some(key) = self.shared.owner(workspace_id) else {
+            return;
+        };
+        self.pending_reveal = Some(PendingReveal {
+            key,
+            workspace_id,
+            navigation,
+            target,
+            deadline: std::time::Instant::now() + REVEAL_LIFETIME,
+        });
+        self.present_reveal(window, cx);
+    }
+
+    /// Shows the pending Reveal's Pane once it is presented here. Any newer selection in the
+    /// origin's Workspace, or leaving that Workspace, drops it instead.
+    fn present_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(reveal) = self.pending_reveal else {
+            return;
+        };
+        let navigation = self
+            .workspaces
+            .active_workspace()
+            .filter(|workspace| workspace.id() == reveal.workspace_id)
+            .map(|workspace| workspace.payload().read(cx).navigation(cx));
+        if navigation != Some(reveal.navigation) || std::time::Instant::now() >= reveal.deadline {
+            self.pending_reveal = None;
+            return;
+        }
+        let Some(workspace_id) = self
+            .shared
+            .get(reveal.key)
+            .and_then(|shared| shared.local(reveal.target.workspace))
+        else {
+            return;
+        };
+        let Some(manager) = self
+            .workspaces
+            .workspace(workspace_id)
+            .map(|entry| entry.payload().clone())
+        else {
+            return;
+        };
+        if !manager
+            .read(cx)
+            .presents_shared_pane(reveal.target.pane, cx)
+        {
+            return;
+        }
+        self.pending_reveal = None;
+        if workspace_id != reveal.workspace_id {
+            if !self.activate_workspace(workspace_id, window, cx) {
+                return;
+            }
+            self.focus(window, cx);
+            self.scroll_active_workspace_into_view(cx);
+        }
+        manager.update(cx, |manager, cx| {
+            manager.open_accepted_shared(reveal.target.pane, window, cx);
+        });
     }
 
     /// Removes a Workspace the server no longer has.

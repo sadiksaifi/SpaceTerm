@@ -63,6 +63,24 @@ impl AgentName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The Client Identity of this agent under the base Client Identity `base`:
+    /// `SHA-256("spaceterm.agent.v1" || base || name)`. The server derives it at admission, so a
+    /// paired client can only name agents of its own pairing.
+    pub fn client(&self, base: &[u8; 32]) -> [u8; 32] {
+        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+        digest.update(b"spaceterm.agent.v1");
+        digest.update(base);
+        digest.update(self.0.as_bytes());
+        let mut client = [0; 32];
+        client.copy_from_slice(digest.finish().as_ref());
+        client
+    }
+
+    /// The suffix every Client Name of this agent ends with.
+    pub(crate) fn name_suffix(&self) -> String {
+        format!(" CLI {}", self.0)
+    }
 }
 
 /// The agent name did not match `[a-z0-9][a-z0-9-]{0,31}`. It carries no value.
@@ -212,22 +230,33 @@ impl<'a> Wire<'a> {
     }
 }
 
+/// A connection the server admitted: its effective Client Identity, which an agent name derives
+/// from the base one, and the name it presents.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Admitted {
+    pub status: AuthenticatedStatus,
+    pub client: [u8; 32],
+    pub agent: Option<AgentName>,
+    pub name: ClientName,
+}
+
 /// Both peers verify the owning account before accepting any protocol values. The client's
 /// identity and name are nonsecret and grant nothing beyond the connection's authority.
 pub(crate) fn admit_server(
     stream: &mut UnixStream,
     server: &[u8; 32],
     build: &str,
-) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
+) -> Result<Admitted, ServerError> {
     crate::host::check_peer(stream)?;
     admit_server_transport(stream, server, build, None)
 }
 
 /// Only the paired host calls this after pinned-server and enrolled-device proof validation.
+/// Every agent it admits derives from the pairing's own Client Identity.
 pub(crate) fn admit_direct_server(
     stream: &mut dyn Preamble,
     paired: &crate::direct::PairedDevice,
-) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
+) -> Result<Admitted, ServerError> {
     admit_server_transport(
         stream,
         &paired.pin.server,
@@ -241,13 +270,9 @@ fn admit_server_transport(
     server: &[u8; 32],
     build: &str,
     expected_client: Option<[u8; 32]>,
-) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
+) -> Result<Admitted, ServerError> {
     let mut wire = Wire::new(stream);
     let hello: Hello = wire.read()?;
-    // Agent identities arrive with identity derivation; until then they are refused.
-    if hello.agent.is_some() {
-        return Err(ServerError::Unsupported);
-    }
     if hello.build != build
         || hello.server != *server
         || hello.client == [0; 32]
@@ -258,6 +283,16 @@ fn admit_server_transport(
     if hello.versions.is_empty() || hello.versions.len() > 16 {
         return Err(ServerError::Protocol);
     }
+    // An agent's Client Name keeps " CLI <agent>" whole, so every client can tell agents apart.
+    if let Some(agent) = &hello.agent
+        && !hello.name.as_str().ends_with(&agent.name_suffix())
+    {
+        return Err(ServerError::Protocol);
+    }
+    let client = hello
+        .agent
+        .as_ref()
+        .map_or(hello.client, |agent| agent.client(&hello.client));
     let selected = if hello.versions.contains(&MAJOR) {
         MAJOR
     } else {
@@ -268,7 +303,7 @@ fn admit_server_transport(
         build: build.to_owned(),
         server: *server,
         server_major: MAJOR,
-        client: hello.client,
+        client,
     })?;
     if hello.lane == Lane::Service {
         crate::service::lane::serve(stream)?;
@@ -277,50 +312,78 @@ fn admit_server_transport(
     if selected == 0 {
         return Err(ServerError::IncompatibleProtocol);
     }
-    Ok((
-        AuthenticatedStatus {
+    Ok(Admitted {
+        status: AuthenticatedStatus {
             protocol_major: selected,
             development_pane: false,
         },
-        hello.client,
-        hello.name,
-    ))
+        client,
+        agent: hello.agent,
+        name: hello.name,
+    })
+}
+
+/// Who a client admits as: its base Client Identity, its Client Name and its optional agent.
+#[derive(Clone, Copy)]
+pub(crate) struct Caller<'a> {
+    pub client: &'a [u8; 32],
+    pub name: &'a ClientName,
+    pub agent: Option<&'a AgentName>,
+}
+
+impl<'a> From<(&'a [u8; 32], &'a ClientName)> for Caller<'a> {
+    fn from((client, name): (&'a [u8; 32], &'a ClientName)) -> Self {
+        Self {
+            client,
+            name,
+            agent: None,
+        }
+    }
+}
+
+impl Caller<'_> {
+    /// The Client Identity the server must offer back.
+    pub(crate) fn effective(&self) -> [u8; 32] {
+        self.agent
+            .map_or(*self.client, |agent| agent.client(self.client))
+    }
 }
 
 #[cfg_attr(
     not(feature = "client"),
     allow(dead_code, reason = "client side used by desktop and admission tests")
 )]
-pub(crate) fn admit_client(
+pub(crate) fn admit_client<'a>(
     stream: &mut UnixStream,
-    client: (&[u8; 32], &ClientName),
+    caller: impl Into<Caller<'a>>,
     server: &[u8; 32],
     build: &str,
     versions: &[u16],
 ) -> Result<AuthenticatedStatus, ServerError> {
     crate::host::check_peer(stream)?;
-    admit_transport(stream, client, server, build, versions)
+    admit_transport(stream, caller, server, build, versions)
 }
 
-pub(crate) fn admit_transport(
+pub(crate) fn admit_transport<'a>(
     stream: &mut dyn Preamble,
-    (client, name): (&[u8; 32], &ClientName),
+    caller: impl Into<Caller<'a>>,
     server: &[u8; 32],
     build: &str,
     versions: &[u16],
 ) -> Result<AuthenticatedStatus, ServerError> {
+    let caller = caller.into();
     let mut wire = Wire::new(stream);
     wire.write(&Hello {
         versions: versions.to_vec(),
         build: build.to_owned(),
         server: *server,
-        client: *client,
-        name: name.clone(),
-        agent: None,
+        client: *caller.client,
+        name: caller.name.clone(),
+        agent: caller.agent.cloned(),
         lane: Lane::Work,
     })?;
     let offer: Offer = wire.read()?;
-    if offer.build != build || offer.server != *server || offer.client != *client {
+    if offer.build != build || offer.server != *server || offer.client != caller.effective() {
         return Err(ServerError::AuthenticationRefused);
     }
     if offer.selected == 0 {
@@ -356,8 +419,11 @@ mod tests {
             let server_result = thread.join().unwrap();
             if accepted {
                 assert_eq!(result.unwrap().protocol_major, MAJOR);
-                let (_, client, name) = server_result.unwrap();
-                assert_eq!((client, name.as_str()), ([9; 32], "Build Mac"));
+                let admitted = server_result.unwrap();
+                assert_eq!(
+                    (admitted.client, admitted.name.as_str()),
+                    ([9; 32], "Build Mac")
+                );
             } else {
                 assert_eq!(result, Err(ServerError::IncompatibleProtocol));
                 assert_eq!(server_result, Err(ServerError::IncompatibleProtocol));
@@ -431,5 +497,108 @@ mod tests {
         let mut wire = Wire::new(&mut server);
         wire.deadline = Instant::now() + Duration::from_millis(10);
         assert!(matches!(wire.read::<Hello>(), Err(ServerError::Protocol)));
+    }
+    #[test]
+    fn an_agent_is_admitted_as_the_identity_the_server_derives_from_its_base() {
+        let agent: AgentName = "agent-1".parse().unwrap();
+        let derived = agent.client(&[9; 32]);
+        assert_ne!(derived, [9; 32]);
+        assert_ne!(
+            derived,
+            agent.client(&[8; 32]),
+            "each base derives its own agents"
+        );
+        let other: AgentName = "agent-2".parse().unwrap();
+        assert_ne!(derived, other.client(&[9; 32]));
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            admit_server(&mut server, &[7; 32], "spaceterm-development")
+        });
+        let name: ClientName = "Build Mac CLI agent-1".into();
+        admit_client(
+            &mut client,
+            Caller {
+                client: &[9; 32],
+                name: &name,
+                agent: Some(&agent),
+            },
+            &[7; 32],
+            "spaceterm-development",
+            &[MAJOR],
+        )
+        .unwrap();
+        let admitted = thread.join().unwrap().unwrap();
+        assert_eq!(admitted.client, derived);
+        assert_eq!(admitted.agent, Some(agent));
+    }
+
+    #[test]
+    fn an_agent_whose_name_hides_it_is_refused() {
+        let agent: AgentName = "agent-1".parse().unwrap();
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            admit_server(&mut server, &[7; 32], "spaceterm-development")
+        });
+        let name: ClientName = "Build Mac".into();
+        assert!(
+            admit_client(
+                &mut client,
+                Caller {
+                    client: &[9; 32],
+                    name: &name,
+                    agent: Some(&agent),
+                },
+                &[7; 32],
+                "spaceterm-development",
+                &[MAJOR],
+            )
+            .is_err()
+        );
+        assert_eq!(thread.join().unwrap(), Err(ServerError::Protocol));
+    }
+
+    /// A paired connection's Hello must carry its pairing's own Client Identity, so its agents
+    /// always derive from it and never from another pairing's.
+    #[test]
+    fn a_paired_client_cannot_admit_an_agent_of_another_pairing() {
+        let agent: AgentName = "agent-1".parse().unwrap();
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            admit_server_transport(
+                &mut server,
+                &[7; 32],
+                "spaceterm-development",
+                Some([9; 32]),
+            )
+        });
+        let name: ClientName = "Build Mac CLI agent-1".into();
+        assert!(
+            admit_transport(
+                &mut client,
+                Caller {
+                    client: &[8; 32],
+                    name: &name,
+                    agent: Some(&agent),
+                },
+                &[7; 32],
+                "spaceterm-development",
+                &[MAJOR],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            thread.join().unwrap(),
+            Err(ServerError::AuthenticationRefused)
+        );
+    }
+
+    #[test]
+    fn agent_names_follow_their_pattern() {
+        for valid in ["a", "agent-1", "0", &"a".repeat(32)] {
+            assert!(valid.parse::<AgentName>().is_ok(), "{valid}");
+        }
+        for invalid in ["", "-a", "Agent", "a_b", "a b", &"a".repeat(33), "é"] {
+            assert!(invalid.parse::<AgentName>().is_err(), "{invalid}");
+        }
     }
 }

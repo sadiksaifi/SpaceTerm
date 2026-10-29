@@ -386,7 +386,9 @@ impl SharedWorkspaceHost {
                 source,
                 root,
                 path,
+                control,
             } => {
+                let creator = control.creator(device, &self.inventory());
                 let selected = next
                     .inventory
                     .workspaces
@@ -394,7 +396,7 @@ impl SharedWorkspaceHost {
                     .find(|w| w.id == workspace)
                     .ok_or(Refusal::Missing)
                     .and_then(|w| starting_directory(w, source, &path))
-                    .and_then(|start| next.add_worktree_tab(device, workspace, root, path, start));
+                    .and_then(|start| next.add_worktree_tab(creator, workspace, root, path, start));
                 let outcome = match selected {
                     Ok(target) => Outcome::Accepted { target },
                     Err(_) => Outcome::WorktreeFailed(Error::Unavailable),
@@ -402,6 +404,9 @@ impl SharedWorkspaceHost {
                 next.finish_worktree(device, sequence, outcome)?;
                 self.commit_retained(next)?;
                 self.writes.operation = None;
+                if let Some(record) = self.state.outcome(device, sequence).cloned() {
+                    self.reveal(&record);
+                }
             }
             preparing::Prepared::Write(write) => {
                 let checked = (|| {
@@ -421,7 +426,7 @@ impl SharedWorkspaceHost {
                         // Reserve capacity before Git starts, without publishing a speculative Tab.
                         next.clone()
                             .add_worktree_tab(
-                                device,
+                                Some(device),
                                 *workspace,
                                 root.clone(),
                                 path.clone(),
@@ -510,7 +515,7 @@ impl SharedWorkspaceHost {
                 }) = operation
                 {
                     match path.and_then(|path| {
-                        next.add_worktree_tab(device, workspace, root, path.clone(), path)
+                        next.add_worktree_tab(Some(device), workspace, root, path.clone(), path)
                             .ok()
                     }) {
                         Some(target) => Outcome::Accepted { target },

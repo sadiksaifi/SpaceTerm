@@ -5,6 +5,7 @@ struct TerminalSessionProcess {
     planner: ShellLaunchPlanner,
     directory: std::path::PathBuf,
     prompt_owner: Option<crate::terminal::metadata::PromptOwner>,
+    session: Option<crate::platform::shell_launch::SessionEnvironment>,
     directory_guard: Option<(
         crate::domain::ValidatedLocalDirectory,
         LocalFilesystemAuthority,
@@ -18,7 +19,10 @@ impl TerminalSessionProcess {
                 crate::platform::shell_launch::ShellLaunchFailure::DirectoryUnavailable
             })?;
         }
-        let launch = self.planner.local(&self.directory)?;
+        let mut launch = self.planner.local(&self.directory)?;
+        if let Some(session) = &self.session {
+            launch = launch.with_session_environment(session);
+        }
         Ok(match self.prompt_owner {
             Some(owner) => launch.with_environment_value(
                 crate::terminal::metadata::PromptOwner::ENVIRONMENT,
@@ -60,6 +64,7 @@ impl TerminalSessionLaunch {
                 planner,
                 directory: directory.to_owned(),
                 prompt_owner,
+                session: None,
                 directory_guard: None,
             },
         }
@@ -74,6 +79,7 @@ impl TerminalSessionLaunch {
 pub struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedLocalDirectory,
     restricted: bool,
+    session: Option<crate::platform::shell_launch::SessionEnvironment>,
 }
 
 impl LocalTerminalLaunchPlan {
@@ -81,11 +87,21 @@ impl LocalTerminalLaunchPlan {
         Self {
             working_directory,
             restricted: false,
+            session: None,
         }
     }
 
     pub fn without_client_effects(mut self) -> Self {
         self.restricted = true;
+        self
+    }
+
+    /// A server's Terminal Session, whose shell learns where it runs.
+    pub fn in_session(
+        mut self,
+        session: crate::platform::shell_launch::SessionEnvironment,
+    ) -> Self {
+        self.session = Some(session);
         self
     }
 
@@ -146,6 +162,7 @@ impl NativeTerminalSessionFactory {
             self.local_filesystem.clone(),
         ));
         launch.restricted = local.restricted;
+        launch.process.session = local.session;
         TerminalRuntime::start_launch(
             Arc::clone(&self.native_pty_adapter_factory),
             geometry,
@@ -388,6 +405,7 @@ mod directory_tests {
             planner: test_launch_planner(),
             directory: root.clone(),
             prompt_owner: None,
+            session: None,
             directory_guard: Some((directory, filesystem)),
         };
         std::fs::rename(&root, root.with_extension("old")).unwrap();

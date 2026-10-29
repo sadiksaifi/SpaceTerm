@@ -174,6 +174,29 @@ pub struct DevelopmentPaneHost {
     names: Arc<std::sync::Mutex<control::ClientNames>>,
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
     notifier: Option<dispatch::SessionNotifiers>,
+    /// What each started Terminal Session tells the CLI inside it about this server.
+    session_context: Option<Arc<ServerSessionContext>>,
+}
+
+/// What every Terminal Session of one server tells `spaceterm` inside it: the server's build
+/// identity and ID, and the server's own CLI executable.
+#[derive(Clone)]
+pub struct ServerSessionContext {
+    pub identity: String,
+    pub server: [u8; 32],
+    pub cli: std::path::PathBuf,
+}
+
+impl ServerSessionContext {
+    /// The context of the server `identity` that this process runs, whose executable is its
+    /// own CLI.
+    pub fn current(identity: &str) -> Result<Self, ServerError> {
+        Ok(Self {
+            identity: identity.to_owned(),
+            server: spaceterm_server::local_server_id(identity)?,
+            cli: std::env::current_exe().map_err(|_| ServerError::StartupFailed)?,
+        })
+    }
 }
 /// A Pane the running server keeps after its Session ended, with the control grant it had.
 #[derive(Clone, Copy)]
@@ -240,6 +263,7 @@ impl DevelopmentPaneHost {
             directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
+            session_context: None,
         })
     }
     /// Native composition for the explicitly launched local Development host.
@@ -275,6 +299,7 @@ impl DevelopmentPaneHost {
             directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
+            session_context: None,
         })
     }
 }

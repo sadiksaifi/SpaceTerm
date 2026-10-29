@@ -1386,6 +1386,20 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
     let second = connect(&endpoint, &target, &target_key);
     let three = fixture.serve_next_with(Arc::clone(&runtime));
     let other = connect(&endpoint, &actor, &actor_key);
+    // An agent of the target pairing is retired with it.
+    let agent: crate::protocol::AgentName = "agent-1".parse().unwrap();
+    let four = fixture.serve_next_with(Arc::clone(&runtime));
+    let agent_link = {
+        let connection = DirectConnection::connect(&endpoint, &target, &target_key).unwrap();
+        let carrier = connection
+            .admit(crate::protocol::Caller {
+                client: &target.client,
+                name: &"Test CLI agent-1".into(),
+                agent: Some(&agent),
+            })
+            .unwrap();
+        spawn_link(carrier, Arc::new(|_| {})).unwrap()
+    };
     assert!(matches!(
         manage(
             &other,
@@ -1414,9 +1428,12 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
     ));
     drop(local);
     local_worker.join().unwrap();
-    assert_eq!(*retired.lock().unwrap(), vec![target.client]);
+    assert_eq!(
+        *retired.lock().unwrap(),
+        vec![target.client, agent.client(&target.client)]
+    );
     // The live connections of the revoked pairing end at once with a typed goodbye.
-    for link in [&first, &second] {
+    for link in [&first, &second, &agent_link] {
         assert_eq!(
             ended(link),
             LinkError::Goodbye(crate::protocol::Fatal::Revoked)
@@ -1433,8 +1450,8 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
         ended(&other),
         LinkError::Goodbye(crate::protocol::Fatal::Revoked)
     );
-    drop((first, second, other));
-    for server in [one, two, three] {
+    drop((first, second, other, agent_link));
+    for server in [one, two, three, four] {
         let _ = server.join().unwrap();
     }
     let server = fixture.serve_next();

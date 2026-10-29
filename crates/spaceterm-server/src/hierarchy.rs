@@ -88,7 +88,36 @@ impl CloseConfirmation {
     }
 }
 
+/// One Pane with the Tab and Workspace that hold it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub workspace: Id,
+    pub tab: Id,
+    pub pane: Id,
+}
+
 impl Inventory {
+    /// Where created work `id` sits, as a Reveal shows it: a Workspace shows its Root Tab's Root
+    /// Pane, and a Tab its Root Pane.
+    pub fn placement(&self, id: Id) -> Option<Placement> {
+        self.workspaces.iter().find_map(|w| {
+            let at = |tab: &Tab, pane: Id| Placement {
+                workspace: w.id,
+                tab: tab.id,
+                pane,
+            };
+            if w.id == id {
+                let tab = w.tabs.iter().find(|t| t.id == w.root_tab)?;
+                return Some(at(tab, tab.root_pane));
+            }
+            w.tabs.iter().find_map(|t| {
+                if t.id == id {
+                    return Some(at(t, t.root_pane));
+                }
+                t.panes.iter().any(|p| p.id == id).then(|| at(t, id))
+            })
+        })
+    }
     pub fn close_confirmation(&self, target: CloseTarget) -> Option<CloseConfirmation> {
         let live = self.close.as_ref()?;
         let ids = self.close_panes(target)?;
@@ -254,6 +283,25 @@ pub enum CreateControl {
     /// A Pane with no controller falls back to `Unclaimed`.
     OriginController { pane: Id },
 }
+
+impl CreateControl {
+    /// The client that controls work `device` creates under this choice. `OriginController`
+    /// reads the origin Pane's control grant in `inventory`, which carries the live grants at
+    /// commit.
+    pub fn creator(&self, device: Id, inventory: &Inventory) -> Option<Id> {
+        match self {
+            Self::Creator => Some(device),
+            Self::Unclaimed => None,
+            Self::OriginController { pane } => inventory
+                .close
+                .as_ref()?
+                .controls
+                .iter()
+                .find(|control| control.pane == *pane)
+                .map(|control| control.owner),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mutation {
     /// End the Sessions on this running server without removing their Panes.
@@ -295,6 +343,16 @@ pub enum Mutation {
     },
 }
 impl Mutation {
+    /// Who controls what this mutation creates, for those that create work.
+    pub fn create_control(&self) -> Option<CreateControl> {
+        match self {
+            Self::CreateWorkspace { control, .. }
+            | Self::CreateTab { control, .. }
+            | Self::SplitPane { control, .. }
+            | Self::Worktree(crate::worktree::Operation::OpenTab { control, .. }) => Some(*control),
+            _ => None,
+        }
+    }
     pub fn is_bounded(&self) -> bool {
         match self {
             Self::EndAllSessions { confirmation } => {
@@ -581,9 +639,10 @@ impl State {
         record.outcome = outcome;
         Ok(())
     }
+    /// Opens a Tab in a Worktree whose Pane `creator` controls, or nobody until first selection.
     pub fn add_worktree_tab(
         &mut self,
-        device: Id,
+        creator: Option<Id>,
         workspace: Id,
         root: PathBuf,
         path: PathBuf,
@@ -615,7 +674,7 @@ impl State {
                 repository_directory: None,
                 presentation: None,
                 confirmed_directory: None,
-                creator: Some(device),
+                creator,
             }],
         });
         self.inventory.revision = self.inventory.revision.saturating_add(1);
@@ -790,8 +849,9 @@ impl State {
             Mutation::CreateWorkspace {
                 name,
                 directory: pin,
-                ..
+                control,
             } => {
+                let creator = control.creator(device, &self.inventory);
                 if (!name.trim().is_empty() && !valid_name(name))
                     || pin.as_deref().is_some_and(|path| !validate_pin(path))
                 {
@@ -833,18 +893,21 @@ impl State {
                             repository_directory: None,
                             presentation: None,
                             confirmed_directory: None,
-                            creator: Some(device),
+                            creator,
                         }],
                     }],
                 });
                 id
             }
             Mutation::CreateTab {
-                workspace, source, ..
+                workspace,
+                source,
+                control,
             } => {
                 if self.tab_count() >= MAX_TABS || self.pane_count() >= MAX_PANES {
                     return Ok(Outcome::Limit);
                 }
+                let creator = control.creator(device, &self.inventory);
                 let Some(w) = self
                     .inventory
                     .workspaces
@@ -891,7 +954,7 @@ impl State {
                         repository_directory: None,
                         presentation: None,
                         confirmed_directory: None,
-                        creator: Some(device),
+                        creator,
                     }],
                 });
                 id
@@ -901,11 +964,12 @@ impl State {
                 tab,
                 source,
                 axis,
-                ..
+                control,
             } => {
                 if self.pane_count() >= MAX_PANES {
                     return Ok(Outcome::Limit);
                 }
+                let creator = control.creator(device, &self.inventory);
                 let Some(w) = self
                     .inventory
                     .workspaces
@@ -944,7 +1008,7 @@ impl State {
                     repository_directory: None,
                     presentation: None,
                     confirmed_directory: None,
-                    creator: Some(device),
+                    creator,
                 });
                 id
             }
@@ -1366,6 +1430,16 @@ impl ClientJournal {
         client: Id,
     ) -> Result<Self, ServerError> {
         let lock = directory.lock("operations.lock", true)?;
+        Self::open_locked(directory, lock, server, client)
+    }
+    /// Opens the journal under `lock`, which the caller already holds on `operations.lock` of
+    /// `directory`.
+    pub(crate) fn open_locked(
+        directory: crate::storage::Directory,
+        lock: crate::storage::Lock,
+        server: Id,
+        client: Id,
+    ) -> Result<Self, ServerError> {
         let record = directory
             .read_json::<JournalRecord>("operations.json")?
             .unwrap_or(JournalRecord {
@@ -1390,6 +1464,40 @@ impl ClientJournal {
     }
     pub fn pending(&self) -> Option<&ClientOperation> {
         self.record.pending.as_ref()
+    }
+    /// How many operations the journal in `directory` still holds, read without its lock: the
+    /// pending one and the last retired one, whose acknowledgement may not have arrived.
+    pub fn held(directory: &crate::storage::Directory) -> Result<u32, ServerError> {
+        Ok(directory
+            .read_json::<JournalRecord>("operations.json")?
+            .map_or(0, |record| {
+                u32::from(record.pending.is_some()) + u32::from(record.last.is_some())
+            }))
+    }
+    /// Drops the pending operation after the server said it recorded no such sequence, so it
+    /// never applied it. Nothing dispatches it again.
+    pub fn abandon(&mut self) -> Result<(), ServerError> {
+        if self.record.pending.take().is_none() {
+            return Ok(());
+        }
+        self.save()
+    }
+    /// Forgets the retired outcome of `sequence` once the server confirmed it forgot it too,
+    /// for a client that presents each outcome itself when it arrives.
+    pub fn settled(&mut self, sequence: u64) -> Result<(), ServerError> {
+        if self
+            .record
+            .last
+            .as_ref()
+            .is_none_or(|last| last.sequence != sequence)
+        {
+            return Ok(());
+        }
+        self.record.last = None;
+        self.record
+            .unseen
+            .retain(|unseen| unseen.sequence != sequence);
+        self.save()
     }
     pub fn last(&self) -> Option<&RetainedOutcome> {
         self.record.last.as_ref()
@@ -1674,7 +1782,7 @@ mod tests {
         for _ in 0..2 {
             anchor = state
                 .add_worktree_tab(
-                    [1; 32],
+                    Some([1; 32]),
                     workspace,
                     "/repo/main".into(),
                     "/repo/feature".into(),
@@ -1700,7 +1808,7 @@ mod tests {
         };
         state
             .add_worktree_tab(
-                [1; 32],
+                Some([1; 32]),
                 other,
                 "/repo/main".into(),
                 "/repo/feature".into(),
@@ -1783,7 +1891,7 @@ mod tests {
         );
         let tab = state
             .add_worktree_tab(
-                [1; 32],
+                Some([1; 32]),
                 workspace,
                 "/repo/main".into(),
                 "/repo/feature".into(),
@@ -2846,6 +2954,69 @@ mod tests {
                 .unwrap();
 
             assert!(root.open().unseen().is_empty());
+        }
+    }
+
+    #[test]
+    fn created_work_is_controlled_as_its_create_control_says() {
+        let mut state = State::empty();
+        let Outcome::Accepted { target: workspace } = state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: None,
+                    control: CreateControl::Unclaimed,
+                },
+                "/tmp".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("the Workspace is created");
+        };
+        let origin = state.inventory.workspaces[0].tabs[0].root_pane;
+        assert_eq!(state.pane(origin).unwrap().2.creator, None);
+        // The publication at commit carries the origin's live control grant.
+        state.inventory.close = Some(CloseInventory {
+            boot: [0; 32],
+            sessions: Vec::new(),
+            controls: vec![ConfirmedControl {
+                pane: origin,
+                session: Some([5; 32]),
+                owner: [7; 32],
+                epoch: 1,
+            }],
+        });
+        let creators = [
+            (CreateControl::Creator, Some([2; 32])),
+            (
+                CreateControl::OriginController { pane: origin },
+                Some([7; 32]),
+            ),
+            (CreateControl::OriginController { pane: [9; 32] }, None),
+        ];
+        for (sequence, (control, creator)) in (1..).zip(creators) {
+            let Outcome::Accepted { target: tab } = state
+                .apply(
+                    [2; 32],
+                    sequence,
+                    Mutation::CreateTab {
+                        workspace,
+                        source: None,
+                        control,
+                    },
+                    "/tmp".as_ref(),
+                    |_| true,
+                )
+                .unwrap()
+            else {
+                panic!("the Tab is created");
+            };
+            let placement = state.inventory.placement(tab).unwrap();
+            assert_eq!((placement.workspace, placement.tab), (workspace, tab));
+            assert_eq!(state.pane(placement.pane).unwrap().2.creator, creator);
         }
     }
 }

@@ -42,6 +42,41 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ_SESSION_NAME",
 ];
 
+/// The variables that tell `spaceterm` inside a server's Terminal Session which server, Pane and
+/// Session it runs in, and which executable is that server's own CLI. An inherited value is
+/// always removed, so a shell started outside such a Session never names one.
+pub const SESSION_ENVIRONMENT: [&str; 5] = [
+    "SPACETERM_IDENTITY",
+    "SPACETERM_SERVER_ID",
+    "SPACETERM_PANE",
+    "SPACETERM_SESSION",
+    "SPACETERM_CLI",
+];
+
+/// Where one Terminal Session of a SpaceTerm Server runs. These are nonsecret fences that grant
+/// nothing: the CLI checks them against the server it admits to before it uses them.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SessionEnvironment {
+    /// The server's build identity, such as `spaceterm`.
+    pub identity: String,
+    pub server: [u8; 32],
+    pub pane: [u8; 32],
+    pub session: [u8; 32],
+    /// The server's own `spaceterm` executable. Shell integration puts its directory first on
+    /// `PATH`.
+    pub cli: PathBuf,
+}
+
+impl fmt::Debug for SessionEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionEnvironment { .. }")
+    }
+}
+
+fn hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Composition supplies the selected shell, resources, captured environment, and policy facts.
 #[derive(Clone)]
 pub struct ShellLaunchPlanner {
@@ -148,8 +183,10 @@ impl ShellLaunchPlanner {
                 .chain(self.host_runtime_environment)
                 .copied()
                 // A Prompt Owner inherited from another session would let that session's shell
-                // speak for this one; the session sets its own.
+                // speak for this one; the session sets its own. The same holds for the Session
+                // a CLI inside it targets.
                 .chain(["TERMINFO", "SPACETERM_PROMPT_OWNER"])
+                .chain(SESSION_ENVIRONMENT)
                 .map(OsString::from)
                 .collect(),
             environment,
@@ -176,6 +213,20 @@ impl PreparedShellLaunch {
     pub fn with_environment_value(mut self, name: &str, value: &str) -> Self {
         self.environment.push((name.into(), value.into()));
         self
+    }
+
+    /// Names the server, Pane and Session this shell runs in, and the server's own CLI.
+    pub fn with_session_environment(self, session: &SessionEnvironment) -> Self {
+        let [identity, server, pane, id, cli] = SESSION_ENVIRONMENT;
+        let mut launch = self
+            .with_environment_value(identity, &session.identity)
+            .with_environment_value(server, &hex(&session.server))
+            .with_environment_value(pane, &hex(&session.pane))
+            .with_environment_value(id, &hex(&session.session));
+        launch
+            .environment
+            .push((cli.into(), session.cli.as_os_str().to_owned()));
+        launch
     }
 
     #[allow(
@@ -466,5 +517,39 @@ mod tests {
             assert!(!format!("{error:?} {error}").contains("private-project"));
             assert!(std::error::Error::source(&error).is_none());
         }
+    }
+
+    #[test]
+    fn a_server_session_names_its_place_and_no_shell_inherits_another_sessions() {
+        let resources = crate::terminal::testing::ShellResourcesFixture::new();
+        let planner =
+            ShellLaunchPlanner::for_test("/bin/zsh".into(), resources.path().to_path_buf());
+        let plain = planner.local(&std::env::temp_dir()).unwrap();
+        for name in SESSION_ENVIRONMENT {
+            assert!(plain.environment_removals().iter().any(|key| key == name));
+            assert_eq!(env_value(&plain, name), None);
+        }
+        let session = SessionEnvironment {
+            identity: "spaceterm-development".into(),
+            server: [0xab; 32],
+            pane: [1; 32],
+            session: [2; 32],
+            cli: "/opt/space term/bin/spaceterm".into(),
+        };
+        assert_eq!(format!("{session:?}"), "SessionEnvironment { .. }");
+        let launch = planner
+            .local(&std::env::temp_dir())
+            .unwrap()
+            .with_session_environment(&session);
+        assert_eq!(
+            SESSION_ENVIRONMENT.map(|name| env_value(&launch, name).unwrap().to_owned()),
+            [
+                "spaceterm-development".into(),
+                "ab".repeat(32).into(),
+                "01".repeat(32).into(),
+                "02".repeat(32).into(),
+                OsString::from("/opt/space term/bin/spaceterm"),
+            ]
+        );
     }
 }

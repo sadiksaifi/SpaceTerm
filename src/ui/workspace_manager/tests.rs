@@ -11668,6 +11668,122 @@ mod shared_repositories {
         inventory
     }
 
+    /// A Reveal moves the view only from the Focused Pane, and only while nothing newer was
+    /// selected.
+    mod reveal {
+        use super::*;
+        use spaceterm_server::hierarchy::{Placement, WorktreeMembership};
+
+        const NEW_TAB: [u8; 32] = [26; 32];
+        const NEW_PANE: [u8; 32] = [27; 32];
+        const TARGET: Placement = Placement {
+            workspace: WORKSPACE,
+            tab: NEW_TAB,
+            pane: NEW_PANE,
+        };
+
+        fn with_new_tab() -> Inventory {
+            let mut inventory = published(1, "main", false);
+            inventory.revision = 2;
+            inventory.workspaces[0].tabs.push(Tab {
+                worktree: Some(MAIN_ROOT.into()),
+                worktree_membership: WorktreeMembership::Following,
+                worktree_repository: Some(MAIN_ROOT.into()),
+                id: NEW_TAB,
+                root_pane: NEW_PANE,
+                panes: vec![pane(NEW_PANE, MAIN_ROOT)],
+            });
+            inventory
+        }
+
+        fn tabs(harness: &Harness, cx: &mut VisualTestContext) -> Entity<TabManager> {
+            harness.manager.read_with(cx, |manager, _| {
+                manager
+                    .workspaces
+                    .workspace(harness.shared)
+                    .expect("the shared Workspace")
+                    .payload()
+                    .clone()
+            })
+        }
+
+        /// The shared Workspace is active with its Root Tab's Pane focused.
+        fn opened(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let (harness, cx) = harness(cx, published(1, "main", false));
+            let tabs = tabs(&harness, cx);
+            cx.update(|window, cx| {
+                window.activate_window();
+                harness.manager.update(cx, |manager, cx| {
+                    manager.activate_workspace(harness.shared, window, cx);
+                });
+                tabs.update(cx, |tabs, cx| {
+                    tabs.open_accepted_shared(ROOT_PANE, window, cx)
+                });
+            });
+            cx.run_until_parked();
+            (harness, cx)
+        }
+
+        fn focused(harness: &Harness, cx: &mut VisualTestContext) -> Option<[u8; 32]> {
+            let tabs = tabs(harness, cx);
+            tabs.read_with(cx, |tabs, cx| tabs.focused_server_pane(cx))
+        }
+
+        fn reveal(harness: &Harness, origin: (TabId, PaneId), cx: &mut VisualTestContext) {
+            cx.update(|window, cx| {
+                harness.manager.update(cx, |manager, cx| {
+                    manager.request_reveal(harness.shared, origin, TARGET, window, cx);
+                });
+            });
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        fn a_reveal_from_the_focused_pane_opens_its_target_once_published(cx: &mut TestAppContext) {
+            let (harness, cx) = opened(cx);
+            assert_eq!(focused(&harness, cx), Some(ROOT_PANE));
+            let origin =
+                tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            reveal(&harness, origin, cx);
+            assert_eq!(
+                focused(&harness, cx),
+                Some(ROOT_PANE),
+                "it waits for publication"
+            );
+            harness.publish(with_new_tab(), cx);
+            assert_eq!(focused(&harness, cx), Some(NEW_PANE));
+        }
+
+        #[gpui::test]
+        fn a_newer_selection_wins_over_a_reveal(cx: &mut TestAppContext) {
+            let (harness, cx) = opened(cx);
+            let tabs = tabs(&harness, cx);
+            let origin = tabs.read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            reveal(&harness, origin, cx);
+            cx.update(|window, cx| {
+                tabs.update(cx, |tabs, cx| {
+                    tabs.open_accepted_shared(FEATURE_PANE, window, cx)
+                });
+            });
+            cx.run_until_parked();
+            harness.publish(with_new_tab(), cx);
+            assert_eq!(focused(&harness, cx), Some(FEATURE_PANE));
+        }
+
+        /// A forged `SPACETERM_PANE` makes the server reveal on that Pane's channel. Unless it is
+        /// the Focused Pane, the desktop drops it.
+        #[gpui::test]
+        fn a_reveal_from_another_pane_is_dropped(cx: &mut TestAppContext) {
+            let (harness, cx) = opened(cx);
+            let (tab, pane) =
+                tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            let other = PaneId::new(pane.get().wrapping_add(1000));
+            reveal(&harness, (tab, other), cx);
+            harness.publish(with_new_tab(), cx);
+            assert_eq!(focused(&harness, cx), Some(ROOT_PANE));
+        }
+    }
+
     struct Harness {
         manager: Entity<WorkspaceManager>,
         edits: Rc<ScriptedEdits>,

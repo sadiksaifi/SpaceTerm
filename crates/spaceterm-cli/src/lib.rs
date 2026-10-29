@@ -3,6 +3,7 @@
 pub mod args;
 pub mod contract;
 pub mod io;
+pub mod journal;
 pub mod list;
 pub mod scope;
 pub mod state;

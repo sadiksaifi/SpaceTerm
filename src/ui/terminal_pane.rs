@@ -226,8 +226,13 @@ pub(crate) enum TerminalPaneEvent {
     TitleChanged(SharedString),
     CaptionChanged,
     SurfaceBackgroundChanged,
-    AttentionChanged { unread_count: u32 },
+    AttentionChanged {
+        unread_count: u32,
+    },
     Exited,
+    /// The server created work for this Pane's Controlling Client from this Pane's Terminal
+    /// Session, and asks to show it.
+    Reveal(spaceterm_server::hierarchy::Placement),
 }
 
 impl std::fmt::Debug for TerminalPaneEvent {
@@ -239,6 +244,7 @@ impl std::fmt::Debug for TerminalPaneEvent {
             Self::SurfaceBackgroundChanged => "TerminalPaneEvent::SurfaceBackgroundChanged",
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
+            Self::Reveal(_) => "TerminalPaneEvent::Reveal",
         })
     }
 }
@@ -2604,9 +2610,17 @@ impl TerminalPane {
                             );
                         return self.offer_permission_setup(request.permissions(), cx);
                     }
-                    Effect::ClipboardRead { .. }
-                    | Effect::ClipboardWrite { .. }
-                    | Effect::Reveal(_) => return false,
+                    Effect::Reveal(reveal) => {
+                        cx.emit(TerminalPaneEvent::Reveal(
+                            spaceterm_server::hierarchy::Placement {
+                                workspace: reveal.workspace,
+                                tab: reveal.tab,
+                                pane: reveal.pane,
+                            },
+                        ));
+                        return false;
+                    }
+                    Effect::ClipboardRead { .. } | Effect::ClipboardWrite { .. } => return false,
                 }
             }
             TerminalSessionEvent::Attention(event) => {
