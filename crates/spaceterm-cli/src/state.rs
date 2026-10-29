@@ -148,17 +148,36 @@ impl Runs {
         Ok(self.read()?.runs)
     }
 
-    /// Claims a run for dispatch or recovery. A live command or another settler owns it otherwise.
+    fn run_lock_name(run: RunId) -> std::ffi::CString {
+        std::ffi::CString::new(format!("{}.lock", crate::io::hex(&run.0)))
+            .expect("a hex run ID has no NUL")
+    }
+
+    /// Claims a pending run for recovery. A live command or another settler owns it otherwise.
     pub fn try_run(&self, run: RunId) -> Result<Option<Lock>, Failure> {
-        self.live
+        let Some(live) = self
+            .live
             .try_lock(&format!("{}.lock", crate::io::hex(&run.0)))
-            .map_err(from_server_error)
+            .map_err(from_server_error)?
+        else {
+            return Ok(None);
+        };
+        let _lock = self.lock()?;
+        if !self.read()?.runs.iter().any(|pending| pending.run == run) {
+            self.live
+                .remove(&Self::run_lock_name(run))
+                .map_err(from_server_error)?;
+            return Ok(None);
+        }
+        Ok(Some(live))
     }
 
     /// Records `run` before dispatch and holds its live lock until the command exits.
     pub fn add(&mut self, run: PendingRun) -> Result<Lock, Failure> {
         let live = self
-            .try_run(run.run)?
+            .live
+            .try_lock(&format!("{}.lock", crate::io::hex(&run.run.0)))
+            .map_err(from_server_error)?
             .ok_or(Failure::new(Code::IdentityBusy))?;
         let _lock = self.lock()?;
         let mut record = self.read()?;
@@ -175,6 +194,7 @@ impl Runs {
     }
 
     /// Forgets `run` after the server acknowledged its receipt, or never admitted it.
+    /// The caller holds the run's live lock until this returns, including while it is unlinked.
     pub fn remove(&mut self, run: RunId) -> Result<(), Failure> {
         let _lock = self.lock()?;
         let mut record = self.read()?;
@@ -185,6 +205,9 @@ impl Runs {
                 .write_json(RUNS, &record)
                 .map_err(from_server_error)?;
         }
+        self.live
+            .remove(&Self::run_lock_name(run))
+            .map_err(from_server_error)?;
         Ok(())
     }
 }
@@ -406,10 +429,59 @@ mod tests {
         assert!(first.try_run(pending(2).run).unwrap().is_none());
         first.remove(pending(1).run).unwrap();
         assert_eq!(second.pending().unwrap(), vec![pending(2)]);
+        assert!(
+            !state
+                .identity_path(&RouteKey::Local, None)
+                .join("runs")
+                .join(format!("{}.lock", crate::io::hex(&pending(1).run.0)))
+                .exists()
+        );
         drop(first_live);
-        assert!(second.try_run(pending(1).run).unwrap().is_some());
+        assert!(second.try_run(pending(1).run).unwrap().is_none());
         drop(second_live);
         assert!(first.try_run(pending(2).run).unwrap().is_some());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn a_settler_on_an_unlinked_run_lock_rechecks_the_journal() {
+        use std::os::fd::AsRawFd;
+        let state = temporary("settler-race");
+        let mut runs = state.runs(&RouteKey::Local, None, Instant::now()).unwrap();
+        let run = PendingRun {
+            run: RunId([4; 16]),
+            pane: [2; 32],
+            session: [3; 32],
+            created_at: 0,
+        };
+        let live = runs.add(run.clone()).unwrap();
+        let path = state
+            .identity_path(&RouteKey::Local, None)
+            .join("runs")
+            .join(format!("{}.lock", crate::io::hex(&run.run.0)));
+        // The settler opened the old inode before remove unlinks it.
+        let old = std::fs::File::open(&path).unwrap();
+        runs.remove(run.run).unwrap();
+        assert!(!path.exists());
+        // SAFETY: old is the live descriptor of this test's lock file.
+        assert_ne!(
+            unsafe { libc::flock(old.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        drop(live);
+        // SAFETY: old remains live after the pathname was unlinked.
+        assert_eq!(
+            unsafe { libc::flock(old.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert!(
+            !runs
+                .pending()
+                .unwrap()
+                .iter()
+                .any(|pending| pending.run == run.run)
+        );
+        drop(old);
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 
@@ -427,7 +499,7 @@ mod tests {
         let mut runs = state
             .runs(&RouteKey::Local, Some(&agent), Instant::now())
             .unwrap();
-        runs.add(run.clone()).unwrap();
+        let live = runs.add(run.clone()).unwrap();
         drop(runs);
         // An unrelated directory is not an identity.
         std::fs::create_dir_all(
@@ -453,6 +525,7 @@ mod tests {
             .unwrap();
         assert_eq!(runs.pending().unwrap(), vec![run.clone()]);
         runs.remove(run.run).unwrap();
+        drop(live);
         drop(runs);
         assert!(state.held(&RouteKey::Local).unwrap().is_empty());
         std::fs::remove_dir_all(&state.root).unwrap();
