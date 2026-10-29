@@ -884,3 +884,76 @@ fn list_maps_a_stale_observation_to_changed() {
     .expect("a stale observation fails");
     assert_eq!(failure.code, Code::Changed);
 }
+
+/// Two live CLI calls of one identity cannot enqueue a second command behind the first.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
+    let mut server = Server::start();
+    let first = server.connect(1);
+    let second = server.connect(1);
+    let (workspace, pane) = workspace(&first, 1);
+    let target = target(workspace, pane, false);
+    let done = run_at_prompt(&first, &target, "true", &mut runs());
+    assert!(done.failure.is_none(), "{:?}", done.failure);
+    let target = PaneTarget {
+        running: true,
+        ..target
+    };
+    let running = target.clone();
+    let call = std::thread::spawn(move || {
+        run_at_prompt(
+            &first,
+            &running,
+            "printf 'RUN-%s\\n' BLOCKED; read -s cli_pending; printf 'FIRST-%s\\n' \"$cli_pending\"",
+            &mut runs(),
+        )
+    });
+    let ready = read::read(
+        &second,
+        &target,
+        &read_args(&["--wait-for", "RUN-BLOCKED"]),
+        Deadline::after(Some(Duration::from_secs(10))),
+    );
+    assert!(ready.failure.is_none(), "{:?}", ready.failure);
+    assert!(!call.is_finished());
+    let mut second_runs = runs();
+    let refused = run::run(
+        &second,
+        &mut || Ok(second.clone()),
+        &target,
+        &run_args("printf 'SECOND-%s\\n' EXECUTED"),
+        None,
+        &mut std::io::empty(),
+        &mut second_runs,
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(refused.failure.unwrap().code, Code::NotAtPrompt);
+    assert!(
+        second_runs.pending().is_empty(),
+        "a refused call leaves no run journal"
+    );
+    let sent = send::send(
+        &second,
+        &target,
+        &send_args(&["sentinel", "--enter"]),
+        &mut std::io::empty(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(sent.failure.is_none(), "{:?}", sent.failure);
+    let done = call.join().unwrap();
+    assert!(done.failure.is_none(), "{:?}", done.failure);
+    // If the second run sent even part of its command, the silent read would consume it.
+    let probe = run_at_prompt(&second, &target, "true", &mut second_runs);
+    assert!(probe.failure.is_none(), "{:?}", probe.failure);
+    let observed = read::read(
+        &second,
+        &target,
+        &read_args(&["--tail", "100"]),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(observed.failure.is_none(), "{:?}", observed.failure);
+    let output = super::start::rows_text(observed.data.unwrap().rows.as_ref().unwrap());
+    assert!(output.contains("FIRST-sentinel"), "{output}");
+    assert!(!output.contains("SECOND-EXECUTED"), "{output}");
+}

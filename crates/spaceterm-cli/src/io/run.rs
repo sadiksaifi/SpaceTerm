@@ -454,7 +454,14 @@ fn follow(
             }
             Ok(Some(Event::Ended(PaneEvent::Takeover(_)))) => {
                 return match status(link, run, deadline) {
-                    Ok(Some(receipt)) if settled(receipt.state) => Finish::Receipt(receipt),
+                    Ok(Some(receipt))
+                        if settled(receipt.state) || receipt.state == RunState::TakenOver =>
+                    {
+                        Finish::Receipt(receipt)
+                    }
+                    // Another call of this identity can replace the channel without taking
+                    // control away. Follow the admitted run through its retained receipt.
+                    Ok(Some(_)) => resolve(link, connect, run, deadline),
                     _ => Finish::Receipt(RunReceipt {
                         run,
                         session: [0; 32],
