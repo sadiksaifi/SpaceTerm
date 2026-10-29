@@ -11776,36 +11776,15 @@ mod shared_repositories {
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
         edits.set_worktree_writes(true);
         let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
-        let penguin = super::named_route("penguin");
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
-            ),
-            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-        );
         cx.update(|window, cx| {
             crate::ui::server_worktrees::testing::present_direct(
-                penguin,
+                super::named_route("penguin"),
                 Rc::clone(&edits),
                 Arc::clone(&reads),
                 cx,
             );
             manager.update(cx, |manager, cx| {
-                let key = manager.present_server_workspaces(
-                    ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
-                        route: penguin,
-                        name: "penguin".into(),
-                    }),
-                    SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                    SharedPaneSessions::with_opener(
-                        ScriptedPanes::new(session_factory) as Rc<_>,
-                        &PaneConstruction::testing(),
-                    ),
-                    window,
-                    cx,
-                );
-                manager.sync_shared_workspaces(key, window, cx);
+                present_penguin(manager, &edits, window, cx)
             });
         });
         cx.run_until_parked();
@@ -11829,6 +11808,65 @@ mod shared_repositories {
             reads,
             cx,
         )
+    }
+
+    /// Presents penguin's Workspaces in `manager`'s window, read through `edits`.
+    fn present_penguin(
+        manager: &mut WorkspaceManager,
+        edits: &Rc<ScriptedEdits>,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceManager>,
+    ) {
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed(),
+            ),
+            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+        );
+        let key = manager.present_server_workspaces(
+            ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                route: super::named_route("penguin"),
+                name: "penguin".into(),
+            }),
+            SharedEditSource::new(Rc::clone(edits) as Rc<_>),
+            SharedPaneSessions::with_opener(
+                ScriptedPanes::new(session_factory) as Rc<_>,
+                &PaneConstruction::testing(),
+            ),
+            window,
+            cx,
+        );
+        manager.sync_shared_workspaces(key, window, cx);
+    }
+
+    /// A Workspace Window opened after `cx`'s over the same connection, as one is after Cmd+Q
+    /// closes the window and SpaceTerm opens it again.
+    fn reopened_window(edits: &Rc<ScriptedEdits>, cx: &VisualTestContext) -> VisualTestContext {
+        let mut app = cx.cx.clone();
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                .with_fallback_title("zsh"),
+        );
+        let handle = app.add_window(|window, cx| {
+            new_desktop_manager(
+                session_factory,
+                std::env::temp_dir(),
+                workspace_adapters(),
+                SidebarState::Expanded,
+                window,
+                cx,
+            )
+        });
+        let edits = Rc::clone(edits);
+        handle
+            .update(&mut app, |manager, window, cx| {
+                present_penguin(manager, &edits, window, cx);
+            })
+            .expect("the reopened window is open");
+        let reopened = VisualTestContext::from_window(handle.into(), &app);
+        reopened.run_until_parked();
+        reopened
     }
 
     /// A paired server's Workspace offers New Worktree and Remove Worktree, because that server
@@ -11998,18 +12036,41 @@ mod shared_repositories {
         );
     }
 
-    /// The form reports a failed creation itself. When a later reading carries the answer for
-    /// the same Worktree after the form closed, nothing reports it a second time.
+    /// The form presents a failed creation itself. A window opened afterwards, as after Cmd+Q
+    /// closes the window, reads the same answer and presents nothing.
     #[gpui::test]
-    fn a_failed_shared_worktree_should_be_reported_only_by_its_form(cx: &mut TestAppContext) {
+    fn a_failure_the_form_presented_should_not_alert_a_reopened_window(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_shared_worktree(&harness, cx);
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Branch, cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
         click("modal-action-new-worktree-cancel", cx);
 
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Branch, cx);
+        let mut reopened = reopened_window(&edits, cx);
 
         assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert!(!reopened.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    }
+
+    /// A retry at the same location whose form closed while disconnected still reports its own
+    /// failure, although the form presented the first attempt's.
+    #[gpui::test]
+    fn a_retry_whose_form_closed_should_report_its_own_failure(cx: &mut TestAppContext) {
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_shared_worktree(&harness, cx);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        click("modal-action-new-worktree-create", cx);
+        edits.set_connected(false);
+        cx.run_until_parked();
+        click("modal-action-new-worktree-cancel", cx);
+        let closed = !harness
+            .manager
+            .read_with(cx, |manager, cx| manager.worktree_form_creating(cx));
+
+        edits.set_connected(true);
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Branch, cx);
+
+        assert!(closed, "Cancel closes a form whose connection is lost");
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     }
 
     /// The server reads Git for a Workspace nobody is looking at, and a new reading reaches its

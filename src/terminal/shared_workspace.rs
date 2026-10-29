@@ -35,12 +35,16 @@ trait EditServer: Send + 'static {
     fn subscribe(&self, sink: Weak<dyn LinkSink>);
 }
 
-/// This client's durable record of the Original Operation in flight and the last one retired.
+/// This client's durable record of the Original Operation in flight, the last one retired, and
+/// whether the client presented that one's outcome.
 trait EditJournal {
     fn pending(&self) -> Option<&ClientOperation>;
     fn last(&self) -> Option<&RetainedOutcome>;
+    fn unpresented(&self) -> Option<&RetainedOutcome>;
+    fn presented(&self) -> Option<u64>;
     fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError>;
     fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError>;
+    fn present(&mut self, sequence: u64) -> Result<(), ServerError>;
 }
 
 impl EditServer for ServerConnection {
@@ -66,11 +70,20 @@ impl EditJournal for ClientJournal {
     fn last(&self) -> Option<&RetainedOutcome> {
         ClientJournal::last(self)
     }
+    fn unpresented(&self) -> Option<&RetainedOutcome> {
+        ClientJournal::unpresented(self)
+    }
+    fn presented(&self) -> Option<u64> {
+        ClientJournal::presented(self)
+    }
     fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
         ClientJournal::submit(self, sequence, mutation)
     }
     fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
         ClientJournal::retire(self, result)
+    }
+    fn present(&mut self, sequence: u64) -> Result<(), ServerError> {
+        ClientJournal::present(self, sequence)
     }
 }
 
@@ -84,6 +97,8 @@ enum Event {
     Released,
     /// The person asked to reconnect now instead of after the reconnect delay.
     Retry,
+    /// The window or a form presented the outcome of this operation.
+    Presented(u64),
     /// The client is gone.
     Stop,
 }
@@ -121,6 +136,8 @@ pub(crate) struct SharedWorkspaceSnapshot {
     pub pending_operation: Option<Mutation>,
     pub rejected: Option<Mutation>,
     pub outcome: Option<RetainedOutcome>,
+    /// The sequence of the last outcome this client presented. Readers never present it again.
+    pub presented: Option<u64>,
     pub error: Option<ServerError>,
     /// How many connection attempts have failed, so a reader can tell that an attempt it asked
     /// for has finished.
@@ -190,6 +207,7 @@ impl SharedWorkspaceClient {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            presented: None,
             error: None,
             failed_attempts: 0,
         }));
@@ -240,6 +258,14 @@ impl SharedWorkspaceClient {
     /// Reconnects now when the connection is down. A connected client ignores it.
     pub(crate) fn retry(&self) {
         let _ = self.commands.send(Event::Retry);
+    }
+    /// Records that the outcome of `sequence` was presented, so no reader in this process or a
+    /// later one presents it again.
+    pub(crate) fn presented(&self, sequence: u64) {
+        self.snapshot.publish(|state| {
+            state.presented = state.presented.max(Some(sequence));
+        });
+        let _ = self.commands.send(Event::Presented(sequence));
     }
     /// Coalesced change hints, including an initial hint. Read `snapshot` after each wake.
     /// Dropping the receiver unsubscribes; closed senders are pruned on publication or subscription.
@@ -299,27 +325,21 @@ struct FinishedOperation {
 /// after a lost reply. The server replays an outcome it already recorded, so a retry never
 /// repeats the edit, and its reply waits for any Worktree write the outcome depends on.
 ///
-/// `dispatched` is the last operation this process dispatched. Without a pending operation, only
-/// its outcome is published again, for a reconnect that overtook its first publication. An
-/// earlier process published the outcomes it retired, so they are never presented twice.
+/// Without a pending operation, the last outcome is published again until the client presents
+/// it, so a crash or a reconnect between retirement and presentation never loses it.
 fn finish(
     link: &ServerLink,
     journal: &mut impl EditJournal,
     controls: &PaneControls,
     state: &PublishedSnapshot,
     seen: u64,
-    dispatched: &mut Option<u64>,
 ) -> Result<FinishedOperation, ServerError> {
     let Some(pending) = journal.pending().cloned() else {
         return Ok(FinishedOperation {
-            outcome: journal
-                .last()
-                .filter(|last| Some(last.sequence) == *dispatched)
-                .cloned(),
+            outcome: journal.unpresented().cloned(),
             reconciled: None,
         });
     };
-    *dispatched = Some(pending.sequence);
     let ReplyBody::Outcome(result) = link
         .request(Operation::Mutate {
             sequence: pending.sequence,
@@ -368,7 +388,6 @@ fn run(
     });
     let mut watched = false;
     let mut active: Option<(u64, Mutation)> = None;
-    let mut dispatched = None;
     while alive.load(Ordering::Acquire) {
         let result = (|| {
             // Events before this attempt are stale; the link and its newest revision are read
@@ -411,14 +430,7 @@ fn run(
                     active = None;
                 }
             });
-            let finished = finish(
-                &link,
-                &mut journal,
-                &controls,
-                &state,
-                seen,
-                &mut dispatched,
-            )?;
+            let finished = finish(&link, &mut journal, &controls, &state, seen)?;
             attachments.release_pending(&link)?;
             state.publish(|s| {
                 if let Some((count, revision)) = finished.reconciled {
@@ -429,6 +441,8 @@ fn run(
                 s.connected = true;
                 s.error = None;
                 s.outcome = finished.outcome;
+                // A presentation this process reported is never forgotten by an older record.
+                s.presented = s.presented.max(journal.presented());
                 s.pending = false;
                 s.pending_operation = None;
                 active = None;
@@ -438,14 +452,7 @@ fn run(
                     Ok(Event::Edit(mutation)) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
-                        let finished = finish(
-                            &link,
-                            &mut journal,
-                            &controls,
-                            &state,
-                            seen,
-                            &mut dispatched,
-                        )?;
+                        let finished = finish(&link, &mut journal, &controls, &state, seen)?;
                         state.publish(|s| {
                             if let Some((count, revision)) = finished.reconciled {
                                 s.inventory = Some(revision.inventory.clone());
@@ -471,6 +478,7 @@ fn run(
                     }
                     Ok(Event::Released) => attachments.release_pending(&link)?,
                     Ok(Event::Retry) => {}
+                    Ok(Event::Presented(sequence)) => journal.present(sequence)?,
                     Ok(Event::Stop) | Err(_) => return Ok(()),
                 }
             }
@@ -491,6 +499,12 @@ fn run(
                 Ok(Event::Edit(mutation)) => reject(&state, mutation),
                 Ok(Event::Link) => wakes.link.store(false, Ordering::Release),
                 Ok(Event::Released) => {}
+                // The journal needs no connection, so a presentation is recorded at once.
+                Ok(Event::Presented(sequence)) => {
+                    let _ = server
+                        .journal()
+                        .and_then(|mut journal| journal.present(sequence));
+                }
                 Ok(Event::Retry) => break,
                 Ok(Event::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
@@ -522,6 +536,7 @@ mod tests {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            presented: None,
             error: None,
             failed_attempts: 0,
         }));
@@ -563,6 +578,7 @@ mod tests {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            presented: None,
             error: None,
             failed_attempts: 0,
         }));
@@ -619,6 +635,7 @@ mod tests {
         pub(super) struct Record {
             pub pending: Option<ClientOperation>,
             pub last: Option<RetainedOutcome>,
+            pub presented: Option<u64>,
         }
 
         /// A journal that keeps its record in memory, shared with the test.
@@ -633,6 +650,25 @@ mod tests {
             }
             fn last(&self) -> Option<&RetainedOutcome> {
                 self.record.last.as_ref()
+            }
+            fn unpresented(&self) -> Option<&RetainedOutcome> {
+                self.record
+                    .last
+                    .as_ref()
+                    .filter(|last| self.record.presented != Some(last.sequence))
+            }
+            fn presented(&self) -> Option<u64> {
+                self.record.presented
+            }
+            fn present(&mut self, sequence: u64) -> Result<(), ServerError> {
+                if self
+                    .unpresented()
+                    .is_some_and(|last| last.sequence == sequence)
+                {
+                    self.record.presented = Some(sequence);
+                    self.shared.lock().unwrap().presented = Some(sequence);
+                }
+                Ok(())
             }
             fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
                 let operation = ClientOperation { sequence, mutation };
@@ -768,6 +804,7 @@ mod tests {
                     record: Record {
                         pending: shared.pending.clone(),
                         last: shared.last.clone(),
+                        presented: shared.presented,
                     },
                     shared: Arc::clone(&self.journal),
                 })
@@ -804,17 +841,74 @@ mod tests {
         }
     }
 
+    /// Sends `mutation` as this client's Original Operation `sequence` and returns its outcome.
+    fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> RetainedOutcome {
+        match link
+            .request(Operation::Mutate { sequence, mutation })
+            .unwrap()
+            .wait()
+        {
+            Ok(ReplyBody::Outcome(outcome)) => outcome,
+            _ => panic!("the edit is unavailable"),
+        }
+    }
+
+    /// A process retired a rename the server refused, then ended before presenting its draft
+    /// review. The next process publishes that outcome until it is presented, and never after.
+    #[test]
+    fn an_outcome_retired_before_a_crash_should_be_published_until_it_is_presented() {
+        let client = [7; 32];
+        let server = served::Server::new(client);
+        let ignore: Arc<dyn LinkSink> = Arc::new(|_: LinkEvent| {});
+        let (setup, _) = server.connect(client, Arc::clone(&ignore));
+        let created = create(&setup, "Kept");
+        let spaceterm_server::hierarchy::Outcome::Accepted { target } = created.outcome else {
+            panic!("the Workspace is created");
+        };
+        let rename = |name: &str| Mutation::RenameWorkspace {
+            workspace: target,
+            version: 0,
+            name: name.into(),
+        };
+        mutate(&setup, created.sequence + 1, rename("Theirs"));
+        let refused = mutate(&setup, created.sequence + 2, rename("Mine"));
+        drop(setup);
+        assert_eq!(
+            refused.outcome,
+            spaceterm_server::hierarchy::Outcome::Conflict
+        );
+        server.journal.lock().unwrap().last = Some(refused.clone());
+
+        let restarted = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        eventually("the restarted client connects", || {
+            restarted.snapshot().connected
+        });
+        let recovered = restarted.snapshot().outcome;
+        restarted.presented(refused.sequence);
+        eventually("the presentation is recorded", || {
+            server.journal.lock().unwrap().presented == Some(refused.sequence)
+        });
+        drop(restarted);
+        let later = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        eventually("the later client connects", || later.snapshot().connected);
+
+        assert_eq!(recovered, Some(refused));
+        assert_eq!(later.snapshot().outcome, None);
+    }
+
     #[test]
     fn the_edit_loop_repeats_its_acknowledgement_and_keeps_receiving_inventory_after_reconnecting()
     {
         let client = [7; 32];
         let server = served::Server::new(client);
         let ignore: Arc<dyn LinkSink> = Arc::new(|_: LinkEvent| {});
-        // An earlier run retired this outcome, but its acknowledgement never arrived.
+        // An earlier run retired and presented this outcome, but its acknowledgement never
+        // arrived.
         let (setup, _) = server.connect(client, Arc::clone(&ignore));
         let lost = create(&setup, "Kept");
         drop(setup);
         server.journal.lock().unwrap().last = Some(lost.clone());
+        server.journal.lock().unwrap().presented = Some(lost.sequence);
 
         let edits = SharedWorkspaceClient::start(server.handle(), Arc::default());
         let workspaces = |edits: &SharedWorkspaceClient| {
@@ -829,7 +923,7 @@ mod tests {
         assert_eq!(
             edits.snapshot().outcome,
             None,
-            "the earlier run presented its own outcome"
+            "the earlier run presented its outcome"
         );
         let (probe, _) = server.connect(client, Arc::clone(&ignore));
         eventually("the repeated acknowledgement retires the outcome", || {

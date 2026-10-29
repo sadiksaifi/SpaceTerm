@@ -220,6 +220,8 @@ pub(crate) struct FormBackend {
     pub branches: crate::worktrees::git::BranchList,
     /// The other computer whose server runs Git, or `None` for this computer's.
     pub machine: Option<String>,
+    /// The sequence of the last Create's outcome, until the form presents it.
+    pub answered: Rc<std::cell::Cell<Option<u64>>>,
 }
 impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
     fn server(&self) -> bool {
@@ -243,6 +245,8 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
         let client = self.client.clone();
         let root = self.root.clone();
         let workspace = self.workspace;
+        let answered = Rc::clone(&self.answered);
+        answered.set(None);
         // The owning server checks the final location; the desktop never probes its filesystem.
         let read = client.read(
             Read::Location {
@@ -273,6 +277,7 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                 })
                 .await;
             let outcome = completed.map_err(create_error)?;
+            answered.set(Some(outcome.sequence));
             result(outcome.clone()).map_err(create_error)?;
             let Outcome::Accepted { target } = outcome.outcome else {
                 return Err(crate::worktrees::git::WorktreeCreateError::Failed);
@@ -290,6 +295,11 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                 })
                 .unwrap_or(path))
         })
+    }
+    fn presented(&self, _: &mut App) {
+        if let Some(sequence) = self.answered.take() {
+            self.client.source.presented(sequence);
+        }
     }
 }
 

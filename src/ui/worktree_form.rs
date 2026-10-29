@@ -52,6 +52,8 @@ pub(crate) trait WorktreeFormBackend {
         branch: WorktreeBranch,
         cx: &mut App,
     ) -> Task<Result<PathBuf, WorktreeCreateError>>;
+    /// The form presented the server's answer to its last Create, so nothing presents it again.
+    fn presented(&self, _cx: &mut App) {}
 }
 
 /// Checks whether a new directory may go at a path.
@@ -151,9 +153,6 @@ pub(crate) struct WorktreeForm {
     pending: bool,
     generation: u64,
     pending_path: Option<PathBuf>,
-    /// The directory of the last Create whose failure the form reported, so no other surface
-    /// reports the server's answer for it again.
-    reported_path: Option<PathBuf>,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
     _status: Task<()>,
@@ -207,7 +206,6 @@ impl WorktreeForm {
             pending: false,
             generation: 0,
             pending_path: None,
-            reported_path: None,
             pending_cancel: None,
             _branches: Task::ready(()),
             _status: Task::ready(()),
@@ -586,8 +584,9 @@ impl WorktreeForm {
         .detach();
     }
 
-    pub(crate) fn reported_path(&self) -> Option<&std::path::Path> {
-        self.reported_path.as_deref()
+    /// Whether a Create is waiting for git, so the form presents its answer.
+    pub(crate) const fn is_creating(&self) -> bool {
+        self.open && self.pending
     }
 
     fn settle_create(
@@ -607,7 +606,7 @@ impl WorktreeForm {
             ))
         {
             self.pending_path = None;
-            self.reported_path = Some(attempted_path.clone());
+            self.backend.presented(cx);
             cx.emit(WorktreeFormEvent::Interrupted(attempted_path));
             return Some(Settlement::Success { primary });
         }
@@ -617,7 +616,7 @@ impl WorktreeForm {
         }
         self.pending = false;
         self.pending_path = None;
-        self.reported_path = Some(attempted_path);
+        self.backend.presented(cx);
         self.set_enabled(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
             Err(WorktreeCreateError::NotSubmitted(reason)) => (None,reason.into()),

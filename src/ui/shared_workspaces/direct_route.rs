@@ -119,6 +119,7 @@ impl SharedWorkspaceEdits for UnavailableEdits {
             pending_operation: None,
             rejected: None,
             outcome: None,
+            presented: None,
             error: Some(spaceterm_server::ServerError::Direct(
                 spaceterm_server::direct::DirectError::Transport,
             )),

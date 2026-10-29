@@ -1310,6 +1310,8 @@ struct JournalRecord {
     client: Id,
     pending: Option<ClientOperation>,
     last: Option<RetainedOutcome>,
+    /// The sequence of the last outcome the client presented, which it never presents again.
+    presented: Option<u64>,
 }
 /// Pending shared edits live outside Settings and are fenced to their original authority.
 #[cfg(feature = "client")]
@@ -1347,6 +1349,29 @@ impl ClientJournal {
     }
     pub fn last(&self) -> Option<&RetainedOutcome> {
         self.record.last.as_ref()
+    }
+    /// The last outcome, unless the client already presented it. Retiring a newer operation
+    /// makes its outcome the one to present.
+    pub fn unpresented(&self) -> Option<&RetainedOutcome> {
+        self.record
+            .last
+            .as_ref()
+            .filter(|last| self.record.presented != Some(last.sequence))
+    }
+    pub fn presented(&self) -> Option<u64> {
+        self.record.presented
+    }
+    /// Records that the client presented the outcome of `sequence`. Only the last outcome can be
+    /// presented again, so an earlier sequence changes nothing.
+    pub fn present(&mut self, sequence: u64) -> Result<(), ServerError> {
+        if self
+            .unpresented()
+            .is_none_or(|last| last.sequence != sequence)
+        {
+            return Ok(());
+        }
+        self.record.presented = Some(sequence);
+        self.save()
     }
     pub fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
         if self.record.pending.is_some() {
