@@ -134,6 +134,9 @@ fn machine_width(available: Pixels, name: Pixels, machine: Pixels) -> Option<Pix
 pub(super) struct RowRepository {
     pub(super) badge: SidebarBadge,
     pub(super) pull_request_paint: PullRequestPaint,
+    /// Whether a Pull Request number is a link. A row that is closing or has left draws it as
+    /// plain text, with no handler, tooltip or accessible role.
+    pub(super) interactive: bool,
 }
 
 /// The repository's share of line 2 when the directory also needs room.
@@ -278,6 +281,19 @@ fn render_repository(
         } => {
             // The number is a link in either state, as in the popover; the hover names the state.
             let color = repository.pull_request_paint.link;
+            if !repository.interactive {
+                return badge_column(
+                    div()
+                        .debug_selector(move || format!("workspace-row-pull-request-text-{id}"))
+                        .min_w_0()
+                        .truncate()
+                        .text_color(gpui_color(color))
+                        .child(text.clone())
+                        .into_any_element(),
+                    width,
+                    appearance,
+                );
+            }
             let url = url.clone();
             let number = div()
                 .id(("workspace-row-pull-request", id))
@@ -305,6 +321,11 @@ fn render_repository(
             .into_any_element()
         }
     };
+    badge_column(badge, width, appearance)
+}
+
+/// The end of line 2 that holds a row's branch or Pull Request, at most `width` wide.
+fn badge_column(badge: AnyElement, width: Pixels, appearance: &ChromeAppearance) -> AnyElement {
     div()
         .flex_shrink_0()
         .max_w(width)
@@ -365,6 +386,7 @@ mod tests {
                     pull_request_paint: appearance
                         .colors
                         .pull_request(appearance.colors.panel_background),
+                    interactive: true,
                 }),
                 false,
                 None,

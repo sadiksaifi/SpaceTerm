@@ -43,7 +43,9 @@ pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 /// slide aside to open a gap where a release would land it. A faded face of the item moves into
 /// that gap. A release anywhere settles the item into that place; a cancellation returns everything
 /// to rest.
-pub(crate) struct ReorderableStrip<Id> {
+///
+/// The selection rests on one `Row` of an item. A strip whose items are single rows uses `()`.
+pub(crate) struct ReorderableStrip<Id, Row = ()> {
     axis: Axis,
     lift: Option<Lift<Id>>,
     /// Each item's displacement from its laid-out place, as it eases toward its target.
@@ -60,10 +62,10 @@ pub(crate) struct ReorderableStrip<Id> {
     /// they grow, so their faces grow from that end.
     growing_from_end: HashSet<Id>,
     /// The closing gap a removed item left before each item, inside that item's slot.
-    leading_gaps: HashMap<Id, Gap>,
+    leading_gaps: HashMap<Id, Gap<Id>>,
     /// The closing gap a removed last item left after the item that is now last, inside that
     /// item's slot.
-    trailing_gaps: HashMap<Id, Gap>,
+    trailing_gaps: HashMap<Id, Gap<Id>>,
     /// When the strip last prepared a frame.
     refreshed_at: Option<Instant>,
     /// Where each item of the last frame started along the strip, and its size, in layout
@@ -71,10 +73,15 @@ pub(crate) struct ReorderableStrip<Id> {
     laid_out: HashMap<Id, (Pixels, Pixels)>,
     /// When the strip prepared the frame `laid_out` comes from.
     laid_out_at: Option<Instant>,
-    /// The selected item at the last refresh.
-    selected: Option<Id>,
-    /// The selection moving to the selected item.
-    flight: Option<Flight<Id>>,
+    /// The selected item and row at the last refresh.
+    selected: Option<(Id, Row)>,
+    /// How far the selected row stood from its item's start along the strip in the last frame.
+    selected_inset: Pixels,
+    /// Where the owner saw the selection drawn along the strip in the last frame, until the next
+    /// selection change starts from there.
+    drawn_selection: Option<Pixels>,
+    /// The selection moving to the selected row.
+    flight: Option<Flight<Id, Row>>,
     /// How far the strip was scrolled along its axis in the last frame.
     scrolled: Pixels,
     /// Whether the items of the last frame ran past the strip's visible end.
@@ -112,10 +119,11 @@ struct Arrival<Id> {
     first_frame: bool,
 }
 
-/// The selection moving from where it was drawn to the item `id`.
-struct Flight<Id> {
+/// The selection moving from where it was drawn to the row `row` of the item `id`.
+struct Flight<Id, Row> {
     id: Id,
-    /// Where the selection started along the strip, from where the item settles.
+    row: Row,
+    /// Where the selection started along the strip, from where the row settles.
     from: Pixels,
     ease: Ease,
     /// How far the strip was scrolled when the selection left, until the next layout shows
@@ -220,9 +228,90 @@ impl ItemMotion {
             }
         })
     }
+
+    /// Holds `item` in a slot as [`Self::frame_slot`] does, and draws `before` and `after` in
+    /// the closing gaps beside it: the items that left from there, at their own size, clipped as
+    /// their gaps close.
+    pub(crate) fn frame_item(
+        self,
+        axis: Axis,
+        slot: Div,
+        item: AnyElement,
+        before: Option<AnyElement>,
+        after: Option<AnyElement>,
+        measure: impl Fn(Size<Pixels>, &mut App) + 'static,
+    ) -> Div {
+        if before.is_none() && after.is_none() {
+            return self.frame_slot(axis, slot, measure).child(item);
+        }
+        let item_position = usize::from(before.is_some());
+        let gap = |extent: Pixels, content: AnyElement| {
+            let gap = div().flex_shrink_0().overflow_hidden();
+            match axis {
+                Axis::Horizontal => gap.w(extent).h_full(),
+                Axis::Vertical => gap.h(extent).w_full(),
+            }
+            .child(content)
+        };
+        let (leading_gap, trailing_gap) = (self.leading_gap, self.trailing_gap);
+        let before = before.map(|content| gap(leading_gap, content));
+        let after = after.map(|content| gap(trailing_gap, content));
+        // The gaps that draw nothing stay padding, as in a slot that draws none.
+        let unpadded = Self {
+            leading_gap: if before.is_some() {
+                px(0.0)
+            } else {
+                leading_gap
+            },
+            trailing_gap: if after.is_some() {
+                px(0.0)
+            } else {
+                trailing_gap
+            },
+            extent: self.extent.map(|extent| {
+                extent
+                    + if before.is_some() {
+                        leading_gap
+                    } else {
+                        px(0.0)
+                    }
+                    + if after.is_some() {
+                        trailing_gap
+                    } else {
+                        px(0.0)
+                    }
+            }),
+            ..self
+        };
+        let slot = match axis {
+            Axis::Horizontal => slot.flex().flex_row(),
+            Axis::Vertical => slot.flex().flex_col(),
+        };
+        let growing = self.extent.is_some();
+        unpadded
+            .frame_slot(axis, slot, |_, _| {})
+            .when(growing, |slot| {
+                slot.on_children_prepainted(move |bounds, _, cx| {
+                    if let Some(item) = bounds.get(item_position) {
+                        measure(item.size, cx);
+                    }
+                })
+            })
+            .children(before)
+            .child(item)
+            .children(after)
+    }
 }
 
 impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
+    /// Moves the selection to the item `selected` from wherever it was drawn, when it differs
+    /// from the last refresh. Call it on every render, after [`Self::refresh`].
+    pub(crate) fn follow_selection(&mut self, selected: Option<Id>, window: &mut Window, cx: &App) {
+        self.follow_row_selection(selected.map(|id| (id, (), px(0.0))), window, cx);
+    }
+}
+
+impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
     pub(crate) fn new(axis: Axis) -> Self {
         Self {
             axis,
@@ -239,6 +328,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             laid_out_at: None,
             laid_out: HashMap::new(),
             selected: None,
+            selected_inset: px(0.0),
+            drawn_selection: None,
             flight: None,
             scrolled: px(0.0),
             overflowing: false,
@@ -269,11 +360,15 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             })
             .collect::<Vec<_>>();
         // The selection draws inside its item's face, which a drop may still be settling.
-        let selection = self.selected.and_then(|id| {
+        let selection = self.selected.and_then(|(id, row)| {
             let position = ids.iter().position(|candidate| *candidate == id)?;
             let motion = self.motion(id, cx);
             let face = self.face(id, painted[position]).origin.along(axis);
-            Some(face + motion.offset.along(axis) + motion.selection_offset.along(axis))
+            Some(
+                face + motion.offset.along(axis)
+                    + self.selected_inset
+                    + self.row_selection_offset(id, row, cx).along(axis),
+            )
         });
         let last = painted.last()?;
         let viewport = items.bounds();
@@ -331,7 +426,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
 
     /// Trims `slot`, the bounds of the item `id`'s slot in the last frame, to the item itself.
     fn trim(&self, id: Id, slot: Bounds<Pixels>) -> Bounds<Pixels> {
-        let painted = |gaps: &HashMap<Id, Gap>| {
+        let painted = |gaps: &HashMap<Id, Gap<Id>>| {
             self.refreshed_at
                 .zip(gaps.get(&id))
                 .map_or(px(0.0), |(at, gap)| gap.at(at))
@@ -407,14 +502,16 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 Gap {
                     extent: px(0.0),
                     ease: Ease::new(PRESENCE_DURATION, now, motion),
+                    leaving: Vec::new(),
                 },
             );
         }
         self.flight = self
             .selected
             .filter(|_| from.selection.is_some())
-            .map(|id| Flight {
+            .map(|(id, row)| Flight {
                 id,
+                row,
                 from: px(0.0),
                 ease: Ease::new(SELECTION_DURATION, now, motion),
                 // The arrival aims the selection from the strip's latest scroll on every frame.
@@ -466,7 +563,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                     settled(id)? + self.scrolled
                 } else {
                     estimate(position).0
-                };
+                } + self.selected_inset;
                 Some(from - to)
             });
         let close = arrival
@@ -497,20 +594,28 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
     }
 
-    /// Moves the selection to the item `selected` from wherever it was drawn, when it differs
-    /// from the last refresh. Call it on every render, after [`Self::refresh`].
-    pub(crate) fn follow_selection(&mut self, selected: Option<Id>, window: &mut Window, cx: &App) {
+    /// Moves the selection to `selected`, a row of an item and how far that row stands from the
+    /// item's start along the strip this frame, from wherever the selection was drawn, when the
+    /// row differs from the last refresh. Call it on every render, after [`Self::refresh`].
+    pub(crate) fn follow_row_selection(
+        &mut self,
+        selected: Option<(Id, Row, Pixels)>,
+        window: &mut Window,
+        cx: &App,
+    ) {
         let now = now(cx);
         if self.lift.is_some() {
             self.flight = None;
         }
+        let inset = selected.map_or(px(0.0), |(_, _, inset)| inset);
+        let selected = selected.map(|(id, row, _)| (id, row));
         if selected != self.selected {
             self.arrival = None;
             let previous = std::mem::replace(&mut self.selected, selected);
             let motion = presence_motion(cx);
             // A selection that leaves a removed item moves with the gap it leaves, so it holds
             // still where that gap closes under it.
-            let removed = previous.is_some_and(|previous| {
+            let removed = previous.is_some_and(|(previous, _)| {
                 self.known
                     .as_ref()
                     .is_some_and(|ids| !ids.contains(&previous))
@@ -518,22 +623,25 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             // A selection that reaches an item growing from the strip's end moves with its growth,
             // which the strip scrolls along, so it holds still at that end.
             let growing_from_end =
-                selected.is_some_and(|selected| self.growing_from_end.contains(&selected));
+                selected.is_some_and(|(selected, _)| self.growing_from_end.contains(&selected));
             let duration = if removed || growing_from_end {
                 PRESENCE_DURATION
             } else {
                 SELECTION_DURATION
             };
-            let from = previous.and_then(|previous| self.selection_start(previous, now));
-            let to = selected.and_then(|selected| {
-                Some(self.settled_start(selected, now)? + self.slid(selected, now))
+            let drawn = self.drawn_selection.take();
+            let from =
+                previous.and_then(|previous| drawn.or_else(|| self.selection_start(previous, now)));
+            let to = selected.and_then(|(selected, _)| {
+                Some(self.settled_start(selected, now)? + self.slid(selected, now) + inset)
             });
             self.flight = from
                 .zip(to)
                 .zip(selected)
                 .filter(|_| self.lift.is_none() && motion != spaceterm_ui::ControlMotion::Reduced)
-                .map(|((from, to), id)| Flight {
+                .map(|((from, to), (id, row))| Flight {
                     id,
+                    row,
                     from: from - to,
                     ease: Ease::new(duration, now, motion),
                     // A strip whose items grow in scrolls along with their growth, which the
@@ -541,6 +649,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                     left_scrolled: self.entering.is_empty().then_some(self.scrolled),
                 });
         }
+        self.selected_inset = inset;
+        self.drawn_selection = None;
         self.begin_arrival(now, cx);
         self.follow_arrival(now);
         if self.flight.as_ref().is_some_and(|flight| {
@@ -553,23 +663,24 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
     }
 
-    /// Where the selection drawn at the item `id` stands along the strip at `now`, or `None` when
-    /// the last frame did not draw the item. A selection in flight stands off the item's settled
-    /// start by what remains of its flight; otherwise it stands at the item's face, which items
-    /// growing in and gaps closing still displace.
-    fn selection_start(&self, id: Id, now: Instant) -> Option<Pixels> {
+    /// Where the selection drawn at the row `row` of the item `id`, the last selected row, stands
+    /// along the strip at `now`, or `None` when the last frame did not draw the item. A selection
+    /// in flight stands off the row's settled start by what remains of its flight; otherwise it
+    /// stands at the row in the item's face, which items growing in and gaps closing still
+    /// displace.
+    fn selection_start(&self, (id, row): (Id, Row), now: Instant) -> Option<Pixels> {
         if !self.laid_out.contains_key(&id) {
             return None;
         }
         let off_settled = self
             .flight
             .as_ref()
-            .filter(|flight| flight.id == id)
+            .filter(|flight| flight.id == id && flight.row == row)
             .map_or_else(
                 || self.displacement(id, now) + self.lag(id, now),
                 |flight| flight.from * (1.0 - flight.ease.at(now)),
             );
-        Some(self.settled_start(id, now)? + self.slid(id, now) + off_settled)
+        Some(self.settled_start(id, now)? + self.slid(id, now) + self.selected_inset + off_settled)
     }
 
     /// How far the item `id` slides along the strip at `now` toward where a drop placed it.
@@ -626,7 +737,7 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             return px(0.0);
         };
         let gap =
-            |gaps: &HashMap<Id, Gap>, id: &Id| gaps.get(id).map_or(px(0.0), |gap| gap.at(now));
+            |gaps: &HashMap<Id, Gap<Id>>, id: &Id| gaps.get(id).map_or(px(0.0), |gap| gap.at(now));
         ids[..position]
             .iter()
             .fold(gap(&self.leading_gaps, &id), |shift, before| {
@@ -749,6 +860,18 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         self.arrival = None;
         let now = now(cx);
         let motion = presence_motion(cx);
+        // An item that returns while its old place still closes draws only where it returns. Its
+        // old place stays empty, so what follows it in the gap keeps its position.
+        for leaving in self
+            .leading_gaps
+            .values_mut()
+            .chain(self.trailing_gaps.values_mut())
+            .flat_map(|gap| gap.leaving.iter_mut())
+        {
+            if leaving.id.is_some_and(|id| ids.contains(&id)) {
+                leaving.id = None;
+            }
+        }
         for (position, id) in ids.iter().enumerate() {
             if known.contains(id) {
                 continue;
@@ -766,34 +889,98 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             .map(|position| items.bounds_for_item(position))
             .collect::<Option<Vec<_>>>()
             .filter(|bounds| bounds.len() == known.len());
+        // The bounds are the last frame's, so the gaps they hold, and what shows in them, are
+        // measured at that frame's time too.
+        let painted_at = self.refreshed_at.unwrap_or(now);
+        // How many items this change already put before each carrier's older leading gap.
+        let mut placed = HashMap::new();
         for (position, id) in known.iter().enumerate() {
             if ids.contains(id) {
                 continue;
             }
             self.entering.remove(id);
-            // The slot's bounds hold its own closing gaps.
-            self.leading_gaps.remove(id);
-            self.trailing_gaps.remove(id);
+            // The slot's bounds hold its own closing gaps, and the items that left from them,
+            // which keep what they show of themselves as their place joins this one.
+            let lead = self.leading_gaps.remove(id);
+            let trail = self.trailing_gaps.remove(id);
             let Some(bounds) = bounds.as_ref() else {
                 continue;
             };
             let extent = bounds[position].size.along(self.axis);
+            let painted =
+                |gap: &Option<Gap<Id>>| gap.as_ref().map_or(px(0.0), |gap| gap.at(painted_at));
+            let face = (extent - painted(&lead) - painted(&trail)).max(px(0.0));
+            let shown = |gap: Option<Gap<Id>>| {
+                gap.map_or_else(Vec::new, |gap| {
+                    let open = gap.at(painted_at);
+                    shown_leaving(gap.leaving, open)
+                })
+            };
+            let leaving = shown(lead)
+                .into_iter()
+                .chain([Leaving {
+                    id: Some(*id),
+                    extent: face,
+                }])
+                .chain(shown(trail))
+                .collect::<Vec<_>>();
             let next = known[position + 1..].iter().find(|id| ids.contains(id));
             let previous = known[..position].iter().rev().find(|id| ids.contains(id));
-            let (gaps, carrier) = match (next, previous) {
-                (Some(next), _) => (&mut self.leading_gaps, *next),
-                (None, Some(previous)) => (&mut self.trailing_gaps, *previous),
+            let (gap, carrier, leading) = match (next, previous) {
+                (Some(next), _) => (self.leading_gaps.remove(next), *next, true),
+                (None, Some(previous)) => (self.trailing_gaps.remove(previous), *previous, false),
                 (None, None) => continue,
             };
-            let open = gaps.get(&carrier).map_or(px(0.0), |gap| gap.at(now));
+            let open = gap.as_ref().map_or(px(0.0), |gap| gap.at(painted_at));
+            let mut older = gap.map_or_else(Vec::new, |gap| shown_leaving(gap.leaving, open));
+            // Items this change removes stand in order before an older leading gap, which is
+            // nearer its carrier, and after an older trailing gap.
+            if leading {
+                let at = placed.entry(carrier).or_insert(0);
+                *at = (*at).min(older.len());
+                let count = leaving.len();
+                older.splice(*at..*at, leaving);
+                *at += count;
+            } else {
+                older.extend(leaving);
+            }
+            let gaps = if leading {
+                &mut self.leading_gaps
+            } else {
+                &mut self.trailing_gaps
+            };
             gaps.insert(
                 carrier,
                 Gap {
                     extent: open + extent,
                     ease: Ease::new(PRESENCE_DURATION, now, motion),
+                    leaving: older,
                 },
             );
         }
+    }
+
+    /// The removed items whose place still closes before the item `id`, and after it, in
+    /// presentation order.
+    pub(crate) fn leaving_beside(&self, id: Id) -> (&[Leaving<Id>], &[Leaving<Id>]) {
+        fn leaving<'a, Id: Eq + Hash>(
+            gaps: &'a HashMap<Id, Gap<Id>>,
+            id: &Id,
+        ) -> &'a [Leaving<Id>] {
+            gaps.get(id).map_or(&[], |gap| gap.leaving.as_slice())
+        }
+        (
+            leaving(&self.leading_gaps, &id),
+            leaving(&self.trailing_gaps, &id),
+        )
+    }
+
+    /// Every removed item whose place still closes.
+    pub(crate) fn leaving(&self) -> impl Iterator<Item = Id> + '_ {
+        self.leading_gaps
+            .values()
+            .chain(self.trailing_gaps.values())
+            .flat_map(|gap| gap.leaving.iter().filter_map(|leaving| leaving.id))
     }
 
     /// Lifts the item `id`, one of the strip's `ids` in presentation order. It keeps its place
@@ -860,10 +1047,11 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             self.lift = None;
             self.slides.clear();
         }
+        let now = now(cx);
+        self.finish_reduced_motion(now, cx);
         self.record_layout(items);
         self.follow_changes(items, ids, cx);
         self.autoscroll(items, ids, window, cx);
-        let now = now(cx);
         self.slides
             .retain(|_, slide| !slide.finished(now) || slide.to != Point::default());
         self.grown.clear();
@@ -897,6 +1085,51 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         }
     }
 
+    /// Ends the motion that started before motion was reduced, so the strip shows its items at
+    /// rest. A drag's displacement still follows the pointer.
+    fn finish_reduced_motion(&mut self, now: Instant, cx: &App) {
+        let reduced = spaceterm_ui::ControlMotion::Reduced;
+        if presence_motion(cx) == reduced {
+            for (ease, _) in self.entering.values_mut() {
+                *ease = Ease::new(PRESENCE_DURATION, now, reduced);
+            }
+            self.leading_gaps.clear();
+            self.trailing_gaps.clear();
+            self.flight = None;
+            self.arriving = None;
+            self.arrival = None;
+        }
+        if super::appearance_runtime::control_motion(cx) == reduced {
+            for slide in self.slides.values_mut() {
+                *slide = Slide::new(slide.to, slide.to, SETTLE_DURATION, now, reduced);
+            }
+        }
+    }
+
+    /// Takes `ids` in place of the strip's items, as the strip of another Workspace takes this
+    /// one's place: the selection leaves from where the old items drew it, the items the old ones
+    /// lacked grow in, and the place of their extra items closes. Call it before
+    /// [`Self::refresh`] on the frame that first shows `ids`. A strip with a lifted item keeps
+    /// its items until the drag ends.
+    pub(crate) fn take_place(&mut self, items: &ScrollHandle, ids: &[Id], cx: &App) {
+        if self.lift.is_some() {
+            return;
+        }
+        let from = self.arriving.take().or_else(|| self.shape(items, cx));
+        *self = Self {
+            known: Some(ids.to_vec()),
+            ..Self::new(self.axis)
+        };
+        if let Some(from) = from {
+            self.arrive(from, cx);
+        }
+    }
+
+    /// Whether the item `id` is growing into the strip, or reached its full size this frame.
+    pub(crate) fn is_entering(&self, id: Id) -> bool {
+        self.entering.contains_key(&id) || self.grown.contains(&id)
+    }
+
     pub(crate) fn dragged(&self) -> Option<Id> {
         self.lift.as_ref().map(|lift| lift.id)
     }
@@ -924,16 +1157,8 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             selection_offset: self
                 .flight
                 .as_ref()
-                .filter(|flight| flight.id == id && self.lift.is_none())
-                .map_or_else(Point::default, |flight| {
-                    let offset = flight.from * (1.0 - flight.ease.at(now))
-                        - self.displacement(id, now)
-                        - self.lag(id, now);
-                    match self.axis {
-                        Axis::Horizontal => point(offset, px(0.0)),
-                        Axis::Vertical => point(px(0.0), offset),
-                    }
-                }),
+                .filter(|flight| flight.id == id)
+                .map_or_else(Point::default, |flight| self.flight_offset(flight, now)),
             extent: entering
                 .map(|(ease, natural)| natural.map_or(px(0.0), |natural| natural * ease.at(now))),
             grows_from_end,
@@ -946,6 +1171,42 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
                 .get(&id)
                 .map_or(px(0.0), |gap| gap.at(now)),
         }
+    }
+
+    /// Records where the selection was drawn along the strip in the last frame, as its owner
+    /// measured the painted selection, so a selection that leaves on the next refresh starts
+    /// exactly there. Call it before [`Self::follow_row_selection`].
+    pub(crate) fn drew_selection_at(&mut self, start: Pixels) {
+        self.drawn_selection = Some(start);
+    }
+
+    /// How much of the selection's move to the row `row` of the item `id` remains, from 1 as it
+    /// leaves to 0 once it arrives.
+    pub(crate) fn row_selection_remaining(&self, id: Id, row: Row, cx: &App) -> f32 {
+        self.flight
+            .as_ref()
+            .filter(|flight| flight.id == id && flight.row == row && self.lift.is_none())
+            .map_or(0.0, |flight| 1.0 - flight.ease.at(now(cx)))
+    }
+
+    /// How far the selection drawn at the row `row` of the item `id` stands from that row while it
+    /// moves there.
+    pub(crate) fn row_selection_offset(&self, id: Id, row: Row, cx: &App) -> Point<Pixels> {
+        self.flight
+            .as_ref()
+            .filter(|flight| flight.id == id && flight.row == row)
+            .map_or_else(Point::default, |flight| self.flight_offset(flight, now(cx)))
+    }
+
+    /// How far the selection in `flight` stands from its row at `now`.
+    fn flight_offset(&self, flight: &Flight<Id, Row>, now: Instant) -> Point<Pixels> {
+        if self.lift.is_some() {
+            return Point::default();
+        }
+        let offset = flight.from * (1.0 - flight.ease.at(now))
+            - self.displacement(flight.id, now)
+            - self.lag(flight.id, now);
+        Point::default().apply_along(self.axis, |_| offset)
     }
 
     /// Follows the pointer with the lifted copy, held inside the strip, and the slot a release would
@@ -1340,14 +1601,39 @@ impl Ease {
     }
 }
 
-/// The space a removed item left in the strip, closing from `extent` to nothing.
-#[derive(Clone, Copy, Debug)]
-struct Gap {
+/// The space removed items left in the strip, closing from `extent` to nothing.
+#[derive(Clone, Debug)]
+struct Gap<Id> {
     extent: Pixels,
     ease: Ease,
+    /// The removed items whose place the gap holds, in presentation order, which a strip may
+    /// draw in it while it closes.
+    leaving: Vec<Leaving<Id>>,
 }
 
-impl Gap {
+/// A removed item a closing gap holds, and how much of it shows from its start: all of it when
+/// it left, or what showed when the gap that held it joined another.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Leaving<Id> {
+    /// The item, or `None` once it returned to the strip, which leaves its place here empty.
+    pub(crate) id: Option<Id>,
+    pub(crate) extent: Pixels,
+}
+
+/// What of `leaving`, drawn one after another from a gap's start, shows in `open` of it.
+fn shown_leaving<Id>(leaving: Vec<Leaving<Id>>, open: Pixels) -> Vec<Leaving<Id>> {
+    let mut remaining = open;
+    leaving
+        .into_iter()
+        .filter_map(|leaving| {
+            let extent = leaving.extent.min(remaining);
+            remaining -= extent;
+            (extent > px(0.0)).then_some(Leaving { extent, ..leaving })
+        })
+        .collect()
+}
+
+impl<Id> Gap<Id> {
     fn at(&self, now: Instant) -> Pixels {
         self.extent * (1.0 - self.ease.at(now))
     }

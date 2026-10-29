@@ -394,6 +394,9 @@ pub(crate) struct TabManager {
     tab_selector_pressed: Option<TabId>,
     tab_menu: Option<TabId>,
     tab_reorder: ReorderableStrip<TabId>,
+    /// The Worktree whose Tabs the strip showed in the last frame of this Workspace's presentation,
+    /// or `None` before its first frame since it was last activated.
+    presented_scope: Option<Option<WorktreeId>>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     tab_bar_scroll_handle: ScrollHandle,
@@ -485,6 +488,7 @@ impl TabManager {
             tab_selector_pressed: None,
             tab_menu: None,
             tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
+            presented_scope: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
@@ -632,6 +636,7 @@ impl TabManager {
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.active = false;
+        self.presented_scope = None;
         self.tabs
             .active_tab()
             .update(cx, |view, cx| view.deactivate(cx));
@@ -2140,6 +2145,17 @@ impl Render for TabManager {
         debug_assert!(self.tabs.len() > 0);
         self.sync_terminal_focus_blocker(cx);
         let ids = self.visible_tab_ids();
+        // Another Active Worktree's Tabs take the place of the old ones, as another Workspace's
+        // strip takes this one's.
+        let scope = self.tabs.active_scope();
+        if self
+            .presented_scope
+            .replace(scope)
+            .is_some_and(|presented| presented != scope)
+        {
+            self.tab_reorder
+                .take_place(&self.tab_bar_scroll_handle, &ids, cx);
+        }
         self.tab_reorder
             .refresh(&self.tab_bar_scroll_handle, &ids, window, cx);
         self.tab_reorder.reveal_while_entering(

@@ -564,6 +564,48 @@ fn window_activity_selects_an_immutable_prepared_variant_without_changing_settin
     });
 }
 
+/// The Developer Workbench's Reduce Motion preview reaches the motion strips and the sidebar
+/// read, as the system setting does.
+#[cfg(feature = "developer-tools")]
+#[gpui::test]
+fn the_reduce_motion_preview_should_reduce_presence_motion_as_the_system_setting_does(
+    cx: &mut TestAppContext,
+) {
+    let (_settings, platform) = start(cx);
+    cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let motion = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            (
+                control_motion(cx),
+                crate::ui::drag_and_drop::presence_motion(cx),
+            )
+        })
+    };
+    let reduced = (
+        spaceterm_ui::ControlMotion::Reduced,
+        spaceterm_ui::ControlMotion::Reduced,
+    );
+
+    let standard = motion(cx);
+    cx.update(|cx| {
+        set_accessibility_preview(AccessibilityPreviewFact::ReduceMotion, true, cx).unwrap();
+    });
+    let previewed = motion(cx);
+    cx.update(|cx| reset_accessibility_preview(cx).unwrap());
+    platform.set_reduced_motion(true);
+    cx.run_until_parked();
+    let system = motion(cx);
+
+    assert_eq!(
+        standard,
+        (
+            spaceterm_ui::ControlMotion::Standard,
+            spaceterm_ui::ControlMotion::Standard
+        )
+    );
+    assert_eq!((previewed, system), (reduced, reduced));
+}
+
 #[cfg(feature = "developer-tools")]
 #[gpui::test]
 fn accessibility_preview_overrides_only_selected_facts_and_resets_to_live_values(

@@ -1,10 +1,12 @@
 //! Workspace sidebar presentation and transient interaction lifecycle.
 //! Workspace policy stays with the application; the sidebar emits typed requests.
+#[cfg(test)]
+mod motion_tests;
 mod text;
 mod view;
 
 use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip};
-use super::sidebar_motion::{SidebarFrame, SidebarMotion};
+use super::sidebar_motion::{Reveal, SidebarFrame, SidebarMotion};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
@@ -309,6 +311,224 @@ impl SidebarRowKey {
     }
 }
 
+/// One row of a Workspace group, by what it shows.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum GroupRow {
+    /// The Workspace row that heads the group.
+    Workspace,
+    Worktree(WorktreeId),
+    /// The label above a former repository's Worktrees, by a digest of its name and how many
+    /// labels before it share that name, so it keeps its place while its Worktrees change.
+    FormerRepository(u64),
+}
+
+/// What one row below a Workspace row shows.
+#[derive(Clone, Copy, Debug)]
+enum GroupRowContent<'a> {
+    /// A Worktree row, with its position among its repository's Worktree rows and their count.
+    Worktree(&'a WorktreeRowViewModel, (usize, usize)),
+    /// The label above a former repository's Worktrees.
+    FormerRepository(&'a SharedString),
+}
+
+/// A row that left its Workspace group, kept to draw while its place closes.
+#[derive(Clone, Debug)]
+enum DepartedRow {
+    Worktree(Box<WorktreeRowViewModel>),
+    FormerRepository(SharedString),
+}
+
+impl DepartedRow {
+    fn content(&self) -> GroupRowContent<'_> {
+        match self {
+            Self::Worktree(row) => GroupRowContent::Worktree(row, (1, 1)),
+            Self::FormerRepository(name) => GroupRowContent::FormerRepository(name),
+        }
+    }
+}
+
+/// How one Workspace group moves as its Worktree rows disclose, come, and go.
+struct GroupMotion {
+    /// How far the group has a Worktree section, which fades its chevron in and out.
+    disclosing: Reveal,
+    /// How far the Worktree rows are disclosed. One progress moves the Workspace row's height
+    /// and line 2, the chevron's turn, the Worktree rows' reveal, and the groups below.
+    disclosed: Reveal,
+    /// The Worktree section the group last presented, kept while its rows close after the
+    /// section leaves.
+    section: Option<WorktreeSection>,
+    /// The group's rows while its Worktree rows are drawn, as they grow in and close. It starts
+    /// afresh each time they are disclosed, so disclosure never reads as rows arriving.
+    rows: ReorderableStrip<GroupRow>,
+    /// The rows that left the group, which draw in their closing places.
+    departed: std::collections::HashMap<GroupRow, DepartedRow>,
+    /// The group's rows as last painted.
+    items: ScrollHandle,
+    /// How the current frame presents the group.
+    frame: GroupFrame,
+    /// Whether the Worktree rows are disclosing in the current frame, or finished in it.
+    opening: bool,
+}
+
+/// How one frame presents a Workspace group.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GroupFrame {
+    disclosing: SidebarFrame,
+    disclosed: SidebarFrame,
+}
+
+impl GroupFrame {
+    /// A group shown at rest with `section`.
+    fn at_rest(section: Option<&WorktreeSection>) -> Self {
+        let rest = |shown: bool| SidebarFrame {
+            reveal: if shown { 1.0 } else { 0.0 },
+            moving: false,
+        };
+        Self {
+            disclosing: rest(section.is_some()),
+            disclosed: rest(section.is_some_and(|section| section.expanded)),
+        }
+    }
+
+    fn moving(self) -> bool {
+        self.disclosing.moving || self.disclosed.moving
+    }
+
+    /// Whether the frame draws the Worktree rows, which it does from the first frame that
+    /// discloses them to the last that closes them.
+    fn draws_worktrees(self) -> bool {
+        self.disclosed.reveal > 0.0 || self.disclosed.moving
+    }
+}
+
+impl GroupMotion {
+    /// A group first presented with `section`, at rest.
+    fn new(section: Option<&WorktreeSection>) -> Self {
+        Self {
+            disclosing: Reveal::new(section.is_some()),
+            disclosed: Reveal::new(section.is_some_and(|section| section.expanded)),
+            section: section.cloned(),
+            rows: ReorderableStrip::new(gpui::Axis::Vertical),
+            departed: std::collections::HashMap::new(),
+            items: ScrollHandle::new(),
+            frame: GroupFrame::at_rest(section),
+            opening: false,
+        }
+    }
+
+    /// Moves toward presenting `section`, from wherever the group was drawn.
+    fn present(
+        &mut self,
+        section: Option<&WorktreeSection>,
+        now: std::time::Instant,
+        motion: spaceterm_ui::ControlMotion,
+    ) {
+        let expanded = section.is_some_and(|section| section.expanded);
+        let disclosing = self
+            .disclosing
+            .present_at(section.is_some(), true, now, motion);
+        let disclosed = self.disclosed.present_at(expanded, true, now, motion);
+        self.opening = expanded && (disclosed.moving || self.frame.disclosed.moving);
+        self.frame = GroupFrame {
+            disclosing,
+            disclosed,
+        };
+        match section {
+            Some(section) if self.section.as_ref() != Some(section) => {
+                if let Some(previous) = self.section.replace(section.clone()) {
+                    let current = worktree_group_rows(section)
+                        .into_iter()
+                        .map(|(row, _)| row)
+                        .collect::<Vec<_>>();
+                    for (row, content) in worktree_group_rows(&previous) {
+                        if current.contains(&row) {
+                            continue;
+                        }
+                        let departed = match content {
+                            GroupRowContent::Worktree(worktree, _) => {
+                                DepartedRow::Worktree(Box::new(worktree.clone()))
+                            }
+                            GroupRowContent::FormerRepository(name) => {
+                                DepartedRow::FormerRepository(name.clone())
+                            }
+                        };
+                        self.departed.insert(row, departed);
+                    }
+                }
+            }
+            Some(_) => {}
+            None if !self.frame.draws_worktrees() && !disclosing.moving => self.section = None,
+            None => {}
+        }
+    }
+
+    /// The rows the group draws this frame, in order.
+    fn row_ids(&self) -> Vec<GroupRow> {
+        let mut ids = vec![GroupRow::Workspace];
+        if let Some(section) = self
+            .section
+            .as_ref()
+            .filter(|_| self.frame.draws_worktrees())
+        {
+            ids.extend(worktree_group_rows(section).into_iter().map(|(row, _)| row));
+        }
+        ids
+    }
+
+    /// The rows that left from beside `row` and still draw in its closing gaps, before it and
+    /// after it, each with how much of it shows from its top. A place with no row to draw, as a
+    /// row that returned leaves, stays empty.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the rows on either side are the same list of departed rows and their extents"
+    )]
+    fn departed_beside(
+        &self,
+        row: GroupRow,
+    ) -> (
+        Vec<(Option<&DepartedRow>, Pixels)>,
+        Vec<(Option<&DepartedRow>, Pixels)>,
+    ) {
+        let (before, after) = self.rows.leaving_beside(row);
+        let departed = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
+            rows.iter()
+                .map(|leaving| {
+                    let departed = leaving.id.and_then(|id| self.departed.get(&id));
+                    (departed, leaving.extent)
+                })
+                .collect::<Vec<_>>()
+        };
+        (departed(before), departed(after))
+    }
+}
+
+/// Each row a Worktree section draws below its Workspace row, in order, with what it shows.
+fn worktree_group_rows(section: &WorktreeSection) -> Vec<(GroupRow, GroupRowContent<'_>)> {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut rows = Vec::new();
+    let mut labels = Vec::new();
+    for group in &section.groups {
+        if let (Some(name), false) = (&group.former_repository, group.rows.is_empty()) {
+            let earlier = labels.iter().filter(|label| *label == name).count();
+            labels.push(name.clone());
+            let mut digest = std::hash::DefaultHasher::new();
+            (name.as_ref(), earlier).hash(&mut digest);
+            rows.push((
+                GroupRow::FormerRepository(digest.finish()),
+                GroupRowContent::FormerRepository(name),
+            ));
+        }
+        let count = group.rows.len();
+        rows.extend(group.rows.iter().enumerate().map(|(index, row)| {
+            (
+                GroupRow::Worktree(row.worktree_id),
+                GroupRowContent::Worktree(row, (index + 1, count)),
+            )
+        }));
+    }
+    rows
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SidebarLayout {
     pub(super) visible: bool,
@@ -347,7 +567,19 @@ pub(super) struct WorkspaceSidebar {
     rename: Option<WorkspaceRenameState>,
     resize_origin: Option<SidebarLayout>,
     suppress_pointer_until_release: bool,
-    workspace_reorder: ReorderableStrip<WorkspaceId>,
+    /// The Workspace groups, whose selection rests on the Workspace row or one of its Worktree
+    /// rows.
+    workspace_reorder: ReorderableStrip<WorkspaceId, Option<WorktreeId>>,
+    /// How each Workspace group moves as its Worktree rows disclose, come, and go.
+    groups: std::collections::HashMap<WorkspaceId, GroupMotion>,
+    /// The row that carried the selection in the last frame, where its chip was painted along the
+    /// list, and how tall the chip was.
+    painted_selection: Option<(SidebarRowKey, Pixels, Pixels)>,
+    /// The row that carried the selection at the last render.
+    selected: Option<SidebarRowKey>,
+    /// The row the selection is moving to, and how much taller than that row's chip the chip it
+    /// left was, so the moving chip starts at the size it was drawn.
+    selection_lengthening: Option<(SidebarRowKey, Pixels)>,
     /// How the sidebar moves as it shows and hides.
     motion: SidebarMotion,
     /// How the current frame presents the sidebar.
@@ -419,6 +651,10 @@ impl WorkspaceSidebar {
             resize_origin: None,
             suppress_pointer_until_release: false,
             workspace_reorder: ReorderableStrip::new(gpui::Axis::Vertical),
+            groups: std::collections::HashMap::new(),
+            painted_selection: None,
+            selected: None,
+            selection_lengthening: None,
             motion: SidebarMotion::new(visible),
             frame: SidebarFrame {
                 reveal: if visible { 1.0 } else { 0.0 },
@@ -918,6 +1154,7 @@ impl WorkspaceSidebar {
         };
         let appearance = super::appearance::chrome(cx);
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let disclosure = view::RowDisclosure::at_rest(row.worktrees.as_ref());
         div()
             .when_some(size, |row, size| row.w(size.width))
             .child(self.render_workspace_row(
@@ -927,6 +1164,7 @@ impl WorkspaceSidebar {
                     level: 1.0,
                     tracker: None,
                 },
+                disclosure,
                 sidebar,
                 presentation,
                 window,
@@ -1014,12 +1252,42 @@ impl Render for WorkspaceSidebar {
                 &ids,
             );
         }
-        let selected = match self.selected_key() {
-            Some(SidebarRowKey::Workspace(workspace_id)) => Some(workspace_id),
-            _ => None,
-        };
+        self.present_groups(window, cx);
+        let appearance = super::appearance::chrome(cx);
+        // A selection that moves starts from the rect its chip was painted at, whatever moved
+        // under it since.
+        let selected_key = self.selected_key();
+        if selected_key != self.selected {
+            self.selection_lengthening = None;
+            if let (Some(previous), Some(next)) = (self.selected, selected_key)
+                && let Some((painted, start, height)) = self.painted_selection
+                && painted == previous
+            {
+                self.workspace_reorder.drew_selection_at(start);
+                self.selection_lengthening =
+                    Some((next, height - self.chip_height(next, appearance)));
+            }
+            self.selected = selected_key;
+        }
+        let selected = selected_key.map(|key| {
+            let row = match key {
+                SidebarRowKey::Workspace(_) => None,
+                SidebarRowKey::Worktree(_, worktree_id) => Some(worktree_id),
+            };
+            (key.workspace_id(), row, self.row_inset(key, appearance, cx))
+        });
         self.workspace_reorder
-            .follow_selection(selected, window, cx);
+            .follow_row_selection(selected, window, cx);
+        // A selected Worktree row growing in or disclosing stays in view, as a new active
+        // Workspace does, once it has been painted.
+        if let Some(key @ SidebarRowKey::Worktree(workspace_id, worktree_id)) = self.selected_key()
+            && self.row_spans.contains_key(&key)
+            && self.groups.get(&workspace_id).is_some_and(|group| {
+                group.opening || group.rows.is_entering(GroupRow::Worktree(worktree_id))
+            })
+        {
+            self.reveal_key(key);
+        }
         self.sync_scrollbar(cx);
         let hovers = self.row_hovers(window, cx);
         self.render_body(hovers, cx.entity().downgrade(), window, cx)
@@ -1027,6 +1295,38 @@ impl Render for WorkspaceSidebar {
 }
 
 impl WorkspaceSidebar {
+    /// Moves each Workspace group toward its rows, and keeps frames coming while any moves. A
+    /// group presented for the first time starts at rest.
+    fn present_groups(&mut self, window: &mut Window, cx: &App) {
+        let now = super::drag_and_drop::now(cx);
+        let motion = super::drag_and_drop::presence_motion(cx);
+        let rows = &self.rows;
+        self.groups
+            .retain(|workspace_id, _| rows.iter().any(|row| row.workspace_id == *workspace_id));
+        let mut moving = false;
+        for row in rows {
+            let section = row.worktrees.as_ref();
+            let group = self
+                .groups
+                .entry(row.workspace_id)
+                .and_modify(|group| group.present(section, now, motion))
+                .or_insert_with(|| GroupMotion::new(section));
+            moving |= group.frame.moving();
+            if group.frame.draws_worktrees() {
+                let ids = group.row_ids();
+                group.rows.refresh(&group.items, &ids, window, cx);
+                let leaving = group.rows.leaving().collect::<Vec<_>>();
+                group.departed.retain(|row, _| leaving.contains(row));
+            } else {
+                group.rows = ReorderableStrip::new(gpui::Axis::Vertical);
+                group.departed.clear();
+            }
+        }
+        if moving {
+            window.request_animation_frame();
+        }
+    }
+
     pub(super) fn set_layout(
         &mut self,
         visible: bool,
@@ -1381,14 +1681,17 @@ impl WorkspaceSidebar {
         self.scroll_handle.set_offset(offset);
     }
 
-    /// Records where a Workspace group painted its rows. `keys` names each child of the group in
-    /// order; a divider has no key.
-    fn record_row_spans(
-        &mut self,
-        workspace_id: WorkspaceId,
-        keys: &[Option<SidebarRowKey>],
-        children: &[gpui::Bounds<Pixels>],
-    ) {
+    /// Records where a Workspace group painted its rows, as its scroll handle tracked them.
+    /// `keys` names each child of the group in order; a label has no key.
+    fn record_row_spans(&mut self, workspace_id: WorkspaceId, keys: &[Option<SidebarRowKey>]) {
+        let children = self
+            .groups
+            .get(&workspace_id)
+            .map_or_else(Vec::new, |group| {
+                (0..group.items.children_count())
+                    .filter_map(|position| group.items.bounds_for_item(position))
+                    .collect::<Vec<_>>()
+            });
         self.row_spans
             .retain(|key, _| key.workspace_id() != workspace_id);
         let Some(origin) = children.first().map(|bounds| bounds.top()) else {
@@ -1449,6 +1752,13 @@ impl WorkspaceSidebar {
 
 #[cfg(test)]
 impl WorkspaceSidebar {
+    /// How far a Workspace's Worktree rows are disclosed this frame, which turns its chevron.
+    pub(super) fn worktrees_disclosed(&self, workspace_id: WorkspaceId) -> Option<f32> {
+        self.groups
+            .get(&workspace_id)
+            .map(|group| group.frame.disclosed.reveal)
+    }
+
     pub(super) fn scroll_handle(&self) -> &ScrollHandle {
         &self.scroll_handle
     }
