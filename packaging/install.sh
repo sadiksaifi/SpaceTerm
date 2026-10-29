@@ -370,27 +370,27 @@ install_linux() {
 # authenticates the original Ed25519 signature and every resource before publishing a runtime.
 # [Signing] Add the Developer ID requirement check with the signing and notarization rollout.
 retain_headless() {
-    mkdir "$work/runtime"
+    mkdir "$work/runtime" 2>/dev/null || die "could not prepare the CLI installation"
     # Refuse links and parent paths before extraction. The Rust verifier enforces the complete
     # signed layout before retention; tar never writes outside this private staging directory.
-    tar -tzf "$headless_archive" > "$work/members" || die "could not read the CLI archive"
+    tar -tzf "$headless_archive" > "$work/members" 2>/dev/null || die "could not read the CLI archive"
     if grep -Ev '^server(/|$)' "$work/members" >/dev/null \
         || grep -E '(^|/)\.\.?(/|$)' "$work/members" >/dev/null; then
         die "the CLI archive layout is invalid"
     fi
-    tar -tvzf "$headless_archive" > "$work/kinds" || die "could not read the CLI archive"
+    tar -tvzf "$headless_archive" > "$work/kinds" 2>/dev/null || die "could not read the CLI archive"
     if cut -c 1 "$work/kinds" | grep -Ev '^[-d]$' >/dev/null; then
         die "the CLI archive must contain only files and directories"
     fi
-    tar -xzf "$headless_archive" -C "$work/runtime" || die "could not unpack the CLI archive"
+    tar -xzf "$headless_archive" -C "$work/runtime" 2>/dev/null || die "could not unpack the CLI archive"
     runtime="$work/runtime/server"
     [ -x "$runtime/bin/spaceterm" ] || die "the CLI executable is missing"
     if [ -n "${headless_identity:-}" ]; then
         compiled_identity="$("$runtime/bin/spaceterm" server provision build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
         [ "$compiled_identity" = "$headless_identity" ] || die "the CLI archive has a different application identity"
     fi
-    cp "$headless_archive" "$runtime/artifact.tar.gz"
-    cp "$headless_signature" "$runtime/artifact.sig"
+    cp "$headless_archive" "$runtime/artifact.tar.gz" 2>/dev/null || die "could not stage the CLI archive"
+    cp "$headless_signature" "$runtime/artifact.sig" 2>/dev/null || die "could not stage the CLI signature"
     "$runtime/bin/spaceterm" server provision retain "$runtime" \
         || die "the signed CLI installation could not be retained"
 }

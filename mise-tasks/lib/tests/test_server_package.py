@@ -43,6 +43,11 @@ class ServerArchiveTests(unittest.TestCase):
             "version": "dev.aaaaaaaaaaaa",
         }
 
+    def test_linux_cannot_produce_a_mac_cli_without_its_native_frameworks(self):
+        with patch.object(server_package, "host_target", return_value="x86_64-unknown-linux-gnu"):
+            with self.assertRaisesRegex(TaskError, "native macOS build"):
+                server_package.package("spaceterm-development", target="aarch64-apple-darwin")
+
     def test_dirty_source_manifest_is_bound_to_its_commit_and_nonproduction_identity(self):
         for identity in ("spaceterm-development", "spaceterm-preflight", "spaceterm"):
             for commit in (self.commit, "b" * 40):
