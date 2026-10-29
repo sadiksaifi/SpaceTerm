@@ -451,6 +451,38 @@ mod presented {
         assert_eq!(edits.unseen().len(), 1, "the failure is still unseen");
     }
 
+    /// Settings shows a failed change, and the person resets the location. Reset is their
+    /// response, so the failure counts as seen and never returns.
+    #[gpui::test]
+    fn reset_should_answer_a_shown_failure(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+
+        click("settings-row-server-worktree-location-reset", servers.cx);
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::Accepted { target: [0; 32] });
+        wait(Duration::from_millis(100), servers.cx);
+
+        assert!(shown);
+        assert_eq!(
+            edits.submitted().len(),
+            2,
+            "Reset writes the default location"
+        );
+        assert!(
+            edits.unseen().is_empty(),
+            "Reset answered the shown failure"
+        );
+    }
+
     /// The person chose another server before the change was answered, so Settings never showed
     /// the failure. It stays unseen for the Workspace Window.
     #[gpui::test]

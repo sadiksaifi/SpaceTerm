@@ -20,7 +20,7 @@
 //!
 pub(crate) use development::ArrangementUnavailable;
 pub(crate) use development::{
-    DirectServer, OutcomeNotice, OutcomeOwner, OutcomeTicket, SharedAcceptance,
+    DirectServer, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, SharedAcceptance,
     SharedAttachmentFailure, SharedCloseApproval, SharedCloseIntent, SharedCloseReview,
     SharedCloseState, SharedCloseUnavailable, SharedEditSource, SharedPaneOpener,
     SharedPaneSessions, SharedPaneSubscription, SharedPanes, SharedRefusal, SharedRefusalReason,
@@ -265,6 +265,30 @@ mod development {
             self,
         ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static + use<> {
             when_answered(move || self.presented(), || {})
+        }
+    }
+
+    /// Whether the person's response answers what a surface shows. It does only once a render
+    /// drew that very answer, which [`Self::drawn`] records by the answer's key.
+    #[derive(Default)]
+    pub(crate) struct DrawnAnswer(Option<u64>);
+
+    impl DrawnAnswer {
+        /// A render drew the answer `key` names.
+        pub(crate) fn drawn(&mut self, key: Option<u64>) {
+            self.0 = key;
+        }
+
+        /// The person responded while the surface held the answer `key` names. Returns whether
+        /// a render had drawn that answer, so the response answers it.
+        pub(crate) fn answers(&mut self, key: Option<u64>) -> bool {
+            let drawn = self.0.take();
+            key.is_some() && key == drawn
+        }
+
+        /// The surface gave its answer up, or holds a new one no render has drawn yet.
+        pub(crate) fn forget(&mut self) {
+            self.0 = None;
         }
     }
 

@@ -252,9 +252,9 @@ pub(super) struct ServerLocation {
     unanswered: Option<crate::ui::shared_workspaces::OutcomeOwner>,
     /// Whether the latest render drew the Location row, so the person can see its failure.
     rendered: bool,
-    /// The sequence of the held failure once a render has drawn its error. Only then can the
+    /// The held failure's sequence once a render has drawn its error. Only then can the
     /// person's response answer it.
-    displayed: Option<u64>,
+    displayed: crate::ui::shared_workspaces::DrawnAnswer,
 }
 
 impl ServerLocation {
@@ -286,7 +286,7 @@ impl ServerLocation {
             check: None,
             unanswered: None,
             rendered: false,
-            displayed: None,
+            displayed: crate::ui::shared_workspaces::DrawnAnswer::default(),
         }
     }
 
@@ -301,7 +301,7 @@ impl ServerLocation {
         self.poll = None;
         self.check = None;
         self.unanswered = None;
-        self.displayed = None;
+        self.displayed.forget();
         self.show(Some(String::new()), cx);
         self.show_last_known(cx);
     }
@@ -309,13 +309,12 @@ impl ServerLocation {
     /// The person responded to Settings. That answers the held failure only if a render drew
     /// its error. A failure whose error no render drew yet goes back to the Workspace Window.
     pub(super) fn answered(&mut self) {
-        let displayed = self.displayed.take();
         if let Some(answer) = self.unanswered.take()
-            && answer.sequence().is_some()
-            && answer.sequence() == displayed
+            && self.displayed.answers(answer.sequence())
         {
             answer.presented();
         }
+        self.displayed.forget();
     }
 
     /// A render starts. Unless it draws the Location row, the person can't see its failure.
@@ -328,7 +327,7 @@ impl ServerLocation {
     pub(super) fn release_unless_rendered(&mut self) {
         if !self.rendered {
             self.unanswered = None;
-            self.displayed = None;
+            self.displayed.forget();
         }
     }
 
@@ -391,6 +390,9 @@ impl ServerLocation {
         self.client = None;
         self.poll = None;
         self.check = None;
+        // The failure's message goes with the connection, unanswered.
+        self.unanswered = None;
+        self.displayed.forget();
         let text = self.model.disconnected();
         self.show(text, cx);
     }
@@ -536,6 +538,8 @@ impl SettingsWindow {
     }
 
     pub(super) fn reset_server_location(&mut self, cx: &mut Context<Self>) {
+        // Reset is the person's response to the row, including its shown failure.
+        self.server_location.answered();
         let template = Settings::default().template;
         let state = &mut self.server_location;
         state.check = None;
@@ -643,7 +647,7 @@ impl SettingsWindow {
                 if shown && state.rendered {
                     state.unanswered = Some(answer);
                     // The error counts as shown once a render draws it.
-                    state.displayed = None;
+                    state.displayed.forget();
                     // The person may have scrolled the field away while the change was on its way.
                     settings.reveal_growing_row(SettingsRowId::ServerWorktreeLocation, cx);
                 }
@@ -675,11 +679,12 @@ impl SettingsWindow {
         let message = model.message();
         // This render draws the held failure's error under the field.
         if message.is_some() {
-            self.server_location.displayed = self
+            let sequence = self
                 .server_location
                 .unanswered
                 .as_ref()
                 .and_then(crate::ui::shared_workspaces::OutcomeOwner::sequence);
+            self.server_location.displayed.drawn(sequence);
         }
         let input = self.server_location.input.clone();
         input.update(cx, |input, cx| input.set_editable(editable, cx));

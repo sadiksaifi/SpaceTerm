@@ -158,6 +158,12 @@ pub(crate) struct WorktreeForm {
     pending_path: Option<PathBuf>,
     /// Whether the form shows an answer the person has not responded to yet.
     unanswered: bool,
+    /// Counts the failures the form has shown, naming the one it shows now. The backend, not
+    /// the form, owns that failure's outcome.
+    failure: u64,
+    /// The shown failure once a render has drawn its error. Only then can the person's response
+    /// answer it.
+    displayed: crate::ui::shared_workspaces::DrawnAnswer,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
     _status: Task<()>,
@@ -215,6 +221,8 @@ impl WorktreeForm {
             generation: 0,
             pending_path: None,
             unanswered: false,
+            failure: 0,
+            displayed: crate::ui::shared_workspaces::DrawnAnswer::default(),
             pending_cancel: None,
             _branches: Task::ready(()),
             _status: Task::ready(()),
@@ -321,11 +329,17 @@ impl WorktreeForm {
         self.revalidate(cx);
     }
 
-    /// The person acted in the form after it showed an answer, which counts as seeing it.
+    /// The person acted in the form after it showed an answer. That counts as seeing it only if
+    /// a render drew its error; an earlier action leaves it to the Workspace Window.
     fn answered(&mut self) {
         if std::mem::take(&mut self.unanswered) {
-            self.backend.presented();
+            if self.displayed.answers(Some(self.failure)) {
+                self.backend.presented();
+            } else {
+                self.backend.release();
+            }
         }
+        self.displayed.forget();
     }
 
     fn set_source(&mut self, source: BranchSource, cx: &mut Context<Self>) {
@@ -663,8 +677,10 @@ impl WorktreeForm {
             Some(FormField::Location) => self.errors.location = Some(message),
             None => self.backend_error = Some(message),
         }
-        // The answer counts as seen once the person responds to the form.
+        // The answer counts as seen once a render draws it and the person then responds.
+        self.failure = self.failure.wrapping_add(1);
         self.unanswered = true;
+        self.displayed.forget();
         cx.notify();
         Some(Settlement::Failure {
             primary,
@@ -686,6 +702,7 @@ impl WorktreeForm {
             self.answered();
         }
         self.unanswered = false;
+        self.displayed.forget();
         self.backend.release();
         self.open = false;
         self.pending = false;
@@ -764,6 +781,10 @@ impl Settlement {
 
 impl Render for WorktreeForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // This render draws the shown failure's error.
+        if self.unanswered {
+            self.displayed.drawn(Some(self.failure));
+        }
         let appearance = super::appearance::shared_chrome(cx);
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         let owner = cx.weak_entity();
@@ -1229,6 +1250,8 @@ mod tests {
         held_create: Option<async_channel::Receiver<Result<(), WorktreeCreateError>>>,
         /// How many times the form recorded its answer as seen.
         presentations: Cell<usize>,
+        /// How many times the form left its answer to the Workspace Window.
+        releases: Cell<usize>,
     }
 
     impl WorktreeFormBackend for ScriptedBackend {
@@ -1276,6 +1299,10 @@ mod tests {
 
         fn presented(&self) {
             self.presentations.set(self.presentations.get() + 1);
+        }
+
+        fn release(&self) {
+            self.releases.set(self.releases.get() + 1);
         }
     }
 
@@ -1528,6 +1555,44 @@ mod tests {
 
         assert_eq!(before, 0, "showing the error alone records nothing");
         assert_eq!(held.backend.presentations.get(), 1);
+    }
+
+    /// The person presses Escape after the Create fails and before any render draws its error.
+    /// The form never showed that failure, so it leaves it to the Workspace Window.
+    #[gpui::test]
+    fn escape_before_the_error_draws_should_leave_the_failure_unanswered(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(true, cx);
+        let form = held.form.clone();
+        // The form notifies once it holds the failure. Observers run before the frame that would
+        // draw the error, as an Escape the person pressed just then does.
+        let escaped = Rc::new(Cell::new(false));
+        let escaping = Rc::clone(&escaped);
+        cx.update(|_, cx| {
+            cx.observe(&form, move |form, cx| {
+                if form.read(cx).unanswered && !escaping.replace(true) {
+                    form.update(cx, |form, cx| {
+                        form.finish_dialog(
+                            DialogOutcome::Dismissed(ModalCloseReason::Cancelled),
+                            cx,
+                        );
+                    });
+                }
+            })
+            .detach();
+        });
+        let releases_before = held.backend.releases.get();
+
+        held.answer
+            .try_send(Err(WorktreeCreateError::BranchExists))
+            .expect("git is waiting");
+        cx.run_until_parked();
+
+        assert!(escaped.get(), "the form held the failure, then closed");
+        assert_eq!(held.backend.presentations.get(), 0, "nothing was answered");
+        assert!(
+            held.backend.releases.get() > releases_before,
+            "the failure goes to the Workspace Window"
+        );
     }
 
     #[gpui::test]
