@@ -290,6 +290,9 @@ pub fn run(
         Ok(command) => command,
         Err(failure) => return Done::failed(failure),
     };
+    if let Err(failure) = super::fence(target, args.session.as_ref()) {
+        return Done::failed(failure);
+    }
     let claimed = match claim(link, target, args, directory, deadline.or(CLAIM_TIMEOUT)) {
         Ok(claimed) => claimed,
         Err(failure) => return Done::failed(failure),

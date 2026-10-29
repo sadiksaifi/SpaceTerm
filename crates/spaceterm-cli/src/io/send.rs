@@ -137,6 +137,9 @@ pub fn send(
         Ok(typing) => typing,
         Err(failure) => return Done::failed(failure),
     };
+    if let Err(failure) = super::fence(target, args.session.as_ref()) {
+        return Done::failed(failure);
+    }
     let (mut channel, lease) =
         match claim_running(link, target, args.take_over, args.size, deadline) {
             Ok(claimed) => claimed,

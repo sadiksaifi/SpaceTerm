@@ -161,6 +161,7 @@ fn target(workspace: Id, pane: Id, running: bool) -> PaneTarget {
         workspace,
         pane,
         running,
+        session: None,
         steps: Vec::new(),
     }
 }
@@ -290,7 +291,10 @@ fn run_read_and_page_through_scrollback() {
         "{}",
         output_text(&done)
     );
-    assert!(runs.pending().is_empty(), "a settled run is retired");
+    assert!(
+        runs.pending().is_empty(),
+        "a settled run is retired"
+    );
 
     let target = PaneTarget {
         running: true,
@@ -673,10 +677,11 @@ fn slow_startup(name: &str, fallback: &str, rc: &str) {
                     Deadline::after(Some(Duration::from_secs(10))),
                 )
                 .unwrap();
-            let super::channel::Claimed::Attached(_) = claimed else {
+            let super::channel::Claimed::Attached(lease) = claimed else {
                 panic!("the Tab starts its shell");
             };
             target.running = true;
+            target.session = Some(lease.session);
             channel.keep();
         }
         let done = run::run(
@@ -1111,4 +1116,59 @@ fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
     let output = super::start::rows_text(observed.data.unwrap().rows.as_ref().unwrap());
     assert!(output.contains("FIRST-sentinel"), "{output}");
     assert!(!output.contains("SECOND-EXECUTED"), "{output}");
+}
+
+/// A stale fence cannot take control or start a replacement Terminal Session.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn stale_session_fences_leave_control_and_ended_sessions_unchanged() {
+    let mut server = Server::start();
+    let person = server.connect(1);
+    let agent = server.connect(2);
+    let (workspace, pane) = workspace(&person, 1);
+    let target = target(workspace, pane, false);
+    let ready = run_at_prompt(&person, &target, "true", &mut runs());
+    assert!(ready.failure.is_none(), "{:?}", ready.failure);
+    let target = PaneTarget {
+        running: true,
+        session: Some([7; 32]),
+        ..target
+    };
+    let sent = send::send(
+        &agent,
+        &target,
+        &send_args(&["x", "--take-over", "--session", "eeeeeeee"]),
+        &mut std::io::empty(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(sent.failure.unwrap().code, Code::SessionChanged);
+    let still_owned = run_at_prompt(&person, &target, "true", &mut runs());
+    assert!(still_owned.failure.is_none(), "{:?}", still_owned.failure);
+    let ended = run_at_prompt(&person, &target, "exit 4", &mut runs());
+    assert_eq!(ended.failure.unwrap().code, Code::SessionEnded);
+    let target = PaneTarget {
+        running: false,
+        session: None,
+        ..target
+    };
+    let mut args = run_args("true");
+    args.session = crate::scope::IdPrefix::parse("eeeeeeee");
+    let refused = run::run(
+        &agent,
+        &mut || Ok(agent.clone()),
+        &target,
+        &args,
+        None,
+        &mut std::io::empty(),
+        &mut runs(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(refused.failure.unwrap().code, Code::SessionChanged);
+    let observed = read::read(
+        &person,
+        &target,
+        &read_args(&[]),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(observed.failure.unwrap().code, Code::SessionEnded);
 }

@@ -33,8 +33,22 @@ pub struct PaneTarget {
     /// Whether a Terminal Session runs in the Pane, as `list` reports it. `pane run` reports
     /// `started_shell` when it did not.
     pub running: bool,
+    /// The Session in the inventory snapshot used for targeting.
+    pub session: Option<Id>,
     /// How targeting reached the Pane, for `data.target`.
     pub steps: Vec<TargetStep>,
+}
+
+/// Checks an explicit Session fence before claiming can change control or start a shell.
+fn fence(target: &PaneTarget, session: Option<&crate::scope::IdPrefix>) -> Result<(), Failure> {
+    if let Some(prefix) = session
+        && target
+            .session
+            .is_none_or(|session| !prefix.matches(&session))
+    {
+        return Err(Failure::new(Code::SessionChanged));
+    }
+    Ok(())
 }
 
 /// What a terminal command reached: its data, its warnings, and the failure that decides its
