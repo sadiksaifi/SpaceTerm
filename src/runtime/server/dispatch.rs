@@ -364,6 +364,9 @@ impl HostCommands for DevelopmentPaneHost {
         }
     }
     fn revoked(&mut self, client: [u8; 32]) {
+        self.release_control(client);
+    }
+    fn release_control(&mut self, client: [u8; 32]) {
         if let Some(dormant) = &mut self.dormant
             && dormant.device == Some(client)
         {
@@ -448,6 +451,9 @@ pub trait HostCommands: Send {
     fn acknowledge(&mut self, _client: [u8; 32], _sequence: u64) {}
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
+    /// Releases only this identity's live and dormant control grants, and keeps its edit
+    /// outcomes and run receipts.
+    fn release_control(&mut self, _client: [u8; 32]) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
     /// Starts read `id` of `connection`. Returns its reply when it settles at once. Otherwise the
     /// read runs on another thread, which wakes the host when it settles, and the next
@@ -1413,6 +1419,10 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn revoked(&mut self, client: [u8; 32]) {
         self.host.revoked(client);
+        self.bell.ring();
+    }
+    fn release_control(&mut self, client: [u8; 32]) {
+        self.host.release_control(client);
         self.bell.ring();
     }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {

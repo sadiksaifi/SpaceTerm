@@ -302,6 +302,9 @@ impl PaneService for HostService {
     fn revoked(&mut self, client: [u8; 32]) {
         self.inner.revoked(client)
     }
+    fn release_control(&mut self, client: [u8; 32]) {
+        self.inner.release_control(client)
+    }
     fn sessions(&self) -> Vec<[u8; 32]> {
         self.inner.sessions()
     }

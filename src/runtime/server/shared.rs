@@ -1499,6 +1499,13 @@ impl HostCommands for SharedWorkspaceHost {
             .retain(|(owner, _), _| *owner != client);
         self.publish();
     }
+    fn release_control(&mut self, client: Id) {
+        self.prototype.release_control(client);
+        for host in self.panes.values_mut() {
+            host.release_control(client);
+        }
+        self.publish();
+    }
     fn shutdown(&mut self) -> Result<(), ServerError> {
         self.stop_worktree_reads();
         self.finish_worktrees(true)
@@ -1679,6 +1686,24 @@ mod tests {
         host.sync.flush().unwrap();
         assert!(retained_outcome(&memory, connected, 1));
         assert!((1..=70).all(|n| !retained_outcome(&memory, [n; 32], 1)));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_evicted_agent_loses_only_its_control_and_still_resolves_its_outcome() {
+        let (mut host, memory) = journaled();
+        let agent = [3; 32];
+        assert!(accepted(&edit(&mut host, agent, 1, "Agent")));
+        host.release_control(agent);
+        host.sync.flush().unwrap();
+        assert!(!host.forgetting.contains(&agent));
+        assert!(retained_outcome(&memory, agent, 1));
+        // The returning agent's lost reply resolves to its original outcome.
+        let Reply::Outcome(resolved) = host.request(agent, agent, Request::Resolve { sequence: 1 })
+        else {
+            panic!("the evicted agent's outcome is retained");
+        };
+        assert!(matches!(resolved.outcome, Outcome::Accepted { .. }));
         host.shutdown().unwrap();
     }
 
