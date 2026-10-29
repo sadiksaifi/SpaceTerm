@@ -2,14 +2,14 @@
 //!
 //! The item lives in the client process beside its windows. Close All Windows leaves it in the
 //! menu bar, and only its Quit, or the system's own termination, exits the client.
-use super::macos_alert::{AlertSeverity, application_alert};
+use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
 use crate::status_menu::{
     self,
     model::{Command, Item, Presentation, State},
     worker::{Event, Request, Worker},
 };
 use block2::RcBlock;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, MainThreadBound};
 use gpui::App;
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
@@ -18,8 +18,8 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventMask,
-    NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSEvent,
+    NSEventMask, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, ns_string};
@@ -104,6 +104,7 @@ struct StatusItem {
     worker: Worker,
     sender: Sender,
     state: Cell<State>,
+    activation: AlertActivation,
     item: Retained<NSStatusItem>,
     rows: Rows,
     // Retains the target and menu delegate for the item's lifetime.
@@ -172,6 +173,7 @@ impl StatusItem {
             worker,
             sender,
             state: Cell::new(State::default()),
+            activation: AlertActivation::FORCEFUL,
             item,
             rows,
             _target: target,
@@ -315,21 +317,25 @@ impl StatusItem {
         self.worker.send(request);
     }
 
-    /// Asks before an operation that ends every client's Terminal Sessions. Cancel is the
-    /// default button, so Return never ends Sessions by accident.
+    /// Asks before an operation that ends every client's Terminal Sessions. Return chooses
+    /// Cancel, so it never ends Sessions by accident.
     fn confirm(&self, command: Command, confirmation: Confirmation, cx: &App) {
         let sender = self.sender.clone();
-        let windowless = cx.windows().is_empty();
-        let message = confirmation.message();
-        let detail = confirmation.detail();
-        let label = confirmation.confirm_label();
-        // The alert runs its own modal loop, so it starts from the run loop rather than inside
-        // the application's event handling.
-        DispatchQueue::main().exec_async(move || {
-            let approved = alert(&message, &detail, Some(label), windowless);
-            let _ =
-                sender.send_blocking(Message::Decided(command, approved.then_some(confirmation)));
-        });
+        let alert = server_alert(
+            &confirmation.message(),
+            &confirmation.detail(),
+            Some(confirmation.confirm_label()),
+            self.mtm,
+        );
+        present(
+            alert,
+            self.activation,
+            cx.windows().is_empty(),
+            move |approved| {
+                let _ = sender
+                    .send_blocking(Message::Decided(command, approved.then_some(confirmation)));
+            },
+        );
     }
 
     fn report(&self, command: Command, error: ServerError, cx: &App) {
@@ -339,24 +345,19 @@ impl StatusItem {
             _ => "restart",
         };
         let message = format!("The {} server couldn\u{2019}t {operation}.", self.name);
-        let detail = error.to_string();
-        let windowless = cx.windows().is_empty();
-        DispatchQueue::main().exec_async(move || {
-            alert(&message, &detail, None, windowless);
-        });
+        let alert = server_alert(&message, &error.to_string(), None, self.mtm);
+        present(alert, self.activation, cx.windows().is_empty(), |_| {});
     }
 }
 
-/// Shows one alert at a time and reports whether the person chose `destructive`. A windowless
-/// client hides afterwards, returning focus to the app the person was using.
-fn alert(message: &str, detail: &str, destructive: Option<&str>, windowless: bool) -> bool {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return false;
-    };
-    if ALERTING.with(|alerting| alerting.replace(true)) {
-        return false;
-    }
-    let application = NSApplication::sharedApplication(mtm);
+/// Builds a server alert. A confirmation offers Cancel, then its `destructive` button; a report
+/// offers OK.
+fn server_alert(
+    message: &str,
+    detail: &str,
+    destructive: Option<&str>,
+    mtm: MainThreadMarker,
+) -> Retained<NSAlert> {
     // Stop and Restart, the only confirmations, end every Terminal Session and the programs in
     // them. A failure report loses nothing more.
     let alert = application_alert(
@@ -369,36 +370,68 @@ fn alert(message: &str, detail: &str, destructive: Option<&str>, windowless: boo
     );
     alert.setMessageText(&NSString::from_str(message));
     alert.setInformativeText(&NSString::from_str(detail));
-    let chosen = match destructive {
+    match destructive {
         Some(label) => {
-            let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
-            // Return chooses Cancel. The destructive button needs a deliberate click or Space.
-            cancel.setKeyEquivalent(ns_string!("\r"));
-            let confirm = alert.addButtonWithTitle(&NSString::from_str(label));
-            confirm.setHasDestructiveAction(true);
-            confirm.setKeyEquivalent(ns_string!(""));
-            application.activate();
-            let escape = cancel_on_escape();
-            let response = alert.runModal();
-            if let Some(escape) = escape {
-                // SAFETY: The monitor came from addLocalMonitorForEventsMatchingMask and is
-                // removed once.
-                unsafe { NSEvent::removeMonitor(&escape) };
-            }
-            response == NSAlertFirstButtonReturn + 1
+            alert.addButtonWithTitle(ns_string!("Cancel"));
+            alert
+                .addButtonWithTitle(&NSString::from_str(label))
+                .setHasDestructiveAction(true);
         }
         None => {
             alert.addButtonWithTitle(ns_string!("OK"));
-            application.activate();
-            alert.runModal();
-            false
         }
-    };
-    if windowless {
-        application.hide(None);
     }
-    ALERTING.with(|alerting| alerting.set(false));
-    chosen
+    alert
+}
+
+/// Shows `alert` one at a time and passes `answered` whether the person chose a confirmation's
+/// destructive button. The alert runs its own modal loop, so it starts from the run loop rather
+/// than inside the application's event handling. It takes the keyboard through `activation`
+/// first. A windowless client hides afterwards, returning focus to the app the person was using.
+fn present(
+    alert: Retained<NSAlert>,
+    activation: AlertActivation,
+    windowless: bool,
+    answered: impl FnOnce(bool) + Send + 'static,
+) {
+    let mtm = alert.mtm();
+    let alert = MainThreadBound::new(alert, mtm);
+    DispatchQueue::main().exec_async(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return answered(false);
+        };
+        if ALERTING.with(|alerting| alerting.replace(true)) {
+            return answered(false);
+        }
+        let alert = alert.get(mtm);
+        // A confirmation offers Cancel and its destructive button; a report offers only OK.
+        let confirming = alert.buttons().count() > 1;
+        let application = NSApplication::sharedApplication(mtm);
+        let escape = confirming.then(cancel_on_escape).flatten();
+        let response = run_modal_alert(alert, activation, bind_server_keys);
+        if let Some(escape) = escape {
+            // SAFETY: The monitor came from addLocalMonitorForEventsMatchingMask and is removed
+            // once.
+            unsafe { NSEvent::removeMonitor(&escape) };
+        }
+        if windowless {
+            application.hide(None);
+        }
+        ALERTING.with(|alerting| alerting.set(false));
+        answered(confirming && response == NSAlertFirstButtonReturn + 1);
+    });
+}
+
+/// Return chooses the first button, Cancel or OK. A confirmation's destructive button has no
+/// key, so it needs a deliberate click or Space.
+fn bind_server_keys(alert: &NSAlert) {
+    for (index, button) in alert.buttons().iter().enumerate() {
+        button.setKeyEquivalent(if index == 0 {
+            ns_string!("\r")
+        } else {
+            ns_string!("")
+        });
+    }
 }
 
 /// A button holds one key equivalent and Cancel holds Return, so Escape stops the modal alert
@@ -486,5 +519,119 @@ impl MenuTarget {
     /// inside menu tracking.
     fn send(&self, message: Message) {
         let _ = self.ivars().sender.try_send(message);
+    }
+}
+
+#[cfg(all(test, feature = "native-tests"))]
+pub(in crate::platform) mod tests {
+    use super::super::macos_alert::testing::{
+        Answering, RECORDED_ACTIVATION, answer_inside_modal_loop, expected_keys,
+        settle_pending_checks,
+    };
+    use super::*;
+
+    /// Each alert's button keys and focused button, and whether each answer approves it. Return
+    /// chooses Cancel or OK, focus rests on it for Space, and Escape cancels a confirmation.
+    /// `None` leaves the alert open.
+    type AnswerCase = (
+        Option<&'static str>,
+        &'static [(&'static str, &'static str)],
+        usize,
+        &'static [(Answering, Option<bool>)],
+    );
+
+    const ANSWER_CASES: [AnswerCase; 3] = [
+        (
+            Some("Stop Server"),
+            &[("Cancel", "\r"), ("Stop Server", "")],
+            0,
+            &[
+                (Answering::Click(0), Some(false)),
+                (Answering::Click(1), Some(true)),
+                (Answering::Key("\r", 36), Some(false)),
+                (Answering::Key(" ", 49), Some(false)),
+                (Answering::PostedKey("\u{1b}", 53), Some(false)),
+                (Answering::Stop, Some(false)),
+            ],
+        ),
+        (
+            Some("Restart Server"),
+            &[("Cancel", "\r"), ("Restart Server", "")],
+            0,
+            &[
+                (Answering::Click(0), Some(false)),
+                (Answering::Click(1), Some(true)),
+                (Answering::Key("\r", 36), Some(false)),
+                (Answering::Key(" ", 49), Some(false)),
+                (Answering::PostedKey("\u{1b}", 53), Some(false)),
+                (Answering::Stop, Some(false)),
+            ],
+        ),
+        (
+            None,
+            &[("OK", "\r")],
+            0,
+            &[
+                (Answering::Click(0), Some(false)),
+                (Answering::Key("\r", 36), Some(false)),
+                (Answering::Stop, Some(false)),
+            ],
+        ),
+    ];
+
+    /// Presents the Stop and Restart confirmations and a failure report as the status item does:
+    /// queued on the main queue, with the test driving the run loop until the alert returns. Each
+    /// alert asks for the keyboard before its modal loop starts. The test records that request
+    /// instead of activating, so the test process never takes the keyboard. Inside each alert's
+    /// modal loop the test answers it by a click or a key. The alert stays transparent, so
+    /// nothing appears on screen.
+    pub(in crate::platform) fn server_alerts_take_the_keyboard_and_bind_their_keys() {
+        let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
+        for (destructive, keys, focused, answers) in ANSWER_CASES {
+            for &(answering, expected) in answers {
+                let alert = server_alert(
+                    "Stop the server?",
+                    "Stopping ends every Terminal Session.",
+                    destructive,
+                    mtm,
+                );
+                alert.window().setAlphaValue(0.0);
+                let (answered, approvals) = std::sync::mpsc::channel();
+                let asking = answer_inside_modal_loop(&alert, answering, || {
+                    present(alert.clone(), RECORDED_ACTIVATION, false, move |approved| {
+                        let _ = answered.send(approved);
+                    });
+                });
+                assert!(asking.modal, "the alert runs its own modal loop");
+                assert_eq!(
+                    asking.activations,
+                    [true],
+                    "the alert asks once for the keyboard, before its modal loop starts"
+                );
+                assert!(!asking.active, "asking never activates the test process");
+                assert_eq!(
+                    asking.laid_out,
+                    (expected_keys(keys), Some(focused)),
+                    "{destructive:?} binds its keys inside its modal loop"
+                );
+                assert_eq!(
+                    asking.left_open,
+                    expected.is_none(),
+                    "{destructive:?} {answering:?}"
+                );
+                assert_eq!(
+                    approvals.try_recv().ok(),
+                    Some(expected.unwrap_or(false)),
+                    "{destructive:?} {answering:?}"
+                );
+                assert!(
+                    NSApplication::sharedApplication(mtm)
+                        .modalWindow()
+                        .is_none(),
+                    "no modal loop remains"
+                );
+            }
+        }
+        settle_pending_checks();
     }
 }
