@@ -240,6 +240,11 @@ pub trait LaneHost: Send + Sync {
     fn sessions(&self) -> Vec<Id>;
     fn devices(&self) -> Result<Vec<LaneDevice>, ServerError>;
     fn network(&self) -> Result<LaneNetwork, ServerError>;
+    /// Whether the server is stopping. The lane then closes its connections, which is how a
+    /// client following an operation observes the shutdown.
+    fn stopping(&self) -> bool {
+        false
+    }
 }
 
 type Launcher = dyn Fn(&OperationId) -> Result<(), ServerError> + Send + Sync;
@@ -331,9 +336,17 @@ impl LaneServer {
         actor: Actor,
     ) -> Result<(), ServerError> {
         loop {
+            // A stopping server must not keep a polling client's connection open: its
+            // shutdown waits for every connection, and the client waits for this one to close.
+            if self.host.stopping() {
+                return Ok(());
+            }
             let Ok(bytes) = stream.receive(MAX_FRAME, Instant::now() + REQUEST_LIMIT) else {
                 return Ok(());
             };
+            if self.host.stopping() {
+                return Ok(());
+            }
             let reply = match serde_json::from_slice::<LaneRequest>(&bytes) {
                 Ok(request) => self.answer(request, &actor),
                 Err(_) => error(&ServerError::Protocol),
@@ -536,12 +549,21 @@ impl LaneServer {
         if self.watching.swap(true, Ordering::SeqCst) {
             return;
         }
-        let lane = Arc::clone(self);
+        // The watcher must not keep the server alive: the lane holds the pane service, whose
+        // shutdown the server waits for, while the helper that settles the record waits for
+        // the server to exit. It holds a weak reference and ends with the server.
+        let lane = Arc::downgrade(self);
         let watched = std::thread::Builder::new()
             .name("spaceterm-service-fence".into())
             .spawn(move || {
                 loop {
                     std::thread::sleep(FENCE_INTERVAL);
+                    let Some(lane) = lane.upgrade() else {
+                        return;
+                    };
+                    if lane.host.stopping() {
+                        return;
+                    }
                     if lane.settled().unwrap_or(false) {
                         lane.host.release_fence();
                         lane.watching.store(false, Ordering::SeqCst);

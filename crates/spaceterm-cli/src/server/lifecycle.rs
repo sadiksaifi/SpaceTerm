@@ -264,11 +264,15 @@ fn execute(
         Kind::Stop => ServiceAction::Stop,
         Kind::Restart => ServiceAction::Restart,
     };
-    let settled = settle(action, outcome);
+    let mut settled = settle(action, outcome);
+    if routed.local && settled.observed == Some(Observed::Shutdown) {
+        settled = confirm_local_stop(context, settled, context.timeout(kind.wait()));
+    }
     if settled.acknowledged {
         let _ = pending.remove(&settled.receipt.operation);
     }
     let text = match (&settled.observed, settled.failure.as_ref()) {
+        (Some(Observed::Shutdown), None) => "Server stopped.\n".to_owned(),
         (Some(Observed::Shutdown), _) => format!(
             "Stop is in progress. Confirm on {} with: spaceterm server status\n",
             routed.server.name
@@ -300,6 +304,52 @@ pub(crate) fn operation_envelope(
         Some(failure) => Envelope::error(command, Some(server), failure, data),
     };
     super::with_recovered(envelope, recovered)
+}
+
+/// On the server's own machine a Stop's outcome is readable without the lane: the helper
+/// records it in the ledger once the server has exited. The record stays for the next lane
+/// connection to acknowledge, because only the server acknowledges ledger records.
+fn confirm_local_stop(context: &Context<'_>, settled: Settled, wait: Duration) -> Settled {
+    use spaceterm_server::service::operations::{Ledger, OperationId, State};
+    let Some(id) = OperationId::parse(&settled.receipt.operation) else {
+        return settled;
+    };
+    let deadline = Instant::now() + wait;
+    loop {
+        let state = Ledger::open(context.identity)
+            .and_then(|ledger| ledger.resolve(&id))
+            .ok()
+            .flatten()
+            .map(|record| record.state);
+        let (receipt_state, failure) = match state {
+            Some(State::Done) => (ReceiptState::Done, None),
+            Some(State::Failed { code }) => {
+                (ReceiptState::Failed, Some(contract::from_lane_code(&code)))
+            }
+            Some(State::NotPerformed(_)) => (
+                ReceiptState::NotPerformed,
+                Some(Failure::new(Code::OperationFailed)),
+            ),
+            Some(State::Unresolved) => (
+                ReceiptState::Unresolved,
+                Some(Failure::new(Code::OutcomeUnconfirmed)),
+            ),
+            _ if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+            _ => return settled,
+        };
+        let mut receipt = settled.receipt;
+        receipt.code = failure.as_ref().map(|v| v.code);
+        receipt.state = receipt_state;
+        return Settled {
+            receipt,
+            observed: settled.observed,
+            failure,
+            acknowledged: false,
+        };
+    }
 }
 
 /// A finished operation flow, as the contract reports it.

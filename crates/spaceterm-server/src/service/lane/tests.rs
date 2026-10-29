@@ -43,6 +43,7 @@ impl Supervisor for Running {
 struct Host {
     sessions: Mutex<Vec<Id>>,
     fenced: AtomicBool,
+    stopping: AtomicBool,
 }
 impl LaneHost for Host {
     fn fence(
@@ -56,6 +57,9 @@ impl LaneHost for Host {
     }
     fn release_fence(&self) {
         self.fenced.store(false, Ordering::SeqCst);
+    }
+    fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
     fn sessions(&self) -> Vec<Id> {
         self.sessions.lock().unwrap().clone()
@@ -306,6 +310,19 @@ fn a_confirmed_stop_is_admitted_once_behind_the_fence() {
             code(execute(&lane.lane, LaneAction::Restart, &token, 2)),
             "service_busy"
         );
+    });
+}
+
+#[test]
+fn a_running_server_without_a_failed_activation_offers_no_return() {
+    with_lane(|lane| {
+        let reply = lane.lane.answer(
+            LaneRequest::Preview {
+                action: LaneAction::Return,
+            },
+            &ACTOR,
+        );
+        assert_eq!(code(reply), "return_unavailable");
     });
 }
 
@@ -562,6 +579,56 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
             &agent_actor,
         );
         assert_eq!(code(reply), "changed");
+    });
+}
+
+#[test]
+fn an_unsettled_operation_never_keeps_a_stopping_server_alive() {
+    with_lane(|lane| {
+        let (token, _) = preview(&lane.lane, LaneAction::Stop);
+        // The helper never settles this record, as while it waits for the server to exit.
+        assert!(matches!(
+            execute(&lane.lane, LaneAction::Stop, &token, 1),
+            LaneReply::Accepted { .. }
+        ));
+        let Lane {
+            lane: server, host, ..
+        } = lane;
+        assert!(host.fenced.load(Ordering::SeqCst));
+        // The server's shutdown drops its lane. The fence watcher must not hold the host.
+        drop(server);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&host) > 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the fence watcher kept the lane's host alive"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+#[test]
+fn a_stopping_server_closes_a_polling_lane_connection() {
+    with_lane(|lane| {
+        let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let host = lane.host.clone();
+        let peer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let resolve =
+                br#"{"request":"resolve","operation":"00000000000000000000000000000000"}"#;
+            client.send(resolve, deadline).unwrap();
+            client.receive(MAX_FRAME, deadline).unwrap();
+            // The server starts stopping while the client keeps polling.
+            host.stopping.store(true, Ordering::SeqCst);
+            let _ = client.send(resolve, deadline);
+            client.receive(MAX_FRAME, deadline).is_err()
+        });
+        let started = Instant::now();
+        lane.lane.serve(&mut server, ACTOR).unwrap();
+        drop(server);
+        assert!(peer.join().unwrap(), "the client saw the connection close");
+        assert!(started.elapsed() < Duration::from_secs(5));
     });
 }
 

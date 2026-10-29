@@ -1154,6 +1154,21 @@ fn a_paired_device_reaches_the_service_lane_as_its_own_pairing() {
         )
         .unwrap()
     };
+    // A full-size upload chunk is larger than the admission window, and still arrives.
+    let chunk = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        vec![7u8; crate::service::lane::MAX_CHUNK],
+    );
+    assert_eq!(
+        call(LaneRequest::UploadChunk {
+            upload: "none".into(),
+            offset: 0,
+            data: chunk,
+        }),
+        LaneReply::Error {
+            code: "changed".into()
+        }
+    );
     let own = OperationId([1; 16]).to_string();
     assert!(matches!(
         call(LaneRequest::Resolve {

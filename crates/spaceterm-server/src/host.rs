@@ -419,6 +419,7 @@ struct HostLane {
     panes: SharedPaneService,
     fence: Arc<AtomicBool>,
     direct: Option<crate::direct::host::Shared>,
+    stop: Arc<Stop>,
 }
 impl HostLane {
     fn manage(
@@ -448,6 +449,9 @@ impl crate::service::lane::LaneHost for HostLane {
     fn release_fence(&self) {
         let _panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
         self.fence.store(false, Ordering::Release);
+    }
+    fn stopping(&self) -> bool {
+        self.stop.stopping()
     }
     fn sessions(&self) -> Vec<[u8; 32]> {
         self.panes
@@ -627,6 +631,7 @@ fn serve_runtime_ready(
             panes: Arc::clone(&panes),
             fence,
             direct: direct.clone(),
+            stop: Arc::clone(&stop),
         }),
     )
     .ok();

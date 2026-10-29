@@ -1839,6 +1839,14 @@ impl crate::protocol::Preamble for QuicStream {
         self.receive_prefixed(max, deadline)
             .map_err(|_| crate::ServerError::Protocol)
     }
+
+    /// A service-lane frame is larger than the admission window. Reading a frame that exceeds
+    /// the window would wait for bytes the peer cannot send until the window grows.
+    fn admitted(&mut self) {
+        self.driver
+            .connection
+            .set_receive_window(VarInt::from_u32(ADMITTED_WINDOW));
+    }
 }
 
 /// Higher sends first when several levels have data.
