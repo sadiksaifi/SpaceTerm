@@ -140,6 +140,9 @@ pub fn send(
     if let Err(failure) = super::fence(target, args.session.as_ref()) {
         return Done::failed(failure);
     }
+    if let Err(failure) = crate::interrupt::dispatch() {
+        return Done::failed(failure);
+    }
     let (mut channel, lease) =
         match claim_running(link, target, args.take_over, args.size, deadline) {
             Ok(claimed) => claimed,
@@ -269,6 +272,9 @@ fn unconfirmed_or(failure: Failure) -> Failure {
 /// `released: false`.
 pub fn release(link: &ServerLink, target: &PaneTarget, deadline: Deadline) -> Done<PaneRelease> {
     let deadline = deadline.or(DEFAULT_TIMEOUT);
+    if let Err(failure) = crate::interrupt::dispatch() {
+        return Done::failed(failure);
+    }
     let released = |released| PaneRelease {
         target: target.steps.clone(),
         released,

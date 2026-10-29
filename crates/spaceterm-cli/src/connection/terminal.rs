@@ -6,23 +6,17 @@ use rustix::termios::{LocalModes, OptionalActions, Termios, tcgetattr, tcsetattr
 use std::fs::{File, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::os::fd::AsFd;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 pub struct Terminal {
     tty: Option<File>,
-    interrupted: Arc<AtomicBool>,
-    signal: signal_hook::SigId,
+    /// Ctrl-C withdraws what a connection command opened, so it is only recorded.
+    _cooperation: crate::interrupt::Cooperation,
 }
 impl Terminal {
     pub fn new(allow_input: bool) -> Result<Self, Failure> {
-        let interrupted = Arc::new(AtomicBool::new(false));
-        let signal = signal_hook::flag::register(signal_hook::consts::SIGINT, interrupted.clone())
-            .map_err(|_| Failure::new(Code::StorageUnavailable))?;
+        let cooperation = crate::interrupt::cooperate()?;
         let tty = allow_input
             .then(|| {
                 OpenOptions::new()
@@ -34,8 +28,7 @@ impl Terminal {
             .flatten();
         Ok(Self {
             tty,
-            interrupted,
-            signal,
+            _cooperation: cooperation,
         })
     }
     fn answer(&mut self, prompt: &str, deadline: Instant) -> Result<bool, Failure> {
@@ -43,13 +36,8 @@ impl Terminal {
         tty.write_all(prompt.as_bytes())
             .and_then(|()| tty.flush())
             .map_err(|_| Failure::new(Code::OutputFailed))?;
-        let answer = read_line(tty, 16, deadline, &self.interrupted)?;
+        let answer = read_line(tty, 16, deadline, &crate::interrupt::interrupted)?;
         Ok(answer.eq_ignore_ascii_case(b"y") || answer.eq_ignore_ascii_case(b"yes"))
-    }
-}
-impl Drop for Terminal {
-    fn drop(&mut self) {
-        signal_hook::low_level::unregister(self.signal);
     }
 }
 
@@ -79,7 +67,7 @@ impl InteractionIo for Terminal {
         self.tty.is_some()
     }
     fn interrupted(&self) -> bool {
-        self.interrupted.load(Ordering::Acquire)
+        crate::interrupt::interrupted()
     }
     fn invitation(&mut self, deadline: Instant) -> Result<Zeroizing<String>, Failure> {
         let stdin = std::io::stdin();
@@ -92,7 +80,7 @@ impl InteractionIo for Terminal {
             let mut input = tty
                 .try_clone()
                 .map_err(|_| Failure::new(Code::InteractionRequired))?;
-            let result = read_line(&mut input, 8192, deadline, &self.interrupted);
+            let result = read_line(&mut input, 8192, deadline, &crate::interrupt::interrupted);
             drop(hidden);
             result?
         } else {
@@ -101,7 +89,7 @@ impl InteractionIo for Terminal {
             let mut input = File::from(
                 rustix::io::dup(&stdin).map_err(|_| Failure::new(Code::InteractionRequired))?,
             );
-            read_line(&mut input, 8192, deadline, &self.interrupted)?
+            read_line(&mut input, 8192, deadline, &crate::interrupt::interrupted)?
         };
         let text =
             std::str::from_utf8(&bytes).map_err(|_| Failure::new(Code::InvalidInvitation))?;
@@ -158,11 +146,11 @@ fn read_line(
     reader: &mut (impl Read + AsFd),
     maximum: usize,
     deadline: Instant,
-    interrupted: &AtomicBool,
+    interrupted: &dyn Fn() -> bool,
 ) -> Result<Zeroizing<Vec<u8>>, Failure> {
     let mut bytes = Zeroizing::new(Vec::with_capacity(maximum.min(256)));
     loop {
-        if interrupted.load(Ordering::Acquire) {
+        if interrupted() {
             return Err(Code::Interrupted.into());
         }
         if Instant::now() >= deadline {
@@ -212,7 +200,7 @@ mod tests {
             &mut reader,
             8192,
             Instant::now() + Duration::from_secs(5),
-            &AtomicBool::new(false),
+            &|| false,
         )
         .unwrap_err();
         assert_eq!(failure.code, Code::InvalidInvitation);
@@ -232,7 +220,7 @@ mod tests {
                 &mut reader,
                 8192,
                 Instant::now() + Duration::from_secs(5),
-                &AtomicBool::new(false),
+                &|| false,
             )
             .unwrap();
             assert_eq!(value.as_slice(), b"spaceterm://pair/fixture");
@@ -242,7 +230,7 @@ mod tests {
             &mut reader,
             8192,
             Instant::now() + Duration::from_secs(5),
-            &AtomicBool::new(true),
+            &|| true,
         )
         .unwrap_err();
         assert_eq!(failure.code, Code::Interrupted);

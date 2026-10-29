@@ -129,6 +129,7 @@ fn dispatch(
         .next_inventory(0)
         .map_err(|error| from_server_error(error.into()))?;
     let sequence = revision.next_sequence;
+    crate::interrupt::dispatch()?;
     journal
         .submit(sequence, mutation.clone())
         .map_err(from_server_error)?;
@@ -237,7 +238,14 @@ fn request(
     deadline: Instant,
 ) -> Option<Result<ReplyBody, Refusal>> {
     let pending = link.request(operation).ok()?;
-    match pending.wait_for(deadline.saturating_duration_since(Instant::now()))? {
+    // SIGINT after dispatch moves the deadline, so the wait checks it again in short slices.
+    let reply = loop {
+        let remaining = crate::interrupt::limit(deadline).checked_duration_since(Instant::now())?;
+        if let Some(reply) = pending.wait_for(remaining.min(crate::interrupt::TICK)) {
+            break reply;
+        }
+    };
+    match reply {
         Ok(reply) => Some(Ok(reply)),
         Err(RequestError::Refused(refusal)) => Some(Err(refusal)),
         Err(RequestError::Link(_)) => None,

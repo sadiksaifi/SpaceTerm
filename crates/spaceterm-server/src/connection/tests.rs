@@ -503,8 +503,9 @@ fn revocation_ends_a_live_paired_connection() {
     registry
         .register(
             harness.connection.peer().connection,
+            harness.connection.peer().client,
             pairing,
-            harness.connection.outbox().clone(),
+            Some(harness.connection.outbox().clone()),
             Box::new(Severed(Arc::clone(&severed))),
         )
         .unwrap();

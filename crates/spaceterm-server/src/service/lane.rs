@@ -260,6 +260,8 @@ pub struct LaneServer {
     feed: Arc<dyn Source>,
     launch: Box<Launcher>,
     upload: Mutex<Option<Upload>>,
+    /// Held for each whole `Execute`.
+    executing: Mutex<()>,
     watching: AtomicBool,
 }
 
@@ -321,6 +323,7 @@ impl LaneServer {
             feed,
             launch,
             upload: Mutex::new(None),
+            executing: Mutex::new(()),
             watching: AtomicBool::new(false),
         };
         lane.ledger()?
@@ -328,12 +331,17 @@ impl LaneServer {
         Ok(Arc::new(lane))
     }
 
-    /// Answers lane requests on an admitted service-lane connection until the peer closes it
-    /// or stays silent past the request limit.
+    /// Answers lane requests on an admitted service-lane connection until the peer closes it,
+    /// stays silent past the request limit, the server stops, or `authorized` fails.
+    /// `authorized` runs before every read and again before every answer, so a revoked pairing
+    /// ends the lane without another answer. A host that stops severs the transport, which ends
+    /// a read already waiting. A newly admitted operation launches only after its `Accepted`
+    /// reply was written.
     pub(crate) fn serve(
         self: &Arc<Self>,
         stream: &mut dyn Preamble,
         actor: Actor,
+        authorized: &dyn Fn() -> Result<(), ServerError>,
     ) -> Result<(), ServerError> {
         loop {
             // A stopping server must not keep a polling client's connection open: its
@@ -341,24 +349,56 @@ impl LaneServer {
             if self.host.stopping() {
                 return Ok(());
             }
+            authorized()?;
             let Ok(bytes) = stream.receive(MAX_FRAME, Instant::now() + REQUEST_LIMIT) else {
                 return Ok(());
             };
             if self.host.stopping() {
                 return Ok(());
             }
-            let reply = match serde_json::from_slice::<LaneRequest>(&bytes) {
-                Ok(request) => self.answer(request, &actor),
-                Err(_) => error(&ServerError::Protocol),
+            authorized()?;
+            let (reply, launch) = match serde_json::from_slice::<LaneRequest>(&bytes) {
+                Ok(request) => self.respond(request, &actor),
+                Err(_) => (error(&ServerError::Protocol), None),
             };
-            let bytes = serde_json::to_vec(&reply).map_err(|_| ServerError::Protocol)?;
-            stream.send(&bytes, Instant::now() + REQUEST_LIMIT)?;
+            let sent = serde_json::to_vec(&reply)
+                .map_err(|_| ServerError::Protocol)
+                .and_then(|bytes| stream.send(&bytes, Instant::now() + REQUEST_LIMIT));
+            // The record is durable, so it launches even when its reply was lost. The client
+            // resolves the same operation ID after a lost reply.
+            if let Some(id) = launch {
+                self.dispatch(&id);
+            }
+            sent?;
         }
     }
 
-    /// Answers one request.
+    /// Answers one request, and launches what it admitted.
     pub fn answer(self: &Arc<Self>, request: LaneRequest, actor: &Actor) -> LaneReply {
+        let (reply, launch) = self.respond(request, actor);
+        if let Some(id) = launch {
+            self.dispatch(&id);
+        }
+        reply
+    }
+
+    /// Answers one request. An `Execute` that admitted a new record returns its ID, which the
+    /// caller launches after it wrote the reply.
+    fn respond(
+        self: &Arc<Self>,
+        request: LaneRequest,
+        actor: &Actor,
+    ) -> (LaneReply, Option<OperationId>) {
         let result = match request {
+            LaneRequest::Execute {
+                action,
+                token,
+                operation,
+            } => {
+                return self
+                    .execute(&action, &token, &operation, actor)
+                    .unwrap_or_else(|failure| (error(&failure), None));
+            }
             LaneRequest::Status => self
                 .admin()
                 .status(Some(self.host.as_ref()))
@@ -379,15 +419,10 @@ impl LaneServer {
                 data,
             } => self.upload_chunk(&upload, offset, &data),
             LaneRequest::Preview { action } => self.preview(&action, actor),
-            LaneRequest::Execute {
-                action,
-                token,
-                operation,
-            } => self.execute(&action, &token, &operation, actor),
             LaneRequest::Resolve { operation } => self.resolve(&operation),
             LaneRequest::Acknowledge { operation } => self.acknowledge(&operation, actor),
         };
-        result.unwrap_or_else(|failure| error(&failure))
+        (result.unwrap_or_else(|failure| error(&failure)), None)
     }
 
     fn stage_upload(
@@ -487,8 +522,11 @@ impl LaneServer {
         token: &str,
         operation: &str,
         actor: &Actor,
-    ) -> Result<LaneReply, ServerError> {
+    ) -> Result<(LaneReply, Option<OperationId>), ServerError> {
         let id = OperationId::parse(operation).ok_or(ServerError::Protocol)?;
+        // One Execute at a time, so a repeated Execute on another connection waits for the
+        // first and finds its record instead of a spent token.
+        let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
         let accepted = LaneReply::Accepted {
             operation: id.to_string(),
             boot: hex(&self.boot),
@@ -497,7 +535,7 @@ impl LaneServer {
         // nothing, even though its token is already spent.
         if let Some(record) = self.ledger()?.resolve(&id)? {
             return if record.actor == *actor {
-                Ok(accepted)
+                Ok((accepted, None))
             } else {
                 Err(ServerError::Changed)
             };
@@ -529,10 +567,8 @@ impl LaneServer {
             admitted = Some(self.ledger()?.admit(record.clone())?);
             Ok(())
         })?;
-        if let Some(Admission::New(_)) = admitted {
-            self.dispatch(&id);
-        }
-        Ok(accepted)
+        let launch = matches!(admitted, Some(Admission::New(_))).then_some(id);
+        Ok((accepted, launch))
     }
 
     /// Launches the helper for a newly admitted record and watches the record until it

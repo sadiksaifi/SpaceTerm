@@ -14,6 +14,8 @@ enum Bind {
 /// How often a `Starting` listener tries its address again while it waits.
 const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 pub(crate) type Shared = Arc<Mutex<State>>;
+/// What a revocation also forgets outside this store.
+pub(crate) type Revoked = Box<dyn Fn(&PairingId) + Send>;
 
 struct PendingInvitation {
     id: ClaimId,
@@ -46,6 +48,8 @@ pub(crate) struct State {
     network: Arc<dyn network::Adapter>,
     /// Wakes the host's accept loop when the listener changes.
     wake: Option<Arc<dyn Wake>>,
+    /// Runs after each revocation, whichever transport asked for it.
+    revoked: Option<Revoked>,
 }
 impl State {
     pub(crate) fn open(paths: &crate::host::Paths) -> Result<Shared, DirectError> {
@@ -74,6 +78,7 @@ impl State {
             released: Default::default(),
             network,
             wake: None,
+            revoked: None,
         };
         state.listen();
         Ok(Arc::new(Mutex::new(state)))
@@ -83,6 +88,10 @@ impl State {
             listener.set_wake(Arc::clone(&wake));
         }
         self.wake = Some(wake);
+    }
+    /// Runs `revoked` after every revocation, so state outside this store forgets the pairing.
+    pub(crate) fn on_revoke(&mut self, revoked: Revoked) {
+        self.revoked = Some(revoked);
     }
     fn listener_changed(&self) {
         if let Some(wake) = &self.wake {
@@ -277,24 +286,37 @@ impl State {
         }
         Ok(())
     }
-    /// Registers a paired connection of listener `generation`, so revocation reaches it through
-    /// `sever`. The authorization check and the registration share this lock with every
-    /// revocation.
-    pub(crate) fn register(
+    /// Whether `paired`, admitted on listener `generation`, still holds its authority: the
+    /// pairing is not revoked and Network Access has not changed since.
+    pub(crate) fn current(
         &mut self,
         paired: &PairedDevice,
         generation: [u8; 32],
-        connection: [u8; 32],
-        outbox: crate::connection::outbox::Outbox,
-        sever: Box<dyn Sever>,
     ) -> Result<(), DirectError> {
         self.authorized(paired)?;
         if generation != self.generation {
             return Err(DirectError::Disabled);
         }
+        Ok(())
+    }
+    /// Registers a paired connection of listener `generation`, so revocation reaches it through
+    /// `sever`. The authorization check and the registration share this lock with every
+    /// revocation. `client` is the connection's effective Client Identity. A service-lane
+    /// connection has no `outbox`.
+    pub(crate) fn register(
+        &mut self,
+        paired: &PairedDevice,
+        generation: [u8; 32],
+        connection: [u8; 32],
+        client: [u8; 32],
+        outbox: Option<crate::connection::outbox::Outbox>,
+        sever: Box<dyn Sever>,
+    ) -> Result<(), DirectError> {
+        self.current(paired, generation)?;
         self.connections
             .register(
                 connection,
+                client,
                 crate::connection::service::Pairing {
                     pairing: paired.pairing,
                     generation,
@@ -307,11 +329,16 @@ impl State {
     /// Records that `paired` admitted `agent`, before the agent's connection can create any
     /// state, so revoking the pairing retires the agent too. Callers hold this lock through
     /// [`Self::register`], so no revocation falls between the two.
+    ///
+    /// The pairing's names are kept from least to most recently admitted. A new name past
+    /// [`storage::MAX_AGENTS`] evicts the least recently admitted name with no live connection,
+    /// and returns its Client Identity. The caller releases that identity's control grants, so
+    /// revocation never needs a name it forgot. An evicted agent that returns is admitted again.
     pub(crate) fn admit_agent(
         &mut self,
         paired: &PairedDevice,
         agent: &crate::protocol::AgentName,
-    ) -> Result<(), DirectError> {
+    ) -> Result<Option<[u8; 32]>, DirectError> {
         self.authorized(paired)?;
         let device = self
             .record
@@ -319,20 +346,28 @@ impl State {
             .iter()
             .find(|device| device.info.pairing == paired.pairing)
             .ok_or(DirectError::AuthenticationRefused)?;
-        if device.agents.contains(agent) {
-            return Ok(());
+        if device.agents.last() == Some(agent) {
+            return Ok(None);
         }
-        if device.agents.len() >= storage::MAX_AGENTS {
-            return Err(DirectError::Capacity);
+        let mut agents = device.agents.clone();
+        agents.retain(|known| known != agent);
+        let mut evicted = None;
+        if agents.len() >= storage::MAX_AGENTS {
+            let index = agents
+                .iter()
+                .position(|known| !self.connections.serves(known.client(&device.info.client)))
+                .ok_or(DirectError::Capacity)?;
+            evicted = Some(agents.remove(index).client(&device.info.client));
         }
+        agents.push(agent.clone());
         let mut next = self.record.clone();
         next.devices
             .iter_mut()
             .find(|device| device.info.pairing == paired.pairing)
             .ok_or(DirectError::AuthenticationRefused)?
-            .agents
-            .push(agent.clone());
-        self.commit(next)
+            .agents = agents;
+        self.commit(next)?;
+        Ok(evicted)
     }
     /// The enrolled public key of `paired`'s device.
     fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
@@ -963,6 +998,9 @@ impl State {
             receipt
         };
         self.connections.revoke(target);
+        if let Some(revoked) = &self.revoked {
+            revoked(&target);
+        }
         Ok((receipt, clients))
     }
     pub(super) fn challenge(&self) -> Result<wire::Challenge, DirectError> {
@@ -1246,6 +1284,7 @@ impl State {
 /// for a paired device admission and then the protocol connection over a
 /// [`crate::connection::quic::QuicCarrier`]. Every action's device key must be the key of the
 /// certificate the client proved in the handshake.
+#[allow(clippy::too_many_arguments, reason = "one connection's whole context")]
 pub(crate) fn serve(
     mut stream: QuicStream,
     generation: [u8; 32],
@@ -1253,6 +1292,7 @@ pub(crate) fn serve(
     environment: &crate::host::Environment,
     waker: crate::connection::io::Waker,
     wake: Arc<dyn Wake>,
+    stopping: &LaneStop,
 ) -> Result<(), ServerError> {
     use super::client::Messages;
     // A connection the listener accepted before its policy changed never joins the new one.
@@ -1318,22 +1358,46 @@ pub(crate) fn serve(
         agent,
         name,
         ..
-    } = crate::protocol::admit_direct_server(&mut stream, &paired, environment.lane.as_ref())?;
+    } = match crate::protocol::admit_direct_server(&mut stream, &paired)? {
+        crate::protocol::Admission::Work(admitted) => admitted,
+        crate::protocol::Admission::Service(actor) => {
+            return serve_lane(
+                stream,
+                &paired,
+                generation,
+                &state,
+                environment,
+                actor,
+                stopping,
+            );
+        }
+    };
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
-    {
+    let evicted = {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(agent) = &agent {
-            state.admit_agent(&paired, agent)?;
-        }
+        let evicted = match &agent {
+            Some(agent) => state.admit_agent(&paired, agent)?,
+            None => None,
+        };
         state.register(
             &paired,
             generation,
             connection,
-            outbox.clone(),
+            client,
+            Some(outbox.clone()),
             Box::new(carrier.sever()),
         )?;
+        evicted
+    };
+    // The direct-network lock is released first, as for a revocation.
+    if let Some(evicted) = evicted {
+        environment
+            .panes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revoked(evicted);
     }
     // Unregisters when serving ends, also when it panics.
     let _registered = Registered {
@@ -1356,6 +1420,77 @@ pub(crate) fn serve(
     Ok(())
 }
 
+/// Serves a paired service-lane connection. It is registered for its whole life, so revoking its
+/// pairing or changing Network Access severs it, and each request first checks that the pairing
+/// still holds its authority. Stopping the host severs it through `stopping`.
+fn serve_lane(
+    mut stream: QuicStream,
+    paired: &PairedDevice,
+    generation: [u8; 32],
+    state: &Shared,
+    environment: &crate::host::Environment,
+    actor: crate::service::operations::Actor,
+    stopping: &LaneStop,
+) -> Result<(), ServerError> {
+    let lane = environment.lane.as_ref().ok_or(ServerError::Unsupported)?;
+    let connection = crate::protocol::random()?;
+    state.lock().unwrap_or_else(|e| e.into_inner()).register(
+        paired,
+        generation,
+        connection,
+        actor.client,
+        None,
+        Box::new(stream.sever()),
+    )?;
+    let _registered = Registered {
+        state: Arc::clone(state),
+        connection,
+    };
+    stopping.watch(Box::new(stream.sever()));
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .note_connection(paired)?;
+    lane.serve(&mut stream, actor, &|| {
+        state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current(paired, generation)
+            .map_err(ServerError::from)
+    })
+}
+
+/// How the host stops a network connection's service lane. A work connection stops on its wake
+/// instead, so this severs only a lane that [`Self::watch`] registered.
+#[derive(Clone, Default)]
+pub(crate) struct LaneStop(Arc<Mutex<LaneStopState>>);
+
+#[derive(Default)]
+struct LaneStopState {
+    stopped: bool,
+    sever: Option<Box<dyn Sever>>,
+}
+
+impl LaneStop {
+    /// Severs `sever` when the host stops, or at once if it already stopped.
+    fn watch(&self, sever: Box<dyn Sever>) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.stopped {
+            sever.sever();
+        }
+        state.sever = Some(sever);
+    }
+
+    /// Severs the watched lane, and any lane watched later.
+    pub(crate) fn stop(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.stopped = true;
+        if let Some(sever) = &state.sever {
+            sever.sever();
+        }
+    }
+}
+
 /// A paired connection's place in the registry, removed when it drops.
 struct Registered {
     state: Shared,
@@ -1376,6 +1511,12 @@ mod network_tests;
 
 #[cfg(test)]
 mod connection_time_tests;
+
+#[cfg(test)]
+mod lane_tests;
+
+#[cfg(test)]
+mod agent_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1564,7 +1705,8 @@ mod tests {
             &paired,
             generation,
             [5; 32],
-            outbox,
+            paired.client,
+            Some(outbox),
             Box::new(super::super::tests::Quiet),
         );
         let empty = state.connections.is_empty();

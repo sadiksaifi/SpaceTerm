@@ -124,7 +124,7 @@ fn native_client() {
     );
     assert_eq!(
         added.render(
-            &global,
+            (&global).into(),
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock()
         ),
@@ -189,9 +189,7 @@ fn native_client() {
             let output = crate::work::start::start(&cli).expect("work command dispatched");
             assert_eq!(
                 output.write(
-                    true,
-                    false,
-                    false,
+                    (&cli.global).into(),
                     &mut std::io::stdout().lock(),
                     &mut std::io::stderr().lock()
                 ),
@@ -214,7 +212,7 @@ fn native_client() {
             };
             let reply = crate::server::run(IDENTITY, &cli.global, command);
             assert_eq!(
-                reply.write(true, false),
+                reply.write((&cli.global).into()),
                 0,
                 "paired service lane status completed"
             );
@@ -251,7 +249,7 @@ fn native_client() {
         };
         if let Some(output) = output {
             output.render(
-                &global,
+                (&global).into(),
                 &mut std::io::stdout().lock(),
                 &mut std::io::stderr().lock(),
             );

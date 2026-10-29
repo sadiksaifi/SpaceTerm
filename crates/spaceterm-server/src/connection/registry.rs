@@ -5,7 +5,7 @@
 //! disabling direct access and an uncertain commit each end the affected connections: the registry
 //! queues `Goodbye(Revoked)`, which also makes the connection stop dispatching, and severs its
 //! receiving, so no further request arrives. The I/O thread then writes the goodbye and
-//! closes the carrier.
+//! closes the carrier. A service-lane connection has no outbox: severing alone ends it.
 use super::outbox::Outbox;
 use super::service::Pairing;
 use crate::direct::PairingId;
@@ -19,8 +19,10 @@ pub trait Sever: Send + Sync {
 
 struct Entry {
     connection: [u8; 32],
+    /// The connection's effective Client Identity: the pairing's own or one of its agents'.
+    client: [u8; 32],
     pairing: Pairing,
-    outbox: Outbox,
+    outbox: Option<Outbox>,
     sever: Box<dyn Sever>,
 }
 
@@ -40,8 +42,9 @@ impl PairedConnections {
     pub fn register(
         &mut self,
         connection: [u8; 32],
+        client: [u8; 32],
         pairing: Pairing,
-        outbox: Outbox,
+        outbox: Option<Outbox>,
         sever: Box<dyn Sever>,
     ) -> Result<(), Full> {
         if self.entries.len() >= MAX_PAIRED_CONNECTIONS {
@@ -49,6 +52,7 @@ impl PairedConnections {
         }
         self.entries.push(Entry {
             connection,
+            client,
             pairing,
             outbox,
             sever,
@@ -58,6 +62,11 @@ impl PairedConnections {
 
     pub fn unregister(&mut self, connection: [u8; 32]) {
         self.entries.retain(|entry| entry.connection != connection);
+    }
+
+    /// Whether a live connection admitted as `client`.
+    pub fn serves(&self, client: [u8; 32]) -> bool {
+        self.entries.iter().any(|entry| entry.client == client)
     }
 
     pub fn len(&self) -> usize {
@@ -89,7 +98,9 @@ impl PairedConnections {
             if !matches(entry) {
                 return true;
             }
-            let _ = entry.outbox.goodbye(Fatal::Revoked);
+            if let Some(outbox) = &entry.outbox {
+                let _ = outbox.goodbye(Fatal::Revoked);
+            }
             entry.sever.sever();
             false
         });
@@ -119,11 +130,12 @@ mod tests {
             registry
                 .register(
                     [index as u8; 32],
+                    [index as u8; 32],
                     Pairing {
                         pairing,
                         generation,
                     },
-                    outboxes[index].clone(),
+                    Some(outboxes[index].clone()),
                     Box::new(Count(Arc::clone(&severed))),
                 )
                 .unwrap();

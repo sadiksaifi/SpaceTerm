@@ -143,6 +143,7 @@ fn setup(
     let launcher = launcher(&home, &installations, context.identity);
     let mut steps = Vec::new();
     let before = service.status().map_err(contract::from_server_error)?;
+    crate::interrupt::dispatch()?;
     // Linux starts the server only with boot startup authorized, so authorize it before the
     // first start. macOS starts at login and has no such step.
     let linger = match service.linger().map_err(contract::from_server_error)? {

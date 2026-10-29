@@ -637,7 +637,10 @@ fn a_broken_comparison_pipe_cancels_the_unfinished_join_and_exits_silently() {
     assert_eq!(output.exit, 141);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    assert_eq!(output.render(&global(), &mut stdout, &mut stderr), 141);
+    assert_eq!(
+        output.render((&global()).into(), &mut stdout, &mut stderr),
+        141
+    );
     assert!(stdout.is_empty());
     assert!(stderr.is_empty());
     assert!(fixture.store.pending_enrollments().unwrap().is_empty());

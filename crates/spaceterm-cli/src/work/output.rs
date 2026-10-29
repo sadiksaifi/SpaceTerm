@@ -57,50 +57,16 @@ impl Output {
             diagnostics: String::new(),
         }
     }
-    pub fn write(
-        &self,
-        json: bool,
-        quiet: bool,
-        verbose: bool,
-        stdout: &mut dyn Write,
-        stderr: &mut dyn Write,
-    ) -> u8 {
-        let written = if json {
-            serde_json::to_writer(&mut *stdout, &self.envelope)
-                .map_err(std::io::Error::from)
-                .and_then(|()| stdout.write_all(b"\n"))
-                .and_then(|()| stdout.flush())
-        } else if quiet && self.envelope.exit() == 0 {
-            Ok(())
-        } else {
-            stdout
-                .write_all(self.text.as_bytes())
-                .and_then(|()| stdout.flush())
-        };
-        if let Err(error) = written {
-            if error.kind() == std::io::ErrorKind::BrokenPipe {
-                return EXIT_BROKEN_PIPE;
-            }
-            let _ = writeln!(stderr, "{}", Failure::new(Code::OutputFailed).text());
-            return Code::OutputFailed.exit();
-        }
-        if !json {
-            if let Some(error) = &self.envelope.error {
-                let _ = writeln!(stderr, "error: {} ({})", error.message, error.code.as_str());
-                if let Details::Usage(details) = &error.details
-                    && let Some(argument) = &details.argument
-                {
-                    let _ = writeln!(stderr, "argument: {argument}");
-                }
-            }
-            for warning in &self.envelope.warnings {
-                let _ = writeln!(stderr, "warning: {}", warning.message);
-            }
-        }
-        if verbose {
-            let _ = stderr.write_all(self.diagnostics.as_bytes());
-        }
-        self.envelope.exit()
+    pub fn write(&self, mode: Mode, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
+        render(
+            &self.envelope,
+            &self.text,
+            &self.diagnostics,
+            mode,
+            crate::interrupt::finish(),
+            stdout,
+            stderr,
+        )
     }
 }
 

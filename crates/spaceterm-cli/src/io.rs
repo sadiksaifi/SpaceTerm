@@ -102,12 +102,28 @@ impl Deadline {
         }
     }
 
+    /// The deadline, or earlier once `SIGINT` arrived after dispatch.
     pub fn until(self) -> Option<Instant> {
-        self.until
+        match (self.until, crate::interrupt::settle_by()) {
+            (Some(until), Some(settle)) => Some(until.min(settle)),
+            (until, settle) => until.or(settle),
+        }
     }
 
     pub fn passed(self) -> bool {
-        self.until.is_some_and(|until| Instant::now() >= until)
+        self.until().is_some_and(|until| Instant::now() >= until)
+    }
+
+    /// How long one wait may block before it checks the deadline again, which `SIGINT` can
+    /// move. `None` once the deadline passed.
+    pub(crate) fn slice(self) -> Option<Duration> {
+        match self.until() {
+            None => Some(crate::interrupt::TICK),
+            Some(until) => until
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .map(|remaining| remaining.min(crate::interrupt::TICK)),
+        }
     }
 
     pub fn elapsed_ms(self) -> u64 {
@@ -176,11 +192,11 @@ pub(crate) fn wait_raw(
     pending: spaceterm_server::connection::link::PendingReply,
     deadline: Deadline,
 ) -> Result<Result<spaceterm_server::protocol::ReplyBody, RequestError>, Failure> {
-    match deadline.until() {
-        None => Ok(pending.wait()),
-        Some(until) => pending
-            .wait_for(until.saturating_duration_since(Instant::now()))
-            .ok_or_else(|| deadline.timeout()),
+    loop {
+        let slice = deadline.slice().ok_or_else(|| deadline.timeout())?;
+        if let Some(reply) = pending.wait_for(slice) {
+            return Ok(reply);
+        }
     }
 }
 

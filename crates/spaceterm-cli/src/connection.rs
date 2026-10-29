@@ -2,6 +2,7 @@
 pub mod route;
 mod terminal;
 use crate::args::{ConnectionCommand, Global};
+use crate::contract::Mode;
 use crate::contract::{
     self, Code, ComparisonEvent, Confirmation, ConnectionAdd, ConnectionList, ConnectionRemove,
     Details, Empty, Envelope, Failure, ListedConnection, Revocation, UsageDetails, UsageKind,
@@ -77,77 +78,46 @@ pub trait InteractionIo {
 
 /// One final envelope. `connection add --json` emits its comparison event through `InteractionIo` first.
 pub struct CommandOutput {
+    /// The envelope as `--json` prints it.
     pub envelope: Value,
     pub exit: u8,
     lines: Vec<String>,
-    failure: Option<Failure>,
+    erased: Envelope<Value>,
 }
 impl CommandOutput {
-    fn envelope<D: Serialize>(
-        envelope: Envelope<D>,
-        lines: Vec<String>,
-        failure: Option<Failure>,
-    ) -> Self {
-        let exit = envelope.exit();
-        match serde_json::to_value(envelope) {
-            Ok(envelope) => Self {
-                envelope,
-                exit,
+    fn envelope<D: Serialize>(envelope: Envelope<D>, lines: Vec<String>) -> Self {
+        let erased = envelope.erased();
+        match serde_json::to_value(&erased) {
+            Ok(value) => Self {
+                envelope: value,
+                exit: erased.exit(),
                 lines,
-                failure,
+                erased,
             },
             Err(_) => Self::failure("", Code::OutputFailed.into()),
         }
     }
     fn failure(command: &str, failure: Failure) -> Self {
         Self::envelope(
-            Envelope::error(command, None, failure.clone(), Empty {}),
+            Envelope::error(command, None, failure, Empty {}),
             Vec::new(),
-            Some(failure),
         )
     }
-    pub fn render(&self, global: &Global, output: &mut impl Write, errors: &mut impl Write) -> u8 {
+    pub fn render(&self, mode: Mode, output: &mut impl Write, errors: &mut impl Write) -> u8 {
+        // The comparison event already met a broken pipe.
         if self.exit == contract::EXIT_BROKEN_PIPE {
             return self.exit;
         }
-        let result = if global.json {
-            serde_json::to_writer(&mut *output, &self.envelope)
-                .map_err(std::io::Error::from)
-                .and_then(|()| output.write_all(b"\n"))
-                .and_then(|()| output.flush())
-        } else if !global.quiet || self.exit != 0 {
-            self.lines
-                .iter()
-                .try_for_each(|line| writeln!(output, "{line}"))
-                .and_then(|()| output.flush())
-        } else {
-            Ok(())
-        };
-        if let Err(error) = result {
-            if error.kind() == std::io::ErrorKind::BrokenPipe {
-                return contract::EXIT_BROKEN_PIPE;
-            }
-            let _ = writeln!(errors, "{}", Failure::new(Code::OutputFailed).text());
-            return Code::OutputFailed.exit();
-        }
-        if !global.json {
-            if let Some(failure) = &self.failure {
-                let _ = writeln!(errors, "{}", failure.text());
-                if let Details::Usage(details) = &failure.details
-                    && let Some(argument) = &details.argument
-                {
-                    let _ = writeln!(errors, "argument: {argument}");
-                }
-            }
-            if let Some(warnings) = self.envelope["warnings"].as_array() {
-                for warning in warnings {
-                    if let Some(message) = warning["message"].as_str() {
-                        let _ = writeln!(errors, "warning: {message}");
-                    }
-                }
-            }
-        }
-        self.exit
+        let text: String = self.lines.iter().map(|line| format!("{line}\n")).collect();
+        contract::render(
+            &self.erased,
+            &text,
+            "",
+            mode,
+            crate::interrupt::finish(),
+            output,
+            errors,
+        )
     }
 }
 
@@ -301,7 +271,6 @@ impl Connections<'_> {
         Ok(CommandOutput::envelope(
             Envelope::ok("connection.list", None, ConnectionList { connections }),
             lines,
-            None,
         ))
     }
     fn add(
@@ -437,7 +406,7 @@ impl Connections<'_> {
                         if pending > 0 {
                             envelope.warnings.push(pending_warning());
                         }
-                        return Ok(CommandOutput::envelope(envelope, lines, failure));
+                        return Ok(CommandOutput::envelope(envelope, lines));
                     }
                     Ok(None) | Err(enrollment::Error::Direct(DirectError::Transport)) => {
                         self.pause(Duration::from_secs(2), deadline)?
@@ -513,11 +482,7 @@ impl Connections<'_> {
                         },
                     },
                 );
-                return Ok(CommandOutput::envelope(
-                    envelope,
-                    lines,
-                    Some(Code::ConfirmationRequired.into()),
-                ));
+                return Ok(CommandOutput::envelope(envelope, lines));
             }
         };
         self.checkpoint(deadline)?;
@@ -575,7 +540,6 @@ impl Connections<'_> {
                 removed.name,
                 if pending { "pending" } else { "confirmed" }
             )],
-            failure,
         ))
     }
 }
