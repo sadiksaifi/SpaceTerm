@@ -671,17 +671,22 @@ fn clearing_scrollback_keeps_the_epoch() {
     // `clear` with E3 erases Scrollback, as Clear Scrollback does.
     let done = run_at_prompt(&link, &target, "printf '\\033[3J'", &mut runs);
     assert!(done.failure.is_none(), "{:?}", done.failure);
-    let after = read::read(
-        &link,
-        &target,
-        &read_args(&["--tail", "5"]),
-        Deadline::after(None),
-    )
-    .data
-    .unwrap()
-    .rows
-    .unwrap()
-    .history;
+    // The run receipt can precede the frame that publishes E3's new history boundary.
+    let until = Instant::now() + Duration::from_secs(5);
+    let after = loop {
+        let observed = read::read(
+            &link,
+            &target,
+            &read_args(&["--tail", "5"]),
+            Deadline::after(Some(Duration::from_secs(5))),
+        );
+        assert!(observed.failure.is_none(), "{:?}", observed.failure);
+        let history = observed.data.unwrap().rows.unwrap().history;
+        if history.oldest == history.total || Instant::now() >= until {
+            break history;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert_eq!(after.epoch, before.epoch);
     assert_eq!(after.oldest, after.total);
 }
