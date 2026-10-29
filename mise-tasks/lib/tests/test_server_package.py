@@ -34,6 +34,7 @@ class ServerArchiveTests(unittest.TestCase):
         self.commit = "a" * 40
         self.info = {
             "schema": 1,
+            "source_sha256": None,
             "protocol_major": 4,
             "capabilities": ["workspace_policy"],
             "identity": "spaceterm-preflight",
@@ -177,8 +178,8 @@ class ServerArchiveTests(unittest.TestCase):
     def test_signed_package_with_missing_or_extra_resources_is_refused(self):
         tree = self.root / "server"
         (tree / "bin").mkdir(parents=True)
-        (tree / "bin/spaceterm-server").write_bytes(b"never executed")
-        (tree / "bin/spaceterm-server").chmod(0o755)
+        (tree / "bin/spaceterm").write_bytes(b"never executed")
+        (tree / "bin/spaceterm").chmod(0o755)
         (tree / "build.json").write_text(json.dumps(self.info))
         resources = tree / "share/spaceterm"
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
@@ -206,8 +207,8 @@ class ServerArchiveTests(unittest.TestCase):
     def test_desktop_artifact_rejects_wrong_exact_build_before_staging(self):
         tree = self.root / "server"
         (tree / "bin").mkdir(parents=True)
-        (tree / "bin/spaceterm-server").write_bytes(b"native executable fixture")
-        (tree / "bin/spaceterm-server").chmod(0o755)
+        (tree / "bin/spaceterm").write_bytes(b"native executable fixture")
+        (tree / "bin/spaceterm").chmod(0o755)
         archive, signature = archive_tree(ROOT, tree, self.info)
         run = subprocess.run
         client = self.root / "client"
@@ -219,6 +220,7 @@ class ServerArchiveTests(unittest.TestCase):
                 output = json.dumps(
                     {
                         "schema": 1,
+                        "source_sha256": None,
                         "identity": self.info["identity"],
                         "target": self.info["target"],
                         "version": "99.0.0",
@@ -227,10 +229,10 @@ class ServerArchiveTests(unittest.TestCase):
                 ).encode()
             elif arguments[0] == "objdump":
                 output = b"elf64-x86-64" if arguments[1] == "-f" else b""
-            elif arguments[1:] == ["--build-info"]:
+            elif arguments[1:] == ["server", "provision", "build-info"]:
                 server_queries.append(arguments[0])
                 output = json.dumps(self.info).encode()
-            elif arguments[1:] == ["--check"]:
+            elif arguments[1:] == ["server", "provision", "check"]:
                 output = b"Server checks passed.\n"
             else:
                 return run(arguments, **kwargs)

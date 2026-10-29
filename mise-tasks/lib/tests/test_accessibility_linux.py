@@ -36,7 +36,7 @@ class SourceAccessibilitySessionTests(unittest.TestCase):
             server.write_text(
                 f"#!{sys.executable}\n"
                 "import pathlib, sys\n"
-                "assert sys.argv[1:] == ['development-serve', 'spaceterm-development']\n"
+                "assert sys.argv[1:] == ['server', 'run', '--owned']\n"
                 "print('spaceterm-development-ready-v1', flush=True)\n"
                 "sys.stdin.buffer.read()\n"
                 f"pathlib.Path({str(root / 'server-cleaned')!r}).touch()\n"
@@ -752,7 +752,7 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
                             self.assertEqual(staged.read_bytes(), contents)
                             self.assertNotEqual(staged, binary)
                             self.assertEqual(
-                                (staged.parent / "spaceterm-server").read_bytes(),
+                                (staged.parent / "spaceterm").read_bytes(),
                                 server.read_bytes(),
                             )
                             self.assertTrue(

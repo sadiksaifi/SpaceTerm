@@ -6,8 +6,9 @@
 # USAGE }
 """Prepare both signed nonproduction server targets from the current source.
 
-Both target packages are cross-built locally, including current uncommitted source.
-No remote builder or production signing credentials are required.
+macOS builds natively on a Mac, including current uncommitted source. Linux cross-builds
+locally. Linux hosts need SPACETERM_SERVER_ARTIFACTS with a Mac-built target from the same
+source snapshot. No production signing credentials are required.
 """
 
 import argparse

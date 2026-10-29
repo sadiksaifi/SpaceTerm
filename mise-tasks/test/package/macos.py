@@ -92,7 +92,7 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     ).stdout,
 }}))
 binary = sys.argv[sys.argv.index("--bin") + 1]
-assert binary == "spaceterm", "the desktop builds no sibling server executable"
+assert binary == "spaceterm-desktop", "the desktop builds no sibling server executable"
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
                   "executable": os.environ["BUILD_EXECUTABLE"]}}))
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
@@ -208,7 +208,7 @@ int main(int argc, char **argv) {{
         bundled = self.root / "dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight"
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
-        server = bundled.with_name("spaceterm-server")
+        server = bundled.with_name("spaceterm")
         self.assertFalse(server.exists())
         artifact = bundled.parent.parent / "Resources/server-artifact"
         self.assertEqual(
@@ -263,7 +263,7 @@ int main(int argc, char **argv) {{
         bundled = self.root / "dist/SpaceTerm.app/Contents/MacOS/SpaceTerm"
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
-        self.assertFalse(bundled.with_name("spaceterm-server").exists())
+        self.assertNotIn("spaceterm", {path.name for path in bundled.parent.iterdir()})
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
         self.assertEqual(json.loads(self.record.read_text())["private_inputs"], [])
         self.assertFalse(json.loads(self.record.read_text())["signing_available"])

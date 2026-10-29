@@ -15,6 +15,7 @@ from pathlib import Path
 
 from spaceterm_tasks import ROOT, server_package
 from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
+from spaceterm_tasks.server_builds import _source
 
 from tests.server_artifact_fixture import archive_tree
 
@@ -37,7 +38,7 @@ executable.write_text(
     "fi\\n"
     "printf '%s\\\\n' \\"$0\\" \\"${SPACETERM_DEVELOPER_WORKBENCH:-}\\" \\"$#\\" \\"$@\\" > \\"$SPACETERM_TEST_RECORD\\"\\n"
 )
-if binary == "spaceterm-server":
+if binary == "spaceterm":
     executable.write_text(
         "#!/bin/sh\\nprintf '%s\\n' spaceterm-development-ready-v1\\ncat >/dev/null\\n"
     )
@@ -49,9 +50,18 @@ print(json.dumps({"reason": "compiler-artifact", "target": {"name": binary},
 
 # Catalog preparation keeps its real Git snapshot, signature and staging checks. Only
 # compiling the two distribution binaries uses prepared artifacts in this launcher fixture.
-CATALOG_DRIVER = """import json, pathlib, runpy, sys
+CATALOG_DRIVER = """import json, os, pathlib, runpy, shutil, sys
 from unittest.mock import patch
 artifacts = json.loads(pathlib.Path(sys.argv[1]).read_text())
+catalog = pathlib.Path(sys.argv[1]).with_name("native-catalog")
+entry = catalog / "aarch64-apple-darwin"
+entry.mkdir(parents=True, exist_ok=True)
+archive, signature = map(pathlib.Path, artifacts["aarch64-apple-darwin"])
+shutil.copyfile(archive, entry / "artifact.tar.gz")
+shutil.copyfile(signature, entry / "artifact.sig")
+import hashlib
+(entry / "artifact.sha256").write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + "\\n")
+os.environ["SPACETERM_SERVER_ARTIFACTS"] = str(catalog)
 sys.argv = sys.argv[2:]
 def package(identity, *, target):
     assert identity == "spaceterm-development"
@@ -111,10 +121,11 @@ class LinuxPrefixTests(unittest.TestCase):
         artifacts = {}
         for target in server_package.TARGETS.values():
             tree = self.private / "server-packages" / target / "server"
-            executable = tree / "bin/spaceterm-server"
+            executable = tree / "bin/spaceterm"
             executable.parent.mkdir(parents=True)
             info = {
                 "schema": 1,
+                "source_sha256": _source(self.root)[2],
                 "identity": "spaceterm-development",
                 "target": target,
                 "commit": "a" * 40,
@@ -127,11 +138,11 @@ class LinuxPrefixTests(unittest.TestCase):
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {{
-    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {{
+    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "build-info") == 0) {{
         puts({json.dumps(json.dumps(info))});
         return 0;
     }}
-    if (argc == 2 && strcmp(argv[1], "--check") == 0) {{
+    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "check") == 0) {{
         puts("Server checks passed.");
         return 0;
     }}
@@ -204,7 +215,7 @@ int main(int argc, char **argv) {{
         prefix = self.root / "target" / "development-apps" / "development"
         self.assertEqual(
             self.record.read_text().splitlines(),
-            [str(prefix / "bin" / "spaceterm"), "", "1", "--new-instance"],
+            [str(prefix / "bin" / "spaceterm-desktop"), "", "1", "--new-instance"],
             "a source launch runs beside a running Development instance",
         )
         self.assertTrue((prefix / "share" / "spaceterm" / "shell-integration" / "zsh").is_dir())
@@ -363,7 +374,7 @@ assert app.launch_uris([sys.argv[2]], None)
         self.assertEqual(
             self.record.read_text().splitlines(),
             [
-                str(self.root / "target/development-apps/development/bin/spaceterm"),
+                str(self.root / "target/development-apps/development/bin/spaceterm-desktop"),
                 "",
                 "1",
                 invitation,
@@ -377,7 +388,7 @@ assert app.launch_uris([sys.argv[2]], None)
         prefix = self.root / "target" / "development-apps" / "development"
         self.assertEqual(
             self.record.read_text().splitlines(),
-            [str(prefix / "bin" / "spaceterm"), "controls", "1", "--new-instance"],
+            [str(prefix / "bin" / "spaceterm-desktop"), "controls", "1", "--new-instance"],
         )
 
     def test_development_launch_removes_only_the_task_library_from_pythonpath(self):
