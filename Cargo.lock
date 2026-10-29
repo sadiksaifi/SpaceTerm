@@ -6183,6 +6183,7 @@ dependencies = [
  "jiff",
  "libc",
  "postcard",
+ "regex",
  "ring",
  "rustix",
  "serde",

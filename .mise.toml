@@ -428,6 +428,21 @@ run = [
     "cargo run -p spaceterm-cli --example cli_identity --locked",
 ]
 
+[tasks."cli:io:test"]
+description = "Test agent terminal I/O: observation, cursors, waits, send and run against an in-process server"
+run = [
+    "cargo test -p spaceterm-cli --lib --locked -- io:: --include-ignored --test-threads=1",
+    "cargo test -p spaceterm-server --features client --lib --locked -- pane::run pane::keys",
+    "cargo test -p spaceterm --lib --all-features --locked -- agent_io_tests::observing agent_io_tests::named_keys terminal::metadata terminal::session::subscriptions",
+]
+
+[tasks."cli:shells:native"]
+description = "Run pane run in every installed shell with SpaceTerm integration. SPACETERM_TEST_<SHELL> names a shell's path"
+run = [
+    "cargo test -p spaceterm --lib --features native-tests --locked -- agent_io_tests:: --test-threads=1 --nocapture",
+    "cargo test -p spaceterm --lib --features native-tests --locked -- shell_integration::",
+]
+
 [tasks."cli:scope:test"]
 description = "Test CLI targeting, labels, organization and the work commands"
 run = [
