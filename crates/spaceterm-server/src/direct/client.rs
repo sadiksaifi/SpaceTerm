@@ -296,9 +296,9 @@ impl DirectConnection {
         not(any(feature = "client", test)),
         allow(dead_code, reason = "the desktop admits and carries the connection")
     )]
-    pub(crate) fn admit(
+    pub(crate) fn admit<'a>(
         self,
-        client: (&[u8; 32], &ClientName),
+        client: impl Into<crate::protocol::Caller<'a>>,
     ) -> Result<Box<dyn crate::connection::carrier::Carrier>, ServerError> {
         let mut stream = *self.stream;
         crate::protocol::admit_transport(

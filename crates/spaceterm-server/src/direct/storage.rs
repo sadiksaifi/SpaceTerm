@@ -4,6 +4,9 @@ use crate::{host::Paths, storage::Directory};
 pub(super) const MAX_DEVICES: usize = 256;
 pub(super) const MAX_REVOCATIONS: usize = 512;
 pub(super) const MAX_CONNECTION_TIME: u64 = 253_402_300_799;
+/// The agent names one pairing has admitted. Names are meant to be reused, so this bounds an
+/// account that generates one per run.
+pub(super) const MAX_AGENTS: usize = 64;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -11,6 +14,17 @@ pub(super) struct Device {
     pub claim: ClaimId,
     pub info: DeviceInfo,
     pub revoked: bool,
+    /// The agents admitted under this pairing, so its revocation also retires their grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<crate::protocol::AgentName>,
+}
+impl Device {
+    /// The pairing's own Client Identity, then each of its agents'.
+    pub fn clients(&self) -> Vec<[u8; 32]> {
+        std::iter::once(self.info.client)
+            .chain(self.agents.iter().map(|agent| agent.client(&self.info.client)))
+            .collect()
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,6 +204,8 @@ impl Store {
                 || !claims.insert(device.claim)
                 || !ids.insert(device.info.pairing)
                 || !clients.insert(device.info.client)
+                || device.agents.len() > MAX_AGENTS
+                || (1..device.agents.len()).any(|i| device.agents[..i].contains(&device.agents[i]))
             {
                 return Err(DirectError::StorageUnavailable);
             }

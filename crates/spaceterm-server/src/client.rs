@@ -73,6 +73,37 @@ pub enum CliRoute {
     },
 }
 
+/// A CLI handle's identity on its route: the base identity, or an agent derived from it.
+#[derive(Clone)]
+struct CliIdentity {
+    /// `cli/routes/<route>`, under `clients`.
+    route: String,
+    agent: Option<crate::protocol::AgentName>,
+}
+
+impl CliIdentity {
+    fn new(route: Option<&[u8; 32]>, agent: Option<crate::protocol::AgentName>) -> Self {
+        let route = route.map_or_else(
+            || "local".to_owned(),
+            |route| route.iter().map(|b| format!("{b:02x}")).collect(),
+        );
+        Self {
+            route: format!("cli/routes/{route}"),
+            agent,
+        }
+    }
+    fn base_account(&self) -> String {
+        format!("{}/base", self.route)
+    }
+    /// The identity's directory under `clients`.
+    fn account(&self) -> String {
+        match &self.agent {
+            None => self.base_account(),
+            Some(agent) => format!("{}/agents/{}", self.route, agent.as_str()),
+        }
+    }
+}
+
 /// Resolving this handle never reads or writes storage and never starts a process.
 #[derive(Clone)]
 pub struct ServerConnection {
@@ -83,6 +114,8 @@ pub struct ServerConnection {
     development: Option<String>,
     computer: std::sync::Arc<dyn crate::computer_name::ComputerName>,
     direct: Option<std::sync::Arc<DirectRoute>>,
+    /// Present for a CLI handle, which keeps its state under `clients/cli`.
+    cli: Option<CliIdentity>,
     shared: std::sync::Arc<SharedLink>,
     client_cache: std::sync::Arc<ClientCache>,
 }
@@ -200,12 +233,32 @@ impl ServerConnection {
         }
         Ok(directory)
     }
+    /// The Client Identity the server admits this handle as: an agent's is derived from the
+    /// base one.
     fn client_id(&self) -> Result<[u8; 32], ServerError> {
+        let base = self.base_client_id()?;
+        Ok(self.effective_client(&base))
+    }
+    fn effective_client(&self, base: &[u8; 32]) -> [u8; 32] {
+        match self.agent() {
+            Some(agent) => agent.client(base),
+            None => *base,
+        }
+    }
+    /// The identity this handle presents in its Hello: the pairing's on a paired route, else
+    /// the retained local one. A CLI agent shares its route's base identity.
+    fn base_client_id(&self) -> Result<[u8; 32], ServerError> {
         if let Some(direct) = &self.direct {
             self.client_directory()?;
             return Ok(direct.paired.client);
         }
-        let directory = self.client_directory()?;
+        let directory = match &self.cli {
+            Some(cli) if cli.agent.is_some() => {
+                self.client_directory()?;
+                Directory::open(&self.paths.data.join("clients").join(cli.base_account()), true)?
+            }
+            _ => self.client_directory()?,
+        };
         let _lock = directory.lock("identity.lock", false)?;
         if let Some(record) = directory.read_json::<ClientIdentity>("client.json")? {
             if record.format != "account-local-1" || record.client == [0; 32] {
@@ -225,6 +278,12 @@ impl ServerConnection {
     }
     /// What other clients call this one while it controls a Pane.
     fn client_name(&self) -> crate::pane::control::ClientName {
+        if let Some(cli) = &self.cli {
+            return crate::pane::control::ClientName::for_cli(
+                self.computer.as_ref(),
+                cli.agent.as_ref(),
+            );
+        }
         crate::pane::control::ClientName::for_computer(
             self.computer.as_ref(),
             self.development.as_deref(),
@@ -359,11 +418,28 @@ impl ServerConnection {
     /// A CLI connection in the `clients/cli` namespace, as the base identity of `route` or as
     /// `agent`. It never reads the desktop's client record, Saved Connections or credentials.
     pub fn for_cli(
-        _identity: &str,
-        _route: CliRoute,
-        _agent: Option<crate::protocol::AgentName>,
+        identity: &str,
+        route: CliRoute,
+        agent: Option<crate::protocol::AgentName>,
     ) -> Result<Self, ServerError> {
-        Err(ServerError::Unsupported)
+        let mut handle = Self::for_identity(identity)?;
+        handle.development = None;
+        match route {
+            CliRoute::Local => {
+                let cli = CliIdentity::new(None, agent);
+                handle.account = cli.account();
+                handle.cli = Some(cli);
+                Ok(handle)
+            }
+            CliRoute::Paired {
+                route,
+                paired,
+                connector,
+            } => {
+                handle.cli = Some(CliIdentity::new(Some(&route), agent));
+                handle.with_direct(route, paired, connector)
+            }
+        }
     }
     pub(crate) fn with_paths(paths: Paths) -> Result<Self, ServerError> {
         let development = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT")
@@ -380,9 +456,13 @@ impl ServerConnection {
             development,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         })
+    }
+    fn agent(&self) -> Option<&crate::protocol::AgentName> {
+        self.cli.as_ref().and_then(|cli| cli.agent.as_ref())
     }
     /// Whether this route has owning-machine local file authority.
     pub fn is_account_local(&self) -> bool {
@@ -411,26 +491,40 @@ impl ServerConnection {
                 return Err(ServerError::AuthenticationRefused);
             }
             // `with_direct` fixed the pin's build to this handle's identity.
-            let carrier = connection.admit((&direct.paired.client, &self.client_name()))?;
+            let carrier = connection.admit(protocol::Caller {
+                client: &direct.paired.client,
+                name: &self.client_name(),
+                agent: self.agent(),
+            })?;
             return Ok((
                 carrier,
-                self.scope_for(direct.paired.client, direct.paired.pin.server),
+                self.scope_for(
+                    self.effective_client(&direct.paired.client),
+                    direct.paired.pin.server,
+                ),
             ));
         }
         crate::service::check_admission(&self.paths, crate::service::OPERATION_LIMIT, cancelled)?;
         let mut stream = host::connect(&self.paths)?;
-        let client = self.client_id()?;
+        let base = self.base_client_id()?;
         let server = self.server_id()?;
         protocol::admit_client(
             &mut stream,
-            (&client, &self.client_name()),
+            protocol::Caller {
+                client: &base,
+                name: &self.client_name(),
+                agent: self.agent(),
+            },
             &server,
             &self.identity,
             &[protocol::MAJOR],
         )?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| ServerError::Protocol)?;
-        Ok((Box::new(carrier), self.scope_for(client, server)))
+        Ok((
+            Box::new(carrier),
+            self.scope_for(self.effective_client(&base), server),
+        ))
     }
     /// Opens a new connection of its own, separate from the shared one. `events` receives its
     /// pushed inventory and health. Dropping every handle of the link closes it.
@@ -564,7 +658,7 @@ impl ServerConnection {
         crate::client_view::retained_revision(
             &directory,
             direct.paired.pin.server,
-            direct.paired.client,
+            self.effective_client(&direct.paired.client),
         )
     }
     /// Removes the Workspace Inventory copy the paired route `route` retained, without network
@@ -598,7 +692,10 @@ impl ServerConnection {
         {
             return Err(ServerError::AuthenticationRefused);
         }
-        self.account = direct_account(&self.account, &route);
+        self.account = match &self.cli {
+            Some(cli) => cli.account(),
+            None => direct_account(&self.account, &route),
+        };
         self.direct = Some(std::sync::Arc::new(DirectRoute {
             id: route,
             paired,
@@ -609,7 +706,10 @@ impl ServerConnection {
             .direct
             .as_ref()
             .ok_or(ServerError::AuthenticationRefused)?;
-        self.bind_scope(self.scope_for(direct.paired.client, direct.paired.pin.server))?;
+        self.bind_scope(self.scope_for(
+            self.effective_client(&direct.paired.client),
+            direct.paired.pin.server,
+        ))?;
         Ok(self)
     }
     fn direct_manage(
@@ -811,7 +911,7 @@ mod tests {
                     sockets.send(stream.try_clone().unwrap()).unwrap();
                     let identity = identity.clone();
                     std::thread::spawn(move || {
-                        let (_, client, name) =
+                        let protocol::Admitted { client, name, .. } =
                             protocol::admit_server(&mut stream, &pin, &identity).unwrap();
                         let (sync, _) = crate::connection::sync::SyncWorker::spawn().unwrap();
                         let environment = host::Environment::for_tests(
@@ -1336,6 +1436,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
@@ -1373,6 +1474,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
@@ -1408,6 +1510,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };

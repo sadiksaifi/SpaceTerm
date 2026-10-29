@@ -304,6 +304,36 @@ impl State {
             )
             .map_err(|_| DirectError::Capacity)
     }
+    /// Records that `paired` admitted `agent`, before the agent's connection can create any
+    /// state, so revoking the pairing retires the agent too. Callers hold this lock through
+    /// [`Self::register`], so no revocation falls between the two.
+    pub(crate) fn admit_agent(
+        &mut self,
+        paired: &PairedDevice,
+        agent: &crate::protocol::AgentName,
+    ) -> Result<(), DirectError> {
+        self.authorized(paired)?;
+        let device = self
+            .record
+            .devices
+            .iter()
+            .find(|device| device.info.pairing == paired.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?;
+        if device.agents.contains(agent) {
+            return Ok(());
+        }
+        if device.agents.len() >= storage::MAX_AGENTS {
+            return Err(DirectError::Capacity);
+        }
+        let mut next = self.record.clone();
+        next.devices
+            .iter_mut()
+            .find(|device| device.info.pairing == paired.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?
+            .agents
+            .push(agent.clone());
+        self.commit(next)
+    }
     /// The enrolled public key of `paired`'s device.
     fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
         self.record
@@ -386,7 +416,7 @@ impl State {
         &mut self,
         actor: Option<PairingId>,
         request: Management,
-    ) -> Result<(ManagementReply, Option<[u8; 32]>), DirectError> {
+    ) -> Result<(ManagementReply, Vec<[u8; 32]>), DirectError> {
         // Only authenticated owning-account IPC grants administration authority.
         // Refuse before recovery, expiry or mutation can affect retained state.
         if actor.is_some()
@@ -576,6 +606,7 @@ impl State {
                         claim: operation,
                         info: info.clone(),
                         revoked: false,
+                        agents: Vec::new(),
                     });
                     self.commit(next)?;
                     if changed_policy && !self.widen() {
@@ -612,13 +643,13 @@ impl State {
                     let cancellation = crypto::hash(&wire::transcript(
                         "cancel", &self.pin, &operation, &pairing,
                     )?);
-                    let (_, client) = self.revoke(Some(pairing), cancellation, pairing)?;
+                    let (_, clients) = self.revoke(Some(pairing), cancellation, pairing)?;
                     return Ok((
                         ManagementReply::SetupCancelled {
                             pin: self.pin.clone(),
                             operation,
                         },
-                        Some(client),
+                        clients,
                     ));
                 }
                 self.cancel_reservation(operation, None, true)?;
@@ -649,7 +680,7 @@ impl State {
                 next.enabled = enabled;
                 self.commit(next)?;
                 if self.widen() {
-                    return Ok((ManagementReply::Status(self.status()), None));
+                    return Ok((ManagementReply::Status(self.status()), Vec::new()));
                 }
                 self.generation = generation;
                 // Network administration arrives only over IPC. Any other change retires all
@@ -765,6 +796,7 @@ impl State {
                     claim: claim.id,
                     info: info.clone(),
                     revoked: false,
+                    agents: Vec::new(),
                 });
                 self.commit(next)?;
                 self.claims[index].decision = Some(Ok(info.clone()));
@@ -791,11 +823,11 @@ impl State {
                     .collect(),
             ),
             Management::Revoke { operation, target } => {
-                let (receipt, client) = self.revoke(actor, operation, target)?;
-                return Ok((ManagementReply::Revoked(receipt), Some(client)));
+                let (receipt, clients) = self.revoke(actor, operation, target)?;
+                return Ok((ManagementReply::Revoked(receipt), clients));
             }
         };
-        Ok((reply, None))
+        Ok((reply, Vec::new()))
     }
     fn check_setup(
         &self,
@@ -870,7 +902,7 @@ impl State {
         actor: Option<PairingId>,
         operation: OperationId,
         target: PairingId,
-    ) -> Result<(RevocationReceipt, [u8; 32]), DirectError> {
+    ) -> Result<(RevocationReceipt, Vec<[u8; 32]>), DirectError> {
         if actor.is_some_and(|actor| actor != target) {
             return Err(DirectError::AuthenticationRefused);
         }
@@ -884,7 +916,7 @@ impl State {
             .iter()
             .find(|d| d.info.pairing == target)
             .ok_or(DirectError::AuthenticationRefused)?;
-        let client = device.info.client;
+        let clients = device.clients();
         let receipt = if let Some(original) = self
             .record
             .revocations
@@ -906,7 +938,7 @@ impl State {
                         operation,
                         target,
                     },
-                    client,
+                    clients,
                 ));
             }
             if let Some(actor) = actor {
@@ -943,7 +975,7 @@ impl State {
             receipt
         };
         self.connections.revoke(target);
-        Ok((receipt, client))
+        Ok((receipt, clients))
     }
     pub(super) fn challenge(&self) -> Result<wire::Challenge, DirectError> {
         if !matches!(self.listener_state, ListenerState::Listening { .. }) {
@@ -969,19 +1001,19 @@ impl State {
             proof,
         })
     }
-    /// Authenticates one pairing exchange, and names the client whose grants a revocation or
-    /// cancellation in it retired.
+    /// Authenticates one pairing exchange, and names the clients whose grants a revocation or
+    /// cancellation in it retired: the pairing's own and its agents'.
     pub(super) fn authenticate_and_resolve(
         &mut self,
         challenge: &wire::Challenge,
         authentication: &wire::Authentication,
-    ) -> (Result<wire::Answer, DirectError>, Option<[u8; 32]>) {
+    ) -> (Result<wire::Answer, DirectError>, Vec<[u8; 32]>) {
         let answer = self.authenticate(challenge, authentication);
         let retired = match &answer {
             Ok(wire::Answer::Revoked(receipt) | wire::Answer::Cancelled(Some(receipt))) => {
-                self.revocation_client(receipt.target)
+                self.revocation_clients(receipt.target)
             }
-            _ => None,
+            _ => Vec::new(),
         };
         (answer, retired)
     }
@@ -1188,12 +1220,14 @@ impl State {
             }
         }
     }
-    pub(crate) fn revocation_client(&self, target: PairingId) -> Option<[u8; 32]> {
+    /// The Client Identities a revocation of `target` retires: the pairing's own and its agents'.
+    pub(crate) fn revocation_clients(&self, target: PairingId) -> Vec<[u8; 32]> {
         self.record
             .devices
             .iter()
             .find(|d| d.info.pairing == target)
-            .map(|d| d.info.client)
+            .map(storage::Device::clients)
+            .unwrap_or_default()
     }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
@@ -1206,15 +1240,14 @@ impl State {
     }
     pub(crate) fn pending_releases(&mut self) -> Result<Vec<[u8; 32]>, DirectError> {
         self.recover()?;
-        let clients: Vec<_> = self
+        let devices: Vec<_> = self
             .record
             .devices
             .iter()
             .filter(|d| d.revoked && !self.released.contains(&d.info.client))
-            .map(|d| d.info.client)
             .collect();
-        self.released.extend(clients.iter().copied());
-        Ok(clients)
+        self.released.extend(devices.iter().map(|d| d.info.client));
+        Ok(devices.into_iter().flat_map(storage::Device::clients).collect())
     }
 }
 
@@ -1270,15 +1303,14 @@ pub(crate) fn serve(
         let (answer, retired) = if key == Some(device) {
             state.authenticate_and_resolve(&challenge, &authentication)
         } else {
-            (Err(DirectError::AuthenticationRefused), None)
+            (Err(DirectError::AuthenticationRefused), Vec::new())
         };
         drop(state);
-        if let Some(client) = retired {
-            environment
-                .panes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .revoked(client);
+        if !retired.is_empty() {
+            let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+            for client in retired {
+                panes.revoked(client);
+            }
         }
         answer
     };
@@ -1290,17 +1322,28 @@ pub(crate) fn serve(
         return Ok(());
     }
     let paired = paired.ok_or(ServerError::AuthenticationRefused)?;
-    let (_, client, name) = crate::protocol::admit_direct_server(&mut stream, &paired)?;
+    let crate::protocol::Admitted {
+        client,
+        agent,
+        name,
+        ..
+    } = crate::protocol::admit_direct_server(&mut stream, &paired)?;
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
-    state.lock().unwrap_or_else(|e| e.into_inner()).register(
-        &paired,
-        generation,
-        connection,
-        outbox.clone(),
-        Box::new(carrier.sever()),
-    )?;
+    {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(agent) = &agent {
+            state.admit_agent(&paired, agent)?;
+        }
+        state.register(
+            &paired,
+            generation,
+            connection,
+            outbox.clone(),
+            Box::new(carrier.sever()),
+        )?;
+    }
     // Unregisters when serving ends, also when it panics.
     let _registered = Registered {
         state: Arc::clone(&state),

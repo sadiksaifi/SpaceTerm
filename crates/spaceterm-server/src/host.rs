@@ -379,11 +379,11 @@ impl DirectManagement for HostDirect {
             .unwrap_or_else(|e| e.into_inner())
             .manage(actor, request);
         let (reply, retired) = result?;
-        if let Some(client) = retired {
-            self.panes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .revoked(client);
+        if !retired.is_empty() {
+            let mut panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+            for client in retired {
+                panes.revoked(client);
+            }
         }
         Ok(reply)
     }
@@ -778,7 +778,8 @@ fn serve_local(
     wake: Arc<dyn Wake>,
     environment: &Environment,
 ) -> Result<(), ServerError> {
-    let (_, client, name) = protocol::admit_server(&mut stream, &server, identity)?;
+    let protocol::Admitted { client, name, .. } =
+        protocol::admit_server(&mut stream, &server, identity)?;
     let peer = Peer {
         client,
         connection: protocol::random()?,

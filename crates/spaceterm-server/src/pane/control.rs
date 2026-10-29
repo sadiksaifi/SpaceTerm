@@ -40,6 +40,34 @@ impl ClientName {
     }
 }
 
+#[cfg(feature = "client")]
+impl ClientName {
+    /// The CLI's name: `<computer> CLI`, or `<computer> CLI <agent>`. Only the computer's name is
+    /// shortened to fit, so " CLI " and the agent name stay whole.
+    pub(crate) fn for_cli(
+        computer: &dyn crate::computer_name::ComputerName,
+        agent: Option<&crate::protocol::AgentName>,
+    ) -> Self {
+        let suffix = agent.map_or_else(|| " CLI".to_owned(), |agent| agent.name_suffix());
+        let budget = MAX_CLIENT_NAME_CHARS - suffix.chars().count();
+        let computer = computer
+            .computer_name()
+            .map(|name| Self::from(name).0)
+            .filter(|name| name != FALLBACK)
+            .unwrap_or_default();
+        let mut kept: Vec<char> = computer.chars().collect();
+        if kept.len() > budget {
+            kept.truncate(budget - 1);
+            while kept.last() == Some(&' ') {
+                kept.pop();
+            }
+            kept.push('\u{2026}');
+        }
+        let computer: String = kept.into_iter().collect();
+        Self::from(format!("{computer}{suffix}").trim_start())
+    }
+}
+
 impl From<String> for ClientName {
     fn from(value: String) -> Self {
         Self::from(value.as_str())
@@ -228,6 +256,32 @@ mod tests {
                 this_client: false
             },
             "the least recently admitted name is forgotten first"
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_cli_name_shortens_only_the_computer_and_keeps_the_agent_whole() {
+        struct Named(Option<&'static str>);
+        impl crate::computer_name::ComputerName for Named {
+            fn computer_name(&self) -> Option<String> {
+                self.0.map(str::to_owned)
+            }
+        }
+        let agent: crate::protocol::AgentName = "a".repeat(32).parse().unwrap();
+        let mac = Named(Some("Sadik’s MacBook Pro"));
+        assert_eq!(ClientName::for_cli(&mac, None).as_str(), "Sadik’s MacBook Pro CLI");
+        let name = ClientName::for_cli(&mac, Some(&agent));
+        assert_eq!(name.as_str().chars().count(), MAX_CLIENT_NAME_CHARS);
+        assert_eq!(
+            name.as_str(),
+            format!("Sadik’s Ma\u{2026} CLI {}", "a".repeat(32))
+        );
+        assert_eq!(received(name.as_str()), name.as_str(), "the server keeps it unchanged");
+        let short: crate::protocol::AgentName = "agent-1".parse().unwrap();
+        assert_eq!(
+            ClientName::for_cli(&Named(None), Some(&short)).as_str(),
+            "CLI agent-1"
         );
     }
 }
