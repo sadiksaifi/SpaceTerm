@@ -833,3 +833,49 @@ fn run_at_prompt_with(
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// A stale inventory must ask the caller to resolve again, without suggesting a takeover.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn list_maps_a_stale_observation_to_changed() {
+    let mut server = Server::start();
+    let link = server.connect(1);
+    let (workspace, pane) = workspace(&link, 1);
+    let target = target(workspace, pane, false);
+    let done = run_at_prompt(&link, &target, "true", &mut runs());
+    assert!(done.failure.is_none(), "{:?}", done.failure);
+    let (_, revision) = link.next_inventory(0).unwrap();
+    let mut inventory = revision.inventory.clone();
+    inventory
+        .close
+        .as_mut()
+        .unwrap()
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == pane)
+        .unwrap()
+        .session = Some([99; 32]);
+    let snapshot = crate::scope::Snapshot {
+        server: SERVER,
+        repositories: inventory.repositories.clone(),
+        inventory,
+    };
+    let resolved = crate::scope::resolve(
+        &snapshot,
+        &crate::scope::ScopeArgs::default(),
+        None,
+        crate::scope::Want::Server,
+        crate::scope::Effect::Passive,
+    )
+    .unwrap();
+    let failure = crate::list::collect(
+        &snapshot,
+        &resolved,
+        [1; 32],
+        &link,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .err()
+    .expect("a stale observation fails");
+    assert_eq!(failure.code, Code::Changed);
+}

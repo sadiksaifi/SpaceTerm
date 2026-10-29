@@ -67,7 +67,12 @@ pub fn collect(
                 let reply = match request
                     .wait_for(deadline.saturating_duration_since(std::time::Instant::now()))
                 {
-                    Some(reply) => reply.map_err(|e| from_server_error(e.into()))?,
+                    Some(reply) => reply.map_err(|error| match error {
+                        spaceterm_server::connection::link::RequestError::Refused(
+                            spaceterm_server::pane::Refusal::Stale,
+                        ) => Failure::new(Code::Changed),
+                        error => from_server_error(error.into()),
+                    })?,
                     None => {
                         request.cancel();
                         return Err(Failure::new(Code::Timeout));
