@@ -31,7 +31,7 @@ impl LaunchAgent {
         })
     }
     fn contents(&self, runtime: &Path) -> Result<Vec<u8>, ServerError> {
-        let executable = runtime.join("bin/spaceterm-server");
+        let executable = runtime.join("bin/spaceterm");
         let executable = executable.to_str().ok_or(ServerError::RuntimeUnavailable)?;
         let executable = executable
             .replace('&', "&amp;")
@@ -43,7 +43,7 @@ impl LaunchAgent {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>{}</string>
-<key>ProgramArguments</key><array><string>{executable}</string><string>service-serve</string><string>{}</string></array>
+<key>ProgramArguments</key><array><string>{executable}</string><string>server</string><string>run</string><string>--service</string><string>--identity</string><string>{}</string></array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ProcessType</key><string>Interactive</string>
@@ -68,7 +68,7 @@ impl LaunchAgent {
         let expected = format!(
             "\"Program\" = \"{}\";",
             runtime
-                .join("bin/spaceterm-server")
+                .join("bin/spaceterm")
                 .to_str()
                 .ok_or(ServerError::UnsafeStorage)?
                 .replace('\\', "\\\\")
@@ -270,7 +270,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/bin/spaceterm-server\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/approved-fixture/bin/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Ok(true)
         );
@@ -278,7 +278,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/other-fixture/bin/spaceterm-server\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/other-fixture/bin/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Err(ServerError::CleanupUnresolved)
         );
@@ -286,7 +286,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/bin/spaceterm-server\";\n"
+                b"\"Program\" = \"/approved-fixture/bin/spaceterm\";\n"
             ),
             Ok(false)
         );
@@ -330,7 +330,7 @@ mod tests {
         };
         let runtime = fixture.root.join("runtime");
         std::fs::create_dir_all(runtime.join("bin")).unwrap();
-        let executable = runtime.join("bin/spaceterm-server");
+        let executable = runtime.join("bin/spaceterm");
         std::fs::write(
             &executable,
             "#!/bin/sh\ncd -- \"$(dirname -- \"$0\")/../..\" || exit 1\n\

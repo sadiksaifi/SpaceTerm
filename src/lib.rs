@@ -29,30 +29,12 @@ pub fn run_desktop() {
             return;
         }
         [argument] if argument == "--help" => {
-            println!(
-                "Usage: {} [--version | --build-info | --help | service-COMMAND IDENTITY]\n\n{}",
-                std::env::args()
-                    .next()
-                    .unwrap_or_else(|| "spaceterm".to_owned()),
-                spaceterm_server::service::control::cli::help(identity.directory_name())
-            );
+            println!("Usage: spaceterm-desktop [--version | --build-info | --help]");
             return;
         }
-        // The service-control fallback for a session without the client or a status area. It
-        // runs before any window system, so it works over SSH and without a display.
         [command, ..] if command.as_encoded_bytes().starts_with(b"service-") => {
-            let code = match spaceterm_server::service::control::cli::run(
-                identity.directory_name(),
-                &arguments,
-                &mut std::io::stdout().lock(),
-            ) {
-                Ok(code) => code.into(),
-                Err(error) => {
-                    eprintln!("{error}");
-                    1
-                }
-            };
-            std::process::exit(code);
+            eprintln!("Invalid arguments. Use spaceterm server --help.");
+            std::process::exit(2);
         }
         _ => {}
     }
