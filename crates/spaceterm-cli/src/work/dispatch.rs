@@ -1,31 +1,118 @@
-//! The one mutation boundary. Its implementation owns sequence allocation, durable journals,
-//! leftover settlement and acknowledgement under one writer lock.
-use crate::contract::{Failure, RecoveredOperation};
-use spaceterm_server::{
-    ServerConnection,
-    hierarchy::{Id, Mutation, Outcome},
+//! The one mutation boundary. The journal owns sequence allocation, recovery and
+//! acknowledgement under one writer lock.
+use crate::{
+    contract::{Code, Failure, RecoveredOperation, from_server_error},
+    journal::{self, Editor},
+    state::{CliState, RouteKey},
 };
+use spaceterm_server::{
+    ServerConnection, ServerError,
+    connection::link::ServerLink,
+    hierarchy::{Id, Mutation, Outcome},
+    protocol::AgentName,
+};
+use std::time::Instant;
 
 pub trait Dispatch {
     fn server_id(&self) -> Id;
     fn client_id(&self) -> Id;
     fn resolve_leftovers(&mut self) -> Result<Vec<RecoveredOperation>, Failure>;
-    /// Returns only after retirement and acknowledgement, or a typed unconfirmed outcome.
     fn submit(&mut self, mutation: Mutation) -> Result<Outcome, Failure>;
 }
 
-/// Stream D supplies the concrete single-lock adapter. No other B code opens a journal or
-/// takes the identity's writer lock.
 pub struct Configuration<'a> {
     pub identity: &'a str,
-    pub route: crate::state::RouteKey,
-    pub agent: Option<&'a spaceterm_server::protocol::AgentName>,
-    pub deadline: std::time::Instant,
+    pub route: RouteKey,
+    pub agent: Option<&'a AgentName>,
+    pub deadline: Instant,
+    pub mutating: bool,
 }
 
-pub fn open(
-    _connection: &ServerConnection,
-    _configuration: &Configuration<'_>,
-) -> Result<Box<dyn Dispatch>, Failure> {
-    Err(Failure::new(crate::contract::Code::Unsupported))
+type Connect<'a> = dyn FnMut(Option<&AgentName>) -> Result<ServerConnection, ServerError> + 'a;
+
+pub fn open<'a>(
+    connection: &'a ServerConnection,
+    link: &'a ServerLink,
+    configuration: &Configuration<'_>,
+    connect: &'a mut Connect<'a>,
+) -> Result<Box<dyn Dispatch + 'a>, Failure> {
+    Ok(Box::new(Journal {
+        server: connection.admitted_server_id().map_err(from_server_error)?,
+        client: connection.admitted_client_id().map_err(from_server_error)?,
+        state: CliState::open(configuration.identity).map_err(from_server_error)?,
+        route: configuration.route,
+        agent: configuration.agent.cloned(),
+        connection,
+        link,
+        connect,
+        deadline: configuration.deadline,
+        mutating: configuration.mutating,
+        editor: None,
+        settled: false,
+    }))
+}
+
+struct Journal<'a> {
+    server: Id,
+    client: Id,
+    state: CliState,
+    route: RouteKey,
+    agent: Option<AgentName>,
+    connection: &'a ServerConnection,
+    link: &'a ServerLink,
+    connect: &'a mut Connect<'a>,
+    deadline: Instant,
+    mutating: bool,
+    editor: Option<Editor<'a>>,
+    settled: bool,
+}
+
+impl Dispatch for Journal<'_> {
+    fn server_id(&self) -> Id {
+        self.server
+    }
+    fn client_id(&self) -> Id {
+        self.client
+    }
+    fn resolve_leftovers(&mut self) -> Result<Vec<RecoveredOperation>, Failure> {
+        if self.settled {
+            return Ok(Vec::new());
+        }
+        let recovered = if self.mutating {
+            let editor = Editor::open(
+                &self.state,
+                self.route,
+                self.agent.as_ref(),
+                self.connection,
+                self.link,
+                &mut *self.connect,
+                self.deadline,
+            )?;
+            let recovered = editor.recovered().to_vec();
+            self.editor = Some(editor);
+            recovered
+        } else {
+            journal::settle(
+                &self.state,
+                &self.route,
+                journal::Current {
+                    agent: self.agent.as_ref(),
+                    connection: self.connection,
+                    link: self.link,
+                    writer: None,
+                },
+                &mut *self.connect,
+                self.deadline,
+            )?
+        };
+        self.settled = true;
+        Ok(recovered)
+    }
+    fn submit(&mut self, mutation: Mutation) -> Result<Outcome, Failure> {
+        let editor = self
+            .editor
+            .as_mut()
+            .ok_or_else(|| Failure::new(Code::ProtocolError))?;
+        Ok(editor.mutate(mutation, self.deadline)?.outcome.outcome)
+    }
 }

@@ -97,20 +97,26 @@ fn local(cli: &Cli) -> Output {
             });
         }
     };
+    let mut connect = |agent: Option<&AgentName>| {
+        ServerConnection::for_cli(identity, CliRoute::Local, agent.cloned())
+    };
     let mut journal = match dispatch::open(
         &connection,
+        &link,
         &dispatch::Configuration {
             identity,
             route: crate::state::RouteKey::Local,
             agent: agent.as_ref(),
             deadline,
+            mutating: !matches!(cli.command, Command::List(_)),
         },
+        &mut connect,
     ) {
         Ok(j) => j,
         Err(e) => return failed(e),
     };
     let mut reader = Connected {
-        link,
+        link: link.clone(),
         actor: journal.client_id(),
         deadline,
     };
