@@ -1,8 +1,8 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
 use spaceterm_server::hierarchy::{
-    CloseInventory, ConfirmedControl, ConfirmedPane, CreateControl, Id, Inventory, Mutation, Outcome,
-    RetainedOutcome, State,
+    CloseInventory, ConfirmedControl, ConfirmedPane, CreateControl, Id, Inventory, Mutation,
+    Outcome, RetainedOutcome, State,
 };
 use spaceterm_server::protocol::PaneEvent;
 use std::collections::{BTreeMap, BTreeSet};

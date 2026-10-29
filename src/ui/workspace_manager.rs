@@ -43,8 +43,8 @@ use crate::close_confirmation::{
 };
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    PaneId, PinnedDirectory, RemoteConnectionPhase, TabId, ValidatedLocalDirectory, WorkspaceCollection,
-    WorkspaceEntry, WorkspaceError, WorkspaceId,
+    PaneId, PinnedDirectory, RemoteConnectionPhase, TabId, ValidatedLocalDirectory,
+    WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::window_movement::{
@@ -4649,7 +4649,10 @@ impl WorkspaceManager {
         else {
             return;
         };
-        if !manager.read(cx).presents_shared_pane(reveal.target.pane, cx) {
+        if !manager
+            .read(cx)
+            .presents_shared_pane(reveal.target.pane, cx)
+        {
             return;
         }
         self.pending_reveal = None;

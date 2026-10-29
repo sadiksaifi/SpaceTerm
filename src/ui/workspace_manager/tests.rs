@@ -11716,7 +11716,9 @@ mod shared_repositories {
                 harness.manager.update(cx, |manager, cx| {
                     manager.activate_workspace(harness.shared, window, cx);
                 });
-                tabs.update(cx, |tabs, cx| tabs.open_accepted_shared(ROOT_PANE, window, cx));
+                tabs.update(cx, |tabs, cx| {
+                    tabs.open_accepted_shared(ROOT_PANE, window, cx)
+                });
             });
             cx.run_until_parked();
             (harness, cx)
@@ -11727,11 +11729,7 @@ mod shared_repositories {
             tabs.read_with(cx, |tabs, cx| tabs.focused_server_pane(cx))
         }
 
-        fn reveal(
-            harness: &Harness,
-            origin: (TabId, PaneId),
-            cx: &mut VisualTestContext,
-        ) {
+        fn reveal(harness: &Harness, origin: (TabId, PaneId), cx: &mut VisualTestContext) {
             cx.update(|window, cx| {
                 harness.manager.update(cx, |manager, cx| {
                     manager.request_reveal(harness.shared, origin, TARGET, window, cx);
@@ -11741,14 +11739,17 @@ mod shared_repositories {
         }
 
         #[gpui::test]
-        fn a_reveal_from_the_focused_pane_opens_its_target_once_published(
-            cx: &mut TestAppContext,
-        ) {
+        fn a_reveal_from_the_focused_pane_opens_its_target_once_published(cx: &mut TestAppContext) {
             let (harness, cx) = opened(cx);
             assert_eq!(focused(&harness, cx), Some(ROOT_PANE));
-            let origin = tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            let origin =
+                tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
             reveal(&harness, origin, cx);
-            assert_eq!(focused(&harness, cx), Some(ROOT_PANE), "it waits for publication");
+            assert_eq!(
+                focused(&harness, cx),
+                Some(ROOT_PANE),
+                "it waits for publication"
+            );
             harness.publish(with_new_tab(), cx);
             assert_eq!(focused(&harness, cx), Some(NEW_PANE));
         }
@@ -11760,7 +11761,9 @@ mod shared_repositories {
             let origin = tabs.read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
             reveal(&harness, origin, cx);
             cx.update(|window, cx| {
-                tabs.update(cx, |tabs, cx| tabs.open_accepted_shared(FEATURE_PANE, window, cx));
+                tabs.update(cx, |tabs, cx| {
+                    tabs.open_accepted_shared(FEATURE_PANE, window, cx)
+                });
             });
             cx.run_until_parked();
             harness.publish(with_new_tab(), cx);
@@ -11772,7 +11775,8 @@ mod shared_repositories {
         #[gpui::test]
         fn a_reveal_from_another_pane_is_dropped(cx: &mut TestAppContext) {
             let (harness, cx) = opened(cx);
-            let (tab, pane) = tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            let (tab, pane) =
+                tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
             let other = PaneId::new(pane.get().wrapping_add(1000));
             reveal(&harness, (tab, other), cx);
             harness.publish(with_new_tab(), cx);

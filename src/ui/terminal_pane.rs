@@ -226,7 +226,9 @@ pub(crate) enum TerminalPaneEvent {
     TitleChanged(SharedString),
     CaptionChanged,
     SurfaceBackgroundChanged,
-    AttentionChanged { unread_count: u32 },
+    AttentionChanged {
+        unread_count: u32,
+    },
     Exited,
     /// The server created work for this Pane's Controlling Client from this Pane's Terminal
     /// Session, and asks to show it.

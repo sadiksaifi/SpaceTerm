@@ -97,7 +97,10 @@ impl LocalTerminalLaunchPlan {
     }
 
     /// A server's Terminal Session, whose shell learns where it runs.
-    pub fn in_session(mut self, session: crate::platform::shell_launch::SessionEnvironment) -> Self {
+    pub fn in_session(
+        mut self,
+        session: crate::platform::shell_launch::SessionEnvironment,
+    ) -> Self {
         self.session = Some(session);
         self
     }

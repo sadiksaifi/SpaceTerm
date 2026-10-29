@@ -37,7 +37,8 @@ impl NativeEffects {
         let now = std::time::Instant::now();
         self.server.retain(|(_, deadline)| *deadline > now);
         if self.server.len() < 8 {
-            self.server.push_back((effect, now + SERVER_EFFECT_LIFETIME));
+            self.server
+                .push_back((effect, now + SERVER_EFFECT_LIFETIME));
         }
     }
     pub(super) fn push(&mut self, request: ClientEffectRequest) {

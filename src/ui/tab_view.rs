@@ -419,9 +419,16 @@ fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TabViewEvent {
-    UserClosePaneRequested { tab_id: TabId, pane_id: PaneId },
-    CloseTabRequested { tab_id: TabId },
-    PresentationChanged { tab_id: TabId },
+    UserClosePaneRequested {
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
+    CloseTabRequested {
+        tab_id: TabId,
+    },
+    PresentationChanged {
+        tab_id: TabId,
+    },
     /// This Tab's Focused Pane asked to show work the server created for it.
     RevealRequested {
         tab_id: TabId,

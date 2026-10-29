@@ -312,9 +312,16 @@ impl TabChromePresentation {
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TabManagerEvent {
-    ClosePaneRequested { tab_id: TabId, pane_id: PaneId },
-    CloseTabRequested { tab_id: TabId },
-    FinalTabCloseRequested { final_tab_id: TabId },
+    ClosePaneRequested {
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
+    CloseTabRequested {
+        tab_id: TabId,
+    },
+    FinalTabCloseRequested {
+        final_tab_id: TabId,
+    },
     PresentationChanged,
     /// The Active Tab's Focused Pane asked to show work the server created for it.
     RevealRequested {
