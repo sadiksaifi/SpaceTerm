@@ -46,27 +46,42 @@ fn trailing_reserve(appearance: &ChromeAppearance, cx: &App) -> Pixels {
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceChromeLayout {
     pub(super) width: Pixels,
+    /// Where the toggle and the switcher end. Beside a Workspace identity they span the chrome.
+    /// Without one the switcher is an icon button, so beside a hidden sidebar they end at that
+    /// button rather than where an identity's chip would.
+    controls_width: Pixels,
     /// How much of the collapsed Workspace identity shows, from 0 beside a shown sidebar to 1
-    /// once it is hidden.
+    /// once it is hidden. Without an identity none ever shows.
     identity_presence: f32,
     fullscreen: bool,
     client_controls_width: Pixels,
 }
 
 impl WorkspaceChromeLayout {
+    /// The layout the chrome rests at. `identity` is the Active Workspace's, or `None` while the
+    /// window presents no Workspace.
     pub(super) fn resolve(
         sidebar: SidebarLayout,
-        identity: &WorkspaceChromeIdentity,
+        identity: Option<&WorkspaceChromeIdentity>,
         window: &Window,
         cx: &App,
     ) -> Self {
+        let width = if sidebar.visible {
+            sidebar.width
+        } else {
+            Self::collapsed_width(identity.unwrap_or(&EMPTY_IDENTITY), window, cx)
+        };
         Self {
-            width: if sidebar.visible {
-                sidebar.width
-            } else {
-                Self::collapsed_width(identity, window, cx)
+            width,
+            controls_width: match identity {
+                None if !sidebar.visible => Self::plain_collapsed_width(window, cx),
+                _ => width,
             },
-            identity_presence: if sidebar.visible { 0.0 } else { 1.0 },
+            identity_presence: if sidebar.visible || identity.is_none() {
+                0.0
+            } else {
+                1.0
+            },
             fullscreen: window.is_fullscreen(),
             client_controls_width: spaceterm_ui::ClientWindowControls::width(
                 spaceterm_ui::WindowControlSide::Left,
@@ -78,19 +93,49 @@ impl WorkspaceChromeLayout {
 
     /// The layout one frame presents while the sidebar `frame` moves: as wide as the part of the
     /// sidebar that shows, with as much of the collapsed Workspace identity as the sidebar hides.
+    /// Without an identity the switcher slides as an icon button between the sidebar's edge and
+    /// the toggle.
     pub(super) fn presented(
         sidebar: SidebarLayout,
         frame: SidebarFrame,
-        identity: &WorkspaceChromeIdentity,
+        identity: Option<&WorkspaceChromeIdentity>,
         window: &Window,
         cx: &App,
     ) -> Self {
-        let collapsed = Self::collapsed_width(identity, window, cx);
-        Self {
-            width: frame.between(collapsed, sidebar.width),
-            identity_presence: 1.0 - frame.reveal,
-            ..Self::resolve(sidebar, identity, window, cx)
+        let resting = Self::resolve(sidebar, identity, window, cx);
+        let collapsed = Self::collapsed_width(identity.unwrap_or(&EMPTY_IDENTITY), window, cx);
+        let width = frame.between(collapsed, sidebar.width);
+        match identity {
+            Some(_) => Self {
+                width,
+                controls_width: width,
+                identity_presence: 1.0 - frame.reveal,
+                ..resting
+            },
+            None => Self {
+                width,
+                controls_width: frame
+                    .between(Self::plain_collapsed_width(window, cx), sidebar.width),
+                ..resting
+            },
         }
+    }
+
+    /// Where the toggle and the switcher end, measured from the window's leading edge.
+    pub(super) fn controls_width(self) -> Pixels {
+        self.controls_width
+    }
+
+    /// The bottom of the toggle and the icon-button switcher, which center in the band beneath
+    /// the window edge.
+    pub(super) fn controls_bottom(cx: &App) -> Pixels {
+        let appearance = chrome(cx);
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        let height = cx
+            .global::<ButtonTheme>()
+            .icon_button_size(TOGGLE_SIZE)
+            .max(cx.global::<ComboBoxTheme>().icon_trigger_size());
+        frame.window_edge() + (frame.top_band_height(appearance.top_height()) + height) / 2.0
     }
 
     /// How much of the collapsed Workspace identity shows, from 0 beside a shown sidebar, where
@@ -204,11 +249,25 @@ impl WorkspaceChromeLayout {
         window: &Window,
         cx: &App,
     ) -> Pixels {
-        let appearance = chrome(cx);
         let chrome_theme = cx.global::<ComboBoxTheme>();
         let (identity_width, _, content_fixed) = Self::identity_widths(identity, window, cx);
         let content_width =
             spaceterm_ui::reserve_measured_width(px(0.0), [identity_width, content_fixed], window);
+        Self::collapsed_width_around(
+            chrome_theme.custom_trigger_width(content_width, window),
+            window,
+            cx,
+        )
+    }
+
+    /// Where the controls end beside a hidden sidebar when the switcher is an icon button.
+    fn plain_collapsed_width(window: &Window, cx: &App) -> Pixels {
+        Self::collapsed_width_around(cx.global::<ComboBoxTheme>().icon_trigger_size(), window, cx)
+    }
+
+    /// The collapsed chrome's width with a switcher `switcher_width` wide.
+    fn collapsed_width_around(switcher_width: Pixels, window: &Window, cx: &App) -> Pixels {
+        let appearance = chrome(cx);
         let edge_reserve = trailing_reserve(appearance, cx);
         let client_controls_width = spaceterm_ui::ClientWindowControls::width(
             spaceterm_ui::WindowControlSide::Left,
@@ -233,7 +292,7 @@ impl WorkspaceChromeLayout {
                 edge_reserve,
                 edge_reserve,
                 cx.global::<ButtonTheme>().icon_button_size(TOGGLE_SIZE),
-                chrome_theme.custom_trigger_width(content_width, window),
+                switcher_width,
             ],
             window,
         )
@@ -276,7 +335,7 @@ impl WorkspaceChromeLayout {
             })
             // Whichever control ends the top-left chrome stops where a selected sidebar row's chip
             // stops, so the identity area and the list under it share one trailing edge.
-            .right(edge_reserve)
+            .right(self.width - self.controls_width + edge_reserve)
             .flex()
             .items_center()
             // The toggle keeps the frame's edge air on its right as well, in every mode, so it
@@ -438,6 +497,14 @@ impl WorkspaceChromeStatus {
         )
     }
 }
+
+/// The identity whose collapsed width the chrome takes while the window presents no Workspace.
+static EMPTY_IDENTITY: WorkspaceChromeIdentity = WorkspaceChromeIdentity {
+    name: String::new(),
+    worktree: None,
+    pinned: false,
+    status: None,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkspaceChromeIdentity {

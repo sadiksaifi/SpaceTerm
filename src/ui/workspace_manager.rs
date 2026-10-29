@@ -795,7 +795,7 @@ impl WorkspaceManager {
         };
         let chrome = WorkspaceChromeLayout::resolve(
             self.sidebar.read(cx).layout(),
-            &self.chrome_identity(workspace_id, cx),
+            Some(&self.chrome_identity(workspace_id, cx)),
             window,
             cx,
         );
@@ -2417,18 +2417,11 @@ impl WorkspaceManager {
         }
     }
 
-    /// The Active Workspace's chrome identity, or an empty one while the window presents no
-    /// Workspace.
-    fn active_chrome_identity(&self, cx: &App) -> WorkspaceChromeIdentity {
-        match self.workspaces.active_workspace_id() {
-            Some(workspace_id) => self.chrome_identity(workspace_id, cx),
-            None => WorkspaceChromeIdentity {
-                name: String::new(),
-                worktree: None,
-                pinned: false,
-                status: None,
-            },
-        }
+    /// The Active Workspace's chrome identity, or `None` while the window presents no Workspace.
+    fn active_chrome_identity(&self, cx: &App) -> Option<WorkspaceChromeIdentity> {
+        self.workspaces
+            .active_workspace_id()
+            .map(|workspace_id| self.chrome_identity(workspace_id, cx))
     }
 
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
@@ -2564,6 +2557,8 @@ impl WorkspaceManager {
             },
         )
         .handle(self.workspace_switcher.clone())
+        // Beside a shown sidebar, and always without a Workspace, the switcher is a Ghost icon
+        // button like the sidebar toggle.
         .when(presence == 0.0, |chooser| chooser.ghost_trigger())
         .when(presence > 0.0, |chooser| {
             // The chip's surface fades with the identity it holds.
@@ -4951,9 +4946,15 @@ impl WorkspaceManager {
         // create or arrange Workspaces that cannot exist yet.
         let recovery = self.startup_recovery();
         let identity = self.active_chrome_identity(cx);
-        let resting_chrome = WorkspaceChromeLayout::resolve(sidebar_layout, &identity, window, cx);
-        let chrome =
-            WorkspaceChromeLayout::presented(sidebar_layout, sidebar_frame, &identity, window, cx);
+        let resting_chrome =
+            WorkspaceChromeLayout::resolve(sidebar_layout, identity.as_ref(), window, cx);
+        let chrome = WorkspaceChromeLayout::presented(
+            sidebar_layout,
+            sidebar_frame,
+            identity.as_ref(),
+            window,
+            cx,
+        );
         let update_control = gpui::AnyView::from(self.update_control.clone());
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
@@ -4976,9 +4977,10 @@ impl WorkspaceManager {
             }
             None => self.render_empty_workspace(
                 (!recovery).then_some(empty::EmptySidebar {
-                    width: sidebar_layout.width,
                     reveal: sidebar_frame.reveal,
                     top_chrome_width: chrome.width,
+                    controls_width: chrome.controls_width(),
+                    controls_bottom: WorkspaceChromeLayout::controls_bottom(cx),
                 }),
                 update_control,
                 close,

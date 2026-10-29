@@ -35,9 +35,11 @@ pub(super) const OFFLINE_TITLE: &str = "Server Not Connected";
 
 /// Where the sidebar stands while the empty view lays out beside it.
 pub(super) struct EmptySidebar {
-    pub(super) width: Pixels,
     pub(super) reveal: f32,
     pub(super) top_chrome_width: Pixels,
+    /// Where the top-left chrome's toggle and switcher end, and how far down they reach.
+    pub(super) controls_width: Pixels,
+    pub(super) controls_bottom: Pixels,
 }
 
 impl WorkspaceManager {
@@ -71,9 +73,10 @@ impl WorkspaceManager {
             .background;
         let recovery = sidebar.is_none();
         let sidebar = sidebar.unwrap_or(EmptySidebar {
-            width: px(0.0),
             reveal: 0.0,
             top_chrome_width: px(0.0),
+            controls_width: px(0.0),
+            controls_bottom: px(0.0),
         });
         // The stage's leading edge follows the sidebar as it shows or hides.
         let hidden_inset = frame.stage_leading_inset(false);
@@ -113,6 +116,21 @@ impl WorkspaceManager {
         }
         let band_free = band.reveal * sidebar.reveal;
         let stage_top = frame.stage_top_inset(appearance.top_height(), band_free);
+        // The stage's top-left corner travels beside the switcher, a frame space after it, while
+        // its top edge is level with the controls. Its top edge eases with the sidebar, and only
+        // once it has dropped below the controls does the corner ease on to the window's edge,
+        // so the stage never passes under the switcher.
+        let below = frame.stage_top_inset(appearance.top_height(), 0.0);
+        let clear = ((below - sidebar.controls_bottom)
+            / (below - frame.stage_top_inset(appearance.top_height(), 1.0)))
+        .clamp(0.0, 1.0);
+        let beside_controls = if clear > 0.0 {
+            let progress = (sidebar.reveal / clear).min(1.0);
+            progress * progress * (3.0 - 2.0 * progress)
+        } else {
+            1.0
+        };
+        let stage_leading = sidebar.controls_width * beside_controls;
         let band = WindowDragRegion::new(
             "empty-workspace-drag-region",
             "Move Window",
@@ -191,7 +209,7 @@ impl WorkspaceManager {
             .min_w_0()
             .min_h_0()
             .relative()
-            .ml(sidebar.width * sidebar.reveal)
+            .ml(stage_leading)
             .border_color(stage_color)
             .border_b(frame.window_edge_inset())
             .border_r(frame.window_edge_inset())

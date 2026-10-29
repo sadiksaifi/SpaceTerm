@@ -11306,6 +11306,133 @@ fn the_empty_stage_should_reach_the_window_top_when_no_tab_strip_holds_the_band(
     );
 }
 
+#[gpui::test]
+fn the_empty_views_workspace_switcher_should_slide_with_the_sidebar_like_its_toggle(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+    let surface = |selector: &'static str, cx: &mut VisualTestContext| {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        let painted = cx.update(|window, _| {
+            let scaled = bounds.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| quad.bounds.intersect(&quad.content_mask.bounds) == scaled)
+                .map(|quad| quad.background)
+        });
+        (bounds, painted)
+    };
+    // With no Workspace there is no label or Tab strip for a chip to match, so the switcher
+    // looks like the sidebar toggle beside it.
+    let plain = |cx: &mut VisualTestContext| {
+        let (switcher, painted) = surface("workspace-switcher", cx);
+        let (toggle_bounds, toggle) = surface("toggle-sidebar-button", cx);
+        assert_eq!(
+            (painted, switcher.size),
+            (toggle, toggle_bounds.size),
+            "the switcher must look like the sidebar toggle"
+        );
+        switcher
+    };
+    let shown = plain(cx);
+    let sidebar = cx
+        .debug_bounds("workspace-sidebar")
+        .expect("the sidebar starts shown");
+    assert_eq!(
+        shown.right() + frame_space(cx),
+        sidebar.right(),
+        "beside a shown sidebar the switcher ends at the sidebar's edge"
+    );
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+    });
+    finish_slides(cx);
+    let hidden = plain(cx);
+    let toggle = cx.debug_bounds("toggle-sidebar-button").unwrap();
+    assert_eq!(
+        hidden.left() - toggle.right(),
+        frame_space(cx),
+        "beside a hidden sidebar the switcher follows the toggle"
+    );
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for showing in [true, false] {
+        let resting = cx.debug_bounds("empty-workspace-pane").unwrap();
+        let mut tops = vec![resting.top()];
+        let mut leading = vec![resting.left()];
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        cx.run_until_parked();
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            let switcher = plain(cx);
+            let reveal = cx
+                .debug_bounds("workspace-sidebar")
+                .map_or(0.0, |drawn| 1.0 + drawn.left() / drawn.size.width);
+            let expected = hidden.left() + (shown.left() - hidden.left()) * reveal;
+            assert!(
+                (switcher.left() - expected).abs() <= px(1.0) && switcher.top() == shown.top(),
+                "the switcher must slide with the sidebar: {switcher:?} at reveal {reveal}"
+            );
+            let pane = cx
+                .debug_bounds("empty-workspace-pane")
+                .expect("the stage draws an empty Pane");
+            assert!(
+                !pane.intersects(&switcher),
+                "the stage must not pass under the switcher: {pane:?} and {switcher:?}"
+            );
+            tops.push(pane.top());
+            leading.push(pane.left());
+        }
+        // Each edge eases on the sidebar's curve, which starts quickly, so no frame may carry
+        // more than a third of the travel.
+        for edge in [&tops, &leading] {
+            let travel = (edge[edge.len() - 1] - edge[0]).abs();
+            let largest_step = edge
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(px(0.0), Pixels::max);
+            assert!(
+                travel > px(0.0) && largest_step < travel / 3.0,
+                "the stage's edge must ease, not jump, while showing is {showing}: {edge:?}"
+            );
+        }
+        assert_eq!(
+            cx.debug_bounds("workspace-sidebar").is_some(),
+            showing,
+            "the sidebar must have settled"
+        );
+    }
+
+    let hovered = |selector: &'static str, cx: &mut VisualTestContext| {
+        let center = cx.debug_bounds(selector).unwrap().center();
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        crate::ui::settle_hover(cx);
+        surface(selector, cx).1
+    };
+    let switcher = hovered("workspace-switcher", cx);
+    assert!(switcher.is_some(), "the switcher needs hover feedback");
+    assert_eq!(
+        switcher,
+        hovered("toggle-sidebar-button", cx),
+        "the switcher must hover like the sidebar toggle"
+    );
+}
+
 /// One shared Workspace with a Tab in each of two Worktrees, its Git facts published by the
 /// server, beside the local Workspace the window keeps active.
 mod shared_repositories {
