@@ -2742,7 +2742,7 @@ mod tests {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());
-            let sibling = fixture.root.join("spaceterm-server");
+            let sibling = fixture.root.join("spaceterm");
             std::fs::write(&sibling, b"unverified sibling").unwrap();
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())
