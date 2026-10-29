@@ -14,8 +14,8 @@ use super::service::{DirectManagement, Dispatch, PaneService, Peer};
 use super::sync::SyncWorker;
 use crate::protocol::frame::Assembler;
 use crate::protocol::{
-    Channel, Claim, ClaimReply, ClientMessage, EffectDone, Fatal, Input, Operation, RawFrame,
-    Refusal, ReplyBody, Request, RequestId, View, limits,
+    Channel, ClaimReply, ClientMessage, EffectDone, Fatal, Input, ObserveReply, Operation,
+    RawFrame, Refusal, ReplyBody, Request, RequestId, View, limits,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -95,30 +95,18 @@ impl AdmittedConnection {
         Ok(match message {
             ClientMessage::Request(request) => {
                 self.outbox.begin(request.id)?;
-                // Major 4 operations that this server does not serve yet.
-                if matches!(
-                    request.operation,
-                    Operation::Observe { .. }
-                        | Operation::Run { .. }
-                        | Operation::RunStatus { .. }
-                        | Operation::RunAcknowledge { .. }
-                        | Operation::Claim(Claim { size: None, .. })
-                ) {
-                    self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
-                    return Ok(None);
-                }
-                if let Operation::Claim(claim) = &request.operation {
-                    if claim.channel.0 <= self.highest_channel {
+                if let Some(channel) = introduced(&request.operation) {
+                    if channel.0 <= self.highest_channel {
                         return Err(Fatal::ProtocolViolation);
                     }
-                    self.highest_channel = claim.channel.0;
+                    self.highest_channel = channel.0;
                     // Too many open channels refuse this claim only; every other channel of the
                     // connection keeps working.
                     if self.serials.len() >= limits::MAX_CHANNELS {
                         self.outbox.reply(request.id, Err(Refusal::Capacity))?;
                         return Ok(None);
                     }
-                    self.serials.insert(claim.channel, 0);
+                    self.serials.insert(channel, 0);
                 }
                 if self.peer.paired() && administration(&request.operation) {
                     self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
@@ -217,14 +205,15 @@ impl AdmittedConnection {
         match inbound {
             Inbound::Request(request) => {
                 let Request { id, operation } = *request;
-                let claim = match &operation {
-                    Operation::Claim(claim) => Some(claim.channel),
-                    _ => None,
-                };
+                let introduced = introduced(&operation);
                 match service.request(peer, id, operation) {
                     Dispatch::Reply(result) => {
-                        if let Some(channel) = claim
-                            && !matches!(*result, Ok(ReplyBody::Claim(ClaimReply::Attached { .. })))
+                        if let Some(channel) = introduced
+                            && !matches!(
+                                *result,
+                                Ok(ReplyBody::Claim(ClaimReply::Attached { .. })
+                                    | ReplyBody::Observe(ObserveReply::Observing { .. }))
+                            )
                         {
                             self.serials.remove(&channel);
                         }
@@ -262,6 +251,15 @@ impl AdmittedConnection {
             },
             Check::Dead(death) => Err(death),
         }
+    }
+}
+
+/// The channel a claim or an observation introduces.
+fn introduced(operation: &Operation) -> Option<Channel> {
+    match operation {
+        Operation::Claim(claim) => Some(claim.channel),
+        Operation::Observe { channel, .. } => Some(*channel),
+        _ => None,
     }
 }
 

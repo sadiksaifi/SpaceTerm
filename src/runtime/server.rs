@@ -116,7 +116,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod directory_tests;
 mod dispatch;
-pub use dispatch::{HostCommands, HostRead, RunRequest, Served, SettledRead};
+pub use dispatch::{HostCommands, HostRead, Observers, RunRequest, Served, SettledRead};
 pub use publish::{Observation, Observed};
 pub use screen_encoder::ScreenCapture;
 #[cfg(test)]
@@ -124,6 +124,8 @@ pub use screen_encoder::ScreenCapture;
 mod effect_tests;
 mod effects;
 use self::effects::NativeEffects;
+#[cfg(test)]
+mod agent_io_tests;
 mod graphics;
 #[cfg(test)]
 mod graphics_tests;
@@ -132,6 +134,7 @@ mod input_tests;
 mod metadata;
 #[cfg(test)]
 mod metadata_tests;
+mod observe;
 mod pane_host;
 #[cfg(test)]
 mod pane_host_tests;
@@ -140,8 +143,6 @@ mod repositories;
 #[cfg(test)]
 #[path = "server/repository_tests.rs"]
 mod repository_tests;
-#[cfg(test)]
-mod run_tests;
 mod screen;
 pub(crate) mod screen_encoder;
 #[cfg(test)]
@@ -223,6 +224,8 @@ struct OwnedPane {
     graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
     /// Whether the controlling client shows this Pane, so its Terminal Session publishes frames.
     presentable: bool,
+    /// Whether an observer shows this Pane, which also makes its Terminal Session publish.
+    observed: bool,
     ended: bool,
     /// Why the shell's exit keeps the Pane. `None` with `ended` closes the Pane.
     end: Option<pane::SessionEnd>,

@@ -241,7 +241,7 @@ impl OwnedPane {
     pub(super) fn view(&mut self, visible: bool, max_hz: u8) {
         if self.presentable != visible {
             self.presentable = visible;
-            self.runtime.set_presentable(visible);
+            self.apply_presentable();
             if !visible {
                 self.runtime.end_server_accessibility_demand();
             }

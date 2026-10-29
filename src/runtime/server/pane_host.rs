@@ -169,6 +169,7 @@ impl DevelopmentPaneHost {
             screen: None,
             graphics_transfer: None,
             presentable: true,
+            observed: false,
             ended: false,
             end: None,
             failed: false,
@@ -374,7 +375,7 @@ impl DevelopmentPaneHost {
 impl OwnedPane {
     pub(super) fn invalidate_input(&mut self) {
         self.presentable = false;
-        self.runtime.set_presentable(false);
+        self.apply_presentable();
         self.graphics_transfer = None;
         self.accessibility.disconnect();
         self.runtime.end_server_accessibility_demand();
@@ -718,7 +719,7 @@ impl OwnedPane {
         self.lease.connection = connection;
         self.connected = true;
         self.presentable = true;
-        self.runtime.set_presentable(true);
+        self.apply_presentable();
         self.runtime.resize(geometry(size));
         self.size = size;
         if let Some(appearance) = appearance {

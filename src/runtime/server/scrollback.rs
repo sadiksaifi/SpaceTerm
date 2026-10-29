@@ -47,7 +47,11 @@ impl OwnedPane {
     /// Starts reading the page. `reply` runs exactly once, on the terminal worker: with the page,
     /// or `Refusal::Stale` when the epoch ended or the alternate screen hides history. Rows the
     /// engine already discarded are left out, so the page may start later than requested.
-    fn scrollback_page(&self, read: ScrollbackRead, reply: PageReply) -> Result<(), Refusal> {
+    pub(super) fn scrollback_page(
+        &self,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
         if self.ended || self.failed {
             return Err(Refusal::Missing);
         }

@@ -1372,6 +1372,67 @@ impl HostCommands for SharedWorkspaceHost {
     ) -> Result<(), Refusal> {
         self.retire_run(device, run)
     }
+    fn observe_start(
+        &mut self,
+        pane: Id,
+        session: Option<Id>,
+    ) -> Result<spaceterm_server::protocol::ObserveReply, Refusal> {
+        if let Some(host) = self.panes.get_mut(&pane) {
+            return host.observe_start(session);
+        }
+        // A Pane whose shell never started has no host yet.
+        let known = self.state.inventory.workspaces.iter().any(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .any(|tab| tab.panes.iter().any(|candidate| candidate.id == pane))
+        });
+        match (known, session) {
+            (true, None) => Ok(spaceterm_server::protocol::ObserveReply::NoSession {
+                state: spaceterm_server::protocol::SessionState::NotStarted,
+            }),
+            (true, Some(_)) => Err(Refusal::Stale),
+            (false, _) => Err(Refusal::Missing),
+        }
+    }
+    fn observe_session(&mut self, pane: Id, session: Id) -> super::publish::Observed {
+        match self.panes.get_mut(&pane) {
+            Some(host) => host.observe_session(session),
+            None => super::publish::Observed::Gone {
+                last: None,
+                event: PaneEvent::Ended,
+            },
+        }
+    }
+    fn observer_live(&self, pane: Id, session: Id) -> bool {
+        self.panes
+            .get(&pane)
+            .is_some_and(|host| host.observer_live(session))
+    }
+    fn observer_scrollback_page(
+        &mut self,
+        pane: Id,
+        session: Id,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        self.panes
+            .get_mut(&pane)
+            .ok_or(Refusal::Missing)?
+            .observer_scrollback_page(session, read, reply)
+    }
+    fn observers(&mut self, observers: &BTreeMap<Id, super::Observers>) {
+        for host in self.panes.values_mut() {
+            if let Some(session) = host.pane.as_ref().map(|pane| pane.lease.session) {
+                host.set_observed(
+                    session,
+                    observers
+                        .get(&session)
+                        .is_some_and(|observers| observers.visible),
+                );
+            }
+        }
+    }
     fn take_settled_runs(&mut self) -> Vec<spaceterm_server::pane::run::Settled> {
         self.drain_settled_runs()
     }

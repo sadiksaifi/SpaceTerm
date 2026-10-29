@@ -1,5 +1,5 @@
-//! `pane run` through the protocol, on real headless PTYs running each installed shell with
-//! SpaceTerm shell integration. Shells that are not installed are skipped.
+//! `pane run` and observation through the protocol, on real headless PTYs. Runs use each installed
+//! shell with SpaceTerm shell integration; shells that are not installed are skipped.
 use super::dispatch::Served;
 use super::tests::{create_shared, shared_inventory, size};
 use super::*;
@@ -10,6 +10,7 @@ use spaceterm_server::protocol::{
     self, Channel, ClaimReply, InputEvent, Operation, PaneEvent, ReplyBody, RequestId, RunDoubt,
     RunId, RunReceipt, RunRefusal, RunReply, RunState, ServerMessage, frame::Assembler,
 };
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 const AGENT: Peer = Peer {
@@ -532,4 +533,313 @@ fn a_run_that_exits_its_shell_settles_as_session_ended() {
         ),
         "unexpected {receipt:?}"
     );
+}
+
+/// One connection, and what it received on each channel.
+struct Client {
+    peer: Peer,
+    outbox: Outbox,
+    assembler: Assembler,
+    rows: BTreeMap<Channel, Vec<String>>,
+    events: Vec<(Channel, PaneEvent)>,
+    pages: usize,
+}
+
+impl Client {
+    fn admit(served: &mut Served<SharedWorkspaceHost>, peer: Peer, name: &str) -> Self {
+        let outbox = Outbox::new(Arc::new(|| {}));
+        served.admitted(&peer, name.into(), outbox.clone());
+        Self {
+            peer,
+            outbox,
+            assembler: Assembler::default(),
+            rows: BTreeMap::new(),
+            events: Vec::new(),
+            pages: 0,
+        }
+    }
+
+    fn reply(
+        &self,
+        served: &mut Served<SharedWorkspaceHost>,
+        operation: Operation,
+    ) -> Result<ReplyBody, Refusal> {
+        match served.request(&self.peer, RequestId(1), operation) {
+            Dispatch::Reply(result) => *result,
+            _ => panic!("the operation replies at once"),
+        }
+    }
+
+    fn show(&self, served: &mut Served<SharedWorkspaceHost>, channel: Channel, visible: bool) {
+        self.outbox.view(channel, visible);
+        served.view(
+            &self.peer,
+            protocol::View {
+                channel,
+                visible,
+                max_hz: 60,
+            },
+        );
+    }
+
+    fn pump(&mut self, served: &mut Served<SharedWorkspaceHost>) {
+        if self.outbox.take_publication() {
+            served.publish(&self.peer);
+        }
+        while let Some((frame, _)) = self.outbox.next_frame() {
+            let frame = protocol::RawFrame::parse(&frame).unwrap();
+            match self.assembler.server(frame).unwrap() {
+                Some(ServerMessage::Frame(frame)) => {
+                    let rows = self.rows.entry(frame.channel).or_default();
+                    if let Some(geometry) = frame.update.geometry
+                        && rows.len() != usize::from(geometry.rows)
+                    {
+                        *rows = vec![String::new(); usize::from(geometry.rows)];
+                    }
+                    if let Some(shift) = frame.update.shift {
+                        shift.apply(rows, String::new).unwrap();
+                    }
+                    for row in &frame.update.rows {
+                        rows[usize::from(row.index)] =
+                            row.runs.iter().map(|run| run.text.as_str()).collect();
+                    }
+                    self.outbox.acknowledge(frame.channel, frame.frame).unwrap();
+                }
+                Some(ServerMessage::Pane(message)) => {
+                    self.events.push((message.channel, message.event));
+                }
+                Some(ServerMessage::Reply(reply)) => match reply.result {
+                    Ok(ReplyBody::Page(_)) => self.pages += 1,
+                    other => panic!("unexpected reply {other:?}"),
+                },
+                _ => {}
+            }
+        }
+    }
+
+    fn shows(&self, channel: Channel, text: &str) -> bool {
+        self.rows
+            .get(&channel)
+            .is_some_and(|rows| rows.iter().any(|row| row.contains(text)))
+    }
+}
+
+fn pump_until(
+    served: &mut Served<SharedWorkspaceHost>,
+    clients: &mut [&mut Client],
+    done: impl Fn(&[&mut Client]) -> bool,
+) {
+    let deadline = Instant::now() + DEADLINE;
+    while !done(clients) {
+        assert!(
+            Instant::now() < deadline,
+            "the condition never held; screens: {:?}; events: {:?}",
+            clients
+                .iter()
+                .map(|client| &client.rows)
+                .collect::<Vec<_>>(),
+            clients
+                .iter()
+                .map(|client| &client.events)
+                .collect::<Vec<_>>()
+        );
+        served.tick(Instant::now());
+        for client in clients.iter_mut() {
+            client.pump(served);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The Pane's creator controls it; another client observes it.
+const CONTROLLER: Peer = Peer {
+    client: [1; 32],
+    connection: [3; 32],
+    pairing: None,
+};
+const OBSERVER: Peer = Peer {
+    client: [2; 32],
+    connection: [4; 32],
+    pairing: None,
+};
+
+/// An observer sees a Pane another client controls, even while that client hides it, and never
+/// changes its size, control or effects. Its channel refuses input and every terminal command,
+/// reads Scrollback, and ends with Release or with the Session.
+#[test]
+fn observing_a_controlled_pane_changes_nothing_about_it() {
+    let mut shared = SharedWorkspaceHost::new(super::tests::host());
+    let workspace = create_shared(&mut shared, 1);
+    let pane = shared_inventory(&mut shared)
+        .workspaces
+        .iter()
+        .find(|candidate| candidate.id == workspace)
+        .and_then(|workspace| workspace.tabs.first())
+        .and_then(|tab| tab.panes.first())
+        .unwrap()
+        .id;
+    let mut served = Served::new(shared);
+    served.ticker(Arc::new(|| {}));
+    let mut person = Client::admit(&mut served, CONTROLLER, "Person");
+    let mut agent = Client::admit(&mut served, OBSERVER, "Agent");
+    let observed_before = agent.reply(
+        &mut served,
+        Operation::Observe {
+            channel: Channel(1),
+            pane,
+            session: None,
+        },
+    );
+    assert!(matches!(
+        observed_before,
+        Ok(ReplyBody::Observe(protocol::ObserveReply::NoSession {
+            state: protocol::SessionState::NotStarted
+        }))
+    ));
+
+    let claimed = person.reply(
+        &mut served,
+        Operation::Claim(protocol::Claim {
+            channel: CHANNEL,
+            attachment: Attachment {
+                workspace,
+                generation: 1,
+            },
+            pane,
+            claim: AttachmentClaim::Select { explicit: true },
+            size: size(),
+            style: None,
+        }),
+    );
+    let Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) = claimed else {
+        panic!("the person claims the Pane")
+    };
+    person.show(&mut served, CHANNEL, true);
+    served.input(
+        &CONTROLLER,
+        protocol::Input {
+            channel: CHANNEL,
+            serial: 1,
+            generation: 1,
+            events: vec![InputEvent::Focus(FocusTarget::Terminal)],
+        },
+    );
+
+    let observed = agent.reply(
+        &mut served,
+        Operation::Observe {
+            channel: Channel(2),
+            pane,
+            session: Some(lease.session),
+        },
+    );
+    assert!(matches!(
+        observed,
+        Ok(ReplyBody::Observe(protocol::ObserveReply::Observing { session, .. }))
+            if session == lease.session
+    ));
+    agent.show(&mut served, Channel(2), true);
+    // The person hides the Pane; the visible observer still receives its frames.
+    person.show(&mut served, CHANNEL, false);
+    served.input(
+        &CONTROLLER,
+        protocol::Input {
+            channel: CHANNEL,
+            serial: 2,
+            generation: 1,
+            events: vec![text("printf 'OBS-%s\\a\\n' seen\r")],
+        },
+    );
+    pump_until(&mut served, &mut [&mut person, &mut agent], |clients| {
+        clients[1].shows(Channel(2), "OBS-seen")
+    });
+
+    // Every terminal command on the observer channel is refused; input is discarded.
+    for operation in [
+        Operation::ClearScrollback {
+            channel: Channel(2),
+        },
+        Operation::Close {
+            channel: Channel(2),
+        },
+        Operation::EndAccessibility {
+            channel: Channel(2),
+        },
+    ] {
+        assert!(matches!(
+            agent.reply(&mut served, operation),
+            Err(Refusal::Unsupported)
+        ));
+    }
+    served.input(
+        &OBSERVER,
+        protocol::Input {
+            channel: Channel(2),
+            serial: 1,
+            generation: 1,
+            events: vec![InputEvent::Resize(PaneSize {
+                columns: 40,
+                ..size()
+            })],
+        },
+    );
+    agent.pump(&mut served);
+    assert!(
+        agent
+            .events
+            .iter()
+            .any(|(channel, event)| *channel == Channel(2)
+                && matches!(
+                    event,
+                    PaneEvent::Input {
+                        outcome: protocol::InputOutcome::Discarded(Refusal::Unsupported),
+                        ..
+                    }
+                ))
+    );
+    assert!(
+        !agent
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, PaneEvent::Effect(_))),
+        "an observer receives no effects"
+    );
+    assert_eq!(
+        served.host().running_lease(pane),
+        Some(lease),
+        "control and Session are unchanged"
+    );
+    assert_eq!(served.host().running_size(pane), Some(size()));
+
+    // Scrollback pages answer on the observer channel.
+    agent.outbox.begin(RequestId(2)).unwrap();
+    assert!(matches!(
+        served.request(
+            &OBSERVER,
+            RequestId(2),
+            Operation::ScrollbackPage {
+                channel: Channel(2),
+                epoch: 1,
+                start: 0,
+                rows: 10,
+            },
+        ),
+        Dispatch::Deferred
+    ));
+    pump_until(&mut served, &mut [&mut agent], |clients| {
+        clients[0].pages == 1
+    });
+
+    // Release ends only the observation.
+    assert!(matches!(
+        agent.reply(
+            &mut served,
+            Operation::Release {
+                channel: Channel(2)
+            }
+        ),
+        Ok(ReplyBody::Done)
+    ));
+    assert_eq!(served.host().running_lease(pane), Some(lease));
+    served.shutdown().unwrap();
 }
