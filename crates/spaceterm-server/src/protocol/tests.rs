@@ -412,6 +412,7 @@ fn inventory() -> hierarchy::Inventory {
         current_directory: current,
         repository_directory: None,
         presentation: None,
+        observers: Default::default(),
         confirmed_directory: Some(PathBuf::from("/home/a")),
         creator: Some([9; 32]),
     };
@@ -629,6 +630,28 @@ fn every_server_message_round_trips() {
     })));
     server_round_trip(ServerMessage::Ping(Ping { nonce: 1 }));
     server_round_trip(ServerMessage::Pong(Pong { nonce: 1 }));
+}
+
+#[test]
+fn inventory_bounds_observer_names_and_preserves_the_overflow_count() {
+    let mut inventory = inventory();
+    inventory.workspaces[0].tabs[0].panes[0].observers = hierarchy::PaneObservers {
+        names: vec!["Build CLI".into(), "Review CLI".into(), "Test CLI".into()],
+        others: 7,
+    };
+    let mut message = ServerMessage::Inventory(Box::new(InventoryRevision {
+        inventory,
+        next_sequence: 9,
+    }));
+    server_round_trip(message.clone());
+    let ServerMessage::Inventory(revision) = &mut message else {
+        unreachable!()
+    };
+    revision.inventory.workspaces[0].tabs[0].panes[0]
+        .observers
+        .names
+        .push("Fourth CLI".into());
+    assert!(message.validate().is_err());
 }
 
 #[test]

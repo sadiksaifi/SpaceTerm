@@ -321,6 +321,8 @@ impl ServerMessage {
                 for pane in panes {
                     count += 1;
                     check(count <= crate::hierarchy::MAX_PANES)?;
+                    check(pane.observers.names.len() <= crate::hierarchy::MAX_OBSERVER_NAMES)?;
+                    check(!pane.observers.names.is_empty() || pane.observers.others == 0)?;
                     if let Some(snapshot) = &pane.presentation {
                         check(snapshot.validate().is_ok())?;
                     }

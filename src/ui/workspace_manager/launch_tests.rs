@@ -47,6 +47,7 @@ fn inventory() -> Inventory {
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator: None,
                 }],
@@ -1772,6 +1773,7 @@ fn with_hidden_tab(
             current_directory: None,
             repository_directory: None,
             presentation: presentation.map(Box::new),
+            observers: Default::default(),
             confirmed_directory: None,
             creator: None,
         }],
@@ -1907,6 +1909,7 @@ fn with_detached_workspace() -> Inventory {
         current_directory: None,
         repository_directory: None,
         presentation: presentation.map(Box::new),
+        observers: Default::default(),
         confirmed_directory: None,
         creator: None,
     };

@@ -235,6 +235,17 @@ pub struct Tab {
     pub root_pane: Id,
     pub panes: Vec<Pane>,
 }
+/// How many observer Client Names accompany a Pane's live inventory.
+pub const MAX_OBSERVER_NAMES: usize = 3;
+
+/// Distinct clients with open observer channels. Normal desktop presentation is not observation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneObservers {
+    pub names: Vec<crate::pane::control::ClientName>,
+    /// Clients beyond the names above, independent of their number of channels.
+    pub others: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pane {
     pub id: Id,
@@ -248,6 +259,8 @@ pub struct Pane {
     pub repository_directory: Option<PathBuf>,
     /// Current presentation for every authorized client, independent of Pane control or visibility.
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
+    /// Live observation presence, excluded from retained Organization.
+    pub observers: PaneObservers,
     pub confirmed_directory: Option<PathBuf>,
     /// The creator reserves control even before measured first use starts a shell.
     pub creator: Option<Id>,
@@ -462,6 +475,7 @@ impl State {
                         p.current_directory = None;
                         p.repository_directory = None;
                         p.presentation = None;
+                        p.observers = PaneObservers::default();
                     }
                 }
             }
@@ -519,6 +533,7 @@ impl State {
                             current_directory: None,
                             repository_directory: None,
                             presentation: None,
+                            observers: Default::default(),
                             confirmed_directory: org.confirmed_directory.clone(),
                             creator: None,
                         }],
@@ -570,6 +585,7 @@ impl State {
             pane.current_directory = None;
             pane.repository_directory = None;
             pane.presentation = None;
+            pane.observers = PaneObservers::default();
         }
         org.shared = Some(Box::new(retained));
         Ok(org)
@@ -673,6 +689,7 @@ impl State {
                 current_directory: None,
                 repository_directory: None,
                 presentation: None,
+                observers: Default::default(),
                 confirmed_directory: None,
                 creator,
             }],
@@ -892,6 +909,7 @@ impl State {
                             current_directory: None,
                             repository_directory: None,
                             presentation: None,
+                            observers: Default::default(),
                             confirmed_directory: None,
                             creator,
                         }],
@@ -953,6 +971,7 @@ impl State {
                         current_directory: None,
                         repository_directory: None,
                         presentation: None,
+                        observers: Default::default(),
                         confirmed_directory: None,
                         creator,
                     }],
@@ -1007,6 +1026,7 @@ impl State {
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator,
                 });
@@ -1345,6 +1365,8 @@ impl State {
                     if p.id == [0; 32]
                         || !ids.insert(p.id)
                         || p.source.is_some_and(|id| !preceding.contains(&id))
+                        || p.observers.names.len() > MAX_OBSERVER_NAMES
+                        || (p.observers.names.is_empty() && p.observers.others != 0)
                         || p.presentation
                             .as_ref()
                             .is_some_and(|snapshot| snapshot.validate().is_err())
@@ -2743,6 +2765,15 @@ mod tests {
                 |_| true,
             )
             .unwrap();
+        state.inventory.workspaces[0].tabs[0].panes[0].observers = PaneObservers {
+            names: vec!["Observer CLI".into()],
+            others: 4,
+        };
+        let envelope = state.envelope("/tmp".as_ref()).unwrap();
+        assert_eq!(
+            envelope.shared.unwrap().inventory.workspaces[0].tabs[0].panes[0].observers,
+            PaneObservers::default()
+        );
         let bytes = serde_json::to_vec(&state).unwrap();
         let mut same_boot: State = serde_json::from_slice(&bytes).unwrap();
         same_boot.begin_boot([7; 32]);
@@ -2752,6 +2783,10 @@ mod tests {
         );
         let mut next_boot: State = serde_json::from_slice(&bytes).unwrap();
         next_boot.begin_boot([8; 32]);
+        assert_eq!(
+            next_boot.inventory.workspaces[0].tabs[0].panes[0].observers,
+            PaneObservers::default()
+        );
         assert_eq!(
             next_boot.inventory.workspaces[0].tabs[0].panes[0].creator,
             None
