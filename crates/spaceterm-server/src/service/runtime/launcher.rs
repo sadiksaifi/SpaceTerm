@@ -73,15 +73,15 @@ pub(super) fn remove(home: &Path, identity: &str, installations: &Path) -> Resul
     if !parent.exists() {
         return Ok(());
     }
-    let directory = owned_directory(&parent)?;
     let launcher = parent.join(identity);
-    if std::fs::read_link(&launcher).is_ok_and(|target| managed(&target, installations)) {
-        std::fs::remove_file(&launcher).map_err(|_| ServerError::StorageUnavailable)?;
-        directory
-            .sync_all()
-            .map_err(|_| ServerError::StorageUnavailable)?;
+    if !std::fs::read_link(&launcher).is_ok_and(|target| managed(&target, installations)) {
+        return Ok(());
     }
-    Ok(())
+    let directory = owned_directory(&parent)?;
+    std::fs::remove_file(&launcher).map_err(|_| ServerError::StorageUnavailable)?;
+    directory
+        .sync_all()
+        .map_err(|_| ServerError::StorageUnavailable)
 }
 
 #[cfg(test)]
@@ -133,5 +133,15 @@ mod tests {
         assert!(!select(&home, "spaceterm-development", &installations, &first).unwrap());
         remove(&home, "spaceterm-development", &installations).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"local tool");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o775),
+        )
+        .unwrap();
+        remove(&home, "spaceterm-development", &installations).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"local tool");
+        std::fs::remove_file(&path).unwrap();
+        remove(&home, "spaceterm-development", &installations).unwrap();
     }
 }
