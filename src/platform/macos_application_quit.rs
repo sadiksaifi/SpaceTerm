@@ -130,6 +130,14 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         self.install_on_delegate((*delegate).as_ref(), handler)
     }
 
+    /// Takes the keyboard even while another app is in front, as the warning shown by itself does.
+    /// The activation policy does not change.
+    fn take_keyboard(&self, _: &mut gpui::App) {
+        if let Some(mtm) = MainThreadMarker::new() {
+            self.activation.request(mtm);
+        }
+    }
+
     /// An installed build focuses the default Quit button for both Return and Space. A
     /// Development run's quit ends its Terminal Sessions, so it focuses the safe Cancel and Return
     /// quits nothing.

@@ -871,6 +871,9 @@ fn present_quit_prompt(
             (host.into(), QuitPromptPlace::Host(host))
         }
     };
+    // The menu bar item can ask while another app is in front, and a window made key there
+    // receives no keys until the client takes the keyboard.
+    adapter.take_keyboard(cx);
     let answer = window.update(cx, |_, window, cx| {
         window.activate_window();
         adapter.present_confirmation(prompt, window, cx)
@@ -1654,6 +1657,7 @@ mod tests {
     use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
 
     use super::*;
+    use crate::platform::application_quit::testing::AskingOnWindow;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
     use crate::terminal::{SelectionCopy, TerminalSessionFactory, WorkspaceTerminalSessionFactory};
     use crate::ui::TerminalPane;
@@ -1812,6 +1816,11 @@ mod tests {
         assert!(dock.borrow().is_empty(), "the client never joins the Dock");
     }
 
+    /// The coordinator takes the keyboard before it makes the window key and presents the
+    /// warning on it, because the menu bar item can ask while another app is in front.
+    const ASKING_ON_A_WINDOW: [AskingOnWindow; 2] =
+        [AskingOnWindow::TookKeyboard, AskingOnWindow::Presented];
+
     #[gpui::test]
     fn exit_with_a_window_open_asks_on_that_window(cx: &mut TestAppContext) {
         let (quit, dock) = windowless_client_asking_alone(cx);
@@ -1823,6 +1832,7 @@ mod tests {
                 cx.has_pending_prompt(),
                 "the warning is a sheet on the window"
             );
+            assert_eq!(quit.take_asking_on_window(), ASKING_ON_A_WINDOW);
             assert!(quit.windowless_prompts().is_empty());
             assert_eq!(
                 cx.update(|cx| cx.windows().len()),
@@ -1860,6 +1870,25 @@ mod tests {
         assert_eq!(quit.confirmations(), 0);
         assert!(cx.update(|cx| cx.windows().is_empty()));
         assert!(dock.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn development_notice_on_a_window_takes_the_keyboard_first(cx: &mut TestAppContext) {
+        let (quit, _) = windowless_client_asking_alone(cx);
+        cx.add_window(|_, _| gpui::EmptyView);
+        let coordinator =
+            development_coordinator(&quit, vec![Err(spaceterm_server::ServerError::NotRunning)]);
+        cx.update(|cx| coordinator.exit(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.pending_prompt().unwrap().0,
+            "Couldn\u{2019}t check Terminal Sessions"
+        );
+        assert!(quit.windowless_prompts().is_empty());
+        assert_eq!(quit.take_asking_on_window(), ASKING_ON_A_WINDOW);
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
     }
 
     type QuitReading =

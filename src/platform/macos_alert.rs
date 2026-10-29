@@ -40,7 +40,8 @@ pub(super) fn application_alert(
     alert
 }
 
-/// How the client takes the keyboard before it shows an alert by itself.
+/// How the client takes the keyboard before it shows an alert by itself or a sheet on one of its
+/// windows.
 #[derive(Clone, Copy)]
 pub(super) struct AlertActivation(fn(&NSApplication));
 
@@ -53,6 +54,10 @@ impl AlertActivation {
         #[allow(deprecated)]
         application.activateIgnoringOtherApps(true);
     });
+
+    pub(super) fn request(self, mtm: MainThreadMarker) {
+        (self.0)(&NSApplication::sharedApplication(mtm));
+    }
 }
 
 /// Activates the client through `activation`, then runs `alert` app-modally until it ends and
@@ -84,7 +89,7 @@ pub(super) fn run_modal_alert(
         NSRunLoop::currentRunLoop()
             .performInModes_block(&NSArray::from_slice(&[NSModalPanelRunLoopMode]), &started);
     }
-    (activation.0)(&NSApplication::sharedApplication(alert.mtm()));
+    activation.request(alert.mtm());
     alert.runModal()
 }
 

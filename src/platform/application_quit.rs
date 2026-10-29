@@ -209,6 +209,11 @@ pub(crate) trait ApplicationQuitAdapter {
 
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
 
+    /// Takes the keyboard from the app in front before a warning appears on one of the client's
+    /// windows, so the warning receives its keys. The menu bar item can ask while another app is
+    /// in front. Hosts whose windows take the keyboard as they come forward need nothing.
+    fn take_keyboard(&self, _cx: &mut App) {}
+
     /// Asks the quit warning in `window`. Installed builds default to Quit. A destructive
     /// Development exit focuses Cancel, and Escape always cancels.
     fn present_confirmation(
@@ -253,9 +258,18 @@ pub(crate) mod testing {
         /// Warnings asked by themselves, oldest first, each with the channel that answers it.
         /// `None` for a host that shows the warning only in a window.
         windowless: Option<RefCell<Vec<WindowlessPrompt>>>,
+        /// Each step of asking on a window, oldest first.
+        on_window: RefCell<Vec<AskingOnWindow>>,
     }
 
     type WindowlessPrompt = (QuitPrompt, async_channel::Sender<QuitAnswer>);
+
+    /// A step the coordinator takes to ask on one of the client's windows.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum AskingOnWindow {
+        TookKeyboard,
+        Presented,
+    }
 
     impl RecordingApplicationQuitAdapter {
         pub(crate) fn with_last_window_policy(policy: LastWindowPolicy) -> Self {
@@ -298,6 +312,11 @@ pub(crate) mod testing {
             }
         }
 
+        /// The steps taken to ask on a window since the last call, oldest first.
+        pub(crate) fn take_asking_on_window(&self) -> Vec<AskingOnWindow> {
+            self.on_window.take()
+        }
+
         pub(crate) fn requests(&self) -> usize {
             self.requests.get()
         }
@@ -332,6 +351,22 @@ pub(crate) mod testing {
             }
             *installed = Some(handler);
             Ok(())
+        }
+
+        fn take_keyboard(&self, _: &mut App) {
+            self.on_window
+                .borrow_mut()
+                .push(AskingOnWindow::TookKeyboard);
+        }
+
+        fn present_confirmation(
+            &self,
+            prompt: &QuitPrompt,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> Task<Option<QuitAnswer>> {
+            self.on_window.borrow_mut().push(AskingOnWindow::Presented);
+            present_window_quit(prompt, window, cx)
         }
 
         fn present_windowless_confirmation(
