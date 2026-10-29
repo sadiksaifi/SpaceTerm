@@ -145,15 +145,28 @@ impl Service {
     /// A preview is retained for ten minutes. Neither preview nor retention starts a server.
     #[cfg(feature = "client")]
     pub fn uninstall_cli(&self, confirmation: Option<&str>) -> Result<CliUninstall, ServerError> {
+        // Admission waits for the service lock, so establish this passive link first.
+        let initial = self.passive_status()?;
+        let link = if initial.running {
+            Some(
+                crate::ServerConnection::for_cli(&self.identity, crate::CliRoute::Local, None)?
+                    .link()?,
+            )
+        } else {
+            None
+        };
         let data = Directory::open(&self.paths.data, true)?;
         let _operation = data.lock("service.lock", false)?;
         data.verify_path(&self.paths.data)?;
         let state = Self::state(&data)?;
         let status = self.passive_status()?;
-        let sessions = if status.running {
-            let client =
-                crate::ServerConnection::for_cli(&self.identity, crate::CliRoute::Local, None)?;
-            let link = client.link()?;
+        if status.running != initial.running {
+            return Err(ServerError::Changed);
+        }
+        let sessions = if let Some(link) = link {
+            if !matches!(link.health(), crate::connection::link::Health::Live) {
+                return Err(ServerError::Changed);
+            }
             let (_, revision) = link.next_inventory(0).map_err(|_| ServerError::Protocol)?;
             let close = revision
                 .inventory
@@ -185,7 +198,7 @@ impl Service {
                 return Err(ServerError::Changed);
             }
             data.remove(c"cli-uninstall.json")?;
-        } else if !sessions.is_empty() {
+        } else if status.running {
             let token = format!(
                 "c1-{}",
                 crate::protocol::random()?
