@@ -1,0 +1,9 @@
+# Observe Panes without taking control
+
+`pane read` opens an Observation for every Pane, including one the caller controls. An observer channel receives screen frames and Scrollback without claiming control, resizing, starting a shell, focusing another client or receiving native effects. It can page history, declare a view and acknowledge frames. Input, resize, focus, style, Scrollback clearing, close and accessibility operations are refused on that channel. Release closes the channel.
+
+A Pane without a running Terminal Session returns its not-started or ended state. Reading starts no replacement Session. Taking Over a Pane leaves observations open; pairing revocation closes that pairing's observations. [ADR 0022](0022-give-one-client-control-of-each-pane.md) owns the observer caption and its distinction from control.
+
+A capture freezes one history boundary and screen frame. Its opaque cursors bind the server, Pane, Terminal Session, history epoch and row. A cursor from another target or Session is refused. Discarded history reports a gap; an epoch change reports a reset. Byte and row caps never advance a forward cursor past omitted rows. Captures report coalescing and contain text or synthesized SGR, without OSC sequences, hyperlinks or clipboard data.
+
+Waits scan the screen and newly added history. Idle means no PTY output, independent of frame coalescing. A Session that ends or changes during a wait returns a changed-session result. Reading never scrolls the desktop: scroll position remains Client View State under [ADR 0041](0041-keep-each-clients-view-independent.md). [ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns frame publication and Scrollback history semantics.
