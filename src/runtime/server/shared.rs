@@ -17,6 +17,7 @@ mod create_control_tests;
 mod edits;
 mod journal;
 mod publication;
+mod runs;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
@@ -92,6 +93,12 @@ pub struct SharedWorkspaceHost {
     blocked: Option<Refusal>,
     organization_prepared: bool,
     attachment_generations: BTreeMap<(Id, Id), (u64, u64)>,
+    /// Every run receipt, until its client acknowledges it.
+    runs: spaceterm_server::pane::run::RunTable,
+    /// Runs recorded before their worker answered.
+    late_runs: Vec<runs::LateRun>,
+    /// Receipts that settled and wait for [`HostCommands::take_settled_runs`].
+    settled_runs: Vec<spaceterm_server::pane::run::Settled>,
 }
 /// The settled answer to an edit, or the Worktree write it still waits for.
 enum Answer {
@@ -155,6 +162,9 @@ impl SharedWorkspaceHost {
             blocked: None,
             organization_prepared: false,
             attachment_generations: BTreeMap::new(),
+            runs: Default::default(),
+            late_runs: Vec::new(),
+            settled_runs: Vec::new(),
         }
     }
     /// Prepare the first organization once, without starting a Terminal Session.
@@ -1340,7 +1350,97 @@ impl HostCommands for SharedWorkspaceHost {
             host.disconnected(connection);
         }
     }
+    fn run(
+        &mut self,
+        request: super::RunRequest,
+    ) -> Result<spaceterm_server::protocol::RunReply, Refusal> {
+        let reply = self.admit_run(request);
+        self.rearm();
+        reply
+    }
+    fn run_status(
+        &mut self,
+        device: Id,
+        run: spaceterm_server::protocol::RunId,
+    ) -> Result<spaceterm_server::protocol::RunReply, Refusal> {
+        self.run_receipt(device, run)
+    }
+    fn run_acknowledge(
+        &mut self,
+        device: Id,
+        run: spaceterm_server::protocol::RunId,
+    ) -> Result<(), Refusal> {
+        self.retire_run(device, run)
+    }
+    fn observe_start(
+        &mut self,
+        pane: Id,
+        session: Option<Id>,
+    ) -> Result<spaceterm_server::protocol::ObserveReply, Refusal> {
+        if let Some(host) = self.panes.get_mut(&pane) {
+            return host.observe_start(session);
+        }
+        // A Pane whose shell never started has no host yet.
+        let known = self.state.inventory.workspaces.iter().any(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .any(|tab| tab.panes.iter().any(|candidate| candidate.id == pane))
+        });
+        if !known {
+            return Err(Refusal::Missing);
+        }
+        Ok(spaceterm_server::protocol::ObserveReply::NoSession {
+            state: spaceterm_server::protocol::SessionState::NotStarted,
+        })
+    }
+    fn observe_session(&mut self, pane: Id, session: Id) -> super::publish::Observed {
+        match self.panes.get_mut(&pane) {
+            Some(host) => host.observe_session(session),
+            None => super::publish::Observed::Gone {
+                last: None,
+                event: PaneEvent::Ended,
+            },
+        }
+    }
+    fn session_size(&self, pane: Id) -> Option<PaneSize> {
+        let pane = self.panes.get(&pane)?.pane.as_ref()?;
+        (!pane.ended && !pane.failed).then_some(pane.size)
+    }
+    fn observer_live(&self, pane: Id, session: Id) -> bool {
+        self.panes
+            .get(&pane)
+            .is_some_and(|host| host.observer_live(session))
+    }
+    fn observer_scrollback_page(
+        &mut self,
+        pane: Id,
+        session: Id,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        self.panes
+            .get_mut(&pane)
+            .ok_or(Refusal::Missing)?
+            .observer_scrollback_page(session, read, reply)
+    }
+    fn observers(&mut self, observers: &BTreeMap<Id, super::Observers>) {
+        for host in self.panes.values_mut() {
+            if let Some(session) = host.pane.as_ref().map(|pane| pane.lease.session) {
+                host.set_observed(
+                    session,
+                    observers
+                        .get(&session)
+                        .is_some_and(|observers| observers.visible),
+                );
+            }
+        }
+    }
+    fn take_settled_runs(&mut self) -> Vec<spaceterm_server::pane::run::Settled> {
+        self.drain_settled_runs()
+    }
     fn revoked(&mut self, client: Id) {
+        self.runs.forget(&client);
         // First, because reading back an uncertain journal restores the state from storage.
         self.forget(client);
         self.prototype.revoked(client);

@@ -326,7 +326,11 @@ mod tests {
         for (shell, kind, arguments) in [
             ("/opt/bin/bash", ShellKind::Bash, vec!["--posix", "-l"]),
             ("/opt/bin/elvish", ShellKind::Elvish, vec!["-l"]),
-            ("/opt/bin/fish", ShellKind::Fish, vec!["-l"]),
+            (
+                "/opt/bin/fish",
+                ShellKind::Fish,
+                vec!["--features", "no-mark-prompt", "-l"],
+            ),
             (
                 "/opt/bin/nu",
                 ShellKind::Nushell,

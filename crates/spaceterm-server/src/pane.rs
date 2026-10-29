@@ -4,6 +4,7 @@ pub mod control;
 pub mod directories;
 pub mod effects;
 pub mod graphics;
+pub mod keys;
 pub mod metadata;
 pub mod run;
 use crate::ServerError;

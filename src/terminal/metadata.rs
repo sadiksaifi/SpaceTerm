@@ -7,6 +7,8 @@ use crate::local_path::LocalPathSemantics;
 
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
+/// The most markers kept for a pending run between two reads. More mean the run lost track.
+const MAX_RUN_MARKERS: usize = 64;
 pub(crate) const PROGRESS_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub use crate::domain::workspace_collection::CurrentDirectory;
@@ -51,6 +53,33 @@ pub enum PromptZone {
     Prompt,
     CommandInput,
     CommandOutput,
+}
+
+/// The owning shell's prompt, as `pane run` admission reads it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct OwnedPrompt {
+    /// The zone the owning shell's own markers last established, or `None` before its first.
+    /// A `B` without the owner still ends an owned prompt, because no integration marks it.
+    pub(crate) zone: Option<PromptZone>,
+    /// Input bytes written to the PTY since the owning shell drew a fresh prompt.
+    pub(crate) input_bytes: u64,
+}
+
+/// One marker a pending run follows, in the order the shell wrote it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunMarker {
+    pub(crate) marker: spaceterm_server::pane::run::Marker,
+    /// The Terminal Session's finished-command count once the marker applied.
+    pub(crate) finished_commands: u64,
+    pub(crate) at: Instant,
+}
+
+/// The markers a pending run follows until its owning shell finishes the command or prompts.
+#[derive(Default)]
+struct RunFollower {
+    markers: Vec<RunMarker>,
+    overflowed: bool,
+    finished: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -462,6 +491,13 @@ pub(crate) struct MetadataTracker {
     owner_reported_directory: Option<Arc<str>>,
     progress_expiry: Option<Instant>,
     title_animation: TitleActivity,
+    owned_prompt: OwnedPrompt,
+    /// Whether the owning shell finished its command and has not drawn its prompt yet.
+    finishing: bool,
+    /// Input written while finishing. Only the next prompt's line editor can read it, so the
+    /// fresh prompt carries it.
+    typeahead: u64,
+    run: Option<RunFollower>,
 }
 
 impl MetadataTracker {
@@ -516,7 +552,68 @@ impl MetadataTracker {
             owner_reported_directory: None,
             progress_expiry: None,
             title_animation: TitleActivity::default(),
+            owned_prompt: OwnedPrompt::default(),
+            finishing: false,
+            typeahead: 0,
+            run: None,
         }
+    }
+
+    pub(crate) fn owned_prompt(&self) -> OwnedPrompt {
+        self.owned_prompt
+    }
+
+    /// Counts input written to the PTY, so a run never pastes into a line someone typed.
+    pub(crate) fn note_input(&mut self, bytes: usize) {
+        let counter = if self.finishing {
+            &mut self.typeahead
+        } else {
+            &mut self.owned_prompt.input_bytes
+        };
+        *counter = counter.saturating_add(bytes as u64);
+    }
+
+    /// Records the markers a run admitted now follows, replacing those of an earlier run.
+    pub(crate) fn follow_run(&mut self) {
+        self.run = Some(RunFollower::default());
+    }
+
+    /// The markers recorded since the last call. Recording stops after the owning shell's
+    /// finish or fresh prompt. Markers beyond the bound end as one marker without the owner.
+    pub(crate) fn take_run_markers(&mut self) -> Vec<RunMarker> {
+        let Some(run) = &mut self.run else {
+            return Vec::new();
+        };
+        let mut markers = std::mem::take(&mut run.markers);
+        if std::mem::take(&mut run.overflowed) {
+            markers.push(RunMarker {
+                marker: spaceterm_server::pane::run::Marker::Unowned,
+                finished_commands: self.snapshot.finished_commands,
+                at: Instant::now(),
+            });
+        }
+        if run.finished {
+            self.run = None;
+        }
+        markers
+    }
+
+    fn record_run_marker(&mut self, marker: spaceterm_server::pane::run::Marker, now: Instant) {
+        use spaceterm_server::pane::run::Marker;
+        let finished_commands = self.snapshot.finished_commands;
+        let Some(run) = self.run.as_mut().filter(|run| !run.finished) else {
+            return;
+        };
+        run.finished = matches!(marker, Marker::PromptStart | Marker::CommandFinished { .. });
+        if run.markers.len() >= MAX_RUN_MARKERS {
+            run.overflowed = true;
+            return;
+        }
+        run.markers.push(RunMarker {
+            marker,
+            finished_commands,
+            at: now,
+        });
     }
 
     pub(crate) fn snapshot(&self) -> Arc<TerminalMetadataSnapshot> {
@@ -653,18 +750,67 @@ impl MetadataTracker {
         })
     }
 
-    /// Returns the directory a prompt marker carrying the session's Prompt Owner commits.
-    fn observe_prompt_owner(&mut self, action: &str, fields: &[&str]) -> Option<Arc<str>> {
+    /// Whether the marker carries the session's Prompt Owner, and if so the directory it
+    /// commits. The owning shell reports its directory before each fresh prompt, never before a
+    /// prompt it only redraws.
+    fn observe_prompt_owner(&mut self, action: &str, fields: &[&str]) -> Option<Option<Arc<str>>> {
         let owner = self.snapshot.context.prompt_owner()?;
         if option(fields, PromptOwner::OPTION) != Some(owner.value()) {
             return None;
         }
         self.prompt_owner_seen = true;
         self.deferred_repository_directory = None;
-        match action {
+        Some(match action {
             "A" | "P" => self.owner_reported_directory.take(),
             _ => None,
-        }
+        })
+    }
+
+    /// Follows the owning shell's prompt for run admission and the pending run.
+    fn observe_owned_prompt(
+        &mut self,
+        action: &str,
+        fields: &[&str],
+        owned: Option<bool>,
+        now: Instant,
+    ) {
+        use spaceterm_server::pane::run::Marker;
+        let marker = match (action, owned) {
+            ("A" | "P", Some(fresh)) => {
+                self.owned_prompt.zone = Some(PromptZone::Prompt);
+                if !fresh {
+                    return;
+                }
+                self.finishing = false;
+                self.owned_prompt.input_bytes = std::mem::take(&mut self.typeahead);
+                Marker::PromptStart
+            }
+            ("B" | "I", _) => {
+                if self.owned_prompt.zone == Some(PromptZone::Prompt) {
+                    self.owned_prompt.zone = Some(PromptZone::CommandInput);
+                }
+                return;
+            }
+            ("C", Some(_)) => {
+                self.owned_prompt.zone = Some(PromptZone::CommandOutput);
+                Marker::CommandStart {
+                    // A cmdline that does not decode never matches a command.
+                    cmdline: option(fields, "cmdline")
+                        .map(|line| percent_decode(line).unwrap_or_default()),
+                }
+            }
+            ("D", Some(_)) => {
+                self.owned_prompt.zone = Some(PromptZone::CommandOutput);
+                self.finishing = true;
+                Marker::CommandFinished {
+                    exit_status: exit_status(fields),
+                }
+            }
+            // Another shell's prompt or command, such as one inside `ssh`.
+            ("A" | "P" | "N" | "C" | "D", None) if self.prompt_owner_seen => Marker::Unowned,
+            _ => return,
+        };
+        self.record_run_marker(marker, now);
     }
 
     pub(crate) fn apply_semantic_prompt(&mut self, value: &str, now: Instant) -> bool {
@@ -673,7 +819,21 @@ impl MetadataTracker {
             return false;
         };
         let fields = fields.collect::<Vec<_>>();
-        let committed = self.observe_prompt_owner(action, &fields);
+        let owned = self.observe_prompt_owner(action, &fields);
+        let fresh = owned.as_ref().map(Option::is_some);
+        let committed = owned.flatten();
+        let changed = self.apply_prompt_action(action, &fields, committed, now);
+        self.observe_owned_prompt(action, &fields, fresh, now);
+        changed
+    }
+
+    fn apply_prompt_action(
+        &mut self,
+        action: &str,
+        fields: &[&str],
+        committed: Option<Arc<str>>,
+        now: Instant,
+    ) -> bool {
         match action {
             "A" | "P" => {
                 let completed = self
@@ -693,7 +853,7 @@ impl MetadataTracker {
             "B" | "I" => self.update(|snapshot| snapshot.prompt_zone = PromptZone::CommandInput),
             "C" => {
                 self.command_started = Some(now);
-                let line = option(&fields, "cmdline")
+                let line = option(fields, "cmdline")
                     .and_then(percent_decode)
                     .unwrap_or_default();
                 let line = sanitize_bounded(&line, MAX_COMMAND_CHARS);
@@ -706,13 +866,7 @@ impl MetadataTracker {
                     snapshot.title_activity = false;
                 })
             }
-            "D" => {
-                let exit_status = fields
-                    .first()
-                    .and_then(|value| value.parse::<i32>().ok())
-                    .or_else(|| option(&fields, "err").and_then(|value| value.parse().ok()));
-                self.finish_command(exit_status, now)
-            }
+            "D" => self.finish_command(exit_status(fields), now),
             _ => false,
         }
     }
@@ -784,6 +938,13 @@ impl MetadataTracker {
         self.snapshot = Arc::new(next);
         true
     }
+}
+
+fn exit_status(fields: &[&str]) -> Option<i32> {
+    fields
+        .first()
+        .and_then(|value| value.parse::<i32>().ok())
+        .or_else(|| option(fields, "err").and_then(|value| value.parse().ok()))
 }
 
 fn option<'a>(fields: &'a [&str], name: &str) -> Option<&'a str> {
@@ -1435,6 +1596,101 @@ mod tests {
         tracker.apply_semantic_prompt("D;0", epoch);
 
         assert_eq!(&*tracker.snapshot().repository_directory, "/elsewhere");
+    }
+
+    /// A fresh prompt follows the owning shell's directory report; a redraw does not.
+    fn fresh_prompt(tracker: &mut MetadataTracker, now: Instant) {
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", now);
+    }
+
+    #[test]
+    fn only_a_fresh_owned_prompt_empties_the_input_line() {
+        let now = Instant::now();
+        let mut tracker = owned_local_tracker(now);
+        assert_eq!(tracker.owned_prompt().zone, None);
+        tracker.apply_semantic_prompt("A", now);
+        assert_eq!(
+            tracker.owned_prompt().zone,
+            None,
+            "an unowned prompt is not the shell's"
+        );
+
+        fresh_prompt(&mut tracker, now);
+        tracker.apply_semantic_prompt("B", now);
+        assert_eq!(
+            tracker.owned_prompt(),
+            OwnedPrompt {
+                zone: Some(PromptZone::CommandInput),
+                input_bytes: 0
+            }
+        );
+        tracker.note_input(2);
+        // A redraw, as zsh prints on resize, keeps what was typed.
+        tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 2);
+        fresh_prompt(&mut tracker, now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 0);
+
+        // Input a running command may read is the command's. Input written after the command
+        // finished, before the prompt, can reach only the next prompt's line editor.
+        tracker.apply_semantic_prompt("C;spaceterm=0f1e", now);
+        assert_eq!(tracker.owned_prompt().zone, Some(PromptZone::CommandOutput));
+        tracker.note_input(5);
+        tracker.apply_semantic_prompt("D;0;spaceterm=0f1e", now);
+        tracker.note_input(3);
+        fresh_prompt(&mut tracker, now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 3);
+        fresh_prompt(&mut tracker, now);
+        assert_eq!(tracker.owned_prompt().input_bytes, 0);
+    }
+
+    #[test]
+    fn a_followed_run_records_owned_markers_until_its_finish() {
+        use spaceterm_server::pane::run::Marker;
+        let now = Instant::now();
+        let mut tracker = owned_local_tracker(now);
+        fresh_prompt(&mut tracker, now);
+        tracker.apply_semantic_prompt("C", now);
+        assert!(
+            tracker.take_run_markers().is_empty(),
+            "nothing is followed before a run"
+        );
+
+        fresh_prompt(&mut tracker, now);
+        tracker.follow_run();
+        tracker.apply_semantic_prompt("B", now);
+        tracker.apply_semantic_prompt("C;cmdline=echo%20a;spaceterm=0f1e", now);
+        tracker.apply_semantic_prompt("D;0", now);
+        tracker.apply_semantic_prompt("D;7;spaceterm=0f1e", now);
+        fresh_prompt(&mut tracker, now);
+        let markers: Vec<_> = tracker
+            .take_run_markers()
+            .into_iter()
+            .map(|marker| (marker.marker, marker.finished_commands))
+            .collect();
+        assert_eq!(
+            markers,
+            [
+                (
+                    Marker::CommandStart {
+                        cmdline: Some("echo a".into())
+                    },
+                    1
+                ),
+                (Marker::Unowned, 2),
+                (
+                    Marker::CommandFinished {
+                        exit_status: Some(7)
+                    },
+                    2
+                ),
+            ]
+        );
+        assert!(
+            tracker.take_run_markers().is_empty(),
+            "recording stopped at the finish"
+        );
     }
 
     #[test]

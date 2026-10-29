@@ -142,6 +142,14 @@ pub fn plan_shell_integration(
                     OsString::from("use spaceterm *; install"),
                 ]);
             }
+            // Fish 4 marks its prompts itself, without the Prompt Owner. SpaceTerm's integration
+            // marks them instead, and fish reads its features only at startup.
+            if kind == ShellKind::Fish {
+                arguments.extend([
+                    OsString::from("--features"),
+                    OsString::from("no-mark-prompt"),
+                ]);
+            }
         }
         ShellKind::Zsh => {
             environment.push((
@@ -296,6 +304,7 @@ mod tests {
             fish.status,
             ShellIntegrationStatus::Applied(ShellKind::Fish)
         );
+        assert_eq!(fish.arguments, ["--features", "no-mark-prompt"]);
         assert!(fish.environment.iter().any(|(name, value)| {
             name == "XDG_DATA_DIRS"
                 && value

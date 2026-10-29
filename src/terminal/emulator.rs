@@ -3,6 +3,7 @@ use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesyst
 mod compression;
 mod history;
 pub(crate) use history::HistoryPage;
+mod run;
 pub use history::HistorySnapshot;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -828,6 +829,8 @@ pub(crate) struct TerminalEmulator {
     prompt_redraw: PromptRedraw,
     find: TerminalFindState,
     history: history::HistoryTracker,
+    /// Owner-marked markers a pending run follows, with where each was observed.
+    run_observations: Vec<spaceterm_server::pane::run::Observation>,
     applied_appearance: TerminalAppearanceUpdate,
     reported_appearance: Rc<Cell<Appearance>>,
 }
@@ -1284,6 +1287,7 @@ impl TerminalEmulator {
             prompt_redraw: PromptRedraw::default(),
             find: TerminalFindState::default(),
             history: history::HistoryTracker::default(),
+            run_observations: Vec::new(),
             applied_appearance: initial_appearance,
             reported_appearance,
         })
@@ -1381,6 +1385,7 @@ impl TerminalEmulator {
                 }
             }
         }
+        self.observe_run_markers();
         if !bytes.is_empty() {
             self.find.invalidate();
         }

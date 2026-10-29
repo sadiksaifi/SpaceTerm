@@ -86,6 +86,7 @@ impl HostCommands for Host {
                 effects: Vec::new(),
                 line: pane::LineState::default(),
                 accessibility: None,
+                progress: Default::default(),
             })
         } else {
             Observed::Gone {

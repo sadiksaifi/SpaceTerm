@@ -31,31 +31,6 @@ fn help_shows_the_visible_tree_without_hidden_commands() {
 }
 
 #[test]
-fn unimplemented_commands_exit_through_the_contract() {
-    for (args, command) in [
-        (&["pane", "run", "true"][..], "pane.run"),
-        (&["pane", "send", "x"], "pane.send"),
-        (&["pane", "read"], "pane.read"),
-        (&["pane", "release"], "pane.release"),
-    ] {
-        let output = spaceterm(&[args, &["--json"]].concat());
-        assert_eq!(output.status.code(), Some(5), "{args:?}");
-        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(envelope["schema"], "spaceterm.cli.v1");
-        assert_eq!(envelope["command"], command);
-        assert_eq!(envelope["status"], "error");
-        assert_eq!(envelope["error"]["code"], "unsupported");
-        let output = spaceterm(args);
-        assert_eq!(output.status.code(), Some(5), "{args:?}");
-        assert!(output.stdout.is_empty());
-        assert_eq!(
-            output.stderr,
-            "error: This operation isn\u{2019}t supported. (unsupported)\n".as_bytes()
-        );
-    }
-}
-
-#[test]
 fn old_grammar_and_bad_values_are_usage_errors_without_the_value() {
     let identity = "private-identity-must-not-appear";
     for args in [
