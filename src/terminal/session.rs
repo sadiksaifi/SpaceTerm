@@ -1393,6 +1393,7 @@ struct TerminalWorkerContext {
     fallback_title: String,
     terminal_name: &'static str,
     restricted: bool,
+    integration_expected: bool,
     initial_appearance: TerminalAppearanceUpdate,
 }
 
@@ -1503,6 +1504,7 @@ impl TerminalWorker {
             fallback_title,
             terminal_name,
             restricted,
+            integration_expected,
             local_filesystem,
             initial_appearance,
         } = context;
@@ -1551,6 +1553,7 @@ impl TerminalWorker {
             );
             return;
         }
+        emulator.expect_integration(integration_expected);
         let graphics_commands = output.commands.clone();
         emulator.set_graphics_budget_wakeup(move || {
             let _ = graphics_commands.send(Command::GraphicsBudgetAvailable);

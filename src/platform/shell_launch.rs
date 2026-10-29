@@ -243,6 +243,10 @@ impl PreparedShellLaunch {
         self.terminal_name
     }
 
+    pub fn integration_expected(&self) -> bool {
+        matches!(self.integration, Some(ShellIntegrationStatus::Applied(_)))
+    }
+
     pub fn executable(&self) -> &OsStr {
         self.executable.as_os_str()
     }

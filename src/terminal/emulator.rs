@@ -831,6 +831,7 @@ pub(crate) struct TerminalEmulator {
     history: history::HistoryTracker,
     /// Owner-marked markers a pending run follows, with where each was observed.
     run_observations: Vec<spaceterm_server::pane::run::Observation>,
+    integration_expected: bool,
     applied_appearance: TerminalAppearanceUpdate,
     reported_appearance: Rc<Cell<Appearance>>,
 }
@@ -1288,6 +1289,7 @@ impl TerminalEmulator {
             find: TerminalFindState::default(),
             history: history::HistoryTracker::default(),
             run_observations: Vec::new(),
+            integration_expected: false,
             applied_appearance: initial_appearance,
             reported_appearance,
         })
