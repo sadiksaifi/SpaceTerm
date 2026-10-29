@@ -384,6 +384,36 @@ mod presented {
         assert!(edits.unseen().is_empty(), "editing the location answers it");
     }
 
+    /// The person moves from Git to another section before the change fails, then closes
+    /// Settings. Settings never showed the failure, so closing it records nothing and the
+    /// failure stays unseen for the Workspace Window.
+    #[gpui::test]
+    fn a_failure_that_arrives_on_another_section_should_stay_unseen_after_closing(
+        cx: &mut TestAppContext,
+    ) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        click("settings-navigation-settings-section-interface", servers.cx);
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let window = servers.window.clone();
+        servers.cx.update(|window_context, cx| {
+            let handle = window_context.window_handle();
+            window.update(cx, |settings, cx| {
+                settings.request_close(super::super::super::CloseIntent::Window(handle), cx);
+            });
+        });
+        servers.cx.run_until_parked();
+
+        assert_eq!(edits.unseen().len(), 1);
+    }
+
     /// The person chose another server before the change was answered, so Settings never showed
     /// the failure. It stays unseen for the Workspace Window.
     #[gpui::test]

@@ -868,7 +868,8 @@ impl SettingsWindow {
     }
 
     fn request_close(&mut self, intent: CloseIntent, cx: &mut Context<Self>) {
-        // Closing the window is the person's response to what it shows. Quitting is not.
+        // Closing the window is the person's response to what it shows, if it shows the
+        // failure. Quitting is not.
         if matches!(intent, CloseIntent::Window(_)) {
             self.server_location.answered();
         }
@@ -1136,6 +1137,8 @@ impl SettingsWindow {
         let settings = crate::ui::appearance::settings::shared(cx);
         let appearance = &settings.chrome;
         self.sync_scrollbar(cx);
+        // Rendering the Location row marks it shown again.
+        self.server_location.render_begins();
         let surface = div()
             .debug_selector(|| "settings-window-surface".to_owned())
             .key_context(SETTINGS_KEY_CONTEXT)
@@ -1165,6 +1168,8 @@ impl SettingsWindow {
                     .child(self.render_detail(&settings, window, cx))
                     .child(self.render_footer(&settings)),
             );
+        // A failure the person can no longer see goes back to the Workspace Window.
+        self.server_location.release_unless_rendered();
         ModalLayer::new(super::window_shell::render(content, window, cx)).into_any_element()
     }
 }

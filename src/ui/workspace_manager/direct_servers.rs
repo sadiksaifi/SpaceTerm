@@ -9,7 +9,6 @@
 
 use std::cmp::Ordering;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use gpui::{App, Context, SharedString, Window};
 
@@ -19,8 +18,7 @@ use crate::direct_connections::{
 };
 use crate::ui::ServerTarget;
 use crate::ui::shared_workspaces::{
-    DirectRoutePanes, DirectServer, SharedEditSource, SharedPaneOpener, SharedPaneSessions,
-    UnavailableEdits,
+    DirectRoutePanes, DirectServer, SharedPaneOpener, SharedPaneSessions, UnavailableEdits,
 };
 
 /// One presented paired route: its binding, its Pane opener and the connection both follow.
@@ -30,24 +28,6 @@ pub(super) struct DirectRoute {
     server: Option<spaceterm_server::ServerConnection>,
     /// The transport while the route has no connection.
     unavailable: Rc<dyn Fn() -> UnavailableEdits>,
-}
-
-/// The transport of `route` without a connection. It records presentations in the route's own
-/// client storage, or keeps them in `retries` until it can.
-fn unavailable(route: DirectRouteId, cx: &mut App) -> Rc<dyn Fn() -> UnavailableEdits> {
-    let storage =
-        crate::ui::direct_servers::installed(cx).and_then(|direct| direct.storage(&route));
-    let retries = cx
-        .default_global::<crate::ui::shared_workspaces::PresentationRetries>()
-        .clone();
-    Rc::new(move || match &storage {
-        Some(storage) => UnavailableEdits::recording(
-            route,
-            Arc::new(storage.clone()) as Arc<dyn crate::ui::shared_workspaces::PresentationRecord>,
-            retries.clone(),
-        ),
-        None => UnavailableEdits::default(),
-    })
 }
 
 /// The paired routes one Workspace Window presents, by route, and the revision of what each
@@ -243,8 +223,9 @@ impl WorkspaceManager {
             Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
             &self.pane_construction,
         );
-        let unavailable = unavailable(route, cx);
-        let edits = SharedEditSource::new(Rc::new(unavailable()));
+        let unavailable = crate::ui::server_worktrees::disconnected_transport(route, cx);
+        // Settings and every window present the route through its one source.
+        let edits = crate::ui::server_worktrees::Client::route_source(route, cx);
         let key = self.present_server_workspaces(
             ServerOrigin::Direct(direct),
             edits,
@@ -314,14 +295,7 @@ impl WorkspaceManager {
                 None
             }
         };
-        let connected = connection.is_some();
         self.follow_direct_route(route, connection);
-        if connected
-            && let Some(key) = self.direct_routes.0.get(route).map(|route| route.key)
-            && let Some(source) = self.shared.get(key).map(|shared| shared.edits())
-        {
-            crate::ui::server_worktrees::Client::adopt_source(route, source, cx);
-        }
     }
 
     /// Points one presented route at a connection's transport and Pane opener, or at what it

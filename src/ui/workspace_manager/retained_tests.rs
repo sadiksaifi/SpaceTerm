@@ -487,3 +487,63 @@ fn only_a_structural_change_should_write_the_routes_copy(cx: &mut TestAppContext
     assert_eq!(after_title, written, "a new title writes nothing");
     assert_eq!(saved(cx), Some(RetainedInventory::retain(&renamed)));
 }
+
+/// Only Settings is open when a paired server refuses its New Worktree Location change, and the
+/// person has not answered the failure Settings shows when the Workspace Window presents that
+/// server. The window leaves the failure to Settings, and alerts it only once Settings gives it
+/// up.
+#[gpui::test]
+fn a_window_should_leave_a_failure_settings_still_shows_to_settings(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_server::worktree::{Error, Operation};
+
+    const ALERT: &str = "modal-action-server-worktree-location-failed-ok";
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let route = named_route("penguin");
+    let edits = Rc::new(ScriptedEdits::new(Some(titled_inventory(
+        harness.next_revision(),
+        &[("Far", 1)],
+    ))));
+    edits.set_worktree_writes(true);
+    // Settings writes through the route's writer and keeps the answer it shows.
+    let answer = cx.update(|_, cx| {
+        crate::ui::server_worktrees::testing::present_direct(
+            route,
+            Rc::clone(&edits),
+            crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}"),
+            cx,
+        );
+        let client = crate::ui::server_worktrees::Client::direct(&route, cx).expect("a writer");
+        let answer = client.source.owner();
+        client
+            .write_owned(
+                Operation::SetLocation {
+                    version: 0,
+                    template: "/Volumes/Locked/{branch}".into(),
+                },
+                answer.ticket(),
+                cx,
+            )
+            .detach();
+        answer
+    });
+    edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+
+    harness.present_saved_route("penguin", route, None, cx);
+    harness.connect_route(route, &edits, &[("Far", 1)], cx);
+    let alerted_while_settings_shows = cx.debug_bounds(ALERT).is_some();
+    drop(answer);
+    cx.run_until_parked();
+
+    assert!(
+        !alerted_while_settings_shows,
+        "Settings still shows the failure"
+    );
+    assert!(
+        cx.debug_bounds(ALERT).is_some(),
+        "the window presents it once Settings gives it up"
+    );
+}

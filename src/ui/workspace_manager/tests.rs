@@ -11826,7 +11826,9 @@ mod shared_repositories {
             ),
             crate::terminal::testing::test_local_directory(std::env::temp_dir()),
         );
-        let source = SharedEditSource::new(Rc::clone(edits) as Rc<_>);
+        // As launch does, the window presents the route through its one source.
+        let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
+        source.replace_transport(Rc::clone(edits) as Rc<_>);
         let key = manager.present_server_workspaces(
             ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
                 route: penguin,
@@ -11840,7 +11842,6 @@ mod shared_repositories {
             window,
             cx,
         );
-        crate::ui::server_worktrees::Client::adopt_source(&penguin, source, cx);
         manager.sync_shared_workspaces(key, window, cx);
     }
 
@@ -11877,6 +11878,14 @@ mod shared_repositories {
         let reopened = VisualTestContext::from_window(handle.into(), &app);
         reopened.run_until_parked();
         reopened
+    }
+
+    /// A Workspace Window in a relaunched process, which starts with none of this process's
+    /// routes, over `edits`, which is [`ScriptedEdits::relaunched`].
+    fn relaunched_window(edits: &Rc<ScriptedEdits>, cx: &VisualTestContext) -> VisualTestContext {
+        cx.cx
+            .update(crate::ui::server_worktrees::testing::forget_routes);
+        reopened_window(edits, cx)
     }
 
     /// Whether the window shows the alert for a failed Worktree operation nobody else presented.
@@ -12103,7 +12112,7 @@ mod shared_repositories {
         let mut reopened = reopened_window(&edits, cx);
         let reopened_alerts = alerts_worktree_failure(&mut reopened);
         close_window(&mut reopened);
-        let mut relaunched = reopened_window(&Rc::new(edits.relaunched()), &reopened);
+        let mut relaunched = relaunched_window(&Rc::new(edits.relaunched()), &reopened);
 
         assert!(reported, "the form reports the taken branch");
         assert!(!alerted);
@@ -12127,7 +12136,7 @@ mod shared_repositories {
         let relaunched = Rc::new(edits.relaunched());
         close_window(cx);
 
-        let mut first = reopened_window(&relaunched, cx);
+        let mut first = relaunched_window(&relaunched, cx);
         let alerted = alerts_worktree_failure(&mut first);
         click(
             "modal-action-server-worktree-operation-failed-ok",
@@ -12137,7 +12146,7 @@ mod shared_repositories {
         let mut reopened = reopened_window(&relaunched, &first);
         let reopened_alerts = alerts_worktree_failure(&mut reopened);
         close_window(&mut reopened);
-        let mut later = reopened_window(&Rc::new(relaunched.relaunched()), &reopened);
+        let mut later = relaunched_window(&Rc::new(relaunched.relaunched()), &reopened);
 
         assert!(
             alerted,
@@ -12201,7 +12210,7 @@ mod shared_repositories {
         let mut again = reopened_window(&edits, &reopened);
         let alerted_again = alerts_worktree_failure(&mut again);
         close_window(&mut again);
-        let mut relaunched = reopened_window(&Rc::new(edits.relaunched()), &again);
+        let mut relaunched = relaunched_window(&Rc::new(edits.relaunched()), &again);
 
         assert!(queued, "the alert waits behind the open form");
         assert!(alerted, "the reopened window presents the queued failure");
@@ -12262,14 +12271,14 @@ mod shared_repositories {
         close_window(cx);
         let relaunched = Rc::new(edits.relaunched());
 
-        let mut first = reopened_window(&relaunched, cx);
+        let mut first = relaunched_window(&relaunched, cx);
         let shown_again = alerts_worktree_failure(&mut first);
         click(
             "modal-action-server-worktree-operation-failed-ok",
             &mut first,
         );
         close_window(&mut first);
-        let mut later = reopened_window(&Rc::new(relaunched.relaunched()), &first);
+        let mut later = relaunched_window(&Rc::new(relaunched.relaunched()), &first);
 
         assert!(opened, "the alert opened");
         assert!(shown_again, "an unanswered alert was never seen");

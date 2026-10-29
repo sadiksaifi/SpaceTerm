@@ -247,9 +247,11 @@ pub(super) struct ServerLocation {
     /// The owning server's check of the text being typed. Replacing it cancels the earlier one.
     check: Option<Task<()>>,
     /// A failed change the section shows, until the person edits the location, chooses another
-    /// server or closes Settings. Settings going away any other way leaves it to the Workspace
-    /// Window.
+    /// server or closes Settings. Settings going away any other way, or no longer showing the
+    /// row, leaves it to the Workspace Window.
     unanswered: Option<crate::ui::shared_workspaces::OutcomeOwner>,
+    /// Whether the latest render drew the Location row, so the person can see its failure.
+    rendered: bool,
 }
 
 impl ServerLocation {
@@ -280,6 +282,7 @@ impl ServerLocation {
             git_answered: false,
             check: None,
             unanswered: None,
+            rendered: false,
         }
     }
 
@@ -298,10 +301,26 @@ impl ServerLocation {
         self.show_last_known(cx);
     }
 
-    /// The person responded to the section after it showed a failed change.
+    /// The person responded to Settings while it showed a failed change. A failure the latest
+    /// render did not show goes back to the Workspace Window instead.
     pub(super) fn answered(&mut self) {
-        if let Some(answer) = self.unanswered.take() {
+        if let Some(answer) = self.unanswered.take()
+            && self.rendered
+        {
             answer.presented();
+        }
+    }
+
+    /// A render starts. Unless it draws the Location row, the person can't see its failure.
+    pub(super) fn render_begins(&mut self) {
+        self.rendered = false;
+    }
+
+    /// Hands a failure back to the Workspace Window once the row it shows in is gone, as when
+    /// the person moves to another section or a search leaves the row out.
+    pub(super) fn release_unless_rendered(&mut self) {
+        if !self.rendered {
+            self.unanswered = None;
         }
     }
 
@@ -612,7 +631,8 @@ impl SettingsWindow {
                     state.show(text, cx);
                 }
                 state.retain(cx);
-                if shown {
+                // Settings shows a failure only while its row is on the page.
+                if shown && state.rendered {
                     state.unanswered = Some(answer);
                     // The person may have scrolled the field away while the change was on its way.
                     settings.reveal_growing_row(SettingsRowId::ServerWorktreeLocation, cx);
@@ -638,6 +658,7 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.server_location.rendered = true;
         let model = &self.server_location.model;
         let editable = model.editable();
         let invalid = model.problem.is_some();
