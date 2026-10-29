@@ -555,53 +555,90 @@ fn confirmed_pane_and_tab_closes_submit_only_the_original_review() {
 #[test]
 fn worktree_creation_uses_the_main_branch_and_opens_exactly_one_tab() {
     use spaceterm_server::worktree::{Branch, BranchName, Branches, Operation, Settings};
-    for open in [false, true] {
-        let initial = fixture().inventory;
-        let mut updated = initial.clone();
-        let mut tab = updated.workspaces[0].tabs[0].clone();
-        tab.id = id(40);
-        tab.root_pane = id(41);
-        tab.worktree = Some("/server/canonical/feature-new".into());
-        tab.panes[0].id = id(41);
-        tab.panes[0].starting_directory = "/server/canonical/feature-new".into();
-        tab.panes[0].presentation = None;
-        tab.panes[0].creator = Some(id(5));
-        updated.workspaces[0].tabs.push(tab);
-        updated.revision = 8;
-        let script = Rc::new(RefCell::new(Script {
-            inventories: VecDeque::from([initial, updated]),
-            replies: VecDeque::from([ReadReply::Context {
-                home: "/server/home".into(),
-                settings: Settings::default(),
-                branches: Branches {
-                    local: vec!["main".into()],
-                    remote: Vec::new(),
-                },
-            }]),
-            outcomes: VecDeque::from([Ok(Outcome::Accepted { target: id(40) })]),
-            ..Default::default()
-        }));
-        let mut args = vec!["worktree", "create", "feature/new", "--workspace", "api"];
-        if open {
-            args.push("--open");
+    for (agent, in_session, expected_control) in [
+        (true, false, "self"),
+        (false, true, "origin"),
+        (false, false, "unclaimed"),
+    ] {
+        for open in [false, true] {
+            let initial = fixture().inventory;
+            let mut updated = initial.clone();
+            let mut tab = updated.workspaces[0].tabs[0].clone();
+            tab.id = id(40);
+            tab.root_pane = id(41);
+            tab.worktree = Some("/server/canonical/feature-new".into());
+            tab.panes[0].id = id(41);
+            tab.panes[0].starting_directory = "/server/canonical/feature-new".into();
+            tab.panes[0].presentation = None;
+            tab.panes[0].creator = if agent {
+                Some(id(5))
+            } else if in_session {
+                Some(id(7))
+            } else {
+                None
+            };
+            updated.workspaces[0].tabs.push(tab);
+            updated.revision = 8;
+            let script = Rc::new(RefCell::new(Script {
+                inventories: VecDeque::from([initial, updated]),
+                replies: VecDeque::from([ReadReply::Context {
+                    home: "/server/home".into(),
+                    settings: Settings::default(),
+                    branches: Branches {
+                        local: vec!["main".into()],
+                        remote: Vec::new(),
+                    },
+                }]),
+                outcomes: VecDeque::from([Ok(Outcome::Accepted { target: id(40) })]),
+                ..Default::default()
+            }));
+            let mut args = vec!["worktree", "create", "feature/new", "--workspace", "api"];
+            if open {
+                args.push("--open");
+            }
+            let server = hex(&id(9));
+            let pane = hex(&id(21));
+            let mut environment = env();
+            environment.agent = agent;
+            if in_session {
+                environment.current_identity = Some("test");
+                environment.current_server = Some(&server);
+                environment.current_pane = Some(&pane);
+            }
+            let output = run_script(&args, &environment, &script);
+            assert_eq!(output.envelope.exit(), 0);
+            if agent {
+                assert_golden("work_worktree_created", &output.envelope);
+            }
+            assert_eq!(
+                output.envelope.data.body["worktree"]["path"],
+                "/server/canonical/feature-new"
+            );
+            assert_eq!(
+                output.envelope.data.body["directory"],
+                "/server/canonical/feature-new"
+            );
+            assert_eq!(output.envelope.data.body["control"], expected_control);
+            assert_eq!(output.envelope.data.body["tab"]["id"], hex(&id(40)));
+            assert_eq!(script.borrow().sent.len(), 1);
+            let requested = match &script.borrow().sent[0] {
+                Mutation::Worktree(Operation::Create { control, .. }) => *control,
+                _ => panic!("Worktree creation is one mutation"),
+            };
+            assert_eq!(
+                requested,
+                if agent {
+                    CreateControl::Creator
+                } else if in_session {
+                    CreateControl::OriginController { pane: id(21) }
+                } else {
+                    CreateControl::Unclaimed
+                }
+            );
+            assert!(
+                matches!(&script.borrow().sent[0],Mutation::Worktree(Operation::Create {branch:Branch::New {name,base:BranchName::Local(base)},path,..}) if name=="feature/new"&&base=="main"&&path==Path::new("/server/home/.worktrees/repo/feature-new"))
+            );
         }
-        let output = run_script(&args, &env(), &script);
-        assert_eq!(output.envelope.exit(), 0);
-        assert_golden("work_worktree_created", &output.envelope);
-        assert_eq!(
-            output.envelope.data.body["worktree"]["path"],
-            "/server/canonical/feature-new"
-        );
-        assert_eq!(
-            output.envelope.data.body["directory"],
-            "/server/canonical/feature-new"
-        );
-        assert_eq!(output.envelope.data.body["control"], "self");
-        assert_eq!(output.envelope.data.body["tab"]["id"], hex(&id(40)));
-        assert_eq!(script.borrow().sent.len(), 1);
-        assert!(
-            matches!(&script.borrow().sent[0],Mutation::Worktree(Operation::Create {branch:Branch::New {name,base:BranchName::Local(base)},path,..}) if name=="feature/new"&&base=="main"&&path==Path::new("/server/home/.worktrees/repo/feature-new"))
-        );
     }
 }
 

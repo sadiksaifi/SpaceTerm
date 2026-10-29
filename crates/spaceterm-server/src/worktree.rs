@@ -69,6 +69,7 @@ pub enum Operation {
         root: PathBuf,
         path: PathBuf,
         branch: Branch,
+        control: crate::hierarchy::CreateControl,
     },
     Remove {
         root: PathBuf,

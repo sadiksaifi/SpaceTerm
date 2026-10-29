@@ -359,17 +359,8 @@ fn nodes(snapshot: &Snapshot) -> Vec<Node> {
             });
         }
         for tab in &w.tabs {
-            let handles: Vec<_> = tab
-                .panes
-                .iter()
-                .map(|p| {
-                    p.presentation
-                        .as_deref()
-                        .map(labels::pane_label)
-                        .unwrap_or_else(|| labels::Label::from_parts("Terminal", ""))
-                })
-                .collect();
-            let label = labels::tab_label(tab, &handles);
+            let handles: Vec<_> = tab.panes.iter().map(labels::pane).collect();
+            let label = labels::tab(tab);
             let directory = tab
                 .panes
                 .iter()

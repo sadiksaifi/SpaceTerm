@@ -56,6 +56,7 @@ pub struct CreateArgs<'a> {
     pub name: &'a str,
     pub base: Option<&'a str>,
     pub path: Option<&'a Path>,
+    pub control: CreateControl,
 }
 
 pub fn create(
@@ -107,6 +108,7 @@ pub fn create(
         root: root.clone(),
         path: path.clone(),
         branch,
+        control: options.control,
     });
     Ok(Create { target, mutation })
 }

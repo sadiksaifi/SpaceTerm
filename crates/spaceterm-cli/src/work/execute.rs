@@ -123,7 +123,7 @@ pub fn run(
         route: route.into(),
         id: hex(&journal.server_id()),
     };
-    let recovered = match journal.resolve_leftovers() {
+    let mut recovered = match journal.resolve_leftovers() {
         Ok(recovered) => recovered,
         Err(failure) => {
             return Output::failed(
@@ -136,6 +136,7 @@ pub fn run(
         }
     };
     let result = execute(command, global, env, journal, reader, &server);
+    recovered.extend_from_slice(journal.recovered());
     let mut output = match result {
         Ok(output) => output,
         Err(error) => error.output(path, server),
@@ -435,14 +436,7 @@ fn execute(
                 pane: CreatedPane {
                     id: hex(&pane.id),
                     directory: pane.starting_directory.to_string_lossy().into_owned(),
-                    control: match control {
-                        CreateControl::Creator => CreatedControl::Own,
-                        CreateControl::Unclaimed => CreatedControl::Unclaimed,
-                        CreateControl::OriginController { .. } if pane.creator.is_some() => {
-                            CreatedControl::Origin
-                        }
-                        CreateControl::OriginController { .. } => CreatedControl::Unclaimed,
-                    },
+                    control: created_control(control, pane),
                 },
                 source_pane: source.as_ref().map(hex),
                 revision: updated.inventory.revision,
@@ -623,6 +617,7 @@ fn execute(
                     name: branch,
                     base: base.as_deref(),
                     path: p.as_deref(),
+                    control,
                 },
                 &context,
             )?;
@@ -643,6 +638,11 @@ fn execute(
                 .and_then(|w| w.tabs.iter().find(|t| t.id == id))
                 .ok_or(Code::ProtocolError)?;
             let actual_path = tab.worktree.as_ref().ok_or(Code::ProtocolError)?;
+            let pane = tab
+                .panes
+                .iter()
+                .find(|p| p.id == tab.root_pane)
+                .ok_or(Code::ProtocolError)?;
             let mut steps = scope::target_steps(&initial, &plan.target);
             steps.push(TargetStep {
                 level: Level::Worktree,
@@ -653,15 +653,8 @@ fn execute(
             });
             let data = WorktreeCreate {
                 target: steps.clone(),
-                directory: tab
-                    .panes
-                    .iter()
-                    .find(|p| p.id == tab.root_pane)
-                    .ok_or(Code::ProtocolError)?
-                    .starting_directory
-                    .to_string_lossy()
-                    .into_owned(),
-                control: CreatedControl::Own,
+                directory: pane.starting_directory.to_string_lossy().into_owned(),
+                control: created_control(control, pane),
                 worktree: WorktreeRef {
                     path: actual_path.to_string_lossy().into_owned(),
                     branch: Some(branch),
@@ -671,9 +664,14 @@ fn execute(
                 tab: Some(tab_ref(tab)),
             };
             let text = format!(
-                "Created Worktree.\nDirectory: {}\nCreated Tab id:{}\nControl: self\n",
+                "Created Worktree.\nDirectory: {}\nCreated Tab id:{}\nControl: {}\n",
                 data.directory,
-                hex(&tab.id)
+                hex(&tab.id),
+                match data.control {
+                    CreatedControl::Own => "self",
+                    CreatedControl::Unclaimed => "unclaimed",
+                    CreatedControl::Origin => "origin",
+                }
             );
             Ok(Output::ok(path, server.clone(), data, text, &steps))
         }
@@ -926,18 +924,17 @@ fn workspace_ref(workspace: &hierarchy::Workspace) -> Ref {
         line: workspace.name.clone(),
     }
 }
+fn created_control(control: CreateControl, pane: &hierarchy::Pane) -> CreatedControl {
+    match control {
+        CreateControl::Creator => CreatedControl::Own,
+        CreateControl::Unclaimed => CreatedControl::Unclaimed,
+        CreateControl::OriginController { .. } if pane.creator.is_some() => CreatedControl::Origin,
+        CreateControl::OriginController { .. } => CreatedControl::Unclaimed,
+    }
+}
+
 fn tab_ref(tab: &hierarchy::Tab) -> Ref {
-    let labels: Vec<_> = tab
-        .panes
-        .iter()
-        .map(|p| {
-            p.presentation
-                .as_deref()
-                .map(labels::pane_label)
-                .unwrap_or_else(|| labels::Label::from_parts("Terminal", ""))
-        })
-        .collect();
-    let label = labels::tab_label(tab, &labels);
+    let label = labels::tab(tab);
     Ref {
         id: hex(&tab.id),
         label: label.activity,

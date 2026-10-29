@@ -362,7 +362,10 @@ impl Mutation {
             Self::CreateWorkspace { control, .. }
             | Self::CreateTab { control, .. }
             | Self::SplitPane { control, .. }
-            | Self::Worktree(crate::worktree::Operation::OpenTab { control, .. }) => Some(*control),
+            | Self::Worktree(
+                crate::worktree::Operation::OpenTab { control, .. }
+                | crate::worktree::Operation::Create { control, .. },
+            ) => Some(*control),
             _ => None,
         }
     }

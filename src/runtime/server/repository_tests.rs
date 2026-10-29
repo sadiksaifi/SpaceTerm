@@ -1219,6 +1219,7 @@ fn worktree_write_retries_resolve_the_original_and_never_recreate_removed_state(
     let workspace = create_shared(&mut host, 1);
     let tree = git.0.join("created");
     let mutation = Mutation::Worktree(Operation::Create {
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
         workspace,
         root: git.0.clone(),
         path: tree.clone(),
@@ -1857,6 +1858,7 @@ fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
         &mut host,
         2,
         Operation::Create {
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
             workspace,
             root: git.0.clone(),
             path: alias.join("created"),
@@ -1929,6 +1931,7 @@ fn creations_git_refuses_should_answer_why_without_creating_anything() {
                 &mut host,
                 sequence,
                 Operation::Create {
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                     workspace,
                     root: git.0.clone(),
                     path: git.0.join("refused"),

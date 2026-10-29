@@ -18,6 +18,10 @@ pub trait Dispatch {
     fn client_id(&self) -> Id;
     fn resolve_leftovers(&mut self) -> Result<Vec<RecoveredOperation>, Failure>;
     fn submit(&mut self, mutation: Mutation) -> Result<Outcome, Failure>;
+    /// Settlement repeated under the writer may discover outcomes an active writer held earlier.
+    fn recovered(&self) -> &[RecoveredOperation] {
+        &[]
+    }
 }
 
 pub struct Configuration<'a> {
@@ -78,8 +82,27 @@ impl Dispatch for Journal<'_> {
         if self.settled {
             return Ok(Vec::new());
         }
-        let recovered = if self.mutating {
-            let editor = Editor::open(
+        let recovered = journal::settle(
+            &self.state,
+            &self.route,
+            journal::Current {
+                agent: self.agent.as_ref(),
+                connection: self.connection,
+                link: self.link,
+                writer: None,
+            },
+            &mut *self.connect,
+            self.deadline,
+        )?;
+        self.settled = true;
+        Ok(recovered)
+    }
+    fn submit(&mut self, mutation: Mutation) -> Result<Outcome, Failure> {
+        if !self.mutating {
+            return Err(Failure::new(Code::ProtocolError));
+        }
+        if self.editor.is_none() {
+            self.editor = Some(Editor::open(
                 &self.state,
                 self.route,
                 self.agent.as_ref(),
@@ -87,32 +110,17 @@ impl Dispatch for Journal<'_> {
                 self.link,
                 &mut *self.connect,
                 self.deadline,
-            )?;
-            let recovered = editor.recovered().to_vec();
-            self.editor = Some(editor);
-            recovered
-        } else {
-            journal::settle(
-                &self.state,
-                &self.route,
-                journal::Current {
-                    agent: self.agent.as_ref(),
-                    connection: self.connection,
-                    link: self.link,
-                    writer: None,
-                },
-                &mut *self.connect,
-                self.deadline,
-            )?
-        };
-        self.settled = true;
-        Ok(recovered)
-    }
-    fn submit(&mut self, mutation: Mutation) -> Result<Outcome, Failure> {
+            )?);
+        }
         let editor = self
             .editor
             .as_mut()
             .ok_or_else(|| Failure::new(Code::ProtocolError))?;
         Ok(editor.mutate(mutation, self.deadline)?.outcome.outcome)
+    }
+    fn recovered(&self) -> &[RecoveredOperation] {
+        self.editor
+            .as_ref()
+            .map_or(&[], |editor| editor.recovered())
     }
 }

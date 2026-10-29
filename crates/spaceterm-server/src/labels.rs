@@ -61,7 +61,7 @@ pub fn activity(title: &str, terminal_control: bool, running: Option<&str>, shel
     }
 }
 
-pub fn pane_label(snapshot: &metadata::Snapshot) -> Label {
+fn presentation(snapshot: &metadata::Snapshot) -> Label {
     let running = snapshot
         .command
         .as_ref()
@@ -76,13 +76,20 @@ pub fn pane_label(snapshot: &metadata::Snapshot) -> Label {
     Label::from_parts(&activity, &directory)
 }
 
+/// A Pane without terminal metadata uses the same caption fallback on every client.
+pub fn pane(pane: &hierarchy::Pane) -> Label {
+    pane.presentation
+        .as_deref()
+        .map(presentation)
+        .unwrap_or_else(|| Label::from_parts("Terminal", ""))
+}
+
 /// A Tab uses its Root Pane's identity. Every Pane remains independently searchable.
-pub fn tab_label(tab: &hierarchy::Tab, panes: &[Label]) -> Label {
+pub fn tab(tab: &hierarchy::Tab) -> Label {
     tab.panes
         .iter()
-        .position(|p| p.id == tab.root_pane)
-        .and_then(|i| panes.get(i))
-        .cloned()
+        .find(|p| p.id == tab.root_pane)
+        .map(pane)
         .unwrap_or_else(|| Label::from_parts("Terminal", ""))
 }
 
@@ -220,10 +227,45 @@ mod tests {
     }
 
     #[test]
+    fn tab_identity_uses_the_root_pane_in_any_position_and_handles_missing_metadata() {
+        let mut state = hierarchy::State::empty();
+        state
+            .apply(
+                [1; 32],
+                1,
+                hierarchy::Mutation::CreateWorkspace {
+                    name: "test".into(),
+                    directory: None,
+                    control: hierarchy::CreateControl::Creator,
+                },
+                std::path::Path::new("/tmp"),
+                |_| true,
+            )
+            .unwrap();
+        let mut tab = state.inventory.workspaces[0].tabs[0].clone();
+        let root = tab.root_pane;
+        tab.panes[0].presentation = Some(Box::new(snapshot()));
+        let mut other = tab.panes[0].clone();
+        other.id = [8; 32];
+        other.presentation = None;
+        tab.panes.insert(0, other);
+        assert_eq!(self::tab(&tab).line, "cargo test · api");
+        assert_eq!(pane(&tab.panes[0]).line, "Terminal");
+        tab.panes
+            .iter_mut()
+            .find(|p| p.id == root)
+            .unwrap()
+            .presentation = None;
+        assert_eq!(self::tab(&tab).line, "Terminal");
+        tab.panes.retain(|p| p.id != root);
+        assert_eq!(self::tab(&tab).line, "Terminal");
+    }
+
+    #[test]
     fn labels_follow_title_command_and_shell_precedence() {
         let mut pane = snapshot();
         assert_eq!(
-            pane_label(&pane),
+            presentation(&pane),
             Label {
                 activity: "cargo test".into(),
                 line: "cargo test · api".into()
@@ -231,26 +273,26 @@ mod tests {
         );
         pane.title_provenance = metadata::TitleProvenance::TerminalControl;
         pane.title = "⚡ - Editor".into();
-        assert_eq!(pane_label(&pane).line, "Editor · api");
+        assert_eq!(presentation(&pane).line, "Editor · api");
         pane.title_provenance = metadata::TitleProvenance::WorkingDirectory;
         pane.command = None;
-        assert_eq!(pane_label(&pane).line, "zsh · api");
+        assert_eq!(presentation(&pane).line, "zsh · api");
         pane.shell_name.clear();
-        assert_eq!(pane_label(&pane).activity, "Terminal");
+        assert_eq!(presentation(&pane).activity, "Terminal");
     }
 
     #[test]
     fn places_preserve_home_root_and_deduplicate_the_activity() {
         let mut pane = snapshot();
         pane.directory = "/home/test".into();
-        assert_eq!(pane_label(&pane).line, "cargo test · ~");
+        assert_eq!(presentation(&pane).line, "cargo test · ~");
         pane.directory = "/".into();
-        assert_eq!(pane_label(&pane).line, "cargo test · /");
+        assert_eq!(presentation(&pane).line, "cargo test · /");
         pane.title_provenance = metadata::TitleProvenance::TerminalControl;
         pane.title = "api".into();
         pane.directory = "/home/test/api/".into();
-        assert_eq!(pane_label(&pane).line, "api");
+        assert_eq!(presentation(&pane).line, "api");
         pane.directory.clear();
-        assert_eq!(pane_label(&pane).line, "api");
+        assert_eq!(presentation(&pane).line, "api");
     }
 }
