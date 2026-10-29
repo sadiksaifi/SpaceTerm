@@ -232,7 +232,7 @@ fn every_interface_invitations_skip_container_bridges_unless_the_owner_chooses_o
     assert_eq!(fixture.invite().endpoint(), at("192.168.1.5"));
     let ManagementReply::Invitation(text) = fixture
         .management(Management::Invite {
-            advertise: Some("172.17.0.1".into()),
+            advertise: Some(format!("172.17.0.1:{}", bind.port())),
         })
         .unwrap()
     else {
@@ -251,53 +251,36 @@ fn every_interface_invitations_skip_container_bridges_unless_the_owner_chooses_o
 }
 
 #[test]
-fn invitations_advertise_only_a_chosen_address_the_listener_takes() {
-    let fixture = fixture(network(
-        &["10.0.0.5", "fd00::5", "127.0.0.1"],
-        &["10.0.0.5"],
-    ));
-    let bind = fixture.listen_at("0.0.0.0".parse().unwrap());
-    let ManagementReply::Invitation(text) = fixture
-        .management(Management::Invite {
-            advertise: Some("fd00::5".into()),
-        })
-        .unwrap()
-    else {
-        panic!()
-    };
-    assert_eq!(
-        Invitation::parse(&text).unwrap().endpoint(),
-        format!("quic://[fd00::5]:{}", bind.port())
-    );
-    // An address that isn't available, such as loopback or another machine's, is refused.
-    for refused in ["127.0.0.1", "10.0.0.9"] {
-        assert!(matches!(
-            fixture.management(Management::Invite {
-                advertise: Some(refused.into()),
-            }),
-            Err(DirectError::InvalidAddress)
-        ));
+fn invitations_advertise_dns_and_nat_authorities_without_local_interface_checks() {
+    let fixture = fixture(network(&["10.0.0.5", "127.0.0.1"], &["10.0.0.5"]));
+    for listener in ["0.0.0.0", "127.0.0.1"] {
+        fixture.listen_at(listener.parse().unwrap());
+        for (authority, expected) in [
+            ("Penguin.EXAMPLE:9443", "quic://penguin.example:9443"),
+            ("203.0.113.5", "quic://203.0.113.5:9231"),
+            ("[2001:db8::9]:9443", "quic://[2001:db8::9]:9443"),
+        ] {
+            let ManagementReply::Invitation(text) = fixture
+                .management(Management::Invite {
+                    advertise: Some(authority.into()),
+                })
+                .unwrap()
+            else {
+                panic!()
+            };
+            let invitation = Invitation::parse(&text).unwrap();
+            assert_eq!(invitation.endpoint(), expected);
+            assert_eq!(invitation.server_pin(), &fixture.state.lock().unwrap().pin);
+        }
+        for invalid in ["quic://host", "host/path", "host:0", "user@host"] {
+            assert!(matches!(
+                fixture.management(Management::Invite {
+                    advertise: Some(invalid.into()),
+                }),
+                Err(DirectError::InvalidAddress)
+            ));
+        }
     }
-    // A listener at one address advertises only that one.
-    let one = fixture.listen_at("127.0.0.1".parse().unwrap());
-    assert!(matches!(
-        fixture.management(Management::Invite {
-            advertise: Some("10.0.0.5".into()),
-        }),
-        Err(DirectError::InvalidAddress)
-    ));
-    let ManagementReply::Invitation(text) = fixture
-        .management(Management::Invite {
-            advertise: Some(one.ip().to_string()),
-        })
-        .unwrap()
-    else {
-        panic!()
-    };
-    assert_eq!(
-        Invitation::parse(&text).unwrap().endpoint(),
-        format!("quic://{one}")
-    );
 }
 
 #[test]

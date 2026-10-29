@@ -3882,3 +3882,41 @@ mod quic_connections {
         let _ = server.join().unwrap();
     }
 }
+
+#[test]
+fn claim_polling_is_scoped_to_the_exact_invitation() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let first = fixture.invite();
+    let second = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let first_claim = fixture.claim(&first, &credential);
+    let second_claim = fixture.claim(&second, &credential);
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims {
+            invitation: Some(first.id()),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(claims, vec![first_claim]);
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims {
+            invitation: Some(second.id()),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(claims, vec![second_claim]);
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims {
+            invitation: Some([0; 32]),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(claims.is_empty());
+}
