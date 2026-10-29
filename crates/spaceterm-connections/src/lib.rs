@@ -115,9 +115,6 @@ pub struct PendingUnpair {
     pub enrollment_cleanup: bool,
     pub self_unpair: bool,
     pub server_confirmed: bool,
-    /// The request was still pending over WSS when QUIC replaced it, and was dropped. The person
-    /// must unpair the device again from the server's machine.
-    pub abandoned: bool,
 }
 
 /// Refuses every connection, so a handle built on it reaches only client storage.
@@ -559,17 +556,7 @@ impl DirectConnections {
             enrollment_cleanup: matches!(pending.authority, records::Authority::Enrollment { .. }),
             self_unpair: matches!(&pending.authority, records::Authority::Direct(actor) if actor.route.paired.pairing == pending.target),
             server_confirmed: pending.confirmed,
-            abandoned: false,
-        }).chain(state.document.abandoned.iter().map(|notice| PendingUnpair {
-            key: notice.operation,
-            server_label: notice.label.clone(),
-            state: UnpairProgress::Unconfirmed,
-            dismissed: false,
-            enrollment_cleanup: false,
-            self_unpair: false,
-            server_confirmed: false,
-            abandoned: true,
-        })).collect()
+        }).collect()
     }
 
     pub fn resume_unpair(&self, key: UnpairKey) {
@@ -584,14 +571,6 @@ impl DirectConnections {
 
     pub fn dismiss_unpair_notice(&self, key: UnpairKey) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        let abandoned = state.document.abandoned.len();
-        state
-            .document
-            .abandoned
-            .retain(|notice| notice.operation != key);
-        if state.document.abandoned.len() != abandoned {
-            self.0.save(&mut state);
-        }
         if let Some(pending) = state
             .document
             .pending

@@ -275,7 +275,6 @@ mod tests {
             enrollment_cleanup: false,
             self_unpair: true,
             server_confirmed: false,
-            abandoned: false,
         }
     }
 

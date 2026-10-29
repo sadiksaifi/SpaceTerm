@@ -277,14 +277,6 @@ impl UnpairAction {
 /// the server's revocation.
 pub(crate) fn present_unpair(pending: &PendingUnpair) -> (String, &'static [UnpairAction]) {
     let server = &pending.server_label;
-    if pending.abandoned {
-        return (
-            format!(
-                "SpaceTerm could not finish unpairing a device from \u{201C}{server}\u{201D} before paired connections moved to QUIC. Unpair that device again on the server\u{2019}s machine."
-            ),
-            &[UnpairAction::Dismiss],
-        );
-    }
     let subject = if pending.enrollment_cleanup {
         format!("SpaceTerm is cancelling the unfinished pairing with \u{201C}{server}\u{201D}.")
     } else if pending.server_confirmed {
@@ -374,7 +366,6 @@ mod tests {
             enrollment_cleanup: false,
             self_unpair: true,
             server_confirmed: false,
-            abandoned: false,
         }
     }
 
@@ -390,19 +381,6 @@ mod tests {
         let (_, actions) = present_unpair(&pending(UnpairProgress::NeedsInteraction));
 
         assert_eq!(actions, &[UnpairAction::Resume]);
-    }
-
-    #[test]
-    fn an_abandoned_revocation_asks_to_unpair_again_and_offers_only_dismiss() {
-        let mut abandoned = pending(UnpairProgress::Unconfirmed);
-        abandoned.abandoned = true;
-        let (explanation, actions) = present_unpair(&abandoned);
-
-        assert_eq!(actions, &[UnpairAction::Dismiss]);
-        assert!(
-            explanation.contains("Unpair that device again on the server\u{2019}s machine."),
-            "{explanation}"
-        );
     }
 
     #[test]

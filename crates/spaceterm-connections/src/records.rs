@@ -129,18 +129,6 @@ pub struct Document {
     schema: u8,
     pub routes: Vec<SavedRoute>,
     pub pending: Vec<PendingRecord>,
-    /// Revocations that were still pending over WSS when QUIC replaced it, kept only so the
-    /// person learns to revoke again; nothing retries them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub abandoned: Vec<Abandoned>,
-}
-
-/// A revocation dropped with its WSS route.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Abandoned {
-    pub operation: UnpairKey,
-    pub label: String,
 }
 
 impl Default for Document {
@@ -149,7 +137,6 @@ impl Default for Document {
             schema: 1,
             routes: Vec::new(),
             pending: Vec::new(),
-            abandoned: Vec::new(),
         }
     }
 }
@@ -164,14 +151,7 @@ impl Document {
     }
 
     fn validate(&self) -> Result<(), ()> {
-        if self.schema != 1
-            || self.routes.len().saturating_add(self.pending.len()) > CAPACITY
-            || self.abandoned.len() > CAPACITY
-            || self
-                .abandoned
-                .iter()
-                .any(|notice| notice.operation == [0; 32] || notice.label.len() > 512)
-        {
+        if self.schema != 1 || self.routes.len().saturating_add(self.pending.len()) > CAPACITY {
             return Err(());
         }
         let mut routes = BTreeSet::new();
