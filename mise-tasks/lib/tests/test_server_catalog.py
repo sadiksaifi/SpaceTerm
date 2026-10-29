@@ -37,7 +37,7 @@ class ServerCatalogTests(unittest.TestCase):
     ):
         directory = Path(tempfile.mkdtemp(dir=self.root))
         tree = directory / "server"
-        executable = tree / "bin/spaceterm-server"
+        executable = tree / "bin/spaceterm"
         executable.parent.mkdir(parents=True)
         # Signed foreign executables are opaque to the catalog. These headers declare
         # the supported machine; native producers separately verify their executables.
@@ -47,6 +47,7 @@ class ServerCatalogTests(unittest.TestCase):
             header = b"\x7fELF\x02\x01\x01" + bytes(9) + bytes.fromhex("03003e00") + bytes(44)
         info = dict(
             schema=1,
+            source_sha256=None,
             identity=self.identity,
             target=native_target,
             commit="a" * 40,
@@ -60,11 +61,11 @@ class ServerCatalogTests(unittest.TestCase):
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {{
-    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {{
+    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "build-info") == 0) {{
         puts({json.dumps(json.dumps(info))});
         return 0;
     }}
-    if (argc == 2 && strcmp(argv[1], "--check") == 0) {{
+    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "check") == 0) {{
         fputs({json.dumps(check_stdout)}, stdout);
         fputs({json.dumps(check_stderr)}, stderr);
         return {check_exit};
@@ -104,6 +105,26 @@ int main(int argc, char **argv) {{
             executable.write_bytes(header)
             executable.chmod(0o755)
         return (*archive_tree(ROOT, tree, info), info)
+
+    def test_collected_mac_artifact_must_match_the_current_source_snapshot(self):
+        source_digest = "b" * 64
+        archive, signature, info = self.artifact(
+            "aarch64-apple-darwin", source_sha256=source_digest
+        )
+        catalog = self.root / "mac-catalog"
+        entry = catalog / info["target"]
+        entry.mkdir(parents=True)
+        shutil.copyfile(archive, entry / "artifact.tar.gz")
+        shutil.copyfile(signature, entry / "artifact.sig")
+        (entry / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+        from spaceterm_tasks.server_catalog import collect_target
+
+        destination = self.root / "collected"
+        with self.assertRaisesRegex(TaskError, "source snapshot"):
+            collect_target(catalog, destination, self.identity, info["target"], "c" * 64)
+        self.assertFalse(destination.exists())
+        collect_target(catalog, destination, self.identity, info["target"], source_digest)
+        self.assertEqual((destination / "artifact.tar.gz").read_bytes(), archive.read_bytes())
 
     def test_native_headless_check_accepts_success(self):
         archive, signature, info = self.artifact(self.target)
@@ -256,7 +277,7 @@ int main(int argc, char **argv) {{
                 archive, signature, _ = self.artifact(self.target)
                 tree = archive.parent / "server"
                 if corrupt_machine:
-                    (tree / "bin/spaceterm-server").write_bytes(b"wrong native machine")
+                    (tree / "bin/spaceterm").write_bytes(b"wrong native machine")
                 else:
                     (tree / "share/spaceterm/shell-integration/zsh/.zshenv").unlink()
                 write_archive(tree, archive)

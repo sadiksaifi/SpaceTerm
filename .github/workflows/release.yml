@@ -60,8 +60,10 @@ jobs:
         include:
           - os: macos-26
             target: aarch64-apple-darwin
+            platform: darwin-arm64
           - os: ubuntu-26.04
             target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -90,6 +92,14 @@ jobs:
         with:
           name: server-catalog-${{ matrix.target }}
           path: dist/server-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload signed CLI release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-release-${{ matrix.platform }}
+          path: dist/release-server-${{ matrix.platform }}/
           if-no-files-found: error
           retention-days: 7
 
@@ -253,6 +263,16 @@ jobs:
         with:
           name: signed-linux-release-assets
           path: dist/release-linux
+      - name: Download macOS CLI release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: server-release-darwin-arm64
+          path: dist/release-server-darwin-arm64
+      - name: Download Linux CLI release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: server-release-linux-x86_64
+          path: dist/release-server-linux-x86_64
       - name: Verify transferred assets
         env:
           CHECKSUM: ${{ needs.package.outputs.checksum }}
@@ -262,6 +282,8 @@ jobs:
           printf '%s  %s\n' "$LINUX_CHECKSUM" dist/release-linux/SHA256SUMS | shasum -a 256 -c -
           (cd dist/release && shasum -a 256 -c SHA256SUMS)
           (cd dist/release-linux && shasum -a 256 -c SHA256SUMS)
+          (cd dist/release-server-darwin-arm64 && shasum -a 256 -c SHA256SUMS)
+          (cd dist/release-server-linux-x86_64 && shasum -a 256 -c SHA256SUMS)
       - name: Publish complete GitHub release
         timeout-minutes: 10
         env:

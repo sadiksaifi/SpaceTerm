@@ -2,7 +2,7 @@
 
 Only a release tag selects the SpaceTerm identity; every other package is SpaceTerm
 Preflight. The archive holds one directory in the installed layout, so the executable at
-bin/spaceterm reads its resources from share/spaceterm beside it.
+bin/spaceterm-desktop reads its resources from share/spaceterm beside it.
 """
 
 import os
@@ -68,8 +68,8 @@ def icon_document(name):
 def stage(name, executable, tree):
     """Lay out one identity's installed directory at `tree`."""
     (tree / "bin").mkdir(parents=True)
-    shutil.copyfile(executable, tree / "bin" / "spaceterm")
-    (tree / "bin" / "spaceterm").chmod(0o755)
+    shutil.copyfile(executable, tree / "bin" / "spaceterm-desktop")
+    (tree / "bin" / "spaceterm-desktop").chmod(0o755)
     resources = tree / "share" / "spaceterm"
     shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
     shutil.copyfile(NOTICES, resources / NOTICES.name)
@@ -173,7 +173,7 @@ def verify(archive=None, release_tag=None):
 
 def verify_tree(tree, name, release_tag):
     label = "archive"
-    executable = tree / "bin" / "spaceterm"
+    executable = tree / "bin" / "spaceterm-desktop"
     if not os.access(executable, os.X_OK):
         raise TaskError(f"{label} executable is missing")
     header = checked(["objdump", "-f", str(executable)], f"{label} executable is unreadable")

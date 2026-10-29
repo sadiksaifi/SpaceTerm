@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let major = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "3".into())
+        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
         .parse()?;
     let first = ServerConnection::for_development_client("takeover-first", major)?;
     let second = ServerConnection::for_development_client("takeover-second", major)?;

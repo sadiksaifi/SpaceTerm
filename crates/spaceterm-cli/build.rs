@@ -38,9 +38,18 @@ fn main() {
     let output = std::path::PathBuf::from(
         std::env::var_os("OUT_DIR").expect("Cargo supplies the output directory"),
     );
+    let source = std::env::var("SPACETERM_SERVER_SOURCE_STATE").ok();
+    assert!(
+        source.as_deref().is_none_or(|value| value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "valid source digest"
+    );
+    let source = source.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
     // All strings come from the validated build identity or Cargo's target triple.
     let document = format!(
-        "{{\"schema\":1,\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{PROTOCOL_MAJOR},\"capabilities\":{CAPABILITIES:?}}}\n",
+        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{PROTOCOL_MAJOR},\"capabilities\":{CAPABILITIES:?}}}\n",
         build.version, build.commit,
     );
     std::fs::write(output.join("build-info.json"), document).expect("write server build metadata");

@@ -33,15 +33,10 @@ fn help_shows_the_visible_tree_without_hidden_commands() {
 #[test]
 fn unimplemented_commands_exit_through_the_contract() {
     for (args, command) in [
-        (&["server", "run"][..], "server.run"),
-        (&["server", "provision", "build-info"], "server.provision"),
-        (&["pane", "run", "true"], "pane.run"),
+        (&["pane", "run", "true"][..], "pane.run"),
         (&["pane", "send", "x"], "pane.send"),
         (&["pane", "read"], "pane.read"),
         (&["pane", "release"], "pane.release"),
-        (&["completion", "zsh"], "completion"),
-        // The server commands Stream F implements are covered by its own tests, and running them
-        // here would act on this account's server.
     ] {
         let output = spaceterm(&[args, &["--json"]].concat());
         assert_eq!(output.status.code(), Some(5), "{args:?}");

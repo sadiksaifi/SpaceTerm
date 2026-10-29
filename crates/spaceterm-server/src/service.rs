@@ -14,6 +14,8 @@ pub mod operations;
 mod registration;
 mod runtime;
 pub mod tokens;
+#[cfg(feature = "client")]
+pub use runtime::CliUninstall;
 pub use runtime::{CandidateMetadata, verify_candidate_bytes};
 
 use crate::{
@@ -377,6 +379,7 @@ impl Service {
         self.supervisor.install(&self.runtime(&state))?;
         state.installed = true;
         data.write_json(c"service.json", &state)?;
+        self.repoint_cli_locked(&self.runtime(&state))?;
         drop(instance);
         if state.stopped {
             self.supervisor.stop()?;
@@ -675,13 +678,21 @@ impl Service {
     ) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
-        let recovering = Self::state(&data)?.is_some_and(|s| {
+        self.apply_control_locked(&data, action, observed_running)
+    }
+    fn apply_control_locked(
+        &self,
+        data: &Directory,
+        action: control::Action,
+        observed_running: Option<bool>,
+    ) -> Result<ServiceStatus, ServerError> {
+        let recovering = Self::state(data)?.is_some_and(|s| {
             s.activation
                 .as_ref()
                 .is_some_and(activation::Operation::pending)
         });
-        self.resume_activation(&data)?;
-        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        self.resume_activation(data)?;
+        let mut state = Self::state(data)?.ok_or(ServerError::NotInstalled)?;
         if recovering {
             return self.snapshot(&state);
         }
@@ -710,10 +721,10 @@ impl Service {
                 Err(error) => return Err(error),
             }
         }
-        self.stop_locked(&data, &mut state)?;
+        self.stop_locked(data, &mut state)?;
         match action {
             control::Action::Stop => {}
-            control::Action::Restart => self.start_locked(&data, &mut state, true)?,
+            control::Action::Restart => self.start_locked(data, &mut state, true)?,
             control::Action::Uninstall => {
                 state.removing = true;
                 data.write_json(c"service.json", &state)?;
@@ -913,7 +924,7 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), ServerError>
     }
     check_cleanup(&state)?;
     let executable = std::env::current_exe().map_err(|_| ServerError::RuntimeUnavailable)?;
-    if executable != service.runtime(&state).join("bin/spaceterm-server") {
+    if executable != service.runtime(&state).join("bin/spaceterm") {
         return Err(ServerError::RuntimeUnavailable);
     }
     runtime::verify(&service.runtime(&state), identity)?;
@@ -1166,7 +1177,7 @@ mod tests {
             ));
             let paths = Paths {
                 identity: "spaceterm-development".into(),
-                data: root.join("data"),
+                data: root.join(".local/share/spaceterm-development/server"),
                 runtime: root.join("runtime"),
             };
             let data = Directory::open(&paths.data, true).unwrap();
@@ -2731,7 +2742,7 @@ mod tests {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());
-            let sibling = fixture.root.join("spaceterm-server");
+            let sibling = fixture.root.join("spaceterm");
             std::fs::write(&sibling, b"unverified sibling").unwrap();
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())

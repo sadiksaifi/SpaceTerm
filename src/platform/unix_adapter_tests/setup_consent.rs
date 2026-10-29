@@ -149,7 +149,7 @@ impl SshProcessAdapter for ProcessAdapter {
                 .is_some_and(|command| command.to_string_lossy().contains(action))
         });
         if stalled {
-            if self.stall.0.lock().unwrap().action == Some("setup-start") {
+            if self.stall.0.lock().unwrap().action == Some("ssh-start") {
                 self.effects
                     .lock()
                     .unwrap()
@@ -177,7 +177,7 @@ impl SshProcessAdapter for ProcessAdapter {
         } else if request
             .arguments()
             .last()
-            .is_some_and(|command| command.to_string_lossy().contains("setup-direct-status"))
+            .is_some_and(|command| command.to_string_lossy().contains("ssh-direct-status"))
         {
             let status = self.status.lock().unwrap();
             (
@@ -200,8 +200,7 @@ impl SshProcessAdapter for ProcessAdapter {
                     .clone()
                     .unwrap_or_else(|| serde_json::to_vec(&discovery(false)).unwrap());
                 (true, vec![], vec![])
-            } else if self.effects_succeed.load(Ordering::SeqCst) && action.contains("setup-start")
-            {
+            } else if self.effects_succeed.load(Ordering::SeqCst) && action.contains("ssh-start") {
                 *self.discovery.lock().unwrap() = serde_json::to_vec(&discovery(true)).unwrap();
                 (true, vec![], vec![])
             } else {
@@ -404,11 +403,11 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
     let target = "x86_64-unknown-linux-gnu";
     let directory = catalog.join(target);
     std::fs::create_dir_all(&directory).unwrap();
-    let manifest = serde_json::json!({"schema":1,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_server::protocol::MAJOR,"capabilities":["workspace_policy"]}).to_string().into_bytes();
+    let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_server::protocol::MAJOR,"capabilities":["workspace_policy"]}).to_string().into_bytes();
     let mut entries = vec![
         ("server/build.json".to_owned(), manifest, 0o644),
         (
-            "server/bin/spaceterm-server".to_owned(),
+            "server/bin/spaceterm".to_owned(),
             executable.to_vec(),
             0o755,
         ),
@@ -1202,7 +1201,7 @@ fn setup_discovery_times_out_before_the_slave_ready_preamble_and_reaps_the_attem
 #[test]
 fn setup_start_times_out_before_the_slave_ready_preamble_as_unconfirmed_and_reaps_the_attempt() {
     let fixture = Fixture::new(serde_json::to_vec(&discovery(false)).unwrap());
-    fixture.adapter.stall.0.lock().unwrap().action = Some("setup-start");
+    fixture.adapter.stall.0.lock().unwrap().action = Some("ssh-start");
     let cancellation = CancellationToken::default();
     let token = cancellation.clone();
     let (completed, outcome) = mpsc::sync_channel(1);

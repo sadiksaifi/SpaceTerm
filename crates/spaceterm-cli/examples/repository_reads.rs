@@ -1,4 +1,4 @@
-//! Real owning-host Git reads through two authenticated clients on protocol major 3.
+//! Real owning-host Git reads through two authenticated clients on protocol major 4.
 #[path = "support/lifecycle.rs"]
 #[expect(
     dead_code,
@@ -21,7 +21,10 @@ mod repository;
 mod support;
 use repository::*;
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("3".into()).parse()?;
+    let major = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
+        .parse()?;
     let a = ServerConnection::for_development_client("repository-smoke-a", major)?;
     let b = ServerConnection::for_development_client("repository-smoke-b", major)?;
     lifecycle::require_idle(&a)?;

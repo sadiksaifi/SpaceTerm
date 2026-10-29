@@ -2,7 +2,7 @@
 Type=Application
 Name=SpaceTerm Preflight
 Comment=Terminal multiplexer
-Exec=spaceterm-preflight %u
+Exec=spaceterm-preflight-desktop %u
 MimeType=x-scheme-handler/spaceterm;
 Icon=io.github.sadiksaifi.spaceterm-preflight
 Terminal=false

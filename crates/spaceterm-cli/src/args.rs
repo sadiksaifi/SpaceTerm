@@ -54,7 +54,10 @@ pub struct Global {
 #[allow(clippy::large_enum_variant, reason = "parsed once per process")]
 pub enum Command {
     /// Set up, pair and administer servers.
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        after_help = "Uninstall:\n  curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall"
+    )]
     Server(ServerCommand),
     /// Join servers, and list or remove Saved Connections.
     #[command(subcommand)]
@@ -149,6 +152,11 @@ pub enum ProvisionCommand {
     /// Retain an unpacked installation for the installer.
     Retain {
         installation: PathBuf,
+    },
+    /// Remove the account service and only its managed CLI launcher.
+    Uninstall {
+        #[arg(long, value_name = "TOKEN")]
+        confirm: Option<String>,
     },
     SshDiscover,
     SshDirectStatus,

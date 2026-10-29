@@ -99,6 +99,5 @@ pub fn run() -> Result<(), ServerError> {
     if !success {
         return Err(ServerError::StartupFailed);
     }
-    println!("Server checks passed.");
     Ok(())
 }

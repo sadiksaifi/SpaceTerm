@@ -8,6 +8,7 @@ import sys
 
 from spaceterm_tasks import macos_signing, release, server_package
 from spaceterm_tasks.package_linux import write_archive
+from spaceterm_tasks.server_builds import _source
 
 SEED = bytes(range(32))
 
@@ -33,6 +34,7 @@ def prepare(
     ).stdout.strip()
     expected = {
         "schema": 1,
+        "source_sha256": _source(root)[2] if include_catalog and not release_tag else None,
         "protocol_major": 4,
         "capabilities": ["workspace_policy"],
         "identity": "spaceterm" if release_tag else "spaceterm-preflight",
@@ -46,16 +48,16 @@ def prepare(
     shutil.rmtree(directory, ignore_errors=True)
     tree = directory / "server"
     (tree / "bin").mkdir(parents=True)
-    executable = tree / "bin/spaceterm-server"
+    executable = tree / "bin/spaceterm"
     source = f"""
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {{
-    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {{
+    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "build-info") == 0) {{
         puts({json.dumps(json.dumps(expected))});
         return 0;
     }}
-    if (argc == 2 && strcmp(argv[1], "--check") == 0) {{
+    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "check") == 0) {{
         puts("Server checks passed.");
         return 0;
     }}
@@ -129,7 +131,7 @@ int main(int argc, char **argv) {{
         target = "x86_64-unknown-linux-gnu" if sys.platform == "darwin" else "aarch64-apple-darwin"
         foreign = directory / "foreign/server"
         (foreign / "bin").mkdir(parents=True)
-        executable = foreign / "bin/spaceterm-server"
+        executable = foreign / "bin/spaceterm"
         if target == "aarch64-apple-darwin":
             header = bytes.fromhex("cffaedfe0c0000010000000002000000") + bytes(16)
         else:

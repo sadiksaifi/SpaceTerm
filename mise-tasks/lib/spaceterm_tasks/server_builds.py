@@ -1,4 +1,4 @@
-"""Build complete nonproduction server catalogs locally from the current source."""
+"""Prepare source-matched nonproduction server catalogs with native macOS builds."""
 
 import fcntl
 import hashlib
@@ -93,13 +93,19 @@ def _portable_paths(root):
 
 
 def prepare(destination, identity):
-    """Build both targets locally and publish only one source-consistent signed catalog."""
+    """Build Linux locally and collect macOS only from its native host."""
     if identity not in NONPRODUCTION:
         raise TaskError("automatic server catalogs accept only nonproduction identities")
     destination = Path(destination)
     if destination.exists() or destination.is_symlink():
         raise TaskError("the server catalog destination already exists")
-    cache = ROOT / "target/server"
+    local = host_target()
+    source_catalog = os.environ.get("SPACETERM_SERVER_ARTIFACTS")
+    if local != TARGETS["darwin"] and not source_catalog:
+        raise TaskError(
+            "Linux catalogs need a Mac-built catalog in SPACETERM_SERVER_ARTIFACTS from the same source snapshot"
+        )
+    cache = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "server"
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / ".catalog.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -114,19 +120,27 @@ def prepare(destination, identity):
         try:
             with tempfile.TemporaryDirectory(dir=cache, prefix=".catalog-") as temporary:
                 collected = Path(temporary)
-                local = host_target()
                 targets = [local, *(target for target in TARGETS.values() if target != local)]
                 for target in targets:
-                    archive, signature = package(identity, target=target)
+                    if target == TARGETS["darwin"] and target != local:
+                        from spaceterm_tasks.server_catalog import collect_target
+
+                        collect_target(source_catalog, collected / target, identity, target, digest)
+                    else:
+                        archive, signature = package(identity, target=target)
+                        if _source(ROOT)[2] != digest:
+                            raise TaskError(
+                                "source changed during server catalog preparation; retry the command"
+                            )
+                        entry = collected / target
+                        entry.mkdir()
+                        shutil.copyfile(archive, entry / "artifact.tar.gz")
+                        shutil.copyfile(signature, entry / "artifact.sig")
+                        (entry / "artifact.sha256").write_text(sha256(archive) + "\n")
                     if _source(ROOT)[2] != digest:
                         raise TaskError(
                             "source changed during server catalog preparation; retry the command"
                         )
-                    entry = collected / target
-                    entry.mkdir()
-                    shutil.copyfile(archive, entry / "artifact.tar.gz")
-                    shutil.copyfile(signature, entry / "artifact.sig")
-                    (entry / "artifact.sha256").write_text(sha256(archive) + "\n")
                 stage_catalog(None, None, destination, identity, source=collected, require_all=True)
         finally:
             for name, value in previous.items():

@@ -165,7 +165,7 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                 entries[0].1 = serde_json::to_vec(&manifest).unwrap();
                 entries
                     .iter_mut()
-                    .find(|(name, _, _)| name == "server/bin/spaceterm-server")
+                    .find(|(name, _, _)| name == "server/bin/spaceterm")
                     .unwrap()
                     .1 = b"must never execute".to_vec();
             });
@@ -877,5 +877,46 @@ fn publication_refuses_an_existing_empty_destination() {
     drop(prepared);
     assert_eq!(std::fs::metadata(destination).unwrap().ino(), inode);
     assert!(!preparation_path.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn native_update_inspection_accepts_a_signed_new_major_without_weakening_pins() {
+    let root = temporary();
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            rewrite(archive, signature, |entries| {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&entries[0].1).unwrap();
+                manifest["protocol_major"] = (crate::protocol::MAJOR + 1).into();
+                entries[0].1 = serde_json::to_vec(&manifest).unwrap();
+            });
+            let service = Service::for_identity("spaceterm-development").unwrap();
+            let pin = digest(&std::fs::read(archive).unwrap());
+            assert_eq!(
+                service
+                    .inspect_update_candidate(archive, signature, &pin)
+                    .unwrap()
+                    .protocol_major,
+                crate::protocol::MAJOR + 1
+            );
+            assert_eq!(
+                service.inspect_candidate(
+                    archive,
+                    signature,
+                    &pin,
+                    crate::protocol::MAJOR,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::IncompatibleProtocol)
+            );
+            assert_eq!(
+                service.inspect_update_candidate(archive, signature, &"0".repeat(64)),
+                Err(ServerError::CandidateChanged)
+            );
+        },
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

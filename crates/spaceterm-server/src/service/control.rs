@@ -1,7 +1,5 @@
 //! Shared policy for local control surfaces. Preparing a confirmation never changes service state.
 
-pub mod cli;
-
 use super::{LingerAuthorization, RetainedInstallation, Service, ServiceStartup, ServiceStatus};
 use crate::ServerError;
 

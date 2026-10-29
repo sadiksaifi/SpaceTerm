@@ -1677,7 +1677,7 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
                 flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
             let mut archive = tar::Builder::new(compressed);
             let helper = format!(
-                "#!/bin/sh\ncase $1 in ssh-enable-linger) exit {};; ssh-enable-linger-password) IFS= read -r password; test \"$password\" = fixture;; ssh-install) test -f \"$3\" && test -f \"$4\";; *) exit 91;; esac\n",
+                "#!/bin/sh\n[ \"$1:$2\" = server:provision ] || exit 91\nshift 2\ncase $1 in ssh-enable-linger) if [ \"${{2-}}\" = --password-stdin ]; then IFS= read -r password; test \"$password\" = fixture; else exit {}; fi;; ssh-install) test -f \"$2\" && test -f \"$3\";; *) exit 91;; esac\n",
                 if authorization_required { 1 } else { 0 },
             );
             let mut header = tar::Header::new_gnu();
@@ -1685,11 +1685,7 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
             header.set_mode(0o755);
             header.set_cksum();
             archive
-                .append_data(
-                    &mut header,
-                    "server/bin/spaceterm-server",
-                    helper.as_bytes(),
-                )
+                .append_data(&mut header, "server/bin/spaceterm", helper.as_bytes())
                 .unwrap();
             archive.into_inner().unwrap().finish().unwrap();
         }
@@ -1920,8 +1916,8 @@ for signum in (signal.SIGHUP,signal.SIGTERM,signal.SIGINT):
     signal.signal(signum,interrupted)
 try:
     write(replacement)
-    result=subprocess.run([binary,'setup-start',application],input=request,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
-    assert result.returncode!=0 and result.stderr.strip()==b'The server changed. Review and confirm again.'
+    result=subprocess.run([binary,'server','provision','ssh-start'],input=request,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
+    assert result.returncode!=0 and b'(changed)' in result.stderr
     assert open(policy_path,'rb').read()==policy
 finally:
     current=os.stat(identity_path,follow_symlinks=False)
@@ -1934,7 +1930,7 @@ raise SystemExit(86)
 "#;
         let quoted = format!("'{}'", replace_and_start.replace('\'', "'\\''"));
         format!(
-            "{prefix}python3 -c {quoted} \"$root/identity.json\" \"$policy\" \"$root/installations/$digest/bin/spaceterm-server\" '{identity}'\n"
+            "{prefix}python3 -c {quoted} \"$root/identity.json\" \"$policy\" \"$root/installations/$digest/bin/spaceterm\" '{identity}'\n"
         )
     }
     fn install(

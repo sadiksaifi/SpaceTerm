@@ -66,7 +66,7 @@ class ServerSourceTests(unittest.TestCase):
             )
             (crate / "Cargo.toml").write_text(
                 '[package]\nname = "spaceterm-cli"\nversion = "0.0.0"\nedition = "2024"\n'
-                '[[bin]]\nname = "spaceterm-server"\npath = "src/main.rs"\n'
+                '[[bin]]\nname = "spaceterm"\npath = "src/main.rs"\n'
             )
             (crate / "src/main.rs").write_text(
                 'fn main() { print!("{}", include_str!(concat!(env!("OUT_DIR"), "/build-info.json"))); }'
@@ -87,7 +87,7 @@ class ServerSourceTests(unittest.TestCase):
                     "spaceterm-cli",
                     "--locked",
                     "--offline",
-                    binary="spaceterm-server",
+                    binary="spaceterm",
                     env=environment,
                     metadata="build-info.json",
                 )
@@ -99,6 +99,9 @@ class ServerSourceTests(unittest.TestCase):
 
             with (
                 patch("spaceterm_tasks.server_builds.ROOT", root),
+                patch(
+                    "spaceterm_tasks.server_builds.host_target", return_value="aarch64-apple-darwin"
+                ),
                 patch.object(cargo, "ROOT", root),
                 patch("spaceterm_tasks.server_builds.package", build_metadata),
             ):
@@ -120,6 +123,9 @@ class ServerSourceTests(unittest.TestCase):
 
             with (
                 patch("spaceterm_tasks.server_builds.ROOT", root),
+                patch(
+                    "spaceterm_tasks.server_builds.host_target", return_value="aarch64-apple-darwin"
+                ),
                 patch("spaceterm_tasks.server_builds.package", changed_build),
                 self.assertRaisesRegex(TaskError, "source changed during server catalog"),
             ):

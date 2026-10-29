@@ -73,7 +73,7 @@ fn installed_resource_root(executable: &Path) -> Option<PathBuf> {
     }
 }
 
-/// `<prefix>/bin/spaceterm` reads `<prefix>/share/spaceterm`.
+/// `<prefix>/bin/spaceterm-desktop` reads `<prefix>/share/spaceterm`.
 #[cfg(target_os = "linux")]
 fn installed_resource_root(executable: &Path) -> Option<PathBuf> {
     let prefix = executable.parent()?.parent()?;
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn linux_installed_resources_live_under_the_prefix_share_directory() {
         assert_eq!(
-            installed_resource_root(Path::new("/opt/spaceterm/bin/spaceterm")),
+            installed_resource_root(Path::new("/opt/spaceterm/bin/spaceterm-desktop")),
             Some(PathBuf::from("/opt/spaceterm/share/spaceterm"))
         );
         assert!(shell_integration_supported(Path::new("/bin/bash")));
@@ -349,7 +349,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            installed_resource_root(Path::new("/usr/local/bin/spaceterm-server")),
+            installed_resource_root(Path::new("/usr/local/bin/spaceterm")),
             Some(PathBuf::from("/usr/local/share/spaceterm"))
         );
         assert!(!shell_integration_supported(Path::new("/bin/bash")));

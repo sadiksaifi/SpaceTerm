@@ -81,7 +81,7 @@ def build_owner(args):
     directory, target = checkout(args)
     command = (
         f"cd {directory} && CARGO_TARGET_DIR={target} mise exec -- cargo build {' '.join(PROTOCOL_PROBE)} "
-        "--bin spaceterm-server --example latency_probe"
+        "--bin spaceterm --example latency_probe"
     )
     if args.jail:
         jail = shlex.quote(args.jail)
@@ -96,7 +96,7 @@ def build_owner(args):
 
 
 def start_server(args, target):
-    command = jailed(args, f"{target}/release/spaceterm-server development-serve {IDENTITY}")
+    command = jailed(args, f"{target}/release/spaceterm server run --owned")
     server = subprocess.Popen(
         ["ssh", "-T", args.owner_host, f"exec sh -c {shlex.quote(command)}"],
         stdin=subprocess.PIPE,

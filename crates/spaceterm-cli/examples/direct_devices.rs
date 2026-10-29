@@ -617,7 +617,7 @@ mod exercise {
         let owner = api(ServerConnection::for_development_client(&name, 4))?;
         require(
             api(owner.refresh())?.protocol_major == 4,
-            "expected protocol major 3",
+            "expected protocol major 4",
         )?;
         let mut connection = api(support::connect(&owner))?;
         let baseline = inventory(&connection)?.0;
@@ -692,7 +692,7 @@ mod exercise {
             )?;
             let paired = scope.enroll(&mut peer)?;
             println!(
-                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 3"
+                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 4"
             );
             let failed = peer.message(json!({"create_workspace": format!("Direct devices cleanup {}", &hex(&random()?)[..12]), "fail_before_handoff": true}))?;
             scope.workspace = Some(api(serde_json::from_value(

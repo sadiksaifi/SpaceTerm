@@ -11,7 +11,8 @@ from pathlib import Path
 
 from spaceterm_tasks import LIBRARY
 
-SERVER = """import pathlib, signal, sys, time
+SERVER = """import os, pathlib, signal, sys, time
+assert all(name not in os.environ for name in ("SPACETERM_SERVER", "SPACETERM_AS", "SPACETERM_PANE", "SPACETERM_CLI"))
 root = pathlib.Path(sys.argv[1])
 def stopped(*_):
     (root / "server-stopped").touch()
@@ -39,7 +40,8 @@ class Process(RealProcess):
         return super().wait(timeout=None if timeout is None else min(timeout, 0.01))
 subprocess.Popen = Process
 """
-GATED_SERVER = """import pathlib, signal, sys, time
+GATED_SERVER = """import os, pathlib, signal, sys, time
+assert all(name not in os.environ for name in ("SPACETERM_SERVER", "SPACETERM_AS", "SPACETERM_PANE", "SPACETERM_CLI"))
 root = pathlib.Path(sys.argv[1])
 def forced_stop(*_):
     (root / "forced-stop").touch()
@@ -74,7 +76,14 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         driver = (FAST_DEADLINES if fast_deadlines else "") + DRIVER
         process = subprocess.Popen(
             [sys.executable, "-c", driver, str(self.server), str(self.client), str(self.root)],
-            env={**os.environ, "PYTHONPATH": str(LIBRARY)},
+            env={
+                **os.environ,
+                "PYTHONPATH": str(LIBRARY),
+                "SPACETERM_SERVER": "saved-connection",
+                "SPACETERM_AS": "parent-agent",
+                "SPACETERM_PANE": "parent-pane",
+                "SPACETERM_CLI": "/parent/cli",
+            },
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )

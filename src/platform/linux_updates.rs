@@ -497,7 +497,7 @@ impl Shared {
     }
 }
 
-/// An installation the installer laid out: `<root>/bin/spaceterm` beside `<root>/share/spaceterm`.
+/// An installation the installer laid out: `<root>/bin/spaceterm-desktop` beside `<root>/share/spaceterm`.
 #[derive(Clone, Debug)]
 struct Installation {
     root: PathBuf,
@@ -508,7 +508,7 @@ struct Installation {
 impl Installation {
     fn locate(executable: &Path) -> Option<Self> {
         let bin = executable.parent()?;
-        if executable.file_name()? != "spaceterm" || bin.file_name()? != "bin" {
+        if executable.file_name()? != "spaceterm-desktop" || bin.file_name()? != "bin" {
             return None;
         }
         let root = bin.parent()?;
@@ -526,7 +526,7 @@ impl Installation {
     }
 
     fn executable_in(root: &Path) -> PathBuf {
-        root.join("bin").join("spaceterm")
+        root.join("bin").join("spaceterm-desktop")
     }
 
     fn staged_tree(&self) -> PathBuf {
@@ -809,8 +809,9 @@ mod tests {
         let root = directory.path().join("lib").join("spaceterm");
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir_all(root.join("share").join("spaceterm")).unwrap();
-        fs::write(root.join("bin").join("spaceterm"), contents).unwrap();
-        let installation = Installation::locate(&root.join("bin").join("spaceterm")).unwrap();
+        fs::write(root.join("bin").join("spaceterm-desktop"), contents).unwrap();
+        let installation =
+            Installation::locate(&root.join("bin").join("spaceterm-desktop")).unwrap();
         Fixture {
             _directory: directory,
             installation,
@@ -848,7 +849,7 @@ mod tests {
             ("spaceterm/", tar::EntryType::Directory, b"", 0o755),
             ("spaceterm/bin/", tar::EntryType::Directory, b"", 0o755),
             (
-                "spaceterm/bin/spaceterm",
+                "spaceterm/bin/spaceterm-desktop",
                 tar::EntryType::Regular,
                 binary,
                 0o755,
@@ -872,13 +873,16 @@ mod tests {
     fn linux_installation_should_be_located_from_its_installed_executable() {
         let fixture = installed("old");
         let root = fixture.installation.root.clone();
-        assert_eq!(fixture.installation.executable, root.join("bin/spaceterm"));
+        assert_eq!(
+            fixture.installation.executable,
+            root.join("bin/spaceterm-desktop")
+        );
         assert_eq!(
             fixture.installation.staging,
             root.parent().unwrap().join(".spaceterm.update")
         );
         // A source build runs from Cargo's target directory, which is not an installation.
-        assert!(Installation::locate(Path::new("/tmp/target/debug/spaceterm")).is_none());
+        assert!(Installation::locate(Path::new("/tmp/target/debug/spaceterm-desktop")).is_none());
     }
 
     #[test]
@@ -887,7 +891,7 @@ mod tests {
         let destination = directory.path().join("tree");
         unpack(&release(b"new"), ROOT, &destination).unwrap();
         use std::os::unix::fs::PermissionsExt as _;
-        let executable = fs::metadata(destination.join("bin/spaceterm")).unwrap();
+        let executable = fs::metadata(destination.join("bin/spaceterm-desktop")).unwrap();
         assert_eq!(executable.permissions().mode() & 0o777, 0o755);
         assert_eq!(
             fs::read(destination.join("share/spaceterm/notes.txt")).unwrap(),
@@ -906,7 +910,7 @@ mod tests {
             )],
             vec![("/etc/escape", tar::EntryType::Regular, &b"x"[..], 0o644)],
             vec![(
-                "other/bin/spaceterm",
+                "other/bin/spaceterm-desktop",
                 tar::EntryType::Regular,
                 &b"x"[..],
                 0o755,
@@ -930,7 +934,7 @@ mod tests {
         assert_eq!(installed_contents(installation), "new");
         // The running process keeps the replaced tree until the next launch discards it.
         assert_eq!(
-            fs::read_to_string(installation.staged_tree().join("bin/spaceterm")).unwrap(),
+            fs::read_to_string(installation.staged_tree().join("bin/spaceterm-desktop")).unwrap(),
             "old"
         );
         installation.discard_staging().unwrap();

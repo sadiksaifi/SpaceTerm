@@ -188,3 +188,43 @@ def verify_catalog(source, identity, *, require_all=False):
             return {target: info for target, (info, _, _) in entries.items()}
     except OSError:
         raise TaskError("the server catalog could not be read or verified safely") from None
+
+
+def collect_target(source, destination, identity, target, source_sha256):
+    """Authenticate one native producer's target from the exact current source snapshot."""
+    destination = Path(destination)
+    try:
+        with tempfile.TemporaryDirectory(prefix="spaceterm-native-target-") as temporary:
+            directory = Path(temporary)
+            snapshot = directory / "snapshot"
+            snapshot.mkdir()
+            parent = _directory(Path(source))
+            try:
+                nested = _directory(target, parent=parent)
+                try:
+                    before = os.fstat(nested)
+                    if set(os.listdir(nested)) != FILES.keys():
+                        raise TaskError(
+                            "the native server target must contain its signed pair and digest"
+                        )
+                    for name, maximum in FILES.items():
+                        _copy_file(nested, name, snapshot / name, maximum)
+                    if _state(os.fstat(nested)) != _state(before):
+                        raise TaskError("the native server target changed while being read")
+                finally:
+                    os.close(nested)
+            finally:
+                os.close(parent)
+            info, archive, signature = _verify_target(
+                snapshot, identity, target, directory / "verified"
+            )
+            if info["build"]["source_sha256"] != source_sha256:
+                raise TaskError(
+                    "the Mac-built server artifact differs from the current source snapshot"
+                )
+            destination.mkdir()
+            shutil.copyfile(archive, destination / "artifact.tar.gz")
+            shutil.copyfile(signature, destination / "artifact.sig")
+            (destination / "artifact.sha256").write_text(info["sha256"] + "\n")
+    except OSError:
+        raise TaskError("the native server target could not be collected safely") from None

@@ -449,8 +449,8 @@ run = "cargo test --package spaceterm-server --no-default-features --locked"
 [tasks."server:check"]
 description = "Check the local server and desktop account admission"
 run = [
-    "cargo clippy --package spaceterm-server --all-targets --all-features --locked -- -D warnings",
-    "cargo clippy --package spaceterm-server --all-targets --no-default-features --locked -- -D warnings",
+    "cargo clippy --package spaceterm-server --all-targets --all-features --locked --no-deps -- -D warnings",
+    "cargo clippy --package spaceterm-server --all-targets --no-default-features --locked --no-deps -- -D warnings",
     "cargo clippy --package spaceterm-cli --all-targets --all-features --locked --no-deps -- -D warnings",
     "cargo clippy --package spaceterm-cli --all-targets --no-default-features --locked --no-deps -- -D warnings",
 ]
@@ -461,15 +461,11 @@ run = "cargo build --package spaceterm-cli --no-default-features --locked"
 
 [tasks."server:development"]
 description = "Run the Development server explicitly in the foreground after local setup"
-run = "cargo run --package spaceterm-cli --no-default-features --locked -- serve spaceterm-development"
-
-[tasks."server:setup-state"]
-description = "Recover nonsecret Development state without starting or changing Stop"
-run = "cargo run --package spaceterm-cli --features client --locked -- setup-state spaceterm-development"
+run = "cargo run --package spaceterm-cli --no-default-features --locked -- server run --identity spaceterm-development"
 
 [tasks."server:status"]
 description = "Connect to the existing Development server"
-run = "cargo run --package spaceterm-cli --features client --locked -- status spaceterm-development"
+run = "cargo run --package spaceterm-cli --features client --locked -- server status"
 
 [tasks."server:dependencies"]
 description = "Show the isolated headless server's production dependencies"
@@ -493,7 +489,7 @@ run = "cargo build --package spaceterm-cli --features client --example persisten
 
 [tasks."server:pane:run"]
 description = "Run the built account-local Pane check without replacing its code signature"
-run = "target/debug/examples/persistent_pane"
+run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/persistent_pane\""
 
 [tasks."server:pane:shutdown:smoke"]
 description = "Verify authenticated approved Development service shutdown terminates its running Pane"
@@ -513,21 +509,25 @@ flag "--confirm-disposable-preflight" help="Authorize only disposable Preflight 
 run = "cargo run --package spaceterm-cli --features client --example end_all_sessions --locked -- spaceterm-preflight {% if usage.confirm_disposable_preflight %}--confirm-disposable-preflight{% endif %}"
 
 [tasks."server:input:smoke"]
-description = "Verify account-local terminal input and native effects with protocol major 3 on an idle server"
+description = "Verify account-local terminal input and native effects with protocol major 4 on an idle server"
 run = [
   "cargo build --package spaceterm-cli --features client --examples --bins --locked",
   "cargo run --package spaceterm-cli --features client --example terminal_input --locked -- 4",
 ]
 
+[tasks."server:admin:native"]
+description = "Verify Preflight administration from Mac to Penguin and from Penguin to Mac"
+run = 'cargo run -p spaceterm-cli --example server_admin_native --locked -- "$@"'
+
 [tasks."server:workspace:smoke"]
-description = "Exercise retained Development work through server kill and shutdown with protocol major 3"
+description = "Exercise retained Development work through server kill and shutdown with protocol major 4"
 run = [
   "cargo build --package spaceterm-cli --features client --examples --bins --locked",
   "cargo run --package spaceterm-cli --features client --example restored_workspace --locked -- 4",
 ]
 
 [tasks."server:shared:smoke"]
-description = "Exercise shared edits, independent Pane control, lost outcomes and restart with protocol major 3"
+description = "Exercise shared edits, independent Pane control, lost outcomes and restart with protocol major 4"
 run = [
   "cargo build --package spaceterm-cli --features client --examples --bins --locked",
   "cargo run --package spaceterm-cli --features client --example shared_workspaces --locked -- 4",
@@ -548,14 +548,14 @@ usage = 'arg "[test]" default="native_server_setup_acceptance" help="Exact funct
 run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::provisioning::unix_adapter_tests::{{usage.test | quote}} --ignored --exact --nocapture"
 
 [tasks."server:worktree:smoke"]
-description = "Exercise owning-server Worktree writes and interrupted originals with protocol major 3"
+description = "Exercise owning-server Worktree writes and interrupted originals with protocol major 4"
 run = [
   "cargo build --package spaceterm-cli --features client --example worktree_writes --bins --locked",
   "cargo run --package spaceterm-cli --features client --example worktree_writes --locked -- 4",
 ]
 
 [tasks."server:repository:smoke"]
-description = "Read owning-server Git facts and external Worktrees through two clients with protocol major 3"
+description = "Read owning-server Git facts and external Worktrees through two clients with protocol major 4"
 run = [
   "cargo build --package spaceterm-cli --features client --example repository_reads --bins --locked",
   "cargo run --package spaceterm-cli --features client --example repository_reads --locked -- 4",
@@ -587,20 +587,25 @@ arg "<candidate-signature>" help="Candidate archive signature"
 arg "<candidate-sha256>" help="Candidate complete archive SHA256"
 flag "--confirm-disposable-development" help="Authorize replacement of disposable Development server work"
 '''
-run = "target/debug/examples/server_update {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
+run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/server_update\" {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
 
 [tasks."server:admission:host"]
 description = "Observe refusal of a real other-account peer without sending requests"
 run = "cargo test --package spaceterm-server --locked --lib host::tests::refuses_a_real_other_account_peer_without_sending_protocol_bytes -- --ignored --exact"
 
 [tasks."server:service"]
-description = "Explicitly control this build's account server service"
+description = "Run a Development CLI server command"
 usage = '''
-arg "<action>" help="status, install, start, stop, restart, uninstall, automatic-start, or enable-linger"
-arg "[argument]" help="Verified retained installation for install, or on|off for automatic-start"
-flag "--confirm" help="Confirm Stop, Restart, or Uninstall after reviewing its effects"
+arg "<action>" help="Development server command" {
+  choices "setup" "status" "start" "stop" "restart" "update"
+}
+flag "--network <network>" help="Network Access for setup"
+flag "--automatic-start <preference>" help="Automatic startup for setup" {
+  choices "on" "off"
+}
+flag "--confirm <token>" help="Token returned by the command's preview"
 '''
-run = "cargo run --package spaceterm-cli --no-default-features --locked -- service-{{usage.action}} spaceterm-development {% if usage.argument %}{{usage.argument | quote}}{% endif %}{% if usage.confirm %} --confirm{% endif %}"
+run = "cargo run --package spaceterm-cli --no-default-features --locked -- server {{usage.action}} {% if usage.network %}--network {{usage.network | quote}}{% endif %} {% if usage.automatic_start %}--automatic-start {{usage.automatic_start | quote}}{% endif %} {% if usage.confirm %}--confirm {{usage.confirm | quote}}{% endif %}"
 
 [tasks."server:service:session:macos"]
 description = "Verify authenticated Session survival and durable Stop on an installed macOS server"
@@ -622,7 +627,7 @@ run = [
 ]
 
 [tasks."server:graphics:transport:test"]
-description = "Test authenticated graphics transfers and slow readers with protocol major 3 and fixture identities"
+description = "Test authenticated graphics transfers and slow readers with protocol major 4 and fixture identities"
 run = "cargo test --package spaceterm-server --lib --features client --locked"
 
 [tasks."server:directory:build"]
@@ -632,21 +637,21 @@ run = "cargo build --package spaceterm-cli --features client --example directory
 [tasks."server:directory:smoke"]
 description = "Exercise directory recovery on an idle Development server without native credential adapters"
 usage = '''
-arg "[major]" default="3" help="Protocol major (3)"
+arg "[major]" default="4" help="Protocol major (4)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = [
   { task = "server:directory:build" },
-  "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
+  "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
 ]
 
 [tasks."server:directory:run"]
 description = "Run a built directory-recovery check without replacing its code signature"
 usage = '''
-arg "[major]" default="3" help="Protocol major (3)"
+arg "[major]" default="4" help="Protocol major (4)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
-run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
+run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
 
 [tasks."bench:latency:quic"]
 description = "Measure a paired QUIC request's round trip on loopback, in a release build"
@@ -672,7 +677,7 @@ arg "<server>" help="Exact idle Development server identity in hexadecimal"
 flag "--confirm-idle-development" help="Authorize only test-created pairings and Workspaces on the idle Development server"
 flag "--restart-idle-service" help="Also verify exposure policy through an explicit idle service restart"
 '''
-run = "target/debug/examples/direct_devices --bind {{usage.bind | quote}} --expect-server {{usage.server | quote}} {% if usage.confirm_idle_development %}--confirm-idle-development{% endif %} {% if usage.restart_idle_service %}--restart-idle-service{% endif %}"
+run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/direct_devices\" --bind {{usage.bind | quote}} --expect-server {{usage.server | quote}} {% if usage.confirm_idle_development %}--confirm-idle-development{% endif %} {% if usage.restart_idle_service %}--restart-idle-service{% endif %}"
 
 [tasks."server:direct:credentials:native:test"]
 description = "Verify two disposable native credential items without replacing another pairing"

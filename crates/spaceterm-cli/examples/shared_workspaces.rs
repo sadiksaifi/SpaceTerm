@@ -1,4 +1,4 @@
-//! Authenticated shared edits, replay, independent Pane control, and forced restart on protocol major 3.
+//! Authenticated shared edits, replay, independent Pane control, and forced restart on protocol major 4.
 #[path = "support/lifecycle.rs"]
 #[expect(
     dead_code,
@@ -39,6 +39,8 @@ fn connect(server: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
 }
 
 fn inventory(link: &ServerLink) -> Result<(Inventory, u64), Box<dyn Error>> {
+    // A mutation replies on its own link. Drain already-published inventory on this peer too.
+    support::round_trip(link)?;
     Ok(support::inventory(link)?)
 }
 fn mutate(link: &ServerLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
@@ -168,7 +170,10 @@ fn attachment_workflow(a: &ServerConnection, b: &ServerConnection) -> Result<(),
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("3".into()).parse()?;
+    let major = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
+        .parse()?;
     let a = ServerConnection::for_development_client("shared-smoke-a", major)?;
     let b = ServerConnection::for_development_client("shared-smoke-b", major)?;
     require_idle(&a)?;
