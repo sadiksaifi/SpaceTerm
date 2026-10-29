@@ -219,6 +219,7 @@ fn a_device_that_removes_its_own_connection_forgets_its_service_operations() {
                 candidate: None,
                 state: State::Admitted,
                 updated_at: 0,
+                orphaned: false,
             })
             .unwrap();
         ledger.mark(&OperationId([id; 16]), State::Done).unwrap();

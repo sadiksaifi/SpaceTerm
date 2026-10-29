@@ -796,6 +796,7 @@ fn fixture_record(identity: &str, id: OperationId, state: State) -> Result<Recor
         candidate: None,
         state,
         updated_at: 0,
+        orphaned: false,
     })
 }
 

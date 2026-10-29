@@ -1121,6 +1121,7 @@ fn a_paired_device_reaches_the_service_lane_as_its_own_pairing() {
                 candidate: None,
                 state: State::Admitted,
                 updated_at: 0,
+                orphaned: false,
             })
             .unwrap();
         ledger.mark(&operation, State::Done).unwrap();

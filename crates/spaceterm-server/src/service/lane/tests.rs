@@ -410,6 +410,61 @@ fn a_settled_outcome_is_resolved_then_acknowledged_by_its_own_actor() {
 }
 
 #[test]
+fn revoking_the_actor_mid_operation_keeps_the_fence_and_refuses_another_operation() {
+    with_lane(|lane| {
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        execute(&lane.lane, LaneAction::Restart, &token, 1);
+        let id = OperationId([1; 16]);
+        // The helper holds its lock and runs the Restart.
+        let helper = Directory::open(&lane.service.paths.data, false)
+            .unwrap()
+            .try_lock(HELPER_LOCK)
+            .unwrap()
+            .unwrap();
+        lane.lane.ledger().unwrap().claim(&id).unwrap();
+        lane.lane
+            .ledger()
+            .unwrap()
+            .forget_pairing(&ACTOR.pairing.unwrap())
+            .unwrap();
+        // The fence watcher sees an unsettled orphan, not an empty ledger.
+        std::thread::sleep(FENCE_INTERVAL * 3);
+        assert!(lane.host.fenced.load(Ordering::SeqCst));
+        let other = Actor {
+            pairing: Some([9; 32]),
+            client: [9; 32],
+        };
+        let LaneReply::Preview { token, .. } = lane.lane.answer(
+            LaneRequest::Preview {
+                action: LaneAction::Stop,
+            },
+            &other,
+        ) else {
+            panic!("expected a preview");
+        };
+        let reply = lane.lane.answer(
+            LaneRequest::Execute {
+                action: LaneAction::Stop,
+                token,
+                operation: OperationId([2; 16]).to_string(),
+            },
+            &other,
+        );
+        assert_eq!(code(reply), "service_busy");
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        // The helper's outcome deletes the orphan, and only then does the fence clear.
+        lane.lane.ledger().unwrap().mark(&id, State::Done).unwrap();
+        drop(helper);
+        assert_eq!(lane.lane.ledger().unwrap().resolve(&id).unwrap(), None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lane.host.fenced.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the fence was never released");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+#[test]
 fn a_full_ledger_refuses_execute_with_capacity() {
     with_lane(|lane| {
         let mut ledger = lane.lane.ledger().unwrap();
@@ -424,6 +479,7 @@ fn a_full_ledger_refuses_execute_with_capacity() {
                 candidate: None,
                 state: State::Admitted,
                 updated_at: 0,
+                orphaned: false,
             };
             ledger.admit(record).unwrap();
             ledger

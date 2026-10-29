@@ -483,8 +483,9 @@ impl crate::service::lane::LaneHost for HostLane {
     }
 }
 
-/// Every revocation, over IPC or the network, forgets the revoked pairing's service operations
-/// in the ledger under `data`, so they never hold its capacity.
+/// Every revocation, over IPC or the network, forgets the revoked pairing's settled service
+/// operations in the ledger under `data`, so they never hold its capacity. An unsettled one stays
+/// orphaned until it settles.
 pub(crate) fn forget_service_operations(data: std::path::PathBuf) -> crate::direct::host::Revoked {
     Box::new(move |pairing| {
         if let Ok(data) = Directory::open(&data, false) {
