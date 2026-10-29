@@ -1,10 +1,10 @@
-//! The CLI's account-private Saved Connections, separate from desktop presentation.
+//! The CLI's account-private Saved Connections and exact recovery requests.
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use spaceterm_server::direct::{Endpoint, PairedDevice};
-use spaceterm_server::{Directory, ServerError};
+use spaceterm_server::direct::{Endpoint, PairedDevice, ServerPin};
+use spaceterm_server::{Directory, Lock, ServerError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum UnpairState {
@@ -12,7 +12,7 @@ pub enum UnpairState {
     Pending,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedConnection {
     pub name: String,
@@ -31,14 +31,46 @@ pub enum StoreError {
     NotFound,
 }
 
+/// Restricted cancellation authority. It contains neither an invitation nor a secret.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingEnrollment {
+    pub route: [u8; 32],
+    pub name: String,
+    pub endpoint: String,
+    pub pin: ServerPin,
+    pub claim: [u8; 32],
+    pub credential: [u8; 32],
+    pub public_key: [u8; 32],
+    pub offered: bool,
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRevocation {
+    pub connection: SavedConnection,
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemovalConfirmation {
+    pub token: [u8; 32],
+    pub expires: u64,
+    pub connection: SavedConnection,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
     connections: Vec<SavedConnection>,
-    pending: Vec<SavedConnection>,
+    pending: Vec<PendingRevocation>,
+    enrollments: Vec<PendingEnrollment>,
+    confirmations: Vec<RemovalConfirmation>,
 }
 
-/// Only an explicit CLI namespace grants authority to open this store.
+/// One client's Saved Connections file. Construction and reads create nothing.
 pub struct ConnectionStore {
     root: PathBuf,
 }
@@ -47,14 +79,22 @@ impl ConnectionStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
-
-    /// Reading absent state never creates a directory, lock or credential item.
     pub fn load(&self) -> Result<Vec<SavedConnection>, StoreError> {
         Ok(self.read()?.connections)
     }
-
     pub fn pending(&self) -> Result<Vec<SavedConnection>, StoreError> {
+        Ok(self
+            .read()?
+            .pending
+            .into_iter()
+            .map(|row| row.connection)
+            .collect())
+    }
+    pub fn pending_revocations(&self) -> Result<Vec<PendingRevocation>, StoreError> {
         Ok(self.read()?.pending)
+    }
+    pub fn pending_enrollments(&self) -> Result<Vec<PendingEnrollment>, StoreError> {
+        Ok(self.read()?.enrollments)
     }
 
     fn read(&self) -> Result<Document, StoreError> {
@@ -65,6 +105,15 @@ impl ConnectionStore {
         }
     }
 
+    /// Serializes a live enrollment or cleanup without blocking unrelated connections.
+    pub fn recovery_guard(&self, route: &[u8; 32]) -> Result<Option<Lock>, StoreError> {
+        let directory = Directory::open(&self.root, true).map_err(|_| StoreError::Unavailable)?;
+        let name: String = route.iter().map(|byte| format!("{byte:02x}")).collect();
+        directory
+            .try_lock(&format!("connection-{name}.lock"))
+            .map_err(|_| StoreError::Unavailable)
+    }
+
     /// The lock covers the current read, the caller's change, and atomic publication.
     pub fn commit_guarded<T>(
         &self,
@@ -73,29 +122,155 @@ impl ConnectionStore {
         self.change(|document| change(&mut document.connections))
     }
 
-    /// Local removal is immediate. Restricted revocation remains in the pending queue.
+    pub fn reserve(&self, enrollment: PendingEnrollment) -> Result<(), StoreError> {
+        self.change(|document| {
+            if document
+                .connections
+                .iter()
+                .any(|row| row.name == enrollment.name)
+            {
+                return Err(StoreError::NameTaken);
+            }
+            if document
+                .enrollments
+                .iter()
+                .any(|row| row.name == enrollment.name)
+            {
+                return Err(StoreError::Changed);
+            }
+            document.enrollments.push(enrollment);
+            Ok(())
+        })
+    }
+
+    pub fn mark_offered(&self, route: [u8; 32]) -> Result<(), StoreError> {
+        self.change(|document| {
+            let row = document
+                .enrollments
+                .iter_mut()
+                .find(|row| row.route == route && !row.confirmed)
+                .ok_or(StoreError::Changed)?;
+            row.offered = true;
+            Ok(())
+        })
+    }
+
+    pub fn publish(&self, connection: SavedConnection) -> Result<(), StoreError> {
+        self.change(|document| {
+            let index = document
+                .enrollments
+                .iter()
+                .position(|row| {
+                    row.route == connection.route
+                        && row.name == connection.name
+                        && row.endpoint == connection.endpoint
+                        && row.pin == connection.paired.pin
+                        && row.credential == connection.credential
+                        && !row.confirmed
+                })
+                .ok_or(StoreError::Changed)?;
+            document.enrollments.remove(index);
+            document.connections.push(connection);
+            Ok(())
+        })
+    }
+
+    pub fn confirm_enrollment_cleanup(&self, route: [u8; 32]) -> Result<(), StoreError> {
+        self.change(|document| {
+            let row = document
+                .enrollments
+                .iter_mut()
+                .find(|row| row.route == route)
+                .ok_or(StoreError::NotFound)?;
+            row.confirmed = true;
+            Ok(())
+        })
+    }
+    pub fn retire_enrollment(&self, route: [u8; 32]) -> Result<(), StoreError> {
+        self.change(|document| {
+            let index = document
+                .enrollments
+                .iter()
+                .position(|row| row.route == route && row.confirmed)
+                .ok_or(StoreError::Changed)?;
+            document.enrollments.remove(index);
+            Ok(())
+        })
+    }
+
+    /// The preview binds the exact local record and expires after one minute.
+    pub fn preview_remove(&self, name: &str, now: u64) -> Result<RemovalConfirmation, StoreError> {
+        self.change(|document| {
+            let connection = document
+                .connections
+                .iter()
+                .find(|row| row.name == name)
+                .ok_or(StoreError::NotFound)?
+                .clone();
+            document
+                .confirmations
+                .retain(|row| row.expires > now && row.connection.route != connection.route);
+            if document.confirmations.len() >= 128 {
+                return Err(StoreError::Unavailable);
+            }
+            let confirmation = RemovalConfirmation {
+                token: crate::random_id().map_err(|_| StoreError::Unavailable)?,
+                expires: now.saturating_add(60),
+                connection,
+            };
+            document.confirmations.push(confirmation.clone());
+            Ok(confirmation)
+        })
+    }
+
+    pub fn confirm_remove(
+        &self,
+        name: &str,
+        token: &[u8; 32],
+        now: u64,
+    ) -> Result<SavedConnection, StoreError> {
+        self.change(|document| {
+            let confirmation = document
+                .confirmations
+                .iter()
+                .find(|row| &row.token == token && row.expires > now && row.connection.name == name)
+                .ok_or(StoreError::Changed)?;
+            let index = document
+                .connections
+                .iter()
+                .position(|row| row == &confirmation.connection)
+                .ok_or(StoreError::Changed)?;
+            Ok(remove(document, index))
+        })
+    }
     pub fn remove(&self, name: &str) -> Result<SavedConnection, StoreError> {
         self.change(|document| {
             let index = document
                 .connections
                 .iter()
-                .position(|saved| saved.name == name)
+                .position(|row| row.name == name)
                 .ok_or(StoreError::NotFound)?;
-            let mut saved = document.connections.remove(index);
-            saved.unpair = UnpairState::Pending;
-            document.pending.push(saved.clone());
-            Ok(saved)
+            Ok(remove(document, index))
         })
     }
-
-    /// Retire only an exact server-confirmed revocation.
+    pub fn confirm_revocation(&self, route: [u8; 32]) -> Result<(), StoreError> {
+        self.change(|document| {
+            let row = document
+                .pending
+                .iter_mut()
+                .find(|row| row.connection.route == route)
+                .ok_or(StoreError::NotFound)?;
+            row.confirmed = true;
+            Ok(())
+        })
+    }
     pub fn retire_pending(&self, route: [u8; 32]) -> Result<(), StoreError> {
         self.change(|document| {
             let index = document
                 .pending
                 .iter()
-                .position(|saved| saved.route == route)
-                .ok_or(StoreError::NotFound)?;
+                .position(|row| row.connection.route == route && row.confirmed)
+                .ok_or(StoreError::Changed)?;
             document.pending.remove(index);
             Ok(())
         })
@@ -122,44 +297,87 @@ impl ConnectionStore {
     }
 }
 
+fn remove(document: &mut Document, index: usize) -> SavedConnection {
+    let mut connection = document.connections.remove(index);
+    connection.unpair = UnpairState::Pending;
+    document
+        .confirmations
+        .retain(|row| row.connection.route != connection.route);
+    document.pending.push(PendingRevocation {
+        connection: connection.clone(),
+        confirmed: false,
+    });
+    connection
+}
 fn read(directory: &Directory) -> Result<Document, StoreError> {
     let document = directory
         .read_json("connections.json")
         .map_err(|_| StoreError::Unavailable)?
         .unwrap_or_default();
-    validate(&document)?;
+    validate(&document).map_err(|_| StoreError::Unavailable)?;
     Ok(document)
 }
-
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name != "local" && name.len() <= 128 && !name.chars().any(char::is_control)
+}
+fn valid_pin(pin: &ServerPin) -> bool {
+    pin.server != [0; 32]
+        && pin.public_key != [0; 32]
+        && pin.certificate != [0; 32]
+        && !pin.build.is_empty()
+        && pin.build.len() <= 128
+        && pin
+            .build
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
 fn validate(document: &Document) -> Result<(), StoreError> {
-    if document.connections.len() + document.pending.len() > 128 {
+    if document.connections.len() + document.pending.len() + document.enrollments.len() > 128
+        || document.confirmations.len() > 128
+    {
         return Err(StoreError::Unavailable);
     }
     let mut names = BTreeSet::new();
     let mut routes = BTreeSet::new();
+    let mut credentials = BTreeSet::new();
     for saved in &document.connections {
-        if saved.name.is_empty()
-            || saved.name == "local"
-            || saved.name.len() > 128
-            || saved.name.chars().any(char::is_control)
-            || !names.insert(&saved.name)
-        {
+        if !valid_name(&saved.name) || !names.insert(&saved.name) {
             return Err(StoreError::NameTaken);
         }
         if saved.unpair != UnpairState::Paired {
             return Err(StoreError::Unavailable);
         }
     }
-    for saved in document.connections.iter().chain(&document.pending) {
-        if saved.route == [0; 32]
+    for saved in document
+        .connections
+        .iter()
+        .chain(document.pending.iter().map(|row| &row.connection))
+    {
+        if !valid_name(&saved.name)
+            || saved.route == [0; 32]
             || saved.credential == [0; 32]
-            || saved.paired.pin.server == [0; 32]
-            || saved.paired.pin.public_key == [0; 32]
-            || saved.paired.pin.certificate == [0; 32]
+            || !valid_pin(&saved.paired.pin)
             || saved.paired.pairing == [0; 32]
             || saved.paired.client == [0; 32]
             || !routes.insert(saved.route)
+            || !credentials.insert(saved.credential)
             || Endpoint::from_url(&saved.endpoint).is_err()
+        {
+            return Err(StoreError::Unavailable);
+        }
+    }
+    for enrollment in &document.enrollments {
+        if !valid_name(&enrollment.name) || !names.insert(&enrollment.name) {
+            return Err(StoreError::NameTaken);
+        }
+        if enrollment.route == [0; 32]
+            || enrollment.claim == [0; 32]
+            || enrollment.credential == [0; 32]
+            || enrollment.public_key == [0; 32]
+            || !routes.insert(enrollment.route)
+            || !credentials.insert(enrollment.credential)
+            || !valid_pin(&enrollment.pin)
+            || Endpoint::from_url(&enrollment.endpoint).is_err()
         {
             return Err(StoreError::Unavailable);
         }
@@ -167,7 +385,11 @@ fn validate(document: &Document) -> Result<(), StoreError> {
     if document
         .pending
         .iter()
-        .any(|saved| saved.unpair != UnpairState::Pending)
+        .any(|row| row.connection.unpair != UnpairState::Pending)
+        || document
+            .confirmations
+            .iter()
+            .any(|row| row.token == [0; 32] || row.expires == 0)
     {
         return Err(StoreError::Unavailable);
     }
@@ -230,6 +452,7 @@ mod tests {
         let removed = store.remove("server-1").unwrap();
         assert!(store.load().unwrap().is_empty());
         assert_eq!(store.pending().unwrap()[0].paired, removed.paired);
+        store.confirm_revocation(removed.route).unwrap();
         store.retire_pending(removed.route).unwrap();
         assert!(store.pending().unwrap().is_empty());
         assert_eq!(

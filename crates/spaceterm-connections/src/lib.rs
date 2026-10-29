@@ -748,4 +748,9 @@ fn random_id() -> Result<[u8; 32], DirectError> {
 pub use credentials::{CredentialError, StoreKind, native};
 
 mod store;
-pub use store::{ConnectionStore, SavedConnection, StoreError, UnpairState};
+pub use store::{
+    ConnectionStore, PendingEnrollment, PendingRevocation, RemovalConfirmation, SavedConnection,
+    StoreError, UnpairState, valid_name,
+};
+
+pub mod enrollment;
