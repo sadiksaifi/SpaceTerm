@@ -1091,4 +1091,4 @@ fn error(failure: &ServerError) -> LaneReply {
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -83,6 +83,18 @@ impl Source for NoFeed {
     }
 }
 
+/// A lane over the server state at `paths`, whose service manager reports a running server and
+/// whose helper launches do nothing.
+pub(crate) fn serving(paths: &crate::host::Paths) -> Arc<LaneServer> {
+    LaneServer::new(
+        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
+        Arc::new(Host::default()),
+        Arc::new(NoFeed),
+        Box::new(|_| Ok(())),
+    )
+    .unwrap()
+}
+
 const ACTOR: Actor = Actor {
     pairing: Some([7; 32]),
     client: [8; 32],

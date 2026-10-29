@@ -233,6 +233,32 @@ impl Connector for Local {
     }
 }
 
+/// The service lane of a paired server, over its authenticated direct connection.
+struct Paired {
+    connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
+    paired: crate::direct::PairedDevice,
+    name: crate::pane::control::ClientName,
+    agent: Option<crate::protocol::AgentName>,
+}
+
+impl Connector for Paired {
+    fn connect(&self, deadline: Instant) -> Result<Box<dyn Preamble + Send>, ServerError> {
+        if Instant::now() >= deadline {
+            return Err(crate::direct::DirectError::Transport.into());
+        }
+        let connection = self.connector.connect()?;
+        if connection.paired() != &self.paired {
+            return Err(ServerError::AuthenticationRefused);
+        }
+        let stream = connection.admit_service_lane(crate::protocol::Caller {
+            client: &self.paired.client,
+            name: &self.name,
+            agent: self.agent.as_ref(),
+        })?;
+        Ok(stream)
+    }
+}
+
 /// A route to one server's service lane. Opening it never starts a server.
 pub struct Lane {
     connector: Box<dyn Connector>,
@@ -253,6 +279,23 @@ impl Lane {
                 paths,
                 server,
                 client,
+                name,
+                agent,
+            }),
+        }
+    }
+
+    /// The lane of a paired server, as its pairing's Client Identity or as `agent`.
+    pub(crate) fn paired(
+        connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
+        paired: crate::direct::PairedDevice,
+        name: crate::pane::control::ClientName,
+        agent: Option<crate::protocol::AgentName>,
+    ) -> Self {
+        Self {
+            connector: Box::new(Paired {
+                connector,
+                paired,
                 name,
                 agent,
             }),

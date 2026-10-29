@@ -310,4 +310,23 @@ impl DirectConnection {
         )?;
         Ok(Box::new(stream.into_carrier()))
     }
+    /// Admits this client to the service lane on the authenticated connection, whatever the
+    /// server's work major, and returns the stream the lane's JSON frames travel on.
+    #[cfg_attr(
+        not(any(feature = "client", test)),
+        allow(dead_code, reason = "the CLI administers paired servers over the lane")
+    )]
+    pub(crate) fn admit_service_lane(
+        self,
+        caller: crate::protocol::Caller<'_>,
+    ) -> Result<Box<crate::connection::quic::QuicStream>, ServerError> {
+        let mut stream = self.stream;
+        crate::protocol::admit_service_lane(
+            stream.as_mut(),
+            caller,
+            &self.paired.pin.server,
+            &self.paired.pin.build,
+        )?;
+        Ok(stream)
+    }
 }

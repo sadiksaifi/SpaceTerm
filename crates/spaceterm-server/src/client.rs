@@ -769,9 +769,14 @@ impl ServerConnection {
     /// This handle's service lane, which answers across protocol majors. Opening it never starts
     /// a server.
     pub fn service_lane(&self) -> Result<crate::service::lane::client::Lane, ServerError> {
-        if self.direct.is_some() {
-            // Paired routes open the lane over their direct connection with stream E's routing.
-            return Err(ServerError::Unsupported);
+        if let Some(direct) = &self.direct {
+            self.client_directory()?;
+            return Ok(crate::service::lane::client::Lane::paired(
+                std::sync::Arc::clone(&direct.connector),
+                direct.paired.clone(),
+                self.client_name(),
+                self.agent().cloned(),
+            ));
         }
         Ok(crate::service::lane::client::Lane::local(
             self.paths.clone(),
