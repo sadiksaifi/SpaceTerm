@@ -7,7 +7,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSModalResponse, NSView, NSWindow,
 };
@@ -18,7 +18,7 @@ use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
     ApplicationQuitRequest, QuitAnswer, QuitButtons, QuitPrompt, present_window_quit,
 };
-use super::macos_alert::{AlertSeverity, application_alert};
+use super::macos_alert::{AlertSeverity, application_alert, run_modal_alert};
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
 const NS_TERMINATE_NOW: NSInteger = 1;
@@ -159,26 +159,8 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         prompt: &QuitPrompt,
         cx: &mut gpui::App,
     ) -> Option<gpui::Task<Option<QuitAnswer>>> {
-        MainThreadMarker::new()?;
-        let prompt = prompt.clone();
-        let (answered, answers) = async_channel::bounded(1);
-        // The alert runs its own modal loop, so it starts from the run loop rather than inside
-        // GPUI's update. A modal loop that ends any other way answers nothing.
-        DispatchQueue::main().exec_async(move || {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            let application = NSApplication::sharedApplication(mtm);
-            let alert = quit_alert(&prompt, mtm);
-            application.activate();
-            let answer = run_quit_alert(&alert, prompt.buttons, mtm);
-            if answer != Some(QuitAnswer::Quit) {
-                application.hide(None);
-            }
-            if let Some(answer) = answer {
-                let _ = answered.try_send(answer);
-            }
-        });
+        let mtm = MainThreadMarker::new()?;
+        let answers = ask_by_itself(quit_alert(prompt, mtm), prompt.buttons, mtm);
         Some(cx.spawn(async move |_| answers.recv().await.ok()))
     }
 
@@ -267,21 +249,35 @@ fn begin_quit_sheet(
     responses
 }
 
-/// Runs `alert` by itself until it ends. Running it lays it out, which can clear the default
-/// button's Return as beginning a sheet does, so the key equivalents are bound from inside its
-/// modal loop.
-fn run_quit_alert(
-    alert: &NSAlert,
+/// Runs `alert` by itself and returns the channel that receives its one answer. The alert runs
+/// its own modal loop, so it starts from the main queue rather than inside GPUI's update. Any
+/// answer but Quit hides the client, which returns focus to the previous app. A modal loop that
+/// ends without a button answers nothing.
+fn ask_by_itself(
+    alert: Retained<NSAlert>,
     buttons: QuitButtons,
     mtm: MainThreadMarker,
-) -> Option<QuitAnswer> {
-    let running = MainThreadBound::new(alert.retain(), mtm);
+) -> async_channel::Receiver<QuitAnswer> {
+    let (answered, answers) = async_channel::bounded(1);
+    let alert = MainThreadBound::new(alert, mtm);
     DispatchQueue::main().exec_async(move || {
-        if let Some(mtm) = MainThreadMarker::new() {
-            bind_quit_keys(running.get(mtm), buttons);
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let application = NSApplication::sharedApplication(mtm);
+        application.activate();
+        let response = run_modal_alert(alert.get(mtm), move |alert| {
+            bind_quit_keys(alert, buttons);
+        });
+        let answer = quit_answer(response, buttons);
+        if answer != Some(QuitAnswer::Quit) {
+            application.hide(None);
+        }
+        if let Some(answer) = answer {
+            let _ = answered.try_send(answer);
         }
     });
-    quit_answer(alert.runModal(), buttons)
+    answers
 }
 
 /// Escape always cancels. Return chooses an installed build's Quit; a destructive Quit has no
@@ -435,8 +431,10 @@ fn request_from_event(event: &AnyObject) -> ApplicationQuitRequest {
 pub(in crate::platform) mod tests {
     use gpui::TestAppContext;
     use objc2::ClassType;
-    use objc2_app_kit::{NSApplicationActivationPolicy, NSModalResponseStop};
 
+    use super::super::macos_alert::testing::{
+        Answering, answer_inside_modal_loop, expected_keys, laid_out, press, settle_pending_checks,
+    };
     use super::*;
 
     #[test]
@@ -480,14 +478,6 @@ pub(in crate::platform) mod tests {
         unsafe impl NSObjectProtocol for TestDelegate {}
     );
 
-    /// How the test answers one presented warning.
-    #[derive(Clone, Copy, Debug)]
-    enum Answering {
-        Click(usize),
-        /// A key press sent to the warning, by its characters and virtual key code.
-        Key(&'static str, u16),
-    }
-
     fn quit_prompt_fixture(buttons: QuitButtons) -> QuitPrompt {
         QuitPrompt {
             title: "Quit SpaceTerm?".to_owned(),
@@ -499,54 +489,6 @@ pub(in crate::platform) mod tests {
             .to_owned(),
             buttons,
         }
-    }
-
-    fn press(window: &NSWindow, characters: &str, code: u16) {
-        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
-        use objc2_foundation::NSPoint;
-
-        let characters = NSString::from_str(characters);
-        for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
-            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-                kind,
-                NSPoint::new(0.0, 0.0),
-                NSEventModifierFlags::empty(),
-                0.0,
-                window.windowNumber(),
-                None,
-                &characters,
-                &characters,
-                false,
-                code,
-            )
-            .expect("AppKit builds a key event");
-            window.sendEvent(&event);
-        }
-    }
-
-    /// The titles and key equivalents of `alert`'s buttons, and the index of the focused one.
-    fn laid_out(alert: &NSAlert) -> (Vec<(String, String)>, Option<usize>) {
-        let buttons = alert.buttons();
-        let focus = alert.window().firstResponder();
-        let focused = buttons.iter().position(|button| {
-            let button: &NSView = &button;
-            focus.as_ref().is_some_and(|focus| {
-                std::ptr::eq(
-                    Retained::as_ptr(focus).cast::<()>(),
-                    (button as *const NSView).cast::<()>(),
-                )
-            })
-        });
-        let keys = buttons
-            .iter()
-            .map(|button| {
-                (
-                    button.title().to_string(),
-                    button.keyEquivalent().to_string(),
-                )
-            })
-            .collect();
-        (keys, focused)
     }
 
     /// Presents each sheet on a real window that stays off screen, lets AppKit lay it out and draw
@@ -596,6 +538,9 @@ pub(in crate::platform) mod tests {
                         alert.buttons().objectAtIndex(index).performClick(None)
                     },
                     Answering::Key(characters, code) => press(&sheet, characters, code),
+                    Answering::PostedKey(..) | Answering::Stop => {
+                        unreachable!("the answer cases click or press keys")
+                    }
                 }
                 settle();
                 let Some(expected) = expected else {
@@ -681,154 +626,49 @@ pub(in crate::platform) mod tests {
         ]
     }
 
-    fn expected_keys(keys: &[(&str, &str)]) -> Vec<(String, String)> {
-        keys.iter()
-            .map(|(title, key)| ((*title).to_owned(), (*key).to_owned()))
-            .collect()
-    }
-
-    /// What the test saw while one warning asked by itself.
-    struct Asking {
-        policy: NSApplicationActivationPolicy,
-        modal: bool,
-        alone: bool,
-        laid_out: (Vec<(String, String)>, Option<usize>),
-        /// The answer left the warning open, so the test ended it with Escape.
-        left_open: bool,
-    }
-
-    /// Runs each warning by itself, as a client with no window does, and answers it from inside
-    /// its modal loop by a click or a key. The warning stays transparent and the test never
-    /// activates the process, so nothing appears on screen or takes focus. Every modal loop the
-    /// test starts ends: an answer that leaves the warning open is followed by Escape, then by
-    /// stopping the loop.
-    pub(in crate::platform) fn windowless_quit_alert_delivers_each_answer_without_a_window_or_policy_change()
-     {
-        use objc2_foundation::{NSDate, NSRunLoop};
-
+    /// Asks with each warning through the windowless path a client with no window takes: the
+    /// adapter queues the warning on the main queue, and the test drives the run loop until it
+    /// returns. Inside the warning's modal loop the test answers it by a click or a key. The
+    /// warning stays transparent and the test process cannot be activated, so nothing appears on
+    /// screen or takes focus.
+    pub(in crate::platform) fn windowless_quit_warning_binds_its_keys_inside_its_modal_loop() {
         let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
         let application = NSApplication::sharedApplication(mtm);
         let policy = application.activationPolicy();
         for (buttons, keys, focused, answers) in answer_cases() {
-            let endings = answers
-                .iter()
-                .map(|&(answering, expected)| (Some(answering), expected))
-                // A modal loop that ends without a button answers nothing.
-                .chain([(None, None)]);
+            // A modal loop that ends without a button answers nothing.
+            let endings = answers.iter().copied().chain([(Answering::Stop, None)]);
             for (answering, expected) in endings {
                 let alert = quit_alert(&quit_prompt_fixture(buttons), mtm);
                 alert.window().setAlphaValue(0.0);
-                let asking = Rc::new(RefCell::new(None));
-                let inside = MainThreadBound::new((alert.clone(), Rc::clone(&asking)), mtm);
-                // Answers once the warning has bound its keys.
-                let shortly = dispatch2::DispatchTime::NOW.time(100_000_000);
-                let _ = DispatchQueue::main().after(shortly, move || {
-                    let mtm =
-                        MainThreadMarker::new().expect("the main queue runs on the main thread");
-                    let (alert, asking) = inside.get(mtm);
-                    let application = NSApplication::sharedApplication(mtm);
-                    let window = alert.window();
-                    let modal = application
-                        .modalWindow()
-                        .is_some_and(|modal| std::ptr::eq(&*modal, &*window));
-                    let alone = application
-                        .windows()
-                        .iter()
-                        .all(|other| !other.isVisible() || std::ptr::eq(&*other, &*window));
-                    *asking.borrow_mut() = Some(Asking {
-                        policy: application.activationPolicy(),
-                        modal,
-                        alone,
-                        laid_out: laid_out(alert),
-                        left_open: false,
-                    });
-                    match answering {
-                        // SAFETY: The button is live on the main thread, and a nil sender is
-                        // allowed.
-                        Some(Answering::Click(index)) => unsafe {
-                            alert.buttons().objectAtIndex(index).performClick(None)
-                        },
-                        Some(Answering::Key(characters, code)) => press(&window, characters, code),
-                        None => application.stopModalWithCode(NSModalResponseStop),
-                    }
-                    wake_modal_loop(&application);
-                    end_if_open(inside, false);
+                let mut answers = None;
+                let asking = answer_inside_modal_loop(&alert, answering, || {
+                    answers = Some(ask_by_itself(alert.clone(), buttons, mtm));
                 });
-                let answer = run_quit_alert(&alert, buttons, mtm);
-                let asking = asking.borrow_mut().take().expect("the warning asks");
+                let answer = answers.and_then(|answers| answers.try_recv().ok());
                 assert!(asking.modal, "the warning runs its own modal loop");
                 assert!(asking.alone, "the warning shows no other window");
+                assert!(!asking.active, "asking never activates the test process");
                 assert_eq!(asking.policy, policy, "asking keeps the activation policy");
-                assert_eq!(asking.laid_out, (expected_keys(keys), Some(focused)));
-                match expected {
-                    Some(expected) => {
-                        assert!(!asking.left_open, "{answering:?} ends the warning");
-                        assert_eq!(answer, Some(expected), "{buttons:?} {answering:?}");
-                    }
-                    None if answering.is_some() => {
-                        assert!(asking.left_open, "{answering:?} answers nothing");
-                        assert_eq!(answer, Some(QuitAnswer::Cancel), "Escape cancels");
-                    }
-                    None => assert_eq!(answer, None, "stopping the loop answers nothing"),
-                }
+                assert_eq!(
+                    asking.laid_out,
+                    (expected_keys(keys), Some(focused)),
+                    "{buttons:?} binds its keys inside its modal loop"
+                );
+                assert_eq!(
+                    asking.left_open,
+                    expected.is_none() && !matches!(answering, Answering::Stop),
+                    "{buttons:?} {answering:?}"
+                );
+                assert_eq!(answer, expected, "{buttons:?} {answering:?}");
                 assert!(application.modalWindow().is_none(), "no modal loop remains");
                 assert_eq!(application.activationPolicy(), policy);
+                if application.isHidden() {
+                    application.unhideWithoutActivation();
+                }
             }
         }
-        // Lets each pending check find its warning already ended.
-        NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.6));
-    }
-
-    type AskingAlert = MainThreadBound<(Retained<NSAlert>, Rc<RefCell<Option<Asking>>>)>;
-
-    /// Checks shortly afterwards whether `alert` still runs its modal loop. The first check
-    /// records it and presses Escape; a later one stops the loop.
-    fn end_if_open(inside: AskingAlert, escaped: bool) {
-        let later = dispatch2::DispatchTime::NOW.time(200_000_000);
-        let _ = DispatchQueue::main().after(later, move || {
-            let mtm = MainThreadMarker::new().expect("the main queue runs on the main thread");
-            let (alert, asking) = inside.get(mtm);
-            let application = NSApplication::sharedApplication(mtm);
-            let window = alert.window();
-            if !application
-                .modalWindow()
-                .is_some_and(|modal| std::ptr::eq(&*modal, &*window))
-            {
-                return;
-            }
-            if escaped {
-                application.stopModalWithCode(NSModalResponseStop);
-                wake_modal_loop(&application);
-                return;
-            }
-            if let Some(asking) = asking.borrow_mut().as_mut() {
-                asking.left_open = true;
-            }
-            press(&window, "\u{1b}", 53);
-            wake_modal_loop(&application);
-            end_if_open(inside, true);
-        });
-    }
-
-    /// A modal loop checks for its end after each event, and a button pressed outside AppKit's
-    /// event handling delivers none, so an empty event follows.
-    fn wake_modal_loop(application: &NSApplication) {
-        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
-        use objc2_foundation::NSPoint;
-
-        let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-            NSEventType::ApplicationDefined,
-            NSPoint::new(0.0, 0.0),
-            NSEventModifierFlags::empty(),
-            0.0,
-            0,
-            None,
-            0,
-            0,
-            0,
-        )
-        .expect("AppKit builds an application event");
-        application.postEvent_atStart(&event, false);
+        settle_pending_checks();
     }
 
     pub(in crate::platform) fn native_hook_cancels_policy_then_consumes_one_confirmation(

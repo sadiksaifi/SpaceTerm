@@ -129,7 +129,12 @@ pub(crate) fn run() {
     native_test!(
         macos_application_quit::tests::quit_sheet_delivers_each_answer_and_keys_quit_by_default
     );
-    native_test!(macos_application_quit::tests::windowless_quit_alert_delivers_each_answer_without_a_window_or_policy_change);
+    native_test!(
+        macos_application_quit::tests::windowless_quit_warning_binds_its_keys_inside_its_modal_loop
+    );
+    native_test!(
+        super::macos_status_menu::tests::server_alerts_bind_return_inside_their_modal_loop
+    );
     gpui_test!(macos_services::tests::service_type_classifies_nil_and_empty_nsstring_as_absent);
     gpui_test!(macos_services::tests::nsstring_decode_enforces_the_paste_byte_limit);
     gpui_test!(macos_services::tests::nsstring_decode_rejects_embedded_nul_without_truncation);
