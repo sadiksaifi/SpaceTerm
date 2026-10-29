@@ -593,6 +593,40 @@ fn forward_pages_reclaim_the_omitted_screen_budget() {
     }
 }
 
+/// A paste followed by Enter executes the command and confirms Enter's serial.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn paste_then_enter_is_delivered() {
+    let mut server = Server::start();
+    let link = server.connect(1);
+    let (workspace, pane) = workspace(&link, 1);
+    let target = target(workspace, pane, false);
+    let ready = run_at_prompt(&link, &target, "true", &mut runs());
+    assert!(ready.failure.is_none(), "{:?}", ready.failure);
+    let target = PaneTarget {
+        running: true,
+        ..target
+    };
+    let sent = send::send(
+        &link,
+        &target,
+        &send_args(&["printf 'PASTE-%s\\n' EXECUTED", "--paste", "--enter"]),
+        &mut std::io::empty(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(sent.failure.is_none(), "{:?}", sent.failure);
+    let delivery = sent.data.unwrap().input;
+    assert!(delivery.delivered);
+    assert_eq!(delivery.serial, 3, "focus, paste, then Enter");
+    let observed = read::read(
+        &link,
+        &target,
+        &read_args(&["--wait-for", "PASTE-EXECUTED"]),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(observed.failure.is_none(), "{:?}", observed.failure);
+}
+
 /// A source whose epoch changes on the first snapshot's pages, then holds.
 struct Rewrapping {
     snapshots: u32,

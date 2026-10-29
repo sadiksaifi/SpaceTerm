@@ -143,9 +143,14 @@ impl Publication {
         {
             open &= self.event(PaneEvent::Accessibility { revision });
         }
-        // A presented screen is the progress its client sees; only progress without one is
-        // reported, at most once per publication.
-        if std::mem::replace(&mut self.progress, progress) != progress && carried == Ok(false) {
+        // A screen can predate the worker's latest input acknowledgement, even when both
+        // arrive in one observation. Send newer progress so delivery cannot wait on more output.
+        let newer_input = screen
+            .as_ref()
+            .is_some_and(|screen| screen.screen.input_serial < progress.input);
+        if std::mem::replace(&mut self.progress, progress) != progress
+            && (carried == Ok(false) || newer_input)
+        {
             open &= self.event(PaneEvent::Progress {
                 input: progress.input,
                 output_bytes: progress.output_bytes,
