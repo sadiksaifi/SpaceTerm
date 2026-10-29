@@ -6,7 +6,8 @@
 //!   connections.json, connections.lock
 //!   routes/<local | 64-hex route>/
 //!     base/            client.json (local route only), operations.json, operations.lock,
-//!                      attachments.json, runs.json, runs.lock, inventory.json (paired routes only)
+//!                      attachments.json, runs.json, runs.lock, runs/<id>.lock,
+//!                      inventory.json (paired routes only)
 //!     agents/<name>/   the same files except client.json
 //! ```
 //!
@@ -111,50 +112,80 @@ struct RunsRecord {
     runs: Vec<PendingRun>,
 }
 
-/// One identity's `runs.json`, held under `runs.lock` while it is open. `run` persists a run
-/// here before it dispatches it, and leftover settlement removes it once acknowledged.
+/// One identity's run journal. Each transaction locks and reloads `runs.json`.
+/// A live command holds only its own run's lock while waiting for its receipt.
 pub struct Runs {
     directory: Directory,
-    _lock: Lock,
-    record: RunsRecord,
+    live: Directory,
 }
 
 impl Runs {
-    pub fn pending(&self) -> &[PendingRun] {
-        &self.record.runs
+    fn lock(&self) -> Result<Lock, Failure> {
+        match self
+            .directory
+            .wait_lock(RUNS_LOCK, std::time::Duration::from_secs(30), None)
+            .map_err(from_server_error)?
+        {
+            LockWait::Locked(lock) => Ok(lock),
+            LockWait::Held | LockWait::Cancelled => Err(Failure::new(Code::IdentityBusy)),
+        }
     }
 
-    /// Records `run` before its dispatch. A full table refuses with `capacity`.
-    pub fn add(&mut self, run: PendingRun) -> Result<(), Failure> {
-        if self
-            .record
-            .runs
-            .iter()
-            .any(|pending| pending.run == run.run)
-        {
-            return Ok(());
+    fn read(&self) -> Result<RunsRecord, Failure> {
+        let record = self
+            .directory
+            .read_json::<RunsRecord>("runs.json")
+            .map_err(from_server_error)?
+            .unwrap_or_default();
+        if record.runs.len() > MAX_PENDING_RUNS {
+            return Err(Failure::new(Code::StorageUnavailable));
         }
-        if self.record.runs.len() >= MAX_PENDING_RUNS {
-            return Err(Failure::new(Code::Capacity));
+        Ok(record)
+    }
+
+    pub fn pending(&self) -> Result<Vec<PendingRun>, Failure> {
+        let _lock = self.lock()?;
+        Ok(self.read()?.runs)
+    }
+
+    /// Claims a run for dispatch or recovery. A live command or another settler owns it otherwise.
+    pub fn try_run(&self, run: RunId) -> Result<Option<Lock>, Failure> {
+        self.live
+            .try_lock(&format!("{}.lock", crate::io::hex(&run.0)))
+            .map_err(from_server_error)
+    }
+
+    /// Records `run` before dispatch and holds its live lock until the command exits.
+    pub fn add(&mut self, run: PendingRun) -> Result<Lock, Failure> {
+        let live = self
+            .try_run(run.run)?
+            .ok_or(Failure::new(Code::IdentityBusy))?;
+        let _lock = self.lock()?;
+        let mut record = self.read()?;
+        if !record.runs.iter().any(|pending| pending.run == run.run) {
+            if record.runs.len() >= MAX_PENDING_RUNS {
+                return Err(Failure::new(Code::Capacity));
+            }
+            record.runs.push(run);
+            self.directory
+                .write_json(RUNS, &record)
+                .map_err(from_server_error)?;
         }
-        self.record.runs.push(run);
-        self.save()
+        Ok(live)
     }
 
     /// Forgets `run` after the server acknowledged its receipt, or never admitted it.
     pub fn remove(&mut self, run: RunId) -> Result<(), Failure> {
-        let before = self.record.runs.len();
-        self.record.runs.retain(|pending| pending.run != run);
-        if self.record.runs.len() == before {
-            return Ok(());
+        let _lock = self.lock()?;
+        let mut record = self.read()?;
+        let before = record.runs.len();
+        record.runs.retain(|pending| pending.run != run);
+        if record.runs.len() != before {
+            self.directory
+                .write_json(RUNS, &record)
+                .map_err(from_server_error)?;
         }
-        self.save()
-    }
-
-    fn save(&self) -> Result<(), Failure> {
-        self.directory
-            .write_json(RUNS, &self.record)
-            .map_err(from_server_error)
+        Ok(())
     }
 }
 
@@ -226,8 +257,7 @@ impl CliState {
         }
     }
 
-    /// The identity's pending runs, under `runs.lock`. Contention waits until `deadline`, then
-    /// fails with `identity_busy`.
+    /// Opens a run journal without retaining its transaction lock.
     pub fn runs(
         &self,
         route: &RouteKey,
@@ -237,46 +267,17 @@ impl CliState {
         let directory = self
             .identity_dir(route, agent)
             .map_err(|_| Code::StorageUnavailable)?;
+        let live = Directory::open(&self.identity_path(route, agent).join("runs"), true)
+            .map_err(|_| Code::StorageUnavailable)?;
         let limit = deadline.saturating_duration_since(Instant::now());
-        let lock = match directory.wait_lock(RUNS_LOCK, limit, None) {
+        let _lock = match directory.wait_lock(RUNS_LOCK, limit, None) {
             Ok(LockWait::Locked(lock)) => lock,
             Ok(LockWait::Held | LockWait::Cancelled) => return Err(Code::IdentityBusy),
             Err(_) => return Err(Code::StorageUnavailable),
         };
-        Self::open_runs(directory, lock)
-    }
-
-    /// Opens pending runs only when no command currently owns their receipt lock.
-    pub fn try_runs(
-        &self,
-        route: &RouteKey,
-        agent: Option<&AgentName>,
-    ) -> Result<Option<Runs>, Code> {
-        let directory = self
-            .identity_dir(route, agent)
-            .map_err(|_| Code::StorageUnavailable)?;
-        let Some(lock) = directory
-            .try_lock(RUNS_LOCK)
-            .map_err(|_| Code::StorageUnavailable)?
-        else {
-            return Ok(None);
-        };
-        Self::open_runs(directory, lock).map(Some)
-    }
-
-    fn open_runs(directory: Directory, lock: Lock) -> Result<Runs, Code> {
-        let record = directory
-            .read_json::<RunsRecord>("runs.json")
-            .map_err(|_| Code::StorageUnavailable)?
-            .unwrap_or_default();
-        if record.runs.len() > MAX_PENDING_RUNS {
-            return Err(Code::StorageUnavailable);
-        }
-        Ok(Runs {
-            directory,
-            _lock: lock,
-            record,
-        })
+        let runs = Runs { directory, live };
+        runs.read().map_err(|failure| failure.code)?;
+        Ok(runs)
     }
 
     /// The base identity and every agent this CLI has used on `route`, without creating any.
@@ -388,6 +389,31 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_runs_keep_independent_locks_and_journal_updates() {
+        let state = temporary("parallel-runs");
+        let mut first = state.runs(&RouteKey::Local, None, Instant::now()).unwrap();
+        let mut second = state.runs(&RouteKey::Local, None, Instant::now()).unwrap();
+        let pending = |id| PendingRun {
+            run: RunId([id; 16]),
+            pane: [id; 32],
+            session: [3; 32],
+            created_at: 0,
+        };
+        let first_live = first.add(pending(1)).unwrap();
+        let second_live = second.add(pending(2)).unwrap();
+        assert_eq!(first.pending().unwrap(), vec![pending(1), pending(2)]);
+        assert!(second.try_run(pending(1).run).unwrap().is_none());
+        assert!(first.try_run(pending(2).run).unwrap().is_none());
+        first.remove(pending(1).run).unwrap();
+        assert_eq!(second.pending().unwrap(), vec![pending(2)]);
+        drop(first_live);
+        assert!(second.try_run(pending(1).run).unwrap().is_some());
+        drop(second_live);
+        assert!(first.try_run(pending(2).run).unwrap().is_some());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
     fn pending_runs_count_as_held_until_removed() {
         let state = temporary("runs");
         let agent: AgentName = "agent-1".parse().unwrap();
@@ -425,7 +451,7 @@ mod tests {
         let mut runs = state
             .runs(&RouteKey::Local, Some(&agent), Instant::now())
             .unwrap();
-        assert_eq!(runs.pending(), std::slice::from_ref(&run));
+        assert_eq!(runs.pending().unwrap(), vec![run.clone()]);
         runs.remove(run.run).unwrap();
         drop(runs);
         assert!(state.held(&RouteKey::Local).unwrap().is_empty());

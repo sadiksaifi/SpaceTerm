@@ -194,7 +194,7 @@ fn doubt(doubt: RunDoubt) -> RunDoubtName {
 }
 
 /// Whether the receipt is final. A run another client took over still follows its command.
-fn settled(state: RunState) -> bool {
+pub(crate) fn settled(state: RunState) -> bool {
     !matches!(
         state,
         RunState::Admitted | RunState::Running | RunState::TakenOver
@@ -322,10 +322,13 @@ pub fn run(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs()),
     };
-    if let Err(failure) = runs.add(pending) {
-        channel.keep();
-        return Done::failed(failure);
-    }
+    let _live = match runs.add(pending) {
+        Ok(live) => live,
+        Err(failure) => {
+            channel.keep();
+            return Done::failed(failure);
+        }
+    };
     let shown = channel.show();
     let startup = deadline.or(CLAIM_TIMEOUT);
     let mut paste_wait = None;

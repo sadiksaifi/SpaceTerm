@@ -13,6 +13,7 @@ clients/cli/
       operations.json, operations.lock
       attachments.json
       runs.json, runs.lock
+      runs/<id>.lock              held while a command follows or recovers this run
       inventory.json              paired route only
       route.json, route.lock      paired route only
       last-connected.json         latest service-lane connection on this route
@@ -20,9 +21,9 @@ clients/cli/
     agents/<name>/                same identity files except client.json and last-connected.json
 ```
 
-Files are created as their operations need them. Every identity's pending runs use `runs.lock`, independently of `operations.lock`. Paired identities also bind their retained pairing through `route.json` under `route.lock`. `base/last-connected.json` records the Unix time when any identity on the route last opened its service lane and completed settlement. [The CLI service adapter](../../crates/spaceterm-cli/src/server.rs) owns that timestamp and pending service-operation IDs. An unreachable status reports that dated observation without inferring shutdown.
+Files are created as their operations need them. Each read-modify-write of an identity's `runs.json` holds `runs.lock`, independently of `operations.lock`. A command following a run holds only `runs/<id>.lock`; settlement skips that run while its lock is held. Paired identities also bind their retained pairing through `route.json` under `route.lock`. `base/last-connected.json` records the Unix time when any identity on the route last opened its service lane and completed settlement. [The CLI service adapter](../../crates/spaceterm-cli/src/server.rs) owns that timestamp and pending service-operation IDs. An unreachable status reports that dated observation without inferring shutdown.
 
-A shared mutation holds the existing Original Operation writer lock from sequence allocation through dispatch, reply, journal retirement and acknowledgement. Mutations under one identity run one at a time; distinct Agent Names allow independent writers. Run receipts use a separate lock and journal. [The terminal command entry point](../../crates/spaceterm-cli/src/io/start.rs) also holds the shared writer lock across settlement and execution of `run`, `send` and `release`, through [the dispatch adapter](../../crates/spaceterm-cli/src/work/dispatch.rs). `read` uses passive settlement and skips active writers. Process exit retains Pane control; `pane release` relinquishes that identity's grant.
+A shared mutation holds the existing Original Operation writer lock from sequence allocation through dispatch, reply, journal retirement and acknowledgement. Mutations under one identity run one at a time; distinct Agent Names allow independent writers. Run receipts use a separate journal. [The terminal command entry point](../../crates/spaceterm-cli/src/io/start.rs) uses passive settlement for `run`, `send`, `release` and `read`, skipping active writers. These commands dispatch no shared mutation and hold no shared writer lock during execution. One identity may run commands in different Panes concurrently. A pending run blocks another run only in its own Pane. A `TakenOver` receipt remains pending until the server records its finish or another final outcome. Process exit retains Pane control; `pane release` relinquishes that identity's grant.
 
 Sending an acknowledgement does not confirm it. After validating and retiring an Original Operation's outcome, [the CLI journal](../../crates/spaceterm-cli/src/journal.rs) sends its acknowledgement and calls `Resolve` until the server answers `Missing`. Only that later answer permits forgetting the retired outcome. Confirmation waits for at most two seconds within the command deadline. A lost or unconfirmed acknowledgement leaves the outcome for a later command to acknowledge again.
 

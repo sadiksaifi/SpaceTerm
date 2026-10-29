@@ -46,9 +46,12 @@ struct Fixture {
 }
 impl Fixture {
     fn command(&self, args: &[&str]) -> Command {
+        self.command_as(self.agent.as_str(), args)
+    }
+    fn command_as(&self, agent: &str, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_spaceterm"));
         command
-            .args(["--as", self.agent.as_str(), "--json"])
+            .args(["--as", agent, "--json"])
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -79,8 +82,12 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.link.close();
         if let Ok(root) = spaceterm_server::cli_state_root("spaceterm-development") {
-            let _ =
-                std::fs::remove_dir_all(root.join("routes/local/agents").join(self.agent.as_str()));
+            for agent in [
+                self.agent.as_str().to_owned(),
+                format!("{}-person", self.agent.as_str()),
+            ] {
+                let _ = std::fs::remove_dir_all(root.join("routes/local/agents").join(agent));
+            }
             let _ = std::fs::remove_dir_all(
                 root.parent()
                     .unwrap()
@@ -142,6 +149,174 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    let second_tab = fixture.run(&["tab", "create", "--workspace", &workspace]);
+    let second_pane = format!("id:{}", second_tab["data"]["pane"]["id"].as_str().unwrap());
+    fixture.run(&[
+        "pane",
+        "run",
+        "echo hello",
+        "--pane",
+        &second_pane,
+        "--timeout",
+        "10s",
+    ]);
+    let mut first_run = Process(Some(
+        fixture
+            .command(&[
+                "pane",
+                "run",
+                "printf 'PARALLEL-%s\\n' READY; sleep 4",
+                "--pane",
+                &pane,
+                "--timeout",
+                "10s",
+            ])
+            .spawn()
+            .unwrap(),
+    ));
+    fixture.run(&[
+        "pane",
+        "read",
+        "--pane",
+        &pane,
+        "--wait-for",
+        "PARALLEL-READY",
+        "--timeout",
+        "3s",
+    ]);
+    assert!(first_run.running());
+    let same_pane = fixture
+        .command(&[
+            "pane",
+            "run",
+            "printf SHOULD_NOT_RUN",
+            "--pane",
+            &pane,
+            "--timeout",
+            "1s",
+        ])
+        .output()
+        .unwrap();
+    let refused: serde_json::Value = serde_json::from_slice(&same_pane.stdout).unwrap();
+    assert_eq!(refused["error"]["code"], "not_at_prompt", "{refused}");
+    let parallel = fixture.run(&[
+        "pane",
+        "run",
+        "printf 'OTHER-%s\\n' FINISHED",
+        "--pane",
+        &second_pane,
+        "--timeout",
+        "1s",
+    ]);
+    assert_eq!(parallel["data"]["run"]["state"], "finished");
+    assert!(
+        first_run.running(),
+        "the other Pane finishes while the first still runs"
+    );
+    let output = first_run.wait();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    // Recovery keeps a taken-over receipt until the command has actually finished.
+    let taken_run = Process(Some(
+        fixture
+            .command(&[
+                "pane",
+                "run",
+                "printf 'TAKEOVER-%s\\n' READY; sleep 3; printf 'TAKEOVER-%s\\n' FINISHED",
+                "--pane",
+                &pane,
+                "--timeout",
+                "10s",
+            ])
+            .spawn()
+            .unwrap(),
+    ));
+    fixture.run(&[
+        "pane",
+        "read",
+        "--pane",
+        &pane,
+        "--wait-for",
+        "TAKEOVER-READY",
+        "--timeout",
+        "3s",
+    ]);
+    let person = format!("{}-person", fixture.agent.as_str());
+    let takeover = fixture
+        .command_as(
+            &person,
+            &[
+                "pane",
+                "send",
+                "--pane",
+                &pane,
+                "--take-over",
+                "--key",
+                "Enter",
+                "--timeout",
+                "2s",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(
+        takeover.status.success(),
+        "{}",
+        String::from_utf8_lossy(&takeover.stdout)
+    );
+    let lost = taken_run.wait();
+    let lost: serde_json::Value = serde_json::from_slice(&lost.stdout).unwrap();
+    assert_eq!(lost["error"]["code"], "controlled", "{lost}");
+    let run = lost["data"]["run"]["id"].as_str().unwrap();
+    let recovering = fixture.run(&["pane", "read", "--pane", &pane]);
+    assert!(
+        recovering["data"]["recovered_operations"]
+            .as_array()
+            .is_none_or(|items| items.iter().all(|item| item["operation"] != run))
+    );
+    let waited = fixture.run(&[
+        "pane",
+        "read",
+        "--pane",
+        &pane,
+        "--wait-for",
+        "TAKEOVER-FINISHED",
+        "--timeout",
+        "5s",
+    ]);
+    let idle = fixture.run(&[
+        "pane",
+        "read",
+        "--pane",
+        &pane,
+        "--wait-idle",
+        "100ms",
+        "--timeout",
+        "5s",
+    ]);
+    let settled = fixture.run(&["pane", "read", "--pane", &pane]);
+    assert!(
+        [waited, idle, settled]
+            .iter()
+            .flat_map(|result| result["data"]["recovered_operations"]
+                .as_array()
+                .into_iter()
+                .flatten())
+            .any(|item| item["operation"] == run && item["outcome"]["state"] == "applied")
+    );
+    fixture.run(&[
+        "pane",
+        "run",
+        "true",
+        "--pane",
+        &pane,
+        "--take-over",
+        "--timeout",
+        "2s",
+    ]);
     for args in [
         vec![
             "pane",

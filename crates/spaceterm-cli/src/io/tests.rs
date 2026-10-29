@@ -292,7 +292,7 @@ fn run_read_and_page_through_scrollback() {
         output_text(&done)
     );
     assert!(
-        runs.pending().is_empty(),
+        runs.pending().unwrap().is_empty(),
         "a settled run is retired"
     );
 
@@ -940,7 +940,7 @@ fn runs_refuse_typed_input_and_survive_take_over_and_lost_links() {
         .filter(|row| row.trim() == "ONCE-42")
         .count();
     assert_eq!(printed, 1, "the command is never sent again");
-    assert!(runs.pending().is_empty());
+    assert!(runs.pending().unwrap().is_empty());
 
     // Another client takes over while the command runs.
     let taker = person.clone();
@@ -1090,7 +1090,7 @@ fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
     );
     assert_eq!(refused.failure.unwrap().code, Code::NotAtPrompt);
     assert!(
-        second_runs.pending().is_empty(),
+        second_runs.pending().unwrap().is_empty(),
         "a refused call leaves no run journal"
     );
     let sent = send::send(
