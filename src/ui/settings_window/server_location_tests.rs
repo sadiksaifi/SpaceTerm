@@ -483,6 +483,42 @@ mod presented {
         );
     }
 
+    /// Settings shows a failed change, and the person presses Enter to write the same location
+    /// again. Enter answers the first failure. The retry's failure stays unseen until the
+    /// person answers it too.
+    #[gpui::test]
+    fn enter_should_answer_a_shown_failure_before_retrying(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (servers, edits) = present_penguin(reads, cx);
+        settle(servers.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", servers.cx);
+        wait(Duration::from_secs(1), servers.cx);
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let first = edits.unseen();
+        let shown = says("Couldn\u{2019}t save this location.", servers.cx);
+
+        servers.cx.simulate_keystrokes("enter");
+        servers.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), servers.cx);
+        let after_retry = edits.unseen();
+
+        assert!(shown);
+        assert_eq!(first.len(), 1);
+        assert_eq!(edits.submitted().len(), 2, "Enter wrote the location again");
+        assert_eq!(
+            after_retry
+                .iter()
+                .map(|unseen| unseen.sequence)
+                .collect::<Vec<_>>(),
+            vec![first[0].sequence + 1],
+            "only the retry's failure is still unseen"
+        );
+    }
+
     /// The person chose another server before the change was answered, so Settings never showed
     /// the failure. It stays unseen for the Workspace Window.
     #[gpui::test]

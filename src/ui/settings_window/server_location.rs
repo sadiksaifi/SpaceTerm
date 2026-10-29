@@ -581,9 +581,12 @@ impl SettingsWindow {
                 });
                 cx.notify();
             }
-            TextInputEvent::Submitted | TextInputEvent::FocusLost => {
-                self.commit_server_location(cx)
+            // Enter is the person's response to a shown failure, whether or not it writes.
+            TextInputEvent::Submitted => {
+                self.server_location.answered();
+                self.commit_server_location(cx);
             }
+            TextInputEvent::FocusLost => self.commit_server_location(cx),
             TextInputEvent::Cancelled => {
                 self.server_location.answered();
                 let state = &mut self.server_location;
@@ -605,6 +608,9 @@ impl SettingsWindow {
         let Some(write) = state.model.commit() else {
             return;
         };
+        // Writing again replaces the shown failure. The person caused it, by Enter, Reset or
+        // leaving the field, so the failure is answered first rather than handed back.
+        state.answered();
         let generation = state.generation;
         let operation = Operation::SetLocation {
             version: write.version,
