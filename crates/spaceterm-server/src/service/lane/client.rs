@@ -239,12 +239,14 @@ pub struct Lane {
 }
 
 impl Lane {
-    /// The lane of the account server at `paths`, as `client` named `name`.
+    /// The lane of the account server at `paths`, as base identity `client` named `name`, or as
+    /// `agent` when given.
     pub(crate) fn local(
         paths: crate::host::Paths,
         server: [u8; 32],
         client: [u8; 32],
         name: crate::pane::control::ClientName,
+        agent: Option<crate::protocol::AgentName>,
     ) -> Self {
         Self {
             connector: Box::new(Local {
@@ -252,7 +254,7 @@ impl Lane {
                 server,
                 client,
                 name,
-                agent: None,
+                agent,
             }),
         }
     }

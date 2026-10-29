@@ -493,6 +493,67 @@ fn an_uploaded_candidate_is_staged_and_previewed_as_an_update() {
 }
 
 #[test]
+fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
+    with_lane(|lane| {
+        let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let identity = lane.lane.service.identity.clone();
+        let server_id = lane.lane.server;
+        let agent: crate::protocol::AgentName = "agent-1".parse().unwrap();
+        let derived = agent.client(&[5; 32]);
+        let peer = std::thread::spawn(move || {
+            let name: crate::pane::control::ClientName = "Build Mac CLI agent-1".into();
+            let major = crate::protocol::admit_service_lane(
+                &mut client,
+                crate::protocol::Caller {
+                    client: &[5; 32],
+                    name: &name,
+                    agent: Some(&agent),
+                },
+                &server_id,
+                &identity,
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            client
+                .send(
+                    br#"{"request":"resolve","operation":"00000000000000000000000000000000"}"#,
+                    deadline,
+                )
+                .unwrap();
+            let reply: LaneReply =
+                serde_json::from_slice(&client.receive(MAX_FRAME, deadline).unwrap()).unwrap();
+            (major, reply)
+        });
+        // The lane consumes the connection, so admission reports it as not for the work lane.
+        let admitted = crate::protocol::admit_server(
+            &mut server,
+            &lane.lane.server,
+            &lane.lane.service.identity,
+            Some(&lane.lane),
+        );
+        assert_eq!(admitted.err(), Some(ServerError::Unsupported));
+        let (major, reply) = peer.join().unwrap();
+        assert_eq!(major, crate::protocol::MAJOR);
+        assert_eq!(code(reply), "not_found");
+        // The admitted actor is the agent's own identity, so its tokens are its own.
+        let (token, _) = preview(&lane.lane, LaneAction::Stop);
+        let agent_actor = Actor {
+            pairing: None,
+            client: derived,
+        };
+        let reply = lane.lane.answer(
+            LaneRequest::Execute {
+                action: LaneAction::Stop,
+                token,
+                operation: OperationId([1; 16]).to_string(),
+            },
+            &agent_actor,
+        );
+        assert_eq!(code(reply), "changed");
+    });
+}
+
+#[test]
 fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
     with_lane(|lane| {
         let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();

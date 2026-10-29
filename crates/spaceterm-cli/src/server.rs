@@ -296,6 +296,15 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|v| format!("{v:02x}")).collect()
 }
 
+/// A direct-management failure on this machine. The account IPC fails to connect only when the
+/// server is not running.
+pub fn local_direct(error: spaceterm_server::direct::DirectError) -> Failure {
+    match error {
+        spaceterm_server::direct::DirectError::Transport => Failure::new(Code::NotRunning),
+        error => contract::from_direct_error(error),
+    }
+}
+
 pub fn lane_failure(error: LaneError) -> Failure {
     match error {
         LaneError::Code(code) => contract::from_lane_code(&code),
@@ -376,13 +385,14 @@ impl Pending {
 /// Opens the lane of `connection` and settles what earlier commands of this identity left on
 /// it. A pending operation that has not settled stays recorded for a later command.
 pub fn open_lane(
+    context: &Context<'_>,
     connection: &Result<ServerConnection, Failure>,
+    route: &RouteKey,
     pending: &Pending,
-    identity: &RecoveredIdentity,
 ) -> Result<Opened, Failure> {
+    let identity = &context.identity_kind();
+    let connection = connection.as_ref().map_err(Clone::clone)?;
     let lane = connection
-        .as_ref()
-        .map_err(Clone::clone)?
         .service_lane()
         .map_err(contract::from_server_error)?;
     let mut session = lane.session().map_err(contract::from_server_error)?;
@@ -403,11 +413,50 @@ pub fn open_lane(
             Leftover::Pending => {}
         }
     }
+    recovered.extend(settle_journals(context, connection, route));
     Ok(Opened {
         lane,
         session,
         recovered,
     })
+}
+
+/// Settles the Workspace edit journals and runs this CLI holds for the route. They need the
+/// work lane, which a server of another protocol major refuses, so they then wait for a later
+/// command.
+fn settle_journals(
+    context: &Context<'_>,
+    connection: &ServerConnection,
+    route: &RouteKey,
+) -> Vec<RecoveredOperation> {
+    let Ok(state) = CliState::open(context.identity) else {
+        return Vec::new();
+    };
+    if state.held(route).map_or(true, |held| held.is_empty()) {
+        return Vec::new();
+    }
+    let Ok(link) = connection.link() else {
+        return Vec::new();
+    };
+    let agent = context.agent();
+    let identity = context.identity;
+    let target = connection.clone();
+    crate::journal::settle(
+        &state,
+        route,
+        crate::journal::Current {
+            agent: agent.as_ref(),
+            connection: &target,
+            link: &link,
+            writer: None,
+        },
+        &mut |agent| match route {
+            RouteKey::Local => ServerConnection::for_cli(identity, CliRoute::Local, agent.cloned()),
+            RouteKey::Paired(_) => Err(ServerError::Unsupported),
+        },
+        std::time::Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap_or_default()
 }
 
 fn recovered_operation(receipt: &LaneReceipt, identity: &RecoveredIdentity) -> RecoveredOperation {

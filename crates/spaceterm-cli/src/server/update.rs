@@ -46,7 +46,7 @@ pub fn run(
         // Settle an interrupted activation first. Recovery never repeats a dispatched step.
         let _ = Service::for_identity(context.identity).and_then(|v| v.recover_activation());
     }
-    let opened = super::open_lane(&routed.connection, &pending, &context.identity_kind());
+    let opened = super::open_lane(context, &routed.connection, &routed.route, &pending);
     match opened {
         Ok(opened) => running(context, routed, opened, &pending, check, files, token),
         Err(_) if routed.local => stopped(context, routed, check, files, token),

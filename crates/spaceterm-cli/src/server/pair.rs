@@ -39,9 +39,7 @@ impl Invitations for ServerConnection {
                     .map_err(|_| Failure::new(Code::Unsupported))?,
             ),
         };
-        let invitation = self
-            .invite_device(address)
-            .map_err(contract::from_direct_error)?;
+        let invitation = self.invite_device(address).map_err(super::local_direct)?;
         Ok((
             invitation.id(),
             invitation.display_text().to_string(),
@@ -51,7 +49,7 @@ impl Invitations for ServerConnection {
     fn claims(&self, invitation: &ClaimId) -> Result<Vec<PairingClaim>, Failure> {
         Ok(self
             .pairing_claims()
-            .map_err(contract::from_direct_error)?
+            .map_err(super::local_direct)?
             .into_iter()
             .filter(|claim| claim.invitation_id == *invitation)
             .collect())
@@ -59,15 +57,14 @@ impl Invitations for ServerConnection {
     fn approve(&self, claim: &PairingClaim) -> Result<String, Failure> {
         self.approve_device(claim)
             .map(|device| device.name.as_str().to_owned())
-            .map_err(contract::from_direct_error)
+            .map_err(super::local_direct)
     }
     fn reject(&self, claim: &ClaimId) -> Result<(), Failure> {
-        self.reject_device(*claim)
-            .map_err(contract::from_direct_error)
+        self.reject_device(*claim).map_err(super::local_direct)
     }
     fn withdraw(&self, invitation: &ClaimId) -> Result<(), Failure> {
         self.withdraw_invitation(*invitation)
-            .map_err(contract::from_direct_error)
+            .map_err(super::local_direct)
     }
 }
 

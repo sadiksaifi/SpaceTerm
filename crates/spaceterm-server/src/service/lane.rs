@@ -692,11 +692,11 @@ impl Admin<'_> {
             }),
             network: match live {
                 Some(host) => host.network()?,
-                None => offline_network(&self.service)?,
+                None => offline_network(self.service)?,
             },
             devices: match live {
                 Some(host) => host.devices()?,
-                None => offline_devices(&self.service)?,
+                None => offline_devices(self.service)?,
             },
             lane_major: LANE_MAJOR,
         })

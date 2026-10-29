@@ -776,8 +776,9 @@ impl ServerConnection {
         Ok(crate::service::lane::client::Lane::local(
             self.paths.clone(),
             self.server_id()?,
-            self.client_id()?,
+            self.base_client_id()?,
             self.client_name(),
+            self.agent().cloned(),
         ))
     }
     pub fn direct_status(&self) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {

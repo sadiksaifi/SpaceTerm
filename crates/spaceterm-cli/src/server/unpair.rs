@@ -5,8 +5,7 @@
 //! either does.
 use super::{Context, Reply};
 use crate::contract::{
-    self, Code, Confirmation, Details, DeviceRef, Envelope, Failure, Level, ServerUnpair,
-    TargetDetails,
+    Code, Confirmation, Details, DeviceRef, Envelope, Failure, Level, ServerUnpair, TargetDetails,
 };
 use serde::Serialize;
 use spaceterm_server::direct::DeviceInfo;
@@ -85,7 +84,7 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
     };
     let devices = match connection.paired_devices() {
         Ok(devices) => devices,
-        Err(error) => return fail(contract::from_direct_error(error)),
+        Err(error) => return fail(super::local_direct(error)),
     };
     let device = match select(&devices, selector) {
         Ok(device) => device,
@@ -142,6 +141,6 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
                 text,
             )
         }
-        Err(error) => fail(contract::from_direct_error(error)),
+        Err(error) => fail(super::local_direct(error)),
     }
 }

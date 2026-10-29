@@ -84,7 +84,7 @@ pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -
         Ok(pending) => pending,
         Err(failure) => return Reply::failure(command, Some(routed.server), failure),
     };
-    let opened = match super::open_lane(&routed.connection, &pending, &context.identity_kind()) {
+    let opened = match super::open_lane(context, &routed.connection, &routed.route, &pending) {
         Ok(opened) => opened,
         Err(failure) => return not_running(context, &routed, command, failure),
     };

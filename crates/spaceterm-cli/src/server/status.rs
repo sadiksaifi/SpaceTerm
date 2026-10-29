@@ -53,7 +53,7 @@ fn over_lane(
     route: RouteKey,
 ) -> Reply {
     let opened = Pending::open(context, &route)
-        .and_then(|pending| super::open_lane(connection, &pending, &context.identity_kind()));
+        .and_then(|pending| super::open_lane(context, connection, &route, &pending));
     let Opened {
         mut session,
         recovered,
