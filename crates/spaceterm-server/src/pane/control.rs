@@ -154,16 +154,20 @@ impl ClientNames {
         self.0.push((client, name));
     }
 
+    /// The latest bounded Client Name, or the neutral fallback for a forgotten identity.
+    pub fn name(&self, client: [u8; 32]) -> ClientName {
+        self.0
+            .iter()
+            .find(|(known, _)| *known == client)
+            .map_or_else(|| ClientName::from(""), |(_, name)| name.clone())
+    }
+
     /// Who controls a Pane as `asking` sees it, given the controlling Client Identity.
     pub fn controller(&self, controlling: Option<[u8; 32]>, asking: [u8; 32]) -> Controller {
         let Some(controlling) = controlling else {
             return Controller::Nobody;
         };
-        let name = self
-            .0
-            .iter()
-            .find(|(known, _)| *known == controlling)
-            .map_or_else(|| ClientName::from(""), |(_, name)| name.clone());
+        let name = self.name(controlling);
         Controller::Client {
             name,
             this_client: controlling == asking,

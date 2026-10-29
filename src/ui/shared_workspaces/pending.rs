@@ -510,6 +510,7 @@ fn new_pane(id: Id, source: Option<Id>, axis: Axis, directory: std::path::PathBu
         current_directory: None,
         repository_directory: None,
         presentation: None,
+        observers: Default::default(),
         confirmed_directory: None,
         creator: None,
     }

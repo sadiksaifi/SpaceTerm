@@ -416,6 +416,7 @@ impl RetainedInventory {
                                     current_directory: None,
                                     repository_directory: None,
                                     presentation: None,
+                                    observers: Default::default(),
                                     confirmed_directory: None,
                                     creator: None,
                                 })
@@ -622,6 +623,7 @@ mod tests {
             current_directory: None,
             repository_directory: None,
             presentation: None,
+            observers: Default::default(),
             confirmed_directory: None,
             creator: None,
         }
@@ -748,6 +750,7 @@ mod reconciliation_tests {
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator: None,
                 },
@@ -759,6 +762,7 @@ mod reconciliation_tests {
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator: None,
                 },
@@ -867,6 +871,7 @@ mod retained_inventory_tests {
             current_directory: Some("/home/tester/project/src".into()),
             repository_directory: Some("/home/tester/project".into()),
             presentation,
+            observers: Default::default(),
             confirmed_directory: Some("/home/tester/project".into()),
             creator: Some([9; 32]),
         }
@@ -898,7 +903,7 @@ mod retained_inventory_tests {
 
     #[test]
     fn a_retained_copy_keeps_structure_and_shell_names_and_drops_titles_paths_and_commands() {
-        let published = inventory(vec![
+        let mut published = inventory(vec![
             pane(
                 3,
                 Some(presentation("vim notes", TitleProvenance::TerminalControl)),
@@ -910,6 +915,10 @@ mod retained_inventory_tests {
             pane(5, None),
         ]);
 
+        published.workspaces[0].tabs[0].panes[0].observers = crate::hierarchy::PaneObservers {
+            names: vec!["Observer CLI".into()],
+            others: 4,
+        };
         let retained = RetainedInventory::retain(&published);
         let presented = retained.inventory();
         let stored = serde_json::to_string(&retained).unwrap();
@@ -923,7 +932,14 @@ mod retained_inventory_tests {
             ),
             (Some("zsh"), Some("zsh"), None)
         );
-        for secret in ["vim notes", "/home/tester", "TOKEN", "tester", "server"] {
+        for secret in [
+            "vim notes",
+            "/home/tester",
+            "TOKEN",
+            "tester",
+            "server",
+            "Observer CLI",
+        ] {
             assert!(!stored.contains(secret), "the copy holds {secret:?}");
         }
         let workspace = &presented.workspaces[0];
@@ -939,6 +955,7 @@ mod retained_inventory_tests {
         assert!(workspace.tabs[0].panes.iter().all(|pane| {
             pane.starting_directory.as_os_str().is_empty()
                 && pane.presentation.is_none()
+                && pane.observers == crate::hierarchy::PaneObservers::default()
                 && pane.creator.is_none()
         }));
     }

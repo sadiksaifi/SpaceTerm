@@ -54,6 +54,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
         current_directory: None,
         repository_directory: None,
         presentation: None,
+        observers: Default::default(),
         confirmed_directory: None,
         creator: None,
     }
