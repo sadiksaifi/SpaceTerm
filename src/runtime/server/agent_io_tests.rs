@@ -371,11 +371,12 @@ fn integrated_shells_run_one_command_and_bind_its_status() {
             );
             continue;
         }
+        // Keep the command pending while the second call checks admission.
         // Single quotes, double spaces and a dollar sign arrive exactly as given.
         let command = match name {
-            "nu" => "print 'RUN-[a  $b]'; exit 3",
-            "elvish" => "echo 'RUN-[a  $b]'; fail x",
-            _ => "printf '%s\\n' 'RUN-[a  $b]'; false",
+            "nu" => "print 'RUN-[a  $b]'; ^sleep 1; exit 3",
+            "elvish" => "echo 'RUN-[a  $b]'; sleep 1; fail x",
+            _ => "printf '%s\\n' 'RUN-[a  $b]'; sleep 1; false",
         };
         let command = command.replace("; exit 3", "; ^sh -c 'exit 3'");
         match bench.run_at_prompt(1, &command) {
