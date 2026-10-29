@@ -155,7 +155,7 @@ fn decode_id(value: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut result = [0; 16];
-    for (part, byte) in value.as_bytes().chunks_exact(2).zip(&mut result) {
+    for (part, byte) in value.as_bytes().as_chunks::<2>().0.iter().zip(&mut result) {
         *byte = u8::from_str_radix(std::str::from_utf8(part).ok()?, 16).ok()?;
     }
     Some(result)

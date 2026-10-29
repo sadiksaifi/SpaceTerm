@@ -826,6 +826,7 @@ impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
             r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+unset SPACETERM_SERVER SPACETERM_AS
 uid=$(id -u)
 [ "$uid" -gt 0 ] || exit 71
 root="$HOME/.local/share/{}/server"
@@ -930,6 +931,7 @@ fn transfer_script(
         r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+unset SPACETERM_SERVER SPACETERM_AS
 umask 077
 work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-{work}.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM

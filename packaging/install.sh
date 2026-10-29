@@ -450,6 +450,9 @@ headless_uninstall() {
 }
 
 install_headless() {
+    # Installer steps always act on this account, independently of CLI work preferences.
+    SPACETERM_SERVER=local
+    export SPACETERM_SERVER
     headless_archive=""
     headless_signature=""
     headless_identity=spaceterm
