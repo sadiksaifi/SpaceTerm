@@ -243,6 +243,7 @@ fn execute(
         session,
         recovered,
     } = opened;
+    let deadline = Instant::now() + context.timeout(kind.wait());
     let outcome = lane.perform(
         session,
         kind.action(),
@@ -274,7 +275,7 @@ fn execute(
     };
     let mut settled = settle(action, outcome);
     if routed.local && settled.observed == Some(Observed::Shutdown) {
-        settled = confirm_local_stop(context, settled, context.timeout(kind.wait()));
+        settled = confirm_local_stop(context, settled, deadline);
     }
     if settled.acknowledged {
         let _ = pending.remove(&settled.receipt.operation);
@@ -317,15 +318,17 @@ pub(crate) fn operation_envelope(
 /// On the server's own machine a Stop's outcome is readable without the lane: the helper
 /// records it in the ledger once the server has exited. The record stays for the next lane
 /// connection to acknowledge, because only the server acknowledges ledger records.
-fn confirm_local_stop(context: &Context<'_>, settled: Settled, wait: Duration) -> Settled {
+///
+/// It follows the operation's own `deadline`, and an interrupt moves that to the settlement
+/// instant. A held ledger lock never blocks it: the read is tried again until then.
+fn confirm_local_stop(context: &Context<'_>, settled: Settled, deadline: Instant) -> Settled {
     use spaceterm_server::service::operations::{Ledger, OperationId, State};
     let Some(id) = OperationId::parse(&settled.receipt.operation) else {
         return settled;
     };
-    let deadline = Instant::now() + wait;
     loop {
         let state = Ledger::open(context.identity)
-            .and_then(|ledger| ledger.resolve(&id))
+            .and_then(|ledger| ledger.resolve_now(&id))
             .ok()
             .flatten()
             .map(|record| record.state);
@@ -342,11 +345,13 @@ fn confirm_local_stop(context: &Context<'_>, settled: Settled, wait: Duration) -
                 ReceiptState::Unresolved,
                 Some(Failure::new(Code::OutcomeUnconfirmed)),
             ),
-            _ if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(250));
-                continue;
-            }
-            _ => return settled,
+            _ => match crate::interrupt::limit(deadline).checked_duration_since(Instant::now()) {
+                Some(left) if !left.is_zero() => {
+                    std::thread::sleep(left.min(Duration::from_millis(250)));
+                    continue;
+                }
+                _ => return settled,
+            },
         };
         let mut receipt = settled.receipt;
         receipt.code = failure.as_ref().map(|v| v.code);

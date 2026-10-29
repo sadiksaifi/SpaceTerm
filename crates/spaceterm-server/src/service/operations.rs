@@ -247,6 +247,13 @@ impl Ledger {
         Ok(self.read()?.into_iter().find(|v| v.id == *operation))
     }
 
+    /// Like [`Self::resolve`], but never waits for the ledger's lock. A held lock is
+    /// `ServiceBusy`, so a caller with its own deadline asks again.
+    pub fn resolve_now(&self, operation: &OperationId) -> Result<Option<Record>, ServerError> {
+        let _lock = self.data.try_lock(LOCK)?.ok_or(ServerError::ServiceBusy)?;
+        Ok(self.read()?.into_iter().find(|v| v.id == *operation))
+    }
+
     /// Every record, for status and the fence watcher.
     pub(crate) fn records(&self) -> Result<Vec<Record>, ServerError> {
         let _lock = self.data.lock(LOCK, false)?;
