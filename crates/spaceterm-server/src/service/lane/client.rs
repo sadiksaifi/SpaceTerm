@@ -5,6 +5,8 @@
 use super::{LaneAction, LaneReceipt, LaneReply, LaneRequest, MAX_FRAME, OperationId};
 use crate::ServerError;
 use crate::protocol::Preamble;
+use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 /// How long a lane request may take before the client gives up on its connection. Staging a
@@ -15,6 +17,8 @@ const POLL: Duration = Duration::from_secs(1);
 /// A session idle this long is replaced before `Execute`. The server closes a lane that stays
 /// silent for 30 s, for example while a person answers a confirmation prompt.
 const STALE: Duration = Duration::from_secs(20);
+/// How often the flow reads its deadline again while a connection or request blocks.
+const CHECK: Duration = Duration::from_millis(100);
 
 /// Opens and admits a fresh service-lane connection.
 pub(crate) trait Connector: Send + Sync {
@@ -40,7 +44,9 @@ impl From<ServerError> for LaneError {
 
 /// One admitted lane connection.
 pub struct Session {
-    stream: Box<dyn Preamble + Send>,
+    /// `None` once a request was abandoned at its deadline, which leaves the connection
+    /// mid-frame.
+    stream: Option<Box<dyn Preamble + Send>>,
     /// When the last request was sent, or the connection opened.
     used: Instant,
 }
@@ -48,7 +54,22 @@ pub struct Session {
 impl Session {
     pub(crate) fn open(connector: &dyn Connector, deadline: Instant) -> Result<Self, ServerError> {
         Ok(Self {
-            stream: connector.connect(deadline)?,
+            stream: Some(connector.connect(deadline)?),
+            used: Instant::now(),
+        })
+    }
+
+    /// Like [`Self::open`], but stops waiting as soon as `deadline()` passes.
+    fn open_within(
+        connector: &Arc<dyn Connector>,
+        deadline: &dyn Fn() -> Instant,
+    ) -> Result<Self, ServerError> {
+        let connector = Arc::clone(connector);
+        let fixed = deadline();
+        let stream =
+            within(deadline, move || connector.connect(fixed)).ok_or(ServerError::Protocol)??;
+        Ok(Self {
+            stream: Some(stream),
             used: Instant::now(),
         })
     }
@@ -59,14 +80,34 @@ impl Session {
         request: &LaneRequest,
         deadline: Instant,
     ) -> Result<LaneReply, ServerError> {
-        let bytes = serde_json::to_vec(request).map_err(|_| ServerError::Protocol)?;
-        if bytes.len() > MAX_FRAME {
-            return Err(ServerError::Protocol);
-        }
+        let bytes = frame(request)?;
+        let stream = self.stream.as_mut().ok_or(ServerError::Protocol)?;
         self.used = Instant::now();
-        self.stream.send(&bytes, deadline)?;
-        let reply = self.stream.receive(MAX_FRAME, deadline)?;
+        stream.send(&bytes, deadline)?;
+        let reply = stream.receive(MAX_FRAME, deadline)?;
         serde_json::from_slice(&reply).map_err(|_| ServerError::Protocol)
+    }
+
+    /// Like [`Self::request`], but stops waiting as soon as `deadline()` passes. A request
+    /// abandoned that way ends this session.
+    fn request_within(
+        &mut self,
+        request: &LaneRequest,
+        deadline: &dyn Fn() -> Instant,
+    ) -> Result<LaneReply, ServerError> {
+        let bytes = frame(request)?;
+        let mut stream = self.stream.take().ok_or(ServerError::Protocol)?;
+        self.used = Instant::now();
+        let fixed = deadline();
+        let (stream, reply) = within(deadline, move || {
+            let reply = stream
+                .send(&bytes, fixed)
+                .and_then(|()| stream.receive(MAX_FRAME, fixed));
+            (stream, reply)
+        })
+        .ok_or(ServerError::Protocol)?;
+        self.stream = Some(stream);
+        serde_json::from_slice(&reply?).map_err(|_| ServerError::Protocol)
     }
 
     /// Sends one request and turns a lane `Error` into [`LaneError::Code`].
@@ -78,6 +119,39 @@ impl Session {
         match self.request(request, deadline)? {
             LaneReply::Error { code } => Err(LaneError::Code(code)),
             reply => Ok(reply),
+        }
+    }
+}
+
+fn frame(request: &LaneRequest) -> Result<Vec<u8>, ServerError> {
+    let bytes = serde_json::to_vec(request).map_err(|_| ServerError::Protocol)?;
+    if bytes.len() > MAX_FRAME {
+        return Err(ServerError::Protocol);
+    }
+    Ok(bytes)
+}
+
+/// Runs blocking lane I/O on its own thread, so the caller stops waiting as soon as
+/// `deadline()` passes. The deadline is read again every [`CHECK`], so an interrupt that moves it
+/// closer ends the wait while a stalled server holds the request. Abandoned I/O ends at its own
+/// fixed deadline. `None` means the deadline passed first.
+fn within<T: Send + 'static>(
+    deadline: &dyn Fn() -> Instant,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("spaceterm-lane-io".into())
+        .spawn(move || {
+            let _ = sender.send(work());
+        })
+        .ok()?;
+    loop {
+        let left = deadline().checked_duration_since(Instant::now())?;
+        match receiver.recv_timeout(left.min(CHECK)) {
+            Ok(value) => return Some(value),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return None,
         }
     }
 }
@@ -104,9 +178,11 @@ pub enum Outcome {
 /// refuse to dispatch it.
 ///
 /// `interrupted` returns the instant by which an interrupted caller must settle, once it was
-/// interrupted. From then on the flow only resolves: it never sends `Execute` again.
+/// interrupted. From then on the flow only resolves: it never sends `Execute` again. Every
+/// connection and request reads it again while it waits, so a stalled server cannot hold the
+/// flow past that instant.
 pub(crate) fn perform(
-    connector: &dyn Connector,
+    connector: &Arc<dyn Connector>,
     session: Session,
     action: LaneAction,
     token: String,
@@ -115,7 +191,7 @@ pub(crate) fn perform(
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
     let mut session = if session.used.elapsed() >= STALE {
-        Session::open(connector, Instant::now() + REQUEST_LIMIT)?
+        Session::open(connector.as_ref(), Instant::now() + REQUEST_LIMIT)?
     } else {
         session
     };
@@ -130,18 +206,20 @@ pub(crate) fn perform(
     };
     let started = Instant::now();
     let deadline = || interrupted().into_iter().fold(started + wait, Instant::min);
-    let request_deadline = || deadline().min(Instant::now() + REQUEST_LIMIT);
-    let (mut boot, mut current) = match session.request(&execute, request_deadline()) {
-        Ok(LaneReply::Accepted { boot, .. }) => (Some(boot), Some(session)),
-        // A refused Execute admitted nothing.
-        Ok(LaneReply::Error { code }) => return Err(LaneError::Code(code)),
-        // Execute was sent, so the operation may be durable: follow the same operation ID.
-        Ok(_) | Err(_) => (None, None),
-    };
+    // Fixed per request from when it is sent, and moved closer by an interrupt.
+    let request_deadline = |sent: Instant| move || deadline().min(sent + REQUEST_LIMIT);
+    let (mut boot, mut current) =
+        match session.request_within(&execute, &request_deadline(Instant::now())) {
+            Ok(LaneReply::Accepted { boot, .. }) => (Some(boot), Some(session)),
+            // A refused Execute admitted nothing.
+            Ok(LaneReply::Error { code }) => return Err(LaneError::Code(code)),
+            // Execute was sent, so the operation may be durable: follow the same operation ID.
+            Ok(_) | Err(_) => (None, None),
+        };
     let mut last = None;
     loop {
         if current.is_none() && (boot.is_none() || !stop) {
-            current = Session::open(connector, request_deadline()).ok();
+            current = Session::open_within(connector, &request_deadline(Instant::now())).ok();
         }
         match current.as_mut() {
             // Without the lane, a Stop that may have been admitted is reported as in progress.
@@ -156,13 +234,13 @@ pub(crate) fn perform(
             // admits the operation now if the first never arrived. An interrupted caller only
             // resolves, so nothing new is dispatched after the interrupt.
             Some(session) if boot.is_none() && interrupted().is_none() => {
-                match session.request(&execute, request_deadline()) {
+                match session.request_within(&execute, &request_deadline(Instant::now())) {
                     Ok(LaneReply::Accepted { boot: admitted, .. }) => {
                         boot = Some(admitted);
                         continue;
                     }
                     Ok(LaneReply::Error { code }) => {
-                        match resolve(session, &operation, request_deadline()) {
+                        match resolve(session, &operation, &request_deadline(Instant::now())) {
                             Ok(LaneReply::Receipt(receipt)) => boot = Some(receipt.boot),
                             // Executes are serialized, so no record means none was admitted.
                             Ok(LaneReply::Error { code: missing }) if missing == "not_found" => {
@@ -174,34 +252,36 @@ pub(crate) fn perform(
                     Ok(_) | Err(_) => current = None,
                 }
             }
-            Some(session) => match resolve(session, &operation, request_deadline()) {
-                Ok(LaneReply::Receipt(receipt)) if settled(&receipt) => {
-                    let _ = session.request(
-                        &LaneRequest::Acknowledge {
-                            operation: operation.clone(),
-                        },
-                        request_deadline(),
-                    );
-                    let boot = boot.unwrap_or_else(|| receipt.boot.clone());
-                    return Ok(Outcome::Settled { receipt, boot });
+            Some(session) => {
+                match resolve(session, &operation, &request_deadline(Instant::now())) {
+                    Ok(LaneReply::Receipt(receipt)) if settled(&receipt) => {
+                        let _ = session.request_within(
+                            &LaneRequest::Acknowledge {
+                                operation: operation.clone(),
+                            },
+                            &request_deadline(Instant::now()),
+                        );
+                        let boot = boot.unwrap_or_else(|| receipt.boot.clone());
+                        return Ok(Outcome::Settled { receipt, boot });
+                    }
+                    Ok(LaneReply::Receipt(receipt)) => {
+                        boot.get_or_insert_with(|| receipt.boot.clone());
+                        last = Some(receipt);
+                    }
+                    // The operation may still arrive on the lost connection, so this proves nothing.
+                    Ok(LaneReply::Error { code }) if code == "not_found" && boot.is_none() => {}
+                    Ok(LaneReply::Error { code }) => return Err(LaneError::Code(code)),
+                    Ok(_) => return Err(LaneError::Server(ServerError::Protocol)),
+                    // The server closed the lane: it is stopping, or it already stopped.
+                    Err(_) if stop => {
+                        return Ok(Outcome::Shutdown {
+                            operation,
+                            boot: boot.unwrap_or_default(),
+                        });
+                    }
+                    Err(_) => current = None,
                 }
-                Ok(LaneReply::Receipt(receipt)) => {
-                    boot.get_or_insert_with(|| receipt.boot.clone());
-                    last = Some(receipt);
-                }
-                // The operation may still arrive on the lost connection, so this proves nothing.
-                Ok(LaneReply::Error { code }) if code == "not_found" && boot.is_none() => {}
-                Ok(LaneReply::Error { code }) => return Err(LaneError::Code(code)),
-                Ok(_) => return Err(LaneError::Server(ServerError::Protocol)),
-                // The server closed the lane: it is stopping, or it already stopped.
-                Err(_) if stop => {
-                    return Ok(Outcome::Shutdown {
-                        operation,
-                        boot: boot.unwrap_or_default(),
-                    });
-                }
-                Err(_) => current = None,
-            },
+            }
         }
         if Instant::now() + POLL >= deadline() {
             return Ok(Outcome::Unconfirmed {
@@ -217,9 +297,9 @@ pub(crate) fn perform(
 fn resolve(
     session: &mut Session,
     operation: &str,
-    deadline: Instant,
+    deadline: &dyn Fn() -> Instant,
 ) -> Result<LaneReply, ServerError> {
-    session.request(
+    session.request_within(
         &LaneRequest::Resolve {
             operation: operation.to_owned(),
         },
@@ -333,7 +413,7 @@ impl Connector for Paired {
 
 /// A route to one server's service lane. Opening it never starts a server.
 pub struct Lane {
-    connector: Box<dyn Connector>,
+    connector: Arc<dyn Connector>,
 }
 
 impl Lane {
@@ -347,7 +427,7 @@ impl Lane {
         agent: Option<crate::protocol::AgentName>,
     ) -> Self {
         Self {
-            connector: Box::new(Local {
+            connector: Arc::new(Local {
                 paths,
                 server,
                 client,
@@ -365,7 +445,7 @@ impl Lane {
         agent: Option<crate::protocol::AgentName>,
     ) -> Self {
         Self {
-            connector: Box::new(Paired {
+            connector: Arc::new(Paired {
                 connector,
                 paired,
                 name,
@@ -390,7 +470,7 @@ impl Lane {
         interrupted: &dyn Fn() -> Option<Instant>,
     ) -> Result<Outcome, LaneError> {
         perform(
-            self.connector.as_ref(),
+            &self.connector,
             session,
             action,
             token,
