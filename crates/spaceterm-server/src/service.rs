@@ -1177,7 +1177,7 @@ mod tests {
             ));
             let paths = Paths {
                 identity: "spaceterm-development".into(),
-                data: root.join("data"),
+                data: root.join(".local/share/spaceterm-development/server"),
                 runtime: root.join("runtime"),
             };
             let data = Directory::open(&paths.data, true).unwrap();
