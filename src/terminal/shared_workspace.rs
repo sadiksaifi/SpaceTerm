@@ -298,19 +298,28 @@ struct FinishedOperation {
 /// Dispatches the journal's Original Operation, or does so again with its original identity
 /// after a lost reply. The server replays an outcome it already recorded, so a retry never
 /// repeats the edit, and its reply waits for any Worktree write the outcome depends on.
+///
+/// `dispatched` is the last operation this process dispatched. Without a pending operation, only
+/// its outcome is published again, for a reconnect that overtook its first publication. An
+/// earlier process published the outcomes it retired, so they are never presented twice.
 fn finish(
     link: &ServerLink,
     journal: &mut impl EditJournal,
     controls: &PaneControls,
     state: &PublishedSnapshot,
     seen: u64,
+    dispatched: &mut Option<u64>,
 ) -> Result<FinishedOperation, ServerError> {
     let Some(pending) = journal.pending().cloned() else {
         return Ok(FinishedOperation {
-            outcome: journal.last().cloned(),
+            outcome: journal
+                .last()
+                .filter(|last| Some(last.sequence) == *dispatched)
+                .cloned(),
             reconciled: None,
         });
     };
+    *dispatched = Some(pending.sequence);
     let ReplyBody::Outcome(result) = link
         .request(Operation::Mutate {
             sequence: pending.sequence,
@@ -359,6 +368,7 @@ fn run(
     });
     let mut watched = false;
     let mut active: Option<(u64, Mutation)> = None;
+    let mut dispatched = None;
     while alive.load(Ordering::Acquire) {
         let result = (|| {
             // Events before this attempt are stale; the link and its newest revision are read
@@ -401,7 +411,14 @@ fn run(
                     active = None;
                 }
             });
-            let finished = finish(&link, &mut journal, &controls, &state, seen)?;
+            let finished = finish(
+                &link,
+                &mut journal,
+                &controls,
+                &state,
+                seen,
+                &mut dispatched,
+            )?;
             attachments.release_pending(&link)?;
             state.publish(|s| {
                 if let Some((count, revision)) = finished.reconciled {
@@ -421,7 +438,14 @@ fn run(
                     Ok(Event::Edit(mutation)) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
-                        let finished = finish(&link, &mut journal, &controls, &state, seen)?;
+                        let finished = finish(
+                            &link,
+                            &mut journal,
+                            &controls,
+                            &state,
+                            seen,
+                            &mut dispatched,
+                        )?;
                         state.publish(|s| {
                             if let Some((count, revision)) = finished.reconciled {
                                 s.inventory = Some(revision.inventory.clone());
@@ -802,6 +826,11 @@ mod tests {
         eventually("the client connects", || {
             edits.snapshot().connected && workspaces(&edits) == 1
         });
+        assert_eq!(
+            edits.snapshot().outcome,
+            None,
+            "the earlier run presented its own outcome"
+        );
         let (probe, _) = server.connect(client, Arc::clone(&ignore));
         eventually("the repeated acknowledgement retires the outcome", || {
             matches!(

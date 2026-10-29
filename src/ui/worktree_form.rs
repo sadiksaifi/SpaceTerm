@@ -151,7 +151,9 @@ pub(crate) struct WorktreeForm {
     pending: bool,
     generation: u64,
     pending_path: Option<PathBuf>,
-    interrupted_path: Option<PathBuf>,
+    /// The directory of the last Create whose failure the form reported, so no other surface
+    /// reports the server's answer for it again.
+    reported_path: Option<PathBuf>,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
     _status: Task<()>,
@@ -205,7 +207,7 @@ impl WorktreeForm {
             pending: false,
             generation: 0,
             pending_path: None,
-            interrupted_path: None,
+            reported_path: None,
             pending_cancel: None,
             _branches: Task::ready(()),
             _status: Task::ready(()),
@@ -584,8 +586,8 @@ impl WorktreeForm {
         .detach();
     }
 
-    pub(crate) fn interrupted_path(&self) -> Option<&std::path::Path> {
-        self.interrupted_path.as_deref()
+    pub(crate) fn reported_path(&self) -> Option<&std::path::Path> {
+        self.reported_path.as_deref()
     }
 
     fn settle_create(
@@ -605,7 +607,7 @@ impl WorktreeForm {
             ))
         {
             self.pending_path = None;
-            self.interrupted_path = Some(attempted_path.clone());
+            self.reported_path = Some(attempted_path.clone());
             cx.emit(WorktreeFormEvent::Interrupted(attempted_path));
             return Some(Settlement::Success { primary });
         }
@@ -615,6 +617,7 @@ impl WorktreeForm {
         }
         self.pending = false;
         self.pending_path = None;
+        self.reported_path = Some(attempted_path);
         self.set_editable(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
             Err(WorktreeCreateError::NotSubmitted(reason)) => (None,reason.into()),

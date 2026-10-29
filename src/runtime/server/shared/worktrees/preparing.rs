@@ -151,7 +151,7 @@ pub(super) fn prepare(
                 run: Box::new(move |git| {
                     let token = CancellationToken::default();
                     git.create(&root, &path, &branch, &token)
-                        .map_err(|_| Error::Branch)?;
+                        .map_err(creation_error)?;
                     let snapshot = list(&git, &root, &token).map_err(|_| Error::Interrupted)?;
                     let physical = local_filesystem()
                         .validate_directory(&path)
@@ -265,5 +265,19 @@ pub(super) fn prepare(
             })))
         }
         Operation::SetLocation { .. } => Err(Error::Unavailable),
+    }
+}
+
+/// The typed reason git refused a creation, which the client shows on the field it concerns.
+fn creation_error(error: crate::worktrees::git::WorktreeCreateError) -> Error {
+    use crate::worktrees::git::WorktreeCreateError;
+    match error {
+        WorktreeCreateError::InvalidName => Error::InvalidName,
+        WorktreeCreateError::BranchExists => Error::BranchExists,
+        WorktreeCreateError::BranchCheckedOut => Error::BranchCheckedOut,
+        WorktreeCreateError::BranchMissing => Error::BranchMissing,
+        WorktreeCreateError::NotSubmitted(_)
+        | WorktreeCreateError::Server(_)
+        | WorktreeCreateError::Failed => Error::Branch,
     }
 }

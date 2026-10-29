@@ -3110,7 +3110,7 @@ impl WorkspaceManager {
             use spaceterm_server::worktree::Operation;
             let presented = match &operation {
                 Operation::Create { path, .. } => {
-                    self.worktree_creation_failure_presented(path, error, cx)
+                    self.worktree_creation_failure_presented(path, cx)
                 }
                 Operation::SetLocation { .. } => true,
                 Operation::Remove { .. } | Operation::OpenTab { .. } => false,

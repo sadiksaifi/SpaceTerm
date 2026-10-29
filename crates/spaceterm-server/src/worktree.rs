@@ -116,7 +116,16 @@ pub enum Error {
     Pinned,
     Changed,
     Location,
+    /// Git could not finish creating the Worktree.
     Branch,
+    /// Git refuses the new branch's name.
+    InvalidName,
+    /// A branch with the new branch's name already exists.
+    BranchExists,
+    /// Another Worktree has the branch checked out.
+    BranchCheckedOut,
+    /// The branch to check out or start from no longer exists.
+    BranchMissing,
     Unavailable,
     Interrupted,
     Template(path_template::WorktreePathTemplateError),

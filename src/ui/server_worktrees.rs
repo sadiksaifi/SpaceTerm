@@ -312,6 +312,10 @@ fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError
     use crate::worktrees::git::WorktreeCreateError;
     match error {
         WriteError::Refused(reason) => WorktreeCreateError::NotSubmitted(creation_refusal(reason)),
+        WriteError::Server(Error::InvalidName) => WorktreeCreateError::InvalidName,
+        WriteError::Server(Error::BranchExists) => WorktreeCreateError::BranchExists,
+        WriteError::Server(Error::BranchCheckedOut) => WorktreeCreateError::BranchCheckedOut,
+        WriteError::Server(Error::BranchMissing) => WorktreeCreateError::BranchMissing,
         WriteError::Server(error) => WorktreeCreateError::Server(error),
     }
 }

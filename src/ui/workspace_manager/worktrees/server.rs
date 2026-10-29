@@ -657,12 +657,27 @@ impl WorkspaceManager {
                 Error::Branch => format!(
                     "Git could not finish creating the Worktree. Check \u{201C}{name}\u{201D} for incomplete files and review the sidebar before trying again."
                 ),
+                Error::InvalidName => "Git doesn\u{2019}t accept this branch name.".to_owned(),
+                Error::BranchExists => {
+                    "A branch with this name already exists. Choose another name and try again."
+                        .to_owned()
+                }
+                Error::BranchCheckedOut => {
+                    "Another Worktree has this branch checked out.".to_owned()
+                }
+                Error::BranchMissing => "This branch no longer exists.".to_owned(),
                 _ => format!(
                     "SpaceTerm could not confirm whether the Worktree was created. Check \u{201C}{name}\u{201D} and the sidebar before trying again."
                 ),
             };
             let title = match error {
-                Error::Location | Error::Missing | Error::Branch => {
+                Error::Location
+                | Error::Missing
+                | Error::Branch
+                | Error::InvalidName
+                | Error::BranchExists
+                | Error::BranchCheckedOut
+                | Error::BranchMissing => {
                     format!("Couldn\u{2019}t Create Worktree \u{201C}{name}\u{201D}")
                 }
                 _ => "Check Worktree Creation".to_owned(),
@@ -725,7 +740,11 @@ impl WorkspaceManager {
                 "The New Worktree Location directory is not writable. Choose another directory in Settings > Git."
             }
             Error::Template(_) => "Correct New Worktree Location in Settings > Git.",
-            Error::Branch => {
+            Error::Branch
+            | Error::InvalidName
+            | Error::BranchExists
+            | Error::BranchCheckedOut
+            | Error::BranchMissing => {
                 "Check the selected branch and existing Worktrees before trying again."
             }
             Error::Unavailable => "Review the Worktrees in the sidebar before trying again.",
