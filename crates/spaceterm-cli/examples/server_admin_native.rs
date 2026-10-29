@@ -78,6 +78,9 @@ struct Options {
     broken: Option<(String, String)>,
     restore: Option<(String, String)>,
     expiry: bool,
+    /// Where `expired-token-issue` keeps a token for a later `expired-token-check`, so the
+    /// ten-minute wait can pass while other work runs.
+    token_file: Option<String>,
     cases: Vec<String>,
 }
 
@@ -110,6 +113,7 @@ impl Options {
             broken: pair("BROKEN"),
             restore: pair("RESTORE"),
             expiry: env("EXPIRY").is_some(),
+            token_file: env("TOKEN_FILE"),
             cases: env("CASES")
                 .map(|v| v.split(',').map(str::to_owned).collect())
                 .unwrap_or_default(),
@@ -137,6 +141,7 @@ impl Options {
                 "--broken" => options.broken = Some((value()?, value()?)),
                 "--restore" => options.restore = Some((value()?, value()?)),
                 "--expiry" => options.expiry = true,
+                "--token-file" => options.token_file = Some(value()?),
                 "--case" => options.cases.push(value()?),
                 other => return Err(format!("unknown option {other}").into()),
             }
@@ -314,6 +319,10 @@ fn run(options: &Options) -> Result<()> {
     if options.expiry {
         cases.push(("expired-token", expired_token));
     }
+    if options.token_file.is_some() {
+        cases.push(("expired-token-issue", expired_token_issue));
+        cases.push(("expired-token-check", expired_token_check));
+    }
     if options.candidate.is_some() {
         cases.push(("update-upload", update_upload));
     }
@@ -469,6 +478,40 @@ fn expired_token(options: &Options) -> Result<String> {
         .cli(&["server", "stop", "--confirm", &token])?
         .expect_code(4, "changed", "an expired token")?;
     Ok("a token expires after ten minutes".into())
+}
+
+/// Issues a Stop token and records when, for a later `expired-token-check`.
+fn expired_token_issue(options: &Options) -> Result<String> {
+    let path = options.token_file.as_ref().ok_or("no --token-file")?;
+    let token = options
+        .cli(&["server", "stop"])?
+        .expect(3, "preview")?
+        .token()?;
+    let issued = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    std::fs::write(path, format!("{issued} {token}"))?;
+    Ok("issued; check it after ten minutes with expired-token-check".into())
+}
+
+/// Uses a token issued at least ten minutes ago. Nothing may restart the server in between,
+/// or the check proves the restart instead of the expiry.
+fn expired_token_check(options: &Options) -> Result<String> {
+    let path = options.token_file.as_ref().ok_or("no --token-file")?;
+    let text = std::fs::read_to_string(path)?;
+    let (issued, token) = text.split_once(' ').ok_or("a malformed token file")?;
+    let age = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .saturating_sub(issued.parse()?);
+    if age < 10 * 60 + 5 {
+        return Err(format!("the token is only {age} s old").into());
+    }
+    options
+        .cli(&["server", "stop", "--confirm", token])?
+        .expect_code(4, "changed", "an expired token")?;
+    std::fs::remove_file(path)?;
+    Ok(format!("a token {age} s old is changed"))
 }
 
 fn admitted_crash(options: &Options) -> Result<String> {
