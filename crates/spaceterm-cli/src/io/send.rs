@@ -153,6 +153,10 @@ pub fn send(
     {
         return Done::failed(Failure::new(Code::SessionChanged));
     }
+    if let Err(failure) = crate::interrupt::dispatch() {
+        channel.keep();
+        return Done::failed(failure);
+    }
     let result = deliver(&mut channel, typing, args.allow_unsafe_paste, deadline);
     let done = |serial, delivered, failure| Done {
         data: Some(PaneSend {
@@ -180,6 +184,7 @@ fn deliver(
     deadline: Deadline,
 ) -> Result<u32, (u32, Failure)> {
     channel.show().map_err(|failure| (0, failure))?;
+    crate::interrupt::dispatch().map_err(|failure| (0, failure))?;
     let handle = channel.handle();
     let mut last = handle
         .input(GENERATION, vec![InputEvent::Focus(FocusTarget::Terminal)])

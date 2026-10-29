@@ -105,6 +105,17 @@ impl Fixture {
             })
             .map_or((0, 0), |held| (held.operations, held.runs))
     }
+    fn assert_no_run_locks(&self) {
+        let root = spaceterm_server::cli_state_root(IDENTITY).unwrap();
+        let locks = root
+            .join("routes/local/agents")
+            .join(self.agent.as_str())
+            .join("runs");
+        assert!(
+            std::fs::read_dir(locks).unwrap().next().is_none(),
+            "settled runs leave no lock files"
+        );
+    }
     /// Stops the server's process until the guard drops, so it answers nothing meanwhile.
     fn freeze(&self) -> Frozen {
         let pid = self.server.0.id() as libc::pid_t;
@@ -147,6 +158,219 @@ fn until(mut ready: impl FnMut() -> bool, what: &str) {
         assert!(Instant::now() < deadline, "{what}");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+// Run in a separate process because the handler exits without unwinding blocked output.
+#[test]
+#[ignore = "child process for stalled_output_is_interruptible"]
+fn blocked_output_child() {
+    use spaceterm_cli::{contract, interrupt};
+    use std::io::Write;
+    let Ok(kind) = std::env::var("SPACETERM_TEST_BLOCKED_OUTPUT") else {
+        return;
+    };
+    let mode = contract::Mode {
+        json: true,
+        ..Default::default()
+    };
+    interrupt::install("pane.read", mode).unwrap();
+    let data = serde_json::json!({"rows": ["x".repeat(8 * 1024 * 1024)]});
+    let envelope = if kind == "confirmed" {
+        contract::Envelope::ok("pane.read", None, data)
+    } else {
+        contract::Envelope::error(
+            "pane.read",
+            None,
+            contract::Failure::new(contract::Code::RunUnconfirmed),
+            data,
+        )
+    };
+    let finishing = kind != "emergency";
+    let interrupted = if finishing {
+        interrupt::finish(envelope.exit())
+    } else {
+        false
+    };
+    std::io::stderr().write_all(b"ready\n").unwrap();
+    if finishing {
+        let exit = contract::render(
+            &envelope,
+            "",
+            "",
+            mode,
+            interrupted,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        );
+        panic!("output unexpectedly completed with exit {exit}");
+    } else {
+        std::io::stdout()
+            .write_all(&vec![b'x'; 1024 * 1024])
+            .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "process interrupt checks; run mise run cli:io:test"]
+fn stalled_output_is_interruptible() {
+    use std::io::BufRead;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    for (kind, expected) in [
+        ("emergency", 130),
+        ("final", 7),
+        ("second", 7),
+        ("confirmed", 130),
+    ] {
+        let mut descriptors = [-1; 2];
+        // SAFETY: pipe fills two writable descriptor slots, owned below after success.
+        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned two fresh descriptors, each transferred exactly once.
+        let (_reader, writer) = unsafe {
+            (
+                std::fs::File::from_raw_fd(descriptors[0]),
+                std::fs::File::from_raw_fd(descriptors[1]),
+            )
+        };
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "blocked_output_child", "--ignored"])
+            .env("SPACETERM_TEST_BLOCKED_OUTPUT", kind)
+            .stdout(writer.try_clone().unwrap())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(child.stderr.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        let process = Process(Some(child));
+        // Leave the reader open without draining it until the process exits.
+        std::thread::sleep(Duration::from_millis(100));
+        // SAFETY: writer retains the inherited descriptor after the child's stdio initialization.
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        process.interrupt();
+        if kind == "second" || kind == "confirmed" {
+            std::thread::sleep(Duration::from_millis(100));
+            process.interrupt();
+        }
+        let limit = if kind == "final" {
+            Duration::from_secs(7)
+        } else {
+            Duration::from_secs(2)
+        };
+        let (output, _) = process.wait(limit);
+        assert_eq!(output.status.code(), Some(expected), "{kind}");
+        // SAFETY: the parent retains the same open file description the child inherited.
+        assert_eq!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) },
+            flags,
+            "{kind}: inherited output flags changed"
+        );
+    }
+}
+
+#[test]
+#[ignore = "owns a foreground Development server; run mise run cli:io:test"]
+fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {
+    let home = std::env::temp_dir().join(format!(
+        "spaceterm-interrupt-startup-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    struct Home(std::path::PathBuf);
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let home = Home(home);
+    let release = home.0.join("release");
+    std::fs::write(
+        home.0.join(".zshrc"),
+        format!(
+            "printf 'STARTUP-%s\\n' WAIT\nwhile [[ ! -f '{}' ]]; do sleep 0.02; done\n",
+            release.display()
+        ),
+    )
+    .unwrap();
+    let client_name = format!("cli-startup-interrupt-{}", std::process::id());
+    let client =
+        ServerConnection::for_development_client(&client_name, spaceterm_server::protocol::MAJOR)
+            .unwrap();
+    lifecycle::require_idle(&client).unwrap();
+    client.setup().unwrap();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_spaceterm"));
+    let server = lifecycle::Server(
+        Command::new(executable)
+            .args(["server", "run", "--identity", IDENTITY])
+            .env(
+                "SHELL",
+                std::env::var("SPACETERM_TEST_ZSH").unwrap_or_else(|_| "/bin/zsh".into()),
+            )
+            .env("ZDOTDIR", &home.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let link = lifecycle::connect(&client).unwrap();
+    let fixture = Fixture {
+        server,
+        link,
+        client_name,
+        agent: format!("startup-interrupt-{}", std::process::id())
+            .parse()
+            .unwrap(),
+    };
+    let created = fixture.run(&["workspace", "create", "Interrupted startup"]);
+    let workspace = created["data"]["workspace"]["id"].as_str().unwrap();
+    let id = std::array::from_fn(|i| u8::from_str_radix(&workspace[i * 2..i * 2 + 2], 16).unwrap());
+    let cleanup = workspace::Workspace::track(&client, &fixture.link, id).unwrap();
+    let pane = format!(
+        "id:{}",
+        cleanup
+            .pane
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let waiting = fixture.spawn(&["pane", "run", "printf SHOULD_NOT_RUN", "--pane", &pane]);
+    until(
+        || fixture.held().1 > 0,
+        "the run never reached its prompt wait",
+    );
+    fixture.run(&[
+        "pane",
+        "read",
+        "--pane",
+        &pane,
+        "--wait-for",
+        "STARTUP-WAIT",
+        "--timeout",
+        "5s",
+    ]);
+    waiting.interrupt();
+    // Let startup finish inside the old retry window. An interrupted CLI must not admit input.
+    std::fs::write(&release, "").unwrap();
+    let (output, _) = waiting.wait(Duration::from_secs(7));
+    assert_eq!(output.status.code(), Some(130), "{}", envelope(&output));
+    assert_eq!(fixture.held(), (0, 0), "the undispatched run was forgotten");
+    fixture.assert_no_run_locks();
+    let observed = fixture.run(&[
+        "pane",
+        "read",
+        "--pane",
+        &pane,
+        "--wait-idle",
+        "300ms",
+        "--timeout",
+        "5s",
+    ]);
+    assert!(
+        !observed["data"].to_string().contains("SHOULD_NOT_RUN"),
+        "no command input was written"
+    );
 }
 
 #[test]
@@ -249,6 +473,7 @@ fn ctrl_c_before_dispatch_exits_130_and_after_dispatch_resolves_first() {
     }
 
     // `pane run -` still reading its command from stdin has dispatched nothing.
+    fixture.assert_no_run_locks();
     let mut reading = fixture.command(&["pane", "run", "-", "--pane", &pane]);
     reading.stdin(Stdio::piped());
     let mut reading = Process(Some(reading.spawn().unwrap()));
@@ -261,9 +486,23 @@ fn ctrl_c_before_dispatch_exits_130_and_after_dispatch_resolves_first() {
     assert_eq!(fixture.held(), (0, 0), "no run was admitted");
 
     // A dispatched run still running reports its confirmed state with exit 130.
-    let running = fixture.spawn(&["pane", "run", "sleep 8", "--pane", &pane]);
-    until(|| fixture.held().1 > 0, "the run was never recorded");
-    std::thread::sleep(Duration::from_millis(500));
+    let running = fixture.spawn(&[
+        "pane",
+        "run",
+        "printf 'INTERRUPT-%s\\n' RUNNING; sleep 8",
+        "--pane",
+        &pane,
+    ]);
+    fixture.run(&[
+        "pane",
+        "read",
+        "--pane",
+        &pane,
+        "--wait-for",
+        "INTERRUPT-RUNNING",
+        "--timeout",
+        "5s",
+    ]);
     running.interrupt();
     let (output, elapsed) = running.wait(Duration::from_secs(8));
     let interrupted = envelope(&output);

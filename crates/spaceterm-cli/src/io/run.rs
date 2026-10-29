@@ -337,6 +337,7 @@ pub fn run(
     let mut paste_wait = None;
     let admitted = shown.and_then(|()| {
         loop {
+            crate::interrupt::dispatch()?;
             let reply = request(
                 link,
                 Operation::Run {
