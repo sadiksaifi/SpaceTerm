@@ -1,4 +1,4 @@
-//! `pane run` on a shared server: admission under the `PaneService` lock, and receipts that
+//! `pane run` on a shared server: queued admission on the Terminal Session worker, and receipts that
 //! follow each run's Terminal Session until its client acknowledges them.
 use super::super::RunRequest;
 use super::*;
@@ -6,18 +6,21 @@ use spaceterm_server::pane::run::{Admission, Settled};
 use spaceterm_server::protocol::{self, HistoryPosition, RunId, RunReply};
 use std::sync::mpsc;
 
-/// How long admission waits for the Terminal Session's worker. A run the worker answers later
-/// is still followed, from an unknown start.
-const ADMISSION_WAIT: Duration = Duration::from_secs(5);
-
-/// A run recorded before its worker answered.
-pub(super) struct LateRun {
+/// A reserved run waiting for its Terminal Session's worker. The host polls it on ticks,
+/// so neither a worker delay nor a PTY write holds the PaneService lock.
+pub(super) struct Admitting {
     pane: Id,
+    run: RunId,
     reply: mpsc::Receiver<Result<crate::terminal::session::RunAdmission, protocol::RunRefusal>>,
+    answer: super::super::RunAnswer,
 }
 
 impl SharedWorkspaceHost {
-    pub(super) fn admit_run(&mut self, request: RunRequest) -> Result<RunReply, Refusal> {
+    pub(super) fn admit_run(
+        &mut self,
+        request: RunRequest,
+        answer: super::super::RunAnswer,
+    ) -> Result<(), Refusal> {
         let RunRequest {
             device,
             connection,
@@ -50,31 +53,20 @@ impl SharedWorkspaceHost {
             return Err(Refusal::Missing);
         }
         if session != lease.session {
-            return Ok(RunReply::Refused(protocol::RunRefusal::SessionChanged));
+            answer(Ok(RunReply::Refused(protocol::RunRefusal::SessionChanged)));
+            return Ok(());
         }
         // A reused id is answered, never written again.
         if let Some(receipt) = self.runs.receipt(&device, &run) {
-            return Ok(RunReply::Receipt(receipt));
+            answer(Ok(RunReply::Receipt(receipt)));
+            return Ok(());
         }
         if let Err(refusal) = self.runs.check(&pane_id) {
-            return Ok(RunReply::Refused(refusal));
+            answer(Ok(RunReply::Refused(refusal)));
+            return Ok(());
         }
         let at = Instant::now();
-        let reply = pane.runtime.run(command.clone());
-        let (start, finished_commands, late) = match reply.recv_timeout(ADMISSION_WAIT) {
-            Ok(Ok(admission)) => (admission.start, admission.finished_commands, None),
-            Ok(Err(refusal)) => return Ok(RunReply::Refused(refusal)),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Refusal::Missing),
-            // Epoch 0 names no history. The finish binds by the run's markers alone.
-            Err(mpsc::RecvTimeoutError::Timeout) => (
-                HistoryPosition { epoch: 0, row: 0 },
-                0,
-                Some(LateRun {
-                    pane: pane_id,
-                    reply,
-                }),
-            ),
-        };
+        let start = HistoryPosition { epoch: 0, row: 0 };
         self.runs
             .admit(Admission {
                 pane: pane_id,
@@ -83,14 +75,19 @@ impl SharedWorkspaceHost {
                 client: device,
                 connection,
                 channel,
-                command,
+                command: command.clone(),
                 start,
-                finished_commands,
+                finished_commands: 0,
                 at,
             })
             .map_err(|_| Refusal::Failed)?;
-        self.late_runs.extend(late);
-        Ok(RunReply::Admitted { start })
+        self.admitting_runs.push(Admitting {
+            pane: pane_id,
+            run,
+            reply: pane.runtime.run(command),
+            answer,
+        });
+        Ok(())
     }
 
     pub(super) fn run_receipt(&mut self, device: Id, run: RunId) -> Result<RunReply, Refusal> {
@@ -111,17 +108,41 @@ impl SharedWorkspaceHost {
     /// Applies what each pending run's Terminal Session observed since the last call: its
     /// markers, a take over, and the end of the Session.
     pub(super) fn settle_runs(&mut self) {
-        let mut late = std::mem::take(&mut self.late_runs);
-        late.retain(|late| match late.reply.try_recv() {
-            Ok(Ok(_)) => false,
-            Err(mpsc::TryRecvError::Empty) => true,
-            Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
-                self.settled_runs.extend(self.runs.abandon(&late.pane));
-                false
-            }
-        });
-        self.late_runs = late;
+        let mut admitting = std::mem::take(&mut self.admitting_runs);
+        let mut waiting = Vec::new();
+        for pending in admitting.drain(..) {
+            let result = match pending.reply.try_recv() {
+                Ok(Ok(admission)) => {
+                    self.runs
+                        .admitted(&pending.run, admission.start, admission.finished_commands);
+                    Ok(RunReply::Admitted {
+                        start: admission.start,
+                    })
+                }
+                Ok(Err(refusal)) => {
+                    self.runs.refused(&pending.run);
+                    Ok(RunReply::Refused(refusal))
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.runs.refused(&pending.run);
+                    Err(Refusal::Missing)
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    waiting.push(pending);
+                    continue;
+                }
+            };
+            (pending.answer)(result);
+        }
+        self.admitting_runs = waiting;
         for (pane_id, session, client) in self.runs.pending_runs() {
+            if self
+                .admitting_runs
+                .iter()
+                .any(|pending| pending.pane == pane_id)
+            {
+                continue;
+            }
             let pane = self
                 .panes
                 .get_mut(&pane_id)
@@ -156,5 +177,99 @@ impl SharedWorkspaceHost {
     /// The lease of the Pane's running Terminal Session.
     pub(in crate::runtime::server) fn running_lease(&self, pane: Id) -> Option<Lease> {
         self.panes.get(&pane)?.pane.as_ref().map(|pane| pane.lease)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::native_pty::{
+        NativePtyAdapterConstructionFailure, NativePtyAdapterFactory, NativePtyAdapterParts,
+        NativePtySize,
+    };
+    use crate::platform::shell_launch::PreparedShellLaunch;
+    use crate::runtime::server::tests::{create_shared, shared_inventory, size};
+    use std::sync::Mutex;
+
+    /// A stalled external PTY constructor keeps the Session worker from answering admission.
+    struct StalledPty(Mutex<mpsc::Receiver<()>>, mpsc::SyncSender<()>);
+    impl NativePtyAdapterFactory for StalledPty {
+        fn create(
+            &self,
+            _: PreparedShellLaunch,
+            _: NativePtySize,
+        ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
+            self.1.send(()).unwrap();
+            let _ = self.0.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            Err(NativePtyAdapterConstructionFailure::ProcessStartFailed)
+        }
+    }
+
+    #[test]
+    fn a_stalled_run_admission_leaves_other_panes_available() {
+        let (release, blocked) = mpsc::channel();
+        let (entered, started) = mpsc::sync_channel(1);
+        let prototype = DevelopmentPaneHost::local_with_pty_factory(Arc::new(StalledPty(
+            Mutex::new(blocked),
+            entered,
+        )))
+        .unwrap();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        let pane = shared_inventory(&mut host)
+            .workspaces
+            .iter()
+            .find(|entry| entry.id == workspace)
+            .unwrap()
+            .tabs[0]
+            .root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("a claim starts the Session worker");
+        };
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (answer, received) = mpsc::sync_channel(1);
+        let at = Instant::now();
+        host.admit_run(
+            RunRequest {
+                device: [1; 32],
+                connection: [1; 32],
+                lease,
+                channel: protocol::Channel(1),
+                run: RunId([1; 16]),
+                command: "true".into(),
+                session: lease.session,
+            },
+            Box::new(move |result| {
+                let _ = answer.send(result);
+            }),
+        )
+        .unwrap();
+        assert!(at.elapsed() < Duration::from_millis(250));
+        assert!(matches!(
+            received.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_ne!(create_shared(&mut host, 2), workspace);
+        release.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        loop {
+            host.settle_runs();
+            if received.try_recv().is_ok() {
+                break;
+            }
+            assert!(Instant::now() < until, "the released worker answers");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(host.runs.pending(&pane).is_none());
+        host.shutdown().unwrap();
     }
 }

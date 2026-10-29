@@ -1,9 +1,9 @@
 //! Server-side run receipts. A run binds one command, written as one bracketed paste at the
 //! prompt, to the first owner-marked command start after it and the finish that follows.
 //!
-//! The table never writes to a PTY. The host checks [`RunTable::check`], writes the command on
-//! the Terminal Session's worker, then records the admission. Each owner-marked marker the worker
-//! saw after it passes through [`RunTable::observe_marker`] in order. A receipt stays until its
+//! The table never writes to a PTY. The host reserves a receipt before enqueueing the command
+//! on the Terminal Session's worker, then completes or removes the reservation when it answers.
+//! Each owner-marked marker the worker saw after it passes through [`RunTable::observe_marker`] in order. A receipt stays until its
 //! client acknowledges it, so a client that lost a reply resolves the run without resending it.
 use crate::hierarchy::Id;
 use crate::protocol::{
@@ -207,7 +207,8 @@ impl RunTable {
             .is_some_and(|entry| entry.admission.client == *client)
     }
 
-    /// Records a run whose command was written. [`Self::check`] passed under the same lock.
+    /// Reserves a run before enqueueing its command. [`Self::check`] passed under the same lock.
+    /// Call [`Self::admitted`] or [`Self::refused`] when the worker answers.
     pub fn admit(&mut self, admission: Admission) -> Result<(), RunRefusal> {
         self.check(&admission.pane)?;
         if self.receipts.contains_key(&admission.run) {
@@ -225,6 +226,19 @@ impl RunTable {
             },
         );
         Ok(())
+    }
+
+    /// Completes a reserved admission before consuming any of its worker's observations.
+    pub fn admitted(&mut self, run: &RunId, start: HistoryPosition, finished_commands: u64) {
+        if let Some(entry) = self.receipts.get_mut(run) {
+            entry.admission.start = start;
+            entry.admission.finished_commands = finished_commands;
+        }
+    }
+
+    /// Removes a reservation when the worker refused without writing input.
+    pub fn refused(&mut self, run: &RunId) {
+        self.receipts.remove(run);
     }
 
     /// Updates the Pane's pending run and returns its receipt when the marker settled it.
@@ -253,14 +267,6 @@ impl RunTable {
                 )
             })
             .collect()
-    }
-
-    /// Settles a pending run whose command the worker never wrote, after it was recorded.
-    pub fn abandon(&mut self, pane: &Id) -> Option<Settled> {
-        Some(
-            self.pending_mut(pane)?
-                .settle(RunState::Unconfirmed(RunDoubt::NoCommandStart), None),
-        )
     }
 
     /// Settles a pending run whose Terminal Session ended or whose Pane closed.

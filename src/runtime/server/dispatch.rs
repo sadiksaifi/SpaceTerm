@@ -503,7 +503,7 @@ pub trait HostCommands: Send {
     }
     /// Writes one command at the prompt of the Terminal Session the request's lease controls,
     /// as `Operation::Run` describes.
-    fn run(&mut self, _request: RunRequest) -> Result<protocol::RunReply, Refusal> {
+    fn run(&mut self, _request: RunRequest, _answer: RunAnswer) -> Result<(), Refusal> {
         Err(Refusal::Unsupported)
     }
     /// The receipt `device` holds for `run`. It never writes the run's command again.
@@ -581,6 +581,9 @@ pub struct Observers {
     /// The Client Identities observing it.
     pub clients: std::collections::BTreeSet<[u8; 32]>,
 }
+
+/// Answers a run admission once the Terminal Session's worker accepts or refuses it.
+pub type RunAnswer = Box<dyn FnOnce(Result<protocol::RunReply, Refusal>) + Send>;
 
 /// A run to admit, as `Operation::Run` names it on a channel.
 pub struct RunRequest {
@@ -1666,9 +1669,20 @@ impl<H: HostCommands> Served<H> {
                 run,
                 command,
                 session,
-            } => self.lease(peer, channel).and_then(|lease| {
-                self.host
-                    .run(RunRequest {
+            } => {
+                let lease = match self.lease(peer, channel) {
+                    Ok(lease) => lease,
+                    Err(refusal) => return Dispatch::reply(Err(refusal)),
+                };
+                let Some(connection) = self.connections.get(&peer.connection) else {
+                    return Dispatch::reply(Err(Refusal::Stale));
+                };
+                let outbox = connection.outbox.clone();
+                let answer = Box::new(move |result: Result<protocol::RunReply, Refusal>| {
+                    let _ = outbox.reply_or_refuse(id, result.map(ReplyBody::Run));
+                });
+                return match self.host.run(
+                    RunRequest {
                         device: peer.client,
                         connection: peer.connection,
                         lease,
@@ -1676,9 +1690,13 @@ impl<H: HostCommands> Served<H> {
                         run,
                         command,
                         session,
-                    })
-                    .map(ReplyBody::Run)
-            }),
+                    },
+                    answer,
+                ) {
+                    Ok(()) => Dispatch::Deferred,
+                    Err(refusal) => Dispatch::reply(Err(refusal)),
+                };
+            }
             Operation::RunStatus { run } => {
                 self.host.run_status(peer.client, run).map(ReplyBody::Run)
             }

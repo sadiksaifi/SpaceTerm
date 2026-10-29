@@ -116,7 +116,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod directory_tests;
 mod dispatch;
-pub use dispatch::{HostCommands, HostRead, Observers, RunRequest, Served, SettledRead};
+pub use dispatch::{HostCommands, HostRead, Observers, RunAnswer, RunRequest, Served, SettledRead};
 pub use publish::{Observation, Observed};
 pub use screen_encoder::ScreenCapture;
 #[cfg(test)]

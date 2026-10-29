@@ -98,7 +98,7 @@ pub struct SharedWorkspaceHost {
     /// Every run receipt, until its client acknowledges it.
     runs: spaceterm_server::pane::run::RunTable,
     /// Runs recorded before their worker answered.
-    late_runs: Vec<runs::LateRun>,
+    admitting_runs: Vec<runs::Admitting>,
     /// Receipts that settled and wait for [`HostCommands::take_settled_runs`].
     settled_runs: Vec<spaceterm_server::pane::run::Settled>,
 }
@@ -166,7 +166,7 @@ impl SharedWorkspaceHost {
             organization_prepared: false,
             attachment_generations: BTreeMap::new(),
             runs: Default::default(),
-            late_runs: Vec::new(),
+            admitting_runs: Vec::new(),
             settled_runs: Vec::new(),
         }
     }
@@ -1137,7 +1137,10 @@ impl SharedWorkspaceHost {
     }
     /// When timed work is next due, without running it.
     fn due(&self, now: Instant) -> Option<Instant> {
-        let waiting = !self.settled() || self.writes.busy() || !self.waiting.is_empty();
+        let waiting = !self.settled()
+            || self.writes.busy()
+            || !self.waiting.is_empty()
+            || !self.admitting_runs.is_empty();
         // A failed synchronization reads the record back from storage on each retry, and a stuck
         // process or full disk rarely recovers within milliseconds, so it retries once a second.
         let soon = if self.blocked.is_some() {
@@ -1384,11 +1387,8 @@ impl HostCommands for SharedWorkspaceHost {
             host.disconnected(connection);
         }
     }
-    fn run(
-        &mut self,
-        request: super::RunRequest,
-    ) -> Result<spaceterm_server::protocol::RunReply, Refusal> {
-        let reply = self.admit_run(request);
+    fn run(&mut self, request: super::RunRequest, answer: super::RunAnswer) -> Result<(), Refusal> {
+        let reply = self.admit_run(request, answer);
         self.rearm();
         reply
     }
