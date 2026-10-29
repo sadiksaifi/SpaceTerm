@@ -570,7 +570,7 @@ impl WorktreeForm {
                 }
             });
         }
-        self.set_editable(false, cx);
+        self.set_enabled(false, cx);
         let generation = self.generation;
         let task = self.backend.create(path.clone(), branch, cx);
         cx.notify();
@@ -618,7 +618,7 @@ impl WorktreeForm {
         self.pending = false;
         self.pending_path = None;
         self.reported_path = Some(attempted_path);
-        self.set_editable(true, cx);
+        self.set_enabled(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
             Err(WorktreeCreateError::NotSubmitted(reason)) => (None,reason.into()),
             Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location)) => (Some(FormField::Location),"Choose a new or empty directory.".into()),
@@ -666,7 +666,7 @@ impl WorktreeForm {
         self.pending = false;
         self.pending_cancel = None;
         self.generation = self.generation.wrapping_add(1);
-        self.set_editable(true, cx);
+        self.set_enabled(true, cx);
         match (outcome, self.pending_path.take()) {
             (
                 DialogOutcome::Completed {
@@ -688,9 +688,12 @@ impl WorktreeForm {
         }
     }
 
-    fn set_editable(&self, editable: bool, cx: &mut Context<Self>) {
+    fn set_enabled(&self, enabled: bool, cx: &mut Context<Self>) {
         for input in [&self.name, &self.location] {
-            input.update(cx, |input, cx| input.set_editable(editable, cx));
+            input.update(cx, |input, cx| {
+                input.set_enabled(enabled, cx);
+                cx.notify();
+            });
         }
     }
 }
@@ -1347,13 +1350,13 @@ mod tests {
     }
 
     /// What assistive technology reads of creation's progress: the spinners' names, the
-    /// announced status, and whether Create and the branch name can still be used.
+    /// announced status, and whether Create and the text fields can still be used.
     #[derive(Debug, PartialEq)]
     struct Progress {
         spinners: Vec<String>,
         status: Option<String>,
         create_disabled: bool,
-        name_editable: bool,
+        fields_enabled: bool,
     }
 
     fn progress(cx: &mut VisualTestContext) -> Progress {
@@ -1371,7 +1374,9 @@ mod tests {
                 .first()
                 .and_then(|node| text(&node["aria"]["value"])),
             create_disabled: tree.node("Create")["aria"]["disabled"] == true,
-            name_editable: tree.node("Branch name")["aria"]["read_only"].is_null(),
+            fields_enabled: ["Branch name", "Location"]
+                .iter()
+                .all(|name| tree.node(name)["aria"]["disabled"].is_null()),
         }
     }
 
@@ -1380,7 +1385,7 @@ mod tests {
             spinners: vec![CREATING.to_owned()],
             status: Some(status.to_owned()),
             create_disabled: true,
-            name_editable: false,
+            fields_enabled: false,
         }
     }
 
@@ -1468,7 +1473,7 @@ mod tests {
                 spinners: Vec::new(),
                 status: Some(CREATE_FAILED.to_owned()),
                 create_disabled: false,
-                name_editable: true,
+                fields_enabled: true,
             }
         );
         assert!(held.events.borrow().is_empty());
@@ -1483,6 +1488,30 @@ mod tests {
     #[gpui::test]
     fn a_failed_server_create_should_replace_the_spinner_with_its_error(cx: &mut TestAppContext) {
         a_failed_create_should_replace_the_spinner_with_its_error(true, cx);
+    }
+
+    #[gpui::test]
+    fn a_pending_create_should_disable_every_control(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(false, cx);
+        let disabled = |cx: &mut VisualTestContext| {
+            let tree = A11yTree::read(cx);
+            [
+                "New Branch",
+                "Branch name",
+                "Start From",
+                "Location",
+                "Create",
+            ]
+            .map(|name| tree.node(name)["aria"]["disabled"] == true)
+        };
+        let pending = disabled(cx);
+
+        held.answer
+            .try_send(Err(WorktreeCreateError::Failed))
+            .expect("git is waiting");
+        cx.run_until_parked();
+
+        assert_eq!((pending, disabled(cx)), ([true; 5], [false; 5]));
     }
 
     #[gpui::test]
