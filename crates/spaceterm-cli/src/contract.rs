@@ -1751,15 +1751,21 @@ pub(crate) mod golden {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("golden")
             .join(format!("{name}.json"));
-        let mut actual = serde_json::to_string_pretty(value).expect("contract values serialize");
-        actual.push('\n');
+        let mut actual = serde_json::to_value(value).expect("contract values serialize");
+        actual.sort_all_objects();
         if std::env::var_os("SPACETERM_GOLDEN_UPDATE").is_some() {
             std::fs::create_dir_all(path.parent().expect("golden directory")).unwrap();
-            std::fs::write(&path, actual).unwrap();
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string_pretty(&actual).unwrap()),
+            )
+            .unwrap();
             return;
         }
         let expected = std::fs::read_to_string(&path)
             .unwrap_or_else(|_| panic!("missing golden file {name}.json"));
+        let expected: serde_json::Value =
+            serde_json::from_str(&expected).expect("valid golden JSON");
         assert_eq!(actual, expected, "golden file {name}.json differs");
     }
 }
