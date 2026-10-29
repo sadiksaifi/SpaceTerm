@@ -734,6 +734,8 @@ def package(identity, release_tag=None, *, target=None):
         write_archive(tree, archive)
         release.sign_ed25519(seed, archive, signature)
         verify(archive, signature, expected, native=native)
+        if _source(ROOT)[2] != source:
+            raise TaskError("source changed during server packaging; retry the command")
         archive.replace(DIST / name)
         signature.replace(DIST / signature.name)
     print(f"Created signed server candidate {name}; nothing published")

@@ -127,9 +127,7 @@ impl Service {
     /// Keep an existing managed launcher on the policy's approved runtime. The service lock
     /// must be held. Services do not create a new PATH launcher as a side effect.
     pub(super) fn repoint_cli_locked(&self, runtime: &Path) -> Result<(), ServerError> {
-        let Ok(home) = self.cli_home() else {
-            return Ok(());
-        };
+        let home = self.cli_home()?;
         if home.join(".local/bin").join(&self.identity).is_symlink() {
             launcher::select(
                 home,

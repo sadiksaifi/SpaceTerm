@@ -126,17 +126,21 @@ def prepare(destination, identity):
                         from spaceterm_tasks.server_catalog import collect_target
 
                         collect_target(source_catalog, collected / target, identity, target, digest)
-                        continue
-                    archive, signature = package(identity, target=target)
+                    else:
+                        archive, signature = package(identity, target=target)
+                        if _source(ROOT)[2] != digest:
+                            raise TaskError(
+                                "source changed during server catalog preparation; retry the command"
+                            )
+                        entry = collected / target
+                        entry.mkdir()
+                        shutil.copyfile(archive, entry / "artifact.tar.gz")
+                        shutil.copyfile(signature, entry / "artifact.sig")
+                        (entry / "artifact.sha256").write_text(sha256(archive) + "\n")
                     if _source(ROOT)[2] != digest:
                         raise TaskError(
                             "source changed during server catalog preparation; retry the command"
                         )
-                    entry = collected / target
-                    entry.mkdir()
-                    shutil.copyfile(archive, entry / "artifact.tar.gz")
-                    shutil.copyfile(signature, entry / "artifact.sig")
-                    (entry / "artifact.sha256").write_text(sha256(archive) + "\n")
                 stage_catalog(None, None, destination, identity, source=collected, require_all=True)
         finally:
             for name, value in previous.items():

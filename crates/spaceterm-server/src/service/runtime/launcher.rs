@@ -94,38 +94,44 @@ mod tests {
             .canonicalize()
             .unwrap()
             .join(format!("st-launcher-{}", std::process::id()));
-        std::fs::create_dir(&home).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
         let installations = home.join(".local/share/spaceterm-development/server/installations");
         let first = installations.join("a".repeat(64));
         let second = installations.join("b".repeat(64));
         let path = home.join(".local/bin/spaceterm-development");
-        let result = (|| {
-            assert!(select(&home, "spaceterm-development", &installations, &first).unwrap());
-            assert_eq!(
-                std::fs::read_link(&path).unwrap(),
-                first.join("bin/spaceterm")
-            );
-            assert!(select(&home, "spaceterm-development", &installations, &second).unwrap());
-            assert_eq!(
-                std::fs::read_link(&path).unwrap(),
-                second.join("bin/spaceterm")
-            );
-            remove(&home, "spaceterm-development", &installations).unwrap();
-            assert!(!path.is_symlink());
-            symlink("/another/tool", &path).unwrap();
-            assert!(!select(&home, "spaceterm-development", &installations, &first).unwrap());
-            remove(&home, "spaceterm-development", &installations).unwrap();
-            assert_eq!(
-                std::fs::read_link(&path).unwrap(),
-                Path::new("/another/tool")
-            );
-            std::fs::remove_file(&path).unwrap();
-            std::fs::write(&path, b"local tool").unwrap();
-            assert!(!select(&home, "spaceterm-development", &installations, &first).unwrap());
-            remove(&home, "spaceterm-development", &installations).unwrap();
-            assert_eq!(std::fs::read(&path).unwrap(), b"local tool");
-        })();
-        std::fs::remove_dir_all(home).unwrap();
-        result
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(home.clone());
+        assert!(select(&home, "spaceterm-development", &installations, &first).unwrap());
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            first.join("bin/spaceterm")
+        );
+        assert!(select(&home, "spaceterm-development", &installations, &second).unwrap());
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            second.join("bin/spaceterm")
+        );
+        remove(&home, "spaceterm-development", &installations).unwrap();
+        assert!(!path.is_symlink());
+        symlink("/another/tool", &path).unwrap();
+        assert!(!select(&home, "spaceterm-development", &installations, &first).unwrap());
+        remove(&home, "spaceterm-development", &installations).unwrap();
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            Path::new("/another/tool")
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"local tool").unwrap();
+        assert!(!select(&home, "spaceterm-development", &installations, &first).unwrap());
+        remove(&home, "spaceterm-development", &installations).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"local tool");
     }
 }
