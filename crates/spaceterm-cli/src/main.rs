@@ -18,6 +18,15 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return usage(&argv, &error),
     };
+    if let Some(output) = spaceterm_cli::work::start::start(&cli) {
+        return ExitCode::from(output.write(
+            cli.global.json,
+            cli.global.quiet,
+            cli.global.verbose,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ));
+    }
     finish(
         cli.command.path(),
         cli.global.json,

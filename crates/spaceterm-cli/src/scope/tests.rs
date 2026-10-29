@@ -78,7 +78,7 @@ fn disagreeing_explicit_scope_reports_the_actual_parent() {
     )
     .unwrap_err();
     assert!(
-        matches!(error, TargetError::Mismatch { actual, .. } if actual.level == Level::Workspace && actual.id == Some(resolution::hex(&id(2))))
+        matches!(error, TargetError::Mismatch { actual, .. } if actual.level == Level::Workspace && actual.id == Some(hex(&id(2))))
     );
 }
 

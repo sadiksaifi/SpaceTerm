@@ -1,0 +1,28 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "workspace.create",
+  "status": "ok",
+  "server": {
+    "name": "fixture",
+    "route": "local",
+    "id": "0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "data": {
+    "revision": 8,
+    "target": [
+      {
+        "id": "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+        "label": "new",
+        "level": "workspace",
+        "source": "created"
+      }
+    ],
+    "workspace": {
+      "id": "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+      "label": "new",
+      "line": "new"
+    }
+  },
+  "error": null,
+  "warnings": []
+}

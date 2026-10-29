@@ -1,0 +1,46 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "pane.split",
+  "status": "ok",
+  "server": {
+    "name": "fixture",
+    "route": "local",
+    "id": "0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "data": {
+    "pane": {
+      "control": "self",
+      "directory": "/server/chosen",
+      "id": "2929292929292929292929292929292929292929292929292929292929292929"
+    },
+    "revision": 8,
+    "source_pane": "1717171717171717171717171717171717171717171717171717171717171717",
+    "tab": {
+      "id": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+      "label": "Editor",
+      "line": "Editor"
+    },
+    "target": [
+      {
+        "id": "0202020202020202020202020202020202020202020202020202020202020202",
+        "label": "tools",
+        "level": "workspace",
+        "source": "flag"
+      },
+      {
+        "id": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "label": "Editor",
+        "level": "tab",
+        "source": "flag"
+      },
+      {
+        "id": "1717171717171717171717171717171717171717171717171717171717171717",
+        "label": "Editor",
+        "level": "pane",
+        "source": "root"
+      }
+    ]
+  },
+  "error": null,
+  "warnings": []
+}

@@ -11,7 +11,10 @@ use spaceterm_server::{
 };
 
 pub enum Review {
-    Direct(Mutation),
+    Direct {
+        mutation: Mutation,
+        effects: CloseEffects,
+    },
     Confirm {
         confirmation: CloseConfirmation,
         effects: CloseEffects,
@@ -68,11 +71,11 @@ pub fn review(
         if facts.control.state == ControlState::Other {
             others.push(OtherController {
                 pane: super::hex(&pane.id),
-                client_name: facts
-                    .control
-                    .client_name
-                    .clone()
-                    .ok_or(Code::ProtocolError)?,
+                client_name: facts.control.client_name.clone().unwrap_or_else(|| {
+                    spaceterm_server::pane::control::ClientName::from("")
+                        .as_str()
+                        .to_owned()
+                }),
             });
         }
     }
@@ -88,17 +91,6 @@ pub fn review(
             })
             .collect::<Option<Vec<_>>>()
     });
-    if matches!(target, CloseTarget::Pane { .. } | CloseTarget::Tab { .. })
-        && !confirmation.removes_workspace
-        && idle
-        && own_controls.is_some()
-    {
-        confirmation.own_controls = own_controls;
-        return Ok(Review::Direct(Mutation::Close {
-            target,
-            confirmation,
-        }));
-    }
     let ends_sessions = sessions.len().try_into().unwrap_or(u32::MAX);
     let effects = CloseEffects {
         ends_sessions,
@@ -108,6 +100,20 @@ pub fn review(
         removes_workspace: confirmation.removes_workspace,
         fallback: None,
     };
+    if matches!(target, CloseTarget::Pane { .. } | CloseTarget::Tab { .. })
+        && !confirmation.removes_workspace
+        && idle
+        && own_controls.is_some()
+    {
+        confirmation.own_controls = own_controls;
+        return Ok(Review::Direct {
+            mutation: Mutation::Close {
+                target,
+                confirmation,
+            },
+            effects,
+        });
+    }
     Ok(Review::Confirm {
         confirmation,
         effects,
@@ -189,8 +195,10 @@ mod tests {
             tab: id(11),
             pane: id(21),
         };
-        let Review::Direct(Mutation::Close { confirmation, .. }) =
-            review(&snapshot, target, id(5), &facts).unwrap()
+        let Review::Direct {
+            mutation: Mutation::Close { confirmation, .. },
+            ..
+        } = review(&snapshot, target, id(5), &facts).unwrap()
         else {
             panic!("expected own close")
         };

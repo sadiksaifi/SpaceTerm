@@ -1,0 +1,39 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "worktree.create",
+  "status": "ok",
+  "server": {
+    "name": "fixture",
+    "route": "local",
+    "id": "0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "data": {
+    "tab": {
+      "id": "2828282828282828282828282828282828282828282828282828282828282828",
+      "label": "Terminal",
+      "line": "Terminal"
+    },
+    "target": [
+      {
+        "id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "label": "api",
+        "level": "workspace",
+        "source": "flag"
+      },
+      {
+        "label": "feature/new",
+        "level": "worktree",
+        "path": "/server/canonical/feature-new",
+        "source": "created"
+      }
+    ],
+    "worktree": {
+      "branch": "feature/new",
+      "main": false,
+      "missing": false,
+      "path": "/server/canonical/feature-new"
+    }
+  },
+  "error": null,
+  "warnings": []
+}

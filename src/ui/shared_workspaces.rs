@@ -1442,7 +1442,7 @@ mod development {
             match spaceterm_server::organize::split(
                 &inventory,
                 self.edits.canonical(self.tab),
-                Some(source),
+                Some(self.edits.canonical(source)),
                 axis,
                 spaceterm_server::hierarchy::CreateControl::Creator,
             ) {
@@ -1554,7 +1554,7 @@ mod development {
             let plan = spaceterm_server::organize::new_tab(
                 &inventory,
                 self.workspace(),
-                Some(source),
+                Some(self.edits.canonical(source)),
                 None,
                 spaceterm_server::hierarchy::CreateControl::Creator,
             );

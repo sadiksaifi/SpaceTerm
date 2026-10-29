@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 pub struct Create {
     pub target: Resolved,
     pub mutation: Mutation,
-    /// Run only after creation is accepted. It uses the same server and writer guard.
-    pub open: Option<Mutation>,
 }
 
 pub struct Context<'a> {
@@ -58,7 +56,6 @@ pub struct CreateArgs<'a> {
     pub name: &'a str,
     pub base: Option<&'a str>,
     pub path: Option<&'a Path>,
-    pub open: bool,
 }
 
 pub fn create(
@@ -66,7 +63,6 @@ pub fn create(
     args: &ScopeArgs,
     current: Option<&Current>,
     options: &CreateArgs<'_>,
-    control: CreateControl,
     context: &Context<'_>,
 ) -> Result<Create, WorkError> {
     let target = scope::resolve(snapshot, args, current, Want::Workspace, Effect::Mutating)?;
@@ -112,20 +108,7 @@ pub fn create(
         path: path.clone(),
         branch,
     });
-    let open = options.open.then_some({
-        Mutation::Worktree(Operation::OpenTab {
-            workspace,
-            source: None,
-            root,
-            path,
-            control,
-        })
-    });
-    Ok(Create {
-        target,
-        mutation,
-        open,
-    })
+    Ok(Create { target, mutation })
 }
 
 pub fn remove(
