@@ -167,7 +167,7 @@ impl Service {
 
     /// Verify and retain a candidate of any protocol major for remote administration, which
     /// reaches the server over the version-stable service lane.
-    pub(super) fn stage_candidate(
+    pub fn stage_candidate(
         &self,
         archive: &Path,
         signature: &Path,

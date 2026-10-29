@@ -766,6 +766,20 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
+    /// This handle's service lane, which answers across protocol majors. Opening it never starts
+    /// a server.
+    pub fn service_lane(&self) -> Result<crate::service::lane::client::Lane, ServerError> {
+        if self.direct.is_some() {
+            // Paired routes open the lane over their direct connection with stream E's routing.
+            return Err(ServerError::Unsupported);
+        }
+        Ok(crate::service::lane::client::Lane::local(
+            self.paths.clone(),
+            self.server_id()?,
+            self.client_id()?,
+            self.client_name(),
+        ))
+    }
     pub fn direct_status(&self) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {
         match self.direct_manage(crate::direct::Management::Status)? {
             crate::direct::ManagementReply::Status(status) => Ok(status),

@@ -14,6 +14,7 @@ pub(crate) mod host;
 mod network;
 mod quic;
 mod storage;
+pub(crate) use storage::observe;
 #[cfg(test)]
 pub(crate) mod tests;
 mod wire;

@@ -1,10 +1,6 @@
 //! The client half of the service lane: one request at a time, and the confirmed-operation flow
 //! of Stop, Restart and Update. The flow never resends `Execute` with a new operation ID. After a
 //! lost connection it only resolves the operation it already admitted.
-#![allow(
-    dead_code,
-    reason = "the CLI's server commands connect it over IPC and QUIC at integration"
-)]
 use super::{LaneAction, LaneReceipt, LaneReply, LaneRequest, MAX_FRAME, OperationId};
 use crate::ServerError;
 use crate::protocol::Preamble;
@@ -243,17 +239,14 @@ pub struct Lane {
 }
 
 impl Lane {
-    /// The lane of this account's server, as `client` named `name`.
-    pub fn local(
-        identity: &str,
+    /// The lane of the account server at `paths`, as `client` named `name`.
+    pub(crate) fn local(
+        paths: crate::host::Paths,
+        server: [u8; 32],
         client: [u8; 32],
         name: crate::pane::control::ClientName,
-    ) -> Result<Self, ServerError> {
-        let paths = crate::host::Paths::for_identity(identity)?;
-        let server = crate::storage::Directory::open(&paths.data, false)?
-            .read()?
-            .server;
-        Ok(Self {
+    ) -> Self {
+        Self {
             connector: Box::new(Local {
                 paths,
                 server,
@@ -261,7 +254,7 @@ impl Lane {
                 name,
                 agent: None,
             }),
-        })
+        }
     }
 
     /// Opens and admits one connection.

@@ -6174,6 +6174,7 @@ dependencies = [
  "jiff",
  "libc",
  "postcard",
+ "ring",
  "serde",
  "serde_json",
  "spaceterm",

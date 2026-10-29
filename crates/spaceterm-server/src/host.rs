@@ -461,17 +461,7 @@ impl crate::service::lane::LaneHost for HostLane {
         else {
             return Ok(Vec::new());
         };
-        Ok(devices
-            .iter()
-            .map(|device| crate::service::lane::LaneDevice {
-                id: device.pairing.iter().map(|v| format!("{v:02x}")).collect(),
-                name: device.name.as_str().to_owned(),
-                fingerprint: device.fingerprint(),
-                last_connected_at: device
-                    .last_connected_at_unix_seconds
-                    .map(crate::service::lane::unix_timestamp),
-            })
-            .collect())
+        Ok(devices.iter().map(crate::service::lane::device).collect())
     }
     fn network(&self) -> Result<crate::service::lane::LaneNetwork, ServerError> {
         let off = crate::service::lane::LaneNetwork {

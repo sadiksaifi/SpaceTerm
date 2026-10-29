@@ -186,6 +186,14 @@ impl Service {
             supervisor,
         }
     }
+    /// Where this account's signed installations are retained.
+    pub fn installations_directory(&self) -> PathBuf {
+        self.paths.data.join("installations")
+    }
+    /// The owning account's home, from its account record rather than the environment.
+    pub fn account_home(&self) -> Option<PathBuf> {
+        self.paths.data.ancestors().nth(4).map(Path::to_owned)
+    }
     /// Whether Linux boot startup is authorized for this account. `None` where startup follows
     /// login instead. This never requests authorization.
     pub fn linger(&self) -> Result<Option<bool>, ServerError> {
