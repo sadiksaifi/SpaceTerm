@@ -68,6 +68,34 @@ impl Fixture {
         }
         command
     }
+    /// The run process may not have claimed its fresh Pane when the observer connects.
+    fn wait_for(&self, pane: &str, text: &str) {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let output = self
+                .command(&[
+                    "pane",
+                    "read",
+                    "--pane",
+                    pane,
+                    "--wait-for",
+                    text,
+                    "--timeout",
+                    "5s",
+                ])
+                .output()
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            if output.status.success() {
+                return;
+            }
+            assert!(
+                Instant::now() < until && envelope["error"]["code"] == "session_not_started",
+                "{envelope}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     fn run(&self, args: &[&str]) -> serde_json::Value {
         let output = self.command(args).output().unwrap();
         assert!(
@@ -129,26 +157,6 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
-    let until = Instant::now() + Duration::from_secs(10);
-    loop {
-        let output = fixture
-            .command(&["pane", "run", "true", "--pane", &pane, "--timeout", "5s"])
-            .output()
-            .unwrap();
-        if output.status.success() {
-            break;
-        }
-        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            Instant::now() < until
-                && matches!(
-                    envelope["error"]["code"].as_str(),
-                    Some("not_at_prompt" | "unsupported_session")
-                ),
-            "{envelope}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
     let second_tab = fixture.run(&["tab", "create", "--workspace", &workspace]);
     let second_pane = format!("id:{}", second_tab["data"]["pane"]["id"].as_str().unwrap());
     fixture.run(&[
@@ -174,16 +182,7 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
             .spawn()
             .unwrap(),
     ));
-    fixture.run(&[
-        "pane",
-        "read",
-        "--pane",
-        &pane,
-        "--wait-for",
-        "PARALLEL-READY",
-        "--timeout",
-        "3s",
-    ]);
+    fixture.wait_for(&pane, "PARALLEL-READY");
     assert!(first_run.running());
     let same_pane = fixture
         .command(&[
@@ -219,6 +218,9 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+    // A fresh Tab avoids racing the previous run's finish against its next prompt.
+    let taken_tab = fixture.run(&["tab", "create", "--workspace", &workspace]);
+    let taken_pane = format!("id:{}", taken_tab["data"]["pane"]["id"].as_str().unwrap());
     // Recovery keeps a taken-over receipt until the command has actually finished.
     let taken_run = Process(Some(
         fixture
@@ -227,23 +229,14 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
                 "run",
                 "printf 'TAKEOVER-%s\\n' READY; sleep 3; printf 'TAKEOVER-%s\\n' FINISHED",
                 "--pane",
-                &pane,
+                &taken_pane,
                 "--timeout",
                 "10s",
             ])
             .spawn()
             .unwrap(),
     ));
-    fixture.run(&[
-        "pane",
-        "read",
-        "--pane",
-        &pane,
-        "--wait-for",
-        "TAKEOVER-READY",
-        "--timeout",
-        "3s",
-    ]);
+    fixture.wait_for(&taken_pane, "TAKEOVER-READY");
     let person = format!("{}-person", fixture.agent.as_str());
     let takeover = fixture
         .command_as(
@@ -252,7 +245,7 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
                 "pane",
                 "send",
                 "--pane",
-                &pane,
+                &taken_pane,
                 "--take-over",
                 "--key",
                 "Enter",
@@ -281,7 +274,7 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
         "pane",
         "read",
         "--pane",
-        &pane,
+        &taken_pane,
         "--wait-for",
         "TAKEOVER-FINISHED",
         "--timeout",
@@ -291,7 +284,7 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
         "pane",
         "read",
         "--pane",
-        &pane,
+        &taken_pane,
         "--wait-idle",
         "100ms",
         "--timeout",
@@ -307,16 +300,6 @@ fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
                 .flatten())
             .any(|item| item["operation"] == run && item["outcome"]["state"] == "applied")
     );
-    fixture.run(&[
-        "pane",
-        "run",
-        "true",
-        "--pane",
-        &pane,
-        "--take-over",
-        "--timeout",
-        "2s",
-    ]);
     for args in [
         vec![
             "pane",
