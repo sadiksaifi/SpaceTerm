@@ -8,6 +8,7 @@ import sys
 
 from spaceterm_tasks import macos_signing, release, server_package
 from spaceterm_tasks.package_linux import write_archive
+from spaceterm_tasks.server_builds import _source
 
 SEED = bytes(range(32))
 
@@ -33,7 +34,7 @@ def prepare(
     ).stdout.strip()
     expected = {
         "schema": 1,
-        "source_sha256": None,
+        "source_sha256": _source(root)[2] if include_catalog and not release_tag else None,
         "protocol_major": 4,
         "capabilities": ["workspace_policy"],
         "identity": "spaceterm" if release_tag else "spaceterm-preflight",

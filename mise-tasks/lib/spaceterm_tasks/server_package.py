@@ -785,6 +785,15 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
     if release_tag:
         require_clean_checkout()
     source = os.environ.get("SPACETERM_SERVER_ARTIFACTS")
+    if source is not None and not release_tag and host_target() == TARGETS["linux"]:
+        from spaceterm_tasks.server_builds import _source
+        from spaceterm_tasks.server_catalog import collect_target
+
+        digest = _source(ROOT)[2]
+        with tempfile.TemporaryDirectory(prefix="spaceterm-native-catalog-") as temporary:
+            collect_target(source, Path(temporary) / "mac", identity, TARGETS["darwin"], digest)
+        if _source(ROOT)[2] != digest:
+            raise TaskError("source changed while reading the Mac-built server catalog")
     automatic = catalog_destination is not None and not release_tag and source is None
     if automatic:
         from spaceterm_tasks.server_builds import prepare
