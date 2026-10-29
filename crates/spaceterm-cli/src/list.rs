@@ -229,23 +229,13 @@ pub fn build(
 }
 
 fn tab(tab: &hierarchy::Tab, target: &Resolved, live: &[PaneFacts]) -> Result<ListTab, Code> {
-    let labels: Vec<_> = tab
-        .panes
-        .iter()
-        .map(|p| {
-            p.presentation
-                .as_deref()
-                .map(labels::pane_label)
-                .unwrap_or_else(|| labels::Label::from_parts("Terminal", ""))
-        })
-        .collect();
-    let label = labels::tab_label(tab, &labels);
+    let label = labels::tab(tab);
     let panes = tab
         .panes
         .iter()
-        .zip(labels)
-        .filter(|(p, _)| target.pane.is_none_or(|id| p.id == id))
-        .map(|(pane, label)| {
+        .filter(|p| target.pane.is_none_or(|id| p.id == id))
+        .map(|pane| {
+            let label = labels::pane(pane);
             let facts = live
                 .iter()
                 .find(|f| f.pane == pane.id)

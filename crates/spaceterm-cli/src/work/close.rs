@@ -52,11 +52,7 @@ pub fn review(
                     ) || matches!(p.prompt_zone, PromptZone::Prompt | PromptZone::CommandInput))
             });
         }
-        let label = pane
-            .presentation
-            .as_deref()
-            .map(labels::pane_label)
-            .unwrap_or_else(|| labels::Label::from_parts("Terminal", ""));
+        let label = labels::pane(pane);
         if let Some(session) = reviewed.session {
             sessions.push(EndedSession {
                 pane: super::hex(&pane.id),

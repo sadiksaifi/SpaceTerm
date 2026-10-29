@@ -927,17 +927,7 @@ fn workspace_ref(workspace: &hierarchy::Workspace) -> Ref {
     }
 }
 fn tab_ref(tab: &hierarchy::Tab) -> Ref {
-    let labels: Vec<_> = tab
-        .panes
-        .iter()
-        .map(|p| {
-            p.presentation
-                .as_deref()
-                .map(labels::pane_label)
-                .unwrap_or_else(|| labels::Label::from_parts("Terminal", ""))
-        })
-        .collect();
-    let label = labels::tab_label(tab, &labels);
+    let label = labels::tab(tab);
     Ref {
         id: hex(&tab.id),
         label: label.activity,
