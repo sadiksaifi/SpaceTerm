@@ -800,6 +800,10 @@ impl<H: HostCommands> Served<H> {
     }
 
     fn claim(&mut self, peer: &Peer, claim: Claim) -> Result<ReplyBody, Refusal> {
+        // The connection refuses a claim that keeps the running size.
+        let Some(size) = claim.size else {
+            return Err(Refusal::Unsupported);
+        };
         let channel = claim.channel;
         let pane = claim.pane;
         // A new claim of a Pane this connection already holds replaces that binding. The host
@@ -825,7 +829,7 @@ impl<H: HostCommands> Served<H> {
                 attachment: claim.attachment,
                 pane: claim.pane,
                 claim: claim.claim,
-                size: claim.size,
+                size,
                 style: claim.style,
             },
         );
@@ -1366,8 +1370,13 @@ impl<H: HostCommands> Served<H> {
             }
             Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
             // Scrollback pages reply from the terminal worker. Direct-network administration never
-            // reaches the service.
-            Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
+            // reaches the service, and the connection refuses observers and runs.
+            Operation::ScrollbackPage { .. }
+            | Operation::Direct(_)
+            | Operation::Observe { .. }
+            | Operation::Run { .. }
+            | Operation::RunStatus { .. }
+            | Operation::RunAcknowledge { .. } => Err(Refusal::Unsupported),
         })
     }
 

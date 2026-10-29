@@ -140,7 +140,7 @@ fn address_loss_reports_a_failed_listener_without_changing_the_retained_policy_o
     assert_eq!(after.pin, before.pin);
     assert_eq!(after.policy, before.policy);
     assert!(matches!(
-        fixture.management(Management::Invite { address: None }),
+        fixture.management(Management::Invite { advertise: None }),
         Err(DirectError::Disabled)
     ));
     assert_eq!(
@@ -201,7 +201,7 @@ fn every_interface_invitation_without_an_available_address_refuses_before_alloca
     assert_eq!(before.listener, ListenerState::Listening { addr: bind });
     let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
     assert!(matches!(
-        fixture.management(Management::Invite { address: None }),
+        fixture.management(Management::Invite { advertise: None }),
         Err(DirectError::InvalidAddress)
     ));
     assert!(fixture.state.lock().unwrap().invitations.is_empty());
@@ -232,7 +232,7 @@ fn every_interface_invitations_skip_container_bridges_unless_the_owner_chooses_o
     assert_eq!(fixture.invite().endpoint(), at("192.168.1.5"));
     let ManagementReply::Invitation(text) = fixture
         .management(Management::Invite {
-            address: Some("172.17.0.1".parse().unwrap()),
+            advertise: Some("172.17.0.1".into()),
         })
         .unwrap()
     else {
@@ -245,7 +245,7 @@ fn every_interface_invitations_skip_container_bridges_unless_the_owner_chooses_o
     // With only a bridge left, the server makes no choice of its own.
     *network.addresses.lock().unwrap() = vec!["172.17.0.1".parse().unwrap()];
     assert!(matches!(
-        fixture.management(Management::Invite { address: None }),
+        fixture.management(Management::Invite { advertise: None }),
         Err(DirectError::InvalidAddress)
     ));
 }
@@ -259,7 +259,7 @@ fn invitations_advertise_only_a_chosen_address_the_listener_takes() {
     let bind = fixture.listen_at("0.0.0.0".parse().unwrap());
     let ManagementReply::Invitation(text) = fixture
         .management(Management::Invite {
-            address: Some("fd00::5".parse().unwrap()),
+            advertise: Some("fd00::5".into()),
         })
         .unwrap()
     else {
@@ -273,7 +273,7 @@ fn invitations_advertise_only_a_chosen_address_the_listener_takes() {
     for refused in ["127.0.0.1", "10.0.0.9"] {
         assert!(matches!(
             fixture.management(Management::Invite {
-                address: Some(refused.parse().unwrap()),
+                advertise: Some(refused.into()),
             }),
             Err(DirectError::InvalidAddress)
         ));
@@ -282,13 +282,13 @@ fn invitations_advertise_only_a_chosen_address_the_listener_takes() {
     let one = fixture.listen_at("127.0.0.1".parse().unwrap());
     assert!(matches!(
         fixture.management(Management::Invite {
-            address: Some("10.0.0.5".parse().unwrap()),
+            advertise: Some("10.0.0.5".into()),
         }),
         Err(DirectError::InvalidAddress)
     ));
     let ManagementReply::Invitation(text) = fixture
         .management(Management::Invite {
-            address: Some(one.ip()),
+            advertise: Some(one.ip().to_string()),
         })
         .unwrap()
     else {

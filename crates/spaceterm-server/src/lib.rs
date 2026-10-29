@@ -9,7 +9,10 @@ pub mod connection;
 pub mod direct;
 pub mod hierarchy;
 mod host;
+pub mod labels;
 pub mod organization;
+#[cfg(feature = "client")]
+pub mod organize;
 pub mod pane;
 pub mod protocol;
 pub mod provisioning;
@@ -22,9 +25,10 @@ pub mod workspace_order;
 pub mod worktree;
 
 #[cfg(feature = "client")]
-pub use client::{ClientScope, ServerConnection};
+pub use client::{CliRoute, ClientScope, ServerConnection};
 #[cfg(feature = "client")]
 pub use startup::{LocalStartup, StartupOutcome};
+pub use storage::{Directory, Lock, LockWait};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthenticatedStatus {
@@ -102,6 +106,14 @@ pub enum ServerError {
     CleanupUnresolved,
     #[error("Waiting for other clients to reconnect.")]
     Capacity,
+}
+
+/// The CLI's state root, `clients/cli` under the account-private server data of `identity`.
+/// It shares no file with the desktop's `clients/desktop`.
+pub fn cli_state_root(identity: &str) -> Result<std::path::PathBuf, ServerError> {
+    Ok(host::Paths::for_identity(identity)?
+        .data
+        .join("clients/cli"))
 }
 
 /// Runs an explicitly requested local server. No service registration or listener

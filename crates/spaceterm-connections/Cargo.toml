@@ -1,0 +1,8 @@
+[package]
+name = "spaceterm-connections"
+publish = false
+edition = "2024"
+
+[dependencies]
+spaceterm-server = { path = "../spaceterm-server" }
+zeroize = "=1.9.0"

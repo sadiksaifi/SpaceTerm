@@ -118,6 +118,7 @@ impl WorkspaceManager {
             source: None,
             root: root.clone(),
             path: outside.clone(),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         });
         // The fallback presents its own failure, so the window presents it only if the person
         // never answers that alert.

@@ -738,7 +738,7 @@ impl ChannelHandle {
             attachment,
             pane,
             claim,
-            size,
+            size: Some(size),
             style,
         });
         let id = state.send_request(operation, Waiter::Slot(Arc::clone(&slot)))?;

@@ -208,6 +208,7 @@ impl MultiServerHarness {
             shared.edits().submit(Mutation::CreateTab {
                 workspace: [server; 32],
                 source: Some([server + 50; 32]),
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             })
         })
     }

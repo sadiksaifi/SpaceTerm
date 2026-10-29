@@ -393,7 +393,7 @@ impl State {
             && !matches!(
                 &request,
                 Management::Status
-                    | Management::Claims
+                    | Management::Claims { .. }
                     | Management::Devices
                     | Management::Revoke { .. }
             )
@@ -664,7 +664,12 @@ impl State {
                 self.listen();
                 ManagementReply::Status(self.status())
             }
-            Management::Invite { address } => {
+            Management::Invite { advertise } => {
+                let address = advertise
+                    .as_deref()
+                    .map(str::parse::<std::net::IpAddr>)
+                    .transpose()
+                    .map_err(|_| DirectError::InvalidAddress)?;
                 let status = self.status();
                 let endpoint = match status.listener {
                     // A listener on every interface advertises one concrete address: the one
@@ -720,10 +725,13 @@ impl State {
                 }
                 ManagementReply::Rejected
             }
-            Management::Claims => ManagementReply::Claims(
+            Management::Claims { invitation } => ManagementReply::Claims(
                 self.claims
                     .iter()
-                    .filter(|c| c.decision.is_none())
+                    .filter(|c| {
+                        c.decision.is_none()
+                            && invitation.is_none_or(|id| c.claim.invitation_id == id)
+                    })
                     .map(|c| c.claim.clone())
                     .collect(),
             ),

@@ -203,7 +203,7 @@ impl Fixture {
     }
     pub(super) fn invite(&self) -> Invitation {
         let ManagementReply::Invitation(text) = self
-            .management(Management::Invite { address: None })
+            .management(Management::Invite { advertise: None })
             .unwrap()
         else {
             panic!()
@@ -245,7 +245,10 @@ impl Fixture {
         let wire::Answer::Claim(claim) = answer else {
             panic!()
         };
-        let ManagementReply::Claims(claims) = self.management(Management::Claims).unwrap() else {
+        let ManagementReply::Claims(claims) = self
+            .management(Management::Claims { invitation: None })
+            .unwrap()
+        else {
             panic!()
         };
         claims.into_iter().find(|c| c.id == claim.id).unwrap()
@@ -342,7 +345,7 @@ fn exposure_defaults_off_and_retains_only_the_explicit_listener_across_restart()
     };
     assert_eq!((status.policy, status.listener), (None, ListenerState::Off));
     assert!(matches!(
-        fixture.management(Management::Invite { address: None }),
+        fixture.management(Management::Invite { advertise: None }),
         Err(DirectError::Disabled)
     ));
     fixture.enable();
@@ -504,7 +507,10 @@ fn an_explicit_owner_rejection_crosses_quic_as_rejected_without_enrolling_the_de
     let mut enrollment =
         Enrollment::claim(&invitation, "Rejected device".into(), &credential).unwrap();
     server.join().unwrap().unwrap();
-    let ManagementReply::Claims(claims) = fixture.management(Management::Claims).unwrap() else {
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims { invitation: None })
+        .unwrap()
+    else {
         panic!()
     };
     let claim = claims
@@ -522,7 +528,7 @@ fn an_explicit_owner_rejection_crosses_quic_as_rejected_without_enrolling_the_de
         server.join().unwrap().unwrap();
     }
     assert!(
-        matches!(fixture.management(Management::Claims), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
+        matches!(fixture.management(Management::Claims { invitation: None }), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
     );
     assert!(
         matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.is_empty())
@@ -576,7 +582,7 @@ fn prepared_enrollment_cancels_before_submission_and_fences_every_late_retry() {
         Enrollment::prepare(&invitation, "Prepared device".into(), &credential).unwrap();
     let id = enrollment.claim_id();
     assert!(
-        matches!(fixture.management(Management::Claims), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
+        matches!(fixture.management(Management::Claims { invitation: None }), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
     );
 
     // Another signing key cannot cancel this prepared original or consume its invitation.
@@ -611,7 +617,7 @@ fn prepared_enrollment_cancels_before_submission_and_fences_every_late_retry() {
         server.join().unwrap().unwrap();
     }
     assert!(
-        matches!(fixture.management(Management::Claims), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
+        matches!(fixture.management(Management::Claims { invitation: None }), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
     );
     assert!(
         matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.is_empty())
@@ -630,7 +636,10 @@ fn both_devices_compare_the_first_authenticated_exchange_across_exact_retries() 
     let server = fixture.serve_next();
     let code = enrollment.submit().unwrap();
     server.join().unwrap().unwrap();
-    let ManagementReply::Claims(claims) = fixture.management(Management::Claims).unwrap() else {
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims { invitation: None })
+        .unwrap()
+    else {
         panic!()
     };
     let claim = &claims[0];
@@ -785,7 +794,10 @@ fn prepared_submission_replays_only_the_same_claim_key_and_name_after_a_lost_rep
         ),
         Err(DirectError::Substituted)
     ));
-    let ManagementReply::Claims(claims) = fixture.management(Management::Claims).unwrap() else {
+    let ManagementReply::Claims(claims) = fixture
+        .management(Management::Claims { invitation: None })
+        .unwrap()
+    else {
         panic!()
     };
     assert_eq!(claims.len(), 1);
@@ -2231,7 +2243,7 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
     ));
     let before = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
     for request in [
-        Management::Invite { address: None },
+        Management::Invite { advertise: None },
         Management::Withdraw(invitation.id()),
         Management::Approve(claim.clone()),
         Management::Reject(claim.id),
@@ -2247,7 +2259,11 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
             Err(DirectError::AuthenticationRefused)
         ));
     }
-    for request in [Management::Status, Management::Claims, Management::Devices] {
+    for request in [
+        Management::Status,
+        Management::Claims { invitation: None },
+        Management::Devices,
+    ] {
         assert!(manage(&connection, request).is_ok());
     }
     assert!(
@@ -2340,6 +2356,7 @@ fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_
                 mutation: crate::hierarchy::Mutation::CreateWorkspace {
                     name: "Remote Workspace".into(),
                     directory: None,
+                    control: crate::hierarchy::CreateControl::Creator,
                 },
             }
         ),

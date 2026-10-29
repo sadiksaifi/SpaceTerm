@@ -40,8 +40,8 @@ IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
-# The SpaceTerm Protocol major that `crates/spaceterm-server-host/build.rs` stamps into server builds.
-PROTOCOL_MAJOR = 3
+# The SpaceTerm Protocol major that `crates/spaceterm-cli/build.rs` stamps into server builds.
+PROTOCOL_MAJOR = 4
 BUILD_KEYS = {"schema", "identity", "target", "commit", "version", "protocol_major", "capabilities"}
 
 
@@ -608,9 +608,9 @@ def package(identity, release_tag=None, *, target=None):
         "--release",
         "--locked",
         "--package",
-        "spaceterm-server-host",
+        "spaceterm-cli",
         "--no-default-features",
-        binary="spaceterm-server",
+        binary="spaceterm",
         env=environment,
         target=(
             "x86_64-unknown-linux-gnu.2.35"

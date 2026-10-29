@@ -41,6 +41,7 @@ fn split(host: &mut SharedWorkspaceHost) -> (Id, Id, Id, Id) {
                 tab: tab.id,
                 source: tab.root_pane,
                 axis: Axis::Right,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     );

@@ -28,7 +28,7 @@ PIXEL_SOURCE = Path(__file__).with_name("latency_pixels.swift")
 # Cargo arguments for the protocol probe example. Release crypto keeps QUIC timings realistic.
 PROTOCOL_PROBE = (
     "--package",
-    "spaceterm-server-host",
+    "spaceterm-cli",
     "--features",
     "client",
     "--release",

@@ -630,6 +630,7 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
             mutation: Mutation::CreateTab {
                 workspace,
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     ) else {
@@ -765,7 +766,8 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
                 sequence: 2,
                 mutation: Mutation::CreateTab {
                     workspace,
-                    source: None
+                    source: None,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 }
             }
         ),
@@ -875,6 +877,7 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
             root: git.0.clone(),
             path: git.0.clone(),
             source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     ) else {
         panic!("open a Tab in the Worktree")
@@ -1022,6 +1025,7 @@ fn a_repaired_tab_promoted_to_root_tab_keeps_its_missing_worktree() {
             root: git.0.clone(),
             path: tree.clone(),
             source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     ) else {
         panic!("open a Tab in the linked Worktree")

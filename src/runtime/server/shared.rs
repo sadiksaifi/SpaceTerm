@@ -1609,7 +1609,8 @@ mod tests {
                     sequence: 1,
                     mutation: Mutation::CreateTab {
                         workspace,
-                        source: None
+                        source: None,
+                        control: spaceterm_server::hierarchy::CreateControl::Creator,
                     },
                 }
             ),
@@ -2002,6 +2003,7 @@ mod tests {
                     tab: tab.id,
                     source: pane,
                     axis: Axis::Down,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 },
             },
         ) else {

@@ -543,7 +543,7 @@ mod wakes {
                 },
                 pane: self.pane,
                 claim,
-                size: size(),
+                size: Some(size()),
                 style: None,
             });
             match self.served.request(peer, RequestId(1), operation) {

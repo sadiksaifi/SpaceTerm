@@ -882,6 +882,7 @@ fn new_workspace_presents_a_pending_creation_without_server_authority(cx: &mut T
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }],
         "the server allocates the automatic name"
     );
@@ -932,6 +933,7 @@ fn new_workspace_without_a_window_creates_once_the_server_presents_its_workspace
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }],
         "one request creates one Workspace"
     );
@@ -968,6 +970,7 @@ fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestApp
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(chosen.clone()),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.workspace_count(cx), 2);
@@ -1437,6 +1440,7 @@ fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(project.clone()),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert!(

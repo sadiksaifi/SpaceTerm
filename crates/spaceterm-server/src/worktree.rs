@@ -85,6 +85,7 @@ pub enum Operation {
         source: Option<Id>,
         root: PathBuf,
         path: PathBuf,
+        control: crate::hierarchy::CreateControl,
     },
 }
 impl Operation {

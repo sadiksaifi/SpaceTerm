@@ -2604,7 +2604,9 @@ impl TerminalPane {
                             );
                         return self.offer_permission_setup(request.permissions(), cx);
                     }
-                    Effect::ClipboardRead { .. } | Effect::ClipboardWrite { .. } => return false,
+                    Effect::ClipboardRead { .. }
+                    | Effect::ClipboardWrite { .. }
+                    | Effect::Reveal(_) => return false,
                 }
             }
             TerminalSessionEvent::Attention(event) => {

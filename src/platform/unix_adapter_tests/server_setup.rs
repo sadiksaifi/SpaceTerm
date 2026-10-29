@@ -21,21 +21,21 @@ use crate::ssh::process::{
     SshProcessSpawnRequest,
 };
 
-#[path = "../../../crates/spaceterm-server-host/examples/support/repository.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/repository.rs"]
 #[expect(
     dead_code,
     reason = "acceptance uses inventory and owning-server mutation helpers"
 )]
 mod repository;
-#[path = "../../../crates/spaceterm-server-host/examples/support/mod.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/mod.rs"]
 #[expect(
     dead_code,
     reason = "acceptance uses Pane claims, terminal commands and directory requests"
 )]
 mod support;
-#[path = "../../../crates/spaceterm-server-host/examples/support/terminal_semantics.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/terminal_semantics.rs"]
 mod terminal_semantics;
-#[path = "../../../crates/spaceterm-server-host/examples/support/worktree.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/worktree.rs"]
 #[expect(
     dead_code,
     reason = "acceptance uses journaled writes and exact removal review"
@@ -112,6 +112,7 @@ fn native_server_owned_work(
             Mutation::CreateWorkspace {
                 name: "QUIC native semantics".into(),
                 directory: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         ),
     )?;
@@ -1327,7 +1328,7 @@ fn native_server_setup_acceptance() {
         !server.is_account_local(),
         "setup returned local file authority"
     );
-    assert_eq!(server.refresh().unwrap().protocol_major, 3);
+    assert_eq!(server.refresh().unwrap().protocol_major, 4);
     let spawns = fixture.adapter.seal();
     let counts = backend.process_counts();
     assert_eq!(counts.active(), 0);
@@ -1379,7 +1380,7 @@ fn native_server_setup_acceptance() {
         relaunched.status(&route) == Some(DirectRouteStatus::Connected)
     });
     let server = relaunched.server(&route).unwrap();
-    assert_eq!(server.refresh().unwrap().protocol_major, 3);
+    assert_eq!(server.refresh().unwrap().protocol_major, 4);
     assert!(
         server
             .paired_devices()
@@ -1499,7 +1500,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                     cycle,
                                     "refresh-protocol",
                                     started,
-                                    if status.protocol_major == 3 {
+                                    if status.protocol_major == 4 {
                                         Ok(())
                                     } else {
                                         Err(ServerError::Protocol)

@@ -271,10 +271,10 @@ def launch(backend: str | None = None) -> int | None:
         catalog = prepare(Path(temporary) / "catalog", "spaceterm-development")
         server = build_executable(
             "--package",
-            "spaceterm-server-host",
+            "spaceterm-cli",
             "--no-default-features",
             "--locked",
-            binary="spaceterm-server",
+            binary="spaceterm",
             env=environment,
         )
         prefix = stage_prefix(

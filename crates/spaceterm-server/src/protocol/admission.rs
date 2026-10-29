@@ -2,6 +2,8 @@
 //! length-prefixed JSON. An incompatible peer therefore always receives a typed incompatibility.
 //! After admission both peers switch to the postcard framing in [`super::frame`].
 //! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
+//! From major 4 on, the preamble is frozen: later majors read and write these exact messages, so
+//! the service lane ([`Lane::Service`]) works across majors.
 use crate::pane::control::ClientName;
 use crate::{AuthenticatedStatus, ServerError};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -12,7 +14,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 /// The protocol major of the pushed, multiplexed exchange.
-pub const MAJOR: u16 = 3;
+pub const MAJOR: u16 = 4;
 const MAX_FRAME: usize = 8192;
 const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
 
@@ -22,15 +24,85 @@ struct Hello {
     versions: Vec<u16>,
     build: String,
     server: [u8; 32],
+    /// The base Client Identity.
     client: [u8; 32],
+    /// Composed by the client and rechecked by the server.
     name: ClientName,
+    agent: Option<AgentName>,
+    lane: Lane,
 }
+
+/// What an admitted connection carries. The service lane stays in bounded JSON whatever the
+/// selected work major, so remote administration works across majors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Lane {
+    Work,
+    Service,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Offer {
+    /// 0 means no shared work major.
     selected: u16,
     build: String,
     server: [u8; 32],
+    server_major: u16,
+    /// The effective Client Identity, derived from the agent name when the client sent one.
+    client: [u8; 32],
+}
+
+/// An agent name, `[a-z0-9][a-z0-9-]{0,31}`. It names an identity, not a secret.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentName(String);
+
+impl AgentName {
+    pub const MAX_LEN: usize = 32;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The agent name did not match `[a-z0-9][a-z0-9-]{0,31}`. It carries no value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "Agent names use 1 to 32 lowercase letters, digits or hyphens, starting with a letter or digit."
+)]
+pub struct InvalidAgentName;
+
+impl TryFrom<String> for AgentName {
+    type Error = InvalidAgentName;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        let bytes = name.as_bytes();
+        let valid = !bytes.is_empty()
+            && bytes.len() <= Self::MAX_LEN
+            && bytes[0].is_ascii_lowercase() | bytes[0].is_ascii_digit()
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-');
+        if valid {
+            Ok(Self(name))
+        } else {
+            Err(InvalidAgentName)
+        }
+    }
+}
+
+impl std::str::FromStr for AgentName {
+    type Err = InvalidAgentName;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        name.to_owned().try_into()
+    }
+}
+
+impl From<AgentName> for String {
+    fn from(name: AgentName) -> Self {
+        name.0
+    }
 }
 
 pub(crate) fn random() -> Result<[u8; 32], ServerError> {
@@ -172,6 +244,10 @@ fn admit_server_transport(
 ) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
     let mut wire = Wire::new(stream);
     let hello: Hello = wire.read()?;
+    // Agent identities arrive with identity derivation; until then they are refused.
+    if hello.agent.is_some() {
+        return Err(ServerError::Unsupported);
+    }
     if hello.build != build
         || hello.server != *server
         || hello.client == [0; 32]
@@ -191,7 +267,13 @@ fn admit_server_transport(
         selected,
         build: build.to_owned(),
         server: *server,
+        server_major: MAJOR,
+        client: hello.client,
     })?;
+    if hello.lane == Lane::Service {
+        crate::service::lane::serve(stream)?;
+        return Err(ServerError::Unsupported);
+    }
     if selected == 0 {
         return Err(ServerError::IncompatibleProtocol);
     }
@@ -234,9 +316,11 @@ pub(crate) fn admit_transport(
         server: *server,
         client: *client,
         name: name.clone(),
+        agent: None,
+        lane: Lane::Work,
     })?;
     let offer: Offer = wire.read()?;
-    if offer.build != build || offer.server != *server {
+    if offer.build != build || offer.server != *server || offer.client != *client {
         return Err(ServerError::AuthenticationRefused);
     }
     if offer.selected == 0 {
@@ -256,7 +340,7 @@ mod tests {
     use super::*;
     #[test]
     fn account_admission_preserves_nonsecret_client_identity_and_refuses_incompatible_majors() {
-        for versions in [vec![2], vec![1], vec![3, 2]] {
+        for versions in [vec![3], vec![1], vec![4, 3]] {
             let (mut client, mut server) = UnixStream::pair().unwrap();
             let accepted = versions.contains(&MAJOR);
             let thread = std::thread::spawn(move || {
@@ -314,6 +398,8 @@ mod tests {
                     selected: MAJOR,
                     build: build.into(),
                     server: server_id,
+                    server_major: MAJOR,
+                    client: [9; 32],
                 })
                 .unwrap();
             });

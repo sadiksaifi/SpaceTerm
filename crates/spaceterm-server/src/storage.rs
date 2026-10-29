@@ -31,7 +31,8 @@ pub(crate) struct SocketIdentity {
     inode: libc::ino_t,
 }
 
-pub(crate) struct Directory(File);
+/// An account-private directory, opened without following symbolic links.
+pub struct Directory(File);
 /// An exclusive lock that ends when this guard drops.
 ///
 /// flock belongs to the open file description, not the descriptor. A child that another thread
@@ -135,7 +136,7 @@ impl Directory {
         }
         private(&self.0, true)
     }
-    pub fn socket_identity(
+    pub(crate) fn socket_identity(
         &self,
         name: &std::ffi::CStr,
     ) -> Result<Option<SocketIdentity>, ServerError> {
@@ -169,7 +170,7 @@ impl Directory {
             inode: metadata.st_ino,
         }))
     }
-    pub fn remove_socket(
+    pub(crate) fn remove_socket(
         &self,
         name: &std::ffi::CStr,
         expected: SocketIdentity,
@@ -201,7 +202,7 @@ impl Directory {
     }
     /// Publish a prepared private socket without replacing any existing ready endpoint.
     /// Caller holds server.lock. Both names must remain beneath this retained directory.
-    pub fn publish_socket(
+    pub(crate) fn publish_socket(
         &self,
         pending: &std::ffi::CStr,
         expected: SocketIdentity,
@@ -360,7 +361,7 @@ impl Directory {
         }
     }
     /// Validate and synchronize retained state before setup or authentication accepts it.
-    pub fn read(&self) -> Result<Record, ServerError> {
+    pub(crate) fn read(&self) -> Result<Record, ServerError> {
         let (record, file) = self.read_visible()?;
         // A previous publication may have renamed successfully but failed to sync its directory.
         // Visible bytes alone do not confirm durability, including after reopening the store.
@@ -401,7 +402,7 @@ impl Directory {
         }
         Ok((record, file))
     }
-    pub fn read_or_create(&self) -> Result<Record, ServerError> {
+    pub(crate) fn read_or_create(&self) -> Result<Record, ServerError> {
         match self.read() {
             Ok(record) => Ok(record),
             Err(ServerError::NotSetUp) => {
@@ -417,14 +418,14 @@ impl Directory {
         }
     }
     /// Caller holds setup.lock. Publish once after fsync so crashes never truncate the old identity.
-    pub fn write(&self, record: &Record) -> Result<(), ServerError> {
+    pub(crate) fn write(&self, record: &Record) -> Result<(), ServerError> {
         if let Some(value) = &record.organization {
             value.validate()?;
         }
         let bytes = serde_json::to_vec(record).map_err(|_| ServerError::StorageUnavailable)?;
         self.write_bytes(c"identity.json", &bytes)
     }
-    pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
+    pub fn read_json<T: serde::de::DeserializeOwned>(
         &self,
         name: &str,
     ) -> Result<Option<T>, ServerError> {
@@ -447,7 +448,7 @@ impl Directory {
             .map_err(|_| ServerError::StorageUnavailable)?;
         Ok(Some(value))
     }
-    pub(crate) fn write_json<T: Serialize>(
+    pub fn write_json<T: Serialize>(
         &self,
         name: &std::ffi::CStr,
         value: &T,
@@ -997,6 +998,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Draft".into(),
                     directory: None,
+                    control: crate::hierarchy::CreateControl::Creator,
                 }
             ),
             Err(ServerError::StorageUnavailable)
@@ -1110,6 +1112,7 @@ mod tests {
         let creation = crate::hierarchy::Mutation::CreateTab {
             workspace: organization.workspace,
             source: None,
+            control: crate::hierarchy::CreateControl::Creator,
         };
         let accepted = shared
             .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)

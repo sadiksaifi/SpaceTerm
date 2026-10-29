@@ -190,6 +190,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
                 mutation: Mutation::CreateWorkspace {
                     name: "Disposable lifecycle fixture".into(),
                     directory: None,
+                    control: crate::hierarchy::CreateControl::Creator,
                 },
             },
         ) else {

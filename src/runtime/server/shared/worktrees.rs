@@ -604,6 +604,7 @@ mod tests {
             source: None,
             root: git.0.clone(),
             path: tree.clone(),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         });
     }
 
@@ -628,6 +629,7 @@ mod tests {
                 root: git.0.clone(),
                 path: tree.clone(),
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         ) else {
             panic!("Worktree Tab");
@@ -649,6 +651,7 @@ mod tests {
                     tab,
                     source,
                     axis: Axis::Right,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 },
             },
         ) else {
@@ -699,6 +702,7 @@ mod tests {
             tab,
             source,
             axis: Axis::Down,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         };
         assert!(
             matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 6, mutation: mutation.clone() }), Reply::Outcome(record) if record.outcome == Outcome::Invalid)
@@ -736,6 +740,7 @@ mod tests {
                 root: git.0.clone(),
                 path: tree.clone(),
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         ) else {
             panic!("open Worktree");
@@ -833,6 +838,7 @@ mod tests {
                     root: git.0.clone(),
                     path: tree.clone(),
                     source: Some(source),
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 },
             ) else {
                 panic!("open Worktree Tab");
@@ -993,6 +999,7 @@ mod tests {
         let other = Mutation::CreateWorkspace {
             name: "Other client".into(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         };
         assert!(matches!(
             host.request(

@@ -241,7 +241,7 @@ fn every_operation_round_trips() {
                 attachment,
                 pane: [8; 32],
                 claim,
-                size: size(),
+                size: Some(size()),
                 style: Some(style.clone()),
             })
         })
@@ -328,7 +328,7 @@ fn every_operation_round_trips() {
             location: "../wt".into(),
         }),
         Operation::Direct(crate::direct::Management::Status),
-        Operation::Direct(crate::direct::Management::Invite { address: None }),
+        Operation::Direct(crate::direct::Management::Invite { advertise: None }),
         Operation::Shutdown,
     ]);
     for operation in operations {
@@ -504,6 +504,7 @@ fn every_server_message_round_trips() {
             mutation: hierarchy::Mutation::CreateTab {
                 workspace: [1; 32],
                 source: None,
+                control: crate::hierarchy::CreateControl::Creator,
             },
             outcome: hierarchy::Outcome::Accepted { target: [2; 32] },
         }),

@@ -64,7 +64,7 @@ fn expected_open(path: &str) -> Mutation {
         workspace: WORKSPACE,
         source: None,
         root: MAIN_ROOT.into(),
-        path: path.into(),
+        path: path.into(), control: spaceterm_server::hierarchy::CreateControl::Creator,
     })
 }
 

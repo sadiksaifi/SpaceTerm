@@ -2146,10 +2146,10 @@ def prepare_binary(args, output):
     try:
         server = build_executable(
             "--package",
-            "spaceterm-server-host",
+            "spaceterm-cli",
             "--no-default-features",
             "--locked",
-            binary="spaceterm-server",
+            binary="spaceterm",
             env=environment,
         )
         # Reuse Development's resource layout, confined to this run's evidence directory.

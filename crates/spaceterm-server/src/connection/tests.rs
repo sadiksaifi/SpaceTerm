@@ -256,6 +256,7 @@ fn edit() -> Operation {
         mutation: crate::hierarchy::Mutation::CreateTab {
             workspace: [1; 32],
             source: None,
+            control: crate::hierarchy::CreateControl::Creator,
         },
     }
 }
@@ -570,7 +571,7 @@ fn a_claim_past_the_channel_bound_is_refused_and_the_connection_continues() {
             attachment: attachment(),
             pane: [2; 32],
             claim: AttachmentClaim::Select { explicit: true },
-            size: size(),
+            size: Some(size()),
             style: None,
         }),
     }));

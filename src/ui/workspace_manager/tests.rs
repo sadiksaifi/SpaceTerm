@@ -9179,6 +9179,7 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(earlier_edits.submitted(), Vec::new());
@@ -13144,6 +13145,7 @@ mod shared_repositories {
                 source: Some([72; 32]),
                 root: MAIN_ROOT.into(),
                 path: FEATURE_ROOT.into(),
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             })]
         );
     }
@@ -14612,6 +14614,7 @@ fn sidebar_new_workspace_menu_should_offer_saved_servers_and_add_server(cx: &mut
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14659,6 +14662,7 @@ fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
         vec![Mutation::CreateWorkspace {
             name: "fresh workspace".to_owned(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14696,6 +14700,7 @@ fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
 
@@ -14902,6 +14907,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(PathBuf::from("/srv/other")),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14948,6 +14954,7 @@ fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut Tes
             vec![Mutation::CreateWorkspace {
                 name: String::new(),
                 directory: Some(PathBuf::from("/srv/new")),
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             }]
         )
     );
@@ -15192,6 +15199,7 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(PathBuf::from("/srv/app")),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert!(

@@ -694,12 +694,12 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
             cargo.write_text(
                 f"#!{sys.executable}\n"
                 "import json, os, sys\n"
-                "assert sys.argv[sys.argv.index('--bin') + 1] == 'spaceterm-server'\n"
+                "assert sys.argv[sys.argv.index('--bin') + 1] == 'spaceterm'\n"
                 "assert '--no-default-features' in sys.argv\n"
                 "assert 'SPACETERM_SERVER_ARCHIVE' not in os.environ\n"
                 "assert 'SPACETERM_SERVER_SIGNATURE' not in os.environ\n"
                 "print(json.dumps({'reason': 'compiler-artifact', "
-                "'target': {'name': 'spaceterm-server'}, "
+                "'target': {'name': 'spaceterm'}, "
                 f"'executable': {str(server)!r}}}))\n"
             )
             cargo.chmod(0o755)

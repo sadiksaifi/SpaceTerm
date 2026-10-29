@@ -109,6 +109,7 @@ pub(super) fn prepare(
             source,
             root,
             path,
+            ..
         } => {
             let list = list(&git, &root, &token)?;
             if !list.worktrees.iter().any(|r| {

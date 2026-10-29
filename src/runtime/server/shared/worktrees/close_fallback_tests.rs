@@ -21,7 +21,7 @@ fn a_worktree_fallback_survives_an_exact_close_and_never_removes_files() {
         workspace,
         source: None,
         root: git.0.clone(),
-        path,
+        path, control: spaceterm_server::hierarchy::CreateControl::Creator,
     };
     let Outcome::Accepted { target: anchor } = finish_write(&mut server, 2, open(feature.clone()))
     else {

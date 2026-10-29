@@ -57,6 +57,22 @@ struct ClientCache {
     scope: std::sync::OnceLock<ClientScope>,
 }
 
+/// Where a CLI connection goes.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one route is built per command and moved into its connection"
+)]
+pub enum CliRoute {
+    /// The server of this account on this machine, over account IPC.
+    Local,
+    /// A paired server over QUIC. `route` is the Saved Connection's route ID.
+    Paired {
+        route: [u8; 32],
+        paired: crate::direct::PairedDevice,
+        connector: Arc<dyn crate::direct::DirectConnector>,
+    },
+}
+
 /// Resolving this handle never reads or writes storage and never starts a process.
 #[derive(Clone)]
 pub struct ServerConnection {
@@ -339,6 +355,15 @@ impl ServerConnection {
 
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
         Self::with_paths(Paths::for_identity(directory_name)?)
+    }
+    /// A CLI connection in the `clients/cli` namespace, as the base identity of `route` or as
+    /// `agent`. It never reads the desktop's client record, Saved Connections or credentials.
+    pub fn for_cli(
+        _identity: &str,
+        _route: CliRoute,
+        _agent: Option<crate::protocol::AgentName>,
+    ) -> Result<Self, ServerError> {
+        Err(ServerError::Unsupported)
     }
     pub(crate) fn with_paths(paths: Paths) -> Result<Self, ServerError> {
         let development = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT")
@@ -627,7 +652,9 @@ impl ServerConnection {
         &self,
         address: Option<std::net::IpAddr>,
     ) -> Result<crate::direct::Invitation, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::Invite { address })? {
+        match self.direct_manage(crate::direct::Management::Invite {
+            advertise: address.map(|address| address.to_string()),
+        })? {
             crate::direct::ManagementReply::Invitation(text) => {
                 crate::direct::Invitation::parse(&text)
             }
@@ -646,7 +673,7 @@ impl ServerConnection {
     pub fn pairing_claims(
         &self,
     ) -> Result<Vec<crate::direct::PairingClaim>, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::Claims)? {
+        match self.direct_manage(crate::direct::Management::Claims { invitation: None })? {
             crate::direct::ManagementReply::Claims(claims) => Ok(claims),
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
@@ -738,7 +765,7 @@ mod tests {
         assert_eq!(
             server.refresh(),
             Ok(AuthenticatedStatus {
-                protocol_major: 3,
+                protocol_major: protocol::MAJOR,
                 development_pane: true,
             })
         );
@@ -976,7 +1003,7 @@ mod tests {
         root: &std::path::Path,
         paired: crate::direct::PairedDevice,
     ) -> ServerConnection {
-        let mut local = ServerConnection::for_development_client("first", 3).unwrap();
+        let mut local = ServerConnection::for_development_client("first", protocol::MAJOR).unwrap();
         local.paths = Paths {
             identity: "spaceterm-development".into(),
             data: root.join("data"),
@@ -1045,7 +1072,7 @@ mod tests {
     #[test]
     fn local_and_direct_workspace_owners_stay_distinct_when_server_and_client_ids_collide() {
         let paired = paired_identity();
-        let local = ServerConnection::for_development_client("first", 3).unwrap();
+        let local = ServerConnection::for_development_client("first", protocol::MAJOR).unwrap();
         // Supply the admitted identity at the transport boundary without starting a server.
         local
             .bind_scope(local.scope_for(paired.client, paired.pin.server))
@@ -1061,7 +1088,8 @@ mod tests {
     fn workspace_owners_ignore_storage_paths_and_development_client_environment_names() {
         let paired = paired_identity();
         let original = direct_fixture(std::path::Path::new("/first"), paired.clone());
-        let mut relaunched = ServerConnection::for_development_client("second", 3).unwrap();
+        let mut relaunched =
+            ServerConnection::for_development_client("second", protocol::MAJOR).unwrap();
         relaunched.paths.data = std::path::PathBuf::from("/second");
         let relaunched = relaunched
             .with_direct([3; 32], paired, Arc::new(NoConnect))
@@ -1097,7 +1125,8 @@ mod tests {
             u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
         ));
         let local = |name| {
-            let mut connection = ServerConnection::for_development_client(name, 3).unwrap();
+            let mut connection =
+                ServerConnection::for_development_client(name, protocol::MAJOR).unwrap();
             connection.paths = Paths {
                 identity: "spaceterm-development".into(),
                 data: root.join("data"),
@@ -1167,6 +1196,7 @@ mod tests {
         let mutation = Mutation::CreateWorkspace {
             name: "Remote original".into(),
             directory: None,
+            control: crate::hierarchy::CreateControl::Creator,
         };
         first
             .shared_journal()
@@ -1391,6 +1421,7 @@ mod tests {
         let mutation = crate::hierarchy::Mutation::CreateWorkspace {
             name: "Original".into(),
             directory: None,
+            control: crate::hierarchy::CreateControl::Creator,
         };
         {
             let mut journal = first.shared_journal().unwrap();

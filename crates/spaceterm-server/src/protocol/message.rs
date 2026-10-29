@@ -192,6 +192,12 @@ pub enum PaneEvent {
     /// The PTY's line mode changed. The server sends the current state first on each channel,
     /// then each change it reads after input, after output and after focus changes.
     Line(LineState),
+    /// The highest input serial written to the PTY and the PTY output byte count, sent at most
+    /// once per frame interval when either advanced without a frame.
+    Progress { input: u32, output_bytes: u64 },
+    /// The channel's run settled. Boxed to keep events small; postcard encodes it as the bare
+    /// receipt.
+    RunFinished(Box<super::operation::RunReceipt>),
 }
 
 impl PaneEvent {

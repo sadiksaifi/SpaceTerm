@@ -7,12 +7,13 @@ edition = "2024"
 members = [
     "crates/spaceterm-directories",
     "crates/spaceterm-server",
-    "crates/spaceterm-server-host",
+    "crates/spaceterm-cli",
+    "crates/spaceterm-connections",
     "crates/spaceterm-ui",
     "third_party/libghostty-vt",
     "third_party/libghostty-vt-sys",
 ]
-default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-server", "crates/spaceterm-server-host", "crates/spaceterm-ui"]
+default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-server", "crates/spaceterm-cli", "crates/spaceterm-connections", "crates/spaceterm-ui"]
 resolver = "2"
 
 [patch.crates-io]
@@ -75,7 +76,7 @@ desktop = [
 ]
 
 [[bin]]
-name = "spaceterm"
+name = "spaceterm-desktop"
 path = "src/main.rs"
 required-features = ["desktop"]
 

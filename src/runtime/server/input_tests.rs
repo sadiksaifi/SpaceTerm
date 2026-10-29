@@ -150,7 +150,7 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
             },
             pane,
             claim: AttachmentClaim::Select { explicit: true },
-            size: size(),
+            size: Some(size()),
             style: None,
         }),
     );

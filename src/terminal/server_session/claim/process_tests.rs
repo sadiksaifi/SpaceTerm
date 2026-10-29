@@ -351,7 +351,8 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                         sequence: 1,
                         mutation: Mutation::CreateWorkspace {
                             name: "Start recovery".into(),
-                            directory: None
+                            directory: None,
+                            control: spaceterm_server::hierarchy::CreateControl::Creator,
                         },
                     }
                 ),

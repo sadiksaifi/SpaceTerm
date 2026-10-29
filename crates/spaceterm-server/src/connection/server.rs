@@ -14,8 +14,8 @@ use super::service::{DirectManagement, Dispatch, PaneService, Peer};
 use super::sync::SyncWorker;
 use crate::protocol::frame::Assembler;
 use crate::protocol::{
-    Channel, ClaimReply, ClientMessage, EffectDone, Fatal, Input, Operation, RawFrame, Refusal,
-    ReplyBody, Request, RequestId, View, limits,
+    Channel, Claim, ClaimReply, ClientMessage, EffectDone, Fatal, Input, Operation, RawFrame,
+    Refusal, ReplyBody, Request, RequestId, View, limits,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -95,6 +95,18 @@ impl AdmittedConnection {
         Ok(match message {
             ClientMessage::Request(request) => {
                 self.outbox.begin(request.id)?;
+                // Major 4 operations that this server does not serve yet.
+                if matches!(
+                    request.operation,
+                    Operation::Observe { .. }
+                        | Operation::Run { .. }
+                        | Operation::RunStatus { .. }
+                        | Operation::RunAcknowledge { .. }
+                        | Operation::Claim(Claim { size: None, .. })
+                ) {
+                    self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
+                    return Ok(None);
+                }
                 if let Operation::Claim(claim) = &request.operation {
                     if claim.channel.0 <= self.highest_channel {
                         return Err(Fatal::ProtocolViolation);

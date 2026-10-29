@@ -4,7 +4,7 @@
 use std::process::Command;
 
 fn desktop() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spaceterm"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_spaceterm-desktop"));
     // No display, session bus, or home: the fallback must not reach for any of them.
     command.env_clear();
     command

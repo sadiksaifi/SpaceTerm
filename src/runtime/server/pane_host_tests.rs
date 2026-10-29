@@ -1278,6 +1278,7 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
             mutation: Mutation::CreateWorkspace {
                 name: "work".into(),
                 directory: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     );
@@ -1309,6 +1310,7 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
                 tab: inventory.workspaces[0].root_tab,
                 source: pane,
                 axis: spaceterm_server::hierarchy::Axis::Right,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     );

@@ -1441,6 +1441,7 @@ mod development {
                 tab: self.edits.canonical(self.tab),
                 source,
                 axis,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             })
         }
     }
@@ -1558,11 +1559,13 @@ mod development {
                             root: root.clone(),
                             path: path.clone(),
                             source: Some(source),
+                            control: spaceterm_server::hierarchy::CreateControl::Creator,
                         })
                     }
                     None => Mutation::CreateTab {
                         workspace: self.workspace(),
                         source: Some(source),
+                        control: spaceterm_server::hierarchy::CreateControl::Creator,
                     },
                 };
             self.edits.submit(mutation)
@@ -2843,7 +2846,11 @@ mod development {
             name: String,
             directory: Option<PathBuf>,
         ) -> SharedSubmission {
-            self.ask(Mutation::CreateWorkspace { name, directory })
+            self.ask(Mutation::CreateWorkspace {
+                name,
+                directory,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
+            })
         }
 
         /// Asks the server to rename a shared Workspace.

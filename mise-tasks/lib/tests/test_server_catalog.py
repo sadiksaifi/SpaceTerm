@@ -51,7 +51,7 @@ class ServerCatalogTests(unittest.TestCase):
             target=native_target,
             commit="a" * 40,
             version="dev.aaaaaaaaaaaa",
-            protocol_major=3,
+            protocol_major=4,
             capabilities=["workspace_policy"],
         )
         info.update(changed)

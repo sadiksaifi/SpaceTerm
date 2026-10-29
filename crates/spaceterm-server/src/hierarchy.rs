@@ -243,6 +243,17 @@ pub enum Axis {
     Right,
     Down,
 }
+/// Who controls work a mutation creates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CreateControl {
+    /// The creating client controls it.
+    Creator,
+    /// The first client to select it acquires it.
+    Unclaimed,
+    /// The client that controls `pane` at commit controls it, and receives `Effect::Reveal`.
+    /// A Pane with no controller falls back to `Unclaimed`.
+    OriginController { pane: Id },
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mutation {
     /// End the Sessions on this running server without removing their Panes.
@@ -258,16 +269,19 @@ pub enum Mutation {
         name: String,
         /// Pins the new Workspace here, and its first Pane starts here.
         directory: Option<PathBuf>,
+        control: CreateControl,
     },
     CreateTab {
         workspace: Id,
         source: Option<Id>,
+        control: CreateControl,
     },
     SplitPane {
         workspace: Id,
         tab: Id,
         source: Id,
         axis: Axis,
+        control: CreateControl,
     },
     RenameWorkspace {
         workspace: Id,
@@ -295,9 +309,9 @@ impl Mutation {
                         .as_ref()
                         .is_none_or(|c| c.len() <= MAX_PANES)
             }
-            Self::CreateWorkspace { name, directory } => {
-                name.len() <= 256 && directory.as_deref().is_none_or(valid_path)
-            }
+            Self::CreateWorkspace {
+                name, directory, ..
+            } => name.len() <= 256 && directory.as_deref().is_none_or(valid_path),
             Self::RenameWorkspace { name, .. } => name.len() <= 256,
             Self::PinWorkspace {
                 directory: Some(path),
@@ -405,6 +419,7 @@ impl State {
                 &Mutation::CreateWorkspace {
                     name: "Development".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 directory,
                 |_| true,
@@ -775,6 +790,7 @@ impl State {
             Mutation::CreateWorkspace {
                 name,
                 directory: pin,
+                ..
             } => {
                 if (!name.trim().is_empty() && !valid_name(name))
                     || pin.as_deref().is_some_and(|path| !validate_pin(path))
@@ -823,7 +839,9 @@ impl State {
                 });
                 id
             }
-            Mutation::CreateTab { workspace, source } => {
+            Mutation::CreateTab {
+                workspace, source, ..
+            } => {
                 if self.tab_count() >= MAX_TABS || self.pane_count() >= MAX_PANES {
                     return Ok(Outcome::Limit);
                 }
@@ -883,6 +901,7 @@ impl State {
                 tab,
                 source,
                 axis,
+                ..
             } => {
                 if self.pane_count() >= MAX_PANES {
                     return Ok(Outcome::Limit);
@@ -1563,6 +1582,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -1641,6 +1661,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -1668,6 +1689,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Other".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -1818,7 +1840,8 @@ mod tests {
                     1,
                     Mutation::CreateWorkspace {
                         name: String::new(),
-                        directory: None
+                        directory: None,
+                        control: CreateControl::Creator,
                     },
                     "/home/test".as_ref(),
                     |_| true
@@ -1839,6 +1862,7 @@ mod tests {
                     tab,
                     source: root,
                     axis: Axis::Right,
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -1901,6 +1925,7 @@ mod tests {
                     Mutation::CreateWorkspace {
                         name: String::new(),
                         directory: None,
+                        control: CreateControl::Creator,
                     },
                     "/home/test".as_ref(),
                     |_| true,
@@ -1916,6 +1941,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: String::new(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -1967,6 +1993,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: Some(pin.into()),
+                    control: CreateControl::Creator,
                 },
                 home,
                 |_| true,
@@ -1979,6 +2006,7 @@ mod tests {
         let create = Mutation::CreateTab {
             workspace,
             source: None,
+            control: CreateControl::Creator,
         };
         assert_eq!(
             state
@@ -2027,6 +2055,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -2044,6 +2073,7 @@ mod tests {
                     tab,
                     source: root,
                     axis: Axis::Right,
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -2061,6 +2091,7 @@ mod tests {
                 Mutation::CreateTab {
                     workspace,
                     source: Some(source),
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -2090,6 +2121,7 @@ mod tests {
                 Mutation::CreateTab {
                     workspace,
                     source: Some(source),
+                    control: CreateControl::Creator,
                 },
                 "/home/test".as_ref(),
                 |_| true,
@@ -2111,6 +2143,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -2125,6 +2158,7 @@ mod tests {
                 Mutation::CreateTab {
                     workspace,
                     source: None,
+                    control: CreateControl::Creator,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -2182,6 +2216,7 @@ mod tests {
         let create = Mutation::CreateWorkspace {
             name: "Build".into(),
             directory: None,
+            control: CreateControl::Creator,
         };
         let Outcome::Accepted { target: workspace } = state
             .apply([1; 32], 1, create, "/tmp".as_ref(), |_| true)
@@ -2201,6 +2236,7 @@ mod tests {
                 Mutation::CreateTab {
                     workspace,
                     source: None,
+                    control: CreateControl::Creator,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -2233,6 +2269,7 @@ mod tests {
         let create = Mutation::CreateWorkspace {
             name: "Build".into(),
             directory: None,
+            control: CreateControl::Creator,
         };
         let first = state
             .apply([1; 32], 1, create.clone(), "/tmp".as_ref(), |_| true)
@@ -2263,6 +2300,7 @@ mod tests {
         let create = |name: &str| Mutation::CreateWorkspace {
             name: name.into(),
             directory: None,
+            control: CreateControl::Creator,
         };
         state
             .apply([1; 32], 1, create("First"), "/tmp".as_ref(), |_| true)
@@ -2283,6 +2321,7 @@ mod tests {
         let create = |sequence: u64| Mutation::CreateWorkspace {
             name: format!("Build {sequence}"),
             directory: None,
+            control: CreateControl::Creator,
         };
         state
             .apply([1; 32], 1, create(1), "/tmp".as_ref(), |_| true)
@@ -2321,6 +2360,7 @@ mod tests {
                     Mutation::CreateWorkspace {
                         name: "Build".into(),
                         directory: None,
+                        control: CreateControl::Creator,
                     },
                     "/tmp".as_ref(),
                     |_| true,
@@ -2330,6 +2370,7 @@ mod tests {
         let create = Mutation::CreateWorkspace {
             name: "More".into(),
             directory: None,
+            control: CreateControl::Creator,
         };
         assert!(matches!(
             state.apply([1; 32], 33, create.clone(), "/tmp".as_ref(), |_| true),
@@ -2458,6 +2499,7 @@ mod tests {
                     Mutation::CreateWorkspace {
                         name: "Build".into(),
                         directory: None,
+                        control: CreateControl::Creator,
                     },
                     "/tmp".as_ref(),
                     |_| true,
@@ -2476,6 +2518,7 @@ mod tests {
         let create = Mutation::CreateWorkspace {
             name: "Other".into(),
             directory: None,
+            control: CreateControl::Creator,
         };
         assert!(matches!(
             state.apply([2; 32], 1, create.clone(), "/tmp".as_ref(), |_| true),
@@ -2502,6 +2545,7 @@ mod tests {
         let create = |directory: &str| Mutation::CreateWorkspace {
             name: "Site".into(),
             directory: Some(directory.into()),
+            control: CreateControl::Creator,
         };
         assert_eq!(
             state
@@ -2534,6 +2578,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -2584,6 +2629,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -2614,6 +2660,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
                     directory: None,
+                    control: CreateControl::Creator,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -2633,6 +2680,7 @@ mod tests {
                     tab,
                     source,
                     axis: Axis::Down,
+                    control: CreateControl::Creator,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -2660,7 +2708,8 @@ mod tests {
                     3,
                     Mutation::CreateTab {
                         workspace,
-                        source: None
+                        source: None,
+                        control: CreateControl::Creator,
                     },
                     "/tmp".as_ref(),
                     |_| true
