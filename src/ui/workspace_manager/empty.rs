@@ -36,6 +36,8 @@ pub(super) const OFFLINE_TITLE: &str = "Server Not Connected";
 /// Where the sidebar stands while the empty view lays out beside it.
 pub(super) struct EmptySidebar {
     pub(super) reveal: f32,
+    /// Where the sliding sidebar's drawn trailing edge is.
+    pub(super) edge: Pixels,
     pub(super) top_chrome_width: Pixels,
     /// Where the top-left chrome's toggle and switcher end, and how far down they reach.
     pub(super) controls_width: Pixels,
@@ -74,6 +76,7 @@ impl WorkspaceManager {
         let recovery = sidebar.is_none();
         let sidebar = sidebar.unwrap_or(EmptySidebar {
             reveal: 0.0,
+            edge: px(0.0),
             top_chrome_width: px(0.0),
             controls_width: px(0.0),
             controls_bottom: px(0.0),
@@ -204,32 +207,27 @@ impl WorkspaceManager {
             Some(launch) => self.render_launch_message(launch, &self.empty_focus, cx),
             None => self.render_empty_message(message_manager, cx),
         };
-        let stage = div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .relative()
-            .ml(stage_leading)
-            .border_color(stage_color)
-            .border_b(frame.window_edge_inset())
-            .border_r(frame.window_edge_inset())
-            .border_l(leading_inset)
-            .bg(stage_color)
-            .child(
-                // An empty Pane: its surface, rim, and corner radius, with no content.
-                div()
-                    .id("empty-workspace-pane")
-                    .debug_selector(|| "empty-workspace-pane".to_owned())
-                    .size_full()
-                    .overflow_hidden()
-                    .rounded(frame.pane_radius())
-                    .bg(gpui_color(appearance.pane_surface(terminal_background)))
-                    .border(frame.pane_rim_width())
-                    .border_color(gpui_color(appearance.pane_rim_on(terminal_background)))
-                    .child(with_tab_traversal(message)),
-            );
-        // The stage lies beneath the band, which stays the window's drag region and paints its
-        // title-bar surface only while it covers nothing of the stage.
+        // An empty Pane: its surface, rim, and corner radius, with no content. Its top-left corner
+        // follows the controls and rises over the band as the band frees.
+        let pane = div()
+            .id("empty-workspace-pane")
+            .debug_selector(|| "empty-workspace-pane".to_owned())
+            .absolute()
+            .top(stage_top)
+            .left(stage_leading + leading_inset)
+            .right(frame.window_edge_inset())
+            .bottom(frame.window_edge_inset())
+            .overflow_hidden()
+            .rounded(frame.pane_radius())
+            .bg(gpui_color(appearance.pane_surface(terminal_background)))
+            .border(frame.pane_rim_width())
+            .border_color(gpui_color(appearance.pane_rim_on(terminal_background)))
+            .child(with_tab_traversal(message));
+        // The chrome surfaces stay put while the Pane moves over them. They tile the window and
+        // each paints once, so no frame of a slide shows the window's base through a gap or
+        // doubles a translucent fill: the title bar's across the band beside the top-left chrome,
+        // and the stage's beneath the band from the sidebar's drawn edge. The band stays the
+        // window's drag region above the Pane.
         div()
             .id("empty-workspace-stage")
             .debug_selector(|| "empty-workspace-stage".to_owned())
@@ -239,16 +237,25 @@ impl WorkspaceManager {
             .min_h_0()
             .child(
                 div()
-                    .debug_selector(|| "empty-workspace-stage-area".to_owned())
                     .absolute()
-                    .top(stage_top)
-                    .left_0()
+                    .top_0()
+                    .left(sidebar.top_chrome_width)
+                    .right_0()
+                    .h(top_height)
+                    .bg(gpui_color(
+                        appearance.surface(crate::appearance::SurfaceRole::Base, title_bar),
+                    )),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(top_height)
+                    .left(sidebar.edge)
                     .right_0()
                     .bottom_0()
-                    .flex()
-                    .flex_col()
-                    .child(stage),
+                    .bg(stage_color),
             )
+            .child(pane)
             .child(
                 div()
                     .absolute()
@@ -259,19 +266,7 @@ impl WorkspaceManager {
                     .flex()
                     .flex_row()
                     .child(div().w(sidebar.top_chrome_width).h_full().flex_shrink_0())
-                    .child(
-                        div()
-                            .h_full()
-                            .min_w_0()
-                            .flex_1()
-                            .when(band_free == 0.0, |band| {
-                                band.bg(gpui_color(
-                                    appearance
-                                        .surface(crate::appearance::SurfaceRole::Base, title_bar),
-                                ))
-                            })
-                            .child(band),
-                    ),
+                    .child(div().h_full().min_w_0().flex_1().child(band)),
             )
             .into_any_element()
     }

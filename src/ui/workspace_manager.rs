@@ -4978,6 +4978,9 @@ impl WorkspaceManager {
             None => self.render_empty_workspace(
                 (!recovery).then_some(empty::EmptySidebar {
                     reveal: sidebar_frame.reveal,
+                    // As the sidebar is drawn, from its leading edge.
+                    edge: sidebar_frame.between(-sidebar_layout.width, gpui::px(0.0))
+                        + sidebar_layout.width,
                     top_chrome_width: chrome.width,
                     controls_width: chrome.controls_width(),
                     controls_bottom: WorkspaceChromeLayout::controls_bottom(cx),
