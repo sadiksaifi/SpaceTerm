@@ -33,8 +33,14 @@ fn main() -> ExitCode {
     if let Err(failure) = validate_route(&cli) {
         return finish(cli.command.path(), cli.global.json, failure);
     }
-    if let args::Command::Server(command) = &cli.command && !matches!(command, args::ServerCommand::Run { .. } | args::ServerCommand::Provision(_)) {
-        let reply = spaceterm_cli::server::run(env!("SPACETERM_SERVER_IDENTITY"), &cli.global, command);
+    if let args::Command::Server(command) = &cli.command
+        && !matches!(
+            command,
+            args::ServerCommand::Run { .. } | args::ServerCommand::Provision(_)
+        )
+    {
+        let reply =
+            spaceterm_cli::server::run(env!("SPACETERM_SERVER_IDENTITY"), &cli.global, command);
         return ExitCode::from(reply.write(cli.global.json, cli.global.quiet));
     }
     if let Some(output) = spaceterm_cli::work::start::start(&cli) {
