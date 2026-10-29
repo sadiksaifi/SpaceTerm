@@ -1,0 +1,21 @@
+{
+  "command": "pane.send",
+  "data": {},
+  "error": {
+    "class": "action_required",
+    "code": "controlled",
+    "details": {
+      "reason": "other"
+    },
+    "message": "Another client controls the Pane. Use --take-over to take it.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "error",
+  "warnings": []
+}

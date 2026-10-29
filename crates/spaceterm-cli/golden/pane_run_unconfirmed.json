@@ -1,0 +1,39 @@
+{
+  "command": "pane.run",
+  "data": {
+    "run": {
+      "duration_ms": null,
+      "exit_status": null,
+      "id": "04040404040404040404040404040404",
+      "reason": "cmdline_mismatch",
+      "repaired": false,
+      "started_shell": true,
+      "state": "unconfirmed"
+    },
+    "target": [
+      {
+        "id": "0202020202020202020202020202020202020202020202020202020202020202",
+        "label": "Terminal",
+        "level": "pane",
+        "source": "flag"
+      }
+    ]
+  },
+  "error": {
+    "class": "unconfirmed",
+    "code": "run_unconfirmed",
+    "details": {
+      "reason": "cmdline_mismatch"
+    },
+    "message": "SpaceTerm couldn’t confirm how the command finished.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "error",
+  "warnings": []
+}

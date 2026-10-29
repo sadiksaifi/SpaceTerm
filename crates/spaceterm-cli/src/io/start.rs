@@ -354,3 +354,7 @@ pub fn rows_text(rows: &Rows) -> String {
     }
     text
 }
+
+#[cfg(test)]
+#[path = "golden_tests.rs"]
+mod golden_tests;
