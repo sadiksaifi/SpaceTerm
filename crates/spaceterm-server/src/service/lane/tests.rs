@@ -570,6 +570,32 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
 }
 
 #[test]
+fn an_unsettled_operation_never_keeps_a_stopping_server_alive() {
+    with_lane(|lane| {
+        let (token, _) = preview(&lane.lane, LaneAction::Stop);
+        // The helper never settles this record, as while it waits for the server to exit.
+        assert!(matches!(
+            execute(&lane.lane, LaneAction::Stop, &token, 1),
+            LaneReply::Accepted { .. }
+        ));
+        let Lane {
+            lane: server, host, ..
+        } = lane;
+        assert!(host.fenced.load(Ordering::SeqCst));
+        // The server's shutdown drops its lane. The fence watcher must not hold the host.
+        drop(server);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&host) > 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the fence watcher kept the lane's host alive"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+#[test]
 fn a_stopping_server_closes_a_polling_lane_connection() {
     with_lane(|lane| {
         let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();

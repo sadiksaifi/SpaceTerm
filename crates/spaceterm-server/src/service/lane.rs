@@ -549,12 +549,21 @@ impl LaneServer {
         if self.watching.swap(true, Ordering::SeqCst) {
             return;
         }
-        let lane = Arc::clone(self);
+        // The watcher must not keep the server alive: the lane holds the pane service, whose
+        // shutdown the server waits for, while the helper that settles the record waits for
+        // the server to exit. It holds a weak reference and ends with the server.
+        let lane = Arc::downgrade(self);
         let watched = std::thread::Builder::new()
             .name("spaceterm-service-fence".into())
             .spawn(move || {
                 loop {
                     std::thread::sleep(FENCE_INTERVAL);
+                    let Some(lane) = lane.upgrade() else {
+                        return;
+                    };
+                    if lane.host.stopping() {
+                        return;
+                    }
                     if lane.settled().unwrap_or(false) {
                         lane.host.release_fence();
                         lane.watching.store(false, Ordering::SeqCst);
