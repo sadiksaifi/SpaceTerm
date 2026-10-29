@@ -11953,6 +11953,51 @@ mod shared_repositories {
         );
     }
 
+    /// Opens the New Worktree form for penguin's Workspace and asks git for `topic/new`.
+    fn create_shared_worktree(harness: &Harness, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                assert!(manager.new_worktree(harness.shared, window, cx));
+            });
+        });
+        cx.run_until_parked();
+        click("new-worktree-name", cx);
+        cx.simulate_input("topic/new");
+        cx.run_until_parked();
+        click("modal-action-new-worktree-create", cx);
+    }
+
+    /// Answers the form's Create, which reads the answer on its next poll.
+    fn answer_shared_worktree(
+        edits: &ScriptedEdits,
+        error: spaceterm_server::worktree::Error,
+        cx: &mut VisualTestContext,
+    ) {
+        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(error));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_branch_git_finds_taken_should_be_reported_on_the_branch_name(cx: &mut TestAppContext) {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
+        create_shared_worktree(&harness, cx);
+
+        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+
+        let tree = A11yTree::read(cx);
+        assert!(
+            tree.with_role("Label")
+                .iter()
+                .any(|node| node["aria"]["value"] == "Branch name already exists."),
+            "the name field reports the taken branch"
+        );
+    }
+
     /// The server reads Git for a Workspace nobody is looking at, and a new reading reaches its
     /// row and every Pane even though its organization revision never changes.
     #[gpui::test]

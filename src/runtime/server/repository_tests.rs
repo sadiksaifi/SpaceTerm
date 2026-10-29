@@ -1877,6 +1877,75 @@ fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
 }
 
 #[test]
+fn creations_git_refuses_should_answer_why_without_creating_anything() {
+    use spaceterm_server::{
+        hierarchy::Outcome,
+        worktree::{Branch, BranchName, Error, Operation},
+    };
+    let git = GitFixture::new();
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    let workspace = create_shared(&mut host, 1);
+    let refusals = [
+        (
+            Branch::New {
+                name: "main".into(),
+                base: BranchName::Local("main".into()),
+            },
+            Error::BranchExists,
+        ),
+        (
+            Branch::Existing {
+                name: "main".into(),
+            },
+            Error::BranchCheckedOut,
+        ),
+        (
+            Branch::New {
+                name: "topic".into(),
+                base: BranchName::Local("gone".into()),
+            },
+            Error::BranchMissing,
+        ),
+        (
+            Branch::New {
+                name: "a..b".into(),
+                base: BranchName::Local("main".into()),
+            },
+            Error::InvalidName,
+        ),
+    ];
+
+    let answers: Vec<_> = refusals
+        .iter()
+        .zip(2..)
+        .map(|((branch, _), sequence)| {
+            finish_write(
+                &mut host,
+                sequence,
+                Operation::Create {
+                    workspace,
+                    root: git.0.clone(),
+                    path: git.0.join("refused"),
+                    branch: branch.clone(),
+                },
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        answers,
+        refusals
+            .iter()
+            .map(|(_, error)| Outcome::WorktreeFailed(*error))
+            .collect::<Vec<_>>()
+    );
+    assert!(!git.0.join("refused").exists());
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_sends_nothing() {
     use spaceterm_server::connection::outbox::Outbox;
     use spaceterm_server::protocol::{RawFrame, frame::Assembler};
