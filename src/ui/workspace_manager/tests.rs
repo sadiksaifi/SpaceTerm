@@ -3089,21 +3089,39 @@ fn stage_paint(
     region: gpui::Bounds<Pixels>,
     cx: &mut VisualTestContext,
 ) -> Vec<gpui::Bounds<gpui::ScaledPixels>> {
-    use gpui::{Bounds, point};
-
-    cx.update(|window, cx| {
+    let color = cx.update(|_, cx| {
         let appearance = crate::ui::appearance::chrome(cx);
         let surface = crate::ui::workspace_frame::base_surface(&appearance.colors);
-        let color = gpui_color(appearance.surface(crate::appearance::SurfaceRole::Base, surface));
+        gpui_color(appearance.surface(crate::appearance::SurfaceRole::Base, surface))
+    });
+    surface_paint(region, &[color], cx)
+}
+
+/// Where this frame paints any of `colors` inside `region`, in scaled pixels: each fill and each
+/// side of each border, clipped as drawn.
+fn surface_paint(
+    region: gpui::Bounds<Pixels>,
+    colors: &[gpui::Rgba],
+    cx: &mut VisualTestContext,
+) -> Vec<gpui::Bounds<gpui::ScaledPixels>> {
+    use gpui::{Bounds, point};
+
+    cx.update(|window, _| {
         let region = region.scale(window.scale_factor());
         let mut painted = Vec::new();
         for quad in window.painted_quads() {
             let bounds = quad.bounds;
             let mut parts = Vec::new();
-            if quad.background == gpui::Background::from(color) {
+            if colors
+                .iter()
+                .any(|&color| quad.background == gpui::Background::from(color))
+            {
                 parts.push(bounds);
             }
-            if quad.border_color == gpui::Hsla::from(color) {
+            if colors
+                .iter()
+                .any(|&color| quad.border_color == gpui::Hsla::from(color))
+            {
                 let widths = quad.border_widths;
                 let (left, right) = (bounds.left() + widths.left, bounds.right() - widths.right);
                 parts.extend([
@@ -11280,9 +11298,6 @@ fn the_empty_stage_should_reach_the_window_top_when_no_tab_strip_holds_the_band(
     harness.detach(3, cx);
 
     let frame = workspace_frame(cx);
-    let area = cx
-        .debug_bounds("empty-workspace-stage-area")
-        .expect("the stage renders");
     let stage = cx
         .debug_bounds("empty-workspace-stage")
         .expect("the stage renders");
@@ -11291,7 +11306,7 @@ fn the_empty_stage_should_reach_the_window_top_when_no_tab_strip_holds_the_band(
         .expect("the stage draws an empty Pane");
 
     assert_eq!(
-        area.top() - stage.top(),
+        pane.top() - stage.top(),
         frame.window_edge_inset(),
         "the stage keeps the window edge inset at the top, as at the right and bottom"
     );
@@ -11304,6 +11319,55 @@ fn the_empty_stage_should_reach_the_window_top_when_no_tab_strip_holds_the_band(
         cx.debug_bounds("empty-workspace-drag-region").is_some(),
         "the band stays the window's drag region"
     );
+}
+
+/// Asserts that, with no Workspace, one chrome surface covers each point of the window outside the
+/// empty Pane: the title bar's above the stage, and the sidebar's or the stage's beside it. A gap
+/// shows the window's darker base, and a second translucent fill darkens what it covers.
+fn assert_empty_chrome_covers_the_window_once(state: &str, cx: &mut VisualTestContext) {
+    let window = cx.debug_bounds("workspace-manager").unwrap();
+    let pane = cx
+        .debug_bounds("empty-workspace-pane")
+        .expect("the stage draws an empty Pane");
+    let colors = cx.update(|_, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        let base =
+            |color| gpui_color(appearance.surface(crate::appearance::SurfaceRole::Base, color));
+        [
+            base(appearance.colors.title_bar_background),
+            base(appearance.colors.title_bar_inactive_background),
+            base(crate::ui::workspace_frame::base_surface(&appearance.colors)),
+        ]
+    });
+    let painted = surface_paint(window, &colors, cx);
+    let scale = cx.update(|window, _| window.scale_factor());
+    let pane = pane.scale(scale);
+    // The fills' edges split the window into cells that each fill covers whole or not at all.
+    let edges = |sides: &dyn Fn(&gpui::Bounds<gpui::ScaledPixels>) -> [gpui::ScaledPixels; 2]| {
+        let mut edges = painted
+            .iter()
+            .chain([&window.scale(scale), &pane])
+            .flat_map(sides)
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges.dedup();
+        edges
+    };
+    let columns = edges(&|bounds| [bounds.left(), bounds.right()]);
+    let rows = edges(&|bounds| [bounds.top(), bounds.bottom()]);
+    for row in rows.windows(2) {
+        for column in columns.windows(2) {
+            let center = gpui::point((column[0] + column[1]) * 0.5, (row[0] + row[1]) * 0.5);
+            if pane.contains(&center) {
+                continue;
+            }
+            let fills = painted.iter().filter(|part| part.contains(&center)).count();
+            assert_eq!(
+                fills, 1,
+                "{state}: chrome must cover {center:?} once, beside the Pane {pane:?}"
+            );
+        }
+    }
 }
 
 #[gpui::test]
@@ -11341,6 +11405,7 @@ fn the_empty_views_workspace_switcher_should_slide_with_the_sidebar_like_its_tog
         switcher
     };
     let shown = plain(cx);
+    assert_empty_chrome_covers_the_window_once("shown", cx);
     let sidebar = cx
         .debug_bounds("workspace-sidebar")
         .expect("the sidebar starts shown");
@@ -11356,6 +11421,7 @@ fn the_empty_views_workspace_switcher_should_slide_with_the_sidebar_like_its_tog
     });
     finish_slides(cx);
     let hidden = plain(cx);
+    assert_empty_chrome_covers_the_window_once("hidden", cx);
     let toggle = cx.debug_bounds("toggle-sidebar-button").unwrap();
     assert_eq!(
         hidden.left() - toggle.right(),
@@ -11380,6 +11446,7 @@ fn the_empty_views_workspace_switcher_should_slide_with_the_sidebar_like_its_tog
             cx.update(|window, cx| window.simulate_next_frame(cx));
             cx.run_until_parked();
             let switcher = plain(cx);
+            assert_empty_chrome_covers_the_window_once(&format!("while showing is {showing}"), cx);
             let reveal = cx
                 .debug_bounds("workspace-sidebar")
                 .map_or(0.0, |drawn| 1.0 + drawn.left() / drawn.size.width);
