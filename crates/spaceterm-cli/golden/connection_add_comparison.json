@@ -1,0 +1,8 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "event": "comparison_code",
+  "data": {
+    "code": "000000",
+    "expires_at": "2033-05-18T03:33:20Z"
+  }
+}
