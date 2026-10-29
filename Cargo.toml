@@ -27,9 +27,10 @@ accesskit_unix = { git = "https://github.com/sadiksaifi/accesskit", tag = "space
 # Every build outside the packaging script is SpaceTerm Development and carries its developer tools.
 default = ["desktop", "developer-tools"]
 # Native fixtures also exercise the desktop adapters.
-native-tests = ["desktop-tests"]
+native-tests = ["desktop-tests", "spaceterm-connections/native-tests"]
 developer-tools = ["desktop-tests", "spaceterm-ui/control-preview"]
 desktop-tests = [
+    "spaceterm-connections/test-support",
     "desktop",
     "gpui/test-support",
     "spaceterm-ui/test-support",
@@ -39,6 +40,7 @@ desktop-tests = [
     "dep:gpui_wgpu",
 ]
 desktop = [
+    "dep:spaceterm-connections",
     "dep:notify",
     "dep:gpui",
     "dep:gpui_platform",
@@ -67,8 +69,6 @@ desktop = [
     "dep:objc2-quick-look-ui",
     "dep:objc2-user-notifications",
     "dep:raw-window-handle",
-    "dep:security-framework",
-    "dep:security-framework-sys",
     "dep:core-foundation",
     "dep:futures-lite",
     "dep:async-io",
@@ -96,6 +96,7 @@ required-features = ["native-tests"]
 sha2 = "0.10"
 
 [dependencies]
+spaceterm-connections = { path = "crates/spaceterm-connections", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -146,8 +147,6 @@ roxmltree = { version = "=0.21.1", optional = true }
 gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-28", features = ["wayland", "x11"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-security-framework = { version = "=3.7.0", optional = true }
-security-framework-sys = { version = "=2.17.0", optional = true }
 core-foundation = { version = "=0.10.1", optional = true }
 block2 = { version = "0.6", optional = true }
 dispatch2 = { version = "=0.3.1", optional = true }

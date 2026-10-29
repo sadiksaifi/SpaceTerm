@@ -803,14 +803,12 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
-    /// Opens an invitation that advertises `address`, or the server's own choice.
+    /// Opens an invitation that advertises an authority, or the server's own choice.
     pub fn invite_device(
         &self,
-        address: Option<std::net::IpAddr>,
+        advertise: Option<String>,
     ) -> Result<crate::direct::Invitation, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::Invite {
-            advertise: address.map(|address| address.to_string()),
-        })? {
+        match self.direct_manage(crate::direct::Management::Invite { advertise })? {
             crate::direct::ManagementReply::Invitation(text) => {
                 crate::direct::Invitation::parse(&text)
             }
@@ -828,8 +826,9 @@ impl ServerConnection {
     }
     pub fn pairing_claims(
         &self,
+        invitation: Option<crate::direct::ClaimId>,
     ) -> Result<Vec<crate::direct::PairingClaim>, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::Claims { invitation: None })? {
+        match self.direct_manage(crate::direct::Management::Claims { invitation })? {
             crate::direct::ManagementReply::Claims(claims) => Ok(claims),
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
