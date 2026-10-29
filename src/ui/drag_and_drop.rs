@@ -62,10 +62,10 @@ pub(crate) struct ReorderableStrip<Id, Row = ()> {
     /// they grow, so their faces grow from that end.
     growing_from_end: HashSet<Id>,
     /// The closing gap a removed item left before each item, inside that item's slot.
-    leading_gaps: HashMap<Id, Gap>,
+    leading_gaps: HashMap<Id, Gap<Id>>,
     /// The closing gap a removed last item left after the item that is now last, inside that
     /// item's slot.
-    trailing_gaps: HashMap<Id, Gap>,
+    trailing_gaps: HashMap<Id, Gap<Id>>,
     /// When the strip last prepared a frame.
     refreshed_at: Option<Instant>,
     /// Where each item of the last frame started along the strip, and its size, in layout
@@ -225,6 +225,79 @@ impl ItemMotion {
             }
         })
     }
+
+    /// Holds `item` in a slot as [`Self::frame_slot`] does, and draws `before` and `after` in
+    /// the closing gaps beside it: the items that left from there, at their own size, clipped as
+    /// their gaps close.
+    pub(crate) fn frame_item(
+        self,
+        axis: Axis,
+        slot: Div,
+        item: AnyElement,
+        before: Option<AnyElement>,
+        after: Option<AnyElement>,
+        measure: impl Fn(Size<Pixels>, &mut App) + 'static,
+    ) -> Div {
+        if before.is_none() && after.is_none() {
+            return self.frame_slot(axis, slot, measure).child(item);
+        }
+        let item_position = usize::from(before.is_some());
+        let gap = |extent: Pixels, content: AnyElement| {
+            let gap = div().flex_shrink_0().overflow_hidden();
+            match axis {
+                Axis::Horizontal => gap.w(extent).h_full(),
+                Axis::Vertical => gap.h(extent).w_full(),
+            }
+            .child(content)
+        };
+        let (leading_gap, trailing_gap) = (self.leading_gap, self.trailing_gap);
+        let before = before.map(|content| gap(leading_gap, content));
+        let after = after.map(|content| gap(trailing_gap, content));
+        // The gaps that draw nothing stay padding, as in a slot that draws none.
+        let unpadded = Self {
+            leading_gap: if before.is_some() {
+                px(0.0)
+            } else {
+                leading_gap
+            },
+            trailing_gap: if after.is_some() {
+                px(0.0)
+            } else {
+                trailing_gap
+            },
+            extent: self.extent.map(|extent| {
+                extent
+                    + if before.is_some() {
+                        leading_gap
+                    } else {
+                        px(0.0)
+                    }
+                    + if after.is_some() {
+                        trailing_gap
+                    } else {
+                        px(0.0)
+                    }
+            }),
+            ..self
+        };
+        let slot = match axis {
+            Axis::Horizontal => slot.flex().flex_row(),
+            Axis::Vertical => slot.flex().flex_col(),
+        };
+        let growing = self.extent.is_some();
+        unpadded
+            .frame_slot(axis, slot, |_, _| {})
+            .when(growing, |slot| {
+                slot.on_children_prepainted(move |bounds, _, cx| {
+                    if let Some(item) = bounds.get(item_position) {
+                        measure(item.size, cx);
+                    }
+                })
+            })
+            .children(before)
+            .child(item)
+            .children(after)
+    }
 }
 
 impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
@@ -349,7 +422,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
 
     /// Trims `slot`, the bounds of the item `id`'s slot in the last frame, to the item itself.
     fn trim(&self, id: Id, slot: Bounds<Pixels>) -> Bounds<Pixels> {
-        let painted = |gaps: &HashMap<Id, Gap>| {
+        let painted = |gaps: &HashMap<Id, Gap<Id>>| {
             self.refreshed_at
                 .zip(gaps.get(&id))
                 .map_or(px(0.0), |(at, gap)| gap.at(at))
@@ -425,6 +498,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 Gap {
                     extent: px(0.0),
                     ease: Ease::new(PRESENCE_DURATION, now, motion),
+                    leaving: Vec::new(),
                 },
             );
         }
@@ -656,7 +730,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             return px(0.0);
         };
         let gap =
-            |gaps: &HashMap<Id, Gap>, id: &Id| gaps.get(id).map_or(px(0.0), |gap| gap.at(now));
+            |gaps: &HashMap<Id, Gap<Id>>, id: &Id| gaps.get(id).map_or(px(0.0), |gap| gap.at(now));
         ids[..position]
             .iter()
             .fold(gap(&self.leading_gaps, &id), |shift, before| {
@@ -779,6 +853,14 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         self.arrival = None;
         let now = now(cx);
         let motion = presence_motion(cx);
+        // An item that returns while its old place still closes draws only where it returns.
+        for gap in self
+            .leading_gaps
+            .values_mut()
+            .chain(self.trailing_gaps.values_mut())
+        {
+            gap.leaving.retain(|leaving| !ids.contains(leaving));
+        }
         for (position, id) in ids.iter().enumerate() {
             if known.contains(id) {
                 continue;
@@ -796,34 +878,79 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             .map(|position| items.bounds_for_item(position))
             .collect::<Option<Vec<_>>>()
             .filter(|bounds| bounds.len() == known.len());
+        // How many items this change already put before each carrier's older leading gap.
+        let mut placed = HashMap::new();
         for (position, id) in known.iter().enumerate() {
             if ids.contains(id) {
                 continue;
             }
             self.entering.remove(id);
-            // The slot's bounds hold its own closing gaps.
-            self.leading_gaps.remove(id);
-            self.trailing_gaps.remove(id);
+            // The slot's bounds hold its own closing gaps, and the items that left from them.
+            let lead = self.leading_gaps.remove(id);
+            let trail = self.trailing_gaps.remove(id);
             let Some(bounds) = bounds.as_ref() else {
                 continue;
             };
             let extent = bounds[position].size.along(self.axis);
+            let leaving = lead
+                .into_iter()
+                .flat_map(|gap| gap.leaving)
+                .chain([*id])
+                .chain(trail.into_iter().flat_map(|gap| gap.leaving))
+                .collect::<Vec<_>>();
             let next = known[position + 1..].iter().find(|id| ids.contains(id));
             let previous = known[..position].iter().rev().find(|id| ids.contains(id));
-            let (gaps, carrier) = match (next, previous) {
-                (Some(next), _) => (&mut self.leading_gaps, *next),
-                (None, Some(previous)) => (&mut self.trailing_gaps, *previous),
+            let (gap, carrier, leading) = match (next, previous) {
+                (Some(next), _) => (self.leading_gaps.remove(next), *next, true),
+                (None, Some(previous)) => (self.trailing_gaps.remove(previous), *previous, false),
                 (None, None) => continue,
             };
-            let open = gaps.get(&carrier).map_or(px(0.0), |gap| gap.at(now));
+            let open = gap.as_ref().map_or(px(0.0), |gap| gap.at(now));
+            let mut older = gap.map_or_else(Vec::new, |gap| gap.leaving);
+            // Items this change removes stand in order before an older leading gap, which is
+            // nearer its carrier, and after an older trailing gap.
+            if leading {
+                let at = placed.entry(carrier).or_insert(0);
+                let count = leaving.len();
+                older.splice(*at..*at, leaving);
+                *at += count;
+            } else {
+                older.extend(leaving);
+            }
+            let gaps = if leading {
+                &mut self.leading_gaps
+            } else {
+                &mut self.trailing_gaps
+            };
             gaps.insert(
                 carrier,
                 Gap {
                     extent: open + extent,
                     ease: Ease::new(PRESENCE_DURATION, now, motion),
+                    leaving: older,
                 },
             );
         }
+    }
+
+    /// The removed items whose place still closes before the item `id`, and after it, in
+    /// presentation order.
+    pub(crate) fn leaving_beside(&self, id: Id) -> (&[Id], &[Id]) {
+        fn leaving<'a, Id: Eq + Hash>(gaps: &'a HashMap<Id, Gap<Id>>, id: &Id) -> &'a [Id] {
+            gaps.get(id).map_or(&[], |gap| gap.leaving.as_slice())
+        }
+        (
+            leaving(&self.leading_gaps, &id),
+            leaving(&self.trailing_gaps, &id),
+        )
+    }
+
+    /// Every removed item whose place still closes.
+    pub(crate) fn leaving(&self) -> impl Iterator<Item = Id> + '_ {
+        self.leading_gaps
+            .values()
+            .chain(self.trailing_gaps.values())
+            .flat_map(|gap| gap.leaving.iter().copied())
     }
 
     /// Lifts the item `id`, one of the strip's `ids` in presentation order. It keeps its place
@@ -1428,14 +1555,17 @@ impl Ease {
     }
 }
 
-/// The space a removed item left in the strip, closing from `extent` to nothing.
-#[derive(Clone, Copy, Debug)]
-struct Gap {
+/// The space removed items left in the strip, closing from `extent` to nothing.
+#[derive(Clone, Debug)]
+struct Gap<Id> {
     extent: Pixels,
     ease: Ease,
+    /// The removed items whose place the gap holds, in presentation order, which a strip may
+    /// draw in it while it closes.
+    leaving: Vec<Id>,
 }
 
-impl Gap {
+impl<Id> Gap<Id> {
     fn at(&self, now: Instant) -> Pixels {
         self.extent * (1.0 - self.ease.at(now))
     }

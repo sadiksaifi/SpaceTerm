@@ -315,8 +315,34 @@ enum GroupRow {
     /// The Workspace row that heads the group.
     Workspace,
     Worktree(WorktreeId),
-    /// The label above a former repository's Worktrees, named by its first Worktree.
-    FormerRepository(WorktreeId),
+    /// The label above a former repository's Worktrees, by a digest of its name and how many
+    /// labels before it share that name, so it keeps its place while its Worktrees change.
+    FormerRepository(u64),
+}
+
+/// What one row below a Workspace row shows.
+#[derive(Clone, Copy, Debug)]
+enum GroupRowContent<'a> {
+    /// A Worktree row, with its position among its repository's Worktree rows and their count.
+    Worktree(&'a WorktreeRowViewModel, (usize, usize)),
+    /// The label above a former repository's Worktrees.
+    FormerRepository(&'a SharedString),
+}
+
+/// A row that left its Workspace group, kept to draw while its place closes.
+#[derive(Clone, Debug)]
+enum DepartedRow {
+    Worktree(Box<WorktreeRowViewModel>),
+    FormerRepository(SharedString),
+}
+
+impl DepartedRow {
+    fn content(&self) -> GroupRowContent<'_> {
+        match self {
+            Self::Worktree(row) => GroupRowContent::Worktree(row, (1, 1)),
+            Self::FormerRepository(name) => GroupRowContent::FormerRepository(name),
+        }
+    }
 }
 
 /// How one Workspace group moves as its Worktree rows disclose, come, and go.
@@ -332,6 +358,8 @@ struct GroupMotion {
     /// The group's rows while its Worktree rows are drawn, as they grow in and close. It starts
     /// afresh each time they are disclosed, so disclosure never reads as rows arriving.
     rows: ReorderableStrip<GroupRow>,
+    /// The rows that left the group, which draw in their closing places.
+    departed: std::collections::HashMap<GroupRow, DepartedRow>,
     /// The group's rows as last painted.
     items: ScrollHandle,
     /// How the current frame presents the group.
@@ -379,6 +407,7 @@ impl GroupMotion {
             disclosed: Reveal::new(section.is_some_and(|section| section.expanded)),
             section: section.cloned(),
             rows: ReorderableStrip::new(gpui::Axis::Vertical),
+            departed: std::collections::HashMap::new(),
             items: ScrollHandle::new(),
             frame: GroupFrame::at_rest(section),
             opening: false,
@@ -404,7 +433,26 @@ impl GroupMotion {
         };
         match section {
             Some(section) if self.section.as_ref() != Some(section) => {
-                self.section = Some(section.clone());
+                if let Some(previous) = self.section.replace(section.clone()) {
+                    let current = worktree_group_rows(section)
+                        .into_iter()
+                        .map(|(row, _)| row)
+                        .collect::<Vec<_>>();
+                    for (row, content) in worktree_group_rows(&previous) {
+                        if current.contains(&row) {
+                            continue;
+                        }
+                        let departed = match content {
+                            GroupRowContent::Worktree(worktree, _) => {
+                                DepartedRow::Worktree(Box::new(worktree.clone()))
+                            }
+                            GroupRowContent::FormerRepository(name) => {
+                                DepartedRow::FormerRepository(name.clone())
+                            }
+                        };
+                        self.departed.insert(row, departed);
+                    }
+                }
             }
             Some(_) => {}
             None if !self.frame.draws_worktrees() && !disclosing.moving => self.section = None,
@@ -420,27 +468,49 @@ impl GroupMotion {
             .as_ref()
             .filter(|_| self.frame.draws_worktrees())
         {
-            ids.extend(worktree_group_rows(section));
+            ids.extend(worktree_group_rows(section).into_iter().map(|(row, _)| row));
         }
         ids
     }
+
+    /// The rows that left from beside `row` and still draw in its closing gaps, before it and
+    /// after it.
+    fn departed_beside(&self, row: GroupRow) -> (Vec<&DepartedRow>, Vec<&DepartedRow>) {
+        let (before, after) = self.rows.leaving_beside(row);
+        let departed = |rows: &[GroupRow]| {
+            rows.iter()
+                .filter_map(|row| self.departed.get(row))
+                .collect::<Vec<_>>()
+        };
+        (departed(before), departed(after))
+    }
 }
 
-/// Each row a Worktree section draws below its Workspace row, in order.
-fn worktree_group_rows(section: &WorktreeSection) -> impl Iterator<Item = GroupRow> + '_ {
-    section.groups.iter().flat_map(|group| {
-        let label = group
-            .former_repository
-            .as_ref()
-            .and(group.rows.first())
-            .map(|first| GroupRow::FormerRepository(first.worktree_id));
-        label.into_iter().chain(
-            group
-                .rows
-                .iter()
-                .map(|row| GroupRow::Worktree(row.worktree_id)),
-        )
-    })
+/// Each row a Worktree section draws below its Workspace row, in order, with what it shows.
+fn worktree_group_rows(section: &WorktreeSection) -> Vec<(GroupRow, GroupRowContent<'_>)> {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut rows = Vec::new();
+    let mut labels = Vec::new();
+    for group in &section.groups {
+        if let (Some(name), false) = (&group.former_repository, group.rows.is_empty()) {
+            let earlier = labels.iter().filter(|label| *label == name).count();
+            labels.push(name.clone());
+            let mut digest = std::hash::DefaultHasher::new();
+            (name.as_ref(), earlier).hash(&mut digest);
+            rows.push((
+                GroupRow::FormerRepository(digest.finish()),
+                GroupRowContent::FormerRepository(name),
+            ));
+        }
+        let count = group.rows.len();
+        rows.extend(group.rows.iter().enumerate().map(|(index, row)| {
+            (
+                GroupRow::Worktree(row.worktree_id),
+                GroupRowContent::Worktree(row, (index + 1, count)),
+            )
+        }));
+    }
+    rows
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1162,7 +1232,7 @@ impl Render for WorkspaceSidebar {
                 SidebarRowKey::Workspace(_) => None,
                 SidebarRowKey::Worktree(_, worktree_id) => Some(worktree_id),
             };
-            (key.workspace_id(), row, self.row_inset(key, appearance))
+            (key.workspace_id(), row, self.row_inset(key, appearance, cx))
         });
         self.workspace_reorder
             .follow_row_selection(selected, window, cx);
@@ -1203,8 +1273,11 @@ impl WorkspaceSidebar {
             if group.frame.draws_worktrees() {
                 let ids = group.row_ids();
                 group.rows.refresh(&group.items, &ids, window, cx);
+                let leaving = group.rows.leaving().collect::<Vec<_>>();
+                group.departed.retain(|row, _| leaving.contains(row));
             } else {
                 group.rows = ReorderableStrip::new(gpui::Axis::Vertical);
+                group.departed.clear();
             }
         }
         if moving {

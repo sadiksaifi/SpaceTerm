@@ -244,19 +244,6 @@ fn detail_line_height(appearance: &crate::ui::appearance::ChromeAppearance) -> P
         + appearance.spacing(SIDEBAR_ROW_DETAIL_LINE_PADDING + SIDEBAR_ROW_LINE_GAP)
 }
 
-/// The height of a Worktree section's rows once each has grown in.
-fn worktree_rows_height(
-    section: &WorktreeSection,
-    appearance: &crate::ui::appearance::ChromeAppearance,
-) -> Pixels {
-    worktree_group_rows(section)
-        .map(|row| match row {
-            GroupRow::FormerRepository(_) => former_repository_height(appearance),
-            GroupRow::Workspace | GroupRow::Worktree(_) => row_height(appearance),
-        })
-        .fold(px(0.0), |height, row| height + row)
-}
-
 fn row_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
     let content_height = appearance
         .typography
@@ -686,10 +673,18 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_col()
                     .gap(appearance.spacing(SIDEBAR_ROW_LINE_GAP))
-                    // The margin moves line 1 from where two lines center it toward where one
-                    // line centers it, as the row loses line 2's room.
+                    // Between one and two lines, the lines fill the row and clip there, so line 2
+                    // never draws over the row below. The padding moves line 1 from where two
+                    // lines center it toward where one line centers it.
                     .when(shows_detail && disclosed > 0.0, |lines| {
-                        lines.mt(detail_line_height(appearance) * disclosed)
+                        lines
+                            .debug_selector(move || {
+                                format!("workspace-row-lines-{}", workspace_id.get())
+                            })
+                            .h(workspace_row_height(appearance, disclosed))
+                            .justify_center()
+                            .overflow_hidden()
+                            .pt(detail_line_height(appearance) * disclosed)
                     })
                     .child(
                         div()
@@ -795,30 +790,54 @@ impl WorkspaceSidebar {
             .into_any_element()
     }
 
-    /// How far the row `key` stands from the start of its Workspace group this frame.
+    /// Each row a Workspace group draws this frame, in order, with how far its face stands from
+    /// the group's start and how tall its slot is, closing gaps and growth included.
+    fn group_layout(
+        &self,
+        workspace_id: WorkspaceId,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> Vec<(GroupRow, Pixels, Pixels)> {
+        let Some(group) = self.groups.get(&workspace_id) else {
+            return Vec::new();
+        };
+        let mut top = px(0.0);
+        group
+            .row_ids()
+            .into_iter()
+            .map(|row| {
+                let natural = match row {
+                    GroupRow::Workspace => {
+                        workspace_row_height(appearance, group.frame.disclosed.reveal)
+                    }
+                    GroupRow::Worktree(_) => row_height(appearance),
+                    GroupRow::FormerRepository(_) => former_repository_height(appearance),
+                };
+                let motion = group.rows.motion(row, cx);
+                let face = top + motion.leading_gap;
+                let slot =
+                    motion.leading_gap + motion.extent.unwrap_or(natural) + motion.trailing_gap;
+                top += slot;
+                (row, face, slot)
+            })
+            .collect()
+    }
+
+    /// How far the row `key` stands from the start of its Workspace group this frame, where the
+    /// group draws it.
     pub(super) fn row_inset(
         &self,
         key: SidebarRowKey,
         appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
     ) -> Pixels {
         let SidebarRowKey::Worktree(workspace_id, worktree_id) = key else {
             return px(0.0);
         };
-        let Some(group) = self.groups.get(&workspace_id) else {
-            return px(0.0);
-        };
-        let Some(section) = group.section.as_ref() else {
-            return px(0.0);
-        };
-        let mut inset = workspace_row_height(appearance, group.frame.disclosed.reveal);
-        for row in worktree_group_rows(section) {
-            inset += match row {
-                GroupRow::Worktree(id) if id == worktree_id => break,
-                GroupRow::FormerRepository(_) => former_repository_height(appearance),
-                GroupRow::Workspace | GroupRow::Worktree(_) => row_height(appearance),
-            };
-        }
-        inset
+        self.group_layout(workspace_id, appearance, cx)
+            .into_iter()
+            .find(|(row, _, _)| *row == GroupRow::Worktree(worktree_id))
+            .map_or(px(0.0), |(_, face, _)| face)
     }
 
     /// Outlines the row whose menu is open. A secondary click leaves the selection where it was,
@@ -1019,19 +1038,7 @@ impl WorkspaceSidebar {
                 appearance,
                 cx,
             );
-            let worktree_rows = drawn
-                .map(|section| {
-                    self.render_worktrees(
-                        workspace_id,
-                        section,
-                        open.is_some().then_some(fade.worktrees),
-                        sidebar.clone(),
-                        window,
-                        appearance,
-                        cx,
-                    )
-                })
-                .unwrap_or_default();
+            let worktree_rows = drawn.map(worktree_group_rows).unwrap_or_default();
             let keys: Vec<Option<SidebarRowKey>> =
                 std::iter::once(Some(SidebarRowKey::Workspace(workspace_id)))
                     .chain(worktree_rows.iter().map(|(row, _)| match row {
@@ -1041,40 +1048,108 @@ impl WorkspaceSidebar {
                         GroupRow::Workspace | GroupRow::FormerRepository(_) => None,
                     }))
                     .collect();
-            // Each Worktree row and label holds a slot that grows it in and closes the gap it
-            // leaves, inside the group.
-            let children = worktree_rows.into_iter().map(|(child, element)| {
+            let mut fades = open
+                .is_some()
+                .then_some(fade.worktrees)
+                .into_iter()
+                .flatten();
+            let mut elements = vec![(GroupRow::Workspace, parent)];
+            for (row, content) in worktree_rows {
+                let fade = match content {
+                    GroupRowContent::Worktree(..) if open.is_some() => match fades.next() {
+                        Some(fade) => Some(fade),
+                        None => break,
+                    },
+                    _ => None,
+                };
+                let element = self.render_group_row(
+                    workspace_id,
+                    content,
+                    fade,
+                    sidebar.clone(),
+                    window,
+                    appearance,
+                    cx,
+                );
+                // Closing rows still draw, from the section the group last presented, but take
+                // no input and are not announced.
+                let element = if open.is_some() {
+                    element
+                } else {
+                    div()
+                        .id(SharedString::from(format!(
+                            "worktree-closing-{}-{row:?}",
+                            workspace_id.get()
+                        )))
+                        .aria_hidden(true)
+                        .child(element)
+                        .into_any_element()
+                };
+                elements.push((row, element));
+            }
+            // Every row holds a slot that grows it in, and draws the rows that left beside it,
+            // clipped, while their places close. Those take no input and are not announced.
+            let departed = |rows: Vec<&DepartedRow>, side: &str, row: GroupRow| {
+                (!rows.is_empty()).then(|| {
+                    div()
+                        .id(SharedString::from(format!(
+                            "worktree-departed-{}-{row:?}-{side}",
+                            workspace_id.get()
+                        )))
+                        .aria_hidden(true)
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .children(rows.into_iter().map(|departed| {
+                            self.render_group_row(
+                                workspace_id,
+                                departed.content(),
+                                None,
+                                sidebar.clone(),
+                                window,
+                                appearance,
+                                cx,
+                            )
+                        }))
+                        .into_any_element()
+                })
+            };
+            let children = elements.into_iter().map(|(row, element)| {
                 let measure_sidebar = sidebar.clone();
                 let motion =
-                    group.map_or_else(ItemMotion::default, |group| group.rows.motion(child, cx));
-                let slot = motion.frame_slot(
-                    gpui::Axis::Vertical,
-                    div().w_full().flex_shrink_0(),
-                    move |size, cx| {
-                        let _ = measure_sidebar.update(cx, |sidebar, _| {
-                            if let Some(group) = sidebar.groups.get_mut(&workspace_id) {
-                                group.rows.measure(child, size);
-                            }
-                        });
-                    },
-                );
-                if open.is_some() {
-                    slot.child(element).into_any_element()
-                } else {
-                    slot.id(SharedString::from(format!(
-                        "worktree-closing-{}-{child:?}",
-                        workspace_id.get()
-                    )))
-                    .aria_hidden(true)
-                    .child(element)
-                    .into_any_element()
-                }
+                    group.map_or_else(ItemMotion::default, |group| group.rows.motion(row, cx));
+                let (before, after) =
+                    group.map_or_else(Default::default, |group| group.departed_beside(row));
+                motion
+                    .frame_item(
+                        gpui::Axis::Vertical,
+                        div().w_full().flex_shrink_0(),
+                        element,
+                        departed(before, "before", row),
+                        departed(after, "after", row),
+                        move |size, cx| {
+                            let _ = measure_sidebar.update(cx, |sidebar, _| {
+                                if let Some(group) = sidebar.groups.get_mut(&workspace_id) {
+                                    group.rows.measure(row, size);
+                                }
+                            });
+                        },
+                    )
+                    // Worktree rows fade as they disclose and close.
+                    .when(
+                        row != GroupRow::Workspace && frame.disclosed.moving,
+                        |slot| slot.opacity(frame.disclosed.reveal),
+                    )
             });
             // While the Worktree rows disclose or close, the group shows as much of them as the
-            // motion has reached, and the groups below follow its height.
-            let disclosing_height = drawn.filter(|_| frame.disclosed.moving).map(|section| {
-                workspace_row_height(appearance, frame.disclosed.reveal)
-                    + worktree_rows_height(section, appearance) * frame.disclosed.reveal
+            // motion has reached, from the height they are drawn at, and the groups below follow.
+            let disclosing_height = drawn.filter(|_| frame.disclosed.moving).map(|_| {
+                let parent = workspace_row_height(appearance, frame.disclosed.reveal);
+                let drawn = self
+                    .group_layout(workspace_id, appearance, cx)
+                    .into_iter()
+                    .fold(px(0.0), |height, (_, _, slot)| height + slot);
+                parent + (drawn - parent) * frame.disclosed.reveal
             });
             let measure_sidebar = sidebar.clone();
             let grow_sidebar = sidebar.clone();
@@ -1112,7 +1187,6 @@ impl WorkspaceSidebar {
                     group.h(height).overflow_hidden()
                 })
                 .when_some(group, |element, group| element.track_scroll(&group.items))
-                .child(parent)
                 .children(children);
             list = list.child(slot.child(group_element));
         }
@@ -1400,72 +1474,56 @@ impl WorkspaceSidebar {
             .into_any_element()
     }
 
-    /// A git Workspace's disclosed Worktree rows, and a label above each former repository's,
-    /// each with the row it is. Rows without `fades` are closing, so they take no input.
+    /// One row below a Workspace row: a Worktree row, or the label above a former repository's
+    /// Worktrees. A Worktree row without `fade` is closing or has left, so it takes no input.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one group render step needs its section, hovers, owner, and host geometry"
+        reason = "one row render step needs its content, hover, owner, and host geometry"
     )]
-    fn render_worktrees(
+    fn render_group_row(
         &self,
         workspace_id: WorkspaceId,
-        section: &WorktreeSection,
-        fades: Option<Vec<RowFade>>,
+        content: GroupRowContent<'_>,
+        fade: Option<RowFade>,
         sidebar: WeakEntity<Self>,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
         cx: &App,
-    ) -> Vec<(GroupRow, AnyElement)> {
-        let open = fades.is_some();
-        let mut fades = fades.into_iter().flatten();
-        let mut elements = Vec::new();
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-        for group in &section.groups {
-            if let (Some(name), Some(first)) = (&group.former_repository, group.rows.first()) {
-                elements.push((
-                    GroupRow::FormerRepository(first.worktree_id),
-                    div()
-                        .debug_selector({
-                            let name = name.clone();
-                            move || format!("worktree-former-repository-{name}")
-                        })
-                        .relative()
-                        .w_full()
-                        .h(former_repository_height(appearance))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_end()
-                        .pl(worktree_text_indent(appearance, cx))
-                        .pr(row_padding(appearance, cx).1)
-                        .truncate()
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(colors.row_secondary))
-                        .child(name.clone())
-                        .into_any_element(),
-                ));
-            }
-            let size = group.rows.len();
-            for (index, worktree) in group.rows.iter().enumerate() {
-                let fade = fades.next();
-                if open && fade.is_none() {
-                    break;
-                }
-                elements.push((
-                    GroupRow::Worktree(worktree.worktree_id),
-                    self.render_worktree_row(
-                        workspace_id,
-                        worktree,
-                        (index + 1, size),
-                        fade,
-                        sidebar.clone(),
-                        window,
-                        appearance,
-                        cx,
-                    ),
-                ));
-            }
+    ) -> AnyElement {
+        match content {
+            GroupRowContent::Worktree(worktree, position) => self.render_worktree_row(
+                workspace_id,
+                worktree,
+                position,
+                fade,
+                sidebar,
+                window,
+                appearance,
+                cx,
+            ),
+            GroupRowContent::FormerRepository(name) => div()
+                .debug_selector({
+                    let name = name.clone();
+                    move || format!("worktree-former-repository-{name}")
+                })
+                .relative()
+                .w_full()
+                .h(former_repository_height(appearance))
+                .flex_shrink_0()
+                .flex()
+                .items_end()
+                .pl(worktree_text_indent(appearance, cx))
+                .pr(row_padding(appearance, cx).1)
+                .truncate()
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                .text_color(gpui_color(
+                    appearance
+                        .host_colors(spaceterm_ui::ControlHost::Panel)
+                        .row_secondary,
+                ))
+                .child(name.clone())
+                .into_any_element(),
         }
-        elements
     }
 
     #[expect(
