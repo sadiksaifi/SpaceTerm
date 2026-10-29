@@ -432,6 +432,7 @@ run = [
 description = "Test agent terminal I/O: observation, cursors, waits, send and run against an in-process server"
 run = [
     "cargo test -p spaceterm-cli --lib --locked -- io:: --include-ignored --test-threads=1",
+    "cargo test -p spaceterm-cli --test io_concurrency --locked -- --ignored --test-threads=1",
     "cargo test -p spaceterm-server --features client --lib --locked -- pane::run pane::keys",
     "cargo test -p spaceterm --lib --all-features --locked -- agent_io_tests::observing agent_io_tests::named_keys terminal::metadata terminal::session::subscriptions",
 ]
@@ -511,8 +512,9 @@ description = "Verify authenticated approved Development service shutdown termin
 run = "cargo run --package spaceterm-cli --features client --example persistent_pane --locked -- --shutdown"
 
 [tasks."server:pane:takeover:smoke"]
-description = "Verify two account-local clients transfer control on the approved Development service"
+description = "Verify two account-local clients transfer control on a disposable Development server"
 run = [
+  "cargo build --package spaceterm-cli --features client --bin spaceterm --locked",
   "cargo run --package spaceterm-cli --features client --example pane_takeover --locked -- 4",
 ]
 

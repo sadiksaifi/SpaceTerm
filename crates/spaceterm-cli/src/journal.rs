@@ -351,9 +351,8 @@ fn settle_identity(
             });
         }
     }
-    // `runs.lock` is held only briefly by a run that records or forgets itself, so this waits
-    // for it like a writer, bounded by the command's deadline.
-    if let Ok(mut runs) = state.runs(route, agent, deadline) {
+    // A live command owns its run receipts. Settlement skips them until that command exits.
+    if let Some(mut runs) = state.try_runs(route, agent).map_err(Failure::new)? {
         for item in settle_runs(&mut runs, link, deadline)? {
             recovered.push(RecoveredOperation {
                 identity: identity.clone(),

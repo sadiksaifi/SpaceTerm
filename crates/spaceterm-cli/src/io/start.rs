@@ -9,7 +9,7 @@ use crate::connection::{NativeCredentials, route};
 use crate::contract::*;
 use crate::scope::{self, Snapshot, TargetData};
 use crate::work::backend::{Connected, Read as _};
-use crate::work::{dispatch, output::Output, paths};
+use crate::work::{output::Output, paths};
 use spaceterm_server::protocol::AgentName;
 use std::time::{Duration, Instant};
 
@@ -87,29 +87,32 @@ fn selected(cli: &Cli, command: &PaneCommand) -> Output {
             Some(connecting),
         )
     };
-    let mutating = !matches!(command, PaneCommand::Read(_));
-    let mut journal = match dispatch::open(
-        &connection,
-        &link,
-        &dispatch::Configuration {
-            identity,
-            route: selected.key(),
+    let state = match crate::state::CliState::open(identity) {
+        Ok(state) => state,
+        Err(error) => return failed(path, Some(server), from_server_error(error)),
+    };
+    let recovered = match crate::journal::settle(
+        &state,
+        &selected.key(),
+        crate::journal::Current {
             agent: agent.as_ref(),
-            deadline: connecting,
-            mutating,
+            connection: &connection,
+            link: &link,
+            writer: None,
         },
         &mut reconnect,
+        connecting,
     ) {
-        Ok(journal) => journal,
-        Err(failure) => return failed(path, Some(server), failure),
-    };
-    let recovered = match journal.resolve_leftovers() {
         Ok(recovered) => recovered,
         Err(failure) => return failed(path, Some(server), failure),
     };
+    let actor = match connection.admitted_client_id() {
+        Ok(actor) => actor,
+        Err(error) => return failed(path, Some(server), from_server_error(error)),
+    };
     let mut reader = Connected {
         link: link.clone(),
-        actor: journal.client_id(),
+        actor,
         deadline: connecting,
     };
     let target = match target(cli, command, &mut reader, server_id) {
@@ -144,10 +147,6 @@ fn selected(cli: &Cli, command: &PaneCommand) -> Output {
                     }
                 }
                 None => None,
-            };
-            let state = match crate::state::CliState::open(identity) {
-                Ok(state) => state,
-                Err(error) => return failed(path, Some(server), from_server_error(error)),
             };
             let mut runs = match state.runs(&selected.key(), agent.as_ref(), connecting) {
                 Ok(runs) => runs,
@@ -354,3 +353,7 @@ pub fn rows_text(rows: &Rows) -> String {
     }
     text
 }
+
+#[cfg(test)]
+#[path = "golden_tests.rs"]
+mod golden_tests;

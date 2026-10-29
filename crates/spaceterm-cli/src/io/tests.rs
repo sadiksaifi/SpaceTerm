@@ -671,17 +671,22 @@ fn clearing_scrollback_keeps_the_epoch() {
     // `clear` with E3 erases Scrollback, as Clear Scrollback does.
     let done = run_at_prompt(&link, &target, "printf '\\033[3J'", &mut runs);
     assert!(done.failure.is_none(), "{:?}", done.failure);
-    let after = read::read(
-        &link,
-        &target,
-        &read_args(&["--tail", "5"]),
-        Deadline::after(None),
-    )
-    .data
-    .unwrap()
-    .rows
-    .unwrap()
-    .history;
+    // The run receipt can precede the frame that publishes E3's new history boundary.
+    let until = Instant::now() + Duration::from_secs(5);
+    let after = loop {
+        let observed = read::read(
+            &link,
+            &target,
+            &read_args(&["--tail", "5"]),
+            Deadline::after(Some(Duration::from_secs(5))),
+        );
+        assert!(observed.failure.is_none(), "{:?}", observed.failure);
+        let history = observed.data.unwrap().rows.unwrap().history;
+        if history.oldest == history.total || Instant::now() >= until {
+            break history;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert_eq!(after.epoch, before.epoch);
     assert_eq!(after.oldest, after.total);
 }
@@ -832,4 +837,123 @@ fn run_at_prompt_with(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A stale inventory must ask the caller to resolve again, without suggesting a takeover.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn list_maps_a_stale_observation_to_changed() {
+    let mut server = Server::start();
+    let link = server.connect(1);
+    let (workspace, pane) = workspace(&link, 1);
+    let target = target(workspace, pane, false);
+    let done = run_at_prompt(&link, &target, "true", &mut runs());
+    assert!(done.failure.is_none(), "{:?}", done.failure);
+    let (_, revision) = link.next_inventory(0).unwrap();
+    let mut inventory = revision.inventory.clone();
+    inventory
+        .close
+        .as_mut()
+        .unwrap()
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == pane)
+        .unwrap()
+        .session = Some([99; 32]);
+    let snapshot = crate::scope::Snapshot {
+        server: SERVER,
+        repositories: inventory.repositories.clone(),
+        inventory,
+    };
+    let resolved = crate::scope::resolve(
+        &snapshot,
+        &crate::scope::ScopeArgs::default(),
+        None,
+        crate::scope::Want::Server,
+        crate::scope::Effect::Passive,
+    )
+    .unwrap();
+    let failure = crate::list::collect(
+        &snapshot,
+        &resolved,
+        [1; 32],
+        &link,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .err()
+    .expect("a stale observation fails");
+    assert_eq!(failure.code, Code::Changed);
+}
+
+/// Two live CLI calls of one identity cannot enqueue a second command behind the first.
+#[test]
+#[ignore = "starts a server and shells; run mise run cli:io:test"]
+fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
+    let mut server = Server::start();
+    let first = server.connect(1);
+    let second = server.connect(1);
+    let (workspace, pane) = workspace(&first, 1);
+    let target = target(workspace, pane, false);
+    let done = run_at_prompt(&first, &target, "true", &mut runs());
+    assert!(done.failure.is_none(), "{:?}", done.failure);
+    let target = PaneTarget {
+        running: true,
+        ..target
+    };
+    let running = target.clone();
+    let call = std::thread::spawn(move || {
+        run_at_prompt(
+            &first,
+            &running,
+            "printf 'RUN-%s\\n' BLOCKED; read -s cli_pending; printf 'FIRST-%s\\n' \"$cli_pending\"",
+            &mut runs(),
+        )
+    });
+    let ready = read::read(
+        &second,
+        &target,
+        &read_args(&["--wait-for", "RUN-BLOCKED"]),
+        Deadline::after(Some(Duration::from_secs(10))),
+    );
+    assert!(ready.failure.is_none(), "{:?}", ready.failure);
+    assert!(!call.is_finished());
+    let mut second_runs = runs();
+    let refused = run::run(
+        &second,
+        &mut || Ok(second.clone()),
+        &target,
+        &run_args("printf 'SECOND-%s\\n' EXECUTED"),
+        None,
+        &mut std::io::empty(),
+        &mut second_runs,
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert_eq!(refused.failure.unwrap().code, Code::NotAtPrompt);
+    assert!(
+        second_runs.pending().is_empty(),
+        "a refused call leaves no run journal"
+    );
+    let sent = send::send(
+        &second,
+        &target,
+        &send_args(&["sentinel", "--enter"]),
+        &mut std::io::empty(),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(sent.failure.is_none(), "{:?}", sent.failure);
+    let done = call.join().unwrap();
+    assert!(done.failure.is_none(), "{:?}", done.failure);
+    // If the second run sent even part of its command, the silent read would consume it.
+    let probe = run_at_prompt(&second, &target, "true", &mut second_runs);
+    assert!(probe.failure.is_none(), "{:?}", probe.failure);
+    let observed = read::read(
+        &second,
+        &target,
+        &read_args(&["--tail", "100"]),
+        Deadline::after(Some(Duration::from_secs(5))),
+    );
+    assert!(observed.failure.is_none(), "{:?}", observed.failure);
+    let output = super::start::rows_text(observed.data.unwrap().rows.as_ref().unwrap());
+    assert!(output.contains("FIRST-sentinel"), "{output}");
+    assert!(!output.contains("SECOND-EXECUTED"), "{output}");
 }

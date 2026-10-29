@@ -6,6 +6,8 @@ mod lifecycle;
     reason = "the input check uses its own key, command and screen helpers"
 )]
 mod support;
+#[path = "support/workspace.rs"]
+mod workspace;
 use lifecycle::{Server, connect, require_idle, size};
 use spaceterm::runtime::PhysicalKey;
 use spaceterm_server::{
@@ -19,50 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 use support::{Claimed, Pane, Screen, has_row};
-
-struct WorkspaceCleanup<'a> {
-    client: &'a ServerConnection,
-    boot: Id,
-    workspace: Option<Id>,
-}
-impl WorkspaceCleanup<'_> {
-    fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
-        let Some(workspace) = self.workspace else {
-            return Ok(());
-        };
-        let link = support::connect(self.client)?;
-        let (inventory, next_sequence) = support::inventory(&link)?;
-        if inventory.close.as_ref().map(|live| live.boot) != Some(self.boot) {
-            return Err("cleanup refused a replacement server".into());
-        }
-        if inventory.workspaces.iter().any(|w| w.id == workspace) {
-            let target = CloseTarget::Workspace { workspace };
-            let confirmation = inventory
-                .close_confirmation(target)
-                .ok_or("cleanup authority missing")?;
-            let result = support::mutate(
-                &link,
-                next_sequence,
-                Mutation::Close {
-                    target,
-                    confirmation,
-                },
-            )?;
-            if result.outcome != (Outcome::Accepted { target: workspace }) {
-                return Err("test Workspace cleanup refused".into());
-            }
-        }
-        self.workspace = None;
-        Ok(())
-    }
-}
-impl Drop for WorkspaceCleanup<'_> {
-    fn drop(&mut self) {
-        if let Err(error) = self.cleanup() {
-            eprintln!("test Workspace cleanup failed: {error}");
-        }
-    }
-}
 
 fn key(text: &str, ime: bool) -> Key {
     Key {
@@ -215,8 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     second.setup()?;
     let mut server = Server::start()?;
     let a = connect(&first)?;
-    let (inventory, next_sequence) = support::inventory(&a)?;
-    let boot = inventory.close.as_ref().ok_or("server boot missing")?.boot;
+    let (_, next_sequence) = support::inventory(&a)?;
     let created = support::mutate(
         &a,
         next_sequence,
@@ -229,19 +186,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let Outcome::Accepted { target: workspace } = created.outcome else {
         return Err("creation refused".into());
     };
-    let mut cleanup = WorkspaceCleanup {
-        client: &first,
-        boot,
-        workspace: Some(workspace),
-    };
-    let (inventory, _) = support::inventory(&a)?;
-    let pane = inventory
-        .workspaces
-        .iter()
-        .find(|w| w.id == workspace)
-        .ok_or("created Workspace missing")?
-        .tabs[0]
-        .root_pane;
+    let mut cleanup = workspace::Workspace::track(&first, &a, workspace)?;
+    let pane = cleanup.pane;
     let original = attached(support::select(&a, pane, true, size())?, "Pane missing")?;
     refused(&original, 1, key("discarded", false))?;
     original.focus(1, FocusTarget::Terminal)?;

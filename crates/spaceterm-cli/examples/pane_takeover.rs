@@ -1,9 +1,14 @@
 //! Real-host two-client check. Admission uses owning-account authority without client credentials.
+#[path = "support/lifecycle.rs"]
+mod lifecycle;
 #[expect(
     dead_code,
     reason = "the takeover check uses only Pane claims and terminal helpers"
 )]
 mod support;
+#[path = "support/workspace.rs"]
+mod workspace;
+use spaceterm_server::hierarchy::{CreateControl, Id, Mutation, Outcome};
 use spaceterm_server::{
     ServerConnection, ServerError,
     connection::link::ServerLink,
@@ -11,19 +16,16 @@ use spaceterm_server::{
     protocol::{Operation, PaneEvent, Takeover},
 };
 use std::error::Error;
-use support::{Claimed, Ending, attach};
+use support::{Claimed, Ending};
 
 fn size(columns: u16) -> PaneSize {
     PaneSize {
         columns,
-        rows: 24,
-        cell_width: 8,
-        cell_height: 18,
+        ..lifecycle::size()
     }
 }
 /// Selects the inventory's first Pane without starting or acquiring it.
-fn select(link: &ServerLink) -> Result<Claimed, ServerError> {
-    let pane = support::first_pane(link, false)?;
+fn select(link: &ServerLink, pane: Id) -> Result<Claimed, ServerError> {
     support::select(link, pane, false, size(80))
 }
 /// The Takeover offer in `claimed` and the Controlling Client it names.
@@ -46,32 +48,43 @@ fn controlled_by(controller: Controller, development: &str) -> Result<String, Bo
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    if !spaceterm_server::service::Service::for_identity("spaceterm-development")?
-        .status()?
-        .installed
-    {
-        return Err(ServerError::NotInstalled.into());
-    }
     let major = std::env::args()
         .nth(1)
         .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
         .parse()?;
     let first = ServerConnection::for_development_client("takeover-first", major)?;
     let second = ServerConnection::for_development_client("takeover-second", major)?;
-    for client in [&first, &second] {
-        assert_eq!(client.refresh()?.protocol_major, major);
-    }
-    let a = support::connect(&first)?;
-    let original = attach(&a, true, size(80))?;
+    lifecycle::require_idle(&first)?;
+    first.setup()?;
+    second.setup()?;
+    let mut server = lifecycle::Server::start()?;
+    let a = lifecycle::connect(&first)?;
+    let (_, sequence) = support::inventory(&a)?;
+    let created = support::mutate(
+        &a,
+        sequence,
+        Mutation::CreateWorkspace {
+            name: "Pane takeover check".into(),
+            directory: None,
+            control: CreateControl::Creator,
+        },
+    )?;
+    let Outcome::Accepted { target: workspace } = created.outcome else {
+        return Err("creation refused".into());
+    };
+    let mut cleanup = workspace::Workspace::track(&first, &a, workspace)?;
+    let pane = cleanup.pane;
+    let Claimed::Attached(original) = support::select(&a, pane, true, size(80))? else {
+        return Err("new Pane was not attached".into());
+    };
     original.command(
         "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 2; printf 'CONTINUED\\n'",
     )?;
     original.await_output("STARTED")?;
     let b = support::connect(&second)?;
-    let takeover = offer(select(&b)?)?;
+    let takeover = offer(select(&b, pane)?)?;
     let first_name = controlled_by(takeover.controller, "takeover-first")?;
     println!("takeover-second observed the Controlling Client {first_name:?}.");
-    let pane = support::first_pane(&b, false)?;
     let Claimed::Attached(transferred) = support::claim(
         &b,
         pane,
@@ -107,7 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     a.close();
     drop(original);
     let a = support::connect(&first)?;
-    let second_name = controlled_by(offer(select(&a)?)?.controller, "takeover-second")?;
+    let second_name = controlled_by(offer(select(&a, pane)?)?.controller, "takeover-second")?;
     println!("takeover-first observed the Controlling Client {second_name:?} after Take Over.");
     transferred.await_output("CONTINUED")?;
     transferred.command("stty size")?;
@@ -121,16 +134,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     println!("takeover-second observed no Controlling Client after Release.");
-    let Claimed::Attached(reclaimed) = select(&a)? else {
+    let Claimed::Attached(reclaimed) = support::select(&a, pane, true, size(80))? else {
         return Err("unclaimed acquisition failed".into());
     };
     assert_eq!(lease.session, reclaimed.lease().session);
-    assert!(matches!(select(&b)?, Claimed::Takeover(_)));
+    assert!(matches!(select(&b, pane)?, Claimed::Takeover(_)));
     assert_eq!(
         support::request(&b, Operation::ClearScrollback { channel }).err(),
         Some(ServerError::StaleControl)
     );
     reclaimed.close()?;
+    cleanup.cleanup()?;
+    support::done(&b, Operation::Shutdown)?;
+    let _ = server.kill();
     println!(
         "Protocol {major}: two account-local clients transferred the same running Session, named each other as the Controlling Client, refused stale content/resize/close, preserved takeover on reconnect, and acquired released control."
     );

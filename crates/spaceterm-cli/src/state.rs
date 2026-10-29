@@ -243,6 +243,28 @@ impl CliState {
             Ok(LockWait::Held | LockWait::Cancelled) => return Err(Code::IdentityBusy),
             Err(_) => return Err(Code::StorageUnavailable),
         };
+        Self::open_runs(directory, lock)
+    }
+
+    /// Opens pending runs only when no command currently owns their receipt lock.
+    pub fn try_runs(
+        &self,
+        route: &RouteKey,
+        agent: Option<&AgentName>,
+    ) -> Result<Option<Runs>, Code> {
+        let directory = self
+            .identity_dir(route, agent)
+            .map_err(|_| Code::StorageUnavailable)?;
+        let Some(lock) = directory
+            .try_lock(RUNS_LOCK)
+            .map_err(|_| Code::StorageUnavailable)?
+        else {
+            return Ok(None);
+        };
+        Self::open_runs(directory, lock).map(Some)
+    }
+
+    fn open_runs(directory: Directory, lock: Lock) -> Result<Runs, Code> {
         let record = directory
             .read_json::<RunsRecord>("runs.json")
             .map_err(|_| Code::StorageUnavailable)?
