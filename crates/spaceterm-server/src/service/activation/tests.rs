@@ -171,6 +171,18 @@ fn stopped_activation_changes_only_the_exact_runtime_and_preserves_stop() {
 }
 
 #[test]
+fn a_candidate_of_another_protocol_major_activates() {
+    runtime::test_support::with_major(crate::protocol::MAJOR + 1, || {
+        with_service(|service, _, candidate, supervisor| {
+            let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+            let status = service.activate(approval).unwrap();
+            assert_eq!(status.phase, ActivationPhase::Completed { running: false });
+            assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+        });
+    });
+}
+
+#[test]
 fn completed_nonproduction_updates_with_dirty_versions_remain_readable_after_relaunch() {
     for identity in ["spaceterm-development", "spaceterm-preflight"] {
         for dirty_previous in [false, true] {
