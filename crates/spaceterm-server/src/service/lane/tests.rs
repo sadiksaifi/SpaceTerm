@@ -101,9 +101,14 @@ impl Source for NoFeed {
 /// A lane over the server state at `paths`, whose service manager reports a running server and
 /// whose helper launches do nothing.
 pub(crate) fn serving(paths: &crate::host::Paths) -> Arc<LaneServer> {
+    serving_with(paths, Arc::new(Host::default()))
+}
+
+/// [`serving`] with its own view of the running server.
+pub(crate) fn serving_with(paths: &crate::host::Paths, host: Arc<dyn LaneHost>) -> Arc<LaneServer> {
     LaneServer::new(
         Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
-        Arc::new(Host::default()),
+        host,
         Arc::new(NoFeed),
         Box::new(|_| Ok(())),
     )
@@ -677,7 +682,9 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
             panic!("expected a service-lane connection");
         };
         assert_eq!(actor.client, derived);
-        lane.lane.serve(&mut server, actor, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut server, actor, None, &|| Ok(()))
+            .unwrap();
         let (major, reply) = peer.join().unwrap();
         assert_eq!(major, crate::protocol::MAJOR);
         assert_eq!(code(reply), "not_found");
@@ -742,7 +749,9 @@ fn a_stopping_server_closes_a_polling_lane_connection() {
             client.receive(MAX_FRAME, deadline).is_err()
         });
         let started = Instant::now();
-        lane.lane.serve(&mut server, ACTOR, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut server, ACTOR, None, &|| Ok(()))
+            .unwrap();
         drop(server);
         assert!(peer.join().unwrap(), "the client saw the connection close");
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -771,7 +780,9 @@ fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
             }
             replies
         });
-        lane.lane.serve(&mut server, ACTOR, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut server, ACTOR, None, &|| Ok(()))
+            .unwrap();
         let mut replies = peer.join().unwrap().into_iter();
         assert_eq!(code(replies.next().unwrap()), "protocol_error");
         assert!(matches!(replies.next().unwrap(), LaneReply::Status(_)));
@@ -816,7 +827,7 @@ mod flow {
                 .lock()
                 .unwrap()
                 .push(server.try_clone().map_err(|_| ServerError::Protocol)?);
-            std::thread::spawn(move || lane.serve(&mut server, ACTOR, &|| Ok(())));
+            std::thread::spawn(move || lane.serve(&mut server, ACTOR, None, &|| Ok(())));
             Ok(Box::new(client))
         }
     }

@@ -1523,6 +1523,23 @@ impl Driver {
     }
 
     /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
+    /// The server address a server connection's client reached: the destination its packets
+    /// carried, or the listener's own address when it listens at one, at the listener's port.
+    /// `None` on a client, or when a listener on every interface learned no destination.
+    fn destination(&self) -> Option<SocketAddr> {
+        let Side::Server { shared, .. } = &self.side else {
+            return None;
+        };
+        let bound = shared.sockets().address;
+        let ip = self
+            .connection
+            .network_path(noq_proto::PathId::ZERO)
+            .ok()
+            .and_then(|path| path.local_ip())
+            .or_else(|| (!bound.ip().is_unspecified()).then(|| bound.ip()))?;
+        Some(SocketAddr::new(ip.to_canonical(), bound.port()))
+    }
+
     /// A second handle on a server connection's bell. A client has none.
     fn ring(&self) -> Option<UnixStream> {
         match &self.side {
@@ -1752,6 +1769,11 @@ impl QuicStream {
     /// The certificates the peer presented.
     pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
         self.driver.peer_certificates()
+    }
+
+    /// The server address a server connection's client reached, when known.
+    pub fn destination(&self) -> Option<SocketAddr> {
+        self.driver.destination()
     }
 
     fn l0(&self) -> Result<StreamId, QuicError> {

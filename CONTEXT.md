@@ -97,6 +97,10 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients contr
 
 **Add Server**: The Settings-owned journey that enrolls a remote SpaceTerm Server through SSH Setup or an Invitation Link.
 
+**Network Access**: A SpaceTerm Server's deliberate QUIC exposure: off, or on at one address of its machine or every interface, at one port.
+
+**Change Network Access**: The confirmed action that turns Network Access on or off or moves it to another address or port, reporting first whether it ends the caller's connection and which connected Paired Devices lose their route.
+
 **Invite Device**: The server action that creates an Invitation Link for one new Paired Device.
 
 **Invitation Link**: A one-use `spaceterm://pair/…` link containing the server address, pinned identity and a strong secret, valid for five minutes.

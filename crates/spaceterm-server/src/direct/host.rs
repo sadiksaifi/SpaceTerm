@@ -318,14 +318,19 @@ impl State {
     }
     /// Registers a paired connection of listener `generation`, so revocation reaches it through
     /// `sever`. The authorization check and the registration share this lock with every
-    /// revocation. `client` is the connection's effective Client Identity. A service-lane
-    /// connection has no `outbox`.
+    /// revocation. `client` is the connection's effective Client Identity, and `route` the
+    /// server address it reached. A service-lane connection has no `outbox`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one connection's whole registration"
+    )]
     pub(crate) fn register(
         &mut self,
         paired: &PairedDevice,
         generation: [u8; 32],
         connection: [u8; 32],
         client: [u8; 32],
+        route: Option<std::net::SocketAddr>,
         outbox: Option<crate::connection::outbox::Outbox>,
         sever: Box<dyn Sever>,
     ) -> Result<(), DirectError> {
@@ -338,6 +343,7 @@ impl State {
                     pairing: paired.pairing,
                     generation,
                 },
+                route,
                 outbox,
                 sever,
             )
@@ -1470,6 +1476,7 @@ pub(crate) fn serve(
         }
     };
     let connection = crate::protocol::random()?;
+    let route = stream.destination();
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
     // A new name past the limit may evict only a name that holds nothing. The idle names stay
@@ -1528,6 +1535,7 @@ pub(crate) fn serve(
                 generation,
                 connection,
                 client,
+                route,
                 Some(outbox.clone()),
                 Box::new(carrier.sever()),
             )
@@ -1582,11 +1590,13 @@ fn serve_lane(
 ) -> Result<(), ServerError> {
     let lane = environment.lane.as_ref().ok_or(ServerError::Unsupported)?;
     let connection = crate::protocol::random()?;
+    let route = stream.destination();
     state.lock().unwrap_or_else(|e| e.into_inner()).register(
         paired,
         generation,
         connection,
         actor.client,
+        route,
         None,
         Box::new(stream.sever()),
     )?;
@@ -1599,7 +1609,7 @@ fn serve_lane(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .note_connection(paired)?;
-    lane.serve(&mut stream, actor, &|| {
+    lane.serve(&mut stream, actor, route, &|| {
         state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1736,6 +1746,12 @@ impl Drop for Registered {
             .unregister(self.connection);
     }
 }
+
+mod network_change;
+pub(crate) use network_change::change_network;
+
+#[cfg(test)]
+mod network_change_tests;
 
 #[cfg(test)]
 mod network_tests;
@@ -1937,6 +1953,7 @@ mod tests {
             generation,
             [5; 32],
             paired.client,
+            None,
             Some(outbox),
             Box::new(super::super::tests::Quiet),
         );

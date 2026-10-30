@@ -5,11 +5,12 @@
 //! frame is length-prefixed JSON of at most [`MAX_FRAME`] bytes. Fields may be added to these
 //! messages. They are never removed or renamed.
 //!
-//! Stop, Restart, Update and Return run in two steps. `Preview` observes the service, the live
+//! Stop, Restart, Update, Return and Network Access changes run in two steps. `Preview` observes the service, the live
 //! Session set and the candidate, and returns a token bound to that observation. `Execute`
 //! recomputes the observation under the hierarchy lock, sets the membership fence so no new
 //! Session starts, admits the operation in the ledger and launches the helper that performs it.
 //! The client later reads the outcome with `Resolve` and deletes it with `Acknowledge`.
+//! [`network`] describes how a Network Access change differs.
 use super::feed::{self, Source};
 use super::operations::{
     Action, Actor, Admission, Evidence, HELPER_LOCK, Ledger, OperationId, Record, State,
@@ -21,6 +22,7 @@ use crate::hierarchy::Id;
 use crate::protocol::Preamble;
 use crate::storage::Directory;
 use base64::Engine;
+use network::{LaneNetworkEffects, NetworkAccess, NetworkCaller, NetworkPlan};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -81,6 +83,7 @@ pub enum LaneAction {
     Restart,
     Update { installation: String },
     Return,
+    Network { access: NetworkAccess },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +104,12 @@ pub enum LaneReply {
         token: String,
         expires_at: String,
         effects: LaneEffects,
+    },
+    /// The preview of a Network Access change.
+    NetworkPreview {
+        token: String,
+        expires_at: String,
+        effects: LaneNetworkEffects,
     },
     Accepted {
         operation: String,
@@ -245,6 +254,29 @@ pub trait LaneHost: Send + Sync {
     fn stopping(&self) -> bool {
         false
     }
+    /// Plans `access` for `caller` under the direct-network lock, and applies it in the same
+    /// hold when `decide` returns true. A server without Network Access is `Unsupported`.
+    fn change_network(
+        &self,
+        _access: NetworkAccess,
+        _caller: Option<&NetworkCaller>,
+        _decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, ServerError>,
+    ) -> Result<(), ServerError> {
+        Err(ServerError::Unsupported)
+    }
+}
+
+/// What an `Execute` admitted, which the lane starts after it wrote `Accepted`.
+enum Dispatch {
+    /// The helper performs it.
+    Helper(OperationId),
+    /// The lane applies a Network Access change itself.
+    Network {
+        id: OperationId,
+        access: NetworkAccess,
+        caller: Option<NetworkCaller>,
+        observation: [u8; 32],
+    },
 }
 
 type Launcher = dyn Fn(&OperationId) -> Result<(), ServerError> + Send + Sync;
@@ -336,12 +368,13 @@ impl LaneServer {
     /// stays silent past the request limit, the server stops, or `authorized` fails.
     /// `authorized` runs before every read and again before every answer, so a revoked pairing
     /// ends the lane without another answer. A host that stops severs the transport, which ends
-    /// a read already waiting. A newly admitted operation launches only after its `Accepted`
-    /// reply was written.
+    /// a read already waiting. A newly admitted operation starts only after its `Accepted`
+    /// reply was written. `route` is the server address a paired connection reached.
     pub(crate) fn serve(
         self: &Arc<Self>,
         stream: &mut dyn Preamble,
         actor: Actor,
+        route: Option<std::net::SocketAddr>,
         authorized: &dyn Fn() -> Result<(), ServerError>,
     ) -> Result<(), ServerError> {
         loop {
@@ -358,39 +391,51 @@ impl LaneServer {
                 return Ok(());
             }
             authorized()?;
+            let caller = NetworkCaller::of(&actor, route);
             let (reply, launch) = match serde_json::from_slice::<LaneRequest>(&bytes) {
-                Ok(request) => self.respond(request, &actor),
+                Ok(request) => self.respond(request, &actor, caller),
                 Err(_) => (error(&ServerError::Protocol), None),
             };
             let sent = serde_json::to_vec(&reply)
                 .map_err(|_| ServerError::Protocol)
                 .and_then(|bytes| stream.send(&bytes, Instant::now() + REQUEST_LIMIT));
-            // The record is durable, so it launches even when its reply was lost. The client
+            // The record is durable, so it starts even when its reply was lost. The client
             // resolves the same operation ID after a lost reply.
-            if let Some(id) = launch {
-                self.dispatch(&id);
+            if let Some(dispatch) = launch {
+                self.dispatch(dispatch);
             }
             sent?;
         }
     }
 
-    /// Answers one request, and launches what it admitted.
+    /// Answers one request from a caller with no paired connection, and starts what it
+    /// admitted.
     pub fn answer(self: &Arc<Self>, request: LaneRequest, actor: &Actor) -> LaneReply {
-        let (reply, launch) = self.respond(request, actor);
-        if let Some(id) = launch {
-            self.dispatch(&id);
+        let (reply, launch) = self.respond(request, actor, NetworkCaller::of(actor, None));
+        if let Some(dispatch) = launch {
+            self.dispatch(dispatch);
         }
         reply
     }
 
-    /// Answers one request. An `Execute` that admitted a new record returns its ID, which the
-    /// caller launches after it wrote the reply.
+    /// Answers one request. An `Execute` that admitted a new record returns what the caller
+    /// starts after it wrote the reply.
     fn respond(
         self: &Arc<Self>,
         request: LaneRequest,
         actor: &Actor,
-    ) -> (LaneReply, Option<OperationId>) {
+        caller: Option<NetworkCaller>,
+    ) -> (LaneReply, Option<Dispatch>) {
         let result = match request {
+            LaneRequest::Execute {
+                action: LaneAction::Network { access },
+                token,
+                operation,
+            } => {
+                return self
+                    .execute_network(access, &token, &operation, actor, caller)
+                    .unwrap_or_else(|failure| (error(&failure), None));
+            }
             LaneRequest::Execute {
                 action,
                 token,
@@ -398,8 +443,12 @@ impl LaneServer {
             } => {
                 return self
                     .execute(&action, &token, &operation, actor)
+                    .map(|(reply, id)| (reply, id.map(Dispatch::Helper)))
                     .unwrap_or_else(|failure| (error(&failure), None));
             }
+            LaneRequest::Preview {
+                action: LaneAction::Network { access },
+            } => self.preview_network(access, actor, caller),
             LaneRequest::Status => self
                 .admin()
                 .status(Some(self.host.as_ref()))
@@ -503,6 +552,144 @@ impl LaneServer {
             .map(|installation| staged_reply(&installation))
     }
 
+    /// Plans a Network Access change without applying it. A paired caller's change that keeps
+    /// no connected device's route is refused before any token is issued.
+    fn preview_network(
+        &self,
+        access: NetworkAccess,
+        actor: &Actor,
+        caller: Option<NetworkCaller>,
+    ) -> Result<LaneReply, ServerError> {
+        let key = action_key(&LaneAction::Network { access })?;
+        let mut planned = None;
+        self.host
+            .change_network(access, caller.as_ref(), &mut |plan| {
+                planned = Some(plan.clone());
+                Ok(false)
+            })?;
+        let plan = planned.ok_or(ServerError::Protocol)?;
+        if plan.refused_for(caller.as_ref()) {
+            return Ok(refusal());
+        }
+        let observation = plan.observation(&self.server, &self.boot, &key);
+        let issued = self
+            .tokens
+            .issue(&key, observation, *actor, Instant::now())?;
+        Ok(LaneReply::NetworkPreview {
+            token: issued.token,
+            expires_at: timestamp(issued.expires_at),
+            effects: plan.effects(),
+        })
+    }
+
+    /// Admits a previewed Network Access change whose plan still matches its token. The
+    /// change itself starts after `Accepted` was written, because it may end this connection.
+    fn execute_network(
+        self: &Arc<Self>,
+        access: NetworkAccess,
+        token: &str,
+        operation: &str,
+        actor: &Actor,
+        caller: Option<NetworkCaller>,
+    ) -> Result<(LaneReply, Option<Dispatch>), ServerError> {
+        let id = OperationId::parse(operation).ok_or(ServerError::Protocol)?;
+        let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
+        let accepted = LaneReply::Accepted {
+            operation: id.to_string(),
+            boot: hex(&self.boot),
+        };
+        if let Some(record) = self.ledger()?.resolve(&id)? {
+            return if record.actor == *actor {
+                Ok((accepted, None))
+            } else {
+                Err(ServerError::Changed)
+            };
+        }
+        let key = action_key(&LaneAction::Network { access })?;
+        let expected = self.tokens.redeem(token, &key, actor, Instant::now())?;
+        let record = Record {
+            id,
+            actor: *actor,
+            server: self.server,
+            boot: self.boot,
+            action: Action::Network(access),
+            observation_digest: expected,
+            candidate: None,
+            state: State::Admitted,
+            updated_at: 0,
+            orphaned: false,
+        };
+        let mut refused = false;
+        let mut admitted = None;
+        self.host
+            .change_network(access, caller.as_ref(), &mut |plan| {
+                if plan.observation(&self.server, &self.boot, &key) != expected {
+                    return Err(ServerError::Changed);
+                }
+                if plan.refused_for(caller.as_ref()) {
+                    refused = true;
+                    return Ok(false);
+                }
+                admitted = Some(self.ledger()?.admit(record.clone())?);
+                Ok(false)
+            })?;
+        if refused {
+            return Ok((refusal(), None));
+        }
+        let dispatch = matches!(admitted, Some(Admission::New(_))).then_some(Dispatch::Network {
+            id,
+            access,
+            caller,
+            observation: expected,
+        });
+        Ok((accepted, dispatch))
+    }
+
+    /// Applies an admitted Network Access change if its plan still matches, and settles its
+    /// record. The record is `Running` while the change applies, so a server that ends then
+    /// leaves it unresolved rather than not performed.
+    fn change_network(
+        &self,
+        id: &OperationId,
+        access: NetworkAccess,
+        caller: Option<NetworkCaller>,
+        observation: [u8; 32],
+    ) {
+        let key = match action_key(&LaneAction::Network { access }) {
+            Ok(key) => key,
+            Err(_) => return,
+        };
+        let (mut started, mut settled) = (false, false);
+        let result = self
+            .host
+            .change_network(access, caller.as_ref(), &mut |plan| {
+                if plan.observation(&self.server, &self.boot, &key) != observation {
+                    return Err(ServerError::Changed);
+                }
+                // A record already settled without this change is left alone.
+                if self.ledger()?.claim(id)?.is_none() {
+                    settled = true;
+                    return Ok(false);
+                }
+                started = true;
+                Ok(true)
+            });
+        if settled {
+            return;
+        }
+        // The plan validated the request, so a failure once the change started is a commit the
+        // host could not confirm.
+        let state = match result {
+            Ok(()) => State::Done,
+            Err(_) if started => State::Unresolved,
+            Err(failure) => State::Failed {
+                code: super::lane_codes::code(&failure).to_owned(),
+            },
+        };
+        // An outcome that could not be recorded stays `Running` for start-up recovery.
+        let _ = self.ledger().and_then(|mut v| v.mark(id, state));
+    }
+
     fn preview(&self, action: &LaneAction, actor: &Actor) -> Result<LaneReply, ServerError> {
         let prepared = self.admin().prepare(action, &self.server, &self.boot)?;
         let sessions = self.host.sessions();
@@ -554,6 +741,7 @@ impl LaneServer {
                 LaneAction::Restart => Action::Restart,
                 LaneAction::Update { .. } => Action::Update,
                 LaneAction::Return => Action::Return,
+                LaneAction::Network { .. } => return Err(ServerError::Protocol),
             },
             observation_digest: expected,
             candidate: prepared.candidate,
@@ -573,9 +761,22 @@ impl LaneServer {
         Ok((accepted, launch))
     }
 
+    /// Starts what `Execute` admitted.
+    fn dispatch(self: &Arc<Self>, dispatch: Dispatch) {
+        match dispatch {
+            Dispatch::Helper(id) => self.launch_helper(&id),
+            Dispatch::Network {
+                id,
+                access,
+                caller,
+                observation,
+            } => self.change_network(&id, access, caller, observation),
+        }
+    }
+
     /// Launches the helper for a newly admitted record and watches the record until it
     /// settles, then clears the membership fence.
-    fn dispatch(self: &Arc<Self>, id: &OperationId) {
+    fn launch_helper(self: &Arc<Self>, id: &OperationId) {
         let launched = (self.launch)(id);
         let mark = match launched {
             Ok(()) => State::Launched,
@@ -663,6 +864,7 @@ impl LaneServer {
                         .unwrap_or_default(),
                 },
                 Action::Return => LaneAction::Return,
+                Action::Network(access) => LaneAction::Network { access },
             },
             state,
             code,
@@ -890,6 +1092,7 @@ impl Admin<'_> {
                 effects.to_major = protocol_major(approval.previous());
                 (false, None)
             }
+            LaneAction::Network { .. } => return Err(ServerError::Unsupported),
         };
         Ok(Prepared {
             service: digest
@@ -1150,6 +1353,13 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|v| format!("{v:02x}")).collect()
 }
 
+/// A paired caller's Network Access change that keeps no connected device's route.
+fn refusal() -> LaneReply {
+    LaneReply::Error {
+        code: super::lane_codes::DISCONNECTS_EVERY_DEVICE.to_owned(),
+    }
+}
+
 fn error(failure: &ServerError) -> LaneReply {
     LaneReply::Error {
         code: super::lane_codes::code(failure).to_owned(),
@@ -1158,5 +1368,6 @@ fn error(failure: &ServerError) -> LaneReply {
 
 #[cfg(feature = "client")]
 pub mod client;
+pub mod network;
 #[cfg(test)]
 pub(crate) mod tests;

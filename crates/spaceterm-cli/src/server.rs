@@ -1,11 +1,13 @@
 //! `spaceterm server`: make this machine a server, pair devices with it, and administer it.
 //!
-//! Status, Stop, Restart and Update reach a running server through its service lane, locally
-//! over account IPC and remotely over the paired connection, so they work across protocol majors.
-//! Setup, Start, pairing, Unpair and End All Sessions stay on the server's own machine. While the server is
+//! Status, Stop, Restart, Update and Network Access changes reach a running server through its
+//! service lane, locally over account IPC and remotely over the paired connection, so they work
+//! across protocol majors. Setup, Start, pairing, Unpair and End All Sessions stay on the server's
+//! own machine. While the server is
 //! stopped, local Status and Update read and change the service directly.
 pub mod end_all_sessions;
 pub mod lifecycle;
+pub mod network;
 pub mod offline_token;
 pub mod pair;
 pub mod setup;
@@ -146,6 +148,9 @@ pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
             archive.as_deref().zip(signature.as_deref()),
             confirm.as_deref(),
         ),
+        ServerCommand::Network { access, confirm } => {
+            network::run(&context, access, confirm.as_deref())
+        }
         ServerCommand::EndAllSessions(confirm) => {
             end_all_sessions::run(&context, confirm.confirm.as_deref())
         }
@@ -168,6 +173,7 @@ fn path(command: &ServerCommand) -> &'static str {
         ServerCommand::Stop(_) => "server.stop",
         ServerCommand::Restart(_) => "server.restart",
         ServerCommand::Update { .. } => "server.update",
+        ServerCommand::Network { .. } => "server.network",
         ServerCommand::EndAllSessions(_) => "server.end-all-sessions",
         ServerCommand::Unpair { .. } => "server.unpair",
         ServerCommand::Run { .. } => "server.run",

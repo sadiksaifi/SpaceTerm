@@ -16,6 +16,7 @@ fn metadata_write_failure_preserves_the_live_connection_and_its_exact_authority(
             generation,
             [5; 32],
             paired.client,
+            None,
             Some(outbox.clone()),
             Box::new(crate::direct::tests::Quiet),
         )

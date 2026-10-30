@@ -1,0 +1,164 @@
+//! Golden envelopes and text of `server network`, built by the functions the command uses.
+use super::*;
+use crate::contract::golden::assert_golden;
+use spaceterm_server::service::lane::client::Outcome;
+use spaceterm_server::service::lane::{LaneDevice, LaneOperationState, LaneReceipt};
+
+const EXPIRES: &str = "2026-10-30T12:10:00Z";
+const OPERATION: &str = "0123456789abcdef0123456789abcdef";
+const BOOT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const TO: &str = "192.0.2.4:9231";
+
+fn server() -> ServerRef {
+    ServerRef {
+        name: "penguin".into(),
+        route: format!("id:{}", "4e".repeat(32)),
+        id: "5b".repeat(32),
+    }
+}
+
+fn on(bind: &str) -> LaneNetworkSetting {
+    LaneNetworkSetting {
+        enabled: true,
+        bind: Some(bind.into()),
+    }
+}
+
+fn effects(caller: LaneCallerEffect) -> LaneNetworkEffects {
+    LaneNetworkEffects {
+        from: on("0.0.0.0:9231"),
+        to: on(TO),
+        ends_connections: true,
+        caller: Some(caller),
+        disconnects: vec![LaneDevice {
+            id: "6c".repeat(32),
+            name: "Studio desktop".into(),
+            fingerprint: "SHA256:studio".into(),
+            last_connected_at: None,
+        }],
+    }
+}
+
+fn receipt(state: LaneOperationState) -> LaneReceipt {
+    LaneReceipt {
+        operation: OPERATION.into(),
+        action: LaneAction::Network {
+            access: NetworkAccess::Address(TO.parse().unwrap()),
+        },
+        state,
+        code: None,
+        boot: BOOT.into(),
+    }
+}
+
+#[test]
+fn a_preview_reports_the_callers_reconnect_and_the_devices_that_lose_their_route() {
+    let effects = effects(LaneCallerEffect::Reconnects);
+    let envelope = preview_envelope(
+        server(),
+        format!("c1-{}", "ab".repeat(32)),
+        EXPIRES.into(),
+        &effects,
+        Vec::new(),
+    );
+    assert_eq!(envelope.exit(), 3);
+    assert_golden("server_network_preview", &envelope);
+    assert_eq!(
+        summary("penguin", &effects),
+        format!(
+            "Change Network Access on penguin from on at 0.0.0.0:9231 to on at {TO}?\n\
+             Every paired connection ends. A device reconnects only if the new setting serves the address it uses.\n\
+             This device's connection ends, and it reconnects.\n\
+             These connected devices lose their route:\n  id:{}  Studio desktop\n",
+            "6c".repeat(32)
+        )
+    );
+}
+
+#[test]
+fn a_preview_says_when_the_caller_cannot_reconnect_or_stays_connected() {
+    let lost = summary("penguin", &effects(LaneCallerEffect::Disconnected));
+    assert!(lost.contains("This device loses its connection and can't reconnect"));
+    let widened = LaneNetworkEffects {
+        from: on(TO),
+        to: on("0.0.0.0:9231"),
+        ends_connections: false,
+        caller: Some(LaneCallerEffect::StaysConnected),
+        disconnects: Vec::new(),
+    };
+    let text = summary("penguin", &widened);
+    assert!(text.contains("This device stays connected."));
+    assert!(!text.contains("Every paired connection ends"));
+    assert!(!widened.unchanged());
+    // The server's own machine has no paired connection to describe.
+    let local = LaneNetworkEffects {
+        caller: None,
+        ..widened
+    };
+    assert!(!summary("local", &local).contains("This device"));
+}
+
+#[test]
+fn a_change_that_disconnects_every_device_is_refused_with_its_own_code() {
+    let failure = contract::from_lane_code("disconnects_every_device");
+    assert_eq!(failure.code, Code::DisconnectsEveryDevice);
+    let envelope = Envelope::error(COMMAND, Some(server()), failure, contract::Empty {});
+    assert_eq!(envelope.exit(), 5);
+    assert_golden("server_network_disconnects_every_device", &envelope);
+}
+
+#[test]
+fn a_change_that_cut_and_restored_the_callers_connection_reports_done() {
+    let settled = super::super::lifecycle::settle(
+        ServiceAction::Network,
+        Outcome::Settled {
+            receipt: receipt(LaneOperationState::Done),
+            boot: BOOT.into(),
+        },
+    );
+    assert!(settled.acknowledged);
+    let (envelope, text) = result(server(), settled, Some(on(TO)));
+    assert_eq!(envelope.exit(), 0);
+    assert_eq!(text, format!("Network Access is now on at {TO}.\n"));
+    assert_golden("server_network_done", &envelope);
+}
+
+#[test]
+fn a_caller_that_lost_its_route_reports_an_unconfirmed_outcome() {
+    let settled = super::super::lifecycle::settle(
+        ServiceAction::Network,
+        Outcome::Unconfirmed {
+            operation: OPERATION.into(),
+            boot: BOOT.into(),
+            last: None,
+        },
+    );
+    assert!(!settled.acknowledged);
+    let (envelope, text) = result(server(), settled, None);
+    assert_eq!(envelope.exit(), 7);
+    assert_eq!(
+        text,
+        "Confirm Network Access on penguin with: spaceterm server status\n"
+    );
+    assert_golden("server_network_unconfirmed", &envelope);
+}
+
+fn parsed(text: &str) -> Network {
+    use clap::Parser;
+    let cli = crate::args::Cli::try_parse_from(["spaceterm", "server", "network", text]).unwrap();
+    match cli.command {
+        crate::args::Command::Server(crate::args::ServerCommand::Network { access, .. }) => access,
+        other => panic!("parsed {other:?}"),
+    }
+}
+
+#[test]
+fn the_access_argument_round_trips_into_the_confirmation_hint() {
+    for text in ["off", "all", "192.0.2.4:9231", "[2001:db8::4]:9231"] {
+        assert_eq!(argument(access(&parsed(text))), text);
+    }
+    assert_eq!(
+        argument(access(&parsed("192.0.2.4"))),
+        format!("192.0.2.4:{}", spaceterm_server::direct::DEFAULT_PORT)
+    );
+}

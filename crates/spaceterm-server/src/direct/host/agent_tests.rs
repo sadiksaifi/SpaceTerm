@@ -38,6 +38,7 @@ fn a_new_agent_name_past_the_limit_evicts_the_least_recently_admitted_idle_name(
             [5; 32],
             agent(0).client(&paired.client),
             None,
+            None,
             Box::new(Quiet),
         )
         .unwrap();

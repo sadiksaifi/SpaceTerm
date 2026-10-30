@@ -462,6 +462,17 @@ impl crate::service::lane::LaneHost for HostLane {
         };
         Ok(devices.iter().map(crate::service::lane::device).collect())
     }
+    fn change_network(
+        &self,
+        access: crate::service::lane::network::NetworkAccess,
+        caller: Option<&crate::service::lane::network::NetworkCaller>,
+        decide: &mut dyn FnMut(
+            &crate::service::lane::network::NetworkPlan,
+        ) -> Result<bool, ServerError>,
+    ) -> Result<(), ServerError> {
+        let state = self.direct.as_ref().ok_or(ServerError::Unsupported)?;
+        crate::direct::host::change_network(state, access, caller, decide)
+    }
     fn network(&self) -> Result<crate::service::lane::LaneNetwork, ServerError> {
         let off = crate::service::lane::LaneNetwork {
             enabled: false,
@@ -920,7 +931,7 @@ fn serve_local(
             // socket's reading, which ends the lane's wait for a request.
             protocol::Admission::Service(actor) => {
                 let lane = environment.lane.as_ref().ok_or(ServerError::Unsupported)?;
-                return lane.serve(&mut stream, actor, &|| Ok(()));
+                return lane.serve(&mut stream, actor, None, &|| Ok(()));
             }
         };
     let peer = Peer {
