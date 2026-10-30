@@ -45,6 +45,31 @@ pub fn rename(
     })
 }
 
+pub fn pin(
+    snapshot: &Snapshot,
+    args: &ScopeArgs,
+    current: Option<&Current>,
+    directory: Option<PathBuf>,
+) -> Result<Planned, WorkError> {
+    let target = scope::resolve(snapshot, args, current, Want::Workspace, Effect::Mutating)?;
+    let workspace = target.workspace.ok_or(WorkError::Code(Code::NotFound))?;
+    let version = snapshot
+        .inventory
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace)
+        .ok_or(WorkError::Code(Code::NotFound))?
+        .pin_version;
+    Ok(Planned {
+        target,
+        mutation: Mutation::PinWorkspace {
+            workspace,
+            version,
+            directory,
+        },
+    })
+}
+
 pub fn kill(
     snapshot: &Snapshot,
     args: &ScopeArgs,

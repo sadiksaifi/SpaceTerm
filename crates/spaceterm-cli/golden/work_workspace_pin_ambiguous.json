@@ -1,0 +1,45 @@
+{
+  "command": "workspace.pin",
+  "data": {
+    "candidates": [
+      {
+        "directory": "/repo",
+        "id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "label": "api",
+        "level": "workspace",
+        "panes": 2,
+        "worktree": null
+      },
+      {
+        "directory": "",
+        "id": "0202020202020202020202020202020202020202020202020202020202020202",
+        "label": "tools",
+        "level": "workspace",
+        "panes": 1,
+        "worktree": null
+      }
+    ]
+  },
+  "error": {
+    "class": "target",
+    "code": "ambiguous_target",
+    "details": {
+      "count": 2,
+      "ids": [
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "0202020202020202020202020202020202020202020202020202020202020202"
+      ],
+      "level": "workspace"
+    },
+    "message": "More than one Workspace matches.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "fixture",
+    "route": "local"
+  },
+  "status": "error",
+  "warnings": []
+}
