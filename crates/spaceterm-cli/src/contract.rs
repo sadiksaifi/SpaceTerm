@@ -16,6 +16,22 @@ pub const SCHEMA: &str = "spaceterm.cli.v1";
 /// A broken stdout pipe stops output and exits with this status, without a message.
 pub const EXIT_BROKEN_PIPE: u8 = 141;
 
+/// Streaming output keeps a closed reader distinct from other write failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputError {
+    BrokenPipe,
+    Failed,
+}
+impl From<std::io::Error> for OutputError {
+    fn from(error: std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            Self::BrokenPipe
+        } else {
+            Self::Failed
+        }
+    }
+}
+
 /// The empty object, for `data` or `details` with nothing to report.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Empty {}

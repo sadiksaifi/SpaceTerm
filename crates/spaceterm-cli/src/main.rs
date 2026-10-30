@@ -185,7 +185,11 @@ fn main() -> ExitCode {
     {
         let reply =
             spaceterm_cli::server::run(env!("SPACETERM_SERVER_IDENTITY"), &cli.global, command);
-        return ExitCode::from(reply.write((&cli.global).into()));
+        return ExitCode::from(reply.write(
+            (&cli.global).into(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ));
     }
     if let Some(output) = spaceterm_cli::io::start::start(&cli) {
         return ExitCode::from(output.write(

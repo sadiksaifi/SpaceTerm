@@ -212,7 +212,11 @@ fn native_client() {
             };
             let reply = crate::server::run(IDENTITY, &cli.global, command);
             assert_eq!(
-                reply.write((&cli.global).into()),
+                reply.write(
+                    (&cli.global).into(),
+                    &mut std::io::stdout().lock(),
+                    &mut std::io::stderr().lock(),
+                ),
                 0,
                 "paired service lane status completed"
             );
