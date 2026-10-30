@@ -1664,6 +1664,10 @@ fn after_retirement(
         if !state.retiring.contains_key(&client) {
             return Ok(state);
         }
+        #[cfg(test)]
+        if let Some(pause) = &state.pause {
+            pause(Pause::BeforeWait { deadline }, client);
+        }
         state = retired
             .wait_timeout(state, deadline - now)
             .unwrap_or_else(|e| e.into_inner())
@@ -1681,6 +1685,8 @@ pub(super) type PauseHook = Arc<dyn Fn(Pause, [u8; 32]) + Send + Sync>;
 pub(super) enum Pause {
     /// Before it waits for its own identity, holding no reservation.
     Waiting,
+    /// Immediately before the condition-variable wait, holding the state lock.
+    BeforeWait { deadline: std::time::Instant },
     /// After the pane service reported its reserved names, before it commits.
     Settled,
 }
