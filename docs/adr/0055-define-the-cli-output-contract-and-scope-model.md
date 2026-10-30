@@ -10,6 +10,8 @@ Errors and warnings contain fixed classifications and bounded typed metadata. La
 
 Targeting selects one server first: `--server`, then `SPACETERM_SERVER`, then `local`. Child selectors never search other servers. Explicit selectors resolve against one Workspace Inventory and repository snapshot; their memberships must agree. Compatible current Terminal Session context fills a missing level only when nothing explicit at or below that level supplies it. Single candidates fill the rest before command-specific creation defaults. Ambiguity stops the operation and returns candidates with handles to copy. Worktrees have path identity; other work objects and saved routes support IDs. Every resolved level reports where its value came from. [The scope resolver](../../crates/spaceterm-cli/src/scope.rs) owns selection; [ADR 0058](0058-derive-agent-identities-at-admission.md) owns the Session context.
 
+`show` uses this resolver and asks the desktop on this machine to present its target; `open` uses only the Session context. [ADR 0060](0060-open-files-and-show-work-in-the-desktop-over-the-desktop-channel.md) owns both.
+
 Destructive commands require an explicit ID, exact handle or validated current context at the acted-on level. A singleton or substring cannot choose that target. Confirmation binds the exact action and its affected work; changed observations require a new preview. Local connection-store commands reject a remote server selector before effects.
 
 ## Paths and creation

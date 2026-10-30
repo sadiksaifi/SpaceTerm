@@ -652,4 +652,4 @@ mod tests {
 }
 
 mod server;
-pub use server::ServerDirectories;
+pub use server::{ServerDirectories, desktop_channel_directory};

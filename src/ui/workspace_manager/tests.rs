@@ -11791,6 +11791,375 @@ mod shared_repositories {
         }
     }
 
+    /// `spaceterm open` and `spaceterm show` reach only what this window presents, and only a
+    /// Local Pane's own filesystem authority opens a file.
+    mod desktop_requests {
+        use super::*;
+        use crate::desktop_channel::{Refusal, Reply, Request, SessionContext};
+        use crate::terminal::native_services::file_preview::{
+            FilePreviewError, FilePreviewFactory, FilePreviewPanel,
+        };
+        use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+        use std::cell::RefCell;
+        use std::path::Path;
+
+        const LOCAL: [u8; 32] = [40; 32];
+        const PENGUIN: [u8; 32] = [41; 32];
+        const SESSION: [u8; 32] = [42; 32];
+        const DESKTOP_WORKSPACE: WorkspaceId = WorkspaceId::new(1);
+
+        fn server_of(origin: &ServerOrigin, _: &App) -> Option<[u8; 32]> {
+            Some(match origin {
+                ServerOrigin::Local => LOCAL,
+                ServerOrigin::Direct(_) => PENGUIN,
+            })
+        }
+
+        /// The published inventory, with each Pane's live Terminal Session.
+        fn live() -> Inventory {
+            let mut inventory = published(1, "main", true);
+            inventory.close = Some(CloseInventory {
+                boot: [1; 32],
+                controls: Vec::new(),
+                sessions: [ROOT_PANE, FEATURE_PANE]
+                    .map(|id| ConfirmedPane {
+                        id,
+                        session: Some(SESSION),
+                    })
+                    .to_vec(),
+            });
+            inventory
+        }
+
+        fn ask(harness: &Harness, request: Request, cx: &mut VisualTestContext) -> Reply {
+            let reply = cx.update(|window, cx| {
+                harness.manager.update(cx, |manager, cx| {
+                    manager.answer_desktop_request(request, &server_of, window, cx)
+                })
+            });
+            cx.run_until_parked();
+            reply
+        }
+
+        fn open(server: [u8; 32], pane: [u8; 32], path: &Path, preview: bool) -> Request {
+            Request::Open {
+                session: SessionContext {
+                    server,
+                    pane,
+                    session: SESSION,
+                },
+                path: path.to_owned(),
+                preview,
+            }
+        }
+
+        /// The Active Workspace and the server Pane its Tab strip focuses.
+        fn view(
+            harness: &Harness,
+            cx: &mut VisualTestContext,
+        ) -> (Option<WorkspaceId>, Option<[u8; 32]>) {
+            harness.manager.read_with(cx, |manager, cx| {
+                let active = manager.workspaces.active_workspace_id();
+                let focused = manager
+                    .workspaces
+                    .workspace(harness.shared)
+                    .and_then(|entry| entry.payload().read(cx).focused_server_pane(cx));
+                (active, focused)
+            })
+        }
+
+        /// A private temporary directory holding one readable file, removed on drop.
+        struct Files(PathBuf);
+        impl Files {
+            fn new() -> Self {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static NEXT: AtomicU32 = AtomicU32::new(0);
+                let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                    "spaceterm-desktop-requests-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::create_dir(&root).unwrap();
+                std::fs::write(root.join("plan.md"), b"plan").unwrap();
+                Self(root)
+            }
+            fn file(&self) -> PathBuf {
+                self.0.join("plan.md")
+            }
+        }
+        impl Drop for Files {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[gpui::test]
+        fn show_brings_this_windows_view_to_a_presented_pane(cx: &mut TestAppContext) {
+            let (harness, cx) = harness(cx, live());
+            assert_eq!(view(&harness, cx).0, Some(DESKTOP_WORKSPACE));
+            let reply = ask(
+                &harness,
+                Request::Show {
+                    server: LOCAL,
+                    workspace: WORKSPACE,
+                    tab: Some(FEATURE_TAB),
+                    pane: Some(FEATURE_PANE),
+                },
+                cx,
+            );
+            assert_eq!(reply, Reply::Done);
+            assert_eq!(
+                view(&harness, cx),
+                (Some(harness.shared), Some(FEATURE_PANE))
+            );
+        }
+
+        #[gpui::test]
+        fn show_refuses_what_this_window_does_not_present_without_moving(cx: &mut TestAppContext) {
+            let (harness, cx) = harness(cx, live());
+            for (server, workspace, tab, pane) in [
+                (PENGUIN, WORKSPACE, None, None),
+                (LOCAL, [77; 32], None, None),
+                (LOCAL, WORKSPACE, Some([77; 32]), None),
+                (LOCAL, WORKSPACE, Some(ROOT_TAB), Some(FEATURE_PANE)),
+            ] {
+                let request = Request::Show {
+                    server,
+                    workspace,
+                    tab,
+                    pane,
+                };
+                assert_eq!(
+                    ask(&harness, request, cx),
+                    Reply::Refused(Refusal::NotShown)
+                );
+                assert_eq!(view(&harness, cx).0, Some(DESKTOP_WORKSPACE));
+            }
+        }
+
+        #[gpui::test]
+        fn open_hands_a_local_sessions_file_to_its_default_application(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (harness, cx) = harness(cx, live());
+            let reply = ask(&harness, open(LOCAL, ROOT_PANE, &files.file(), false), cx);
+            assert_eq!(reply, Reply::Done);
+            let opened = cx.opened_url().expect("the file was opened");
+            assert!(
+                opened.starts_with("file://") && opened.ends_with("/plan.md"),
+                "{opened}"
+            );
+            assert_eq!(
+                view(&harness, cx).0,
+                Some(DESKTOP_WORKSPACE),
+                "opening a file moves no view"
+            );
+        }
+
+        #[gpui::test]
+        fn open_refuses_another_server_pane_or_session(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (harness, cx) = harness(cx, live());
+            for request in [
+                open(PENGUIN, ROOT_PANE, &files.file(), false),
+                open(LOCAL, [77; 32], &files.file(), false),
+                Request::Open {
+                    session: SessionContext {
+                        server: LOCAL,
+                        pane: ROOT_PANE,
+                        session: [43; 32],
+                    },
+                    path: files.file(),
+                    preview: false,
+                },
+            ] {
+                assert_eq!(
+                    ask(&harness, request, cx),
+                    Reply::Refused(Refusal::NotShown)
+                );
+            }
+            assert_eq!(cx.opened_url(), None);
+        }
+
+        #[gpui::test]
+        fn open_refuses_a_path_that_names_no_regular_file(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (harness, cx) = harness(cx, live());
+            for path in [
+                files.0.join("missing.md"),
+                files.0.clone(),
+                PathBuf::from("plan.md"),
+            ] {
+                for preview in [false, true] {
+                    assert_eq!(
+                        ask(&harness, open(LOCAL, ROOT_PANE, &path, preview), cx),
+                        Reply::Refused(Refusal::FileUnavailable),
+                        "{}",
+                        path.display()
+                    );
+                }
+            }
+            assert_eq!(cx.opened_url(), None);
+        }
+
+        /// The account cannot open the file, as for one without read permission. The native
+        /// identity adapter's own tests cover the operating system's refusal.
+        #[gpui::test]
+        fn open_refuses_a_file_this_account_has_no_authority_to_read(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (harness, cx) = harness_constructing(
+                cx,
+                live(),
+                &PaneConstruction::testing(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed(),
+                LocalFilesystemAuthority::testing_with_failure(
+                    crate::platform::local_filesystem::LocalFilesystemError::PermissionDenied,
+                ),
+            );
+            for preview in [false, true] {
+                assert_eq!(
+                    ask(&harness, open(LOCAL, ROOT_PANE, &files.file(), preview), cx),
+                    Reply::Refused(Refusal::FileUnavailable)
+                );
+            }
+            assert_eq!(cx.opened_url(), None);
+            assert_eq!(view(&harness, cx).0, Some(DESKTOP_WORKSPACE));
+        }
+
+        /// A preview that records each file it presents.
+        #[derive(Clone, Default)]
+        struct RecordingPreview(Rc<RefCell<Vec<PathBuf>>>);
+        impl FilePreviewPanel for RecordingPreview {
+            fn preview_file(&mut self, path: &Path) -> Result<(), FilePreviewError> {
+                self.0.borrow_mut().push(path.to_owned());
+                Ok(())
+            }
+            fn dismiss(&mut self) {}
+        }
+        impl FilePreviewFactory for RecordingPreview {
+            fn create(&self) -> Box<dyn FilePreviewPanel> {
+                Box::new(self.clone())
+            }
+        }
+
+        #[gpui::test]
+        fn preview_shows_the_sessions_pane_and_presents_its_file(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let preview = RecordingPreview::default();
+            let construction = PaneConstruction::new(
+                Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                Rc::new(
+                    crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                ),
+                crate::terminal::native_services::NativeServiceAdapters {
+                    file_preview: Rc::new(preview.clone()),
+                    ..crate::terminal::native_services::testing::adapters()
+                },
+                PaneLifecycleDependencies::testing(),
+            );
+            let (harness, cx) = harness_constructing(
+                cx,
+                live(),
+                &construction,
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed()
+                    .with_client_filesystem(crate::runtime::local_filesystem()),
+                crate::runtime::local_filesystem(),
+            );
+            let reply = ask(&harness, open(LOCAL, FEATURE_PANE, &files.file(), true), cx);
+            assert_eq!(reply, Reply::Done);
+            assert_eq!(*preview.0.borrow(), [files.file()]);
+            assert_eq!(
+                view(&harness, cx),
+                (Some(harness.shared), Some(FEATURE_PANE))
+            );
+            assert_eq!(cx.opened_url(), None);
+        }
+
+        #[gpui::test]
+        fn preview_without_a_file_preview_is_refused(cx: &mut TestAppContext) {
+            let files = Files::new();
+            // The testing File Preview reports its platform unavailable.
+            let (harness, cx) = harness_constructing(
+                cx,
+                live(),
+                &PaneConstruction::testing(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed()
+                    .with_client_filesystem(crate::runtime::local_filesystem()),
+                crate::runtime::local_filesystem(),
+            );
+            assert_eq!(
+                ask(&harness, open(LOCAL, ROOT_PANE, &files.file(), true), cx),
+                Reply::Refused(Refusal::PreviewUnavailable)
+            );
+        }
+
+        /// A paired route's Panes, which carry no local filesystem authority.
+        struct RemotePanes(Rc<ScriptedPanes>);
+        impl crate::ui::shared_workspaces::SharedPaneOpener for RemotePanes {
+            fn open(
+                &self,
+                pane: [u8; 32],
+            ) -> Option<crate::ui::shared_workspaces::SharedPaneSubscription> {
+                self.0.open(pane)
+            }
+            fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
+                self.0.placeholder()
+            }
+        }
+
+        #[gpui::test]
+        fn a_remote_sessions_path_never_opens_a_local_file(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (manager, _, cx) = workspace_manager(cx);
+            let edits = Rc::new(ScriptedEdits::new(Some(live())));
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| {
+                    let penguin = super::super::named_route("penguin");
+                    let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
+                    source.replace_transport(Rc::clone(&edits) as Rc<_>);
+                    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+                        Rc::new(
+                            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                                .server_backed(),
+                        ),
+                        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+                    );
+                    let key = manager.present_server_workspaces(
+                        ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                            route: penguin,
+                            name: "penguin".into(),
+                        }),
+                        source,
+                        SharedPaneSessions::with_opener(
+                            Rc::new(RemotePanes(ScriptedPanes::new(session_factory))) as Rc<_>,
+                            &PaneConstruction::testing(),
+                        ),
+                        window,
+                        cx,
+                    );
+                    manager.sync_shared_workspaces(key, window, cx);
+                });
+            });
+            cx.run_until_parked();
+            for preview in [false, true] {
+                let reply = cx.update(|window, cx| {
+                    manager.update(cx, |manager, cx| {
+                        manager.answer_desktop_request(
+                            open(PENGUIN, ROOT_PANE, &files.file(), preview),
+                            &server_of,
+                            window,
+                            cx,
+                        )
+                    })
+                });
+                assert_eq!(reply, Reply::Refused(Refusal::RemoteSession));
+            }
+            assert_eq!(cx.opened_url(), None);
+        }
+    }
+
     struct Harness {
         manager: Entity<WorkspaceManager>,
         edits: Rc<ScriptedEdits>,
@@ -11839,13 +12208,28 @@ mod shared_repositories {
     }
 
     fn harness(cx: &mut TestAppContext, initial: Inventory) -> (Harness, &mut VisualTestContext) {
-        let (manager, sessions, cx) = workspace_manager(cx);
+        harness_constructing(
+            cx,
+            initial,
+            &PaneConstruction::testing(),
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()).server_backed(),
+            crate::runtime::local_filesystem(),
+        )
+    }
+
+    /// [`harness`] whose shared Panes are built by `construction` over `sessions`, with the
+    /// account-local route's filesystem authority `local_files`.
+    fn harness_constructing<'a>(
+        cx: &'a mut TestAppContext,
+        initial: Inventory,
+        construction: &PaneConstruction,
+        sessions: TestTerminalSessionFactory,
+        local_files: LocalFilesystemAuthority,
+    ) -> (Harness, &'a mut VisualTestContext) {
+        let (manager, sessions_asked, cx) = workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
-            ),
+            Rc::new(sessions),
             crate::terminal::testing::test_local_directory(std::env::temp_dir()),
         );
         cx.update(|window, cx| {
@@ -11853,8 +12237,8 @@ mod shared_repositories {
                 manager.present_shared_workspaces(
                     SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
                     SharedPaneSessions::with_opener(
-                        ScriptedPanes::new(session_factory) as Rc<_>,
-                        &PaneConstruction::testing(),
+                        ScriptedPanes::with_local_files(session_factory, local_files) as Rc<_>,
+                        construction,
                     ),
                     window,
                     cx,
@@ -11879,7 +12263,7 @@ mod shared_repositories {
                 manager,
                 edits,
                 shared,
-                sessions,
+                sessions: sessions_asked,
             },
             cx,
         )

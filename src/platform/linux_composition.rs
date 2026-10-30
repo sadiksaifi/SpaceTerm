@@ -302,6 +302,13 @@ fn compose(
             ssh_setup: Some(ssh_setup),
             direct_servers: Some(direct_servers),
             server_context_paths: Some(server_context_paths),
+            desktop_channel: super::unix_desktop_channel::DesktopChannelListener::bind(
+                identity.directory_name(),
+            )
+            .ok()
+            .map(|listener| {
+                Arc::new(listener) as Arc<dyn crate::desktop_channel::DesktopChannelEndpoint>
+            }),
         },
         services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),

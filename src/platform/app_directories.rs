@@ -4,4 +4,5 @@ pub(crate) use spaceterm_directories::APP_DIR_NAME;
 pub(crate) use spaceterm_directories::DesktopResourceDirectories;
 pub(crate) use spaceterm_directories::{
     AppDirectories, AppDirectoryEnvironment, AppDirectoryRoot, DirectoryError,
+    desktop_channel_directory,
 };

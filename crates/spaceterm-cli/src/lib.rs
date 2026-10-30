@@ -2,6 +2,7 @@
 //! state. The executable in `main.rs` runs it.
 pub mod args;
 pub mod contract;
+pub mod desktop;
 pub mod interrupt;
 pub mod io;
 pub mod journal;

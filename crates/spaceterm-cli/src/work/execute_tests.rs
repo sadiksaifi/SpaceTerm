@@ -101,6 +101,7 @@ fn env() -> Environment<'static> {
         agent: true,
         now: 100,
         confirmation: None,
+        desktop: &crate::desktop::NoDesktop,
     }
 }
 fn cli(args: &[&str]) -> Cli {
@@ -795,4 +796,111 @@ fn unconfirmed_worktree_creation_never_retries_or_opens_another_tab() {
     );
     assert_eq!(output.envelope.exit(), 7);
     assert_eq!(script.borrow().sent.len(), 1);
+}
+
+mod show {
+    use super::*;
+    use spaceterm::desktop_channel::{ChannelError, Refusal, Reply, Request};
+
+    struct Recorded {
+        answer: Result<Reply, ChannelError>,
+        requests: RefCell<Vec<Request>>,
+    }
+    impl crate::desktop::Desktop for Recorded {
+        fn request(&self, request: &Request) -> Result<Reply, ChannelError> {
+            self.requests.borrow_mut().push(request.clone());
+            self.answer
+        }
+    }
+
+    fn show(
+        args: &[&str],
+        current: Option<u8>,
+        answer: Result<Reply, ChannelError>,
+    ) -> (Output, Vec<Request>) {
+        let desktop = Recorded {
+            answer,
+            requests: RefCell::default(),
+        };
+        let server = "09".repeat(32);
+        let pane = current.map(|byte| format!("{byte:02x}").repeat(32));
+        let env = Environment {
+            current_identity: Some("test"),
+            current_server: Some(&server),
+            current_pane: pane.as_deref(),
+            desktop: &desktop,
+            ..env()
+        };
+        let script = Rc::new(RefCell::new(Script {
+            inventories: VecDeque::from([fixture().inventory]),
+            ..Default::default()
+        }));
+        let output = run_script(&[&["show"], args].concat(), &env, &script);
+        assert!(
+            script.borrow().sent.is_empty(),
+            "show dispatched a mutation"
+        );
+        (output, desktop.requests.into_inner())
+    }
+
+    #[test]
+    fn show_in_a_session_brings_the_desktop_to_the_current_pane() {
+        let (output, requests) = show(&[], Some(22), Ok(Reply::Done));
+        assert_eq!(output.envelope.exit(), 0);
+        assert_eq!(
+            requests,
+            [Request::Show {
+                server: id(9),
+                workspace: id(1),
+                tab: Some(id(12)),
+                pane: Some(id(22)),
+            }]
+        );
+        assert_golden("work_show", &output.envelope);
+    }
+
+    #[test]
+    fn show_acts_on_the_deepest_explicit_level() {
+        let (_, requests) = show(&["--workspace", "tools"], Some(22), Ok(Reply::Done));
+        assert_eq!(
+            requests,
+            [Request::Show {
+                server: id(9),
+                workspace: id(2),
+                tab: None,
+                pane: None,
+            }]
+        );
+        let (_, requests) = show(&["--tab", "id:0c0c0c"], None, Ok(Reply::Done));
+        assert_eq!(
+            requests,
+            [Request::Show {
+                server: id(9),
+                workspace: id(1),
+                tab: Some(id(12)),
+                pane: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn ambiguous_targets_ask_no_desktop_and_refusals_keep_their_codes() {
+        let (output, requests) = show(&[], None, Ok(Reply::Done));
+        assert_eq!(output.envelope.exit(), 4);
+        assert!(requests.is_empty());
+        for (answer, code) in [
+            (Ok(Reply::Refused(Refusal::NotShown)), "not_shown"),
+            (Err(ChannelError::Unavailable), "desktop_unavailable"),
+        ] {
+            let (output, _) = show(&["--pane", "id:151515"], None, answer);
+            assert_eq!(
+                output
+                    .envelope
+                    .error
+                    .as_ref()
+                    .map(|error| error.code.as_str()),
+                Some(code)
+            );
+        }
+    }
 }

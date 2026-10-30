@@ -5576,6 +5576,8 @@ mod repository;
 mod server_bindings;
 use server_bindings::ServerBindings;
 pub(crate) use server_bindings::{ServerKey, ServerOrigin};
+mod desktop_requests;
+pub(crate) use desktop_requests::serve as serve_desktop_requests;
 mod direct_servers;
 mod display_order;
 mod shared_repositories;

@@ -3844,7 +3844,7 @@ impl TerminalPane {
             }
             TerminalContextMenuCommand::FilePreview if actions.file_preview => {
                 if let Some(link) = link {
-                    self.preview_context_link(&link, window, cx);
+                    let _ = self.preview_context_link(&link, window, cx);
                 }
             }
             _ => {}
@@ -3852,20 +3852,38 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Presents the File Preview of a local file that `spaceterm open --preview` named in this
+    /// Pane's Terminal Session. `false` when the Pane has no local file authority or its desktop
+    /// has no File Preview.
+    pub(crate) fn preview_local_file(
+        &mut self,
+        link: &crate::terminal::HyperlinkTarget,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.file_preview_available
+            || !self.terminal_session.local_file_capabilities.are_enabled()
+        {
+            return false;
+        }
+        self.preview_context_link(link, window, cx)
+    }
+
+    /// Whether the preview was presented or handed to a deferred adapter.
     fn preview_context_link(
         &mut self,
         link: &crate::terminal::HyperlinkTarget,
         window: &Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(target) =
             FilePreviewTarget::from_link(link, self.terminal_session.local_file_capabilities)
         else {
             self.file_preview.dismiss();
-            return;
+            return false;
         };
         match self.file_preview.preview_in_window(&target, window, cx) {
-            Ok(None) => {}
+            Ok(None) => true,
             Ok(Some(completion)) => {
                 self._file_preview_task = Some(cx.spawn(async move |this, cx| {
                     let Some(failure) = completion.failure().await else {
@@ -3877,8 +3895,12 @@ impl TerminalPane {
                         }
                     });
                 }));
+                true
             }
-            Err(_) => self.present_file_preview_failure(cx),
+            Err(_) => {
+                self.present_file_preview_failure(cx);
+                false
+            }
         }
     }
 

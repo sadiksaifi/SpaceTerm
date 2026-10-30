@@ -1,0 +1,40 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "show",
+  "status": "ok",
+  "server": {
+    "name": "fixture",
+    "route": "local",
+    "id": "0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "data": {
+    "target": [
+      {
+        "id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "label": "api",
+        "level": "workspace",
+        "source": "current"
+      },
+      {
+        "label": "feature/x",
+        "level": "worktree",
+        "path": "/trees/feature",
+        "source": "current"
+      },
+      {
+        "id": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "label": "cargo test · feature",
+        "level": "tab",
+        "source": "current"
+      },
+      {
+        "id": "1616161616161616161616161616161616161616161616161616161616161616",
+        "label": "cargo test · feature",
+        "level": "pane",
+        "source": "current"
+      }
+    ]
+  },
+  "error": null,
+  "warnings": []
+}

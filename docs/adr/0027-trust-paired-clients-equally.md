@@ -6,6 +6,6 @@ Every remote client uses QUIC with pinned server trust and a deliberately enroll
 
 Client Identity distinguishes views, attachments, Pane control and operations; Client Name labels control for other clients. Neither grants authority. Connection, Terminal Session, control and attachment generations independently fence operations.
 
-Native service actions run with owning-account operating-system authority on the server's machine. [ADR 0057](0057-administer-servers-over-the-service-lane.md) delegates admitted remote actions to a transient helper with that authority. Remote values grant no client-local file access. Signed-artifact verification, deliberate Stop, bounded process ownership and reconciliation of started Git writes remain required.
+Native service actions run with owning-account operating-system authority on the server's machine. [ADR 0057](0057-administer-servers-over-the-service-lane.md) delegates admitted remote actions to a transient helper with that authority. Remote values grant no client-local file access. The desktop's own Desktop Channel admits only its account by peer credentials and opens files only for Local Panes under [ADR 0060](0060-open-files-and-show-work-in-the-desktop-over-the-desktop-channel.md). Signed-artifact verification, deliberate Stop, bounded process ownership and reconciliation of started Git writes remain required.
 
 [ADR 0052](0052-carry-paired-connections-over-quic.md) owns the paired transport.

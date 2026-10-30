@@ -76,6 +76,10 @@ pub enum Command {
     /// Create and remove Worktrees.
     #[command(subcommand)]
     Worktree(WorktreeCommand),
+    /// Open a local file, or its File Preview, in the desktop showing this Terminal Session.
+    Open(OpenArgs),
+    /// Bring the desktop's own view to a Workspace, Tab or Pane.
+    Show(ShowArgs),
     /// Print shell completions.
     #[command(hide = true)]
     Completion {
@@ -431,6 +435,22 @@ pub struct ReadArgs {
     pub max_bytes: Option<u32>,
 }
 
+#[derive(Debug, Args)]
+pub struct OpenArgs {
+    /// A local file. Relative paths start at the current directory.
+    #[arg(value_name = "PATH")]
+    pub path: PathBuf,
+    /// Show its File Preview instead of opening it.
+    #[arg(long)]
+    pub preview: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ShowArgs {
+    #[command(flatten)]
+    pub scope: Scope,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum WorktreeCommand {
     /// Create a Worktree.
@@ -529,6 +549,8 @@ impl Command {
                 WorktreeCommand::Create { .. } => "worktree.create",
                 WorktreeCommand::Remove { .. } => "worktree.remove",
             },
+            Self::Open(_) => "open",
+            Self::Show(_) => "show",
             Self::Completion { .. } => "completion",
         }
     }
@@ -723,6 +745,8 @@ mod tests {
             &["pane", "release"],
             &["worktree", "create", "feature-y", "--open"],
             &["worktree", "remove", "--worktree", "feature-x"],
+            &["open", "notes.md", "--preview"],
+            &["show", "--tab", "id:0be4f3"],
             &["--as", "agent-1", "--json", "--timeout", "30s", "list"],
         ] {
             parse(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
@@ -797,6 +821,8 @@ mod tests {
             "tab",
             "pane",
             "worktree",
+            "open",
+            "show",
         ] {
             assert!(help.contains(visible), "{visible}");
         }

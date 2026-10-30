@@ -790,6 +790,13 @@ codes! {
     NotAtPrompt = "not_at_prompt", Target, true, "The shell is not waiting at an empty prompt.";
     RepairNotNeeded = "repair_not_needed", Target, false, "The Terminal Session's directory is available.";
     NoFallbackWorktree = "no_fallback_worktree", Target, false, "No other Worktree can keep the Workspace open.";
+    // CLI-native: the desktop on this machine.
+    NotShown = "not_shown", Target, false, "The desktop on this machine doesn\u{2019}t show this work.";
+    RemoteSession = "remote_session", Target, false, "This Terminal Session runs on another machine. Its paths grant no local file access.";
+    FileUnavailable = "file_unavailable", Target, false, "The path names no regular file this account can read.";
+    DesktopUnavailable = "desktop_unavailable", Unavailable, true, "No SpaceTerm desktop is running for this account on this machine.";
+    DesktopIncompatible = "desktop_incompatible", Unavailable, false, "This CLI and the desktop are incompatible. Update the older one.";
+    PreviewUnavailable = "preview_unavailable", Unavailable, false, "This desktop has no File Preview.";
     // CLI-native: route or environment.
     LocalOnly = "local_only", Unavailable, false, "This command runs only on the server's own machine.";
     UnsupportedSession = "unsupported_session", Unavailable, false, "This session does not support the command.";
@@ -1885,6 +1892,22 @@ pub struct PaneRelease {
     pub released: bool,
 }
 
+/// `open`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Opened {
+    /// The absolute path the desktop opened.
+    pub path: String,
+    pub preview: bool,
+    pub pane: String,
+    pub session: String,
+}
+
+/// `show`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Shown {
+    pub target: Vec<TargetStep>,
+}
+
 #[cfg(test)]
 pub(crate) mod golden {
     //! Golden envelopes in `crates/spaceterm-cli/golden/`. Set `SPACETERM_GOLDEN_UPDATE=1` to
@@ -2033,6 +2056,9 @@ mod tests {
                     NotAtPrompt,
                     RepairNotNeeded,
                     NoFallbackWorktree,
+                    NotShown,
+                    RemoteSession,
+                    FileUnavailable,
                 ],
                 4,
             ),
@@ -2042,6 +2068,9 @@ mod tests {
                     UnsupportedSession,
                     IdentityBusy,
                     CredentialUnavailable,
+                    DesktopUnavailable,
+                    DesktopIncompatible,
+                    PreviewUnavailable,
                 ],
                 5,
             ),

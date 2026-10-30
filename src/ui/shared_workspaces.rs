@@ -3475,8 +3475,16 @@ mod development {
             pub(crate) fn new(
                 session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             ) -> std::rc::Rc<Self> {
+                Self::with_local_files(session_factory, crate::runtime::local_filesystem())
+            }
+
+            /// Panes of the account-local route whose filesystem authority is `local_files`.
+            pub(crate) fn with_local_files(
+                session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
+                local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
+            ) -> std::rc::Rc<Self> {
                 std::rc::Rc::new(Self {
-                    local_files: crate::runtime::local_filesystem(),
+                    local_files,
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
                 })

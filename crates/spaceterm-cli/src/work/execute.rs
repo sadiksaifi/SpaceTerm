@@ -29,12 +29,15 @@ pub struct Environment<'a> {
     pub agent: bool,
     pub now: i64,
     pub confirmation: Option<&'a str>,
+    /// The desktop on this machine, which `show` asks.
+    pub desktop: &'a dyn crate::desktop::Desktop,
 }
 
 pub fn handles(command: &Command) -> bool {
     matches!(
         command,
         Command::List(_)
+            | Command::Show(_)
             | Command::Workspace(_)
             | Command::Tab(_)
             | Command::Worktree(_)
@@ -308,6 +311,50 @@ fn execute(
                 data,
                 text,
                 &scope::target_steps(&initial, &target),
+            ))
+        }
+        Command::Show(_) => {
+            // The deepest explicit level is shown. Without one, the current Pane is.
+            let want = if args.pane.is_some()
+                || (args.workspace.is_none() && args.worktree.is_none() && args.tab.is_none())
+            {
+                scope::Want::Pane
+            } else if args.tab.is_some() || args.worktree.is_some() {
+                scope::Want::Tab
+            } else {
+                scope::Want::Workspace
+            };
+            let target = scope::resolve(
+                &initial,
+                &args,
+                current.as_ref(),
+                want,
+                scope::Effect::Passive,
+            )?;
+            let request = spaceterm::desktop_channel::Request::Show {
+                server: initial.server,
+                workspace: target.workspace.ok_or(Code::ProtocolError)?,
+                tab: if want == scope::Want::Workspace {
+                    None
+                } else {
+                    Some(target.tab.ok_or(Code::ProtocolError)?)
+                },
+                pane: if want == scope::Want::Pane {
+                    Some(target.pane.ok_or(Code::ProtocolError)?)
+                } else {
+                    None
+                },
+            };
+            crate::desktop::ask(env.desktop, &request)?;
+            let steps = scope::target_steps(&initial, &target);
+            Ok(Output::ok(
+                path,
+                server.clone(),
+                Shown {
+                    target: steps.clone(),
+                },
+                "Showed in the desktop.\n".into(),
+                &steps,
             ))
         }
         Command::Workspace(WorkspaceCommand::Create { name, directory }) => {
@@ -944,6 +991,7 @@ fn tab_ref(tab: &hierarchy::Tab) -> Ref {
 fn command_scope(command: &Command) -> ScopeArgs {
     match command {
         Command::List(args) => args.scope.args(),
+        Command::Show(args) => args.scope.args(),
         Command::Workspace(
             WorkspaceCommand::Rename { workspace, .. } | WorkspaceCommand::Kill { workspace, .. },
         ) => ScopeArgs {

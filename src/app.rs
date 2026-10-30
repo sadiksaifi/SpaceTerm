@@ -1352,6 +1352,9 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) direct_servers: Option<crate::direct_connections::DirectConnections>,
     /// Private presentation context, independent of saved connection authority and Settings.
     pub(crate) server_context_paths: Option<Arc<AppPaths>>,
+    /// Answers `spaceterm open` and `spaceterm show` from this account. `None` listens nowhere,
+    /// as when another desktop of this identity already listens.
+    pub(crate) desktop_channel: Option<Arc<dyn crate::desktop_channel::DesktopChannelEndpoint>>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1505,6 +1508,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         }
     });
     let pending_invitations = Rc::new(RefCell::new(Some(pending_invitations)));
+    let desktop_channel = RefCell::new(host.adapters.desktop_channel.clone());
     application.on_reopen(move |cx| {
         leave_menu_only(cx);
         restore_default_window(cx, &reopened_host);
@@ -1525,7 +1529,17 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                         if let Err(error) = open_initial_workspace(cx, &host) {
                             reported_failure.set(Some(error));
                             cx.quit();
-                        } else if let Some(receiver) = pending_invitations.borrow_mut().take() {
+                            return;
+                        }
+                        if let Some(endpoint) = desktop_channel.borrow_mut().take() {
+                            crate::ui::serve_desktop_requests(
+                                endpoint,
+                                crate::application_identity::ApplicationIdentity::current()
+                                    .directory_name(),
+                                cx,
+                            );
+                        }
+                        if let Some(receiver) = pending_invitations.borrow_mut().take() {
                             cx.spawn(async move |cx| {
                                 while let Ok(link) = receiver.recv().await {
                                     cx.update(|cx| {
@@ -2450,6 +2464,7 @@ mod runtime_tests {
                 ssh_setup: None,
                 direct_servers: None,
                 server_context_paths: None,
+                desktop_channel: None,
             },
             services: Some(services),
             window_movement: movement,

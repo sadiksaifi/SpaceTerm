@@ -108,7 +108,7 @@ fn selected(cli: &Cli) -> Output {
                     route: selected.key(),
                     agent: agent.as_ref(),
                     deadline,
-                    mutating: !matches!(cli.command, Command::List(_)),
+                    mutating: !matches!(cli.command, Command::List(_) | Command::Show(_)),
                 },
                 &mut connect,
             ) {
@@ -245,6 +245,7 @@ pub fn run_connected(
         agent,
         now: jiff::Timestamp::now().as_second(),
         confirmation,
+        desktop: &crate::desktop::LocalDesktop(identity),
     };
     execute::run(
         &cli.command,
@@ -376,6 +377,7 @@ mod tests {
                             agent: false,
                             now: 100,
                             confirmation,
+                            desktop: &crate::desktop::NoDesktop,
                         },
                         &mut Writer {
                             state: &state,

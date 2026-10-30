@@ -774,6 +774,54 @@ impl TabManager {
             .any(|(_, view)| view.read(cx).holds_shared_pane(pane))
     }
 
+    /// Whether this strip presents the server Tab `tab`, and the server Pane `pane` within it
+    /// when both are given.
+    pub(crate) fn presents_shared_target(
+        &self,
+        tab: Option<spaceterm_server::hierarchy::Id>,
+        pane: Option<spaceterm_server::hierarchy::Id>,
+        cx: &App,
+    ) -> bool {
+        let tab_id = match tab {
+            Some(tab) => match self
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.local_tab(tab))
+            {
+                Some(tab_id) => Some(tab_id),
+                None => return false,
+            },
+            None => None,
+        };
+        pane.is_none_or(|pane| {
+            self.tabs.iter().any(|(id, view)| {
+                tab_id.is_none_or(|tab_id| tab_id == id) && view.read(cx).holds_shared_pane(pane)
+            })
+        })
+    }
+
+    /// Presents the File Preview of `link` for the server Pane `pane`. `false` when no Tab of
+    /// this strip holds the Pane or it cannot preview a local file.
+    pub(crate) fn preview_shared_local_file(
+        &mut self,
+        pane: spaceterm_server::hierarchy::Id,
+        link: &crate::terminal::HyperlinkTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(view) = self
+            .tabs
+            .iter()
+            .find(|(_, view)| view.read(cx).holds_shared_pane(pane))
+            .map(|(_, view)| view.clone())
+        else {
+            return false;
+        };
+        view.update(cx, |view, cx| {
+            view.preview_shared_local_file(pane, link, window, cx)
+        })
+    }
+
     pub(crate) fn active_terminal_identity(&self, cx: &App) -> (TabId, PaneId) {
         let tab_id = self.tabs.active_tab_id();
         let pane_id = self.tabs.active_tab().read(cx).focused_pane_id();
