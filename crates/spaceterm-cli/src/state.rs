@@ -174,17 +174,18 @@ impl Runs {
 
     /// Records `run` before dispatch and holds its live lock until the command exits.
     pub fn add(&mut self, run: PendingRun) -> Result<Lock, Failure> {
+        let _lock = self.lock()?;
+        let mut record = self.read()?;
+        let recorded = record.runs.iter().any(|pending| pending.run == run.run);
+        if !recorded && record.runs.len() >= MAX_PENDING_RUNS {
+            return Err(Failure::new(Code::Capacity));
+        }
         let live = self
             .live
             .try_lock(&format!("{}.lock", crate::io::hex(&run.run.0)))
             .map_err(from_server_error)?
             .ok_or(Failure::new(Code::IdentityBusy))?;
-        let _lock = self.lock()?;
-        let mut record = self.read()?;
-        if !record.runs.iter().any(|pending| pending.run == run.run) {
-            if record.runs.len() >= MAX_PENDING_RUNS {
-                return Err(Failure::new(Code::Capacity));
-            }
+        if !recorded {
             record.runs.push(run);
             self.directory
                 .write_json(RUNS, &record)
@@ -408,6 +409,39 @@ mod tests {
         );
         drop(held);
         assert!(state.try_writer(&RouteKey::Local, None).unwrap().is_some());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn refused_runs_leave_no_lock_files() {
+        let state = temporary("full-runs");
+        let mut runs = state.runs(&RouteKey::Local, None, Instant::now()).unwrap();
+        let pending = |id| PendingRun {
+            run: RunId([id; 16]),
+            pane: [2; 32],
+            session: [3; 32],
+            created_at: 0,
+        };
+        let live: Vec<_> = (0..MAX_PENDING_RUNS as u8)
+            .map(|id| runs.add(pending(id)).unwrap())
+            .collect();
+        let path = state.identity_path(&RouteKey::Local, None).join("runs");
+        let before: std::collections::BTreeSet<_> = std::fs::read_dir(&path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        for id in 16..48 {
+            assert!(
+                matches!(runs.add(pending(id)), Err(failure) if failure.code == Code::Capacity)
+            );
+        }
+        let after = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after, "refused runs must not create lock files");
+        assert_eq!(runs.pending().unwrap().len(), MAX_PENDING_RUNS);
+        drop(live);
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 
