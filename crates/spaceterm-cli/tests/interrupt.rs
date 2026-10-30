@@ -269,6 +269,244 @@ fn stalled_output_is_interruptible() {
     }
 }
 
+// Each child installs the real signal handler and runs the send handler. The transport holds
+// the paste outcome until SIGINT arrives, then delivers it inside the settlement grace.
+#[test]
+#[ignore = "child process for the paste interrupt checks"]
+fn paste_wait_child() {
+    use clap::Parser;
+    use spaceterm_cli::{args, contract, interrupt, io};
+    use spaceterm_server::connection::link::ServerLink;
+    use spaceterm_server::pane::{Lease, PasteConfirmation, PasteOutcome};
+    use spaceterm_server::protocol::{
+        ClaimReply, ClientMessage, InputEvent, InputOutcome, Operation, PaneEvent, PaneMessage,
+        RawFrame, Reply, ReplyBody, ServerMessage, frame,
+    };
+    use std::io::Write;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    let Ok(kind) = std::env::var("SPACETERM_TEST_PASTE_WAIT") else {
+        return;
+    };
+    let confirmation = kind == "confirmation";
+    let mode = contract::Mode {
+        json: true,
+        ..Default::default()
+    };
+    interrupt::install("pane.send", mode).unwrap();
+    let (wake, ready) = mpsc::channel();
+    let notify = wake.clone();
+    let finished = Arc::new(AtomicBool::new(false));
+    let link = ServerLink::new(
+        Arc::new(|_| {}),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        Instant::now(),
+    );
+    let peer = link.clone();
+    let stopped = Arc::clone(&finished);
+    let server = std::thread::spawn(move || {
+        let send = |message| {
+            for bytes in frame::encode_server(&message).unwrap().frames {
+                peer.receive(RawFrame::parse(&bytes).unwrap(), Instant::now())
+                    .unwrap();
+            }
+        };
+        let mut assembler = frame::Assembler::default();
+        let mut keys = 0;
+        let mut resolutions = Vec::new();
+        loop {
+            ready.recv_timeout(Duration::from_secs(10)).unwrap();
+            while let Some((bytes, _)) = peer.next_frame() {
+                let Some(message) = assembler.client(RawFrame::parse(&bytes).unwrap()).unwrap()
+                else {
+                    continue;
+                };
+                match message {
+                    ClientMessage::Request(request) => {
+                        assert!(matches!(request.operation, Operation::Claim(_)));
+                        send(ServerMessage::Reply(Box::new(Reply {
+                            id: request.id,
+                            result: Ok(ReplyBody::Claim(ClaimReply::Attached {
+                                lease: Lease {
+                                    server: [1; 32],
+                                    session: [2; 32],
+                                    control: [3; 32],
+                                    connection: [4; 32],
+                                },
+                            })),
+                        })));
+                    }
+                    ClientMessage::Input(input) => {
+                        let event = |event| {
+                            send(ServerMessage::Pane(PaneMessage {
+                                channel: input.channel,
+                                event,
+                            }))
+                        };
+                        for input_event in input.events {
+                            let outcome = match input_event {
+                                InputEvent::Paste { last: true, .. } => {
+                                    std::io::stderr().write_all(b"ready\n").unwrap();
+                                    until(
+                                        interrupt::interrupted,
+                                        "SIGINT never reached the paste wait",
+                                    );
+                                    Some(if confirmation {
+                                        PasteOutcome::ConfirmationRequired(PasteConfirmation {
+                                            id: 7,
+                                            byte_len: 8,
+                                            line_count: 2,
+                                            multiline: true,
+                                            control_bytes: false,
+                                            closing_fence: false,
+                                        })
+                                    } else {
+                                        PasteOutcome::Written
+                                    })
+                                }
+                                InputEvent::ResolvePaste { id, confirm } => {
+                                    assert_eq!(id, 7);
+                                    resolutions.push(confirm);
+                                    Some(if confirm {
+                                        PasteOutcome::Written
+                                    } else {
+                                        PasteOutcome::Cancelled
+                                    })
+                                }
+                                InputEvent::Key(_) => {
+                                    keys += 1;
+                                    None
+                                }
+                                InputEvent::Focus(_) => None,
+                                _ => panic!("unexpected input"),
+                            };
+                            if let Some(outcome) = outcome {
+                                event(PaneEvent::Input {
+                                    serial: input.serial,
+                                    outcome: InputOutcome::Paste(outcome),
+                                });
+                            }
+                        }
+                        event(PaneEvent::Progress {
+                            input: input.serial,
+                            output_bytes: 0,
+                        });
+                    }
+                    ClientMessage::View(_) => {}
+                    _ => panic!("unexpected client message"),
+                }
+            }
+            if stopped.load(Ordering::Acquire) {
+                return (keys, resolutions);
+            }
+        }
+    });
+    let args::Command::Pane(args::PaneCommand::Send(args)) = args::Cli::parse_from([
+        "spaceterm",
+        "pane",
+        "send",
+        "echo one\necho two",
+        "--paste",
+        "--enter",
+        "--allow-unsafe-paste",
+    ])
+    .command
+    else {
+        unreachable!();
+    };
+    let target = io::PaneTarget {
+        server: [1; 32],
+        workspace: [5; 32],
+        pane: [6; 32],
+        running: true,
+        session: Some([2; 32]),
+        steps: Vec::new(),
+    };
+    let done = io::send::send(
+        &link,
+        &target,
+        &args,
+        &mut std::io::empty(),
+        io::Deadline::after(Some(Duration::from_secs(10))),
+    );
+    finished.store(true, Ordering::Release);
+    // Wake the transport so it drains every message queued before send returned.
+    notify.send(()).unwrap();
+    let (keys, resolutions) = server.join().unwrap();
+    link.close();
+    assert_eq!(keys, 0, "SIGINT must prevent Enter");
+    assert_eq!(
+        resolutions,
+        if confirmation {
+            vec![false]
+        } else {
+            Vec::new()
+        },
+        "an interrupted pending paste must be cancelled"
+    );
+    let data = done.data.unwrap();
+    assert_eq!(data.input.serial, if confirmation { 3 } else { 2 });
+    assert_eq!(data.input.delivered, !confirmation);
+    let envelope = match done.failure {
+        Some(failure) => contract::Envelope::error("pane.send", None, failure, data),
+        None => contract::Envelope::ok("pane.send", None, data),
+    };
+    let interrupted = interrupt::finish(envelope.exit());
+    std::process::exit(contract::render(
+        &envelope,
+        "",
+        "",
+        mode,
+        interrupted,
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    ) as i32);
+}
+
+fn interrupt_paste_wait(kind: &str) {
+    use std::io::{BufRead, Read};
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "paste_wait_child", "--ignored", "--nocapture"])
+        .env("SPACETERM_TEST_PASTE_WAIT", kind)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut process = Process(Some(child));
+    let mut ready = String::new();
+    let mut stderr = std::io::BufReader::new(process.0.as_mut().unwrap().stderr.take().unwrap());
+    stderr.read_line(&mut ready).unwrap();
+    assert_eq!(ready, "ready\n");
+    process.interrupt();
+    let (output, _) = process.wait(Duration::from_secs(7));
+    let mut errors = String::new();
+    stderr.read_to_string(&mut errors).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "{}\n{errors}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+#[ignore = "process interrupt checks; run mise run cli:io:test"]
+fn ctrl_c_during_paste_delivery_never_sends_enter() {
+    interrupt_paste_wait("written");
+}
+
+#[test]
+#[ignore = "process interrupt checks; run mise run cli:io:test"]
+fn ctrl_c_during_paste_confirmation_cancels_without_enter() {
+    interrupt_paste_wait("confirmation");
+}
+
 #[test]
 #[ignore = "owns a foreground Development server; run mise run cli:io:test"]
 fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {

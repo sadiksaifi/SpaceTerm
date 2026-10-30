@@ -208,9 +208,14 @@ fn deliver(
         }
     };
     let mut paste_settled = !pasting;
+    let mut paste_cancelled = false;
     loop {
         if paste_settled && channel.input >= last {
             if after_paste.is_empty() {
+                return Ok(last);
+            }
+            if crate::interrupt::dispatch().is_err() {
+                // The paste is delivered. Settle that input without appending Enter.
                 return Ok(last);
             }
             last = channel
@@ -230,18 +235,19 @@ fn deliver(
                 InputOutcome::Discarded(refusal) => return Err((last, discarded(refusal))),
                 InputOutcome::Paste(PasteOutcome::Written) => paste_settled = true,
                 InputOutcome::Paste(PasteOutcome::ConfirmationRequired(confirmation)) => {
-                    // Without --allow-unsafe-paste the paste is cancelled and nothing is written.
+                    paste_cancelled = crate::interrupt::dispatch().is_err();
+                    // Interruption withdraws an uncommitted paste even with prior consent.
                     last = channel
                         .handle()
                         .input(
                             GENERATION,
                             vec![InputEvent::ResolvePaste {
                                 id: confirmation.id,
-                                confirm: allow_unsafe_paste,
+                                confirm: allow_unsafe_paste && !paste_cancelled,
                             }],
                         )
                         .map_err(|error| (last, unconfirmed_or(link_failure(error))))?;
-                    if !allow_unsafe_paste {
+                    if !allow_unsafe_paste && !paste_cancelled {
                         return Err((last, Failure::new(Code::PasteConfirmationRequired)));
                     }
                 }
@@ -249,6 +255,9 @@ fn deliver(
                     return Err((last, usage("<TEXT>")));
                 }
                 InputOutcome::Paste(PasteOutcome::Cancelled | PasteOutcome::Stale) => {
+                    if paste_cancelled {
+                        return Err((last, Failure::new(Code::Interrupted)));
+                    }
                     return Err((last, controlled(ControlledReason::Stale)));
                 }
             },
