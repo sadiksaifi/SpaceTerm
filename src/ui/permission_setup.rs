@@ -1,5 +1,5 @@
-//! Permission Setup: one guided pass through System Settings that adds SpaceTerm to a privacy list.
-//! A setup starts only on request, and closing System Settings ends it.
+//! Permission Setup: one guided pass through System Settings that turns on the server's entry in a
+//! privacy list. A setup starts only on request, and closing System Settings ends it.
 
 mod guide;
 mod placement;
@@ -15,9 +15,9 @@ use gpui::{App, AppContext as _, Bounds, Context, DisplayId, Entity, Pixels, Tas
 
 use crate::platform::permission_access::{
     AccessibilityNaming, PermissionAccess, PermissionAccessSubscription, PermissionAuthorization,
-    PermissionSetupPreparation, PermissionSetupReadiness, SystemPermission,
+    PermissionHolder, PermissionSetupPreparation, PermissionSetupReadiness, SystemPermission,
 };
-use crate::platform::setup_guide_host::{ApplicationBundle, SetupGuideHost, SystemSettingsWindow};
+use crate::platform::setup_guide_host::{SetupGuideHost, SystemSettingsWindow};
 
 pub(crate) use guide::SetupGuide;
 
@@ -65,6 +65,16 @@ pub(crate) const fn permission_copy(
             pane: "Device Control and Data Access",
             purpose: "click and type in other apps",
         },
+    }
+}
+
+/// The entry System Settings lists a server's grants under, as running text names it.
+pub(crate) fn holder_name(holder: Option<PermissionHolder>) -> String {
+    match holder {
+        Some(PermissionHolder::Server { name }) => name,
+        Some(PermissionHolder::Launcher) | None => {
+            "the app that started the SpaceTerm server".to_owned()
+        }
     }
 }
 
@@ -116,14 +126,10 @@ pub(crate) struct GuidePresentation {
 /// Owns the one running setup and the Setup Guide window it presents.
 pub(crate) struct PermissionSetup {
     access: Rc<dyn PermissionAccess>,
-    /// What System Settings calls the Accessibility permission, which holds for the process.
-    naming: AccessibilityNaming,
     host: Arc<dyn SetupGuideHost>,
     run: Option<SetupRun>,
     /// The latest failure of each permission's setup, cleared when its next setup starts.
     failures: Vec<(SystemPermission, PermissionSetupFailure)>,
-    /// The running application as the guide offers it, resolved once on first use.
-    bundle: Option<Option<ApplicationBundle>>,
     /// Notifies this setup's observers of authorization changes, from the first
     /// [`PermissionSetup::watch_authorization`] on.
     watch: Option<(Box<dyn PermissionAccessSubscription>, Task<()>)>,
@@ -176,14 +182,17 @@ impl PermissionSetup {
         cx.new(|_| Self::new(access, host))
     }
 
+    /// What System Settings calls the Accessibility permission, as the server reports it.
+    fn naming(&self) -> AccessibilityNaming {
+        self.access.accessibility_naming()
+    }
+
     fn new(access: Rc<dyn PermissionAccess>, host: Arc<dyn SetupGuideHost>) -> Self {
         Self {
-            naming: access.accessibility_naming(),
             access,
             host,
             run: None,
             failures: Vec::new(),
-            bundle: None,
             watch: None,
         }
     }
@@ -520,13 +529,13 @@ impl PermissionSetup {
             granted: run.step == SetupStep::Granted,
             cleared: run.cleared,
             next: run.queued.front().copied(),
-            naming: self.naming,
+            naming: self.naming(),
         })
     }
 
     /// Names `permission` as System Settings does on the running system.
     pub(crate) fn copy(&self, permission: SystemPermission) -> &'static PermissionCopy {
-        permission_copy(permission, self.naming)
+        permission_copy(permission, self.naming())
     }
 
     /// Shows the latest presentation in an open guide.
@@ -565,11 +574,8 @@ impl PermissionSetup {
         let Some(presentation) = self.presentation() else {
             return;
         };
-        let bounds = placement::place_guide(content, visible, guide::height(presentation));
-        if self.bundle.is_none() {
-            self.bundle = Some(self.host.application_bundle());
-        }
-        let bundle = self.bundle.clone().flatten();
+        let bounds = placement::place_guide(content, visible, guide::HEIGHT);
+        let holder = holder_name(Some(self.access.holder()));
         let Some(run) = &mut self.run else {
             return;
         };
@@ -595,7 +601,7 @@ impl PermissionSetup {
         let setup = cx.weak_entity();
         let host = Arc::clone(&self.host);
         run.guide =
-            guide::open(display, bounds, presentation, bundle, host, setup, cx).map(|handle| {
+            guide::open(display, bounds, presentation, holder, host, setup, cx).map(|handle| {
                 GuideWindow {
                     handle,
                     display,

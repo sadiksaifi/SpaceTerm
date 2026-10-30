@@ -449,14 +449,14 @@ fn a_rejected_request_reports_failure_instead_of_waiting(cx: &mut TestAppContext
     let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
     access
         .request_failure
-        .set(Some(MicrophoneAccessError::OffMainThread));
+        .set(Some(MicrophoneAccessError::PlatformRejected));
     let (window, cx) = open_privacy(&access, cx);
 
     click(REQUEST_SELECTOR, cx);
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Failed(MicrophoneAccessError::OffMainThread)
+        MicrophoneAccessStatus::Failed(MicrophoneAccessError::PlatformRejected)
     );
     assert_eq!(
         action(&window, cx),
@@ -472,12 +472,8 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     let (window, cx) = open_settings(Some(access.clone()), cx);
     for (error, expected) in [
         (
-            MicrophoneAccessError::OffMainThread,
-            "Couldn\u{2019}t check microphone access.",
-        ),
-        (
             MicrophoneAccessError::PlatformUnavailable,
-            "Microphone access unknown.",
+            "Couldn\u{2019}t check microphone access.",
         ),
         (
             MicrophoneAccessError::PlatformRejected,
@@ -587,7 +583,7 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
     click(OPEN_SETTINGS_SELECTOR, cx);
     assert_eq!(
         explanation(&window, cx),
-        "Open System Settings and allow SpaceTerm in Privacy & Security > Microphone."
+        "Open System Settings and allow the SpaceTerm server in Privacy & Security > Microphone."
     );
     let label = cx.debug_bounds(LABEL_SELECTOR).expect("label bounds");
     let description = cx

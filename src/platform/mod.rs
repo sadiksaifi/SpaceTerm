@@ -156,15 +156,6 @@ mod macos_application_quit;
 #[cfg(feature = "desktop")]
 pub(crate) mod macos_application_quit;
 
-#[cfg(all(target_os = "macos", not(test)))]
-#[cfg(feature = "desktop")]
-mod macos_permission_access;
-#[cfg(all(target_os = "macos", test))]
-#[cfg(feature = "desktop")]
-pub(crate) mod macos_permission_access;
-#[cfg(target_os = "macos")]
-#[cfg(feature = "desktop")]
-mod macos_permission_probe;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
 mod macos_setup_guide_host;
@@ -189,13 +180,6 @@ mod macos_locale;
 #[cfg(all(target_os = "macos", test))]
 #[cfg(feature = "desktop")]
 pub(crate) mod macos_locale;
-
-#[cfg(all(target_os = "macos", not(test)))]
-#[cfg(feature = "desktop")]
-mod macos_microphone_access;
-#[cfg(all(target_os = "macos", test))]
-#[cfg(feature = "desktop")]
-pub(crate) mod macos_microphone_access;
 
 #[cfg(all(target_os = "macos", not(test)))]
 #[cfg(feature = "desktop")]
@@ -246,12 +230,9 @@ mod macos_services;
 #[cfg(feature = "desktop")]
 pub(crate) mod macos_services;
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
-mod macos_system_settings;
-#[cfg(all(target_os = "macos", test))]
-#[cfg(feature = "desktop")]
-pub(crate) mod macos_system_settings;
+pub(crate) mod server_permission_access;
 
 #[cfg(all(target_os = "macos", not(test)))]
 #[cfg(feature = "desktop")]
@@ -300,8 +281,6 @@ compile_error!("SpaceTerm supports macOS and Linux only");
 #[cfg(feature = "desktop")]
 mod macos_composition;
 #[cfg(feature = "desktop")]
-pub(crate) mod permission_recovery;
-#[cfg(feature = "desktop")]
 pub(crate) mod services_registration;
 #[cfg(feature = "desktop")]
 pub(crate) mod window_movement;
@@ -330,10 +309,7 @@ pub(crate) use linux_composition::main;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(feature = "desktop")]
 pub(crate) fn dispatch_helper_from_environment() -> Option<i32> {
-    let result = unix_askpass_transport::dispatch_helper_from_environment();
-    #[cfg(target_os = "macos")]
-    let result = result.or_else(macos_permission_probe::dispatch_probe_from_environment);
-    result
+    unix_askpass_transport::dispatch_helper_from_environment()
 }
 
 #[cfg(feature = "desktop")]

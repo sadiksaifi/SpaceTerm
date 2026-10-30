@@ -151,7 +151,7 @@ impl MicrophoneAccessRow {
                 match self.recovery_failure {
                     None => "Lets terminal programs use the microphone.",
                     Some(_) => {
-                        "Open System Settings and allow SpaceTerm in Privacy & Security > Microphone."
+                        "Open System Settings and allow the SpaceTerm server in Privacy & Security > Microphone."
                     }
                 },
                 Some(Action::OpenSettings),
@@ -166,10 +166,9 @@ impl MicrophoneAccessRow {
                 "Unavailable",
                 "settings-microphone-access-state-unavailable",
                 match error {
-                    MicrophoneAccessError::OffMainThread => {
+                    MicrophoneAccessError::PlatformUnavailable => {
                         "Couldn\u{2019}t check microphone access."
                     }
-                    MicrophoneAccessError::PlatformUnavailable => "Microphone access unknown.",
                     MicrophoneAccessError::PlatformRejected => "Microphone access request failed.",
                 },
                 Some(Action::CheckAgain),

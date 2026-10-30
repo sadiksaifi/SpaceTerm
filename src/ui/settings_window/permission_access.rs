@@ -16,7 +16,8 @@ use crate::platform::permission_access::{
 };
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::permission_setup::{
-    PermissionCopy, PermissionSetup, PermissionSetupFailure, PermissionSetupStatus, permission_copy,
+    PermissionCopy, PermissionSetup, PermissionSetupFailure, PermissionSetupStatus, holder_name,
+    permission_copy,
 };
 
 use super::SettingsWindow;
@@ -144,10 +145,6 @@ enum TroubleshootDecision {
 pub(super) struct PermissionAccessRow {
     permission: SystemPermission,
     access: Option<Rc<dyn PermissionAccess>>,
-    /// What System Settings calls the Accessibility permission, which holds for the process.
-    naming: AccessibilityNaming,
-    /// The running application, which is what a person turns on in System Settings.
-    application_name: &'static str,
     status: PermissionAccessStatus,
     /// The permission's Permission Setup, or `None` when the host composes none.
     setup: Option<PermissionSetupStatus>,
@@ -160,18 +157,11 @@ impl PermissionAccessRow {
     fn new(
         permission: SystemPermission,
         access: Option<Rc<dyn PermissionAccess>>,
-        application_name: &'static str,
         setup: Option<PermissionSetupStatus>,
     ) -> Self {
         let mut row = Self {
             permission,
-            naming: access
-                .as_ref()
-                .map_or_else(AccessibilityNaming::default, |access| {
-                    access.accessibility_naming()
-                }),
             access,
-            application_name,
             status: PermissionAccessStatus::Unsupported,
             setup,
             notice: None,
@@ -183,7 +173,7 @@ impl PermissionAccessRow {
 
     /// Names the permission as System Settings does on the running system.
     pub(super) fn copy(&self) -> &'static PermissionCopy {
-        permission_copy(self.permission, self.naming)
+        permission_copy(self.permission, self.naming())
     }
 
     /// Reads the current authorization, which can change in System Settings at any time.
@@ -252,6 +242,20 @@ impl PermissionAccessRow {
         succeeded
     }
 
+    /// What System Settings calls the Accessibility permission, as the server reports it.
+    fn naming(&self) -> AccessibilityNaming {
+        self.access
+            .as_ref()
+            .map_or_else(AccessibilityNaming::default, |access| {
+                access.accessibility_naming()
+            })
+    }
+
+    /// What System Settings lists the grant under, which is what a person turns on.
+    fn holder_name(&self) -> String {
+        holder_name(self.access.as_ref().map(|access| access.holder()))
+    }
+
     pub(super) fn presentation(&self) -> PermissionAccessPresentation {
         use PermissionAccessAction as Action;
         use PermissionAuthorization as Authorization;
@@ -259,14 +263,15 @@ impl PermissionAccessRow {
         let text = permission_text(self.permission);
         let copy = self.copy();
         let name = copy.name;
-        let application = self.application_name;
+        let application = self.holder_name();
+        let application = application.as_str();
         let pane = copy.pane;
         let purpose = format!("Lets terminal programs {}.", copy.purpose);
         let notice = self.notice.map(|notice| match notice {
             RecoveryNotice::OpenFailed => open_failed(application, pane),
             RecoveryNotice::Resetting => format!("Resetting {name}…"),
             RecoveryNotice::ResetFailed => format!(
-                "Couldn\u{2019}t reset {name}. Remove {application} in Privacy & Security > {pane}, then add it again."
+                "Couldn\u{2019}t reset {name}. Remove {application} in Privacy & Security > {pane}, then set it up again."
             ),
         });
 
@@ -317,11 +322,8 @@ impl PermissionAccessRow {
                 "Unavailable",
                 text.state_unavailable,
                 match error {
-                    PermissionAccessError::OffMainThread => {
-                        format!("Couldn\u{2019}t check {name} access.")
-                    }
                     PermissionAccessError::PlatformUnavailable => {
-                        format!("{name} access unknown.")
+                        format!("Couldn\u{2019}t check {name} access.")
                     }
                     PermissionAccessError::PlatformRejected => {
                         format!("{name} access check failed.")
@@ -387,7 +389,6 @@ impl PermissionAccessRows {
     pub(super) fn new(
         access: Option<Rc<dyn PermissionAccess>>,
         setup: Option<Entity<PermissionSetup>>,
-        application_name: &'static str,
         cx: &App,
     ) -> Self {
         // A Permission Setup acts through the access capability, so it applies only beside one.
@@ -401,13 +402,11 @@ impl PermissionAccessRows {
             screen_recording: PermissionAccessRow::new(
                 SystemPermission::ScreenRecording,
                 access.clone(),
-                application_name,
                 status(SystemPermission::ScreenRecording),
             ),
             accessibility: PermissionAccessRow::new(
                 SystemPermission::Accessibility,
                 access,
-                application_name,
                 status(SystemPermission::Accessibility),
             ),
             setup,
@@ -416,7 +415,7 @@ impl PermissionAccessRows {
 
     /// What System Settings calls the Accessibility permission on the running system.
     pub(super) fn naming(&self) -> AccessibilityNaming {
-        self.accessibility.naming
+        self.accessibility.naming()
     }
 
     pub(super) fn setup(&self) -> Option<&Entity<PermissionSetup>> {
@@ -519,7 +518,7 @@ impl SettingsWindow {
         let copy = row.copy();
         let name = copy.name;
         let pane = copy.pane;
-        let application = row.application_name;
+        let application = row.holder_name();
         let title = format!("{name} Not Working?");
         let reopen = "Quit and reopen the program that needs access.";
         let (message, primary) = if row.can_reset() {
@@ -539,7 +538,7 @@ impl SettingsWindow {
         } else {
             (
                 format!(
-                    "{reopen} If that doesn\u{2019}t help, remove {application} from Privacy & Security > {pane} and add it again."
+                    "{reopen} If that doesn\u{2019}t help, remove {application} from Privacy & Security > {pane}, then set it up again."
                 ),
                 ModalAction::new(
                     TroubleshootDecision::OpenSettings,

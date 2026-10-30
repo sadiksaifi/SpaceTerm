@@ -1,11 +1,13 @@
 //! Portable authorization seam for the System Permissions that programs in a Terminal Session
-//! inherit from SpaceTerm.
+//! inherit from this machine's SpaceTerm Server.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// One permission that programs in a Terminal Session inherit from SpaceTerm and that only System
-/// Settings grants.
+pub(crate) use spaceterm_server::permissions::PermissionHolder;
+
+/// One permission that programs in a Terminal Session inherit from their server and that only
+/// System Settings grants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SystemPermission {
     /// Capturing the screen, which a program needs to take screenshots.
@@ -53,8 +55,6 @@ pub(crate) enum PermissionAuthorization {
     )
 )]
 pub(crate) enum PermissionAccessError {
-    #[error("permission access is unavailable off the main thread")]
-    OffMainThread,
     #[error("permission access is unavailable on this platform")]
     PlatformUnavailable,
     #[error("the platform rejected the permission operation")]
@@ -76,9 +76,9 @@ pub(crate) type PermissionResetCompletion =
 pub(crate) enum PermissionSetupReadiness {
     /// Tools started now already receive the permission, so there is nothing to set up.
     AlreadyGranted,
-    /// System Settings is ready to accept SpaceTerm into the permission's list. `cleared` says
-    /// whether the setup removed any earlier entry for SpaceTerm first. The system does not say
-    /// whether an entry existed, so the removal may have found none.
+    /// System Settings lists the holder for the person to turn on. `cleared` says whether the setup
+    /// removed the holder's earlier entry first. The system does not say whether an entry existed,
+    /// so the removal may have found none.
     Ready { cleared: bool },
 }
 
@@ -154,9 +154,9 @@ pub(crate) struct PermissionAccessObservation {
     pub(crate) subscription: Box<dyn PermissionAccessSubscription>,
 }
 
-/// Native permission authorization and its explicit recovery operations.
+/// Permission authorization and its explicit recovery operations.
 ///
-/// Every operation acts on the running application's own grant for one permission. None of them
+/// Every operation acts on the grant of this machine's server for one permission. None of them
 /// captures the screen or sends input to test access.
 pub(crate) trait PermissionAccess {
     /// Returns the latest known authorization.
@@ -180,10 +180,10 @@ pub(crate) trait PermissionAccess {
     ///
     /// It verifies the authorization first and reports [`PermissionSetupReadiness::AlreadyGranted`]
     /// without changing anything when tools already receive the permission. Otherwise it removes
-    /// any entry for the running application when it can, because System Settings ignores an
-    /// application dropped onto a list that already holds it, and an entry from an earlier build
-    /// grants nothing. The completion may run on any thread. The caller keeps the returned
-    /// preparation for as long as it wants the result.
+    /// the holder's entry when it can, because an entry from an earlier build grants nothing, and
+    /// requests the permission again so System Settings lists the holder to turn on. The
+    /// completion may run on any thread. The caller keeps the returned preparation for as long as
+    /// it wants the result.
     fn prepare_setup(
         &self,
         permission: SystemPermission,
@@ -196,11 +196,15 @@ pub(crate) trait PermissionAccess {
     /// list they can find.
     fn accessibility_naming(&self) -> AccessibilityNaming;
 
-    /// Whether [`Self::reset`] can act on exactly the running application's identity.
+    /// Whose System Settings entry holds the grants, so SpaceTerm names the entry a person turns
+    /// on.
+    fn holder(&self) -> PermissionHolder;
+
+    /// Whether [`Self::reset`] can act on exactly the server's own entry.
     fn can_reset(&self) -> bool;
 
-    /// Forgets the Operating System's decision for one permission and the running application
-    /// only, so a later Permission Setup adds the application again.
+    /// Forgets the Operating System's decision for one permission and the server only, so a later
+    /// Permission Setup lists the server again.
     ///
     /// The result reports the reset alone. The completion follows a verification, so a read made
     /// on completion reflects the reset. When that verification fails after a successful reset,
@@ -243,6 +247,7 @@ pub(crate) mod testing {
         observers: Rc<Cell<usize>>,
         reads: Cell<usize>,
         pub(crate) naming: Cell<AccessibilityNaming>,
+        pub(crate) holder: RefCell<PermissionHolder>,
     }
 
     /// Counts an observation until its owner drops it.
@@ -279,6 +284,9 @@ pub(crate) mod testing {
                 observers: Rc::default(),
                 reads: Cell::new(0),
                 naming: Cell::new(AccessibilityNaming::default()),
+                holder: RefCell::new(PermissionHolder::Server {
+                    name: "SpaceTerm Development Server".into(),
+                }),
             })
         }
 
@@ -379,6 +387,10 @@ pub(crate) mod testing {
 
         fn accessibility_naming(&self) -> AccessibilityNaming {
             self.naming.get()
+        }
+
+        fn holder(&self) -> PermissionHolder {
+            self.holder.borrow().clone()
         }
 
         fn can_reset(&self) -> bool {

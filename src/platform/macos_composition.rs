@@ -149,6 +149,9 @@ fn compose(
     );
     let server_context_paths = startup.server_context_paths();
     let command_line_tool = command_line_tool(identity);
+    let server_permissions = Rc::new(
+        super::server_permission_access::ServerPermissionAccess::new(identity.directory_name()),
+    );
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
         Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),
@@ -188,15 +191,11 @@ fn compose(
                 file_preview: Rc::new(super::macos_quick_look::MacosQuickLookFactory),
             },
             lifecycle,
-            microphone_access: identity.microphone_access().then(|| {
-                Rc::new(super::macos_microphone_access::MacosMicrophoneAccess::new())
-                    as Rc<dyn crate::platform::microphone_access::MicrophoneAccess>
-            }),
-            // Every identity offers these controls. A grant belongs to the signature of the build
-            // that holds it, so a rebuilt SpaceTerm Development is where stale grants recur most.
-            permission_access: Some(Rc::new(
-                super::macos_permission_access::MacosPermissionAccess::new(identity),
-            )
+            // Programs in Terminal Sessions inherit the grants of this machine's server, so the
+            // rows read and set up that server's grants.
+            microphone_access: Some(Rc::clone(&server_permissions)
+                as Rc<dyn crate::platform::microphone_access::MicrophoneAccess>),
+            permission_access: Some(server_permissions
                 as Rc<dyn crate::platform::permission_access::PermissionAccess>),
             setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
                 as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),

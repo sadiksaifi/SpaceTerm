@@ -813,7 +813,6 @@ impl SettingsWindow {
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
                 permission_setup,
-                crate::application_identity::ApplicationIdentity::current().display_name(),
                 cx,
             ),
             _permission_changes: permission_changes,

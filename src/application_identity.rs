@@ -52,7 +52,6 @@ pub(crate) struct ApplicationIdentity {
     application_id: &'static str,
     icon: ApplicationIcon,
     update_source: UpdateSource,
-    microphone_access: bool,
 }
 
 impl ApplicationIdentity {
@@ -92,33 +91,8 @@ impl ApplicationIdentity {
         self.icon
     }
 
-    /// The bundle identifier the Operating System keys this identity's privacy grants to.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only the native permission host consumes this identity policy"
-        )
-    )]
-    pub(crate) const fn bundle_identifier(self) -> &'static str {
-        self.application_id()
-    }
-
     pub(crate) const fn update_source(self) -> UpdateSource {
         self.update_source
-    }
-
-    /// SpaceTerm Development is re-signed ad hoc on every build, so privacy grants would not
-    /// persist.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only the native microphone host consumes this identity policy"
-        )
-    )]
-    pub(crate) const fn microphone_access(self) -> bool {
-        self.microphone_access
     }
 
     const fn production() -> Self {
@@ -130,7 +104,6 @@ impl ApplicationIdentity {
             application_id: "io.github.sadiksaifi.spaceterm",
             icon: icon!("spaceterm/SpaceTerm.icon", ["Glyph.svg"]),
             update_source: UpdateSource::SignedFeed,
-            microphone_access: true,
         }
     }
 
@@ -146,7 +119,6 @@ impl ApplicationIdentity {
                 ["Channel Mark.svg", "Glyph.svg"]
             ),
             update_source: UpdateSource::Unavailable,
-            microphone_access: true,
         }
     }
 
@@ -162,8 +134,6 @@ impl ApplicationIdentity {
                 ["Channel Mark.svg", "Glyph.svg"]
             ),
             update_source: UpdateSource::Simulation,
-            // Each rebuild is signed ad hoc again, which invalidates a microphone grant.
-            microphone_access: false,
         }
     }
 }
@@ -282,11 +252,11 @@ mod tests {
         ];
 
         assert_eq!(
-            identities.map(|identity| (identity.update_source(), identity.microphone_access())),
+            identities.map(ApplicationIdentity::update_source),
             [
-                (UpdateSource::SignedFeed, true),
-                (UpdateSource::Unavailable, true),
-                (UpdateSource::Simulation, false),
+                UpdateSource::SignedFeed,
+                UpdateSource::Unavailable,
+                UpdateSource::Simulation,
             ]
         );
     }
@@ -318,7 +288,7 @@ mod tests {
             }
             assert_eq!(plist_string(plist, "CFBundleIdentifier"), bundle_identifier);
             assert_eq!(identity.application_id(), bundle_identifier);
-            assert_eq!(identity.bundle_identifier(), bundle_identifier);
+            assert_eq!(identity.application_id(), bundle_identifier);
         }
     }
 
