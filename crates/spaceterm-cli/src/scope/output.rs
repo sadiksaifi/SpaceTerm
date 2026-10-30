@@ -1,5 +1,6 @@
 use super::*;
 use crate::contract::TargetStep;
+use crate::shell::quote;
 use std::fmt::Write;
 
 /// Diagnostics report only bounded classifications and IDs, even in verbose mode.
@@ -68,10 +69,6 @@ pub(super) fn data_text(data: &TargetData) -> String {
         }
     }
     output
-}
-
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 fn name(level: Level) -> &'static str {

@@ -102,6 +102,8 @@ pub(crate) enum AccessFailure {
     Unsupported,
     /// The address isn't one the server can listen at.
     InvalidAddress,
+    /// The server couldn't listen at the address and port, so nothing changed.
+    AddressUnavailable,
     /// Direct network access is off, so the server opens no invitation.
     Disabled,
     /// The server already holds as many devices or connections as it allows.
@@ -261,6 +263,7 @@ fn classify(error: impl Into<DirectError>) -> AccessFailure {
         | DirectError::Revoked => AccessFailure::Unreachable,
         DirectError::IncompatibleProtocol => AccessFailure::Unsupported,
         DirectError::InvalidAddress => AccessFailure::InvalidAddress,
+        DirectError::AddressUnavailable => AccessFailure::AddressUnavailable,
         DirectError::Disabled => AccessFailure::Disabled,
         DirectError::Capacity => AccessFailure::Capacity,
         DirectError::StorageUnavailable => AccessFailure::Storage,
@@ -313,6 +316,9 @@ impl AccessFailure {
                     "Enter an IP address of \u{201C}{server}\u{201D}, optionally followed by a port."
                 )
             }
+            Self::AddressUnavailable => format!(
+                "\u{201C}{server}\u{201D} couldn\u{2019}t listen at that address and port. Another app may be using the port."
+            ),
             Self::Disabled => {
                 format!("Allow devices to connect to \u{201C}{server}\u{201D} before inviting one.")
             }

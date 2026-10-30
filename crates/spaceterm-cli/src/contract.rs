@@ -800,6 +800,7 @@ codes! {
     DesktopBusy = "desktop_busy", Unavailable, true, "The desktop is still checking earlier files. Try again.";
     // CLI-native: route or environment.
     LocalOnly = "local_only", Unavailable, false, "This command runs only on the server's own machine.";
+    DisconnectsEveryDevice = "disconnects_every_device", Unavailable, false, "This change would leave no connected device a route to the server. Make it on the server's own machine.";
     UnsupportedSession = "unsupported_session", Unavailable, false, "This session does not support the command.";
     IdentityBusy = "identity_busy", Unavailable, true, "Another command of this identity is running.";
     CredentialUnavailable = "credential_unavailable", Unavailable, false, "This machine has no credential store for SpaceTerm pairings. Use a desktop session with a Keychain or Secret Service.";
@@ -851,6 +852,7 @@ codes! {
     Revoked = "revoked", ActionRequired, false, "This device was unpaired.";
     NetworkOff = "network_off", Unavailable, false, "The server's Network Access is off.";
     InvalidAddress = "invalid_address", Target, false, "Enter a DNS name or IP address and an optional nonzero port.";
+    AddressUnavailable = "address_unavailable", Unavailable, true, "The server couldn\u{2019}t listen at this address and port. Nothing changed.";
     ClaimDecided = "claim_decided", Target, false, "This pairing claim was already decided.";
     ComparisonMismatch = "comparison_mismatch", Failed, false, "The Comparison Code did not match.";
     WrongServer = "wrong_server", Target, false, "This invitation or connection names another server.";
@@ -960,6 +962,7 @@ pub fn from_direct_error(error: DirectError) -> Failure {
         DirectError::Disabled => Code::NetworkOff,
         DirectError::InvalidRequest => Code::ProtocolError,
         DirectError::InvalidAddress => Code::InvalidAddress,
+        DirectError::AddressUnavailable => Code::AddressUnavailable,
         DirectError::AlreadyDecided => Code::ClaimDecided,
         DirectError::Substituted => Code::ComparisonMismatch,
         DirectError::WrongServer => Code::WrongServer,
@@ -1528,6 +1531,7 @@ pub enum ServiceAction {
     Restart,
     Update,
     Return,
+    Network,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1565,6 +1569,44 @@ pub struct ServiceOperation {
     pub operation: String,
     pub receipt: Receipt,
     pub observed: Option<Observed>,
+}
+
+/// Network Access before or after a change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NetworkSetting {
+    pub enabled: bool,
+    pub bind: Option<String>,
+}
+
+/// What a Network Access change does to the paired connection that asked for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallerEffect {
+    StaysConnected,
+    Reconnects,
+    Disconnected,
+}
+
+/// `effects` of `server.network`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NetworkEffects {
+    pub from: NetworkSetting,
+    pub to: NetworkSetting,
+    /// Every paired connection ends, including the caller's.
+    pub ends_connections: bool,
+    /// Null on the server's own machine.
+    pub caller: Option<CallerEffect>,
+    /// Connected Paired Devices whose route the change removes.
+    pub disconnects: Vec<DeviceRef>,
+}
+
+/// `server.network`. `operation` and `receipt` are null when Network Access already matched.
+/// `network` is null when this device could not read Network Access after the change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServerNetwork {
+    pub network: Option<NetworkSetting>,
+    pub operation: Option<String>,
+    pub receipt: Option<Receipt>,
 }
 
 /// `server.update --check`.

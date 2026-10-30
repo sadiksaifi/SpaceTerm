@@ -101,13 +101,40 @@ impl Source for NoFeed {
 /// A lane over the server state at `paths`, whose service manager reports a running server and
 /// whose helper launches do nothing.
 pub(crate) fn serving(paths: &crate::host::Paths) -> Arc<LaneServer> {
+    serving_with(paths, Arc::new(Host::default()))
+}
+
+/// [`serving`] with its own view of the running server.
+pub(crate) fn serving_with(paths: &crate::host::Paths, host: Arc<dyn LaneHost>) -> Arc<LaneServer> {
+    serving_with_feed(paths, host, Arc::new(NoFeed))
+}
+
+/// [`serving_with`] whose release feed is `feed`.
+pub(crate) fn serving_with_feed(
+    paths: &crate::host::Paths,
+    host: Arc<dyn LaneHost>,
+    feed: Arc<dyn Source>,
+) -> Arc<LaneServer> {
     LaneServer::new(
         Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
-        Arc::new(Host::default()),
-        Arc::new(NoFeed),
+        host,
+        feed,
         Box::new(|_| Ok(())),
     )
     .unwrap()
+}
+
+/// A release feed that takes `0` to answer and then has no release, as a slow download holds
+/// the lane connection that asked for it.
+pub(crate) struct SlowFeed(pub Duration);
+impl Source for SlowFeed {
+    fn latest(&self) -> Result<Option<feed::Signed>, ServerError> {
+        std::thread::sleep(self.0);
+        Ok(None)
+    }
+    fn download(&self, _: &feed::Feed, _: &mut dyn Write) -> Result<(), ServerError> {
+        panic!("no feed to download from")
+    }
 }
 
 const ACTOR: Actor = Actor {
@@ -677,7 +704,9 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
             panic!("expected a service-lane connection");
         };
         assert_eq!(actor.client, derived);
-        lane.lane.serve(&mut server, actor, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut server, actor, None, &|| Ok(()))
+            .unwrap();
         let (major, reply) = peer.join().unwrap();
         assert_eq!(major, crate::protocol::MAJOR);
         assert_eq!(code(reply), "not_found");
@@ -742,7 +771,9 @@ fn a_stopping_server_closes_a_polling_lane_connection() {
             client.receive(MAX_FRAME, deadline).is_err()
         });
         let started = Instant::now();
-        lane.lane.serve(&mut server, ACTOR, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut server, ACTOR, None, &|| Ok(()))
+            .unwrap();
         drop(server);
         assert!(peer.join().unwrap(), "the client saw the connection close");
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -771,7 +802,9 @@ fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
             }
             replies
         });
-        lane.lane.serve(&mut server, ACTOR, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut server, ACTOR, None, &|| Ok(()))
+            .unwrap();
         let mut replies = peer.join().unwrap().into_iter();
         assert_eq!(code(replies.next().unwrap()), "protocol_error");
         assert!(matches!(replies.next().unwrap(), LaneReply::Status(_)));
@@ -819,7 +852,7 @@ mod flow {
             // The fixture's signing trust is per thread, so the serving thread holds it too.
             std::thread::spawn(move || {
                 crate::service::runtime::test_support::with_fixture_trust(|| {
-                    lane.serve(&mut server, ACTOR, &|| Ok(()))
+                    lane.serve(&mut server, ACTOR, None, &|| Ok(()))
                 })
             });
             Ok(Box::new(client))

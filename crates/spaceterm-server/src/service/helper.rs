@@ -93,6 +93,8 @@ fn perform(identity: &str, record: &Record) -> Result<State, ServerError> {
             service.activate(approval)?.phase
         }
         Action::Return => service.return_to_previous(service.prepare_return()?)?.phase,
+        // The lane applies Network Access changes itself and never launches a helper for one.
+        Action::Network(_) => return Err(ServerError::Unsupported),
     };
     Ok(activation_outcome(phase))
 }

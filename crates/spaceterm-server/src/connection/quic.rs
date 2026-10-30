@@ -83,6 +83,10 @@ const DRAIN_SENDS: usize = 8;
 const ADDRESS_LIMIT: Duration = Duration::from_secs(2);
 /// The server name every client sends. The pinned certificate, not a name, authenticates.
 pub const SERVER_NAME: &str = "spaceterm.invalid";
+/// How long a retired listener keeps routing to connections that have not ended. Its sockets
+/// then close, so slow work that still holds one of them, such as a download a severed service
+/// lane runs, never keeps the address from the listener that replaces it.
+pub const RETIRE_LIMIT: Duration = Duration::from_secs(5);
 
 /// Failures before the carrier exists. Classifications only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -874,8 +878,9 @@ impl QuicListener {
         result.recv().unwrap_or(Err(QuicError::Transport))
     }
 
-    /// Stops taking connections but keeps routing to the live ones until the last ends, so
-    /// their goodbyes still leave and their acknowledgements still arrive. Connections that
+    /// Stops taking connections but keeps routing to the live ones until the last ends, or for
+    /// at most [`RETIRE_LIMIT`], so their goodbyes still leave and their acknowledgements still
+    /// arrive. Connections that
     /// waited for the host are dropped. Returns false when no connection is live: the caller
     /// drops the listener, which closes its socket at once.
     pub fn retire(&self) -> bool {
@@ -959,6 +964,7 @@ impl Demux {
         let mut buffer = vec![0; RECEIVE_BYTES];
         let mut send = Vec::new();
         let mut descriptors = Vec::with_capacity(3);
+        let mut retired_since: Option<Instant> = None;
         loop {
             let poll = |fd| libc::pollfd {
                 fd,
@@ -1006,7 +1012,13 @@ impl Demux {
             }
             self.route(&mut buffer, &mut send);
             self.shared.lock().expire(Instant::now());
-            if self.try_finish() {
+            retired_since = match (self.phase.load(Ordering::Acquire), retired_since) {
+                (RETIRED, None) => Some(Instant::now()),
+                (RETIRED, since) => since,
+                _ => None,
+            };
+            let overdue = retired_since.is_some_and(|since| since.elapsed() >= RETIRE_LIMIT);
+            if self.try_finish() || (overdue && self.close_retired()) {
                 // The host binds again once a retired socket is free.
                 if let Some(wake) = &*self.wake.lock().unwrap_or_else(|e| e.into_inner()) {
                     wake.wake();
@@ -1014,6 +1026,26 @@ impl Demux {
                 return;
             }
         }
+    }
+
+    /// Finishes a retired listener past [`RETIRE_LIMIT`] and closes its sockets, while
+    /// connections that have not ended still hold it. They can no longer send or receive.
+    fn close_retired(&self) -> bool {
+        if self
+            .phase
+            .compare_exchange(RETIRED, FINISHED, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let mut sockets = self
+            .shared
+            .sockets
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        sockets.udp.clear();
+        sockets.lost = None;
+        true
     }
 
     /// Finishes a retired listener whose last connection ended. A revive that came first keeps
@@ -1523,6 +1555,23 @@ impl Driver {
     }
 
     /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
+    /// The server address a server connection's client reached: the destination its packets
+    /// carried, or the listener's own address when it listens at one, at the listener's port.
+    /// `None` on a client, or when a listener on every interface learned no destination.
+    fn destination(&self) -> Option<SocketAddr> {
+        let Side::Server { shared, .. } = &self.side else {
+            return None;
+        };
+        let bound = shared.sockets().address;
+        let ip = self
+            .connection
+            .network_path(noq_proto::PathId::ZERO)
+            .ok()
+            .and_then(|path| path.local_ip())
+            .or_else(|| (!bound.ip().is_unspecified()).then(|| bound.ip()))?;
+        Some(SocketAddr::new(ip.to_canonical(), bound.port()))
+    }
+
     /// A second handle on a server connection's bell. A client has none.
     fn ring(&self) -> Option<UnixStream> {
         match &self.side {
@@ -1752,6 +1801,11 @@ impl QuicStream {
     /// The certificates the peer presented.
     pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
         self.driver.peer_certificates()
+    }
+
+    /// The server address a server connection's client reached, when known.
+    pub fn destination(&self) -> Option<SocketAddr> {
+        self.driver.destination()
     }
 
     fn l0(&self) -> Result<StreamId, QuicError> {
@@ -2659,5 +2713,61 @@ mod tests {
         assert!(!listener.retire(), "no connection is live");
         drop(listener);
         assert!(QuicListener::bind(bound, config).is_ok());
+    }
+
+    /// A connection whose thread holds it past retirement, as a severed lane still running a
+    /// download does, keeps a retired listener routing for at most [`RETIRE_LIMIT`]. Its socket
+    /// then closes, so the address binds again.
+    #[test]
+    fn a_retired_listener_frees_its_port_within_the_limit_while_a_connection_lives() {
+        let config = server_config_for_tests();
+        let listener =
+            QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
+        let address = listener.address();
+        let client_config = {
+            let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyServer))
+            .with_no_client_auth();
+            tls.alpn_protocols = vec![ALPN.to_vec()];
+            client_config(tls).unwrap()
+        };
+        let client = std::thread::spawn(move || {
+            QuicStream::connect(
+                client_config,
+                &[address],
+                Instant::now() + Duration::from_secs(8),
+                &AtomicBool::new(false),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut held = loop {
+            if let Some(stream) = listener.accept() {
+                break stream;
+            }
+            assert!(Instant::now() < deadline, "no connection arrived");
+            std::thread::park_timeout(Duration::from_millis(5));
+        };
+        held.handshake(deadline).unwrap();
+        let retired = Instant::now();
+        assert!(listener.retire(), "the held connection is live");
+        assert!(!listener.finished());
+        while !listener.finished() {
+            assert!(
+                retired.elapsed() < RETIRE_LIMIT + Duration::from_secs(2),
+                "the retired listener outlived its limit"
+            );
+            std::thread::park_timeout(Duration::from_millis(20));
+        }
+        assert!(retired.elapsed() >= RETIRE_LIMIT);
+        // The connection still lives, and its address binds again.
+        assert!(QuicListener::bind(address, config).is_ok());
+        drop(held);
+        // The client waits for bytes on L0 that never come.
+        let _ = client.join();
     }
 }

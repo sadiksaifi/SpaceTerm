@@ -678,3 +678,22 @@ fn an_uncertain_restart_is_reported_and_the_next_check_settles_it(cx: &mut TestA
         footnote(&servers)
     );
 }
+
+/// The card makes no Network Access change, so it names one only when a connection settles an
+/// earlier change the CLI made.
+#[test]
+fn an_earlier_network_access_change_reads_as_an_earlier_change() {
+    let network = LaneAction::Network {
+        access: spaceterm_server::service::lane::network::NetworkAccess::All,
+    };
+    let (act, settlement) = earlier(&[receipt(network, LaneOperationState::Done, "a")]).unwrap();
+    assert_eq!(act, Act::NetworkAccess);
+    assert_eq!(
+        earlier_message("penguin", &act, &settlement).0,
+        "SpaceTerm confirmed that an earlier Network Access change of penguin finished."
+    );
+    assert_eq!(
+        ended_message("penguin", &Ended::Changed(act, Settlement::Done)).0,
+        "penguin changed its Network Access."
+    );
+}

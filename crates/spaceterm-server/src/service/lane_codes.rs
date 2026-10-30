@@ -3,6 +3,10 @@
 use crate::ServerError;
 use crate::direct::DirectError;
 
+/// A paired caller asked for a Network Access change that keeps no connected Paired Device's
+/// route. Only the server's own machine makes that change.
+pub const DISCONNECTS_EVERY_DEVICE: &str = "disconnects_every_device";
+
 /// The contract code of a server failure.
 pub fn code(error: &ServerError) -> &'static str {
     match error {
@@ -55,6 +59,7 @@ fn direct_code(error: &DirectError) -> &'static str {
         DirectError::Disabled => "network_off",
         DirectError::InvalidRequest => "protocol_error",
         DirectError::InvalidAddress => "invalid_address",
+        DirectError::AddressUnavailable => "address_unavailable",
         DirectError::AlreadyDecided => "claim_decided",
         DirectError::Substituted => "comparison_mismatch",
         DirectError::WrongServer => "wrong_server",

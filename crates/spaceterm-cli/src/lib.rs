@@ -9,6 +9,7 @@ pub mod journal;
 pub mod list;
 pub mod scope;
 pub mod server;
+pub mod shell;
 pub mod state;
 pub mod work;
 

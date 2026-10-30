@@ -257,6 +257,10 @@ pub enum DirectError {
     InvalidRequest,
     #[error("Enter a DNS name or IP address and a nonzero UDP port.")]
     InvalidAddress,
+    /// The server couldn't listen at the address and port, for example because another app
+    /// holds them. Nothing changed.
+    #[error("The server couldn\u{2019}t listen at this address and port.")]
+    AddressUnavailable,
     #[error("This claim has already been decided.")]
     AlreadyDecided,
     #[error("This proof belongs to a different claim.")]
