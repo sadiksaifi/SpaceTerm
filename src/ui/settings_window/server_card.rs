@@ -1,9 +1,11 @@
 //! The selected server's card: the Server row, Start automatically and Terminal Sessions.
 //!
 //! Each row reads what SpaceTerm already knows: this account's service and update rows, and the
-//! direct registry. Rendering asks no server anything. A paired server's native service is
-//! administered on its own machine, so its card offers only connection steps. When SpaceTerm isn't connected to the server, the rows under Server dim and show what
-//! SpaceTerm last observed, and the card's footnote says how to change them.
+//! direct registry. Rendering asks no server anything. A paired server's card offers its
+//! connection steps, and Stop, Restart and Update over its service lane, which
+//! [`super::remote_admin`] takes. Start stays on a server's own computer. When SpaceTerm isn't
+//! connected to the server, the rows under Server dim and show what SpaceTerm last observed, and
+//! the card's footnote says how to change them.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, ElementId, SharedString, Window, accesskit, div};
@@ -14,6 +16,7 @@ use spaceterm_ui::{
 };
 
 use super::SettingsWindow;
+use super::remote_admin::{Change, Work};
 use super::server_list::{ServerChoice, status_dot, tone_color};
 use super::server_selection;
 use super::server_update::{UpdateAction, UpdateState, UpdateStep};
@@ -240,6 +243,8 @@ pub(super) fn operating_system_name(reported: &str) -> SharedString {
 enum StatusStep {
     Local(ServiceAction),
     Direct(DirectServerAction),
+    /// A change to a paired server over its service lane.
+    Remote(Change),
     UnpairThisDevice,
     /// A step of the server's update journey, or Check Now.
     Version(VersionStep),
@@ -323,7 +328,7 @@ impl SettingsWindow {
             }
             ServerChoice::Direct(route) => {
                 let retained = self.retained_status.get(&choice.key()).copied();
-                match self
+                let mut state = match self
                     .saved_direct_servers()
                     .into_iter()
                     .find(|(saved, _, _)| saved == route)
@@ -335,7 +340,15 @@ impl SettingsWindow {
                     }
                     Some((_, status, _)) => direct_state(status),
                     None => ServerState::new("Not connected", "Not connected", Tone::Idle),
+                };
+                // A server SpaceTerm stopped reads as stopped rather than as a connection that
+                // keeps retrying, until someone starts it on its own computer.
+                if !state.live && self.remote_stopped(route) {
+                    state = ServerState::new("Stopped", "Stopped", Tone::Idle);
                 }
+                state.operation = self.remote_operation(route);
+                state.checking |= self.remote_reading(route);
+                state
             }
         }
     }
@@ -416,18 +429,28 @@ impl SettingsWindow {
             return None;
         }
         let name = self.server_name(choice);
+        // The stop SpaceTerm made explains itself, including where to start the server again.
+        if let ServerChoice::Direct(route) = choice
+            && self.remote_stopped(route)
+        {
+            return None;
+        }
         if self.server_unreachable(choice) {
             let observed = server_selection::facts(&choice.key(), cx)
                 .map(|facts| facts.observed_at)
                 .filter(|at| *at > 0)
                 .map(|at| observed_time(at, cx));
-            return Some(observed.map_or_else(
-                || "SpaceTerm can\u{2019}t reach the server right now.".into(),
-                |at| {
-                    format!("SpaceTerm can\u{2019}t reach {name}. Last known settings: {at}.")
-                        .into()
-                },
-            ));
+            let reach = observed.map_or_else(
+                || "SpaceTerm can\u{2019}t reach the server right now.".to_owned(),
+                |at| format!("SpaceTerm can\u{2019}t reach {name}. Last known settings: {at}."),
+            );
+            // A stopped server accepts no connection, so only its own computer starts it.
+            return Some(match choice {
+                ServerChoice::Direct(_) => {
+                    format!("{reach} If it\u{2019}s stopped, start it on its own computer.").into()
+                }
+                ServerChoice::Local => reach.into(),
+            });
         }
         Some(
             match choice {
@@ -547,16 +570,22 @@ impl SettingsWindow {
                 (!update.working && update.tone != CaptionTone::Guidance)
                     .then_some((update.explanation, update.tone))
             }
-            ServerChoice::Direct(_) => None,
+            ServerChoice::Direct(route) => {
+                self.remote_message(&route, &self.server_name(&ServerChoice::Direct(route)))
+            }
         }
     }
 
     /// The service and connection steps the Server row offers, in order, and the management
     /// steps its ⋯ menu always holds.
-    fn status_steps(&self, choice: &ServerChoice) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
+    fn status_steps(
+        &self,
+        choice: &ServerChoice,
+        cx: &App,
+    ) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
         match choice {
             ServerChoice::Local => self.local_status_steps(),
-            ServerChoice::Direct(route) => self.direct_status_steps(*route),
+            ServerChoice::Direct(route) => self.direct_status_steps(*route, cx),
         }
     }
 
@@ -624,6 +653,7 @@ impl SettingsWindow {
     fn direct_status_steps(
         &self,
         route: crate::direct_connections::DirectRouteId,
+        cx: &App,
     ) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
         let Some((_, status, _)) = self
             .saved_direct_servers()
@@ -633,11 +663,16 @@ impl SettingsWindow {
             return (Vec::new(), Vec::new());
         };
         let presentation = crate::ui::direct_servers::present(status, "");
-        let buttons = presentation
+        let mut buttons: Vec<(StatusStep, bool)> = presentation
             .actions
             .iter()
             .map(|action| (StatusStep::Direct(*action), false))
             .collect();
+        // The server's own update check found a newer release, so Update leads the row.
+        let ready = self.remote_ready(&route, cx);
+        if self.remote_available(&route).is_some() && ready {
+            buttons.push((StatusStep::Remote(Change::Update), false));
+        }
         let reconnectable = !matches!(
             status,
             DirectRouteStatus::Connecting | DirectRouteStatus::Refused(RefusalReason::Revoked)
@@ -647,16 +682,36 @@ impl SettingsWindow {
         } else {
             "Unpair This Computer\u{2026}"
         };
-        let menu = vec![
-            MenuItem::new(
-                "Reconnect",
-                StatusStep::Direct(DirectServerAction::Connect),
-                reconnectable,
-            ),
+        let mut menu = Vec::new();
+        // Stop and Restart reach the server over its service lane while SpaceTerm holds a
+        // connection to it. Start needs the server's own computer, so the menu offers none.
+        if super::remote_admin::installed(cx).is_some() {
+            menu.push(MenuItem::new(
+                Change::Restart.label(),
+                StatusStep::Remote(Change::Restart),
+                ready,
+            ));
+            menu.push(MenuItem::new(
+                Change::Stop.label(),
+                StatusStep::Remote(Change::Stop),
+                ready,
+            ));
+        }
+        let reconnect = MenuItem::new(
+            "Reconnect",
+            StatusStep::Direct(DirectServerAction::Connect),
+            reconnectable,
+        );
+        menu.push(if menu.is_empty() {
+            reconnect
+        } else {
+            reconnect.after_separator()
+        });
+        menu.push(
             MenuItem::new(unpair, StatusStep::UnpairThisDevice, true)
                 .destructive()
                 .after_separator(),
-        ];
+        );
         (buttons, menu)
     }
 
@@ -683,6 +738,9 @@ impl SettingsWindow {
             }
             (StatusStep::Direct(action), ServerChoice::Direct(route)) => {
                 self.run_direct_action(route, action, cx);
+            }
+            (StatusStep::Remote(change), ServerChoice::Direct(route)) => {
+                self.request_remote_change(route, change, window.window_handle(), cx);
             }
             (StatusStep::UnpairThisDevice, ServerChoice::Direct(_)) => {
                 self.confirm_unpair_this_device(window, cx);
@@ -921,12 +979,16 @@ impl SettingsWindow {
         let needs_update = self.server_state(&choice).state.as_ref() == "Needs update";
         match choice {
             ServerChoice::Local => self.local_version_view(observed, needs_update),
-            // A server is updated on its own computer, so Check Now only checks SpaceTerm and
-            // reads the paired server's facts again over its connection.
-            ServerChoice::Direct(_) => {
-                let version = version_text(observed.as_ref());
+            // Check Now checks SpaceTerm, reads the paired server's facts again over its
+            // connection, and asks the server's lane for its version and newest release.
+            ServerChoice::Direct(route) => {
+                let version = version_text(self.remote_version(&route).or(observed).as_ref());
+                let subtitle = match self.remote_available(&route) {
+                    Some(available) => available_subtitle(&version, Some(&available)),
+                    None => version,
+                };
                 VersionView {
-                    subtitle: format!("{version} \u{b7} Update it from its own computer").into(),
+                    subtitle: subtitle.into(),
                     actions: vec![VersionStep::Observe],
                     restore: None,
                 }
@@ -1016,7 +1078,7 @@ impl SettingsWindow {
     fn server_row_view(&self, cx: &App) -> Option<ServerRowView> {
         let choice = self.selected_server()?;
         let version = self.version_view(cx);
-        let (buttons, menu) = self.status_steps(&choice);
+        let (buttons, menu) = self.status_steps(&choice, cx);
         let busy = self.server_progress(&choice).is_some();
         let mut steps: Vec<StatusStep> = version
             .actions
@@ -1117,7 +1179,7 @@ impl SettingsWindow {
                     .filter(|action| *action != ServiceAction::Check)
                     .map(|action| SharedString::new_static(service_progress(action)))
             }
-            ServerChoice::Direct(_) => None,
+            ServerChoice::Direct(route) => self.remote_progress(route),
         }
     }
 
@@ -1251,7 +1313,8 @@ impl SettingsWindow {
                 self.check_local_server(cx);
                 self.check_server_service(cx);
             }
-            ServerChoice::Direct(_) => {}
+            // The person asked, so the server's lane is read for its Status and update.
+            ServerChoice::Direct(route) => self.read_remote(*route, cx),
         }
         self.reread_facts(target, cx)
     }
@@ -1265,7 +1328,7 @@ impl SettingsWindow {
                     .is_some_and(|row| row.state.working.is_some())
                     || self.local_server_working()
             }
-            ServerChoice::Direct(_) => false,
+            ServerChoice::Direct(route) => self.remote_work(route) == Some(&Work::Reading),
         }
     }
 
@@ -1546,6 +1609,7 @@ fn status_step_selector(step: &StatusStep) -> &'static str {
     match step {
         StatusStep::Local(action) => action.selector(),
         StatusStep::Direct(action) => action.selector(),
+        StatusStep::Remote(change) => change.selector(),
         StatusStep::UnpairThisDevice => "settings-server-unpair",
         StatusStep::Version(step) => step.selector(),
         StatusStep::InstallBuild(..) => super::servers::INSTALL_CHOICE_SELECTOR,
@@ -1573,6 +1637,15 @@ fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedStr
         StatusStep::Version(VersionStep::Local(action)) => {
             action.consequence().map(SharedString::new_static)
         }
+        StatusStep::Remote(Change::Stop) => Some(SharedString::from(format!(
+            "Stops {machine} for every client. Start it again on its own computer."
+        ))),
+        StatusStep::Remote(Change::Restart) => Some(SharedString::from(format!(
+            "Restarts {machine}, ending its Terminal Sessions for every client."
+        ))),
+        StatusStep::Remote(Change::Update) => Some(SharedString::from(format!(
+            "Updates {machine}, ending its Terminal Sessions for every client."
+        ))),
         _ => None,
     }
 }
@@ -1580,6 +1653,7 @@ fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedStr
 /// Whether the step leads as the primary button: one that updates the server.
 fn status_step_primary(step: &StatusStep) -> bool {
     matches!(step, StatusStep::Version(step) if step.primary())
+        || *step == StatusStep::Remote(Change::Update)
 }
 
 /// How strongly a step claims the Server row's one button, lowest first. `None` belongs in the
@@ -1587,7 +1661,8 @@ fn status_step_primary(step: &StatusStep) -> bool {
 fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
         StatusStep::Version(VersionStep::Local(UpdateAction::Return)) => Some(0),
-        StatusStep::Version(VersionStep::Local(UpdateAction::Update)) => Some(1),
+        StatusStep::Version(VersionStep::Local(UpdateAction::Update))
+        | StatusStep::Remote(Change::Update) => Some(1),
         StatusStep::Local(ServiceAction::Start) => Some(2),
         _ => None,
     }
@@ -1692,6 +1767,7 @@ fn status_step_label(step: &StatusStep) -> &'static str {
         StatusStep::Local(ServiceAction::Check) => "Check Status",
         StatusStep::Local(action) => action.label(),
         StatusStep::Direct(action) => action.label(),
+        StatusStep::Remote(change) => change.label(),
         StatusStep::UnpairThisDevice => "Unpair\u{2026}",
         StatusStep::Version(step) => step.label(),
         StatusStep::InstallBuild(..) => "Install\u{2026}",

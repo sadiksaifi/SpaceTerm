@@ -12,7 +12,10 @@
 //! succeeds only once this device is admitted over the network, and every later operation uses
 //! that connection. Joining follows the direct connections registry, which owns the enrollment
 //! and its exact cleanup. The invitation link stays in the obscured field until Join hands it to
-//! the registry once; the sheet keeps only the server name and address it names.
+//! the registry once; the sheet keeps only the server name and address it names. A network address
+//! the person enters replaces only the address the link names, for a server this computer reaches
+//! another way, such as through NAT. The link's pinned identity still decides which server Join
+//! accepts, so a wrong address can only fail to reach it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,7 +42,7 @@ use super::{AddServerRequest, SettingsWindow};
 use crate::cancellation::CancellationToken;
 use crate::direct_connections::{DirectConnections, DirectRouteId, JoinId, JoinStatus};
 use crate::domain::SshDestination;
-use crate::server_connection::direct::{DEFAULT_PORT, DirectError, Invitation};
+use crate::server_connection::direct::{DEFAULT_PORT, DirectError, Endpoint, Invitation};
 use crate::server_connection::pane::control::ClientName;
 use crate::ssh::provisioning::{
     SetupAddress, SetupFailure, SetupOffer, SetupPhase, SetupProgress, SetupRequest,
@@ -65,6 +68,10 @@ pub(super) const HOSTS_MENU_SELECTOR: &str = "add-server-ssh-hosts";
 /// Prefixes each configured host in the SSH Hosts menu, followed by its position.
 pub(super) const HOST_CHOICE_SELECTOR: &str = "add-server-ssh-host";
 pub(super) const LINK_SELECTOR: &str = "add-server-link";
+/// The optional network address an invitation is joined through.
+pub(super) const ENDPOINT_SELECTOR: &str = "add-server-endpoint";
+/// The disclosure that shows or hides the invitation's optional network address.
+pub(super) const ENDPOINT_DISCLOSURE_SELECTOR: &str = "add-server-endpoint-disclosure";
 pub(super) const PASTE_SELECTOR: &str = "add-server-paste";
 pub(super) const PREVIEW_SELECTOR: &str = "add-server-preview";
 pub(super) const PROBLEM_SELECTOR: &str = "add-server-problem";
@@ -82,6 +89,11 @@ const HOST_INVALID: &str = "Enter an SSH host or alias without spaces or command
 const ADDRESS_INVALID: &str =
     "Enter a host name or IP address, optionally followed by a port, such as studio.local:9231.";
 const LINK_DESCRIPTION: &str = "Paste the invitation link from the other computer.";
+/// What the invitation's disclosure says while the address is hidden. It is also its
+/// accessibility hint.
+const ENDPOINT_DISCLOSURE_DESCRIPTION: &str = "Optional. Use when this computer reaches the server at a different name or address than the invitation.";
+/// What a shown disclosure's accessibility hint says.
+const DISCLOSURE_HIDE: &str = "Hide the network address";
 /// How long the host, address and link fields are, so a long value scrolls inside the field.
 const FIELD_WIDTH: f32 = 260.0;
 
@@ -89,6 +101,14 @@ const FIELD_WIDTH: f32 = 260.0;
 fn address_description() -> SharedString {
     format!(
         "The name or IP address this computer uses to reach the server. Leave it empty to use the one SSH reaches. Port {DEFAULT_PORT} unless you add one."
+    )
+    .into()
+}
+
+/// What the invitation's address field says, naming the port SpaceTerm uses unless one is given.
+fn endpoint_description() -> SharedString {
+    format!(
+        "The name or IP address this computer uses to reach the server. Leave it empty to use the one in the invitation. Port {DEFAULT_PORT} unless you add one."
     )
     .into()
 }
@@ -178,16 +198,27 @@ enum FocusTarget {
     Host,
     Address,
     Link,
+    Endpoint,
     Action(SheetAction),
 }
 
-/// The title and actions one stage presents. A different shape replaces the sheet on screen.
-/// Which actions are available is not part of the shape: it changes in place as the person types.
-#[derive(Clone, Debug, PartialEq)]
+/// The title and actions one stage presents, and where its keyboard focus starts. A different
+/// title or set of actions replaces the sheet on screen. Which actions are available changes in
+/// place as the person types.
+#[derive(Clone, Debug)]
 struct Shape {
     title: SharedString,
     actions: Vec<SheetAction>,
     focus: FocusTarget,
+}
+
+impl Shape {
+    /// Whether `self` must replace `shown` on screen. Focus applies only when a sheet is
+    /// presented, so a change in it alone replaces nothing: the field the person is typing in
+    /// keeps its focus and caret while its problem clears.
+    fn replaces(&self, shown: &Self) -> bool {
+        self.title != shown.title || self.actions != shown.actions
+    }
 }
 
 /// What an invitation link names, read without connecting. It holds no part of the secret.
@@ -327,6 +358,8 @@ pub(super) struct AddServerSheet {
     host: Entity<TextInput>,
     address: Entity<TextInput>,
     link: Entity<TextInput>,
+    /// The network address an invitation is joined through instead of the one it names.
+    endpoint: Entity<TextInput>,
     /// The hosts this computer's SSH configuration names. Empty until discovery, which starts
     /// when the sheet opens, answers.
     hosts: Vec<SshDestination>,
@@ -334,8 +367,14 @@ pub(super) struct AddServerSheet {
     host_invalid: bool,
     /// Whether the typed address was refused when the person last chose Set Up.
     address_invalid: bool,
-    /// Whether the optional network address is shown.
+    /// Whether the optional network address is shown. A refused address shows it; only the
+    /// person's disclosure hides it.
     address_shown: bool,
+    /// Whether the typed invitation address was refused when the person last chose Join.
+    endpoint_invalid: bool,
+    /// Whether the invitation's optional network address is shown. A refused address shows it;
+    /// only the person's disclosure hides it.
+    endpoint_shown: bool,
     /// What the link in the field names, or why it can't be used. `None` while it is empty.
     preview: Option<Result<Preview, DirectError>>,
     stage: Stage,
@@ -407,6 +446,21 @@ impl AddServerSheet {
                 .escape_behavior(TextInputEscapeBehavior::Propagate)
                 .debug_selector(LINK_SELECTOR)
         });
+        let endpoint = cx.new(|cx| {
+            TextInput::new(
+                ENDPOINT_SELECTOR,
+                "Network address",
+                String::new(),
+                window,
+                cx,
+            )
+            .variant(TextInputVariant::Bare)
+            .placeholder("studio.local")
+            .input_length_limit(Some(270))
+            .return_behavior(TextInputReturnBehavior::Propagate)
+            .escape_behavior(TextInputEscapeBehavior::Propagate)
+            .debug_selector(ENDPOINT_SELECTOR)
+        });
         let prompts = crate::ui::ssh_setup::prompt_activity(window, cx);
         let mut subscriptions = vec![
             cx.subscribe_in(
@@ -435,6 +489,16 @@ impl AddServerSheet {
                 |sheet, _, event: &TextInputEvent, window, cx| {
                     if matches!(event, TextInputEvent::ValueChanged(_)) {
                         sheet.read_link(cx);
+                        sheet.show(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &endpoint,
+                window,
+                |sheet, _, event: &TextInputEvent, window, cx| {
+                    if matches!(event, TextInputEvent::ValueChanged(_)) {
+                        sheet.endpoint_invalid = false;
                         sheet.show(window, cx);
                     }
                 },
@@ -487,10 +551,13 @@ impl AddServerSheet {
             host,
             address,
             link,
+            endpoint,
             hosts: Vec::new(),
             host_invalid: false,
             address_invalid: false,
             address_shown: false,
+            endpoint_invalid: false,
+            endpoint_shown: false,
             preview: None,
             stage: Stage::Form,
             attempt: 0,
@@ -570,6 +637,10 @@ impl AddServerSheet {
                     self.link
                         .update(cx, |input, cx| input.set_value(link.trim(), cx));
                     self.read_link(cx);
+                    // An address entered for another link doesn't carry over to this one.
+                    self.endpoint.update(cx, |input, cx| input.clear(cx));
+                    self.endpoint_invalid = false;
+                    self.endpoint_shown = false;
                 }
             }
         }
@@ -630,6 +701,21 @@ impl AddServerSheet {
             .then_some(*join)
     }
 
+    /// Whether the refused network address takes keyboard focus ahead of a usable host.
+    fn address_needs_focus(&self) -> bool {
+        self.address_invalid && self.address_shown && !self.host_invalid
+    }
+
+    /// Whether the refused invitation address takes keyboard focus ahead of a usable link.
+    fn endpoint_needs_focus(&self) -> bool {
+        self.endpoint_invalid && self.endpoint_shown && self.link_usable()
+    }
+
+    /// Whether the link in the field names an invitation Join can use.
+    fn link_usable(&self) -> bool {
+        matches!(self.preview, Some(Ok(_)))
+    }
+
     fn read_link(&mut self, cx: &App) {
         let value = self.link.read(cx).value().trim();
         self.preview = (!value.is_empty()).then(|| Preview::read(value));
@@ -640,8 +726,9 @@ impl AddServerSheet {
             return;
         }
         let field = match self.method {
-            Method::Ssh if self.address_invalid && !self.host_invalid => &self.address,
+            Method::Ssh if self.address_needs_focus() => &self.address,
             Method::Ssh => &self.host,
+            Method::Invitation if self.endpoint_needs_focus() => &self.endpoint,
             Method::Invitation => &self.link,
         };
         field.read(cx).focus_handle().focus(window, cx);
@@ -681,9 +768,8 @@ impl AddServerSheet {
                     Method::Invitation => (SheetAction::Join, FocusTarget::Link),
                 };
                 let focus = match focus {
-                    FocusTarget::Host if self.address_invalid && !self.host_invalid => {
-                        FocusTarget::Address
-                    }
+                    FocusTarget::Host if self.address_needs_focus() => FocusTarget::Address,
+                    FocusTarget::Link if self.endpoint_needs_focus() => FocusTarget::Endpoint,
                     focus => focus,
                 };
                 Shape {
@@ -810,7 +896,13 @@ impl AddServerSheet {
             return;
         }
         let wanted = self.shape(cx);
-        if wanted == self.shown {
+        let kept = match (&wanted, &self.shown) {
+            (Some(wanted), Some(shown)) => !wanted.replaces(shown),
+            (None, None) => true,
+            _ => false,
+        };
+        if kept {
+            self.shown = wanted;
             self.sync_availability(window, cx);
             cx.notify();
             return;
@@ -867,7 +959,8 @@ impl AddServerSheet {
             SheetAction::SetUp => {
                 self.ssh.is_some() && !self.host.read(cx).value().trim().is_empty()
             }
-            SheetAction::Join => self.direct.is_some() && matches!(self.preview, Some(Ok(_))),
+            // The link is enough: the network address is optional.
+            SheetAction::Join => self.direct.is_some() && self.link_usable(),
             _ => true,
         }
     }
@@ -906,6 +999,9 @@ impl AddServerSheet {
             FocusTarget::Host => DialogInitialFocus::Body(self.host.read(cx).focus_handle()),
             FocusTarget::Address => DialogInitialFocus::Body(self.address.read(cx).focus_handle()),
             FocusTarget::Link => DialogInitialFocus::Body(self.link.read(cx).focus_handle()),
+            FocusTarget::Endpoint => {
+                DialogInitialFocus::Body(self.endpoint.read(cx).focus_handle())
+            }
             FocusTarget::Action(action) => DialogInitialFocus::Action(action),
         };
         let dialog = Dialog::new(
@@ -1358,10 +1454,26 @@ impl AddServerSheet {
         self.show(window, cx);
     }
 
-    /// Hands the link to the registry once. The field empties as it does, so the link lives on
-    /// only in the registry's own join.
+    /// Hands the link to the registry once, with the network address when the person entered
+    /// one. The field empties as it does, so the link lives on only in the registry's own join. An
+    /// address that names no host is refused first, and the link stays for another try.
     fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(direct) = self.direct.clone() else {
+            return;
+        };
+        if !self.link_usable() {
+            return;
+        }
+        let entered = self.endpoint.read(cx).value().trim().to_owned();
+        let endpoint = if entered.is_empty() {
+            None
+        } else if let Ok(endpoint) = Endpoint::parse(&entered) {
+            Some(endpoint)
+        } else {
+            self.endpoint_invalid = true;
+            self.endpoint_shown = true;
+            self.show(window, cx);
+            self.focus_field(window, cx);
             return;
         };
         let Some(Ok(preview)) = self.preview.take() else {
@@ -1382,7 +1494,7 @@ impl AddServerSheet {
         cx.spawn_in(window, async move |sheet, cx| {
             let joined = cx
                 .background_executor()
-                .spawn(async move { direct.join(text, name) })
+                .spawn(async move { direct.join(text, endpoint, name) })
                 .await;
             let started = joined.as_ref().ok().copied();
             let kept = sheet
@@ -1850,43 +1962,16 @@ impl AddServerSheet {
             self.host_invalid.then_some(HOST_INVALID),
         );
         // The network address is optional, so it stays folded away until the person asks for it
-        // or it needs attention.
-        let shown = self.address_shown || self.address_invalid;
-        let disclosure_owner = cx.weak_entity();
-        let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
-        let disclosure = Button::new(ADDRESS_DISCLOSURE_SELECTOR, "Network Address")
-            .variant(ButtonVariant::Ghost)
-            .size(ButtonSize::Regular)
-            .align_start()
-            .tab_stop(true)
-            .leading(move |foreground| {
-                Icon::new(
-                    if shown {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    },
-                    icon_size,
-                    foreground,
-                )
-                .into_any_element()
-            })
-            .debug_selector(ADDRESS_DISCLOSURE_SELECTOR)
-            .accessibility_description(if shown {
-                "Hide the network address"
-            } else {
-                ADDRESS_DISCLOSURE_DESCRIPTION
-            })
-            .on_activate(move |_, window, cx| {
-                let _ = disclosure_owner.update(cx, |sheet, cx| {
-                    sheet.address_shown = !sheet.address_shown;
-                    if sheet.address_shown {
-                        sheet.address.read(cx).focus_handle().focus(window, cx);
-                    }
-                    cx.notify();
-                });
-            })
-            .into_any_element();
+        // or Set Up refuses it. Only the disclosure folds it, so an edit never hides it.
+        let shown = self.address_shown;
+        let disclosure = Self::disclosure(
+            appearance,
+            ADDRESS_DISCLOSURE_SELECTOR,
+            shown,
+            ADDRESS_DISCLOSURE_DESCRIPTION,
+            |sheet| &mut sheet.address_shown,
+            cx,
+        );
         let address = shown.then(|| {
             Self::field_row(
                 appearance,
@@ -1913,6 +1998,49 @@ impl AddServerSheet {
             .child(host)
             .child(disclosure)
             .children(address)
+            .into_any_element()
+    }
+
+    /// The Network Address disclosure, which shows or hides one optional address field.
+    /// `toggled` names whether that field is shown. Keyboard focus stays on the disclosure, as on
+    /// a macOS disclosure, and Tab moves into the field it shows.
+    fn disclosure(
+        appearance: &ChromeAppearance,
+        selector: &'static str,
+        shown: bool,
+        hint: &'static str,
+        toggled: fn(&mut Self) -> &mut bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owner = cx.weak_entity();
+        let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
+        Button::new(selector, "Network Address")
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Regular)
+            .align_start()
+            .tab_stop(true)
+            .leading(move |foreground| {
+                Icon::new(
+                    if shown {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    },
+                    icon_size,
+                    foreground,
+                )
+                .into_any_element()
+            })
+            .debug_selector(selector)
+            .expanded(shown)
+            .accessibility_description(if shown { DISCLOSURE_HIDE } else { hint })
+            .on_activate(move |_, _, cx| {
+                let _ = owner.update(cx, |sheet, cx| {
+                    let shown = toggled(sheet);
+                    *shown = !*shown;
+                    cx.notify();
+                });
+            })
             .into_any_element()
     }
 
@@ -2006,6 +2134,35 @@ impl AddServerSheet {
             }
             _ => None,
         };
+        // The network address is optional, so it stays folded away until the person asks for it
+        // or Join refuses it. Only the disclosure folds it, so an edit never hides it.
+        let shown = self.endpoint_shown;
+        let disclosure = Self::disclosure(
+            appearance,
+            ENDPOINT_DISCLOSURE_SELECTOR,
+            shown,
+            ENDPOINT_DISCLOSURE_DESCRIPTION,
+            |sheet| &mut sheet.endpoint_shown,
+            cx,
+        );
+        let endpoint = shown.then(|| {
+            Self::field_row(
+                appearance,
+                ENDPOINT_SELECTOR,
+                "Network Address",
+                endpoint_description(),
+                Self::field_frame(
+                    appearance,
+                    ENDPOINT_SELECTOR,
+                    &self.endpoint,
+                    self.endpoint_invalid,
+                    None,
+                    cx,
+                ),
+                None,
+                self.endpoint_invalid.then_some(ADDRESS_INVALID),
+            )
+        });
         div()
             .flex()
             .flex_col()
@@ -2013,6 +2170,8 @@ impl AddServerSheet {
             .gap(appearance.spacing(12.0))
             .child(row)
             .children(preview)
+            .child(disclosure)
+            .children(endpoint)
             .into_any_element()
     }
 

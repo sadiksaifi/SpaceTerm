@@ -326,7 +326,7 @@ fn a_disconnected_paired_server_offers_connect_and_dims_its_settings(cx: &mut Te
     ] {
         assert!(rendered(row, servers.cx), "{row} presents penguin");
     }
-    // A paired server is administered on its own computer.
+    // Only this computer's server presents these rows.
     for row in [
         "settings-row-end-all-sessions",
         "settings-row-network-access",
@@ -500,7 +500,7 @@ fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
     );
 }
 
-/// The Server row's subtitle, such as "Version 1.4.0 · Update it from its own computer".
+/// The Server row's subtitle, such as "Version 1.4.0 · 1.5.0 is available".
 fn version_announcement(cx: &mut VisualTestContext) -> Option<String> {
     A11yTree::read(cx).in_order().iter().find_map(|node| {
         ["label", "value"].into_iter().find_map(|field| {
@@ -1036,8 +1036,8 @@ fn end_all_sessions_caption(servers: &Servers<'_>) -> String {
 }
 
 /// The confirmation names this computer's server, and only its current run is asked to end its
-/// Sessions, once. Cancelling asks nothing. A paired server offers no End All Sessions, because a
-/// server is administered on its own computer.
+/// Sessions, once. Cancelling asks nothing. A paired server offers no End All Sessions, because
+/// End All Sessions uses account-local work admission.
 #[gpui::test]
 fn end_all_sessions_confirms_and_reaches_only_this_computers_server(cx: &mut TestAppContext) {
     use super::super::end_sessions::{END_CANCEL_SELECTOR, END_CONFIRM_SELECTOR, END_SELECTOR};

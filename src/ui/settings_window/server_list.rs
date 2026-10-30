@@ -126,8 +126,8 @@ pub(super) fn looks_like_host(query: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || ".-_@:[]".contains(character))
 }
 
-/// Rows that administer this computer's server. A server is administered on its own computer, so
-/// a paired server presents none of them.
+/// Rows that administer this computer's server. A paired server's card takes Stop, Restart and
+/// Update over its service lane instead, and presents none of these.
 const ACCOUNT_ROWS: [SettingsRowId; 4] = [
     SettingsRowId::ServerAutoStart,
     SettingsRowId::NetworkAccess,

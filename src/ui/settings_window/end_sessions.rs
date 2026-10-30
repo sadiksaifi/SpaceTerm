@@ -1,5 +1,5 @@
-//! End All Sessions for this computer's server, when Servers presents it. A paired server is
-//! administered on its own computer, so it offers no End All Sessions here.
+//! End All Sessions for this computer's server, when Servers presents it. End All Sessions uses
+//! account-local work admission, so a paired server offers none here.
 //!
 //! The action ends every live Terminal Session on that server for every client. The server keeps
 //! running, and its Workspaces, Tabs, Panes, and control grants remain. The row reads the
