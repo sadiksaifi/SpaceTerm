@@ -363,8 +363,11 @@ impl PermissionAccessChanges {
         let refresh = cx.spawn(async move |settings, cx| {
             while changed.recv().await.is_ok() {
                 while changed.try_recv().is_ok() {}
+                // One server report holds every System Permission, so a change also refreshes the
+                // microphone row.
                 let refreshed = settings.update(cx, |settings, cx| {
                     settings.refresh_permission_access(cx);
+                    settings.refresh_microphone_access(cx);
                 });
                 if refreshed.is_err() {
                     break;

@@ -2,7 +2,8 @@
 //!
 //! Programs in a Terminal Session inherit their server's grants, so the desktop reads and sets
 //! them up by asking the server on this machine over its account-local service lane. It never asks
-//! a paired server: those grants are set up only on their own machines. Reads return the latest
+//! a paired server: those grants are set up only on their own machines. The desktop opens System
+//! Settings itself, because macOS brings it forward only for the active application. Reads return the latest
 //! report at once and refresh it in the background, and a refreshed report that differs signals
 //! every observer, so a Settings row converges on what the server reports.
 
@@ -90,9 +91,13 @@ fn failure(reply: Result<LaneReply, ServerError>) -> Result<LaneReply, Failure> 
     }
 }
 
+/// Opens a System Settings list, reporting whether the system accepted it.
+pub(crate) type SettingsOpener = Box<dyn Fn(&'static str) -> bool>;
+
 /// The server's System Permissions as the desktop presents them.
 pub(crate) struct ServerPermissionAccess {
     shared: Arc<Shared>,
+    open: SettingsOpener,
     /// The holder System Settings lists before the first report arrives.
     expected_holder: PermissionHolder,
     /// How often an unanswered microphone request reads again.
@@ -184,6 +189,7 @@ impl ServerPermissionAccess {
     pub(crate) fn new(identity: &'static str) -> Self {
         Self::with(
             Box::new(LocalPermissionLane { identity }),
+            Box::new(super::macos_system_settings::open),
             expected_holder(identity),
             Duration::from_millis(500),
         )
@@ -191,6 +197,7 @@ impl ServerPermissionAccess {
 
     fn with(
         lane: Box<dyn PermissionLane>,
+        open: SettingsOpener,
         expected_holder: PermissionHolder,
         poll: Duration,
     ) -> Self {
@@ -201,6 +208,7 @@ impl ServerPermissionAccess {
         Shared::refresh(&shared);
         Self {
             shared,
+            open,
             expected_holder,
             poll,
         }
@@ -330,13 +338,9 @@ impl PermissionAccess for ServerPermissionAccess {
     }
 
     fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError> {
-        let request = LaneRequest::OpenPermissionSettings {
-            permission: server_permission(permission),
-        };
-        match self.shared.call(&request, CHANGE_LIMIT)? {
-            LaneReply::PermissionSettingsOpened => Ok(()),
-            _ => Err(PermissionAccessError::PlatformUnavailable),
-        }
+        (self.open)(server::settings_uri(server_permission(permission)))
+            .then_some(())
+            .ok_or(PermissionAccessError::PlatformRejected)
     }
 
     fn accessibility_naming(&self) -> AccessibilityNaming {
@@ -435,13 +439,9 @@ impl MicrophoneAccess for ServerPermissionAccess {
     }
 
     fn open_settings(&self) -> Result<(), MicrophoneAccessError> {
-        let request = LaneRequest::OpenPermissionSettings {
-            permission: server::SystemPermission::Microphone,
-        };
-        match self.shared.call(&request, CHANGE_LIMIT)? {
-            LaneReply::PermissionSettingsOpened => Ok(()),
-            _ => Err(MicrophoneAccessError::PlatformUnavailable),
-        }
+        (self.open)(server::settings_uri(server::SystemPermission::Microphone))
+            .then_some(())
+            .ok_or(MicrophoneAccessError::PlatformRejected)
     }
 }
 
@@ -508,6 +508,7 @@ mod tests {
     fn access(lane: &Arc<ScriptedLane>) -> ServerPermissionAccess {
         ServerPermissionAccess::with(
             Box::new(Arc::clone(lane)),
+            Box::new(|uri| uri.ends_with("Privacy_Microphone")),
             expected_holder("spaceterm"),
             Duration::from_millis(1),
         )
@@ -683,14 +684,31 @@ mod tests {
             code: server::PERMISSION_FAILED.into(),
         });
         let access = access(&lane);
+        let (sender, reset) = std::sync::mpsc::channel();
+        access
+            .reset(
+                SystemPermission::ScreenRecording,
+                Box::new(move |result| sender.send(result).unwrap()),
+            )
+            .unwrap();
         assert_eq!(
-            PermissionAccess::open_settings(&access, SystemPermission::ScreenRecording),
+            reset.recv_timeout(Duration::from_secs(5)).unwrap(),
             Err(PermissionAccessError::PlatformRejected)
         );
+    }
+
+    /// The desktop opens System Settings itself, so the server is asked nothing.
+    #[test]
+    fn system_settings_opens_at_the_permissions_list_without_the_server() {
+        let lane = Arc::new(ScriptedLane::default());
+        let access = access(&lane);
+        settle(&access);
+        assert_eq!(MicrophoneAccess::open_settings(&access), Ok(()));
         assert_eq!(
-            MicrophoneAccess::open_settings(&access),
-            Err(MicrophoneAccessError::PlatformUnavailable),
-            "an unsupported request is unavailable"
+            PermissionAccess::open_settings(&access, SystemPermission::ScreenRecording),
+            Err(PermissionAccessError::PlatformRejected),
+            "the scripted system accepts only the microphone list"
         );
+        assert_eq!(*lane.requests.lock().unwrap(), [LaneRequest::Permissions]);
     }
 }

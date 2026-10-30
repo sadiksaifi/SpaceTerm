@@ -3,8 +3,10 @@
 //!
 //! Only the server's own machine sets these up: [route validation](crate::connection::route)
 //! refuses a remote `--server` before anything is sent, and the server's lane refuses a paired
-//! caller as well. Each command asks the running server over its account-local lane, because the
-//! server is the responsible process whose grants its Terminal Sessions receive.
+//! caller as well. Status and requests ask the running server over its account-local lane,
+//! because the server is the responsible process whose grants its Terminal Sessions receive.
+//! `settings` opens System Settings from this command, which runs in the application the person
+//! uses, because macOS brings System Settings forward only for the active application.
 use super::{Context, Pending, Reply};
 use crate::args::{PermissionName, PermissionsCommand};
 use crate::contract::{
@@ -17,8 +19,10 @@ use spaceterm_server::permissions::{
 use spaceterm_server::service::lane::{LaneReply, LaneRequest};
 use std::time::{Duration, Instant};
 
-/// A probe answers within three seconds, and opening System Settings within ten.
+/// A probe answers within three seconds.
 const LIMIT: Duration = Duration::from_secs(30);
+/// Launch Services answers within a second. A slower `open` is stuck and is stopped.
+const OPEN_LIMIT: Duration = Duration::from_secs(10);
 
 pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply {
     let path = match command {
@@ -38,9 +42,15 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
         Some(PermissionsCommand::Request { permission }) => LaneRequest::RequestPermission {
             permission: permission.permission(),
         },
-        Some(PermissionsCommand::Settings { permission }) => LaneRequest::OpenPermissionSettings {
-            permission: permission.permission(),
-        },
+        Some(PermissionsCommand::Settings { permission }) => {
+            return match open_settings(permission.permission()) {
+                Ok(()) => {
+                    let (envelope, text) = settings(server, permission.permission());
+                    Reply::new(&envelope, text)
+                }
+                Err(failure) => Reply::failure(path, Some(server), failure),
+            };
+        }
     };
     let opened = Pending::open(context, &RouteKey::Local).and_then(|pending| {
         super::open_lane(
@@ -91,14 +101,6 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
                 outcome,
                 report.as_ref(),
             );
-            envelope.data.recovered_operations = recovered;
-            Reply::new(&envelope, text)
-        }
-        (
-            Some(PermissionsCommand::Settings { permission }),
-            Ok(LaneReply::PermissionSettingsOpened),
-        ) => {
-            let (mut envelope, text) = settings(server, permission.permission());
             envelope.data.recovered_operations = recovered;
             Reply::new(&envelope, text)
         }
@@ -195,6 +197,35 @@ pub(crate) fn requested(
         },
     );
     (envelope, format!("{text}\n"))
+}
+
+/// Opens System Settings at the list that holds `permission`, through Launch Services.
+fn open_settings(permission: SystemPermission) -> Result<(), Failure> {
+    if !cfg!(target_os = "macos") {
+        return Err(Failure::new(Code::Unsupported));
+    }
+    let mut child = std::process::Command::new("/usr/bin/open")
+        .arg(spaceterm_server::permissions::settings_uri(permission))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| Failure::new(Code::PermissionFailed))?;
+    let deadline = Instant::now() + OPEN_LIMIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => return Err(Failure::new(Code::PermissionFailed)),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Failure::new(Code::PermissionFailed));
+            }
+        }
+    }
 }
 
 /// The `server.permissions.settings` envelope and its text.

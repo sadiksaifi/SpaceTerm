@@ -232,6 +232,9 @@ pub(crate) mod macos_services;
 
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
+mod macos_system_settings;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
 pub(crate) mod server_permission_access;
 
 #[cfg(all(target_os = "macos", not(test)))]

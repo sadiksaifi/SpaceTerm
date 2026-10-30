@@ -1,6 +1,6 @@
 //! Watches directories with kqueue, one descriptor each, without FSEvents.
 //!
-//! A macOS server links no CoreServices, so it cannot use FSEvents. kqueue reports a write to a
+//! A macOS server watches with kqueue rather than FSEvents. kqueue reports a write to a
 //! directory when an entry is added, removed or renamed in it, which is how git writes every file
 //! a Git facts watch follows. Only directories are watched, never recursively.
 

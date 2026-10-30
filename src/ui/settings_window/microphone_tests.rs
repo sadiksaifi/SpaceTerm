@@ -605,3 +605,49 @@ fn microphone_access_publishes_its_state(cx: &mut TestAppContext) {
             .any(|label| label["aria"]["value"] == "Allowed")
     );
 }
+
+/// One server report holds every System Permission, so the server's change signal refreshes the
+/// microphone row too, without the window becoming active.
+#[gpui::test]
+fn a_reported_permission_change_refreshes_the_microphone_row(cx: &mut TestAppContext) {
+    use crate::platform::permission_access::PermissionAuthorization::NotGranted;
+    use crate::platform::permission_access::testing::ScriptedPermissionAccess;
+
+    let microphone = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let system = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
+    let platform = RecordingAppearancePlatform::default();
+    platform.set_system_appearance(Some(Appearance::Dark));
+    cx.update(|cx| {
+        appearance_runtime::install(settings, Rc::new(platform), cx)
+            .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+    });
+    let (window, cx) = cx.add_window_view(|window, cx| {
+        SettingsWindow::new_with_capabilities(
+            Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+            super::super::PermissionCapabilities {
+                microphone: Some(microphone.clone()),
+                system_permissions: Some(system.clone()),
+                permission_setup: None,
+            },
+            None,
+            None,
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    microphone
+        .authorization
+        .set(Ok(MicrophoneAuthorization::Authorized));
+    system.report_change();
+    cx.run_until_parked();
+
+    assert_eq!(
+        status(&window, cx),
+        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::Authorized)
+    );
+}

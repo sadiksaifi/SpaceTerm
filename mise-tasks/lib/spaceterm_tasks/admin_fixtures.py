@@ -108,7 +108,8 @@ def _broken_verification(destination, target, result):
     normal = Path(result[target]["normal"]["archive"])
     broken = destination / target / "broken.tar.gz"
     signature = broken.with_suffix(broken.suffix + ".sig")
-    omitted = "server/share/spaceterm/shell-integration/VERSION"
+    resources = server_package.resource_directory(target, "spaceterm-preflight")
+    omitted = f"server/{resources}/shell-integration/VERSION"
     with tarfile.open(normal, "r:gz") as source, tarfile.open(broken, "w:gz") as output:
         for member in source:
             if member.name != omitted:

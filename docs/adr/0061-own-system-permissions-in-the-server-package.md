@@ -12,11 +12,11 @@ TCC tracks a bare executable by its path. Each server version lives at its own `
 
 ## Operations
 
-[The server's System Permissions](../../crates/spaceterm-server/src/permissions.rs) are the only code that reads or changes these grants.
+[The server's System Permissions](../../crates/spaceterm-server/src/permissions.rs) are the only code that reads, requests or resets these grants.
 
 - **Reads.** A read runs in a probe child, `spaceterm server provision permission-report`. The child inherits the server's responsibility, and a fresh process holds no cached Screen Recording answer.
-- **Requests.** A request runs in the server itself. For the microphone it calls `AVCaptureDevice requestAccessForMediaType:`. For Screen Recording it calls `CGRequestScreenCaptureAccess`. For Accessibility it calls `AXIsProcessTrustedWithOptions` with the prompt option. Each request lists the server in System Settings and may show the system's own prompt. An Aqua LaunchAgent belongs to the GUI login session, so its prompts appear there. [TN2083](https://developer.apple.com/library/archive/technotes/tn2083/_index.html) describes Aqua agents as having "access to all GUI services".
-- **Opening System Settings.** The server links no AppKit. It opens the privacy list through Launch Services with `/usr/bin/open`, and TN2083 calls Launch Services daemon-safe.
+- **Requests.** A request runs in the server itself. For the microphone it calls `AVCaptureDevice requestAccessForMediaType:`. For Screen Recording it calls `CGRequestScreenCaptureAccess`. For Accessibility it calls `AXIsProcessTrustedWithOptions` with the prompt option. Each request lists the server in System Settings and may show the system's own prompt. launchd starts the server without Launch Services, so before a request the server registers its own bundle with `LSRegisterURL`, which lets System Settings name its entry. An Aqua LaunchAgent belongs to the GUI login session, so its prompts appear there. [TN2083](https://developer.apple.com/library/archive/technotes/tn2083/_index.html) describes Aqua agents as having "access to all GUI services".
+- **Opening System Settings.** The client the person uses opens the privacy list: the desktop through `NSWorkspace`, and the CLI through `/usr/bin/open`. macOS brings an application forward only at the request of the active application, and a background server is never active. Opening a list changes no grant, so [the permissions module](../../crates/spaceterm-server/src/permissions.rs) only names the list in `settings_uri`.
 - **Resets.** A reset runs `/usr/bin/tccutil reset <service> <bundle identifier>`. It runs only while launchd runs the server from its own bundle, so it never reaches another application's grant.
 
 The desktop's Setup Guide no longer offers an application to drag into a list. A Permission Setup asks the server to clear its stale entry and request the permission again, opens System Settings at that list, and names the entry to turn on.
@@ -25,8 +25,8 @@ The desktop's Setup Guide no longer offers an application to drag into a list. A
 
 These grants are set up only on the server's machine, through that machine's desktop Settings or its `spaceterm` CLI.
 
-- **Service lane.** The lane carries `permissions`, `request_permission`, `open_permission_settings`, `prepare_permission_setup` and `reset_permission`. [The lane](../../crates/spaceterm-server/src/service/lane.rs) answers them only for an account-local caller. It refuses a paired caller with `local_only` before the system is asked anything.
-- **CLI.** `spaceterm server permissions` shows each permission's state and who holds it. `request PERMISSION` asks for one permission, and `settings PERMISSION` opens its list. [Route validation](../../crates/spaceterm-cli/src/connection/route.rs) refuses a remote `--server` with `local_only` before any credential or transport is opened.
+- **Service lane.** The lane carries `permissions`, `request_permission`, `prepare_permission_setup` and `reset_permission`. [The lane](../../crates/spaceterm-server/src/service/lane.rs) answers them only for an account-local caller. It refuses a paired caller with `local_only` before the system is asked anything.
+- **CLI.** `spaceterm server permissions` shows each permission's state and who holds it. `request PERMISSION` asks the server for one permission, and `settings PERMISSION` opens its list from the CLI. [Route validation](../../crates/spaceterm-cli/src/connection/route.rs) refuses a remote `--server` with `local_only` before any credential or transport is opened.
 - **Desktop.** Settings > Privacy presents the account-local server's grants through [the desktop adapter](../../src/platform/server_permission_access.rs), and a paired server's card offers none.
 
 As [ADR 0027](0027-trust-paired-clients-equally.md) says of every machine-only action, this is not a security boundary. It keeps setup where System Settings and the prompts appear.

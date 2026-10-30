@@ -3,9 +3,10 @@
 //!
 //! macOS attributes a program's privacy checks to its responsible process. A LaunchAgent is its
 //! own responsible process and its children inherit that, so the server, not a client, holds the
-//! grants its Terminal Sessions use. The server reads, requests and resets its own grants and opens
-//! System Settings for them, only for a caller on its own machine: the service lane refuses a
-//! paired caller before it reaches [`SystemPermissions`]. Nothing here records audio, captures the
+//! grants its Terminal Sessions use. The server reads, requests and resets its own grants, only for
+//! a caller on its own machine: the service lane refuses a paired caller before it reaches
+//! [`SystemPermissions`]. The client the person uses opens System Settings at [`settings_uri`],
+//! because macOS brings an application forward only for the active one. Nothing here records audio, captures the
 //! screen or sends input to test a grant. [ADR 0061](../../../docs/adr/0061-own-system-permissions-in-the-server-package.md)
 //! records the decisions.
 use serde::{Deserialize, Serialize};
@@ -158,6 +159,21 @@ impl PermissionError {
     }
 }
 
+/// The System Settings list that holds `permission` on macOS.
+pub const fn settings_uri(permission: SystemPermission) -> &'static str {
+    match permission {
+        SystemPermission::Microphone => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone"
+        }
+        SystemPermission::ScreenRecording => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
+        }
+        SystemPermission::Accessibility => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
+        }
+    }
+}
+
 /// The contract code of a System Permission operation the system did not complete.
 pub const PERMISSION_FAILED: &str = "permission_failed";
 
@@ -169,9 +185,6 @@ pub trait SystemPermissions: Send + Sync {
     /// Asks the system for `permission`: a prompt for one that [`SystemPermission::prompts`],
     /// otherwise an entry in System Settings that the person turns on.
     fn request(&self, permission: SystemPermission) -> Result<RequestOutcome, PermissionError>;
-
-    /// Opens System Settings at the list that holds `permission`.
-    fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionError>;
 
     /// Prepares System Settings for a Permission Setup: when programs do not receive the
     /// permission, removes the holder's earlier entry if it can, then requests it again so
@@ -193,9 +206,6 @@ impl SystemPermissions for Unsupported {
         Err(PermissionError::Unsupported)
     }
     fn request(&self, _: SystemPermission) -> Result<RequestOutcome, PermissionError> {
-        Err(PermissionError::Unsupported)
-    }
-    fn open_settings(&self, _: SystemPermission) -> Result<(), PermissionError> {
         Err(PermissionError::Unsupported)
     }
     fn prepare_setup(&self, _: SystemPermission) -> Result<SetupReadiness, PermissionError> {
@@ -273,10 +283,6 @@ pub(crate) mod testing {
         fn request(&self, permission: SystemPermission) -> Result<RequestOutcome, PermissionError> {
             self.record("request", permission);
             Ok(RequestOutcome::Requested)
-        }
-        fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionError> {
-            self.record("open_settings", permission);
-            Ok(())
         }
         fn prepare_setup(
             &self,

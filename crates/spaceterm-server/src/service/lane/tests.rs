@@ -320,15 +320,12 @@ const LOCAL_ACTOR: Actor = Actor {
     client: [8; 32],
 };
 
-fn permission_requests() -> [LaneRequest; 5] {
+fn permission_requests() -> [LaneRequest; 4] {
     use crate::permissions::SystemPermission;
     [
         LaneRequest::Permissions,
         LaneRequest::RequestPermission {
             permission: SystemPermission::Microphone,
-        },
-        LaneRequest::OpenPermissionSettings {
-            permission: SystemPermission::ScreenRecording,
         },
         LaneRequest::PreparePermissionSetup {
             permission: SystemPermission::Accessibility,
@@ -368,7 +365,7 @@ fn a_local_caller_reads_and_changes_the_servers_own_permissions() {
     let fixture = super::super::tests::Fixture::new();
     let permissions = ScriptedPermissions::granting(PermissionState::NotGranted);
     let lane = serving_permissions(&fixture.paths, permissions.clone());
-    let [read, request, open, prepare, reset] = permission_requests();
+    let [read, request, prepare, reset] = permission_requests();
     let LaneReply::Permissions(report) = lane.answer(read, &LOCAL_ACTOR) else {
         panic!("expected a report");
     };
@@ -381,10 +378,6 @@ fn a_local_caller_reads_and_changes_the_servers_own_permissions() {
         LaneReply::PermissionRequested(RequestOutcome::Requested)
     );
     assert_eq!(
-        lane.answer(open, &LOCAL_ACTOR),
-        LaneReply::PermissionSettingsOpened
-    );
-    assert_eq!(
         lane.answer(prepare, &LOCAL_ACTOR),
         LaneReply::PermissionSetup(SetupReadiness::Ready { cleared: true })
     );
@@ -393,7 +386,6 @@ fn a_local_caller_reads_and_changes_the_servers_own_permissions() {
         *permissions.calls.lock().unwrap(),
         [
             ("request", SystemPermission::Microphone),
-            ("open_settings", SystemPermission::ScreenRecording),
             ("prepare_setup", SystemPermission::Accessibility),
             ("reset", SystemPermission::Accessibility),
         ]

@@ -799,6 +799,7 @@ def package(identity, release_tag=None, *, target=None):
                 )
                 shutil.rmtree(server)
                 signed.rename(server)
+                (tree / executable_path(target, identity)).chmod(0o755)
         verify_tree(tree, expected, native=native)
         if not native:
             verify_cross_build(tree, expected)

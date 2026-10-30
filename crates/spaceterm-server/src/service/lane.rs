@@ -90,10 +90,6 @@ pub enum LaneRequest {
     RequestPermission {
         permission: SystemPermission,
     },
-    /// Opens System Settings at one System Permission's list.
-    OpenPermissionSettings {
-        permission: SystemPermission,
-    },
     /// Prepares a Permission Setup of one System Permission.
     PreparePermissionSetup {
         permission: SystemPermission,
@@ -149,7 +145,6 @@ pub enum LaneReply {
     Acknowledged,
     Permissions(PermissionsReport),
     PermissionRequested(RequestOutcome),
-    PermissionSettingsOpened,
     PermissionSetup(SetupReadiness),
     PermissionReset,
     /// `code` is a code from the CLI output contract.
@@ -515,7 +510,6 @@ impl LaneServer {
             LaneRequest::Acknowledge { operation } => self.acknowledge(&operation, actor),
             LaneRequest::Permissions
             | LaneRequest::RequestPermission { .. }
-            | LaneRequest::OpenPermissionSettings { .. }
             | LaneRequest::PreparePermissionSetup { .. }
             | LaneRequest::ResetPermission { .. } => {
                 return (self.permission(request, actor), None);
@@ -538,9 +532,6 @@ impl LaneServer {
             LaneRequest::RequestPermission { permission } => permissions
                 .request(permission)
                 .map(LaneReply::PermissionRequested),
-            LaneRequest::OpenPermissionSettings { permission } => permissions
-                .open_settings(permission)
-                .map(|()| LaneReply::PermissionSettingsOpened),
             LaneRequest::PreparePermissionSetup { permission } => permissions
                 .prepare_setup(permission)
                 .map(LaneReply::PermissionSetup),

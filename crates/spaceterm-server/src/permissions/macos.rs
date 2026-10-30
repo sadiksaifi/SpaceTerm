@@ -2,8 +2,8 @@
 //! signature.
 //!
 //! Reads run in a probe child. Requests run in the server itself, the responsible process whose
-//! prompt and System Settings entry name the server. Opening System Settings goes through Launch
-//! Services by `/usr/bin/open`, because the server links no AppKit.
+//! prompt and System Settings entry name the server.
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -15,26 +15,10 @@ use super::{
 };
 use crate::service::{Layout, bundle_identifier, bundle_name};
 
-const OPEN: &str = "/usr/bin/open";
 /// The system's own privacy reset tool, addressed by absolute path so no search path replaces it.
 const TCCUTIL: &str = "/usr/bin/tccutil";
 /// Both tools answer within a second. A slower one is stuck and is stopped.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The System Settings list that holds each permission.
-const fn settings_uri(permission: SystemPermission) -> &'static str {
-    match permission {
-        SystemPermission::Microphone => {
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone"
-        }
-        SystemPermission::ScreenRecording => {
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
-        }
-        SystemPermission::Accessibility => {
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
-        }
-    }
-}
 
 /// The privacy service `tccutil` names for each permission.
 const fn tcc_service(permission: SystemPermission) -> &'static str {
@@ -50,51 +34,73 @@ pub(super) trait Native: Send + Sync {
     fn probe(&self) -> Result<Probe, PermissionError>;
     /// Asks the system for `permission` from this process. It returns before anyone answers.
     fn request(&self, permission: SystemPermission) -> Result<(), PermissionError>;
-    fn open(&self, uri: &'static str) -> Result<(), PermissionError>;
+    /// Registers the bundle at `bundle` with Launch Services, so System Settings can name the
+    /// entry a request lists. launchd starts the server without Launch Services.
+    fn register(&self, bundle: &std::path::Path) -> Result<(), PermissionError>;
     fn reset(&self, service: &'static str, bundle: &str) -> Result<(), PermissionError>;
     fn os_major(&self) -> Option<u32>;
 }
 
 pub(crate) struct MacosSystemPermissions {
     holder: PermissionHolder,
-    /// The bundle identifier a reset may name, present only while the server runs from this
-    /// identity's bundle as its own responsible process, so a reset reaches no other grant.
-    reset_bundle: Option<String>,
+    /// The server's own bundle, present only while launchd runs the server from this identity's
+    /// bundle as its own responsible process, so a reset reaches no other grant.
+    own: Option<OwnBundle>,
     native: Box<dyn Native>,
     /// Held for each probe, setup and reset, so a reset never lands between a probe and the
     /// setup that acts on its reading.
     probing: Mutex<()>,
 }
 
+struct OwnBundle {
+    identifier: String,
+    path: PathBuf,
+}
+
 impl MacosSystemPermissions {
     pub(crate) fn new(identity: &str) -> Self {
-        let own_bundle = Layout::host(identity).is_some_and(|layout| {
-            std::env::current_exe()
-                .and_then(|executable| executable.canonicalize())
-                .is_ok_and(|executable| executable.ends_with(layout.executable()))
-        });
         // SAFETY: getppid reads this process's parent and cannot fail.
         let launched = unsafe { libc::getppid() } == 1;
-        Self::with(identity, own_bundle && launched, Box::new(System))
+        let bundle = Layout::host(identity)
+            .zip(
+                std::env::current_exe()
+                    .and_then(|executable| executable.canonicalize())
+                    .ok(),
+            )
+            .and_then(|(layout, executable)| own_bundle(&executable, layout))
+            .filter(|_| launched);
+        Self::with(identity, bundle, Box::new(System))
     }
 
-    /// `own` says whether launchd started this server from its identity's bundle, which makes
+    /// `bundle` is the server's own bundle when launchd started the server from it, which makes
     /// the server its own responsible process.
-    fn with(identity: &str, own: bool, native: Box<dyn Native>) -> Self {
+    fn with(identity: &str, bundle: Option<PathBuf>, native: Box<dyn Native>) -> Self {
         let name = bundle_name(identity).and_then(|name| name.strip_suffix(".app"));
-        let (holder, reset_bundle) = match name {
-            Some(name) if own => (
+        let (holder, own) = match (name, bundle) {
+            (Some(name), Some(path)) => (
                 PermissionHolder::Server { name: name.into() },
-                Some(bundle_identifier(identity)),
+                Some(OwnBundle {
+                    identifier: bundle_identifier(identity),
+                    path,
+                }),
             ),
             _ => (PermissionHolder::Launcher, None),
         };
         Self {
             holder,
-            reset_bundle,
+            own,
             native,
             probing: Mutex::new(()),
         }
+    }
+
+    /// Asks the system for `permission`, after Launch Services learns the server's own bundle.
+    /// A failed registration only leaves System Settings without the bundle's name.
+    fn ask(&self, permission: SystemPermission) -> Result<(), PermissionError> {
+        if let Some(own) = &self.own {
+            let _ = self.native.register(&own.path);
+        }
+        self.native.request(permission)
     }
 
     fn probing(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -110,7 +116,7 @@ impl MacosSystemPermissions {
                 .collect(),
             accessibility_naming: accessibility_naming(self.native.os_major()),
             holder: self.holder.clone(),
-            resettable: self.reset_bundle.is_some(),
+            resettable: self.own.is_some(),
         }
     }
 }
@@ -136,12 +142,8 @@ impl SystemPermissions for MacosSystemPermissions {
         if !ask {
             return Ok(RequestOutcome::Decided { state });
         }
-        self.native.request(permission)?;
+        self.ask(permission)?;
         Ok(RequestOutcome::Requested)
-    }
-
-    fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionError> {
-        self.native.open(settings_uri(permission))
     }
 
     fn prepare_setup(
@@ -155,22 +157,30 @@ impl SystemPermissions for MacosSystemPermissions {
             return Ok(SetupReadiness::AlreadyGranted);
         }
         // A failed reset leaves an entry the person turns on instead.
-        let cleared = self
-            .reset_bundle
-            .as_deref()
-            .is_some_and(|bundle| self.native.reset(tcc_service(permission), bundle).is_ok());
-        self.native.request(permission)?;
+        let cleared = self.own.as_ref().is_some_and(|own| {
+            self.native
+                .reset(tcc_service(permission), &own.identifier)
+                .is_ok()
+        });
+        self.ask(permission)?;
         Ok(SetupReadiness::Ready { cleared })
     }
 
     fn reset(&self, permission: SystemPermission) -> Result<(), PermissionError> {
-        let bundle = self
-            .reset_bundle
-            .as_deref()
-            .ok_or(PermissionError::Unavailable)?;
+        let own = self.own.as_ref().ok_or(PermissionError::Unavailable)?;
         let _probing = self.probing();
-        self.native.reset(tcc_service(permission), bundle)
+        self.native.reset(tcc_service(permission), &own.identifier)
     }
+}
+
+/// The bundle that holds `executable` in `layout`, when it does.
+fn own_bundle(executable: &Path, layout: Layout) -> Option<PathBuf> {
+    let installation = layout
+        .executable()
+        .components()
+        .try_fold(executable, |path, _| path.parent())?;
+    (installation.join(layout.executable()) == executable)
+        .then(|| installation.join(layout.signed()))
 }
 
 /// macOS 27 renamed System Settings' Accessibility list to Device Control and Data Access.
@@ -196,8 +206,19 @@ unsafe extern "C" {
     static kAXTrustedCheckOptionPrompt: CFTypeRef;
 }
 
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    fn LSRegisterURL(url: CFTypeRef, update: u8) -> i32;
+}
+
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
+    fn CFURLCreateFromFileSystemRepresentation(
+        allocator: CFTypeRef,
+        buffer: *const u8,
+        length: isize,
+        directory: u8,
+    ) -> CFTypeRef;
     static kCFBooleanTrue: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
     static kCFTypeDictionaryValueCallBacks: u8;
@@ -268,8 +289,8 @@ impl Native for System {
         }
     }
 
-    fn open(&self, uri: &'static str) -> Result<(), PermissionError> {
-        run_tool(Command::new(OPEN).arg(uri))
+    fn register(&self, bundle: &std::path::Path) -> Result<(), PermissionError> {
+        register_bundle(bundle)
     }
 
     fn reset(&self, service: &'static str, bundle: &str) -> Result<(), PermissionError> {
@@ -343,6 +364,28 @@ fn request_accessibility() -> Result<(), PermissionError> {
     Ok(())
 }
 
+fn register_bundle(bundle: &Path) -> Result<(), PermissionError> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let bytes = bundle.as_os_str().as_bytes();
+    let length = isize::try_from(bytes.len()).map_err(|_| PermissionError::Unavailable)?;
+    // SAFETY: The buffer and length describe the path's bytes for the call. The URL is released
+    // after Launch Services, which retains what it keeps, reads it.
+    unsafe {
+        let url =
+            CFURLCreateFromFileSystemRepresentation(std::ptr::null(), bytes.as_ptr(), length, 1);
+        if url.is_null() {
+            return Err(PermissionError::Unavailable);
+        }
+        let status = LSRegisterURL(url, 0);
+        CFRelease(url);
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(PermissionError::Rejected)
+        }
+    }
+}
+
 fn run_tool(command: &mut Command) -> Result<(), PermissionError> {
     let mut child = command
         .stdin(Stdio::null())
@@ -392,8 +435,11 @@ mod tests {
                 .push(format!("request {}", permission.as_str()));
             Ok(())
         }
-        fn open(&self, uri: &'static str) -> Result<(), PermissionError> {
-            self.effects.lock().unwrap().push(format!("open {uri}"));
+        fn register(&self, bundle: &Path) -> Result<(), PermissionError> {
+            self.effects
+                .lock()
+                .unwrap()
+                .push(format!("register {}", bundle.display()));
             Ok(())
         }
         fn reset(&self, service: &'static str, bundle: &str) -> Result<(), PermissionError> {
@@ -420,7 +466,7 @@ mod tests {
         (
             MacosSystemPermissions::with(
                 "spaceterm-preflight",
-                own,
+                own.then(|| PathBuf::from(OWN_BUNDLE)),
                 Box::new(Arc::clone(&scripted)),
             ),
             scripted,
@@ -432,6 +478,8 @@ mod tests {
     }
 
     const BUNDLE: &str = "io.github.sadiksaifi.spaceterm-preflight.server";
+    const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Preflight Server.app";
+    const REGISTER: &str = "register /installations/aa/SpaceTerm Preflight Server.app";
 
     #[test]
     fn the_server_names_its_own_bundle_only_when_launchd_started_it_from_there() {
@@ -502,7 +550,7 @@ mod tests {
             );
             let mut expected_effects = vec!["probe".to_owned()];
             if asked {
-                expected_effects.push("request microphone".into());
+                expected_effects.extend([REGISTER.to_owned(), "request microphone".into()]);
             }
             assert_eq!(effects(&scripted), expected_effects, "{state:?}");
         }
@@ -521,7 +569,10 @@ mod tests {
             permissions.request(SystemPermission::ScreenRecording),
             Ok(RequestOutcome::Requested)
         );
-        assert_eq!(effects(&scripted), ["probe", "request screen_recording"]);
+        assert_eq!(
+            effects(&scripted),
+            ["probe", REGISTER, "request screen_recording"]
+        );
 
         *scripted.states.lock().unwrap() =
             vec![(SystemPermission::ScreenRecording, PermissionState::Granted)];
@@ -549,6 +600,7 @@ mod tests {
             [
                 "probe".to_owned(),
                 format!("reset Accessibility {BUNDLE}"),
+                REGISTER.to_owned(),
                 "request accessibility".to_owned(),
             ]
         );
@@ -585,8 +637,9 @@ mod tests {
         assert_eq!(effects(&scripted), ["probe"]);
     }
 
+    /// An inherited holder is the launching app, which Launch Services already knows.
     #[test]
-    fn a_setup_for_an_inherited_holder_requests_without_resetting() {
+    fn a_setup_for_an_inherited_holder_requests_without_resetting_or_registering() {
         let (permissions, scripted) = permissions(
             false,
             &[(
@@ -605,19 +658,41 @@ mod tests {
     fn settings_routes_and_reset_services_are_exact() {
         let (permissions, scripted) = permissions(true, &[]);
         for permission in SystemPermission::ALL {
-            permissions.open_settings(permission).unwrap();
             permissions.reset(permission).unwrap();
         }
         assert_eq!(
             effects(&scripted),
             [
-                "open x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone".to_owned(),
                 format!("reset Microphone {BUNDLE}"),
-                "open x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture".to_owned(),
                 format!("reset ScreenCapture {BUNDLE}"),
-                "open x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility".to_owned(),
                 format!("reset Accessibility {BUNDLE}"),
             ]
+        );
+        assert_eq!(
+            SystemPermission::ALL.map(super::super::settings_uri),
+            [
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_own_bundle_is_the_one_that_holds_the_executable() {
+        let layout = Layout::for_target("aarch64-apple-darwin", "spaceterm-preflight").unwrap();
+        let installation = Path::new("/data/installations/aa");
+        assert_eq!(
+            own_bundle(&installation.join(layout.executable()), layout),
+            Some(installation.join("SpaceTerm Preflight Server.app"))
+        );
+        assert_eq!(
+            own_bundle(
+                Path::new("/Applications/SpaceTerm Development.app/Contents/MacOS/spaceterm"),
+                layout
+            ),
+            None,
+            "the Development server inside the desktop bundle is not the server's own bundle"
         );
     }
 
