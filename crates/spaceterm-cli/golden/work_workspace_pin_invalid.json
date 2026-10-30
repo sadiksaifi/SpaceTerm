@@ -1,0 +1,18 @@
+{
+  "command": "workspace.pin",
+  "data": {},
+  "error": {
+    "class": "usage",
+    "code": "invalid_arguments",
+    "details": {
+      "argument": "<DIR>",
+      "kind": "relative_path"
+    },
+    "message": "Invalid arguments. See --help.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": null,
+  "status": "error",
+  "warnings": []
+}
