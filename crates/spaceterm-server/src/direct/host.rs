@@ -138,7 +138,9 @@ impl State {
     }
     /// Listens at `address`: takes back a retired listener there, or binds a new one. A bind
     /// that a retired listener's live connections still block waits as `Starting` until they
-    /// end; [`Self::retry_listen`] then binds again.
+    /// end, within [`crate::connection::quic::RETIRE_LIMIT`]; [`Self::retry_listen`] then binds
+    /// again. Only a bind refused after every retired listener finished counts against
+    /// `STALL_AFTER`, so retirement never uses up the time the bind itself has.
     fn open_at(&mut self, address: std::net::SocketAddr) -> ListenerState {
         let revived = self
             .retired
@@ -156,6 +158,7 @@ impl State {
                 ListenerState::Listening { addr: address }
             }
             Err(Bind::InUse) if !self.retired.is_empty() => {
+                self.starting_since = None;
                 ListenerState::Starting { addr: address }
             }
             // A connection that just ended may still hold the socket for a moment.
@@ -171,25 +174,16 @@ impl State {
             Err(_) => ListenerState::Failed(DirectError::Transport),
         }
     }
-    /// Binds again while `Starting`, once retired listeners finished. Returns when to try
-    /// again, if still waiting.
+    /// Binds again while `Starting`. Every turn tries the bind, so an address a retired
+    /// listener just released binds at once; [`Self::open_at`] decides when waiting has failed.
+    /// Returns when to try again, if still waiting.
     pub(crate) fn retry_listen(&mut self) -> Option<std::time::Instant> {
         let ListenerState::Starting { addr } = self.listener_state else {
             self.starting_since = None;
             return None;
         };
-        if self
-            .starting_since
-            .is_some_and(|since| since.elapsed() >= crate::protocol::limits::STALL_AFTER)
-            && self.retired.iter().all(QuicListener::finished)
-        {
-            self.listener_state = ListenerState::Failed(DirectError::Transport);
-            return None;
-        }
         self.listener_state = self.open_at(addr);
         if matches!(self.listener_state, ListenerState::Starting { .. }) {
-            self.starting_since
-                .get_or_insert_with(std::time::Instant::now);
             Some(std::time::Instant::now() + LISTEN_RETRY)
         } else {
             self.starting_since = None;
@@ -1797,7 +1791,7 @@ impl Drop for Registered {
 }
 
 mod network_change;
-pub(crate) use network_change::change_network;
+pub(crate) use network_change::{change_network, listener};
 
 #[cfg(test)]
 mod network_change_tests;

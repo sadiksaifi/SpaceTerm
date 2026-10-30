@@ -159,7 +159,11 @@ fn preview(
         "{summary}Confirm with: {}\n",
         context.command_line(
             &routed.server,
-            &format!("{} --confirm {token}", command.replace('.', " "))
+            &[
+                command.split('.').collect::<Vec<_>>(),
+                vec!["--confirm", &token]
+            ]
+            .concat()
         )
     );
     Reply::new(

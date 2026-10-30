@@ -274,7 +274,7 @@ fn preview(
     }
     let text = format!(
         "{summary}Confirm with: {}\n",
-        context.command_line(&routed.server, &format!("server update --confirm {token}"))
+        context.command_line(&routed.server, &["server", "update", "--confirm", &token])
     );
     Reply::new(
         &preview_envelope(
@@ -703,7 +703,7 @@ fn offline_preview(
         summary(&routed.server.name, &effects),
         context.command_line(
             &routed.server,
-            &format!("server update --confirm {}", issued.token)
+            &["server", "update", "--confirm", &issued.token]
         )
     );
     Reply::new(

@@ -136,7 +136,7 @@ pub(crate) fn confirm_line(
 ) -> String {
     context.command_line(
         server,
-        &format!("server network {} --confirm {token}", argument(access)),
+        &["server", "network", &argument(access), "--confirm", token],
     )
 }
 
@@ -283,7 +283,7 @@ fn execute(
     };
     let settled = super::lifecycle::settle(ServiceAction::Network, outcome);
     let network = settled.failure.is_none().then(|| read_back(lane)).flatten();
-    let status = context.command_line(&routed.server, "server status");
+    let status = context.command_line(&routed.server, &["server", "status"]);
     let (envelope, text) = result(routed.server, settled, network, &status);
     Reply::new(&super::with_recovered(envelope, recovered), text)
 }

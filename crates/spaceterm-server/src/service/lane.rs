@@ -22,7 +22,9 @@ use crate::hierarchy::Id;
 use crate::protocol::Preamble;
 use crate::storage::Directory;
 use base64::Engine;
-use network::{LaneNetworkEffects, NetworkAccess, NetworkCaller, NetworkPlan};
+use network::{
+    LISTEN_LIMIT, LaneNetworkEffects, ListenerProgress, NetworkAccess, NetworkCaller, NetworkPlan,
+};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -262,6 +264,10 @@ pub trait LaneHost: Send + Sync {
         _caller: Option<&NetworkCaller>,
         _decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, ServerError>,
     ) -> Result<(), ServerError> {
+        Err(ServerError::Unsupported)
+    }
+    /// Whether Network Access accepts connections now.
+    fn listener(&self) -> Result<ListenerProgress, ServerError> {
         Err(ServerError::Unsupported)
     }
 }
@@ -649,7 +655,7 @@ impl LaneServer {
     /// record. The record is `Running` while the change applies, so a server that ends then
     /// leaves it unresolved rather than not performed.
     fn change_network(
-        &self,
+        self: &Arc<Self>,
         id: &OperationId,
         access: NetworkAccess,
         caller: Option<NetworkCaller>,
@@ -659,7 +665,7 @@ impl LaneServer {
             Ok(key) => key,
             Err(_) => return,
         };
-        let (mut started, mut settled, mut refused) = (false, false, false);
+        let (mut started, mut settled, mut refused, mut enables) = (false, false, false, false);
         let result = self
             .host
             .change_network(access, caller.as_ref(), &mut |plan| {
@@ -678,10 +684,26 @@ impl LaneServer {
                     return Ok(false);
                 }
                 started = true;
+                enables = plan.to.enabled;
                 Ok(true)
             });
         if settled {
             return;
+        }
+        // A change that turns access on is done only once its listener accepts. One that waits
+        // for the listener it replaces to retire settles on a watcher, because this thread may
+        // hold one of that listener's connections.
+        if result.is_ok() && !refused && enables {
+            match self.host.listener() {
+                Ok(ListenerProgress::Listening) => {}
+                Ok(ListenerProgress::Starting) => return self.watch_listener(*id),
+                Ok(ListenerProgress::Stopped) | Err(_) => {
+                    let _ = self
+                        .ledger()
+                        .and_then(|mut v| v.mark(id, State::Unresolved));
+                    return;
+                }
+            }
         }
         // Once the change started, `AddressUnavailable` means the host could not ready the new
         // listener and changed nothing. Any other failure is a commit it could not confirm.
@@ -702,6 +724,40 @@ impl LaneServer {
         };
         // An outcome that could not be recorded stays `Running` for start-up recovery.
         let _ = self.ledger().and_then(|mut v| v.mark(id, state));
+    }
+
+    /// Settles an applied Network Access change once its listener accepts: done when it listens
+    /// within [`LISTEN_LIMIT`], unresolved when it stops or the limit passes, because the policy
+    /// was saved. The watcher holds no strong reference, so it never keeps a stopping server
+    /// alive; start-up recovery then settles the record.
+    fn watch_listener(self: &Arc<Self>, id: OperationId) {
+        let lane = Arc::downgrade(self);
+        let until = Instant::now() + LISTEN_LIMIT;
+        let watched = std::thread::Builder::new()
+            .name("spaceterm-network-listener".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let Some(lane) = lane.upgrade() else {
+                        return;
+                    };
+                    if lane.host.stopping() {
+                        return;
+                    }
+                    let state = match lane.host.listener() {
+                        Ok(ListenerProgress::Listening) => State::Done,
+                        Ok(ListenerProgress::Starting) if Instant::now() < until => continue,
+                        _ => State::Unresolved,
+                    };
+                    let _ = lane.ledger().and_then(|mut v| v.mark(&id, state));
+                    return;
+                }
+            });
+        if watched.is_err() {
+            let _ = self
+                .ledger()
+                .and_then(|mut v| v.mark(&id, State::Unresolved));
+        }
     }
 
     fn preview(&self, action: &LaneAction, actor: &Actor) -> Result<LaneReply, ServerError> {

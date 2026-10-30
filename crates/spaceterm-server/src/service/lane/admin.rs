@@ -25,9 +25,10 @@ pub const STOP_WAIT: Duration = Duration::from_secs(90);
 /// How long any other action is followed: until it settles, or until a server that replaces
 /// itself, as Restart, Update and Return do, returns.
 pub const RETURN_WAIT: Duration = Duration::from_secs(180);
-/// How long a Network Access change is followed. A caller the new listener still serves
-/// reconnects within seconds, and one it no longer serves never can, so waiting as long as for a
-/// server that replaces itself only delays an unconfirmed outcome.
+/// How long a Network Access change is followed. It covers the server's own
+/// [`super::network::LISTEN_LIMIT`] for the new listener, and a reconnect after it. One the new
+/// listener no longer serves never reconnects, so waiting as long as for a server that replaces
+/// itself only delays an unconfirmed outcome.
 pub const NETWORK_WAIT: Duration = Duration::from_secs(30);
 
 /// How long an action is followed after its `Execute`. Only Stop ends the lane it is followed
@@ -470,6 +471,8 @@ mod tests {
             }),
             NETWORK_WAIT
         );
+        // A change settles within the server's listener limit, and the caller then reconnects.
+        assert!(NETWORK_WAIT >= super::super::network::LISTEN_LIMIT + Duration::from_secs(10));
         for action in [
             LaneAction::Restart,
             LaneAction::Return,

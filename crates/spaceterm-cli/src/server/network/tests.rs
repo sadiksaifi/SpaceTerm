@@ -220,3 +220,63 @@ fn the_confirmation_names_the_server_and_actor_it_was_previewed_for() {
         })
     ));
 }
+
+/// The words a shell produces from `line`, with the leading `spaceterm` printing its arguments
+/// instead of running. `None` when `shell` isn't installed.
+fn shell_words(shell: &str, flags: &[&str], line: &str) -> Option<Vec<String>> {
+    let script = line.replacen("spaceterm", "printf '%s\\n'", 1);
+    let output = std::process::Command::new(shell)
+        .args(flags)
+        .arg("-c")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    assert!(
+        output.status.success(),
+        "{shell} refused the printed command: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+#[test]
+fn an_ipv6_confirmation_pastes_into_sh_and_zsh_as_the_same_command() {
+    use clap::Parser;
+    let cli =
+        crate::args::Cli::try_parse_from(["spaceterm", "server", "network", "[::1]:9231"]).unwrap();
+    let access = NetworkAccess::Address("[::1]:9231".parse().unwrap());
+    let line = confirm_line(&context_for(&cli.global), &server(), access, "c1-ab");
+    assert!(line.contains(" '[::1]:9231' "), "{line}");
+    // Zsh without its startup files, so its default `nomatch` applies, as in a new shell.
+    let mut shells = 0;
+    for (shell, flags) in [("/bin/sh", &[][..]), ("zsh", &["-f"][..])] {
+        let Some(words) = shell_words(shell, flags, &line) else {
+            continue;
+        };
+        shells += 1;
+        let copied =
+            crate::args::Cli::try_parse_from(std::iter::once("spaceterm".to_owned()).chain(words))
+                .unwrap();
+        assert_eq!(
+            copied.global.server.as_deref(),
+            Some(server().route.as_str())
+        );
+        let crate::args::Command::Server(crate::args::ServerCommand::Network {
+            access: copied,
+            confirm,
+        }) = copied.command
+        else {
+            panic!("{shell} produced another command");
+        };
+        assert_eq!(argument(super::access(&copied)), "[::1]:9231");
+        assert_eq!(confirm.as_deref(), Some("c1-ab"));
+    }
+    assert!(shells >= 1, "no shell ran");
+}

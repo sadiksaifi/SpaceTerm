@@ -3,7 +3,8 @@
 //! change it describes is the change `SetPolicy` makes in the same hold.
 use super::*;
 use crate::service::lane::network::{
-    LaneCallerEffect, LaneNetworkSetting, NetworkAccess, NetworkCaller, NetworkPlan,
+    LaneCallerEffect, LaneNetworkSetting, ListenerProgress, NetworkAccess, NetworkCaller,
+    NetworkPlan,
 };
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -22,6 +23,20 @@ pub(crate) fn change_network(
         state.apply_network(target)?;
     }
     Ok(())
+}
+
+/// Whether `state`'s Network Access accepts connections now.
+pub(crate) fn listener(state: &Shared) -> ListenerProgress {
+    match state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .status()
+        .listener
+    {
+        ListenerState::Listening { .. } => ListenerProgress::Listening,
+        ListenerState::Starting { .. } => ListenerProgress::Starting,
+        ListenerState::Off | ListenerState::Failed(_) => ListenerProgress::Stopped,
+    }
 }
 
 /// What a plan applies: the policy `SetPolicy` saves and whether exposure is on.

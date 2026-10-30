@@ -106,13 +106,35 @@ pub(crate) fn serving(paths: &crate::host::Paths) -> Arc<LaneServer> {
 
 /// [`serving`] with its own view of the running server.
 pub(crate) fn serving_with(paths: &crate::host::Paths, host: Arc<dyn LaneHost>) -> Arc<LaneServer> {
+    serving_with_feed(paths, host, Arc::new(NoFeed))
+}
+
+/// [`serving_with`] whose release feed is `feed`.
+pub(crate) fn serving_with_feed(
+    paths: &crate::host::Paths,
+    host: Arc<dyn LaneHost>,
+    feed: Arc<dyn Source>,
+) -> Arc<LaneServer> {
     LaneServer::new(
         Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
         host,
-        Arc::new(NoFeed),
+        feed,
         Box::new(|_| Ok(())),
     )
     .unwrap()
+}
+
+/// A release feed that takes `0` to answer and then has no release, as a slow download holds
+/// the lane connection that asked for it.
+pub(crate) struct SlowFeed(pub Duration);
+impl Source for SlowFeed {
+    fn latest(&self) -> Result<Option<feed::Signed>, ServerError> {
+        std::thread::sleep(self.0);
+        Ok(None)
+    }
+    fn download(&self, _: &feed::Feed, _: &mut dyn Write) -> Result<(), ServerError> {
+        panic!("no feed to download from")
+    }
 }
 
 const ACTOR: Actor = Actor {

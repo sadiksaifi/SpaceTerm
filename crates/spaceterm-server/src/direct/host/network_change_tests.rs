@@ -57,6 +57,9 @@ impl LaneHost for Direct {
     ) -> Result<(), ServerError> {
         change_network(&self.0, access, caller, decide)
     }
+    fn listener(&self) -> Result<crate::service::lane::network::ListenerProgress, ServerError> {
+        Ok(listener(&self.0))
+    }
 }
 
 const LOCAL: Actor = Actor {
@@ -470,6 +473,54 @@ mod flow {
     }
 
     #[test]
+    fn a_narrowing_that_slow_lane_work_delays_still_listens_before_it_settles_done() {
+        let fixture = Fixture::new();
+        let every = fixture.listen_at(Ipv4Addr::UNSPECIFIED.into());
+        // Another device's lane is inside a release fetch that outlasts the change, so its
+        // thread holds a connection of the every-interface listener the narrowing retires.
+        let lane = crate::service::lane::tests::serving_with_feed(
+            &fixture.paths,
+            Arc::new(Direct(Arc::clone(&fixture.state))),
+            Arc::new(crate::service::lane::tests::SlowFeed(
+                crate::protocol::limits::STALL_AFTER + Duration::from_secs(5),
+            )),
+        );
+        let _serving = Serving::start(&fixture, &lane);
+        let (endpoint, other, credential) =
+            device_at(&fixture, every.port(), Ipv4Addr::LOCALHOST.into());
+        let mut busy = open_lane(&endpoint, &other, &credential);
+        let fetching = std::thread::spawn(move || {
+            let _ = call(&mut busy, &LaneRequest::StageFetch);
+            busy
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let (endpoint, paired, credential) =
+            device_at(&fixture, every.port(), Ipv4Addr::LOCALHOST.into());
+        let client = paired_lane(endpoint, &paired, credential);
+        let narrowed = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), every.port());
+        let started = Instant::now();
+        let (effects, outcome) = perform(
+            &client,
+            NetworkAccess::Address(narrowed),
+            crate::service::lane::admin::NETWORK_WAIT,
+        );
+        assert_eq!(effects.caller, Some(LaneCallerEffect::Reconnects));
+        let Outcome::Settled { receipt, .. } = outcome else {
+            panic!("expected a settled change, got {outcome:?}");
+        };
+        assert_eq!(receipt.state, LaneOperationState::Done);
+        assert!(started.elapsed() < crate::service::lane::admin::NETWORK_WAIT);
+        // Done means the narrowed listener accepts, although the fetch still runs.
+        let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(status.listener, ListenerState::Listening { addr: narrowed });
+        assert!(!fetching.is_finished() || started.elapsed() > Duration::from_secs(5));
+        drop(fetching.join());
+    }
+
+    #[test]
     fn a_caller_whose_route_the_change_removes_reports_an_unconfirmed_outcome() {
         let fixture = Fixture::new();
         let every = fixture.listen_at(Ipv4Addr::UNSPECIFIED.into());
@@ -717,4 +768,94 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
             code: "disconnects_every_device".into()
         }
     );
+}
+
+/// A host whose listener reports `Starting` once after a change, then stops, as when another
+/// socket takes a narrowed address before the server binds it.
+struct Stalling {
+    direct: Direct,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl LaneHost for Stalling {
+    fn fence(
+        &self,
+        admit: &mut dyn FnMut(&[[u8; 32]]) -> Result<(), ServerError>,
+    ) -> Result<(), ServerError> {
+        self.direct.fence(admit)
+    }
+    fn release_fence(&self) {}
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
+    fn devices(&self) -> Result<Vec<LaneDevice>, ServerError> {
+        Ok(Vec::new())
+    }
+    fn network(&self) -> Result<LaneNetwork, ServerError> {
+        self.direct.network()
+    }
+    fn change_network(
+        &self,
+        access: NetworkAccess,
+        caller: Option<&NetworkCaller>,
+        decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, ServerError>,
+    ) -> Result<(), ServerError> {
+        self.direct.change_network(access, caller, decide)
+    }
+    fn listener(&self) -> Result<crate::service::lane::network::ListenerProgress, ServerError> {
+        use crate::service::lane::network::ListenerProgress;
+        Ok(match self.reads.fetch_add(1, Ordering::SeqCst) {
+            0 => ListenerProgress::Starting,
+            _ => ListenerProgress::Stopped,
+        })
+    }
+}
+
+#[test]
+fn an_applied_change_whose_listener_never_accepts_settles_unresolved_not_done() {
+    let fixture = Fixture::new();
+    let at = fixture.listen_at(Ipv4Addr::LOCALHOST.into());
+    let lane = crate::service::lane::tests::serving_with(
+        &fixture.paths,
+        Arc::new(Stalling {
+            direct: Direct(Arc::clone(&fixture.state)),
+            reads: Default::default(),
+        }),
+    );
+    let all = NetworkAccess::All;
+    let (token, _) = preview(lane.answer(
+        LaneRequest::Preview {
+            action: network(all),
+        },
+        &LOCAL,
+    ));
+    assert!(matches!(
+        lane.answer(execute(&token, all, 6), &LOCAL),
+        LaneReply::Accepted { .. }
+    ));
+    let resolve = || {
+        let LaneReply::Receipt(receipt) = lane.answer(
+            LaneRequest::Resolve {
+                operation: OperationId([6; 16]).to_string(),
+            },
+            &LOCAL,
+        ) else {
+            panic!("expected a receipt");
+        };
+        receipt.state
+    };
+    // The change applied and waits for its listener.
+    assert_eq!(resolve(), LaneOperationState::Running);
+    assert_eq!(
+        policy(&fixture),
+        (
+            Some(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), at.port())),
+            true
+        )
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while resolve() == LaneOperationState::Running {
+        assert!(Instant::now() < deadline, "the watcher never settled");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(resolve(), LaneOperationState::Unresolved);
 }

@@ -240,18 +240,20 @@ impl Context<'_> {
     }
 
     /// The command line a person copies to repeat a command against the same server as the same
-    /// actor: `spaceterm --server ROUTE [--as AGENT] ARGS`. `server` is the resolved target, so
-    /// the copy ignores a different `SPACETERM_SERVER` or `SPACETERM_AS` in another shell. A
-    /// route and an agent name hold no character a shell would interpret.
-    pub fn command_line(&self, server: &ServerRef, args: &str) -> String {
-        let mut line = format!("spaceterm --server {}", server.route);
-        if let Some(agent) = self.agent() {
-            line.push_str(" --as ");
-            line.push_str(agent.as_str());
+    /// actor: `spaceterm --server ROUTE [--as AGENT] WORDS…`. `server` is the resolved target, so
+    /// the copy ignores a different `SPACETERM_SERVER` or `SPACETERM_AS` in another shell. Every
+    /// word is a [`crate::shell::word`], so the line pastes into any POSIX shell or Zsh.
+    pub fn command_line(&self, server: &ServerRef, words: &[&str]) -> String {
+        let agent = self.agent();
+        let mut line = vec!["spaceterm", "--server", server.route.as_str()];
+        if let Some(agent) = &agent {
+            line.extend(["--as", agent.as_str()]);
         }
-        line.push(' ');
-        line.push_str(args);
-        line
+        line.extend(words);
+        line.iter()
+            .map(|word| crate::shell::word(word))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     pub fn agent(&self) -> Option<spaceterm_server::protocol::AgentName> {

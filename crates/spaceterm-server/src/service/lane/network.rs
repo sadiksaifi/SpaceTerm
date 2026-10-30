@@ -9,13 +9,34 @@
 //!
 //! The lane binds a preview's token to the plan, admits the change in the ledger, writes
 //! `Accepted`, then plans again and applies the change in-process. No helper runs and no Terminal
-//! Session ends, so the change sets no membership fence.
+//! Session ends, so the change sets no membership fence. A change that turns access on settles as
+//! done only once its listener accepts connections.
 use super::LaneDevice;
 use crate::direct::PairingId;
 use crate::hierarchy::Id;
 use crate::service::operations::Actor;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::time::Duration;
+
+/// How long an applied change may wait for its listener to accept. A narrowing binds only after
+/// the listener it replaces retires, within [`crate::connection::quic::RETIRE_LIMIT`], and the
+/// bind itself may then wait up to `STALL_AFTER` for a socket that just closed.
+pub const LISTEN_LIMIT: Duration = Duration::from_secs(
+    crate::connection::quic::RETIRE_LIMIT.as_secs()
+        + crate::protocol::limits::STALL_AFTER.as_secs()
+        + 2,
+);
+
+/// Whether Network Access accepts connections, as a change waits for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenerProgress {
+    Listening,
+    /// Waiting to bind, as while the listener it replaces retires.
+    Starting,
+    /// Off, or the listener failed.
+    Stopped,
+}
 
 /// The Network Access a change asks for. `All` listens on every interface at the current port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
