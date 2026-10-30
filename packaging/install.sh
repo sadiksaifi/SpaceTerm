@@ -381,9 +381,9 @@ install_linux() {
 # is an app-like bundle named for its identity, so System Permissions follow the bundle.
 server_executable() {
     case "$(uname -s):$headless_identity" in
-        Darwin:spaceterm) printf '%s' 'SpaceTerm Server.app/Contents/MacOS/spaceterm' ;;
-        Darwin:spaceterm-preflight) printf '%s' 'SpaceTerm Preflight Server.app/Contents/MacOS/spaceterm' ;;
-        Darwin:spaceterm-development) printf '%s' 'SpaceTerm Development Server.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm) printf '%s' 'SpaceTerm.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm-preflight) printf '%s' 'SpaceTerm Preflight.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm-development) printf '%s' 'SpaceTerm Development.app/Contents/MacOS/spaceterm' ;;
         *) printf '%s' bin/spaceterm ;;
     esac
 }

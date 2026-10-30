@@ -285,7 +285,7 @@ pub(crate) mod testing {
                 reads: Cell::new(0),
                 naming: Cell::new(AccessibilityNaming::default()),
                 holder: RefCell::new(PermissionHolder::Server {
-                    name: "SpaceTerm Development Server".into(),
+                    name: "SpaceTerm Development".into(),
                 }),
             })
         }

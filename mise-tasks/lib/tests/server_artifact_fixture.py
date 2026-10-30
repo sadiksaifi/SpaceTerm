@@ -170,7 +170,8 @@ def populate(root, tree, expected):
         capture_output=True,
     )
     if expected["target"] == "aarch64-apple-darwin":
-        info = tree / server_package.bundle_directory(expected["identity"]) / "Contents/Info.plist"
+        bundle = tree / server_package.bundle_directory(expected["identity"])
+        info = bundle / "Contents/Info.plist"
         info.write_bytes(plistlib.dumps(server_package.server_info(expected["identity"])))
 
 

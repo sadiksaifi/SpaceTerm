@@ -154,7 +154,10 @@ pub(crate) fn requested(
     let naming = report.map_or_else(AccessibilityNaming::default, |report| {
         report.accessibility_naming
     });
-    let holder = report.map_or("the server", |report| holder_name(&report.holder));
+    let product = spaceterm_server::service::bundle_name(context.identity)
+        .and_then(|name| name.strip_suffix(".app"))
+        .unwrap_or("SpaceTerm");
+    let holder = report.map_or(product, |report| holder_name(&report.holder));
     let name = name(permission, naming);
     let settings = || {
         context.command_line(
@@ -281,7 +284,7 @@ fn state(state: PermissionState) -> &'static str {
 fn holder_name(holder: &PermissionHolder) -> &str {
     match holder {
         PermissionHolder::Server { name } => name,
-        PermissionHolder::Launcher => "the app that started the server",
+        PermissionHolder::Launcher => "the app that started SpaceTerm",
     }
 }
 
@@ -291,7 +294,7 @@ fn holder_sentence(holder: &PermissionHolder) -> String {
             format!("System Settings lists these permissions under {name}.")
         }
         PermissionHolder::Launcher => {
-            "The app that started the server holds these permissions.".to_owned()
+            "The app that started SpaceTerm holds these permissions.".to_owned()
         }
     }
 }
@@ -349,7 +352,7 @@ mod tests {
         let (envelope, text) = status(
             server(),
             &report(PermissionHolder::Server {
-                name: "SpaceTerm Server".into(),
+                name: "SpaceTerm".into(),
             }),
         );
         crate::contract::golden::assert_golden("server_permissions", &envelope);
@@ -358,10 +361,10 @@ mod tests {
             "Microphone        not requested\n\
              Screen Recording  allowed\n\
              Device Control    not allowed\n\
-             System Settings lists these permissions under SpaceTerm Server.\n"
+             System Settings lists these permissions under SpaceTerm.\n"
         );
         let (_, text) = status(server(), &report(PermissionHolder::Launcher));
-        assert!(text.ends_with("The app that started the server holds these permissions.\n"));
+        assert!(text.ends_with("The app that started SpaceTerm holds these permissions.\n"));
     }
 
     #[test]
@@ -372,7 +375,7 @@ mod tests {
             global: &global,
         };
         let held = report(PermissionHolder::Server {
-            name: "SpaceTerm Server".into(),
+            name: "SpaceTerm".into(),
         });
         let text =
             |permission, outcome| requested(&context, server(), permission, outcome, Some(&held)).1;
@@ -382,7 +385,7 @@ mod tests {
         );
         assert_eq!(
             text(SystemPermission::Accessibility, RequestOutcome::Requested),
-            "Turn on SpaceTerm Server in System Settings > Privacy & Security > Device Control and Data Access. Open it with: spaceterm --server local server permissions settings accessibility\n"
+            "Turn on SpaceTerm in System Settings > Privacy & Security > Device Control and Data Access. Open it with: spaceterm --server local server permissions settings accessibility\n"
         );
         assert_eq!(
             text(
@@ -391,7 +394,7 @@ mod tests {
                     state: PermissionState::NotGranted
                 }
             ),
-            "Microphone was denied. Turn on SpaceTerm Server in System Settings > Privacy & Security > Microphone. Open it with: spaceterm --server local server permissions settings microphone\n"
+            "Microphone was denied. Turn on SpaceTerm in System Settings > Privacy & Security > Microphone. Open it with: spaceterm --server local server permissions settings microphone\n"
         );
         assert_eq!(
             text(

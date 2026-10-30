@@ -266,9 +266,7 @@ impl SetupGuide {
                 .into_any_element()
         } else {
             let advice = if presentation.cleared {
-                format!(
-                    "SpaceTerm removed an entry an earlier {holder} left, then listed it again."
-                )
+                format!("SpaceTerm removed an earlier entry for {holder}, then listed it again.")
             } else {
                 format!(
                     "If {holder} isn\u{2019}t listed, close System Settings and set it up again."

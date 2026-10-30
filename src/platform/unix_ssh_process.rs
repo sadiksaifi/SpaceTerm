@@ -305,7 +305,7 @@ mod tests {
                 script.ends_with(&format!("exec \"$path\" server provision '{command}'\n")),
                 "{script}"
             );
-            assert!(script.contains("Darwin) executable='SpaceTerm Development Server.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
+            assert!(script.contains("Darwin) executable='SpaceTerm Development.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
         }
     }
 

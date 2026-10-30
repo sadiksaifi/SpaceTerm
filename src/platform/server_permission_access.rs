@@ -559,7 +559,7 @@ mod tests {
             ],
             accessibility_naming: server::AccessibilityNaming::Accessibility,
             holder: PermissionHolder::Server {
-                name: "SpaceTerm Server".into(),
+                name: "SpaceTerm".into(),
             },
             resettable: true,
         }
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(
             PermissionAccess::holder(&access),
             PermissionHolder::Server {
-                name: "SpaceTerm Server".into()
+                name: "SpaceTerm".into()
             }
         );
     }
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(
             PermissionAccess::holder(&access),
             PermissionHolder::Server {
-                name: "SpaceTerm Server".into()
+                name: "SpaceTerm".into()
             },
             "the holder System Settings is expected to list"
         );

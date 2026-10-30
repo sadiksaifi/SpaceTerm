@@ -583,7 +583,7 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
     click(OPEN_SETTINGS_SELECTOR, cx);
     assert_eq!(
         explanation(&window, cx),
-        "Open System Settings and allow the SpaceTerm server in Privacy & Security > Microphone."
+        "Open System Settings and allow SpaceTerm Development in Privacy & Security > Microphone."
     );
     let label = cx.debug_bounds(LABEL_SELECTOR).expect("label bounds");
     let description = cx

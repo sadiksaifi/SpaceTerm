@@ -80,13 +80,16 @@ impl Layout {
     }
 }
 
-/// The macOS bundle directory of an identity's server package. Its name is the name System
-/// Settings lists the server's grants under.
+/// The macOS bundle directory of an identity's server package, named for the identity's product.
+/// Privacy prompts and System Settings show a bundle's Launch Services display name, which is its
+/// directory name, not `CFBundleName` or `CFBundleDisplayName`. A person therefore sees the
+/// product's name: SpaceTerm, SpaceTerm Preflight or SpaceTerm Development. The system hides the
+/// `.app` extension unless the person turned on "Show all filename extensions".
 pub fn bundle_name(identity: &str) -> Option<&'static str> {
     match identity {
-        "spaceterm" => Some("SpaceTerm Server.app"),
-        "spaceterm-preflight" => Some("SpaceTerm Preflight Server.app"),
-        "spaceterm-development" => Some("SpaceTerm Development Server.app"),
+        "spaceterm" => Some("SpaceTerm.app"),
+        "spaceterm-preflight" => Some("SpaceTerm Preflight.app"),
+        "spaceterm-development" => Some("SpaceTerm Development.app"),
         _ => None,
     }
 }
@@ -105,15 +108,15 @@ mod tests {
         let layout = Layout::for_target(MACOS, "spaceterm-preflight").unwrap();
         assert_eq!(
             layout.executable(),
-            Path::new("SpaceTerm Preflight Server.app/Contents/MacOS/spaceterm")
+            Path::new("SpaceTerm Preflight.app/Contents/MacOS/spaceterm")
         );
         assert_eq!(
             layout.resource(Path::new("share/spaceterm/shell-integration/VERSION")),
             Some(PathBuf::from(
-                "SpaceTerm Preflight Server.app/Contents/Resources/shell-integration/VERSION"
+                "SpaceTerm Preflight.app/Contents/Resources/shell-integration/VERSION"
             ))
         );
-        assert_eq!(layout.signed(), Path::new("SpaceTerm Preflight Server.app"));
+        assert_eq!(layout.signed(), Path::new("SpaceTerm Preflight.app"));
         assert_eq!(layout.bundle_files().len(), 2);
     }
 

@@ -276,7 +276,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/SpaceTerm Development Server.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Ok(true)
         );
@@ -284,7 +284,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/other-fixture/SpaceTerm Development Server.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/other-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Err(ServerError::CleanupUnresolved)
         );
@@ -292,7 +292,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/SpaceTerm Development Server.app/Contents/MacOS/spaceterm\";\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n"
             ),
             Ok(false)
         );

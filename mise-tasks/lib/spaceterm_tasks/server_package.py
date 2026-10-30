@@ -40,11 +40,12 @@ from spaceterm_tasks.packaging import (
 
 TARGETS = {"darwin": "aarch64-apple-darwin", "linux": "x86_64-unknown-linux-gnu"}
 IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
-# System Settings lists the System Permissions of each identity's server under this name.
+# The product name a person sees for each identity's server bundle. Privacy prompts and System
+# Settings show the bundle's Launch Services display name, which is its directory name.
 BUNDLES = {
-    "spaceterm": "SpaceTerm Server",
-    "spaceterm-preflight": "SpaceTerm Preflight Server",
-    "spaceterm-development": "SpaceTerm Development Server",
+    "spaceterm": "SpaceTerm",
+    "spaceterm-preflight": "SpaceTerm Preflight",
+    "spaceterm-development": "SpaceTerm Development",
 }
 SERVER_INFO = ROOT / "packaging/macos/server/Info.plist"
 SHARED_RESOURCES = "share/spaceterm"

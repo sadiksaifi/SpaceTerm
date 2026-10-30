@@ -192,13 +192,20 @@ impl SystemPermissions for MacosSystemPermissions {
     }
 }
 
-/// The bundle that holds `executable` in `layout`, when it does.
+/// The bundle that holds `executable` in `layout`, when it is a retained installation's: the
+/// bundle lies directly in a directory named by the installation's digest. The Development
+/// desktop's bundle has the same name, and its foreground server is no installation.
 fn own_bundle(executable: &Path, layout: Layout) -> Option<PathBuf> {
     let installation = layout
         .executable()
         .components()
         .try_fold(executable, |path, _| path.parent())?;
-    (installation.join(layout.executable()) == executable)
+    let digest = installation.file_name()?.to_str()?;
+    let retained = digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    (retained && installation.join(layout.executable()) == executable)
         .then(|| installation.join(layout.signed()))
 }
 
@@ -497,8 +504,8 @@ mod tests {
     }
 
     const BUNDLE: &str = "io.github.sadiksaifi.spaceterm-preflight.server";
-    const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Preflight Server.app";
-    const REGISTER: &str = "register /installations/aa/SpaceTerm Preflight Server.app";
+    const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Preflight.app";
+    const REGISTER: &str = "register /installations/aa/SpaceTerm Preflight.app";
 
     #[test]
     fn the_server_names_its_own_bundle_only_when_launchd_started_it_from_there() {
@@ -507,7 +514,7 @@ mod tests {
         assert_eq!(
             report.holder,
             PermissionHolder::Server {
-                name: "SpaceTerm Preflight Server".into()
+                name: "SpaceTerm Preflight".into()
             }
         );
         assert!(report.resettable);
@@ -765,18 +772,22 @@ mod tests {
     #[test]
     fn the_own_bundle_is_the_one_that_holds_the_executable() {
         let layout = Layout::for_target("aarch64-apple-darwin", "spaceterm-preflight").unwrap();
-        let installation = Path::new("/data/installations/aa");
+        let installation = Path::new("/data/installations").join("a".repeat(64));
         assert_eq!(
             own_bundle(&installation.join(layout.executable()), layout),
-            Some(installation.join("SpaceTerm Preflight Server.app"))
+            Some(installation.join("SpaceTerm Preflight.app"))
         );
+        let development =
+            Layout::for_target("aarch64-apple-darwin", "spaceterm-development").unwrap();
         assert_eq!(
             own_bundle(
-                Path::new("/Applications/SpaceTerm Development.app/Contents/MacOS/spaceterm"),
-                layout
+                Path::new(
+                    "/target/development-apps/SpaceTerm Development.app/Contents/MacOS/spaceterm"
+                ),
+                development
             ),
             None,
-            "the Development server inside the desktop bundle is not the server's own bundle"
+            "the Development desktop's bundle has the server's name but is no installation"
         );
     }
 

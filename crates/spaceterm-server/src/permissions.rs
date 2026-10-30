@@ -272,7 +272,7 @@ pub(crate) mod testing {
                         .to_vec(),
                     accessibility_naming: AccessibilityNaming::DeviceControl,
                     holder: PermissionHolder::Server {
-                        name: "SpaceTerm Development Server".into(),
+                        name: "SpaceTerm Development".into(),
                     },
                     resettable: true,
                 })),

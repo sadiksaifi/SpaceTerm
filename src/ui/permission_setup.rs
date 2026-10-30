@@ -72,9 +72,10 @@ pub(crate) const fn permission_copy(
 pub(crate) fn holder_name(holder: Option<PermissionHolder>) -> String {
     match holder {
         Some(PermissionHolder::Server { name }) => name,
-        Some(PermissionHolder::Launcher) | None => {
-            "the app that started the SpaceTerm server".to_owned()
-        }
+        Some(PermissionHolder::Launcher) | None => format!(
+            "the app that started {}",
+            crate::application_identity::ApplicationIdentity::current().display_name()
+        ),
     }
 }
 

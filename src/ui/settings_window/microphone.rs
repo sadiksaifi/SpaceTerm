@@ -14,6 +14,18 @@ use crate::ui::appearance::ChromeAppearance;
 use super::SettingsWindow;
 use crate::ui::sidebar_window::form::{action_button, badge};
 
+/// The recovery after System Settings could not open. It names the entry the list shows: the
+/// server bundle, named for this build's product.
+fn open_failed() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        format!(
+            "Open System Settings and allow {} in Privacy & Security > Microphone.",
+            crate::application_identity::ApplicationIdentity::current().display_name()
+        )
+    })
+}
+
 pub(super) const CONTROL_SELECTOR: &str = "settings-microphone-access-control";
 pub(super) const REQUEST_SELECTOR: &str = "settings-microphone-access-request";
 pub(super) const OPEN_SETTINGS_SELECTOR: &str = "settings-microphone-access-open-settings";
@@ -150,9 +162,7 @@ impl MicrophoneAccessRow {
                 "settings-microphone-access-state-denied",
                 match self.recovery_failure {
                     None => "Lets terminal programs use the microphone.",
-                    Some(_) => {
-                        "Open System Settings and allow the SpaceTerm server in Privacy & Security > Microphone."
-                    }
+                    Some(_) => open_failed(),
                 },
                 Some(Action::OpenSettings),
             ),

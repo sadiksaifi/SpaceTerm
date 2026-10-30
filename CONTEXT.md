@@ -265,7 +265,7 @@ _Avoid_: local echo, speculative echo
 
 **System Permission**: An operating-system privacy grant that programs in a Terminal Session inherit from their SpaceTerm Server, set up only on that server's machine.
 
-**Permission Holder**: The System Settings entry whose System Permissions a server's Terminal Sessions receive: the server's own bundle, or the application that started the server.
+**Permission Holder**: The System Settings entry whose System Permissions a server's Terminal Sessions receive: the server's own bundle, listed under the product's name, such as SpaceTerm Preflight, or the application that started the server.
 
 **Permission Request**: A terminal-output request offering Permission Setup for missing System Permissions.
 

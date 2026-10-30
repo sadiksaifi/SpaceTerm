@@ -4,7 +4,7 @@
     "accessibility_naming": "device_control",
     "holder": {
       "holder": "server",
-      "name": "SpaceTerm Server"
+      "name": "SpaceTerm"
     },
     "permissions": [
       {
