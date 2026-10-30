@@ -134,3 +134,36 @@ fn remote_work_paths_are_rejected_before_route_or_credential_access() {
     assert_eq!(envelope["error"]["code"], "invalid_arguments");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("private-relative-directory"));
 }
+
+#[test]
+fn workspace_pin_rejects_relative_remote_paths_before_route_or_credential_access() {
+    for json in [false, true] {
+        let mut args = vec![
+            "--server",
+            "remote-fixture",
+            "workspace",
+            "pin",
+            "private-relative-directory",
+        ];
+        if json {
+            args.push("--json");
+        }
+        let output = spaceterm(&args);
+        assert_eq!(output.status.code(), Some(2));
+        if json {
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(envelope["command"], "workspace.pin");
+            assert_eq!(envelope["error"]["code"], "invalid_arguments");
+            assert_eq!(envelope["error"]["details"]["argument"], "<DIR>");
+            assert!(output.stderr.is_empty());
+        } else {
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                include_str!("../golden/work_workspace_pin_invalid.stderr")
+            );
+        }
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-relative-directory"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-relative-directory"));
+    }
+}
