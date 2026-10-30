@@ -148,7 +148,7 @@ fn compose(
         direct_servers.clone(),
     );
     let server_context_paths = startup.server_context_paths();
-    let command_line_tool = command_line_tool(identity, &startup.home_directory);
+    let command_line_tool = command_line_tool(identity);
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
         Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),
@@ -231,18 +231,16 @@ fn compose(
 /// This build's command, installed through the account's service and shown in Finder.
 fn command_line_tool(
     identity: ApplicationIdentity,
-    home: &std::path::Path,
-) -> Option<crate::command_line_tool::CommandLineToolAdapters> {
+) -> Option<Arc<crate::command_line_tool::CommandLineTool>> {
     let files =
         super::account_launcher_files::AccountLauncherFiles::new(identity.directory_name()).ok()?;
-    Some(crate::command_line_tool::CommandLineToolAdapters {
-        files: Arc::new(files),
-        search_path: Arc::new(super::login_shell_search_path::LoginShellSearchPath::new(
-            super::launch_host::user_shell(),
-            home.to_owned(),
-        )),
-        viewer: Arc::new(super::macos_file_viewer::FinderViewer),
-    })
+    Some(Arc::new(crate::command_line_tool::CommandLineTool::new(
+        identity.directory_name(),
+        crate::command_line_tool::CommandLineToolAdapters {
+            files: Arc::new(files),
+            viewer: Arc::new(super::macos_file_viewer::FinderViewer),
+        },
+    )))
 }
 
 fn update_adapter(identity: ApplicationIdentity) -> Rc<dyn crate::updates::UpdateAdapter> {

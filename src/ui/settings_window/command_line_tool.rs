@@ -1,6 +1,6 @@
-//! The Command Line Tool row: whether this build's command is in `~/.local/bin` and on the
-//! shell's PATH, with Install or a way to show it. The row belongs to this computer, so it
-//! ignores the server picker. [`crate::command_line_tool`] owns the launcher policy.
+//! The Command Line Tool row: whether this build's command is in `~/.local/bin`, with Install or
+//! a way to show it. The row belongs to this computer, so it ignores the server picker.
+//! [`crate::command_line_tool`] owns the launcher policy.
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -8,10 +8,7 @@ use gpui::{AnyElement, App, Context, Global, SharedString, Task, Window, div};
 use spaceterm_ui::{Button, ButtonSize, ButtonVariant, ProgressRing, ProgressSize, ProgressState};
 
 use super::SettingsWindow;
-use crate::command_line_tool::{
-    CommandLineTool, CommandLineToolAdapters, Launcher, SearchPath, ToolAction, ToolFailure,
-    ToolStatus,
-};
+use crate::command_line_tool::{CommandLineTool, Launcher, ToolAction, ToolFailure};
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
@@ -20,28 +17,26 @@ pub(super) const PROGRESS_SELECTOR: &str = "settings-command-line-tool-progress"
 /// Where the launcher lives on every supported desktop, as people type it.
 const DIRECTORY: &str = "~/.local/bin";
 
-/// The adapters each Settings window builds its own [`CommandLineTool`] from, so a window that
-/// opens later asks the shell for its PATH again.
-struct CommandLineToolAccess(CommandLineToolAdapters);
+/// The tool Settings windows present.
+struct CommandLineToolAccess(Arc<CommandLineTool>);
 
 impl Global for CommandLineToolAccess {}
 
 /// Offers the Command Line Tool row in Settings windows opened from now on.
-pub(crate) fn configure_command_line_tool(adapters: CommandLineToolAdapters, cx: &mut App) {
-    cx.set_global(CommandLineToolAccess(adapters));
+pub(crate) fn configure_command_line_tool(tool: Arc<CommandLineTool>, cx: &mut App) {
+    cx.set_global(CommandLineToolAccess(tool));
 }
 
-/// The tool a new Settings window presents for `name`. `None` omits the row.
-pub(super) fn offered(name: &'static str, cx: &App) -> Option<Arc<CommandLineTool>> {
-    let access = cx.try_global::<CommandLineToolAccess>()?;
-    Some(Arc::new(CommandLineTool::new(name, access.0.clone())))
+/// The tool a new Settings window presents. `None` omits the row.
+pub(super) fn offered(cx: &App) -> Option<Arc<CommandLineTool>> {
+    Some(Arc::clone(&cx.try_global::<CommandLineToolAccess>()?.0))
 }
 
 /// What SpaceTerm last learned about the command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ToolCheck {
     NotChecked,
-    Checked(ToolStatus),
+    Checked(Launcher),
     Failed(ToolFailure),
 }
 
@@ -74,6 +69,8 @@ pub(super) struct CommandLineToolRow {
     pub(super) failure: Option<ToolFailure>,
     /// Returns the background result to GPUI. Dropping the window drops it.
     _operation: Option<Task<()>>,
+    /// Waits for the file manager's answer to a reveal.
+    _reveal: Option<Task<()>>,
 }
 
 impl CommandLineToolRow {
@@ -84,6 +81,7 @@ impl CommandLineToolRow {
             working: None,
             failure: None,
             _operation: None,
+            _reveal: None,
         }
     }
 
@@ -120,8 +118,8 @@ pub(super) fn present(
             failure_text(failure, name),
             None,
         ),
-        ToolCheck::Checked(status) => {
-            let (state, selector, explanation) = match status.launcher {
+        ToolCheck::Checked(launcher) => {
+            let (state, selector, explanation) = match launcher {
                 Launcher::Missing => (
                     "Not installed",
                     "settings-command-line-tool-state-missing",
@@ -159,8 +157,8 @@ pub(super) fn present(
                     ),
                 ),
             };
-            let action = status.action();
-            let label = match (action, status.launcher) {
+            let action = launcher.action();
+            let label = match (action, launcher) {
                 (ToolAction::Install, Launcher::Stale) => "Reinstall",
                 (ToolAction::Install, _) => "Install",
                 (ToolAction::Reveal, _) => reveal,
@@ -173,22 +171,19 @@ pub(super) fn present(
             )
         }
     };
-    // A command SpaceTerm owns or would install is found by name only from PATH.
-    let unsearched = matches!(
+    // SpaceTerm runs no shell to learn PATH, so the row names the directory PATH must include
+    // for a command SpaceTerm owns or would install.
+    let ours = matches!(
         check,
-        ToolCheck::Checked(ToolStatus {
-            launcher: Launcher::Missing | Launcher::Stale | Launcher::Installed,
-            search_path: SearchPath::Excluded,
-        })
+        ToolCheck::Checked(Launcher::Missing | Launcher::Stale | Launcher::Installed)
     );
     let caption = match failure {
         Some(failure) => Some((failure_text(failure, name), CaptionTone::Error)),
-        None if unsearched => Some((
+        None if ours => Some((
             SharedString::from(format!(
-                "{DIRECTORY} isn\u{2019}t on your shell\u{2019}s PATH. Add it to run \
-                 \u{201C}{name}\u{201D} by name."
+                "Terminals run \u{201C}{name}\u{201D} by name when {DIRECTORY} is on PATH."
             )),
-            CaptionTone::Warning,
+            CaptionTone::Guidance,
         )),
         None => None,
     };
@@ -249,7 +244,7 @@ impl SettingsWindow {
     }
 
     /// Runs the row's action. Install runs on the background executor; showing the command asks
-    /// the file manager at once.
+    /// the file manager, whose answer arrives later.
     pub(super) fn request_command_line_tool(&mut self, action: ToolAction, cx: &mut Context<Self>) {
         let Some(row) = self.command_line_tool.as_mut() else {
             return;
@@ -260,7 +255,17 @@ impl SettingsWindow {
         match action {
             ToolAction::Install => self.run_command_line_tool(ToolWork::Install, cx),
             ToolAction::Reveal => {
-                row.failure = row.tool.reveal().err();
+                row.failure = None;
+                let shown = row.tool.reveal();
+                row._reveal = Some(cx.spawn(async move |settings, cx| {
+                    let shown = shown.await;
+                    let _ = settings.update(cx, |settings, cx| {
+                        if let Some(row) = settings.command_line_tool.as_mut() {
+                            row.failure = shown.err();
+                        }
+                        cx.notify();
+                    });
+                }));
                 cx.notify();
             }
         }
@@ -366,13 +371,10 @@ mod tests {
 
     const NAME: &str = "spaceterm-development";
 
-    fn checked(launcher: Launcher, search_path: SearchPath) -> ToolRowPresentation {
+    fn checked(launcher: Launcher) -> ToolRowPresentation {
         present(
             NAME,
-            ToolCheck::Checked(ToolStatus {
-                launcher,
-                search_path,
-            }),
+            ToolCheck::Checked(launcher),
             None,
             None,
             "Show in Finder",
@@ -381,21 +383,17 @@ mod tests {
 
     #[test]
     fn each_launcher_state_reads_one_way_and_offers_one_action() {
-        let missing = checked(Launcher::Missing, SearchPath::Included);
+        let missing = checked(Launcher::Missing);
         assert_eq!(
-            (missing.state, missing.action, missing.caption),
-            (
-                "Not installed",
-                Some((ToolAction::Install, "Install")),
-                None
-            )
+            (missing.state, missing.action),
+            ("Not installed", Some((ToolAction::Install, "Install")))
         );
-        let stale = checked(Launcher::Stale, SearchPath::Included);
+        let stale = checked(Launcher::Stale);
         assert_eq!(
             (stale.state, stale.action),
             ("Broken", Some((ToolAction::Install, "Reinstall")))
         );
-        let installed = checked(Launcher::Installed, SearchPath::Unknown);
+        let installed = checked(Launcher::Installed);
         assert_eq!(
             (
                 installed.state,
@@ -412,7 +410,7 @@ mod tests {
             (Launcher::OtherLink, "Other link"),
             (Launcher::OtherFile, "Other file"),
         ] {
-            let other = checked(launcher, SearchPath::Excluded);
+            let other = checked(launcher);
             assert_eq!(
                 (other.state, other.action, other.caption),
                 (state, Some((ToolAction::Reveal, "Show in Finder")), None)
@@ -426,17 +424,16 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_missing_from_path_is_said_plainly() {
-        for launcher in [Launcher::Missing, Launcher::Installed] {
-            let presentation = checked(launcher, SearchPath::Excluded);
+    fn the_row_names_the_directory_path_must_include_without_claiming_it_does() {
+        for launcher in [Launcher::Missing, Launcher::Stale, Launcher::Installed] {
             assert_eq!(
-                presentation.caption,
+                checked(launcher).caption,
                 Some((
                     SharedString::new_static(
-                        "~/.local/bin isn\u{2019}t on your shell\u{2019}s PATH. Add it to run \
-                         \u{201C}spaceterm-development\u{201D} by name."
+                        "Terminals run \u{201C}spaceterm-development\u{201D} by name when \
+                         ~/.local/bin is on PATH."
                     ),
-                    CaptionTone::Warning
+                    CaptionTone::Guidance
                 ))
             );
         }
@@ -446,10 +443,7 @@ mod tests {
     fn a_failed_action_replaces_the_path_note_and_a_failed_read_offers_nothing() {
         let refused = present(
             NAME,
-            ToolCheck::Checked(ToolStatus {
-                launcher: Launcher::Missing,
-                search_path: SearchPath::Excluded,
-            }),
+            ToolCheck::Checked(Launcher::Missing),
             None,
             Some(ToolFailure::NoServerPackage),
             "Show in Finder",

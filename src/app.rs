@@ -1353,7 +1353,7 @@ pub(crate) struct ApplicationCapabilities {
     /// Private presentation context, independent of saved connection authority and Settings.
     pub(crate) server_context_paths: Option<Arc<AppPaths>>,
     /// Reads and installs this build's command for Settings. `None` omits its row.
-    pub(crate) command_line_tool: Option<crate::command_line_tool::CommandLineToolAdapters>,
+    pub(crate) command_line_tool: Option<Arc<crate::command_line_tool::CommandLineTool>>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1588,8 +1588,8 @@ pub(crate) fn initialize_application(
     if let Some(paths) = &host.adapters.server_context_paths {
         crate::ui::settings_window::configure_server_context(Arc::clone(paths), cx);
     }
-    if let Some(adapters) = &host.adapters.command_line_tool {
-        crate::ui::settings_window::configure_command_line_tool(adapters.clone(), cx);
+    if let Some(tool) = &host.adapters.command_line_tool {
+        crate::ui::settings_window::configure_command_line_tool(Arc::clone(tool), cx);
     }
     if let (Some(access), Some(guide)) =
         (&host.adapters.permission_access, &host.adapters.setup_guide)

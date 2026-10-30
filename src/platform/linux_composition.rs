@@ -244,7 +244,7 @@ fn compose(
         direct_servers.clone(),
     );
     let server_context_paths = startup.server_context_paths();
-    let command_line_tool = command_line_tool(identity, &startup.home_directory, bus.clone());
+    let command_line_tool = command_line_tool(identity, bus.clone());
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
         super::repository_status_host::repository_status_adapters(
@@ -321,19 +321,17 @@ fn compose(
 /// This build's command, installed through the account's service and shown in the file manager.
 fn command_line_tool(
     identity: ApplicationIdentity,
-    home: &std::path::Path,
     bus: Option<super::linux_session_bus::SessionBus>,
-) -> Option<crate::command_line_tool::CommandLineToolAdapters> {
+) -> Option<Arc<crate::command_line_tool::CommandLineTool>> {
     let files =
         super::account_launcher_files::AccountLauncherFiles::new(identity.directory_name()).ok()?;
-    Some(crate::command_line_tool::CommandLineToolAdapters {
-        files: Arc::new(files),
-        search_path: Arc::new(super::login_shell_search_path::LoginShellSearchPath::new(
-            super::launch_host::user_shell(),
-            home.to_owned(),
-        )),
-        viewer: Arc::new(super::linux_file_viewer::FileManagerViewer::new(bus)),
-    })
+    Some(Arc::new(crate::command_line_tool::CommandLineTool::new(
+        identity.directory_name(),
+        crate::command_line_tool::CommandLineToolAdapters {
+            files: Arc::new(files),
+            viewer: Arc::new(super::linux_file_viewer::FileManagerViewer::new(bus)),
+        },
+    )))
 }
 
 #[cfg(test)]

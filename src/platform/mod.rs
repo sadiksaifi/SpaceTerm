@@ -80,8 +80,6 @@ mod account_launcher_files;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
 mod linux_file_viewer;
-#[cfg(feature = "desktop")]
-mod login_shell_search_path;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
 mod macos_file_viewer;

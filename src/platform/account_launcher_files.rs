@@ -1,5 +1,5 @@
 //! The account's command-line launcher, through the server's service code `install.sh` uses.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::command_line_tool::{Launcher, LauncherFiles, LinkOutcome, ToolFailure};
 use crate::server_connection::ServerError;
@@ -51,12 +51,6 @@ impl LauncherFiles for AccountLauncherFiles {
 
     fn launcher(&self) -> PathBuf {
         self.launcher.clone()
-    }
-
-    /// Resolves links in the home directory, so a home reached through a link compares equal.
-    fn directory(&self) -> PathBuf {
-        let directory = self.launcher.parent().unwrap_or(Path::new("/"));
-        std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_owned())
     }
 }
 

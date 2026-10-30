@@ -213,10 +213,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     let window_drag = composition.window_movement.create();
     let permissions = composition.permissions.clone();
     let theme_registry = composition.theme_registry.clone();
-    let local_server = servers::offered_local_server(command_line_tool::offered(
-        crate::application_identity::ApplicationIdentity::current().directory_name(),
-        cx,
-    ));
+    let local_server = servers::offered_local_server(command_line_tool::offered(cx));
     let opened = cx.open_window(
         super::sidebar_window::window_options(
             "Settings",

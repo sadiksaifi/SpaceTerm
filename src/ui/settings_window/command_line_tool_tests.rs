@@ -6,9 +6,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::{ACTION_SELECTOR, ToolCheck};
 use crate::appearance::Appearance;
-use crate::command_line_tool::testing::{
-    DIRECTORY, RecordingViewer, ScriptedFiles, ScriptedShell, tool,
-};
+use crate::command_line_tool::testing::{DIRECTORY, RecordingViewer, ScriptedFiles, tool};
 use crate::command_line_tool::{Launcher, LinkOutcome, ToolAction, ToolFailure};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -33,10 +31,17 @@ fn open_settings(
     launcher: Option<Launcher>,
     cx: &mut TestAppContext,
 ) -> (Fixture, Entity<SettingsWindow>, &mut VisualTestContext) {
+    open_with_viewer(launcher, RecordingViewer::default(), cx)
+}
+
+fn open_with_viewer(
+    launcher: Option<Launcher>,
+    viewer: RecordingViewer,
+    cx: &mut TestAppContext,
+) -> (Fixture, Entity<SettingsWindow>, &mut VisualTestContext) {
     let files = ScriptedFiles::new(Ok(launcher.unwrap_or(Launcher::Missing)));
-    let shell = ScriptedShell::new(Some(&["/usr/bin"]));
-    let viewer = Arc::new(RecordingViewer::default());
-    let command_line_tool = launcher.map(|_| Arc::new(tool(&files, &shell, &viewer)));
+    let viewer = Arc::new(viewer);
+    let command_line_tool = launcher.map(|_| Arc::new(tool(&files, &viewer)));
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
@@ -104,10 +109,10 @@ fn opening_servers_checks_the_command_and_install_then_shows_it(cx: &mut TestApp
         (missing.state, missing.action),
         ("Not installed", Some((ToolAction::Install, "Install")))
     );
-    // The scripted shell doesn't search ~/.local/bin, which the row says before installing.
+    // The row names the directory PATH must include, without claiming whether it does.
     assert_eq!(
         missing.caption.map(|(_, tone)| tone),
-        Some(CaptionTone::Warning)
+        Some(CaptionTone::Guidance)
     );
 
     click(ACTION_SELECTOR, cx);
@@ -187,4 +192,30 @@ fn a_build_without_the_tool_omits_the_row(cx: &mut TestAppContext) {
     assert!(window.read_with(cx, |settings, cx| {
         settings.command_line_tool_presentation(cx).is_none()
     }));
+}
+
+#[gpui::test]
+fn a_file_manager_that_cannot_show_the_command_is_reported(cx: &mut TestAppContext) {
+    let refusing = RecordingViewer {
+        refuse: true,
+        ..RecordingViewer::default()
+    };
+    let (fixture, window, cx) = open_with_viewer(Some(Launcher::Installed), refusing, cx);
+    click(NAVIGATION_SELECTOR, cx);
+    click(ACTION_SELECTOR, cx);
+    assert_eq!(fixture.viewer.shown.lock().unwrap().len(), 1);
+    let refused = presentation(&window, cx);
+    assert_eq!(
+        (
+            refused.state,
+            refused.caption.map(|(text, tone)| (text.to_string(), tone))
+        ),
+        (
+            "Installed",
+            Some((
+                "The file manager couldn\u{2019}t show the command.".to_owned(),
+                CaptionTone::Error
+            ))
+        )
+    );
 }

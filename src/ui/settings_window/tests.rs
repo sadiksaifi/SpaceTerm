@@ -395,7 +395,6 @@ fn open_settings_with_capabilities(
                         &crate::command_line_tool::testing::ScriptedFiles::new(Ok(
                             crate::command_line_tool::Launcher::Missing,
                         )),
-                        &crate::command_line_tool::testing::ScriptedShell::new(None),
                         &std::sync::Arc::default(),
                     ),
                 )),
