@@ -93,18 +93,26 @@ impl State {
         Ok((plan, target))
     }
 
-    /// Applies a planned change through `SetPolicy`.
+    /// Applies a planned change through `SetPolicy`. A listener that failed afterwards fails
+    /// the change, so its outcome is never reported as done.
     fn apply_network(&mut self, target: Target) -> Result<(), DirectError> {
         // Turning access off keeps the configured listener for the next deliberate enable.
         let policy = target.policy.filter(|_| target.enabled);
-        self.manage(
+        let (reply, _) = self.manage(
             None,
             Management::SetPolicy {
                 policy,
                 enabled: target.enabled,
             },
-        )
-        .map(drop)
+        )?;
+        match reply {
+            ManagementReply::Status(DirectStatus {
+                listener: ListenerState::Failed(error),
+                ..
+            }) => Err(error),
+            ManagementReply::Status(_) => Ok(()),
+            _ => Err(DirectError::InvalidRequest),
+        }
     }
 
     fn target(&self, access: NetworkAccess) -> Result<Target, DirectError> {
@@ -135,8 +143,8 @@ impl State {
         Ok(target)
     }
 
-    /// Whether `SetPolicy` would keep the listener and its connections, as [`Self::widen`]
-    /// decides after the commit.
+    /// Whether `SetPolicy` would keep the listener and its connections, as
+    /// [`Self::prepare_listener`] decides. A widening that then fails to bind changes nothing.
     fn keeps_listener(&self, target: &Target) -> bool {
         let ListenerState::Listening { addr } = self.listener_state else {
             return false;
@@ -144,14 +152,8 @@ impl State {
         let Some(policy) = target.policy.as_ref().filter(|_| target.enabled) else {
             return false;
         };
-        if !policy.covers(addr) {
-            return false;
-        }
-        policy.bind == addr
-            || !self
-                .retired
-                .iter()
-                .any(|listener| !listener.finished() && listener.address().port() == addr.port())
+        // A covering policy keeps this listener, or is refused when it can't widen.
+        policy.covers(addr)
     }
 }
 

@@ -8,6 +8,7 @@ const EXPIRES: &str = "2026-10-30T12:10:00Z";
 const OPERATION: &str = "0123456789abcdef0123456789abcdef";
 const BOOT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const TO: &str = "192.0.2.4:9231";
+const STATUS: &str = "spaceterm --server id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e server status";
 
 fn server() -> ServerRef {
     ServerRef {
@@ -117,7 +118,7 @@ fn a_change_that_cut_and_restored_the_callers_connection_reports_done() {
         },
     );
     assert!(settled.acknowledged);
-    let (envelope, text) = result(server(), settled, Some(on(TO)));
+    let (envelope, text) = result(server(), settled, Some(on(TO)), STATUS);
     assert_eq!(envelope.exit(), 0);
     assert_eq!(text, format!("Network Access is now on at {TO}.\n"));
     assert_golden("server_network_done", &envelope);
@@ -134,11 +135,13 @@ fn a_caller_that_lost_its_route_reports_an_unconfirmed_outcome() {
         },
     );
     assert!(!settled.acknowledged);
-    let (envelope, text) = result(server(), settled, None);
+    let (envelope, text) = result(server(), settled, None, STATUS);
     assert_eq!(envelope.exit(), 7);
     assert_eq!(
         text,
-        "Confirm Network Access on penguin with: spaceterm server status\n"
+        format!(
+            "Check Network Access with: {STATUS}\nIf this device can't reach penguin, run spaceterm server status on that machine.\n"
+        )
     );
     assert_golden("server_network_unconfirmed", &envelope);
 }
@@ -161,4 +164,59 @@ fn the_access_argument_round_trips_into_the_confirmation_hint() {
         argument(access(&parsed("192.0.2.4"))),
         format!("192.0.2.4:{}", spaceterm_server::direct::DEFAULT_PORT)
     );
+}
+
+fn context_for(global: &crate::args::Global) -> Context<'_> {
+    Context {
+        identity: "spaceterm-development",
+        global,
+    }
+}
+
+#[test]
+fn the_confirmation_names_the_server_and_actor_it_was_previewed_for() {
+    use clap::Parser;
+    let cli = crate::args::Cli::try_parse_from([
+        "spaceterm",
+        "--server",
+        "penguin",
+        "--as",
+        "builder",
+        "--no-input",
+        "server",
+        "network",
+        "all",
+    ])
+    .unwrap();
+    let line = confirm_line(
+        &context_for(&cli.global),
+        &server(),
+        NetworkAccess::All,
+        "c1-ab",
+    );
+    assert_eq!(
+        line,
+        format!(
+            "spaceterm --server id:{} --as builder server network all --confirm c1-ab",
+            "4e".repeat(32)
+        )
+    );
+    // The copied line parses back to the same command, target and actor.
+    let words: Vec<&str> = line.split(' ').collect();
+    let copied = crate::args::Cli::try_parse_from(&words).unwrap();
+    assert_eq!(
+        copied.global.server.as_deref(),
+        Some(server().route.as_str())
+    );
+    assert_eq!(
+        copied.global.agent.as_ref().map(|v| v.as_str()),
+        Some("builder")
+    );
+    assert!(matches!(
+        copied.command,
+        crate::args::Command::Server(crate::args::ServerCommand::Network {
+            confirm: Some(_),
+            ..
+        })
+    ));
 }

@@ -659,12 +659,18 @@ impl LaneServer {
             Ok(key) => key,
             Err(_) => return,
         };
-        let (mut started, mut settled) = (false, false);
+        let (mut started, mut settled, mut refused) = (false, false, false);
         let result = self
             .host
             .change_network(access, caller.as_ref(), &mut |plan| {
                 if plan.observation(&self.server, &self.boot, &key) != observation {
                     return Err(ServerError::Changed);
+                }
+                // The devices that keep a route are not in the digest. One that left since
+                // admission can leave none, so the refusal is checked again in this hold.
+                if plan.refused_for(caller.as_ref()) {
+                    refused = true;
+                    return Ok(false);
                 }
                 // A record already settled without this change is left alone.
                 if self.ledger()?.claim(id)?.is_none() {
@@ -677,10 +683,18 @@ impl LaneServer {
         if settled {
             return;
         }
-        // The plan validated the request, so a failure once the change started is a commit the
-        // host could not confirm.
+        // Once the change started, `AddressUnavailable` means the host could not ready the new
+        // listener and changed nothing. Any other failure is a commit it could not confirm.
         let state = match result {
+            Ok(()) if refused => State::Failed {
+                code: super::lane_codes::DISCONNECTS_EVERY_DEVICE.to_owned(),
+            },
             Ok(()) => State::Done,
+            Err(failure @ ServerError::Direct(crate::direct::DirectError::AddressUnavailable)) => {
+                State::Failed {
+                    code: super::lane_codes::code(&failure).to_owned(),
+                }
+            }
             Err(_) if started => State::Unresolved,
             Err(failure) => State::Failed {
                 code: super::lane_codes::code(&failure).to_owned(),

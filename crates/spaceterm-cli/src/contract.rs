@@ -844,6 +844,7 @@ codes! {
     Revoked = "revoked", ActionRequired, false, "This device was unpaired.";
     NetworkOff = "network_off", Unavailable, false, "The server's Network Access is off.";
     InvalidAddress = "invalid_address", Target, false, "Enter a DNS name or IP address and an optional nonzero port.";
+    AddressUnavailable = "address_unavailable", Unavailable, true, "The server couldn\u{2019}t listen at this address and port. Nothing changed.";
     ClaimDecided = "claim_decided", Target, false, "This pairing claim was already decided.";
     ComparisonMismatch = "comparison_mismatch", Failed, false, "The Comparison Code did not match.";
     WrongServer = "wrong_server", Target, false, "This invitation or connection names another server.";
@@ -953,6 +954,7 @@ pub fn from_direct_error(error: DirectError) -> Failure {
         DirectError::Disabled => Code::NetworkOff,
         DirectError::InvalidRequest => Code::ProtocolError,
         DirectError::InvalidAddress => Code::InvalidAddress,
+        DirectError::AddressUnavailable => Code::AddressUnavailable,
         DirectError::AlreadyDecided => Code::ClaimDecided,
         DirectError::Substituted => Code::ComparisonMismatch,
         DirectError::WrongServer => Code::WrongServer,

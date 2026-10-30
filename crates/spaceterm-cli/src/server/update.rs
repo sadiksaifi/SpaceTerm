@@ -321,7 +321,10 @@ fn preview(
             Failure::new(Code::ConfirmationRequired),
         );
     }
-    let text = format!("{summary}Confirm with: spaceterm server update --confirm {token}\n");
+    let text = format!(
+        "{summary}Confirm with: {}\n",
+        context.command_line(&routed.server, &format!("server update --confirm {token}"))
+    );
     Reply::new(
         &preview_envelope(
             routed.server,
@@ -618,7 +621,7 @@ fn stopped(
             token,
         ) {
             Ok(true) => {}
-            Ok(false) => return offline_preview(routed, effects, ("return", &observed)),
+            Ok(false) => return offline_preview(context, routed, effects, ("return", &observed)),
             Err(failure) => return fail(failure),
         }
         let to = effects.to.clone();
@@ -662,7 +665,7 @@ fn stopped(
         token,
     ) {
         Ok(true) => {}
-        Ok(false) => return offline_preview(routed, effects, ("update", &observed)),
+        Ok(false) => return offline_preview(context, routed, effects, ("update", &observed)),
         Err(failure) => return fail(failure),
     }
     let to = effects.to.clone();
@@ -737,6 +740,7 @@ fn confirmed(
 }
 
 fn offline_preview(
+    context: &Context<'_>,
     routed: Routed,
     effects: UpdateEffects,
     (purpose, observed): (&str, &str),
@@ -744,9 +748,12 @@ fn offline_preview(
     let issued =
         super::offline_token::issue(purpose, observed.as_bytes(), std::time::SystemTime::now());
     let text = format!(
-        "{}Confirm with: spaceterm server update --confirm {}\n",
+        "{}Confirm with: {}\n",
         summary(&routed.server.name, &effects),
-        issued.token
+        context.command_line(
+            &routed.server,
+            &format!("server update --confirm {}", issued.token)
+        )
     );
     Reply::new(
         &preview_envelope(

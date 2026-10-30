@@ -248,7 +248,9 @@ fn setup(
     Ok((data, text))
 }
 
-/// Applies `--network` through the running server. An unchanged policy is `already_done`.
+/// Applies `--network` through the running server. An unchanged policy is `already_done`. The
+/// server readies the new listener before it changes anything, so an address it can't listen at
+/// fails the step and keeps the current Network Access.
 fn set_network(
     connection: &spaceterm_server::ServerConnection,
     network: &Network,
@@ -275,9 +277,12 @@ fn set_network(
     if unchanged {
         return Ok(StepResult::AlreadyDone);
     }
-    connection
+    let status = connection
         .set_direct_policy(policy.or(current.policy), enabled)
         .map_err(contract::from_direct_error)?;
+    if let spaceterm_server::direct::ListenerState::Failed(error) = status.listener {
+        return Err(contract::from_direct_error(error));
+    }
     Ok(StepResult::Done)
 }
 

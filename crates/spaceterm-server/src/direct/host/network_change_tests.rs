@@ -527,3 +527,194 @@ mod flow {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|v| format!("{v:02x}")).collect()
 }
+
+/// A lane transport that answers a fixed list of requests and runs `accepted` while it writes
+/// an `Accepted` reply, the moment between admission and the change.
+struct Scripted {
+    requests: std::collections::VecDeque<LaneRequest>,
+    replies: Vec<LaneReply>,
+    accepted: Option<Box<dyn FnOnce()>>,
+}
+impl Scripted {
+    fn new(requests: Vec<LaneRequest>) -> Self {
+        Self {
+            requests: requests.into(),
+            replies: Vec::new(),
+            accepted: None,
+        }
+    }
+}
+impl Preamble for Scripted {
+    fn send(&mut self, frame: &[u8], _: Instant) -> Result<(), ServerError> {
+        let reply: LaneReply = serde_json::from_slice(frame).unwrap();
+        if matches!(reply, LaneReply::Accepted { .. })
+            && let Some(accepted) = self.accepted.take()
+        {
+            accepted();
+        }
+        self.replies.push(reply);
+        Ok(())
+    }
+    fn receive(&mut self, _: usize, _: Instant) -> Result<Vec<u8>, ServerError> {
+        let request = self.requests.pop_front().ok_or(ServerError::Protocol)?;
+        Ok(serde_json::to_vec(&request).unwrap())
+    }
+}
+
+/// Holds `[::1]` at `port` like another app, or `None` without IPv6 loopback.
+fn hold_ipv6(port: u16) -> Option<std::net::UdpSocket> {
+    std::net::UdpSocket::bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)).ok()
+}
+
+#[test]
+fn a_widening_another_app_blocks_keeps_the_listener_and_every_connection() {
+    let fixture = Fixture::new();
+    let at = fixture.listen_at(Ipv4Addr::LOCALHOST.into());
+    let Some(_other_app) = hold_ipv6(at.port()) else {
+        eprintln!("skipped: this host has no IPv6 loopback");
+        return;
+    };
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let lane = lane(&fixture);
+    let _serving = Serving::start(&fixture, &lane);
+    let mut stream = open_lane(&fixture.endpoint(), &paired, &credential);
+    // The preview expects the listener to widen in place.
+    let (token, effects) = preview(
+        call(
+            &mut stream,
+            &LaneRequest::Preview {
+                action: network(NetworkAccess::All),
+            },
+        )
+        .unwrap(),
+    );
+    assert_eq!(effects.caller, Some(LaneCallerEffect::StaysConnected));
+    assert!(matches!(
+        call(&mut stream, &execute(&token, NetworkAccess::All, 4)).unwrap(),
+        LaneReply::Accepted { .. }
+    ));
+    // Widening failed before anything was saved or retired, so the device keeps its lane and
+    // the record reports the typed failure instead of done.
+    let LaneReply::Receipt(receipt) = call(
+        &mut stream,
+        &LaneRequest::Resolve {
+            operation: OperationId([4; 16]).to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("expected a receipt");
+    };
+    assert_eq!(receipt.state, LaneOperationState::Failed);
+    assert_eq!(receipt.code.as_deref(), Some("address_unavailable"));
+    assert_eq!(policy(&fixture), (Some(at), true));
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    assert_eq!(status.listener, ListenerState::Listening { addr: at });
+    // The same refusal reaches `server setup --network` on the server's own machine.
+    assert!(matches!(
+        fixture.management(Management::SetPolicy {
+            enabled: true,
+            policy: Some(NetworkPolicy::every_interface(at.port()).unwrap()),
+        }),
+        Err(DirectError::AddressUnavailable)
+    ));
+    assert_eq!(policy(&fixture), (Some(at), true));
+    assert!(call(&mut stream, &LaneRequest::Status).is_ok());
+}
+
+#[test]
+fn an_address_another_app_holds_is_refused_before_the_current_listener_retires() {
+    let fixture = Fixture::new();
+    let at = fixture.listen_at(Ipv4Addr::LOCALHOST.into());
+    let taken = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let elsewhere = taken.local_addr().unwrap();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let lane = lane(&fixture);
+    let _serving = Serving::start(&fixture, &lane);
+    let mut stream = open_lane(&fixture.endpoint(), &paired, &credential);
+    assert!(matches!(
+        fixture.management(Management::SetPolicy {
+            enabled: true,
+            policy: Some(NetworkPolicy::new(elsewhere).unwrap()),
+        }),
+        Err(DirectError::AddressUnavailable)
+    ));
+    assert_eq!(policy(&fixture), (Some(at), true));
+    assert!(call(&mut stream, &LaneRequest::Status).is_ok());
+}
+
+#[test]
+fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_strand_the_caller() {
+    let fixture = Fixture::new();
+    let every = fixture.listen_at(Ipv4Addr::UNSPECIFIED.into());
+    let lane = lane(&fixture);
+    let _serving = Serving::start(&fixture, &lane);
+    // The only device that keeps a route reaches the server over IPv6.
+    let credential = DeviceCredential::generate().unwrap();
+    let other = fixture.enroll(&credential);
+    let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), every.port());
+    let Ok(connection) = DirectConnection::connect(&format!("quic://{v6}"), &other, &credential)
+    else {
+        eprintln!("skipped: this host has no IPv6 loopback");
+        return;
+    };
+    let mut kept = connection
+        .admit_service_lane(crate::protocol::Caller {
+            client: &other.client,
+            name: &"Studio CLI".into(),
+            agent: None,
+        })
+        .unwrap();
+    assert!(call(&mut kept, &LaneRequest::Status).is_ok());
+    // The caller reaches the server over IPv4 and asks for IPv6 only.
+    let caller = fixture.enroll(&DeviceCredential::generate().unwrap());
+    let actor = Actor {
+        pairing: Some(caller.pairing),
+        client: caller.client,
+    };
+    let route = Some(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), every.port()));
+    let access = NetworkAccess::Address(v6);
+    let mut previewing = Scripted::new(vec![LaneRequest::Preview {
+        action: network(access),
+    }]);
+    lane.serve(&mut previewing, actor, route, &|| Ok(()))
+        .unwrap();
+    let (token, effects) = preview(previewing.replies.remove(0));
+    assert_eq!(effects.caller, Some(LaneCallerEffect::Disconnected));
+    // The other device is revoked while `Accepted` is written, before the change applies.
+    let mut executing = Scripted::new(vec![execute(&token, access, 5)]);
+    let (state, pairing) = (Arc::clone(&fixture.state), other.pairing);
+    executing.accepted = Some(Box::new(move || {
+        state
+            .lock()
+            .unwrap()
+            .manage(
+                None,
+                Management::Revoke {
+                    operation: crate::direct::crypto::random().unwrap(),
+                    target: pairing,
+                },
+            )
+            .unwrap();
+    }));
+    lane.serve(&mut executing, actor, route, &|| Ok(()))
+        .unwrap();
+    assert!(matches!(executing.replies[0], LaneReply::Accepted { .. }));
+    // No connected device keeps a route now, so the change was refused, not applied.
+    assert_eq!(policy(&fixture), (Some(every), true));
+    let record = crate::service::operations::Ledger::in_directory(
+        crate::storage::Directory::open(&fixture.paths.data, false).unwrap(),
+    )
+    .resolve(&OperationId([5; 16]))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        record.state,
+        crate::service::operations::State::Failed {
+            code: "disconnects_every_device".into()
+        }
+    );
+}

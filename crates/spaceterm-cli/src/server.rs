@@ -246,6 +246,21 @@ impl Context<'_> {
         }
     }
 
+    /// The command line a person copies to repeat a command against the same server as the same
+    /// actor: `spaceterm --server ROUTE [--as AGENT] ARGS`. `server` is the resolved target, so
+    /// the copy ignores a different `SPACETERM_SERVER` or `SPACETERM_AS` in another shell. A
+    /// route and an agent name hold no character a shell would interpret.
+    pub fn command_line(&self, server: &ServerRef, args: &str) -> String {
+        let mut line = format!("spaceterm --server {}", server.route);
+        if let Some(agent) = self.agent() {
+            line.push_str(" --as ");
+            line.push_str(agent.as_str());
+        }
+        line.push(' ');
+        line.push_str(args);
+        line
+    }
+
     pub fn agent(&self) -> Option<spaceterm_server::protocol::AgentName> {
         self.global.agent.clone().or_else(|| {
             std::env::var("SPACETERM_AS")

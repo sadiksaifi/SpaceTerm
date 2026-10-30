@@ -129,12 +129,25 @@ fn preview(
         );
     }
     let text = format!(
-        "{summary}Confirm with: spaceterm server network {} --confirm {token}\n",
-        argument(access)
+        "{summary}Confirm with: {}\n",
+        confirm_line(context, &routed.server, access, &token)
     );
     Reply::new(
         &preview_envelope(routed.server, token, expires_at, &effects, opened.recovered),
         text,
+    )
+}
+
+/// The confirmation a person copies: the same change, target and actor.
+pub(crate) fn confirm_line(
+    context: &Context<'_>,
+    server: &ServerRef,
+    access: NetworkAccess,
+    token: &str,
+) -> String {
+    context.command_line(
+        server,
+        &format!("server network {} --confirm {token}", argument(access)),
     )
 }
 
@@ -280,22 +293,24 @@ fn execute(
         let _ = pending.remove(&settled.receipt.operation);
     }
     let network = settled.failure.is_none().then(|| read_back(lane)).flatten();
-    let (envelope, text) = result(routed.server, settled, network);
+    let status = context.command_line(&routed.server, "server status");
+    let (envelope, text) = result(routed.server, settled, network, &status);
     Reply::new(&super::with_recovered(envelope, recovered), text)
 }
 
 /// The envelope and text of a confirmed change, from its settled flow and the Network Access
-/// read back after it, if any.
+/// read back after it, if any. `status` is the command that reads the same server's status.
 pub(crate) fn result(
     server: ServerRef,
     settled: Settled,
     network: Option<LaneNetworkSetting>,
+    status: &str,
 ) -> (Envelope<ServerNetwork>, String) {
     let text = match (&settled.failure, &network) {
         (None, Some(network)) => format!("Network Access is now {}.\n", describe(network)),
         (None, None) => "Network Access changed.\n".to_owned(),
         (Some(failure), _) if failure.code == Code::OutcomeUnconfirmed => format!(
-            "Confirm Network Access on {} with: spaceterm server status\n",
+            "Check Network Access with: {status}\nIf this device can't reach {}, run spaceterm server status on that machine.\n",
             server.name
         ),
         (Some(_), _) => String::new(),

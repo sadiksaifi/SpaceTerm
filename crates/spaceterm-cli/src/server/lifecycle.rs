@@ -182,8 +182,11 @@ fn preview(
         );
     }
     let text = format!(
-        "{summary}Confirm with: spaceterm {} --confirm {token}\n",
-        command.replace('.', " ")
+        "{summary}Confirm with: {}\n",
+        context.command_line(
+            &routed.server,
+            &format!("{} --confirm {token}", command.replace('.', " "))
+        )
     );
     Reply::new(
         &preview_envelope(
