@@ -74,7 +74,7 @@ pub enum Action {
 }
 
 /// Who asked for an operation. Only the same actor acknowledges its record, and revoking a
-/// pairing forgets that pairing's records.
+/// pairing forgets that pairing's settled records and orphans its unsettled one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Actor {
     pub pairing: Option<crate::direct::PairingId>,
@@ -127,6 +127,10 @@ pub struct Record {
     pub state: State,
     /// Seconds since the Unix epoch.
     pub updated_at: u64,
+    /// The actor's pairing was revoked while the record was unsettled. No actor can acknowledge
+    /// it, so the ledger deletes it as soon as it settles. Until then it keeps the membership
+    /// fence and refuses other operations like any unsettled record.
+    pub orphaned: bool,
 }
 
 /// How [`Ledger::admit`] treated a record.
@@ -173,7 +177,7 @@ impl Ledger {
     /// Persists `record` as `Admitted`. A repeated ID returns the existing record. The ledger
     /// refuses a second operation while one is unsettled, and any operation when it is full.
     pub fn admit(&mut self, record: Record) -> Result<Admission, ServerError> {
-        if record.state != State::Admitted {
+        if record.state != State::Admitted || record.orphaned {
             return Err(ServerError::Protocol);
         }
         self.change(|records| {
@@ -243,6 +247,13 @@ impl Ledger {
         Ok(self.read()?.into_iter().find(|v| v.id == *operation))
     }
 
+    /// Like [`Self::resolve`], but never waits for the ledger's lock. A held lock is
+    /// `ServiceBusy`, so a caller with its own deadline asks again.
+    pub fn resolve_now(&self, operation: &OperationId) -> Result<Option<Record>, ServerError> {
+        let _lock = self.data.try_lock(LOCK)?.ok_or(ServerError::ServiceBusy)?;
+        Ok(self.read()?.into_iter().find(|v| v.id == *operation))
+    }
+
     /// Every record, for status and the fence watcher.
     pub(crate) fn records(&self) -> Result<Vec<Record>, ServerError> {
         let _lock = self.data.lock(LOCK, false)?;
@@ -270,13 +281,19 @@ impl Ledger {
         })
     }
 
-    /// Revoking a pairing forgets its records, whatever their state.
+    /// Revoking a pairing deletes its settled records. An unsettled record stays, orphaned, until
+    /// its helper or start-up recovery settles it, because a helper may still be acting on it.
     pub fn forget_pairing(
         &mut self,
         pairing: &crate::direct::PairingId,
     ) -> Result<(), ServerError> {
         self.change(|records| {
-            records.retain(|v| v.actor.pairing.as_ref() != Some(pairing));
+            for record in records
+                .iter_mut()
+                .filter(|v| v.actor.pairing.as_ref() == Some(pairing))
+            {
+                record.orphaned = true;
+            }
             Ok(())
         })
     }
@@ -356,6 +373,7 @@ impl Ledger {
         let before = self.read()?;
         let mut records = before.clone();
         let result = apply(&mut records)?;
+        records.retain(|v| !(v.orphaned && v.state.terminal()));
         if records != before {
             self.data
                 .write_json(FILE, &Document { schema: 1, records })?;
@@ -428,6 +446,7 @@ mod tests {
             candidate: None,
             state: State::Admitted,
             updated_at: 0,
+            orphaned: false,
         }
     }
 
@@ -615,11 +634,36 @@ mod tests {
     }
 
     #[test]
-    fn revoking_a_pairing_forgets_its_records() {
+    fn revoking_a_pairing_forgets_its_outcomes_and_orphans_its_unsettled_operation_until_it_settles()
+     {
         let fixture = Fixture::new();
         let mut ledger = fixture.ledger();
+        let settled = OperationId([1; 16]);
+        let running = OperationId([2; 16]);
         ledger.admit(record(1, Action::Stop, 1)).unwrap();
+        ledger.mark(&settled, State::Done).unwrap();
+        ledger.admit(record(2, Action::Restart, 1)).unwrap();
+        ledger.claim(&running).unwrap();
         ledger.forget_pairing(&[7; 32]).unwrap();
-        assert_eq!(ledger.resolve(&OperationId([1; 16])).unwrap(), None);
+        assert_eq!(ledger.resolve(&settled).unwrap(), None);
+        let orphan = ledger.resolve(&running).unwrap().unwrap();
+        assert!(orphan.orphaned && orphan.state == State::Running);
+        // The orphan still refuses another device's operation.
+        let mut other = record(3, Action::Stop, 1);
+        other.actor.pairing = Some([9; 32]);
+        assert_eq!(ledger.admit(other.clone()), Err(ServerError::ServiceBusy));
+        // Its helper's outcome deletes it, since nobody is left to acknowledge it.
+        assert_eq!(
+            ledger.mark(&running, State::Done).unwrap().state,
+            State::Done
+        );
+        assert_eq!(ledger.resolve(&running).unwrap(), None);
+        assert!(matches!(ledger.admit(other).unwrap(), Admission::New(_)));
+        // An orphan that start-up recovery settles is deleted the same way.
+        ledger.mark(&OperationId([3; 16]), State::Done).unwrap();
+        ledger.admit(record(4, Action::Stop, 1)).unwrap();
+        ledger.forget_pairing(&[7; 32]).unwrap();
+        ledger.recover_at_start(&[2; 32], &IDLE).unwrap();
+        assert_eq!(ledger.resolve(&OperationId([4; 16])).unwrap(), None);
     }
 }

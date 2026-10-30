@@ -2,7 +2,7 @@ use super::*;
 use crate::connection::Wake;
 use crate::connection::quic::{QuicListener, QuicStream};
 use crate::connection::registry::{PairedConnections, Sever};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 const MAX_PENDING: usize = 32;
 /// Why a listener did not bind.
@@ -50,6 +50,10 @@ pub(crate) struct State {
     wake: Option<Arc<dyn Wake>>,
     /// Runs after each revocation, whichever transport asked for it.
     revoked: Option<Revoked>,
+    /// Evicted agent identities whose control grants are still being released, and the signal
+    /// that one finished. The release runs outside this lock, so a returning agent waits for it.
+    retiring: std::collections::BTreeSet<[u8; 32]>,
+    retired_agent: Arc<Condvar>,
 }
 impl State {
     pub(crate) fn open(paths: &crate::host::Paths) -> Result<Shared, DirectError> {
@@ -79,6 +83,8 @@ impl State {
             network,
             wake: None,
             revoked: None,
+            retiring: Default::default(),
+            retired_agent: Arc::default(),
         };
         state.listen();
         Ok(Arc::new(Mutex::new(state)))
@@ -332,8 +338,9 @@ impl State {
     ///
     /// The pairing's names are kept from least to most recently admitted. A new name past
     /// [`storage::MAX_AGENTS`] evicts the least recently admitted name with no live connection,
-    /// and returns its Client Identity. The caller releases that identity's control grants, so
-    /// revocation never needs a name it forgot. An evicted agent that returns is admitted again.
+    /// and returns its Client Identity. The caller releases that identity's control grants
+    /// through [`Retirement`], so revocation never needs a name it forgot. An evicted agent that
+    /// returns is admitted again once that release ends.
     pub(crate) fn admit_agent(
         &mut self,
         paired: &PairedDevice,
@@ -367,6 +374,9 @@ impl State {
             .ok_or(DirectError::AuthenticationRefused)?
             .agents = agents;
         self.commit(next)?;
+        if let Some(evicted) = evicted {
+            self.retiring.insert(evicted);
+        }
         Ok(evicted)
     }
     /// The enrolled public key of `paired`'s device.
@@ -1375,30 +1385,36 @@ pub(crate) fn serve(
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
-    let evicted = {
-        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+    let (evicted, registered) = {
+        let mut locked = after_retirement(&state, client);
         let evicted = match &agent {
-            Some(agent) => state.admit_agent(&paired, agent)?,
+            Some(agent) => locked.admit_agent(&paired, agent)?,
             None => None,
         };
-        state.register(
+        let registered = locked.register(
             &paired,
             generation,
             connection,
             client,
             Some(outbox.clone()),
             Box::new(carrier.sever()),
-        )?;
-        evicted
+        );
+        (evicted, registered)
     };
-    // The direct-network lock is released first, as for a revocation.
+    // The direct-network lock is released first, as for a revocation. The evicted identity
+    // keeps its outcomes and run receipts, and loses only its control grants.
     if let Some(evicted) = evicted {
+        let _retirement = Retirement {
+            state: Arc::clone(&state),
+            client: evicted,
+        };
         environment
             .panes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .revoked(evicted);
+            .release_control(evicted);
     }
+    registered?;
     // Unregisters when serving ends, also when it panics.
     let _registered = Registered {
         state: Arc::clone(&state),
@@ -1488,6 +1504,31 @@ impl LaneStop {
         if let Some(sever) = &state.sever {
             sever.sever();
         }
+    }
+}
+
+/// Locks `state` once no release of `client`'s control grants after an eviction is still
+/// running. A returning agent's new grants therefore always follow that release.
+fn after_retirement(state: &Shared, client: [u8; 32]) -> MutexGuard<'_, State> {
+    let state = state.lock().unwrap_or_else(|e| e.into_inner());
+    let retired = Arc::clone(&state.retired_agent);
+    retired
+        .wait_while(state, |state| state.retiring.contains(&client))
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// An evicted agent identity whose control grants are being released. Dropping it, also when
+/// the release panics, lets that agent be admitted again.
+struct Retirement {
+    state: Shared,
+    client: [u8; 32],
+}
+
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retiring.remove(&self.client);
+        state.retired_agent.notify_all();
     }
 }
 

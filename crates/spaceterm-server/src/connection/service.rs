@@ -73,6 +73,10 @@ pub trait PaneService: Send {
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox);
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
+    /// Releases only the live and dormant control grants of an agent identity whose name its
+    /// pairing evicted. Its edit outcomes and run receipts stay, so the agent resolves them when
+    /// it returns.
+    fn release_control(&mut self, _client: [u8; 32]) {}
     /// Every operation except `Operation::Direct`, which goes to [`DirectManagement`], and
     /// account administration from paired peers, which the connection refuses.
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch;

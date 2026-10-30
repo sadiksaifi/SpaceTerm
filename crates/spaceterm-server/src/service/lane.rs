@@ -558,6 +558,7 @@ impl LaneServer {
             candidate: prepared.candidate,
             state: State::Admitted,
             updated_at: 0,
+            orphaned: false,
         };
         let mut admitted = None;
         self.host.fence(&mut |sessions| {

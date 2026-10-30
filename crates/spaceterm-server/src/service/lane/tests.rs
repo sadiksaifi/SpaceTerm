@@ -410,6 +410,61 @@ fn a_settled_outcome_is_resolved_then_acknowledged_by_its_own_actor() {
 }
 
 #[test]
+fn revoking_the_actor_mid_operation_keeps_the_fence_and_refuses_another_operation() {
+    with_lane(|lane| {
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        execute(&lane.lane, LaneAction::Restart, &token, 1);
+        let id = OperationId([1; 16]);
+        // The helper holds its lock and runs the Restart.
+        let helper = Directory::open(&lane.service.paths.data, false)
+            .unwrap()
+            .try_lock(HELPER_LOCK)
+            .unwrap()
+            .unwrap();
+        lane.lane.ledger().unwrap().claim(&id).unwrap();
+        lane.lane
+            .ledger()
+            .unwrap()
+            .forget_pairing(&ACTOR.pairing.unwrap())
+            .unwrap();
+        // The fence watcher sees an unsettled orphan, not an empty ledger.
+        std::thread::sleep(FENCE_INTERVAL * 3);
+        assert!(lane.host.fenced.load(Ordering::SeqCst));
+        let other = Actor {
+            pairing: Some([9; 32]),
+            client: [9; 32],
+        };
+        let LaneReply::Preview { token, .. } = lane.lane.answer(
+            LaneRequest::Preview {
+                action: LaneAction::Stop,
+            },
+            &other,
+        ) else {
+            panic!("expected a preview");
+        };
+        let reply = lane.lane.answer(
+            LaneRequest::Execute {
+                action: LaneAction::Stop,
+                token,
+                operation: OperationId([2; 16]).to_string(),
+            },
+            &other,
+        );
+        assert_eq!(code(reply), "service_busy");
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        // The helper's outcome deletes the orphan, and only then does the fence clear.
+        lane.lane.ledger().unwrap().mark(&id, State::Done).unwrap();
+        drop(helper);
+        assert_eq!(lane.lane.ledger().unwrap().resolve(&id).unwrap(), None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lane.host.fenced.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the fence was never released");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+#[test]
 fn a_full_ledger_refuses_execute_with_capacity() {
     with_lane(|lane| {
         let mut ledger = lane.lane.ledger().unwrap();
@@ -424,6 +479,7 @@ fn a_full_ledger_refuses_execute_with_capacity() {
                 candidate: None,
                 state: State::Admitted,
                 updated_at: 0,
+                orphaned: false,
             };
             ledger.admit(record).unwrap();
             ledger
@@ -768,7 +824,7 @@ mod flow {
             let (session, token) = previewed(&switch, LaneAction::Restart);
             let mut admitted = Vec::new();
             let outcome = client::perform(
-                switch.as_ref(),
+                &(switch.clone() as Arc<dyn Connector>),
                 session,
                 LaneAction::Restart,
                 token,
@@ -811,7 +867,7 @@ mod flow {
             let (session, token) = previewed(&switch, LaneAction::Stop);
             let mut admitted = None;
             let outcome = client::perform(
-                switch.as_ref(),
+                &(switch.clone() as Arc<dyn Connector>),
                 session,
                 LaneAction::Stop,
                 token,
@@ -865,7 +921,7 @@ mod flow {
             let (session, token) = previewed(&switch, LaneAction::Restart);
             let started = Instant::now();
             let outcome = client::perform(
-                switch.as_ref(),
+                &(switch.clone() as Arc<dyn Connector>),
                 session,
                 LaneAction::Restart,
                 token,
@@ -960,7 +1016,7 @@ mod flow {
             let (session, token) = lossy.previewed(LaneAction::Restart);
             let mut admitted = None;
             let outcome = client::perform(
-                lossy.as_ref(),
+                &(lossy.clone() as Arc<dyn Connector>),
                 session,
                 LaneAction::Restart,
                 token,
@@ -990,7 +1046,7 @@ mod flow {
             let started = Instant::now();
             let interrupted = started + Duration::from_secs(3);
             let outcome = client::perform(
-                lossy.as_ref(),
+                &(lossy.clone() as Arc<dyn Connector>),
                 session,
                 LaneAction::Restart,
                 token,
@@ -1008,6 +1064,82 @@ mod flow {
         });
     }
 
+    /// A server that admits `Execute` and then answers nothing more on any connection, while
+    /// it keeps each connection open.
+    #[derive(Default)]
+    struct Stalling {
+        lane: Mutex<Option<Arc<LaneServer>>>,
+        stalled: Arc<AtomicBool>,
+    }
+    impl Connector for Stalling {
+        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, ServerError> {
+            let lane = self.lane.lock().unwrap().clone().unwrap();
+            let (client, mut server) = UnixStream::pair().map_err(|_| ServerError::Protocol)?;
+            let stalled = self.stalled.clone();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while let Ok(bytes) = server.receive(MAX_FRAME, deadline) {
+                    if stalled.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
+                    let execute = matches!(request, LaneRequest::Execute { .. });
+                    let reply = lane.answer(request, &ACTOR);
+                    if execute {
+                        stalled.store(true, Ordering::SeqCst);
+                        continue;
+                    }
+                    let _ = server.send(&serde_json::to_vec(&reply).unwrap(), deadline);
+                }
+            });
+            Ok(Box::new(client))
+        }
+    }
+
+    #[test]
+    fn an_interrupt_ends_a_request_a_stalled_server_holds_within_the_grace() {
+        with_lane(|lane| {
+            let stalling = Arc::new(Stalling::default());
+            *stalling.lane.lock().unwrap() = Some(lane.lane.clone());
+            let mut session =
+                Session::open(stalling.as_ref(), Instant::now() + Duration::from_secs(5)).unwrap();
+            let LaneReply::Preview { token, .. } = session
+                .request(
+                    &LaneRequest::Preview {
+                        action: LaneAction::Restart,
+                    },
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap()
+            else {
+                panic!("expected a preview");
+            };
+            let started = Instant::now();
+            // SIGINT arrives 1 s into the stalled Execute, and the caller settles within 5 s.
+            let at = started + Duration::from_secs(1);
+            let outcome = client::perform(
+                &(stalling.clone() as Arc<dyn Connector>),
+                session,
+                LaneAction::Restart,
+                token,
+                Duration::from_secs(60),
+                &mut |_| Ok(()),
+                &|| (Instant::now() >= at).then_some(at + Duration::from_secs(5)),
+            )
+            .unwrap();
+            assert!(
+                matches!(outcome, Outcome::Unconfirmed { .. }),
+                "{outcome:?}"
+            );
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= Duration::from_secs(6) && elapsed < Duration::from_secs(7),
+                "{elapsed:?}"
+            );
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        });
+    }
+
     #[test]
     fn a_stop_whose_accepted_reply_was_lost_reports_shutdown_when_the_server_is_gone() {
         with_lane(|lane| {
@@ -1019,7 +1151,7 @@ mod flow {
                 *gone.lane.lock().unwrap() = None;
             }));
             let outcome = client::perform(
-                lossy.as_ref(),
+                &(lossy.clone() as Arc<dyn Connector>),
                 session,
                 LaneAction::Stop,
                 token,
