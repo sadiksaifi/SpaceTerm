@@ -378,6 +378,40 @@ impl Sheet<'_> {
         assert_eq!(self.field(typing).0, text);
     }
 
+    /// The role and name of the node with keyboard focus, as assistive technology reads it.
+    fn focus(&mut self) -> (String, String) {
+        let tree = A11yTree::read(self.cx);
+        let node = tree.focused().expect("a node has keyboard focus");
+        (
+            node["aria"]["role"].as_str().unwrap_or_default().to_owned(),
+            node["aria"]["label"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+
+    /// Presses and releases Space, which activates a focused button on release.
+    fn press_space(&mut self) {
+        self.cx.simulate_keystrokes("space");
+        self.cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("space").unwrap(),
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// Presses Tab until the Network Address disclosure has keyboard focus.
+    fn tab_to_disclosure(&mut self) {
+        for _ in 0..6 {
+            if self.focus() == ("Button".to_owned(), "Network Address".to_owned()) {
+                return;
+            }
+            self.cx.simulate_keystrokes("tab");
+            self.cx.run_until_parked();
+        }
+        panic!("Tab reaches the Network Address disclosure");
+    }
+
     /// Shows an SSH sign-in prompt in the sheet's window, then has the person dismiss it, as the
     /// AskPass presenter reports both.
     fn decline_prompt(&mut self) {
@@ -570,6 +604,37 @@ fn correcting_a_refused_address_keeps_focus_in_it(cx: &mut TestAppContext) {
     assert_eq!(
         sheet.computers.asked()[0].address.as_deref(),
         Some("studio.local:9231")
+    );
+}
+
+/// Space opens the network address from the keyboard and leaves focus on the disclosure, as a
+/// macOS disclosure does. Space again folds it away.
+#[gpui::test]
+fn the_keyboard_opens_the_network_address_with_focus_on_its_disclosure(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.tab_to_disclosure();
+
+    sheet.press_space();
+
+    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_some());
+    assert_eq!(
+        sheet.focus(),
+        ("Button".to_owned(), "Network Address".to_owned())
+    );
+    sheet.cx.simulate_keystrokes("tab");
+    sheet.cx.run_until_parked();
+    assert!(
+        sheet.field(|sheet| &sheet.address).1,
+        "Tab moves into the shown address"
+    );
+
+    sheet.cx.simulate_keystrokes("shift-tab");
+    sheet.press_space();
+    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_none());
+    assert_eq!(
+        sheet.focus(),
+        ("Button".to_owned(), "Network Address".to_owned())
     );
 }
 
@@ -1128,6 +1193,55 @@ fn correcting_a_refused_invitation_address_keeps_focus_in_it(cx: &mut TestAppCon
     sheet.choose(SheetAction::Join.selector());
     sheet.settle(|sheet| A11yTree::read(sheet.cx).find("Code").is_some());
     assert_eq!(sheet.title(), "Join studio");
+}
+
+/// Space opens the invitation's network address from the keyboard and leaves focus on the
+/// disclosure, as a macOS disclosure does.
+#[gpui::test]
+fn the_keyboard_opens_the_invitation_address_with_focus_on_its_disclosure(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
+    sheet.tab_to_disclosure();
+
+    sheet.press_space();
+
+    assert!(sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_some());
+    assert_eq!(
+        sheet.focus(),
+        ("Button".to_owned(), "Network Address".to_owned())
+    );
+    sheet.cx.simulate_keystrokes("tab");
+    sheet.cx.run_until_parked();
+    assert!(
+        sheet.field(|sheet| &sheet.endpoint).1,
+        "Tab moves into the shown address"
+    );
+}
+
+/// Select All and a retyped address after a refused Join stay in the address, as the person
+/// corrects it from the keyboard.
+#[gpui::test]
+fn retyping_a_refused_invitation_address_after_select_all_keeps_focus_in_it(
+    cx: &mut TestAppContext,
+) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link.clone())));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.cx.run_until_parked();
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.cx.simulate_keystrokes("cmd-a");
+    for character in "public.example".chars() {
+        sheet.cx.simulate_input(&character.to_string());
+        sheet.cx.run_until_parked();
+        assert!(sheet.field(|sheet| &sheet.endpoint).1);
+    }
+
+    assert_eq!(sheet.field(|sheet| &sheet.endpoint).0, "public.example");
+    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
 }
 
 /// An entered address replaces only the one the invitation names. An address that doesn't reach

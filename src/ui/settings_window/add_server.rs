@@ -1961,7 +1961,7 @@ impl AddServerSheet {
             ADDRESS_DISCLOSURE_SELECTOR,
             shown,
             ADDRESS_DISCLOSURE_DESCRIPTION,
-            |sheet| (&mut sheet.address_shown, &sheet.address),
+            |sheet| &mut sheet.address_shown,
             cx,
         );
         let address = shown.then(|| {
@@ -1993,14 +1993,15 @@ impl AddServerSheet {
             .into_any_element()
     }
 
-    /// The Network Address disclosure, which shows or hides one optional address field and
-    /// focuses the field it shows. `toggled` names that field and whether it is shown.
+    /// The Network Address disclosure, which shows or hides one optional address field.
+    /// `toggled` names whether that field is shown. Keyboard focus stays on the disclosure, as on
+    /// a macOS disclosure, and Tab moves into the field it shows.
     fn disclosure(
         appearance: &ChromeAppearance,
         selector: &'static str,
         shown: bool,
         hint: &'static str,
-        toggled: fn(&mut Self) -> (&mut bool, &Entity<TextInput>),
+        toggled: fn(&mut Self) -> &mut bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let owner = cx.weak_entity();
@@ -2024,13 +2025,10 @@ impl AddServerSheet {
             })
             .debug_selector(selector)
             .accessibility_description(if shown { DISCLOSURE_HIDE } else { hint })
-            .on_activate(move |_, window, cx| {
+            .on_activate(move |_, _, cx| {
                 let _ = owner.update(cx, |sheet, cx| {
-                    let (shown, field) = toggled(sheet);
+                    let shown = toggled(sheet);
                     *shown = !*shown;
-                    if *shown {
-                        field.read(cx).focus_handle().focus(window, cx);
-                    }
                     cx.notify();
                 });
             })
@@ -2135,7 +2133,7 @@ impl AddServerSheet {
             ENDPOINT_DISCLOSURE_SELECTOR,
             shown,
             ENDPOINT_DISCLOSURE_DESCRIPTION,
-            |sheet| (&mut sheet.endpoint_shown, &sheet.endpoint),
+            |sheet| &mut sheet.endpoint_shown,
             cx,
         );
         let endpoint = shown.then(|| {
