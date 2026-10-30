@@ -16,7 +16,7 @@ mod runtime;
 pub mod tokens;
 #[cfg(feature = "client")]
 pub use runtime::CliUninstall;
-pub use runtime::{CandidateMetadata, verify_candidate_bytes};
+pub use runtime::{CandidateMetadata, CliLauncher, CliLink, verify_candidate_bytes};
 
 use crate::{
     ServerError,
@@ -379,7 +379,8 @@ impl Service {
         self.supervisor.install(&self.runtime(&state))?;
         state.installed = true;
         data.write_json(c"service.json", &state)?;
-        self.repoint_cli_locked(&self.runtime(&state))?;
+        // A launcher failure never blocks the service; clients read it as Outdated.
+        self.repoint_cli_locked(&self.runtime(&state));
         drop(instance);
         if state.stopped {
             self.supervisor.stop()?;

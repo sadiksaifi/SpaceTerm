@@ -64,7 +64,7 @@ pub enum Command {
     Connection(ConnectionCommand),
     /// Show Workspaces, Worktrees, Tabs and Panes.
     List(ListArgs),
-    /// Create, rename and kill Workspaces.
+    /// Create, rename, pin, unpin and kill Workspaces.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
     /// Open and close Tabs.
@@ -214,6 +214,8 @@ pub enum ConnectionCommand {
     },
     /// Show Saved Connections.
     List,
+    /// Rename the CLI's saved connection only, preserving its pairing.
+    Rename { old: String, new: String },
     /// Unpair This Computer from a server.
     Remove {
         name: String,
@@ -268,6 +270,19 @@ pub enum WorkspaceCommand {
     /// Rename a Workspace.
     Rename {
         new_name: String,
+        #[arg(long, value_name = "W", value_parser = selector)]
+        workspace: Option<Selector>,
+    },
+    /// Set a Workspace's Pinned Directory.
+    Pin {
+        /// Directory on the selected server. Quote `~/` for a remote server.
+        #[arg(value_name = "DIR")]
+        directory: PathBuf,
+        #[arg(long, value_name = "W", value_parser = selector)]
+        workspace: Option<Selector>,
+    },
+    /// Clear a Workspace's Pinned Directory.
+    Unpin {
         #[arg(long, value_name = "W", value_parser = selector)]
         workspace: Option<Selector>,
     },
@@ -525,12 +540,15 @@ impl Command {
             Self::Connection(command) => match command {
                 ConnectionCommand::Add { .. } => "connection.add",
                 ConnectionCommand::List => "connection.list",
+                ConnectionCommand::Rename { .. } => "connection.rename",
                 ConnectionCommand::Remove { .. } => "connection.remove",
             },
             Self::List(_) => "list",
             Self::Workspace(command) => match command {
                 WorkspaceCommand::Create { .. } => "workspace.create",
                 WorkspaceCommand::Rename { .. } => "workspace.rename",
+                WorkspaceCommand::Pin { .. } => "workspace.pin",
+                WorkspaceCommand::Unpin { .. } => "workspace.unpin",
                 WorkspaceCommand::Kill { .. } => "workspace.kill",
             },
             Self::Tab(command) => match command {
@@ -715,6 +733,7 @@ mod tests {
             &["server", "unpair", "id:9c1d44e0"],
             &["connection", "add", "penguin", "--join"],
             &["connection", "list"],
+            &["connection", "rename", "penguin", "lab"],
             &["connection", "remove", "penguin"],
             &["list", "--workspace", "api"],
             &[

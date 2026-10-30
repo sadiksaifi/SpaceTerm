@@ -85,6 +85,9 @@ pub fn validate(command: &Command, local: bool) -> Result<(), Failure> {
         Command::Workspace(WorkspaceCommand::Rename { new_name, .. }) => {
             name(new_name, "<NEW_NAME>")?
         }
+        Command::Workspace(WorkspaceCommand::Pin { directory, .. }) => {
+            path(Some(directory), local, "<DIR>")?
+        }
         Command::Worktree(WorktreeCommand::Create { path: p, .. }) => {
             path(p.as_deref(), local, "--path")?
         }
@@ -421,6 +424,46 @@ fn execute(
                     revision: updated.inventory.revision,
                 },
                 format!("Renamed Workspace id:{}\n", hex(&id)),
+                &steps,
+            ))
+        }
+        Command::Workspace(WorkspaceCommand::Pin { .. } | WorkspaceCommand::Unpin { .. }) => {
+            let directory = match command {
+                Command::Workspace(WorkspaceCommand::Pin { directory, .. }) => {
+                    Some(paths.resolve(directory)?)
+                }
+                _ => None,
+            };
+            let plan = workspace::pin(&initial, &args, current.as_ref(), directory)?;
+            let steps = scope::target_steps(&initial, &plan.target);
+            let id = submit(journal, plan.mutation)?;
+            let updated = snapshot(reader, initial.server)?;
+            let workspace = updated
+                .inventory
+                .workspaces
+                .iter()
+                .find(|w| w.id == id)
+                .ok_or(Code::ProtocolError)?;
+            let pinned_directory = workspace
+                .pinned_directory
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            let text = match &pinned_directory {
+                Some(directory) => {
+                    format!("Pinned Workspace id:{}\nDirectory: {directory}\n", hex(&id))
+                }
+                None => format!("Unpinned Workspace id:{}\n", hex(&id)),
+            };
+            Ok(Output::ok(
+                path,
+                server.clone(),
+                WorkspacePin {
+                    target: steps.clone(),
+                    workspace: workspace_ref(workspace),
+                    pinned_directory,
+                    revision: updated.inventory.revision,
+                },
+                text,
                 &steps,
             ))
         }
@@ -993,7 +1036,10 @@ fn command_scope(command: &Command) -> ScopeArgs {
         Command::List(args) => args.scope.args(),
         Command::Show(args) => args.scope.args(),
         Command::Workspace(
-            WorkspaceCommand::Rename { workspace, .. } | WorkspaceCommand::Kill { workspace, .. },
+            WorkspaceCommand::Rename { workspace, .. }
+            | WorkspaceCommand::Pin { workspace, .. }
+            | WorkspaceCommand::Unpin { workspace, .. }
+            | WorkspaceCommand::Kill { workspace, .. },
         ) => ScopeArgs {
             workspace: workspace.clone(),
             ..Default::default()

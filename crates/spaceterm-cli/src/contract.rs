@@ -1630,6 +1630,14 @@ pub struct ConnectionAdd {
     pub connection: Connection,
 }
 
+/// `connection.rename`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConnectionRename {
+    pub previous_name: String,
+    pub name: String,
+    pub route: String,
+}
+
 /// The first NDJSON line of `connection add --json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ComparisonEvent {
@@ -1772,6 +1780,16 @@ pub struct WorkspaceChange {
     /// Present for Workspace creation, from its server-created Root Pane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
+    pub revision: u64,
+}
+
+/// `workspace.pin` and `workspace.unpin`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkspacePin {
+    pub target: Vec<TargetStep>,
+    pub workspace: Ref,
+    /// The server's Pinned Directory after acceptance, or null after unpinning.
+    pub pinned_directory: Option<String>,
     pub revision: u64,
 }
 

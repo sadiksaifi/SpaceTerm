@@ -12,4 +12,4 @@ Preflight uses [the `/usr/bin/security` adapter](../../crates/spaceterm-connecti
 
 CLI pairing-secret access without a usable store fails with `credential_unavailable` and exits 5. An access requiring interaction fails with `credential_interaction_required` and exits 3 when interaction is suppressed. JSON, `--no-input` and a missing terminal use quiet credential reads. Enrollment inserts and restricted cleanup also suppress native prompts. [CLI route selection](../../crates/spaceterm-cli/src/connection/route.rs) and [connection error mapping](../../crates/spaceterm-cli/src/connection.rs) own these choices. The CLI never writes a plaintext credential fallback.
 
-The server role, account-local work and `connection list` require no client credential or native credential store. Terminal programs retain their own credential access.
+The server role, account-local work, `connection list` and `connection rename` require no client credential or native credential store. Terminal programs retain their own credential access.

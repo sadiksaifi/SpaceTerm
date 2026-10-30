@@ -1,0 +1,17 @@
+{
+  "command": "connection.rename",
+  "data": {},
+  "error": {
+    "class": "target",
+    "code": "not_found",
+    "details": {
+      "level": "connection"
+    },
+    "message": "No Saved Connection matches.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": null,
+  "status": "error",
+  "warnings": []
+}

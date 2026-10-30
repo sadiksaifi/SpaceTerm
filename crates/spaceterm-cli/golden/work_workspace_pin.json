@@ -1,0 +1,29 @@
+{
+  "command": "workspace.pin",
+  "data": {
+    "pinned_directory": "/client/cwd/projects/api",
+    "revision": 8,
+    "target": [
+      {
+        "id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "label": "api",
+        "level": "workspace",
+        "source": "flag"
+      }
+    ],
+    "workspace": {
+      "id": "0101010101010101010101010101010101010101010101010101010101010101",
+      "label": "api",
+      "line": "api"
+    }
+  },
+  "error": null,
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "fixture",
+    "route": "local"
+  },
+  "status": "ok",
+  "warnings": []
+}

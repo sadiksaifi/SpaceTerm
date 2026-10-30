@@ -798,6 +798,205 @@ fn unconfirmed_worktree_creation_never_retries_or_opens_another_tab() {
     assert_eq!(script.borrow().sent.len(), 1);
 }
 
+#[test]
+fn workspace_pin_and_unpin_report_the_committed_pin() {
+    for (action, directory, expected) in [
+        (
+            "pin",
+            Some("projects/api"),
+            Some("/client/cwd/projects/api"),
+        ),
+        ("unpin", None, None),
+    ] {
+        let mut initial = fixture().inventory;
+        initial.workspaces[0].pin_version = 7;
+        initial.workspaces[0].pinned_directory = Some("/old".into());
+        let mut updated = initial.clone();
+        updated.revision = 8;
+        updated.workspaces[0].pin_version = 8;
+        updated.workspaces[0].pinned_directory = expected.map(Into::into);
+        let script = Rc::new(RefCell::new(Script {
+            inventories: VecDeque::from([initial, updated]),
+            outcomes: VecDeque::from([Ok(Outcome::Accepted { target: id(1) })]),
+            ..Default::default()
+        }));
+        let mut args = vec!["workspace", action];
+        args.extend(directory);
+        args.extend(["--workspace", "api"]);
+        let output = run_script(&args, &env(), &script);
+        assert_eq!(output.envelope.exit(), 0);
+        assert_golden(&format!("work_workspace_{action}"), &output.envelope);
+        let expected_text = match action {
+            "pin" => include_str!("../../golden/work_workspace_pin.txt"),
+            _ => include_str!("../../golden/work_workspace_unpin.txt"),
+        };
+        assert_pin_render(
+            &output,
+            &format!("work_workspace_{action}"),
+            expected_text,
+            "",
+        );
+        assert!(matches!(&script.borrow().sent[0], Mutation::PinWorkspace {
+            workspace, version: 7, directory
+        } if *workspace == id(1) && directory.as_deref() == expected.map(Path::new)));
+    }
+}
+
+#[test]
+fn workspace_pin_ambiguity_lists_choices_without_dispatch() {
+    let mut initial = fixture().inventory;
+    initial.workspaces[1].pinned_directory = Some("/tools".into());
+    let script = Rc::new(RefCell::new(Script {
+        inventories: VecDeque::from([initial]),
+        ..Default::default()
+    }));
+    let output = run_script(&["workspace", "pin", "/repo"], &env(), &script);
+    assert_eq!(output.envelope.exit(), 4);
+    assert_golden("work_workspace_pin_ambiguous", &output.envelope);
+    assert_pin_render(
+        &output,
+        "work_workspace_pin_ambiguous",
+        include_str!("../../golden/work_workspace_pin_ambiguous.txt"),
+        include_str!("../../golden/work_workspace_pin_ambiguous.stderr"),
+    );
+    assert!(script.borrow().sent.is_empty());
+}
+
+#[test]
+fn workspace_pin_rejects_remote_relative_and_invalid_paths_before_recovery() {
+    let mut remote = env();
+    remote.local = false;
+    for path in ["private/secret", "~", "~other/repo", "a\0b"] {
+        let script = Rc::new(RefCell::new(Script::default()));
+        let output = run_script(
+            &["workspace", "pin", path, "--workspace", "api"],
+            &remote,
+            &script,
+        );
+        assert_eq!(output.envelope.exit(), 2);
+        assert_pin_render(
+            &output,
+            "work_workspace_pin_invalid",
+            "",
+            include_str!("../../golden/work_workspace_pin_invalid.stderr"),
+        );
+        assert!(script.borrow().events.is_empty());
+    }
+}
+
+#[test]
+fn workspace_pin_resolves_remote_home_on_the_server() {
+    for (path, expected) in [("~/repo", "/server/home/repo"), ("/srv/repo", "/srv/repo")] {
+        let mut updated = fixture().inventory;
+        updated.workspaces[0].pinned_directory = Some(expected.into());
+        let script = Rc::new(RefCell::new(Script {
+            inventories: VecDeque::from([fixture().inventory, updated]),
+            outcomes: VecDeque::from([Ok(Outcome::Accepted { target: id(1) })]),
+            ..Default::default()
+        }));
+        let mut remote = env();
+        remote.local = false;
+        let output = run_script(
+            &["workspace", "pin", path, "--workspace", "api"],
+            &remote,
+            &script,
+        );
+        assert_eq!(output.envelope.exit(), 0);
+        assert!(
+            matches!(&script.borrow().sent[0], Mutation::PinWorkspace { directory: Some(path), .. } if path == Path::new(expected))
+        );
+    }
+}
+
+#[test]
+fn workspace_pin_reports_a_server_refusal_without_echoing_the_directory() {
+    let script = Rc::new(RefCell::new(Script {
+        inventories: VecDeque::from([fixture().inventory]),
+        outcomes: VecDeque::from([Ok(Outcome::Invalid)]),
+        ..Default::default()
+    }));
+    let output = run_script(
+        &["workspace", "pin", "/private/secret", "--workspace", "api"],
+        &env(),
+        &script,
+    );
+    assert_eq!(output.envelope.exit(), 4);
+    assert_pin_render(
+        &output,
+        "work_workspace_pin_refused",
+        "",
+        include_str!("../../golden/work_workspace_pin_refused.stderr"),
+    );
+    assert_eq!(script.borrow().sent.len(), 1);
+}
+
+#[test]
+fn workspace_pin_refuses_an_empty_directory_before_dispatch() {
+    let mut command = cli(&["workspace", "pin", "/placeholder"]).command;
+    let Command::Workspace(WorkspaceCommand::Pin { directory, .. }) = &mut command else {
+        unreachable!()
+    };
+    *directory = std::path::PathBuf::new();
+    assert_eq!(
+        validate(&command, true).unwrap_err().code,
+        Code::InvalidArguments
+    );
+}
+
+#[test]
+fn workspace_pin_keeps_conflicts_and_unconfirmed_outcomes_without_retrying() {
+    for (outcome, code, exit) in [
+        (Outcome::Conflict, Code::Conflict, 4),
+        (Outcome::Pending, Code::OutcomeUnconfirmed, 7),
+    ] {
+        let script = Rc::new(RefCell::new(Script {
+            inventories: VecDeque::from([fixture().inventory]),
+            outcomes: VecDeque::from([Ok(outcome)]),
+            ..Default::default()
+        }));
+        let output = run_script(
+            &["workspace", "unpin", "--workspace", "api"],
+            &env(),
+            &script,
+        );
+        assert_eq!(output.envelope.exit(), exit);
+        assert_eq!(output.envelope.error.as_ref().unwrap().code, code);
+        assert_eq!(script.borrow().sent.len(), 1);
+    }
+}
+
+fn assert_pin_render(output: &Output, name: &str, text: &str, error: &str) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mode = Mode {
+        json: false,
+        quiet: false,
+        verbose: false,
+    };
+    assert_eq!(
+        output.write(mode, &mut stdout, &mut stderr),
+        output.envelope.exit()
+    );
+    assert_eq!(String::from_utf8(stdout).unwrap(), text);
+    assert_eq!(String::from_utf8(stderr).unwrap(), error);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mode = Mode {
+        json: true,
+        quiet: false,
+        verbose: false,
+    };
+    assert_eq!(
+        output.write(mode, &mut stdout, &mut stderr),
+        output.envelope.exit()
+    );
+    assert!(stderr.is_empty());
+    assert_golden(
+        name,
+        &serde_json::from_slice::<serde_json::Value>(&stdout).unwrap(),
+    );
+}
+
 mod show {
     use super::*;
     use spaceterm::desktop_channel::{ChannelError, Refusal, Reply, Request};

@@ -5,8 +5,8 @@ use crate::args::{ConnectionCommand, Global};
 use crate::contract::Mode;
 use crate::contract::{
     self, Code, ComparisonEvent, Confirmation, ConnectionAdd, ConnectionList, ConnectionRemove,
-    Details, Empty, Envelope, Failure, ListedConnection, OutputError, Revocation, UsageDetails,
-    UsageKind, Warning, WarningCode, WarningDetails,
+    ConnectionRename, Details, Empty, Envelope, Failure, ListedConnection, OutputError, Revocation,
+    UsageDetails, UsageKind, Warning, WarningCode, WarningDetails,
 };
 use crate::state::{CliState, RouteKey};
 use connections::enrollment::{self, PairingClient, PairingNetwork};
@@ -180,6 +180,7 @@ impl Connections<'_> {
         let deadline = Instant::now() + duration;
         let result = match command {
             ConnectionCommand::List => self.list(),
+            ConnectionCommand::Rename { old, new } => self.rename(old, new, deadline),
             ConnectionCommand::Add {
                 name,
                 join,
@@ -259,6 +260,34 @@ impl Connections<'_> {
             lines,
         ))
     }
+    fn rename(&self, old: &str, new: &str, deadline: Instant) -> Result<CommandOutput, Failure> {
+        for (name, argument) in [(old, "<OLD>"), (new, "<NEW>")] {
+            if !connections::valid_name(name) {
+                return Err(reserved_name_for(argument));
+            }
+        }
+        self.checkpoint(deadline)?;
+        let renamed = self
+            .store
+            .transaction(deadline, &|| self.io.interrupted())
+            .rename(old, new)
+            .map_err(|error| match error {
+                StoreError::NameTaken => reserved_name_for("<NEW>"),
+                other => store_failure(other),
+            })?;
+        Ok(CommandOutput::envelope(
+            Envelope::ok(
+                "connection.rename",
+                None,
+                ConnectionRename {
+                    previous_name: old.to_owned(),
+                    name: renamed.name,
+                    route: format!("id:{}", hex(&renamed.route)),
+                },
+            ),
+            vec![format!("Renamed {old} to {new}.")],
+        ))
+    }
     fn add(
         &mut self,
         name: Option<&str>,
@@ -331,6 +360,7 @@ impl Connections<'_> {
                 name,
                 format!("{computer} CLI").into(),
                 deadline,
+                &|| self.io.interrupted(),
             )
             .map_err(|error| match error {
                 enrollment::Error::Store(StoreError::NameTaken) => Code::Changed.into(),
@@ -339,7 +369,7 @@ impl Connections<'_> {
         let attempt = (|| -> Result<CommandOutput, Failure> {
             let comparison = loop {
                 self.checkpoint(deadline)?;
-                match joining.submit() {
+                match joining.submit(&|| self.io.interrupted()) {
                     Ok(code) => break code,
                     Err(enrollment::Error::Direct(DirectError::Transport)) => {
                         self.pause(Duration::from_secs(2), deadline)?
@@ -363,7 +393,7 @@ impl Connections<'_> {
             }
             loop {
                 self.checkpoint(deadline)?;
-                match joining.finish() {
+                match joining.finish(&|| self.io.interrupted()) {
                     Ok(Some(connection)) => {
                         let data = ConnectionAdd {
                             connection: connection_data(
@@ -435,6 +465,7 @@ impl Connections<'_> {
         } else {
             let preview = self
                 .store
+                .transaction(deadline, &|| self.io.interrupted())
                 .preview_remove(name, now)
                 .map_err(store_failure)?;
             if self.allows_input() {
@@ -474,6 +505,7 @@ impl Connections<'_> {
         self.checkpoint(deadline)?;
         let removed = self
             .store
+            .transaction(deadline, &|| self.io.interrupted())
             .confirm_remove(name, &token, unix_now()?)
             .map_err(|error| {
                 if error == StoreError::Unavailable {
@@ -534,6 +566,7 @@ fn command_path(command: &ConnectionCommand) -> &'static str {
     match command {
         ConnectionCommand::Add { .. } => "connection.add",
         ConnectionCommand::List => "connection.list",
+        ConnectionCommand::Rename { .. } => "connection.rename",
         ConnectionCommand::Remove { .. } => "connection.remove",
     }
 }
@@ -547,16 +580,21 @@ pub(super) fn usage(argument: &str) -> Failure {
     )
 }
 fn reserved_name() -> Failure {
+    reserved_name_for("<NAME>")
+}
+fn reserved_name_for(argument: &str) -> Failure {
     Failure::with(
         Code::InvalidArguments,
         Details::Usage(UsageDetails {
-            argument: Some("<NAME>".into()),
+            argument: Some(argument.into()),
             kind: UsageKind::ReservedName,
         }),
     )
 }
 pub(super) fn store_failure(error: StoreError) -> Failure {
     match error {
+        StoreError::Timeout => Code::Timeout.into(),
+        StoreError::Interrupted => Code::Interrupted.into(),
         StoreError::Unavailable => Code::StorageUnavailable.into(),
         StoreError::Changed => Code::Changed.into(),
         StoreError::NameTaken => reserved_name(),
