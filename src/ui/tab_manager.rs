@@ -800,12 +800,12 @@ impl TabManager {
         })
     }
 
-    /// Presents the File Preview of `link` for the server Pane `pane`. `false` when no Tab of
+    /// Presents the prepared File Preview for the server Pane `pane`. `false` when no Tab of
     /// this strip holds the Pane or it cannot preview a local file.
     pub(crate) fn preview_shared_local_file(
         &mut self,
         pane: spaceterm_server::hierarchy::Id,
-        link: &crate::terminal::HyperlinkTarget,
+        prepared: crate::terminal::native_services::PreparedFilePreview,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -818,7 +818,7 @@ impl TabManager {
             return false;
         };
         view.update(cx, |view, cx| {
-            view.preview_shared_local_file(pane, link, window, cx)
+            view.preview_shared_local_file(pane, prepared, window, cx)
         })
     }
 

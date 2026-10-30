@@ -11,6 +11,7 @@ use super::{ServerKey, ServerOrigin, WorkspaceManager};
 use crate::desktop_channel::{Refusal, Reply, Request, SessionContext};
 use crate::domain::WorkspaceId;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
+use crate::terminal::native_services::{FilePreviewTarget, PreparedFilePreview};
 use crate::terminal::{HyperlinkTarget, TerminalLocalFileCapabilities};
 use gpui::{App, Context, Task, Window};
 use spaceterm_server::hierarchy::Id;
@@ -67,7 +68,7 @@ impl Drop for ValidationSlot {
 /// A file the worker validated, ready for its host handoff.
 enum Validated {
     Open(String),
-    Preview(HyperlinkTarget),
+    Preview(PreparedFilePreview),
 }
 
 impl WorkspaceManager {
@@ -284,22 +285,27 @@ impl WorkspaceManager {
                 cx.open_url(&url);
                 Ok(())
             }
-            Ok(Validated::Preview(target)) => {
+            Ok(Validated::Preview(prepared)) => {
                 // File Preview presents for its Pane, so the person sees which Pane asked.
-                self.show_shared(workspace_id, None, Some(session.pane), window, cx)
-                    .and_then(|()| {
-                        let manager = self
-                            .workspaces
-                            .workspace(workspace_id)
-                            .map(|entry| entry.payload().clone())
-                            .ok_or(Refusal::NotShown)?;
-                        manager
-                            .update(cx, |manager, cx| {
-                                manager.preview_shared_local_file(session.pane, &target, window, cx)
-                            })
-                            .then_some(())
-                            .ok_or(Refusal::PreviewUnavailable)
+                if let Err(refusal) =
+                    self.show_shared(workspace_id, None, Some(session.pane), window, cx)
+                {
+                    return Some(Reply::Refused(refusal));
+                }
+                let manager = self
+                    .workspaces
+                    .workspace(workspace_id)
+                    .map(|entry| entry.payload().clone())?;
+                if Instant::now() >= act_by {
+                    return None;
+                }
+                // The worker prepared the target, so presenting it touches no file here.
+                manager
+                    .update(cx, |manager, cx| {
+                        manager.preview_shared_local_file(session.pane, prepared, window, cx)
                     })
+                    .then_some(())
+                    .ok_or(Refusal::PreviewUnavailable)
             }
         };
         Some(reply(answer))
@@ -329,7 +335,9 @@ fn validate(
         .and_then(HyperlinkTarget::from_local_file)
         .ok_or(Refusal::FileUnavailable)?;
     if preview {
-        return Ok(Validated::Preview(target));
+        return FilePreviewTarget::prepare(&target, TerminalLocalFileCapabilities::Enabled)
+            .map(Validated::Preview)
+            .ok_or(Refusal::FileUnavailable);
     }
     target
         .activation_url(TerminalLocalFileCapabilities::Enabled)

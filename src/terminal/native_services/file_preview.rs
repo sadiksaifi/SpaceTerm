@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::FilePreviewTarget;
+use super::{FilePreviewTarget, PreparedFilePreview};
 
 #[cfg_attr(
     not(target_os = "macos"),
@@ -41,6 +41,18 @@ pub(crate) trait FilePreviewPanel {
         let path = target
             .revalidated_path()
             .ok_or(FilePreviewError::StaleTarget)?;
+        self.preview_file(&path)
+            .map(|()| FilePreviewSubmission::Presented)
+    }
+    /// Presents a target revalidated off the window's thread without touching the filesystem
+    /// here. A deferred adapter that revalidates at its own final handoff presents its target.
+    fn preview_prepared_in_window(
+        &mut self,
+        prepared: PreparedFilePreview,
+        _: &gpui::Window,
+        _: &mut gpui::App,
+    ) -> Result<FilePreviewSubmission, FilePreviewError> {
+        let (_, path) = prepared.into_parts();
         self.preview_file(&path)
             .map(|()| FilePreviewSubmission::Presented)
     }
@@ -117,6 +129,27 @@ impl<P: FilePreviewPanel> FilePreviewPresenter<P> {
             }
         }
     }
+    /// Presents a target a worker prepared, with no filesystem work on this thread. The
+    /// failure and replacement policy is [`Self::preview_in_window`]'s.
+    pub(crate) fn preview_prepared_in_window(
+        &mut self,
+        prepared: PreparedFilePreview,
+        window: &gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Result<Option<FilePreviewCompletion>, FilePreviewError> {
+        self.request += 1;
+        match self.panel.preview_prepared_in_window(prepared, window, cx) {
+            Ok(FilePreviewSubmission::Presented) => Ok(None),
+            Ok(FilePreviewSubmission::Pending(failure)) => Ok(Some(FilePreviewCompletion {
+                request: self.request,
+                failure,
+            })),
+            Err(error) => {
+                self.panel.dismiss();
+                Err(error)
+            }
+        }
+    }
     /// Applies the failure policy to a deferred failure of the current request. A failure of a
     /// superseded or dismissed request returns `None` and changes nothing.
     pub(crate) fn settle(&mut self, failure: FilePreviewFailure) -> Option<FilePreviewError> {
@@ -143,6 +176,14 @@ impl FilePreviewPanel for Box<dyn FilePreviewPanel> {
         cx: &mut gpui::App,
     ) -> Result<FilePreviewSubmission, FilePreviewError> {
         (**self).preview_file_in_window(target, window, cx)
+    }
+    fn preview_prepared_in_window(
+        &mut self,
+        prepared: PreparedFilePreview,
+        window: &gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Result<FilePreviewSubmission, FilePreviewError> {
+        (**self).preview_prepared_in_window(prepared, window, cx)
     }
     fn dismiss(&mut self) {
         (**self).dismiss();

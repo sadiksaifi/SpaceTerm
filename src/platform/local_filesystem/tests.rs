@@ -55,6 +55,30 @@ impl LocalFilesystemAuthority {
         )
     }
 
+    /// `inner`, with each identity check also recording the thread that made it.
+    pub(crate) fn testing_observed(
+        inner: &Self,
+        threads: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+    ) -> Self {
+        struct Observed(
+            Arc<dyn LocalIdentitySource>,
+            Arc<Mutex<Vec<std::thread::ThreadId>>>,
+        );
+        impl LocalIdentitySource for Observed {
+            fn identify(
+                &self,
+                path: &Path,
+            ) -> Result<LocalIdentityObservation, LocalFilesystemError> {
+                self.1.lock().unwrap().push(std::thread::current().id());
+                self.0.identify(path)
+            }
+        }
+        Self::new(
+            inner.paths,
+            Arc::new(Observed(Arc::clone(&inner.identity), threads)),
+        )
+    }
+
     pub(crate) fn same_source(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
     }

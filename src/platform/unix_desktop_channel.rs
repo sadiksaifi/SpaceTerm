@@ -46,6 +46,25 @@ fn ready(stream: &UnixStream, events: libc::c_short, wait: Duration) -> std::io:
     Ok(())
 }
 
+/// Nanoseconds since boot on the clock `Instant` reads: `CLOCK_UPTIME_RAW` on macOS and
+/// `CLOCK_MONOTONIC` on Linux. Every process on the machine reads the same value.
+pub(crate) fn monotonic_nanoseconds() -> u64 {
+    #[cfg(target_os = "macos")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+    #[cfg(target_os = "linux")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: writes only the live timespec above.
+    unsafe { libc::clock_gettime(CLOCK, &mut now) };
+    u64::try_from(now.tv_sec)
+        .unwrap_or(0)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::try_from(now.tv_nsec).unwrap_or(0))
+}
+
 pub(crate) fn directory(identity: &str) -> Result<PathBuf, ChannelError> {
     super::app_directories::desktop_channel_directory(effective_user(), identity)
         .map_err(|_| ChannelError::Unavailable)
@@ -300,6 +319,55 @@ mod tests {
                 !endpoint.0.join(SOCKET).exists(),
                 "the socket outlived its desktop"
             );
+        }
+
+        /// The listener serves one connection at a time, so a request can wait behind a slow
+        /// one. Its client's expiry still holds when the desktop finally reads it.
+        #[test]
+        fn a_request_queued_past_its_clients_deadline_never_acts() {
+            let endpoint = Endpoint::new();
+            let listener = DesktopChannelListener::bind_at(&endpoint.0).unwrap();
+            let acted = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let served = {
+                let acted = std::sync::Arc::clone(&acted);
+                std::thread::spawn(move || {
+                    for slow in [true, false] {
+                        let stream = listener.accept().unwrap().unwrap();
+                        let request_by = std::time::Instant::now() + Duration::from_secs(5);
+                        let _ = serve(stream, IDENTITY, request_by, |request, _| {
+                            acted.lock().unwrap().push(request);
+                            if slow {
+                                std::thread::sleep(Duration::from_millis(800));
+                            }
+                            Some(Reply::Done)
+                        });
+                    }
+                })
+            };
+            let first_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let first = std::thread::spawn({
+                let path = endpoint.0.clone();
+                move || {
+                    let client = connect_at(&path, &|| first_deadline).unwrap();
+                    exchange(client, IDENTITY, &show(), &|| first_deadline)
+                }
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            let queued = Request::Show {
+                server: [1; 32],
+                workspace: [3; 32],
+                tab: None,
+                pane: None,
+            };
+            let deadline = std::time::Instant::now() + Duration::from_millis(400);
+            let client = connect_at(&endpoint.0, &|| deadline).unwrap();
+            assert_eq!(
+                exchange(client, IDENTITY, &queued, &|| deadline),
+                Err(ChannelError::Timeout)
+            );
+            assert_eq!(first.join().unwrap(), Ok(Reply::Done));
+            served.join().unwrap();
+            assert_eq!(*acted.lock().unwrap(), [show()], "the queued request acted");
         }
 
         #[test]

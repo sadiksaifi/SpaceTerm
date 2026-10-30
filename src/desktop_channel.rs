@@ -6,8 +6,9 @@
 //! the desktop decides what it presents, and only a Local Pane may open a local file.
 //!
 //! Every connect, read and write ends by an absolute deadline, recomputed before each operation.
-//! The client's request carries how long it will wait, and the desktop performs no effect after
-//! that time, so a request the client gave up on never acts.
+//! The client's request carries the instant it stops waiting, on the host's monotonic clock that
+//! every process on the machine reads alike. The desktop performs no effect after that instant,
+//! however long the request waited in its queue, so a request the client gave up on never acts.
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -127,8 +128,8 @@ pub enum ChannelError {
 struct RequestEnvelope<T> {
     schema: String,
     identity: String,
-    /// How long, in milliseconds from sending, the client waits for the reply.
-    within_ms: u64,
+    /// When the client stops waiting, in nanoseconds on the host's monotonic clock.
+    expires_at: u64,
     body: T,
 }
 
@@ -175,7 +176,8 @@ pub fn exchange(
     let message = serde_json::to_vec(&RequestEnvelope {
         schema: SCHEMA.to_owned(),
         identity: identity.to_owned(),
-        within_ms: u64::try_from(within.as_millis()).unwrap_or(u64::MAX),
+        expires_at: host_clock()
+            .saturating_add(u64::try_from(within.as_nanos()).unwrap_or(u64::MAX)),
         body: request,
     })
     .map_err(|_| ChannelError::Protocol)?;
@@ -201,6 +203,7 @@ pub fn exchange(
 /// Reads one request from an authenticated stream by `request_by`, answers it with `handle`,
 /// and writes the reply within [`TRANSFER_WINDOW`]. `handle` receives the instant after which
 /// the request must not act, and answers `None` when it gave up, which writes no reply. A
+/// request whose client already stopped waiting never reaches `handle` and gets no answer. A
 /// request in another schema or for another application identity is refused without reaching
 /// `handle`. A malformed, oversized or late request gets no answer.
 pub fn serve(
@@ -221,10 +224,10 @@ pub fn serve(
         if request.identity != identity {
             Reply::Refused(Refusal::Incompatible)
         } else {
-            let window = Duration::from_millis(request.within_ms)
-                .min(MAX_EFFECT_WINDOW)
-                .saturating_sub(REPLY_MARGIN);
-            match handle(request.body, received + window) {
+            let Some(act_by) = act_by(request.expires_at, received) else {
+                return Ok(());
+            };
+            match handle(request.body, act_by) {
                 Some(reply) => reply,
                 None => return Ok(()),
             }
@@ -252,6 +255,23 @@ pub(crate) trait DesktopChannelEndpoint: Send + Sync {
     /// Waits for the next connection. `Ok(None)` is a connection closed unread because its
     /// peer runs as another account.
     fn accept(&self) -> std::io::Result<Option<Box<dyn ChannelStream>>>;
+}
+
+/// Nanoseconds on the host's monotonic clock, the one `Instant` reads, which counts from boot and
+/// so means the same in every process on this machine.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn host_clock() -> u64 {
+    crate::platform::unix_desktop_channel::monotonic_nanoseconds()
+}
+
+/// The instant a request received at `received` stops acting: [`REPLY_MARGIN`] before its
+/// client's expiry, and never later than [`MAX_EFFECT_WINDOW`] after it arrived. `None` when that
+/// already passed.
+fn act_by(expires_at: u64, received: Instant) -> Option<Instant> {
+    let left = Duration::from_nanos(expires_at.saturating_sub(host_clock()));
+    let act_by =
+        (Instant::now() + left.saturating_sub(REPLY_MARGIN)).min(received + MAX_EFFECT_WINDOW);
+    (Instant::now() < act_by).then_some(act_by)
 }
 
 fn remaining(deadline: Deadline<'_>) -> Result<Duration, ChannelError> {
@@ -420,8 +440,10 @@ mod tests {
             Duration::from_secs(3),
         );
         let (_, by) = received.unwrap();
-        assert!(by <= Instant::now() + Duration::from_secs(3) - REPLY_MARGIN);
-        assert!(by > sent + Duration::from_secs(2));
+        // The expiry is absolute: the client's own deadline, less the reply margin.
+        let deadline = sent + Duration::from_secs(3);
+        assert!(by <= deadline - REPLY_MARGIN + Duration::from_millis(50));
+        assert!(by >= deadline - REPLY_MARGIN - Duration::from_millis(50));
         // However long the client waits, a request acts within the desktop's own bound.
         let (_, received) = answer(
             IDENTITY,
@@ -430,6 +452,31 @@ mod tests {
             Duration::from_secs(24 * 60 * 60),
         );
         assert!(received.unwrap().1 <= Instant::now() + MAX_EFFECT_WINDOW);
+    }
+
+    #[test]
+    fn a_request_read_after_its_client_stopped_waiting_never_acts() {
+        let (client, desktop) = UnixStream::pair().unwrap();
+        let deadline = after(Duration::from_millis(300));
+        let waiting =
+            std::thread::spawn(move || exchange(client, IDENTITY, &open(false), &|| deadline));
+        // The desktop is still busy with an earlier request when this one arrives.
+        std::thread::sleep(Duration::from_millis(500));
+        let served = serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |_, _| {
+            panic!("a request acted after its client stopped waiting")
+        });
+        assert_eq!(served, Ok(()));
+        assert_eq!(waiting.join().unwrap(), Err(ChannelError::Timeout));
+    }
+
+    #[test]
+    fn the_shared_clock_is_the_one_instant_reads() {
+        let before = host_clock();
+        let instant = Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        let elapsed = Duration::from_nanos(host_clock() - before);
+        assert!(elapsed >= instant.elapsed().saturating_sub(Duration::from_millis(5)));
+        assert!(elapsed < Duration::from_secs(1));
     }
 
     #[test]

@@ -12287,6 +12287,48 @@ mod shared_repositories {
             assert_eq!(cx.opened_url(), None);
         }
 
+        /// A file on a mount that can stall after its check must not freeze the window, so a
+        /// preview checks and resolves the file only on the worker.
+        #[gpui::test]
+        fn preview_touches_no_file_on_the_windows_thread(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let preview = RecordingPreview::default();
+            let construction = PaneConstruction::new(
+                Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
+                Rc::new(
+                    crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                ),
+                crate::terminal::native_services::NativeServiceAdapters {
+                    file_preview: Rc::new(preview.clone()),
+                    ..crate::terminal::native_services::testing::adapters()
+                },
+                PaneLifecycleDependencies::testing(),
+            );
+            let threads = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (harness, cx) = harness_constructing(
+                cx,
+                live(),
+                &construction,
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed()
+                    .with_client_filesystem(crate::runtime::local_filesystem()),
+                LocalFilesystemAuthority::testing_observed(
+                    &crate::runtime::local_filesystem(),
+                    Arc::clone(&threads),
+                ),
+            );
+            let window_thread = std::thread::current().id();
+            let reply = ask(&harness, open(LOCAL, FEATURE_PANE, &files.file(), true), cx);
+            assert_eq!(reply, Reply::Done);
+            assert_eq!(*preview.0.borrow(), [files.file()]);
+            let threads = threads.lock().unwrap();
+            assert!(!threads.is_empty(), "the worker checked the file");
+            assert!(
+                threads.iter().all(|thread| *thread != window_thread),
+                "the window's thread touched the file"
+            );
+        }
+
         #[gpui::test]
         fn preview_without_a_file_preview_is_refused(cx: &mut TestAppContext) {
             let files = Files::new();

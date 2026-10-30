@@ -3844,7 +3844,7 @@ impl TerminalPane {
             }
             TerminalContextMenuCommand::FilePreview if actions.file_preview => {
                 if let Some(link) = link {
-                    let _ = self.preview_context_link(&link, window, cx);
+                    self.preview_context_link(&link, window, cx);
                 }
             }
             _ => {}
@@ -3853,11 +3853,12 @@ impl TerminalPane {
     }
 
     /// Presents the File Preview of a local file that `spaceterm open --preview` named in this
-    /// Pane's Terminal Session. `false` when the Pane has no local file authority or its desktop
-    /// has no File Preview.
-    pub(crate) fn preview_local_file(
+    /// Pane's Terminal Session, which a worker already revalidated. It touches no file here.
+    /// `false` when the Pane has no local file authority, its desktop has no File Preview, or
+    /// presentation failed at once.
+    pub(crate) fn preview_prepared_local_file(
         &mut self,
-        link: &crate::terminal::HyperlinkTarget,
+        prepared: crate::terminal::native_services::PreparedFilePreview,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3866,23 +3867,39 @@ impl TerminalPane {
         {
             return false;
         }
-        self.preview_context_link(link, window, cx)
+        let submitted = self
+            .file_preview
+            .preview_prepared_in_window(prepared, window, cx);
+        self.follow_file_preview(submitted, cx)
     }
 
-    /// Whether the preview was presented or handed to a deferred adapter.
     fn preview_context_link(
         &mut self,
         link: &crate::terminal::HyperlinkTarget,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) {
         let Some(target) =
             FilePreviewTarget::from_link(link, self.terminal_session.local_file_capabilities)
         else {
             self.file_preview.dismiss();
-            return false;
+            return;
         };
-        match self.file_preview.preview_in_window(&target, window, cx) {
+        let submitted = self.file_preview.preview_in_window(&target, window, cx);
+        self.follow_file_preview(submitted, cx);
+    }
+
+    /// Follows one submitted preview to its deferred failure. Whether the preview was presented
+    /// or handed to a deferred adapter.
+    fn follow_file_preview(
+        &mut self,
+        submitted: Result<
+            Option<crate::terminal::native_services::file_preview::FilePreviewCompletion>,
+            crate::terminal::native_services::file_preview::FilePreviewError,
+        >,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match submitted {
             Ok(None) => true,
             Ok(Some(completion)) => {
                 self._file_preview_task = Some(cx.spawn(async move |this, cx| {

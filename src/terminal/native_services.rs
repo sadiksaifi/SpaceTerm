@@ -254,6 +254,36 @@ impl FilePreviewTarget {
     pub(crate) fn revalidated_path(&self) -> Option<PathBuf> {
         self.local_access.revalidate(&self.link)
     }
+
+    /// Authorizes and revalidates `link` for a File Preview whose presentation must not touch
+    /// the filesystem, as on a thread other than the window's. The filesystem work happens here.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn prepare(
+        link: &HyperlinkTarget,
+        local_file_capabilities: TerminalLocalFileCapabilities,
+    ) -> Option<PreparedFilePreview> {
+        let target = Self::from_link(link, local_file_capabilities)?;
+        let path = target.revalidated_path()?;
+        Some(PreparedFilePreview { target, path })
+    }
+}
+
+/// A File Preview target already revalidated, with the canonical path it resolved to. Presenting
+/// it does no filesystem work on the window's thread; a deferred adapter still revalidates at its
+/// own final handoff.
+#[cfg(feature = "desktop")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedFilePreview {
+    target: FilePreviewTarget,
+    path: PathBuf,
+}
+
+#[cfg(feature = "desktop")]
+impl PreparedFilePreview {
+    /// The authorized target, which a deferred adapter revalidates, and its canonical path.
+    pub(crate) fn into_parts(self) -> (FilePreviewTarget, PathBuf) {
+        (self.target, self.path)
+    }
 }
 
 pub(crate) fn activated_link(
