@@ -846,3 +846,100 @@ fn ctrl_c_before_dispatch_exits_130_and_after_dispatch_resolves_first() {
         "no Execute was sent"
     );
 }
+
+/// A fake desktop on this account's Development Desktop Channel endpoint. It holds the endpoint
+/// lock, so a running SpaceTerm Development desktop must be quit first.
+struct FakeDesktop {
+    listener: std::os::unix::net::UnixListener,
+    socket: std::path::PathBuf,
+    _lock: spaceterm_server::Lock,
+}
+impl FakeDesktop {
+    fn listen() -> Self {
+        let directory = spaceterm::desktop_channel::endpoint_directory(IDENTITY).unwrap();
+        let retained = spaceterm_server::Directory::open(&directory, true).unwrap();
+        let lock = retained
+            .try_lock("lock")
+            .unwrap()
+            .expect("quit SpaceTerm Development first: its desktop holds the Desktop Channel");
+        retained.remove(c"d").unwrap();
+        let socket = directory.join("d");
+        Self {
+            listener: std::os::unix::net::UnixListener::bind(&socket).unwrap(),
+            socket,
+            _lock: lock,
+        }
+    }
+}
+impl Drop for FakeDesktop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+/// `open` inside a Session, with a Session context the fake desktop never checks.
+fn open_in_session() -> Process {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_spaceterm"));
+    command
+        .args([
+            "--json",
+            "open",
+            "/private/tmp/spaceterm-interrupt-fixture.txt",
+        ])
+        .env_remove("SPACETERM_SERVER")
+        .env("SPACETERM_IDENTITY", IDENTITY)
+        .env("SPACETERM_SERVER_ID", "01".repeat(32))
+        .env("SPACETERM_PANE", "02".repeat(32))
+        .env("SPACETERM_SESSION", "03".repeat(32))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    Process(Some(command.spawn().unwrap()))
+}
+
+#[test]
+#[ignore = "owns the Development Desktop Channel endpoint; run mise run cli:io:test"]
+fn an_interrupt_after_a_desktop_request_settles_its_answer_within_the_grace() {
+    use std::io::{Read, Write};
+    let desktop = FakeDesktop::listen();
+    for answer_after in [Some(Duration::from_millis(500)), None] {
+        let process = open_in_session();
+        let (mut stream, _) = desktop.listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request).contains("\"open\""));
+        // The request reached the desktop, so Ctrl-C now must wait for its answer.
+        process.interrupt();
+        if let Some(after) = answer_after {
+            std::thread::sleep(after);
+            stream
+                .write_all(
+                    br#"{"schema":"spaceterm.desktop.v1","identity":"spaceterm-development","body":"done"}"#,
+                )
+                .unwrap();
+            drop(stream);
+            let (output, _) = process.wait(Duration::from_secs(3));
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            // The confirmed outcome stays, reported as interrupted.
+            assert_eq!(result["error"]["code"], "interrupted", "{result}");
+            assert_eq!(
+                result["data"]["path"],
+                "/private/tmp/spaceterm-interrupt-fixture.txt"
+            );
+            assert_eq!(output.status.code(), Some(130));
+        } else {
+            let (output, elapsed) = process.wait(Duration::from_secs(8));
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["error"]["code"], "outcome_unconfirmed", "{result}");
+            assert_eq!(output.status.code(), Some(7));
+            assert!(
+                elapsed >= Duration::from_secs(4),
+                "it gave up before the grace ended"
+            );
+            drop(stream);
+        }
+    }
+}

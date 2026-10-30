@@ -797,6 +797,7 @@ codes! {
     DesktopUnavailable = "desktop_unavailable", Unavailable, true, "No SpaceTerm desktop is running for this account on this machine.";
     DesktopIncompatible = "desktop_incompatible", Unavailable, false, "This CLI and the desktop are incompatible. Update the older one.";
     PreviewUnavailable = "preview_unavailable", Unavailable, false, "This desktop has no File Preview.";
+    DesktopBusy = "desktop_busy", Unavailable, true, "The desktop is still checking earlier files. Try again.";
     // CLI-native: route or environment.
     LocalOnly = "local_only", Unavailable, false, "This command runs only on the server's own machine.";
     UnsupportedSession = "unsupported_session", Unavailable, false, "This session does not support the command.";
@@ -2089,6 +2090,7 @@ mod tests {
                     DesktopUnavailable,
                     DesktopIncompatible,
                     PreviewUnavailable,
+                    DesktopBusy,
                 ],
                 5,
             ),

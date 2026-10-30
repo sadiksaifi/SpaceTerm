@@ -11799,9 +11799,11 @@ mod shared_repositories {
         use crate::terminal::native_services::file_preview::{
             FilePreviewError, FilePreviewFactory, FilePreviewPanel,
         };
+        use crate::ui::workspace_manager::desktop_requests::DesktopRequests;
         use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
         use std::cell::RefCell;
         use std::path::Path;
+        use std::time::{Duration, Instant};
 
         const LOCAL: [u8; 32] = [40; 32];
         const PENGUIN: [u8; 32] = [41; 32];
@@ -11831,14 +11833,68 @@ mod shared_repositories {
             inventory
         }
 
-        fn ask(harness: &Harness, request: Request, cx: &mut VisualTestContext) -> Reply {
-            let reply = cx.update(|window, cx| {
-                harness.manager.update(cx, |manager, cx| {
-                    manager.answer_desktop_request(request, &server_of, window, cx)
+        fn context() -> DesktopRequests {
+            DesktopRequests::new(Rc::new(server_of))
+        }
+
+        /// Asks `manager` and returns its answer once it settles. File validation runs on a
+        /// worker thread, so this lets the window run until the answer arrives.
+        fn ask_with(
+            manager: &Entity<WorkspaceManager>,
+            request: Request,
+            context: &DesktopRequests,
+            cx: &mut VisualTestContext,
+        ) -> Option<Reply> {
+            let answer = submit(manager, request, context, cx);
+            settle(&answer, cx)
+        }
+
+        type Answer = Rc<RefCell<Option<Option<Reply>>>>;
+
+        fn submit(
+            manager: &Entity<WorkspaceManager>,
+            request: Request,
+            context: &DesktopRequests,
+            cx: &mut VisualTestContext,
+        ) -> Answer {
+            let answer: Answer = Rc::default();
+            let settled = Rc::clone(&answer);
+            cx.update(|window, cx| {
+                let task = manager.update(cx, |manager, cx| {
+                    manager.answer_desktop_request(
+                        request,
+                        Instant::now() + Duration::from_secs(10),
+                        context,
+                        window,
+                        cx,
+                    )
+                });
+                cx.spawn(async move |_| {
+                    *settled.borrow_mut() = Some(task.await);
                 })
+                .detach();
             });
-            cx.run_until_parked();
-            reply
+            answer
+        }
+
+        fn settle(answer: &Answer, cx: &mut VisualTestContext) -> Option<Reply> {
+            let started = Instant::now();
+            loop {
+                cx.executor().advance_clock(Duration::from_millis(20));
+                cx.run_until_parked();
+                if let Some(reply) = answer.borrow_mut().take() {
+                    return reply;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "the answer never settled"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn ask(harness: &Harness, request: Request, cx: &mut VisualTestContext) -> Reply {
+            ask_with(&harness.manager, request, &context(), cx).expect("an answer")
         }
 
         fn open(server: [u8; 32], pane: [u8; 32], path: &Path, preview: bool) -> Request {
@@ -12026,6 +12082,161 @@ mod shared_repositories {
             assert_eq!(view(&harness, cx).0, Some(DESKTOP_WORKSPACE));
         }
 
+        /// File validation that waits until the test releases it, as on an unresponsive network
+        /// mount, and then finds the file unreadable.
+        fn gated() -> (LocalFilesystemAuthority, std::sync::mpsc::Sender<()>) {
+            let (release, gate) = std::sync::mpsc::channel();
+            (
+                LocalFilesystemAuthority::testing_gated(
+                    gate,
+                    crate::platform::local_filesystem::LocalFilesystemError::PermissionDenied,
+                ),
+                release,
+            )
+        }
+
+        #[gpui::test]
+        fn a_file_check_that_blocks_never_holds_the_window(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (filesystem, release) = gated();
+            let (harness, cx) = harness_constructing(
+                cx,
+                live(),
+                &PaneConstruction::testing(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed(),
+                filesystem,
+            );
+            let context = context();
+            let blocked = submit(
+                &harness.manager,
+                open(LOCAL, ROOT_PANE, &files.file(), false),
+                &context,
+                cx,
+            );
+            cx.run_until_parked();
+            assert!(blocked.borrow().is_none(), "the check is still blocked");
+            // The window keeps answering while the check waits.
+            let shown = ask_with(
+                &harness.manager,
+                Request::Show {
+                    server: LOCAL,
+                    workspace: WORKSPACE,
+                    tab: None,
+                    pane: Some(FEATURE_PANE),
+                },
+                &context,
+                cx,
+            );
+            assert_eq!(shown, Some(Reply::Done));
+            release.send(()).unwrap();
+            assert_eq!(
+                settle(&blocked, cx),
+                Some(Reply::Refused(Refusal::FileUnavailable))
+            );
+        }
+
+        #[gpui::test]
+        fn a_session_that_ends_during_its_file_check_opens_nothing(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (filesystem, release) = gated();
+            let (harness, cx) = harness_constructing(
+                cx,
+                live(),
+                &PaneConstruction::testing(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed(),
+                filesystem,
+            );
+            let blocked = submit(
+                &harness.manager,
+                open(LOCAL, ROOT_PANE, &files.file(), true),
+                &context(),
+                cx,
+            );
+            let mut replaced = live();
+            replaced.revision = 2;
+            if let Some(close) = &mut replaced.close {
+                close.sessions[0].session = Some([43; 32]);
+            }
+            harness.publish(replaced, cx);
+            release.send(()).unwrap();
+            assert_eq!(
+                settle(&blocked, cx),
+                Some(Reply::Refused(Refusal::NotShown))
+            );
+            assert_eq!(view(&harness, cx).0, Some(DESKTOP_WORKSPACE));
+            assert_eq!(cx.opened_url(), None);
+        }
+
+        #[gpui::test]
+        fn file_checks_beyond_the_bound_are_refused_as_busy(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (filesystem, release) = gated();
+            let (harness, cx) = harness_constructing(
+                cx,
+                live(),
+                &PaneConstruction::testing(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed(),
+                filesystem,
+            );
+            let context = context();
+            let blocked: Vec<_> = (0..4)
+                .map(|_| {
+                    submit(
+                        &harness.manager,
+                        open(LOCAL, ROOT_PANE, &files.file(), false),
+                        &context,
+                        cx,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                ask_with(
+                    &harness.manager,
+                    open(LOCAL, ROOT_PANE, &files.file(), false),
+                    &context,
+                    cx,
+                ),
+                Some(Reply::Refused(Refusal::Busy))
+            );
+            for _ in &blocked {
+                release.send(()).unwrap();
+            }
+            for answer in &blocked {
+                assert_eq!(
+                    settle(answer, cx),
+                    Some(Reply::Refused(Refusal::FileUnavailable))
+                );
+            }
+        }
+
+        #[gpui::test]
+        fn nothing_acts_after_the_clients_deadline(cx: &mut TestAppContext) {
+            let files = Files::new();
+            let (harness, cx) = harness(cx, live());
+            let task = cx.update(|window, cx| {
+                harness.manager.update(cx, |manager, cx| {
+                    manager.answer_desktop_request(
+                        open(LOCAL, ROOT_PANE, &files.file(), false),
+                        Instant::now(),
+                        &context(),
+                        window,
+                        cx,
+                    )
+                })
+            });
+            let answer: Answer = Rc::default();
+            let settled = Rc::clone(&answer);
+            cx.update(|_, cx| {
+                cx.spawn(async move |_| *settled.borrow_mut() = Some(task.await))
+                    .detach()
+            });
+            assert_eq!(settle(&answer, cx), None);
+            assert_eq!(cx.opened_url(), None);
+        }
+
         /// A preview that records each file it presents.
         #[derive(Clone, Default)]
         struct RecordingPreview(Rc<RefCell<Vec<PathBuf>>>);
@@ -12144,17 +12355,13 @@ mod shared_repositories {
             });
             cx.run_until_parked();
             for preview in [false, true] {
-                let reply = cx.update(|window, cx| {
-                    manager.update(cx, |manager, cx| {
-                        manager.answer_desktop_request(
-                            open(PENGUIN, ROOT_PANE, &files.file(), preview),
-                            &server_of,
-                            window,
-                            cx,
-                        )
-                    })
-                });
-                assert_eq!(reply, Reply::Refused(Refusal::RemoteSession));
+                let reply = ask_with(
+                    &manager,
+                    open(PENGUIN, ROOT_PANE, &files.file(), preview),
+                    &context(),
+                    cx,
+                );
+                assert_eq!(reply, Some(Reply::Refused(Refusal::RemoteSession)));
             }
             assert_eq!(cx.opened_url(), None);
         }

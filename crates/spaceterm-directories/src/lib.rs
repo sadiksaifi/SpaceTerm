@@ -225,6 +225,8 @@ pub enum DirectoryError {
     InvalidAppName,
     #[error("HOME is required to resolve the {root:?} application directory")]
     MissingHome { root: AppDirectoryRoot },
+    #[error("the operating system gives this account no private directory")]
+    NoAccountDirectory,
 }
 
 /// Read-only freedesktop locations of the host desktop's own resources, such as icon themes and

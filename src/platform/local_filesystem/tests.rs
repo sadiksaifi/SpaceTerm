@@ -36,6 +36,25 @@ impl LocalFilesystemAuthority {
         )
     }
 
+    /// An authority whose identity checks each wait for one message from `release`, then fail
+    /// with `error`.
+    pub(crate) fn testing_gated(
+        release: std::sync::mpsc::Receiver<()>,
+        error: LocalFilesystemError,
+    ) -> Self {
+        struct Gated(Mutex<std::sync::mpsc::Receiver<()>>, LocalFilesystemError);
+        impl LocalIdentitySource for Gated {
+            fn identify(&self, _: &Path) -> Result<LocalIdentityObservation, LocalFilesystemError> {
+                let _ = self.0.lock().unwrap().recv();
+                Err(self.1)
+            }
+        }
+        Self::new(
+            crate::local_path::LocalPathSemantics::Posix,
+            Arc::new(Gated(Mutex::new(release), error)),
+        )
+    }
+
     pub(crate) fn same_source(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
     }

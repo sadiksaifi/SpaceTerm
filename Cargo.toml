@@ -124,6 +124,7 @@ unicode-bidi = { version = "=0.3.18", optional = true }
 unicode-segmentation = { version = "=1.13.3", optional = true }
 zeroize = "=1.9.0"
 same-file = "=1.0.6"
+socket2 = "=0.6.5"
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
 tar = { version = "=0.4.46", default-features = false, optional = true }
 flate2 = { version = "=1.1.10", optional = true }

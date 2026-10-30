@@ -6,20 +6,30 @@ use crate::contract::*;
 use crate::work::output::{Output, value};
 use spaceterm::desktop_channel::{ChannelError, Refusal, Reply, Request, SessionContext};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// The desktop on this machine. Tests inject a double so they never reach a running desktop.
 pub trait Desktop {
     fn request(&self, request: &Request) -> Result<Reply, ChannelError>;
 }
 
-/// This account's desktop of one application identity.
-pub struct LocalDesktop<'a>(pub &'a str);
+/// This account's desktop of one application identity, asked by `deadline`. An interrupt
+/// brings the deadline to the interrupt's settlement instant.
+pub struct LocalDesktop<'a> {
+    pub identity: &'a str,
+    pub deadline: Instant,
+}
 
 impl Desktop for LocalDesktop<'_> {
     fn request(&self, request: &Request) -> Result<Reply, ChannelError> {
-        spaceterm::desktop_channel::request(self.0, request)
+        spaceterm::desktop_channel::request(self.identity, request, &|| {
+            crate::interrupt::limit(self.deadline)
+        })
     }
 }
+
+/// How long `open` waits without `--timeout`.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A desktop that commands other than `open` and `show` never ask.
 #[cfg(test)]
@@ -33,25 +43,41 @@ impl Desktop for NoDesktop {
 }
 
 /// Asks the desktop one request, mapping each refusal and channel failure to its fixed code.
+/// The request is the command's dispatched effect: after it, an interrupt waits for the answer
+/// within the interrupt grace, and an answer that does not arrive leaves the outcome
+/// unconfirmed.
 pub fn ask(desktop: &dyn Desktop, request: &Request) -> Result<(), Failure> {
-    let code = match desktop.request(request) {
-        Ok(Reply::Done) => return Ok(()),
+    crate::interrupt::dispatch()?;
+    match classify(desktop.request(request), crate::interrupt::interrupted()) {
+        None => Ok(()),
+        Some(code) => Err(Failure::new(code)),
+    }
+}
+
+/// The fixed code of one exchange's result, or `None` when the desktop did what was asked.
+fn classify(result: Result<Reply, ChannelError>, interrupted: bool) -> Option<Code> {
+    Some(match result {
+        Ok(Reply::Done) => return None,
         Ok(Reply::Refused(refusal)) => match refusal {
             Refusal::NotShown => Code::NotShown,
             Refusal::RemoteSession => Code::RemoteSession,
             Refusal::FileUnavailable => Code::FileUnavailable,
             Refusal::PreviewUnavailable => Code::PreviewUnavailable,
+            Refusal::Busy => Code::DesktopBusy,
             Refusal::Incompatible => Code::DesktopIncompatible,
         },
         Err(error) => match error {
             ChannelError::Unavailable => Code::DesktopUnavailable,
             ChannelError::UnsafeEndpoint => Code::UnsafeStorage,
             ChannelError::AccountMismatch => Code::AuthenticationRefused,
+            // The desktop acts on nothing after the deadline its request carried, unless an
+            // interrupt ended the wait sooner.
+            ChannelError::Timeout if interrupted => Code::OutcomeUnconfirmed,
             ChannelError::Timeout => Code::Timeout,
+            ChannelError::Unanswered => Code::OutcomeUnconfirmed,
             ChannelError::Protocol => Code::DesktopIncompatible,
         },
-    };
-    Err(Failure::new(code))
+    })
 }
 
 /// The Session context `spaceterm` inherited from the Terminal Session it runs in.
@@ -107,8 +133,12 @@ pub fn start(cli: &Cli) -> Option<Output> {
         session: session.as_deref(),
     };
     let identity = env!("SPACETERM_SERVER_IDENTITY");
+    let desktop = LocalDesktop {
+        identity,
+        deadline: Instant::now() + cli.global.timeout.unwrap_or(OPEN_TIMEOUT),
+    };
     Some(match std::env::current_dir() {
-        Ok(cwd) => open(args, identity, &session, &cwd, &LocalDesktop(identity)),
+        Ok(cwd) => open(args, identity, &session, &cwd, &desktop),
         Err(_) => failed(Failure::new(Code::DirectoryUnavailable)),
     })
 }
@@ -322,6 +352,8 @@ mod tests {
             ),
             (Err(ChannelError::UnsafeEndpoint), "unsafe_storage", 5),
             (Err(ChannelError::Timeout), "timeout", 6),
+            (Err(ChannelError::Unanswered), "outcome_unconfirmed", 7),
+            (Ok(Reply::Refused(Refusal::Busy)), "desktop_busy", 5),
             (Ok(Reply::Refused(Refusal::NotShown)), "not_shown", 4),
             (
                 Ok(Reply::Refused(Refusal::RemoteSession)),
@@ -363,6 +395,19 @@ mod tests {
             )
             .envelope,
         );
+    }
+
+    #[test]
+    fn an_interrupt_that_ends_the_wait_leaves_the_outcome_unconfirmed() {
+        assert_eq!(
+            classify(Err(ChannelError::Timeout), true),
+            Some(Code::OutcomeUnconfirmed)
+        );
+        assert_eq!(
+            classify(Err(ChannelError::Timeout), false),
+            Some(Code::Timeout)
+        );
+        assert_eq!(classify(Ok(Reply::Done), true), None);
     }
 
     #[test]

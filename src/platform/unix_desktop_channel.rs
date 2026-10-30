@@ -1,10 +1,11 @@
-//! The desktop channel's POSIX endpoint: a stream socket in an account-private directory named
-//! by application identity and account, whose peers must run as this account.
+//! The desktop channel's POSIX endpoint: a stream socket in a private directory per application
+//! identity, inside the operating system's own directory for this account, whose peers must run
+//! as this account.
 #[cfg(target_os = "linux")]
 use super::linux_peer_credentials as peer_credentials;
 #[cfg(target_os = "macos")]
 use super::macos_peer_credentials as peer_credentials;
-use crate::desktop_channel::ChannelError;
+use crate::desktop_channel::{ChannelError, Deadline};
 use spaceterm_server::{Directory, ServerError};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -12,13 +13,40 @@ use std::time::Duration;
 
 const SOCKET: &str = "d";
 
-impl crate::desktop_channel::HalfClose for UnixStream {
+impl crate::desktop_channel::ChannelIo for UnixStream {
     fn close_write(&mut self) -> std::io::Result<()> {
         self.shutdown(std::net::Shutdown::Write)
     }
+    fn limit_read(&mut self, wait: Duration) -> std::io::Result<()> {
+        ready(self, libc::POLLIN, wait)
+    }
+    fn limit_write(&mut self, wait: Duration) -> std::io::Result<()> {
+        ready(self, libc::POLLOUT, wait)
+    }
 }
 
-fn directory(identity: &str) -> Result<PathBuf, ChannelError> {
+/// Waits at most `wait` for `events` on a stream that never blocks. Socket timeouts cannot bound
+/// this: some hosts refuse to change them once the client half-closed.
+fn ready(stream: &UnixStream, events: libc::c_short, wait: Duration) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    stream.set_nonblocking(true)?;
+    let mut descriptor = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    let milliseconds = libc::c_int::try_from(wait.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+    // SAFETY: one live pollfd for the stream's open descriptor, which outlives the call.
+    if unsafe { libc::poll(&mut descriptor, 1, milliseconds) } < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn directory(identity: &str) -> Result<PathBuf, ChannelError> {
     super::app_directories::desktop_channel_directory(effective_user(), identity)
         .map_err(|_| ChannelError::Unavailable)
 }
@@ -37,28 +65,38 @@ pub(crate) fn same_account(peer: libc::uid_t, own: libc::uid_t) -> Result<(), Ch
     }
 }
 
-/// Connects to this account's desktop of `identity`, refusing an endpoint that is not private
-/// or a listener running as another account.
-pub(crate) fn connect(identity: &str, timeout: Duration) -> Result<UnixStream, ChannelError> {
-    connect_at(&directory(identity)?, timeout)
+/// Connects to this account's desktop of `identity` by `deadline`, refusing an endpoint that is
+/// not private or a listener running as another account.
+pub(crate) fn connect(identity: &str, deadline: Deadline<'_>) -> Result<UnixStream, ChannelError> {
+    connect_at(&directory(identity)?, deadline)
 }
 
-fn connect_at(path: &std::path::Path, timeout: Duration) -> Result<UnixStream, ChannelError> {
+fn connect_at(path: &std::path::Path, deadline: Deadline<'_>) -> Result<UnixStream, ChannelError> {
     let retained = Directory::open(path, false).map_err(|error| match error {
         ServerError::NotSetUp => ChannelError::Unavailable,
         ServerError::UnsafeStorage => ChannelError::UnsafeEndpoint,
         _ => ChannelError::Unavailable,
     })?;
-    let stream = UnixStream::connect(path.join(SOCKET)).map_err(|_| ChannelError::Unavailable)?;
+    let wait = deadline().saturating_duration_since(std::time::Instant::now());
+    if wait.is_zero() {
+        return Err(ChannelError::Timeout);
+    }
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+        .map_err(|_| ChannelError::Unavailable)?;
+    let address =
+        socket2::SockAddr::unix(path.join(SOCKET)).map_err(|_| ChannelError::Unavailable)?;
+    socket
+        .connect_timeout(&address, wait)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => ChannelError::Timeout,
+            _ => ChannelError::Unavailable,
+        })?;
+    let stream = UnixStream::from(std::os::fd::OwnedFd::from(socket));
     retained
         .verify_path(path)
         .map_err(|_| ChannelError::UnsafeEndpoint)?;
     let peer = peer_credentials::peer_user(&stream).map_err(|_| ChannelError::AccountMismatch)?;
     same_account(peer, effective_user())?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .map_err(|_| ChannelError::Protocol)?;
     Ok(stream)
 }
 
@@ -71,9 +109,6 @@ mod listener {
     use spaceterm_server::Lock;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
-
-    /// How long the desktop waits for a connected client to finish its request.
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// The one listening desktop of an application identity for this account. A second desktop
     /// process finds the lock held and listens nowhere.
@@ -143,8 +178,6 @@ mod listener {
             if same_account(peer, self.own).is_err() {
                 return Ok(None);
             }
-            stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-            stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
             Ok(Some(Box::new(stream)))
         }
     }
@@ -196,12 +229,16 @@ mod tests {
     fn connecting_without_a_listening_desktop_is_unavailable() {
         let endpoint = Endpoint::new();
         assert_eq!(
-            connect_at(&endpoint.0, Duration::from_secs(1)).err(),
+            connect_at(&endpoint.0, &|| std::time::Instant::now()
+                + Duration::from_secs(1))
+            .err(),
             Some(ChannelError::Unavailable)
         );
         Directory::open(&endpoint.0, true).unwrap();
         assert_eq!(
-            connect_at(&endpoint.0, Duration::from_secs(1)).err(),
+            connect_at(&endpoint.0, &|| std::time::Instant::now()
+                + Duration::from_secs(1))
+            .err(),
             Some(ChannelError::Unavailable)
         );
     }
@@ -213,7 +250,9 @@ mod tests {
         std::fs::create_dir(&endpoint.0).unwrap();
         std::fs::set_permissions(&endpoint.0, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
-            connect_at(&endpoint.0, Duration::from_secs(1)).err(),
+            connect_at(&endpoint.0, &|| std::time::Instant::now()
+                + Duration::from_secs(1))
+            .err(),
             Some(ChannelError::UnsafeEndpoint)
         );
     }
@@ -242,15 +281,20 @@ mod tests {
             let listener = DesktopChannelListener::bind_at(&endpoint.0).unwrap();
             let served = std::thread::spawn(move || {
                 let stream = listener.accept().unwrap().expect("the same account");
-                serve(stream, IDENTITY, |request| {
+                let request_by = std::time::Instant::now() + Duration::from_secs(5);
+                serve(stream, IDENTITY, request_by, |request, _| {
                     assert_eq!(request, show());
-                    Reply::Done
+                    Some(Reply::Done)
                 })
                 .unwrap();
                 listener
             });
-            let client = connect_at(&endpoint.0, Duration::from_secs(5)).unwrap();
-            assert_eq!(exchange(client, IDENTITY, &show()), Ok(Reply::Done));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let client = connect_at(&endpoint.0, &|| deadline).unwrap();
+            assert_eq!(
+                exchange(client, IDENTITY, &show(), &|| deadline),
+                Ok(Reply::Done)
+            );
             drop(served.join().unwrap());
             assert!(
                 !endpoint.0.join(SOCKET).exists(),
@@ -282,9 +326,7 @@ mod tests {
             // The desktop may close the connection before a client could configure it, so this
             // client connects without the CLI's own checks.
             let client = UnixStream::connect(endpoint.0.join(SOCKET)).unwrap();
-            client
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let request = Request::Open {
                 session: SessionContext {
                     server: [1; 32],
@@ -294,10 +336,12 @@ mod tests {
                 path: "/private/fixture".into(),
                 preview: false,
             };
-            assert_eq!(
-                exchange(client, IDENTITY, &request),
-                Err(ChannelError::Protocol)
-            );
+            // The desktop closes before reading, so the request never arrives whole, or arrives
+            // and gets no answer.
+            assert!(matches!(
+                exchange(client, IDENTITY, &request, &|| deadline),
+                Err(ChannelError::Protocol | ChannelError::Unanswered)
+            ));
             assert!(
                 accepted.join().unwrap(),
                 "another account's request was accepted"

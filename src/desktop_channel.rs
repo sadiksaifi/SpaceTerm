@@ -4,17 +4,32 @@
 //! answers once and closes. Both ends require the peer to run as their own account. Requests
 //! carry exact server, Workspace, Tab, Pane and Terminal Session IDs as fences, never authority:
 //! the desktop decides what it presents, and only a Local Pane may open a local file.
+//!
+//! Every connect, read and write ends by an absolute deadline, recomputed before each operation.
+//! The client's request carries how long it will wait, and the desktop performs no effect after
+//! that time, so a request the client gave up on never acts.
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The format of every request and reply. A different schema is refused as incompatible.
 pub const SCHEMA: &str = "spaceterm.desktop.v1";
 /// The largest request or reply, which bounds a local path of 4 KiB with its envelope.
-const MAX_MESSAGE_BYTES: u64 = 16 * 1024;
-/// How long the client waits for the desktop's answer, including File Preview handoff.
-pub const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+/// How long the desktop gives a connected client to deliver its whole request, and itself to
+/// deliver its whole reply.
+pub const TRANSFER_WINDOW: Duration = Duration::from_secs(2);
+/// The longest a request stays able to act, however long its client says it waits.
+pub const MAX_EFFECT_WINDOW: Duration = Duration::from_secs(60);
+/// How much sooner than its client gives up the desktop stops acting, so a reply can arrive.
+const REPLY_MARGIN: Duration = Duration::from_millis(250);
+/// The longest one blocking read or write waits before it rechecks its deadline.
+const POLL: Duration = Duration::from_millis(100);
+
+/// When the waiting ends. It is read again before every operation, so a caller can bring it
+/// forward while an exchange runs, as an interrupt does.
+pub type Deadline<'a> = &'a dyn Fn() -> Instant;
 
 pub type Id = [u8; 32];
 
@@ -83,6 +98,8 @@ pub enum Refusal {
     FileUnavailable,
     /// This desktop has no File Preview.
     PreviewUnavailable,
+    /// The desktop is still checking as many earlier files as it checks at once.
+    Busy,
     /// The request's schema or application identity is not this desktop's.
     Incompatible,
 }
@@ -96,83 +113,138 @@ pub enum ChannelError {
     UnsafeEndpoint,
     /// The process at the endpoint runs as another account.
     AccountMismatch,
-    /// The desktop did not answer in time.
+    /// The deadline passed.
     Timeout,
-    /// The exchange did not complete.
+    /// The desktop received the whole request and closed without an answer, so whether it
+    /// acted is unknown.
+    Unanswered,
+    /// The exchange failed before the desktop received the whole request.
     Protocol,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Envelope<T> {
+struct RequestEnvelope<T> {
     schema: String,
     identity: String,
+    /// How long, in milliseconds from sending, the client waits for the reply.
+    within_ms: u64,
     body: T,
 }
 
-/// Sends one request on a connected, authenticated stream and reads the desktop's reply.
-pub fn exchange<S: Read + Write + HalfClose>(
-    mut stream: S,
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyEnvelope {
+    schema: String,
+    identity: String,
+    body: Reply,
+}
+
+/// A connected stream whose waits the exchange bounds.
+pub trait ChannelIo: Read + Write {
+    /// Ends the client's request so the desktop reads it to its end.
+    fn close_write(&mut self) -> std::io::Result<()>;
+    /// Waits at most `wait`, which is never zero, until a read would not block. Reads and writes
+    /// never block: they report `WouldBlock` instead.
+    fn limit_read(&mut self, wait: Duration) -> std::io::Result<()>;
+    /// Waits at most `wait`, which is never zero, until a write would not block.
+    fn limit_write(&mut self, wait: Duration) -> std::io::Result<()>;
+}
+
+impl<T: ChannelIo + ?Sized> ChannelIo for Box<T> {
+    fn close_write(&mut self) -> std::io::Result<()> {
+        (**self).close_write()
+    }
+    fn limit_read(&mut self, wait: Duration) -> std::io::Result<()> {
+        (**self).limit_read(wait)
+    }
+    fn limit_write(&mut self, wait: Duration) -> std::io::Result<()> {
+        (**self).limit_write(wait)
+    }
+}
+
+/// Sends one request on a connected, authenticated stream and reads the desktop's reply by
+/// `deadline`.
+pub fn exchange(
+    mut stream: impl ChannelIo,
     identity: &str,
     request: &Request,
+    deadline: Deadline<'_>,
 ) -> Result<Reply, ChannelError> {
-    let message = serde_json::to_vec(&Envelope {
+    let within = remaining(deadline)?;
+    let message = serde_json::to_vec(&RequestEnvelope {
         schema: SCHEMA.to_owned(),
         identity: identity.to_owned(),
+        within_ms: u64::try_from(within.as_millis()).unwrap_or(u64::MAX),
         body: request,
     })
     .map_err(|_| ChannelError::Protocol)?;
-    if message.len() as u64 > MAX_MESSAGE_BYTES {
+    if message.len() > MAX_MESSAGE_BYTES {
         return Err(ChannelError::Protocol);
     }
-    stream.write_all(&message).map_err(io_error)?;
-    stream.flush().map_err(io_error)?;
-    stream.close_write().map_err(io_error)?;
-    let reply: Envelope<Reply> = read_message(&mut stream)?;
+    write_by(&mut stream, &message, deadline)?;
+    stream.close_write().map_err(|_| ChannelError::Protocol)?;
+    let reply = match read_by(&mut stream, deadline) {
+        Ok(reply) => reply,
+        Err(ChannelError::Timeout) => return Err(ChannelError::Timeout),
+        Err(_) => return Err(ChannelError::Unanswered),
+    };
+    let reply: ReplyEnvelope =
+        serde_json::from_slice(&reply).map_err(|_| ChannelError::Unanswered)?;
     let incompatible = reply.body == Reply::Refused(Refusal::Incompatible);
     if reply.schema != SCHEMA || (reply.identity != identity && !incompatible) {
-        return Err(ChannelError::Protocol);
+        return Err(ChannelError::Unanswered);
     }
     Ok(reply.body)
 }
 
-/// Reads one request from an authenticated stream, answers it with `handle`, and writes the
-/// reply. A request in another schema or for another application identity is refused without
-/// reaching `handle`. A malformed or oversized request gets no answer.
-pub fn serve<S: Read + Write>(
-    mut stream: S,
+/// Reads one request from an authenticated stream by `request_by`, answers it with `handle`,
+/// and writes the reply within [`TRANSFER_WINDOW`]. `handle` receives the instant after which
+/// the request must not act, and answers `None` when it gave up, which writes no reply. A
+/// request in another schema or for another application identity is refused without reaching
+/// `handle`. A malformed, oversized or late request gets no answer.
+pub fn serve(
+    mut stream: impl ChannelIo,
     identity: &str,
-    handle: impl FnOnce(Request) -> Reply,
+    request_by: Instant,
+    handle: impl FnOnce(Request, Instant) -> Option<Reply>,
 ) -> Result<(), ChannelError> {
-    let reply = match read_message::<serde_json::Value>(&mut stream)? {
-        value if value.get("schema").and_then(|schema| schema.as_str()) != Some(SCHEMA) => {
+    let message = read_by(&mut stream, &|| request_by)?;
+    let received = Instant::now();
+    let value: serde_json::Value =
+        serde_json::from_slice(&message).map_err(|_| ChannelError::Protocol)?;
+    let reply = if value.get("schema").and_then(|schema| schema.as_str()) != Some(SCHEMA) {
+        Reply::Refused(Refusal::Incompatible)
+    } else {
+        let request: RequestEnvelope<Request> =
+            serde_json::from_value(value).map_err(|_| ChannelError::Protocol)?;
+        if request.identity != identity {
             Reply::Refused(Refusal::Incompatible)
-        }
-        value => {
-            let request: Envelope<Request> =
-                serde_json::from_value(value).map_err(|_| ChannelError::Protocol)?;
-            if request.identity == identity {
-                handle(request.body)
-            } else {
-                Reply::Refused(Refusal::Incompatible)
+        } else {
+            let window = Duration::from_millis(request.within_ms)
+                .min(MAX_EFFECT_WINDOW)
+                .saturating_sub(REPLY_MARGIN);
+            match handle(request.body, received + window) {
+                Some(reply) => reply,
+                None => return Ok(()),
             }
         }
     };
-    let message = serde_json::to_vec(&Envelope {
+    let message = serde_json::to_vec(&ReplyEnvelope {
         schema: SCHEMA.to_owned(),
         identity: identity.to_owned(),
         body: reply,
     })
     .map_err(|_| ChannelError::Protocol)?;
-    stream.write_all(&message).map_err(io_error)?;
-    stream.flush().map_err(io_error)
+    let reply_by = Instant::now() + TRANSFER_WINDOW;
+    write_by(&mut stream, &message, &|| reply_by)
 }
 
 /// A connection from a peer the desktop authenticated as its own account.
 #[cfg(feature = "desktop")]
-pub(crate) trait ChannelStream: Read + Write + Send {}
+pub(crate) trait ChannelStream: ChannelIo + Send {}
 #[cfg(feature = "desktop")]
-impl<T: Read + Write + Send> ChannelStream for T {}
+impl<T: ChannelIo + Send> ChannelStream for T {}
 
 /// The desktop's listening endpoint, which host composition selects.
 #[cfg(feature = "desktop")]
@@ -182,35 +254,85 @@ pub(crate) trait DesktopChannelEndpoint: Send + Sync {
     fn accept(&self) -> std::io::Result<Option<Box<dyn ChannelStream>>>;
 }
 
-/// Ends the client's request so the desktop reads it to its end.
-pub trait HalfClose {
-    fn close_write(&mut self) -> std::io::Result<()>;
+fn remaining(deadline: Deadline<'_>) -> Result<Duration, ChannelError> {
+    let remaining = deadline().saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(ChannelError::Timeout)
+    } else {
+        Ok(remaining)
+    }
 }
 
-fn read_message<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Result<T, ChannelError> {
+/// The next wait by the deadline: at most [`POLL`], so a deadline brought forward takes effect.
+fn wait(deadline: Deadline<'_>) -> Result<Duration, ChannelError> {
+    Ok(remaining(deadline)?.min(POLL))
+}
+
+fn retried(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+/// Reads to the end of the stream by `deadline`, refusing more than [`MAX_MESSAGE_BYTES`].
+fn read_by(stream: &mut impl ChannelIo, deadline: Deadline<'_>) -> Result<Vec<u8>, ChannelError> {
     let mut message = Vec::new();
-    stream
-        .take(MAX_MESSAGE_BYTES + 1)
-        .read_to_end(&mut message)
-        .map_err(io_error)?;
-    if message.len() as u64 > MAX_MESSAGE_BYTES {
-        return Err(ChannelError::Protocol);
+    let mut buffer = [0; 4096];
+    loop {
+        stream
+            .limit_read(wait(deadline)?)
+            .map_err(|_| ChannelError::Protocol)?;
+        match stream.read(&mut buffer) {
+            Ok(0) => return Ok(message),
+            Ok(count) => {
+                message.extend_from_slice(&buffer[..count]);
+                if message.len() > MAX_MESSAGE_BYTES {
+                    return Err(ChannelError::Protocol);
+                }
+            }
+            Err(error) if retried(&error) => {}
+            Err(_) => return Err(ChannelError::Protocol),
+        }
     }
-    serde_json::from_slice(&message).map_err(|_| ChannelError::Protocol)
 }
 
-fn io_error(error: std::io::Error) -> ChannelError {
-    match error.kind() {
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => ChannelError::Timeout,
-        _ => ChannelError::Protocol,
+fn write_by(
+    stream: &mut impl ChannelIo,
+    mut message: &[u8],
+    deadline: Deadline<'_>,
+) -> Result<(), ChannelError> {
+    while !message.is_empty() {
+        stream
+            .limit_write(wait(deadline)?)
+            .map_err(|_| ChannelError::Protocol)?;
+        match stream.write(message) {
+            Ok(0) => return Err(ChannelError::Protocol),
+            Ok(count) => message = &message[count..],
+            Err(error) if retried(&error) => {}
+            Err(_) => return Err(ChannelError::Protocol),
+        }
     }
+    Ok(())
 }
 
-/// Connects to this account's desktop of `identity` and asks it one request.
+/// The directory holding this account's endpoint of the desktop of `identity`.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn request(identity: &str, request: &Request) -> Result<Reply, ChannelError> {
-    let stream = crate::platform::unix_desktop_channel::connect(identity, REPLY_TIMEOUT)?;
-    exchange(stream, identity, request)
+pub fn endpoint_directory(identity: &str) -> Result<PathBuf, ChannelError> {
+    crate::platform::unix_desktop_channel::directory(identity)
+}
+
+/// Connects to this account's desktop of `identity` and asks it one request by `deadline`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn request(
+    identity: &str,
+    request: &Request,
+    deadline: Deadline<'_>,
+) -> Result<Reply, ChannelError> {
+    let stream = crate::platform::unix_desktop_channel::connect(identity, deadline)?;
+    exchange(stream, identity, request, deadline)
 }
 
 #[cfg(test)]
@@ -232,22 +354,29 @@ mod tests {
         }
     }
 
+    fn after(wait: Duration) -> Instant {
+        Instant::now() + wait
+    }
+
+    /// Exchanges `request` with a desktop answering `reply`, and returns what the desktop's
+    /// handler received with its effect deadline.
     fn answer(
         client_identity: &'static str,
         request: Request,
-        reply: Reply,
-    ) -> (Result<Reply, ChannelError>, Option<Request>) {
+        reply: Option<Reply>,
+        wait: Duration,
+    ) -> (Result<Reply, ChannelError>, Option<(Request, Instant)>) {
         let (client, desktop) = UnixStream::pair().unwrap();
         let served = std::thread::spawn(move || {
             let mut received = None;
-            serve(desktop, IDENTITY, |request| {
-                received = Some(request);
+            let _ = serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |request, by| {
+                received = Some((request, by));
                 reply
-            })
-            .unwrap();
+            });
             received
         });
-        let result = exchange(client, client_identity, &request);
+        let deadline = after(wait);
+        let result = exchange(client, client_identity, &request, &|| deadline);
         (result, served.join().unwrap())
     }
 
@@ -263,27 +392,121 @@ mod tests {
                 pane: None,
             },
         ] {
-            let (reply, received) = answer(IDENTITY, request.clone(), Reply::Done);
+            let (reply, received) = answer(
+                IDENTITY,
+                request.clone(),
+                Some(Reply::Done),
+                Duration::from_secs(5),
+            );
             assert_eq!(reply, Ok(Reply::Done));
-            assert_eq!(received, Some(request));
+            assert_eq!(received.map(|(request, _)| request), Some(request));
         }
         let (reply, _) = answer(
             IDENTITY,
             open(true),
-            Reply::Refused(Refusal::PreviewUnavailable),
+            Some(Reply::Refused(Refusal::PreviewUnavailable)),
+            Duration::from_secs(5),
         );
         assert_eq!(reply, Ok(Reply::Refused(Refusal::PreviewUnavailable)));
     }
 
     #[test]
+    fn the_desktop_acts_only_while_its_client_still_waits() {
+        let sent = Instant::now();
+        let (_, received) = answer(
+            IDENTITY,
+            open(false),
+            Some(Reply::Done),
+            Duration::from_secs(3),
+        );
+        let (_, by) = received.unwrap();
+        assert!(by <= Instant::now() + Duration::from_secs(3) - REPLY_MARGIN);
+        assert!(by > sent + Duration::from_secs(2));
+        // However long the client waits, a request acts within the desktop's own bound.
+        let (_, received) = answer(
+            IDENTITY,
+            open(false),
+            Some(Reply::Done),
+            Duration::from_secs(24 * 60 * 60),
+        );
+        assert!(received.unwrap().1 <= Instant::now() + MAX_EFFECT_WINDOW);
+    }
+
+    #[test]
+    fn a_request_the_desktop_gave_up_on_is_unanswered() {
+        let (reply, received) = answer(IDENTITY, open(false), None, Duration::from_secs(5));
+        assert!(received.is_some());
+        assert_eq!(reply, Err(ChannelError::Unanswered));
+    }
+
+    #[test]
+    fn the_client_stops_at_its_deadline_even_when_it_moves_earlier() {
+        let (client, desktop) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let deadline = after(Duration::from_millis(300));
+        assert_eq!(
+            exchange(client, IDENTITY, &open(false), &|| deadline),
+            Err(ChannelError::Timeout)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(desktop);
+
+        let (client, _desktop) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let original = after(Duration::from_secs(30));
+        let moved = after(Duration::from_millis(300));
+        // An interrupt brings the deadline forward while the client waits.
+        let deadline = || {
+            if started.elapsed() > Duration::from_millis(100) {
+                moved
+            } else {
+                original
+            }
+        };
+        assert_eq!(
+            exchange(client, IDENTITY, &open(false), &deadline),
+            Err(ChannelError::Timeout)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_client_trickling_its_request_holds_the_desktop_only_until_the_request_deadline() {
+        let (mut client, desktop) = UnixStream::pair().unwrap();
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..20 {
+                if client.write_all(b" ").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let started = Instant::now();
+        let served = serve(
+            desktop,
+            IDENTITY,
+            after(Duration::from_millis(500)),
+            |_, _| panic!("a late request was handled"),
+        );
+        assert_eq!(served, Err(ChannelError::Timeout));
+        assert!(started.elapsed() < Duration::from_millis(900));
+        trickle.join().unwrap();
+    }
+
+    #[test]
     fn another_identity_or_schema_is_refused_before_the_handler() {
-        let (reply, received) = answer("spaceterm", open(false), Reply::Done);
+        let (reply, received) = answer(
+            "spaceterm",
+            open(false),
+            Some(Reply::Done),
+            Duration::from_secs(5),
+        );
         assert_eq!(reply, Ok(Reply::Refused(Refusal::Incompatible)));
-        assert_eq!(received, None);
+        assert!(received.is_none());
 
         let (mut client, desktop) = UnixStream::pair().unwrap();
         let served = std::thread::spawn(move || {
-            serve(desktop, IDENTITY, |_| {
+            serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |_, _| {
                 panic!("an old schema reached the handler")
             })
         });
@@ -291,25 +514,27 @@ mod tests {
             .write_all(br#"{"schema":"spaceterm.desktop.v0","identity":"x","body":{}}"#)
             .unwrap();
         client.close_write().unwrap();
-        let reply: Envelope<Reply> = read_message(&mut client).unwrap();
+        let deadline = after(Duration::from_secs(5));
+        let reply: ReplyEnvelope =
+            serde_json::from_slice(&read_by(&mut client, &|| deadline).unwrap()).unwrap();
         assert_eq!(reply.body, Reply::Refused(Refusal::Incompatible));
         served.join().unwrap().unwrap();
     }
 
     #[test]
     fn oversized_or_malformed_requests_get_no_answer() {
-        for message in [vec![b' '; MAX_MESSAGE_BYTES as usize + 1], b"{".to_vec()] {
+        for message in [vec![b' '; MAX_MESSAGE_BYTES + 1], b"{".to_vec()] {
             let (mut client, desktop) = UnixStream::pair().unwrap();
             let served = std::thread::spawn(move || {
-                serve(desktop, IDENTITY, |_| {
+                serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |_, _| {
                     panic!("a malformed request was handled")
                 })
             });
-            client.write_all(&message).unwrap();
-            client.close_write().unwrap();
+            let _ = client.write_all(&message);
+            let _ = client.close_write();
             assert_eq!(served.join().unwrap(), Err(ChannelError::Protocol));
             let mut reply = Vec::new();
-            client.read_to_end(&mut reply).unwrap();
+            let _ = client.read_to_end(&mut reply);
             assert!(reply.is_empty());
         }
     }
