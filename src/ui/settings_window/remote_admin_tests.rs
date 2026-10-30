@@ -619,3 +619,62 @@ fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
         "the update the old reading offered is gone"
     );
 }
+
+/// A Restart whose receipt never arrives says it can't be confirmed. The next Check Now settles
+/// the pending operation and says what became of it.
+#[gpui::test]
+fn an_uncertain_restart_is_reported_and_the_next_check_settles_it(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Ok(Prepared {
+        preview: preview(LaneAction::Restart, effects(1)),
+        settled: Vec::new(),
+    });
+    *remote.perform.lock().unwrap() = Ok(Performed {
+        outcome: Outcome::Unconfirmed {
+            operation: "0123456789abcdef0123456789abcdef".into(),
+            boot: "a".into(),
+            last: None,
+        },
+        settled: Vec::new(),
+    });
+    let servers = open_penguin(&remote, cx);
+
+    click(RESTART_SELECTOR, servers.cx);
+    answer(CONFIRM_SELECTOR, servers.cx);
+    servers.cx.run_until_parked();
+    assert!(
+        footnote(&servers).contains(
+            "SpaceTerm couldn\u{2019}t confirm whether penguin finished its restart. Check Now \
+             asks penguin again."
+        ),
+        "got {:?}",
+        footnote(&servers)
+    );
+
+    // The server's start-up couldn't prove the Restart either, so its receipt settles as
+    // unresolved, and this connection acknowledges it.
+    *remote.read.lock().unwrap() = Ok(Reading {
+        status: status(version("1.2.0", "aaaaaaaaaa")),
+        check: LaneCheck {
+            approved: version("1.2.0", "aaaaaaaaaa"),
+            latest: None,
+            staged: Vec::new(),
+        },
+        settled: vec![receipt(
+            LaneAction::Restart,
+            LaneOperationState::Unresolved,
+            "b",
+        )],
+    });
+    click(
+        super::super::server_card::VERSION_CHECK_SELECTOR,
+        servers.cx,
+    );
+    servers.cx.run_until_parked();
+    assert!(
+        footnote(&servers)
+            .contains("penguin couldn\u{2019}t confirm whether an earlier restart finished."),
+        "got {:?}",
+        footnote(&servers)
+    );
+}

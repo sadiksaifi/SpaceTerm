@@ -463,6 +463,12 @@ impl Lane {
         }
     }
 
+    /// A lane over `connector`, for flows tested against a served fixture lane.
+    #[cfg(test)]
+    pub(crate) fn over(connector: Arc<dyn Connector>) -> Self {
+        Self { connector }
+    }
+
     /// Opens and admits one connection.
     pub fn session(&self) -> Result<Session, ServerError> {
         Session::open(self.connector.as_ref(), Instant::now() + REQUEST_LIMIT)
