@@ -30,6 +30,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - Reuse delegates when role and context fit; brief with goals, agreed constraints and evidence, leaving open decisions to them.
 - Coordinate shared caches and native resources per host; separate baseline artifacts and overlap independent checks and reviews.
 - Run scoped tests, then required acceptance checks; reuse evidence only while relevant code, artifacts, configuration and environment still match.
+- Track issues on the project board: when you start one, assign it with `gh issue edit <number> --add-assignee @me` (In progress); keep its PR a draft while you work, and run `gh pr ready` once it is ready for review by you or another agent (In review). A PR body with `Closes #<number>` moves the issue to Done on merge.
 - Before any user-requested commit, push, or PR merge into main, disclose any known pre-existing test or check failures unrelated to your changes.
 - For local server setup or incompatible development state, follow [the local workflow](docs/local-server.md).
 - For Linux work and native verification, use Penguin directly: `ssh penguin` for commands and Remora for its desktop.

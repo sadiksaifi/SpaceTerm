@@ -5,7 +5,7 @@ on:
     types: [assigned, unassigned]
   # Run trusted default-branch code for fork PRs, without checking out PR code.
   pull_request_target:
-    types: [opened, reopened, ready_for_review, closed]
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
 
 permissions:
   issues: read
@@ -45,7 +45,7 @@ jobs:
                   query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                     repository(owner: $owner, name: $repo) {
                       pullRequest(number: $number) {
-                        id state merged
+                        id state merged isDraft
                         closingIssuesReferences(first: 100, after: $cursor) {
                           nodes {
                             id state
@@ -63,7 +63,7 @@ jobs:
                   core.setOutput('needed', 'false');
                   return;
                 }
-                work.pullRequest = { id: pullRequest.id, state: pullRequest.state, number };
+                work.pullRequest = { id: pullRequest.id, state: pullRequest.state, draft: pullRequest.isDraft, number };
                 const references = pullRequest.closingIssuesReferences;
                 work.issues.push(...references.nodes.filter(issue =>
                   issue.repository.nameWithOwner === `${owner}/${repo}` && issue.state === 'OPEN'));
@@ -138,11 +138,14 @@ jobs:
               return node;
             }
             const assignedStatus = issue => issue.assignees.totalCount ? 'In progress' : 'Backlog';
-            const reviewing = work.pullRequest?.state === 'OPEN';
-            // Issues-only Backlog built-ins leave all open PRs, including drafts, to this Action.
-            if (reviewing) await setStatus(work.pullRequest.id, 'In review');
+            // Issues-only Backlog built-ins leave all open PRs to this Action. A draft is still
+            // being worked on; a PR marked ready for review is under review.
+            const open = work.pullRequest?.state === 'OPEN';
+            const reviewing = open && !work.pullRequest.draft;
+            const openStatus = reviewing ? 'In review' : 'In progress';
+            if (open) await setStatus(work.pullRequest.id, openStatus);
             for (const issue of work.issues) {
-              await setStatus(issue.id, reviewing ? 'In review' : assignedStatus(issue));
+              await setStatus(issue.id, open ? openStatus : assignedStatus(issue));
             }
 
             // A close/merge may have finished while the writes used their earlier snapshots.
