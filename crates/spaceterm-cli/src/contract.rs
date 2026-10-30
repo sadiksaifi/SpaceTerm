@@ -1776,6 +1776,16 @@ pub struct WorkspaceChange {
     pub revision: u64,
 }
 
+/// `workspace.pin` and `workspace.unpin`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkspacePin {
+    pub target: Vec<TargetStep>,
+    pub workspace: Ref,
+    /// The server's Pinned Directory after acceptance, or null after unpinning.
+    pub pinned_directory: Option<String>,
+    pub revision: u64,
+}
+
 /// `workspace.kill`, `tab.close`, `pane.close` and `worktree.remove` after confirmation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Closed {
