@@ -231,10 +231,6 @@ impl Context<'_> {
     }
 }
 
-fn terminal_stdout() -> bool {
-    terminal(libc::STDOUT_FILENO)
-}
-
 fn terminal(fd: libc::c_int) -> bool {
     // SAFETY: isatty only observes the descriptor.
     unsafe { libc::isatty(fd) == 1 }

@@ -51,6 +51,7 @@ fn removed_arguments_fail_before_server_access_without_echoing_the_input() {
         vec!["server", "provision", "network"],
         vec!["server", "provision", "automatic-start"],
         vec!["server", "provision", "linger"],
+        vec!["server", "pair", "--qr"],
         vec!["server", "run", "--identity", identity],
         vec!["server", "run", "--service", "--owned"],
     ] {
@@ -59,6 +60,19 @@ fn removed_arguments_fail_before_server_access_without_echoing_the_input() {
         assert!(output.stdout.is_empty(), "{args:?}");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("must-not-appear"));
     }
+}
+
+#[test]
+fn pairing_json_keeps_the_interaction_required_contract_without_a_qr() {
+    let output = spaceterm(&["server", "pair", "--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../golden/server_pair_interaction_required.json"
+    ))
+    .unwrap();
+    assert_eq!(actual, expected);
 }
 
 #[test]

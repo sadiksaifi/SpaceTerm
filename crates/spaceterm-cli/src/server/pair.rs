@@ -1,9 +1,12 @@
 //! `server pair`: let another device pair with this server, on the server's own machine.
 //!
-//! It prints a one-use Invitation Link as its only stdout line, waits for that invitation's
-//! claim, then asks the person to type the Comparison Code the joining device shows. A match
-//! approves the claim. A mismatch rejects it. The invitation is withdrawn on end of input,
+//! It prints a one-use Invitation Link and, when stdout supports it, the same link as a QR
+//! code, then waits for that invitation's claim and asks the person to type the Comparison
+//! Code the joining device shows. A match approves the claim. A mismatch rejects it.
+//! The invitation is withdrawn on end of input,
 //! interrupt, timeout and every failure, so no link outlives the command.
+mod qr;
+
 use super::{Context, Reply};
 use crate::contract::{self, Code, Envelope, Failure, Warning, WarningCode, WarningDetails};
 use spaceterm_server::ServerConnection;
@@ -59,7 +62,7 @@ impl Invitations for ServerConnection {
 
 /// The person at the terminal.
 pub trait Person {
-    /// Shows the Invitation Link, the command's only stdout line.
+    /// Shows the Invitation Link and, when supported, its QR rendering on stdout.
     fn show_link(&mut self, link: &str) -> Result<(), Failure>;
     /// Says something on stderr.
     fn say(&mut self, text: &str);
@@ -75,8 +78,7 @@ struct Terminal;
 impl Person for Terminal {
     fn show_link(&mut self, link: &str) -> Result<(), Failure> {
         let mut out = std::io::stdout().lock();
-        writeln!(out, "{link}")
-            .and_then(|()| out.flush())
+        qr::write_invitation(&mut out, link, qr::terminal_columns())
             .map_err(|_| Failure::new(Code::OutputFailed))
     }
     fn say(&mut self, text: &str) {
@@ -174,8 +176,8 @@ pub fn pair(
     }
 }
 
-/// A successful pairing's reply. The Invitation Link was the command's only stdout line, so
-/// the reply adds nothing to stdout.
+/// A successful pairing's reply. The invitation was already shown, so the reply adds
+/// nothing to stdout.
 fn approved(server: Option<crate::contract::ServerRef>) -> Reply {
     Reply::new(
         &Envelope::ok(COMMAND, server, contract::Empty {}),
@@ -188,7 +190,7 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         return Reply::failure(COMMAND, None, failure);
     }
     // Pairing needs a person at a terminal, so it creates no invitation without one.
-    if context.global.json || !context.interactive() || !super::terminal_stdout() {
+    if !context.interactive() {
         return Reply::failure(COMMAND, None, Failure::new(Code::InteractionRequired));
     }
     if let Some(address) = address
