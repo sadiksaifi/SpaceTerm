@@ -17,6 +17,10 @@ pub fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConnections
     super::worker::enrollment_tests::retryable_join(label, stage)
 }
 
+pub fn lost_claim_invitation(label: &str) -> (DirectConnections, Zeroizing<String>) {
+    super::worker::enrollment_tests::lost_claim_invitation(label)
+}
+
 /// An unjoined registry for the real Add Server journey. The network boundary returns
 /// a fixed exchange comparison ("000007") and waits for the person's cancellation.
 pub fn waiting_invitation(

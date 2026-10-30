@@ -10,10 +10,9 @@ use crate::contract::{
 };
 use spaceterm_server::service::Service;
 use spaceterm_server::service::control::{Action as ControlAction, Controller, Wording};
+use spaceterm_server::service::lane::admin::{self, Verdict};
 use spaceterm_server::service::lane::client::Outcome;
-use spaceterm_server::service::lane::{
-    LaneAction, LaneEffects, LaneOperationState, LaneReceipt, LaneReply, LaneRequest,
-};
+use spaceterm_server::service::lane::{LaneAction, LaneEffects, LaneOperationState, LaneReceipt};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,10 +42,7 @@ impl Kind {
     }
     /// Stop waits for the server to close the lane. Restart waits for it to return.
     fn wait(self) -> Duration {
-        match self {
-            Self::Stop => Duration::from_secs(90),
-            Self::Restart => Duration::from_secs(180),
-        }
+        admin::wait(&self.action())
     }
 }
 
@@ -125,38 +121,16 @@ fn preview(
     pending: &Pending,
 ) -> Reply {
     let command = kind.command();
-    let reply = opened.session.request(
-        &LaneRequest::Preview {
-            action: kind.action(),
-        },
-        Instant::now() + Duration::from_secs(30),
-    );
-    let (token, expires_at, effects) = match reply {
-        Ok(LaneReply::Preview {
-            token,
-            expires_at,
-            effects,
-        }) => (token, expires_at, effects),
-        Ok(LaneReply::Error { code }) => {
-            return Reply::failure(
-                command,
-                Some(routed.server),
-                contract::from_lane_code(&code),
-            );
-        }
-        Ok(_) => {
-            return Reply::failure(
-                command,
-                Some(routed.server),
-                Failure::new(Code::ProtocolError),
-            );
-        }
+    let previewed = admin::preview(&mut opened.session, kind.action());
+    let admin::Preview {
+        token,
+        expires_at,
+        effects,
+        ..
+    } = match previewed {
+        Ok(preview) => preview,
         Err(error) => {
-            return Reply::failure(
-                command,
-                Some(routed.server),
-                contract::from_server_error(error),
-            );
+            return Reply::failure(command, Some(routed.server), super::lane_failure(error));
         }
     };
     let wording = Wording::for_server(
@@ -247,12 +221,14 @@ fn execute(
         recovered,
     } = opened;
     let deadline = Instant::now() + context.timeout(kind.wait());
-    let outcome = lane.perform(
+    let outcome = admin::execute(
+        &lane,
         session,
         kind.action(),
         token,
         context.timeout(kind.wait()),
-        &mut |operation| pending.add(operation),
+        pending.operations(),
+        &mut super::dispatch,
         &crate::interrupt::settle_by,
     );
     let outcome = match outcome {
@@ -279,9 +255,6 @@ fn execute(
     let mut settled = settle(action, outcome);
     if routed.local && settled.observed == Some(Observed::Shutdown) {
         settled = confirm_local_stop(context, settled, deadline);
-    }
-    if settled.acknowledged {
-        let _ = pending.remove(&settled.receipt.operation);
     }
     let text = match (&settled.observed, settled.failure.as_ref()) {
         (Some(Observed::Shutdown), None) => "Server stopped.\n".to_owned(),
@@ -394,17 +367,16 @@ pub fn settle(action: ServiceAction, outcome: Outcome) -> Settled {
         },
         Outcome::Settled { receipt, boot } => {
             let observed = (receipt.boot != boot).then_some(Observed::Restarted);
-            let failure = match receipt.state {
-                LaneOperationState::Done => None,
-                LaneOperationState::Failed => Some(
-                    receipt
-                        .code
-                        .as_deref()
+            let failure = match admin::receipt_verdict(&receipt) {
+                Verdict::Done => None,
+                Verdict::Failed(code) => Some(
+                    code.as_deref()
                         .map(contract::from_lane_code)
                         .unwrap_or(Failure::new(Code::OperationFailed)),
                 ),
-                LaneOperationState::NotPerformed => Some(Failure::new(Code::OperationFailed)),
-                _ => Some(unconfirmed(&receipt)),
+                Verdict::NotPerformed => Some(Failure::new(Code::OperationFailed)),
+                // A settled receipt is never a shutdown, which only a lost lane reports.
+                Verdict::Uncertain | Verdict::Shutdown => Some(unconfirmed(&receipt)),
             };
             Settled {
                 receipt: receipt_of(&receipt),

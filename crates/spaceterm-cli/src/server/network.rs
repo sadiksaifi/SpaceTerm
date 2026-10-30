@@ -15,6 +15,7 @@ use crate::contract::{
     self, CallerEffect, Code, Confirmation, ConfirmationData, DeviceRef, Envelope, Failure,
     NetworkEffects, NetworkSetting, RecoveredOperation, ServerNetwork, ServerRef, ServiceAction,
 };
+use spaceterm_server::service::lane::admin;
 use spaceterm_server::service::lane::client::{Lane, within};
 use spaceterm_server::service::lane::network::{
     LaneCallerEffect, LaneNetworkEffects, LaneNetworkSetting, NetworkAccess,
@@ -23,9 +24,6 @@ use spaceterm_server::service::lane::{LaneAction, LaneReply, LaneRequest};
 use std::time::{Duration, Instant};
 
 const COMMAND: &str = "server.network";
-/// How long a confirmed change waits for its receipt, including reconnecting after the change
-/// ended this connection.
-const WAIT: Duration = Duration::from_secs(30);
 /// How long the command reads Network Access back after a completed change.
 const READ_BACK: Duration = Duration::from_secs(10);
 
@@ -79,23 +77,14 @@ fn preview(
     mut opened: Opened,
     pending: &Pending,
 ) -> Reply {
-    let reply = opened.session.request(
-        &LaneRequest::Preview {
-            action: LaneAction::Network { access },
-        },
-        Instant::now() + Duration::from_secs(30),
-    );
-    let (token, expires_at, effects) = match reply {
-        Ok(LaneReply::NetworkPreview {
-            token,
-            expires_at,
-            effects,
-        }) => (token, expires_at, effects),
-        Ok(LaneReply::Error { code }) => {
-            return failure(routed.server, contract::from_lane_code(&code), opened);
-        }
-        Ok(_) => return failure(routed.server, Failure::new(Code::ProtocolError), opened),
-        Err(error) => return failure(routed.server, contract::from_server_error(error), opened),
+    let admin::NetworkPreview {
+        token,
+        expires_at,
+        effects,
+        ..
+    } = match admin::preview_network(&mut opened.session, access) {
+        Ok(preview) => preview,
+        Err(error) => return failure(routed.server, super::lane_failure(error), opened),
     };
     if effects.unchanged() {
         let data = ServerNetwork {
@@ -263,12 +252,16 @@ fn execute(
         session,
         recovered,
     } = opened;
-    let outcome = lane.perform(
+    let action = LaneAction::Network { access };
+    let wait = context.timeout(admin::wait(&action));
+    let outcome = admin::execute(
+        &lane,
         session,
-        LaneAction::Network { access },
+        action,
         token,
-        context.timeout(WAIT),
-        &mut |operation| pending.add(operation),
+        wait,
+        pending.operations(),
+        &mut super::dispatch,
         &crate::interrupt::settle_by,
     );
     let outcome = match outcome {
@@ -289,9 +282,6 @@ fn execute(
         }
     };
     let settled = super::lifecycle::settle(ServiceAction::Network, outcome);
-    if settled.acknowledged {
-        let _ = pending.remove(&settled.receipt.operation);
-    }
     let network = settled.failure.is_none().then(|| read_back(lane)).flatten();
     let status = context.command_line(&routed.server, "server status");
     let (envelope, text) = result(routed.server, settled, network, &status);

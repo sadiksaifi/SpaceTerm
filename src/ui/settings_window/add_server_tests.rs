@@ -333,6 +333,155 @@ impl Sheet<'_> {
         })
     }
 
+    /// The value of the sheet's field `field` picks, and whether it has keyboard focus.
+    fn field(&mut self, field: fn(&AddServerSheet) -> &Entity<TextInput>) -> (String, bool) {
+        self.cx.update(|window, cx| {
+            let sheet = open_sheet(window, cx).expect("the sheet is open");
+            let input = field(sheet.read(cx)).read(cx);
+            (
+                input.value().to_owned(),
+                input.focus_handle().is_focused(window),
+            )
+        })
+    }
+
+    /// Replaces the refused text in the focused field one keystroke at a time with `text`, as the
+    /// person corrects it. After each keystroke the field `typing` keeps focus and the field
+    /// `kept` keeps its value.
+    fn correct(
+        &mut self,
+        typing: fn(&AddServerSheet) -> &Entity<TextInput>,
+        kept: fn(&AddServerSheet) -> &Entity<TextInput>,
+        text: &str,
+    ) {
+        let (refused, focused) = self.field(typing);
+        assert!(focused, "the refused field has keyboard focus");
+        let (other, _) = self.field(kept);
+        let presentation = self.presented().0;
+        let edits =
+            std::iter::repeat_n(None, refused.chars().count()).chain(text.chars().map(Some));
+        for edit in edits {
+            match edit {
+                None => self.cx.simulate_keystrokes("backspace"),
+                Some(character) => self.cx.simulate_input(&character.to_string()),
+            }
+            self.cx.run_until_parked();
+            let (_, focused) = self.field(typing);
+            assert!(focused, "the corrected field keeps keyboard focus");
+            assert_eq!(self.field(kept).0, other, "the other field is unchanged");
+            assert_eq!(
+                self.presented().0,
+                presentation,
+                "the sheet stays on screen while the person types"
+            );
+        }
+        assert_eq!(self.field(typing).0, text);
+    }
+
+    /// Folds the refused address away with its disclosure, opens it again and retypes it with
+    /// `text` after Select All. The field stays shown and focused through every keystroke, and
+    /// the field `kept` keeps its value.
+    fn retype_after_folding(
+        &mut self,
+        disclosure: &'static str,
+        selector: &'static str,
+        typing: fn(&AddServerSheet) -> &Entity<TextInput>,
+        kept: fn(&AddServerSheet) -> &Entity<TextInput>,
+        text: &str,
+    ) {
+        let (other, _) = self.field(kept);
+        self.click(disclosure);
+        assert!(
+            self.cx.debug_bounds(selector).is_none(),
+            "the disclosure folds a refused address away"
+        );
+        self.click(disclosure);
+        self.click(selector);
+        self.cx.simulate_keystrokes("cmd-a");
+        for character in text.chars() {
+            self.cx.simulate_input(&character.to_string());
+            self.cx.run_until_parked();
+            assert!(
+                self.cx.debug_bounds(selector).is_some(),
+                "an edit never hides the address"
+            );
+            assert!(self.field(typing).1, "the address keeps keyboard focus");
+            assert_eq!(self.field(kept).0, other, "the other field is unchanged");
+        }
+        assert_eq!(self.field(typing).0, text);
+    }
+
+    /// The role and name of the node with keyboard focus, as assistive technology reads it.
+    fn focus(&mut self) -> (String, String) {
+        let tree = A11yTree::read(self.cx);
+        let node = tree.focused().expect("a node has keyboard focus");
+        (
+            node["aria"]["role"].as_str().unwrap_or_default().to_owned(),
+            node["aria"]["label"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+
+    /// Presses and releases Space, which activates a focused button on release.
+    fn press_space(&mut self) {
+        self.cx.simulate_keystrokes("space");
+        self.cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("space").unwrap(),
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// What assistive technology reads from the focused node: its help, expanded state and value.
+    fn announced(&mut self) -> (String, Option<bool>, String) {
+        let tree = A11yTree::read(self.cx);
+        let node = tree.focused().expect("a node has keyboard focus");
+        (
+            node["aria"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            node["aria"]["expanded"].as_bool(),
+            node["aria"]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+
+    /// Opens and folds the focused Network Address disclosure with Space. Its help, expanded state
+    /// and value follow each change while it keeps focus, so assistive technology announces the
+    /// new state in place. `hint` is its help while folded.
+    fn toggle_disclosure_in_place(&mut self, hint: &str) {
+        let folded = (hint.to_owned(), Some(false), "collapsed".to_owned());
+        let expanded = (
+            DISCLOSURE_HIDE.to_owned(),
+            Some(true),
+            "expanded".to_owned(),
+        );
+        let disclosure = ("Button".to_owned(), "Network Address".to_owned());
+        assert_eq!(self.announced(), folded);
+        self.press_space();
+        assert_eq!(self.focus(), disclosure);
+        assert_eq!(self.announced(), expanded);
+        self.press_space();
+        assert_eq!(self.focus(), disclosure);
+        assert_eq!(self.announced(), folded);
+    }
+
+    /// Presses Tab until the Network Address disclosure has keyboard focus.
+    fn tab_to_disclosure(&mut self) {
+        for _ in 0..6 {
+            if self.focus() == ("Button".to_owned(), "Network Address".to_owned()) {
+                return;
+            }
+            self.cx.simulate_keystrokes("tab");
+            self.cx.run_until_parked();
+        }
+        panic!("Tab reaches the Network Address disclosure");
+    }
+
     /// Shows an SSH sign-in prompt in the sheet's window, then has the person dismiss it, as the
     /// AskPass presenter reports both.
     fn decline_prompt(&mut self) {
@@ -503,6 +652,78 @@ fn an_address_that_names_no_host_is_refused_before_setup_runs(cx: &mut TestAppCo
     assert!(
         sheet.computers.asked().is_empty(),
         "SSH runs only for a usable address"
+    );
+}
+
+/// Correcting a refused network address keeps keyboard focus in it, so no keystroke reaches the
+/// host.
+#[gpui::test]
+fn correcting_a_refused_address_keeps_focus_in_it(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(|route| vec![Outcome::Finish(Ok(route))], cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.enter_address("not a host");
+    sheet.choose(SheetAction::SetUp.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.correct(|sheet| &sheet.address, |sheet| &sheet.host, "studio.local");
+
+    assert!(!sheet.says("Enter a host name or IP address"));
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+    assert_eq!(
+        sheet.computers.asked()[0].address.as_deref(),
+        Some("studio.local:9231")
+    );
+}
+
+/// Space opens the network address from the keyboard and leaves focus on the disclosure, as a
+/// macOS disclosure does. Space again folds it away.
+#[gpui::test]
+fn the_keyboard_opens_the_network_address_with_focus_on_its_disclosure(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.tab_to_disclosure();
+
+    sheet.press_space();
+
+    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_some());
+    assert_eq!(
+        sheet.focus(),
+        ("Button".to_owned(), "Network Address".to_owned())
+    );
+    sheet.cx.simulate_keystrokes("tab");
+    sheet.cx.run_until_parked();
+    assert!(
+        sheet.field(|sheet| &sheet.address).1,
+        "Tab moves into the shown address"
+    );
+
+    sheet.cx.simulate_keystrokes("shift-tab");
+    sheet.press_space();
+    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_none());
+    assert_eq!(
+        sheet.focus(),
+        ("Button".to_owned(), "Network Address".to_owned())
+    );
+}
+
+/// A refused address the person folded away and opened again stays shown while they correct it.
+#[gpui::test]
+fn correcting_a_refused_address_after_folding_it_keeps_it_shown(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.enter_address("not a host");
+    sheet.choose(SheetAction::SetUp.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.retype_after_folding(
+        ADDRESS_DISCLOSURE_SELECTOR,
+        ADDRESS_SELECTOR,
+        |sheet| &sheet.address,
+        |sheet| &sheet.host,
+        "studio.local",
     );
 }
 
@@ -1004,6 +1225,197 @@ fn a_delivered_invitation_names_its_server_and_address_and_waits_for_join(cx: &m
         "Add Server",
         "a delivered link joins nothing until the person chooses Join"
     );
+}
+
+/// The invitation's network address starts folded away, and one that names no host is refused
+/// before anything is joined. It stays shown with keyboard focus, and the link stays for another
+/// try.
+#[gpui::test]
+fn an_invitation_address_that_names_no_host_is_refused_before_join(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link)));
+    assert!(
+        sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_none(),
+        "the optional network address starts folded away"
+    );
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+
+    sheet.choose(SheetAction::Join.selector());
+
+    assert!(sheet.says("Enter a host name or IP address"));
+    assert_eq!(sheet.title(), "Add Server", "nothing was joined");
+    assert!(!sheet.disabled("Join"), "the link stays for another try");
+    let focused = sheet.cx.update(|window, cx| {
+        let sheet = open_sheet(window, cx).expect("the sheet is open");
+        sheet
+            .read(cx)
+            .endpoint
+            .read(cx)
+            .focus_handle()
+            .is_focused(window)
+    });
+    assert!(focused, "the refused address has keyboard focus");
+}
+
+/// Correcting a refused invitation address keeps keyboard focus in it, so no keystroke reaches the
+/// invitation link.
+#[gpui::test]
+fn correcting_a_refused_invitation_address_keeps_focus_in_it(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link.clone())));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+    sheet.choose(SheetAction::Join.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.correct(
+        |sheet| &sheet.endpoint,
+        |sheet| &sheet.link,
+        "public.example",
+    );
+
+    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
+    assert!(!sheet.says("Enter a host name or IP address"));
+    sheet.choose(SheetAction::Join.selector());
+    sheet.settle(|sheet| A11yTree::read(sheet.cx).find("Code").is_some());
+    assert_eq!(sheet.title(), "Join studio");
+}
+
+/// Space opens the invitation's network address from the keyboard and leaves focus on the
+/// disclosure, as a macOS disclosure does.
+#[gpui::test]
+fn the_keyboard_opens_the_invitation_address_with_focus_on_its_disclosure(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
+    sheet.tab_to_disclosure();
+
+    sheet.press_space();
+
+    assert!(sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_some());
+    assert_eq!(
+        sheet.focus(),
+        ("Button".to_owned(), "Network Address".to_owned())
+    );
+    sheet.cx.simulate_keystrokes("tab");
+    sheet.cx.run_until_parked();
+    assert!(
+        sheet.field(|sheet| &sheet.endpoint).1,
+        "Tab moves into the shown address"
+    );
+}
+
+/// Both disclosures announce their new state in place while they keep keyboard focus.
+#[gpui::test]
+fn the_network_address_disclosures_announce_their_state_in_place(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.tab_to_disclosure();
+    sheet.toggle_disclosure_in_place(ADDRESS_DISCLOSURE_DESCRIPTION);
+
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
+    sheet.tab_to_disclosure();
+    sheet.toggle_disclosure_in_place(ENDPOINT_DISCLOSURE_DESCRIPTION);
+}
+
+/// Select All and a retyped address after a refused Join stay in the address, as the person
+/// corrects it from the keyboard.
+#[gpui::test]
+fn retyping_a_refused_invitation_address_after_select_all_keeps_focus_in_it(
+    cx: &mut TestAppContext,
+) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link.clone())));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.cx.run_until_parked();
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.cx.simulate_keystrokes("cmd-a");
+    for character in "public.example".chars() {
+        sheet.cx.simulate_input(&character.to_string());
+        sheet.cx.run_until_parked();
+        assert!(sheet.field(|sheet| &sheet.endpoint).1);
+    }
+
+    assert_eq!(sheet.field(|sheet| &sheet.endpoint).0, "public.example");
+    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
+}
+
+/// A refused invitation address the person folded away and opened again stays shown while they
+/// correct it.
+#[gpui::test]
+fn correcting_a_refused_invitation_address_after_folding_it_keeps_it_shown(
+    cx: &mut TestAppContext,
+) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link)));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+    sheet.choose(SheetAction::Join.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.retype_after_folding(
+        ENDPOINT_DISCLOSURE_SELECTOR,
+        ENDPOINT_SELECTOR,
+        |sheet| &sheet.endpoint,
+        |sheet| &sheet.link,
+        "public.example",
+    );
+}
+
+/// An entered address replaces only the one the invitation names. An address that doesn't reach
+/// the server pauses the join with the usual network failure, and the saved connection keeps the
+/// invitation's pinned identity.
+#[gpui::test]
+fn an_entered_invitation_address_replaces_only_where_join_connects(cx: &mut TestAppContext) {
+    let (direct, link) = crate::direct_connections::tests::lost_claim_invitation("studio");
+    let pin = Invitation::parse(&link).unwrap().server_pin().clone();
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link)));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "Public.EXAMPLE");
+
+    sheet.choose(SheetAction::Join.selector());
+    sheet.settle(|sheet| {
+        sheet
+            .says("SpaceTerm couldn\u{2019}t reach the server. Check your network, then try again.")
+    });
+    assert_eq!(sheet.title(), "Pairing Paused");
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected().is_some());
+
+    let Some(ServerChoice::Direct(route)) = sheet.selected() else {
+        panic!("the joined server is selected")
+    };
+    let route = direct.route(&route).expect("the joined server is saved");
+    assert_eq!(route.endpoint, "quic://public.example:9231");
+    assert_eq!(route.paired.pin, pin, "the invitation's pin stays");
+}
+
+/// A link delivered later doesn't take an address entered for an earlier one.
+#[gpui::test]
+fn a_delivered_link_starts_without_an_earlier_address(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "public.example");
+
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("annex"))));
+
+    assert!(sheet.says("annex"));
+    assert!(sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_none());
+    let entered = sheet.cx.update(|window, cx| {
+        let sheet = open_sheet(window, cx).expect("the sheet is open");
+        sheet.read(cx).endpoint.read(cx).value().to_owned()
+    });
+    assert!(entered.is_empty());
 }
 
 #[gpui::test]

@@ -827,7 +827,12 @@ mod flow {
                 .lock()
                 .unwrap()
                 .push(server.try_clone().map_err(|_| ServerError::Protocol)?);
-            std::thread::spawn(move || lane.serve(&mut server, ACTOR, None, &|| Ok(())));
+            // The fixture's signing trust is per thread, so the serving thread holds it too.
+            std::thread::spawn(move || {
+                crate::service::runtime::test_support::with_fixture_trust(|| {
+                    lane.serve(&mut server, ACTOR, None, &|| Ok(()))
+                })
+            });
             Ok(Box::new(client))
         }
     }
@@ -1252,6 +1257,161 @@ mod flow {
             .unwrap();
             assert!(matches!(outcome, Outcome::Shutdown { .. }), "{outcome:?}");
             assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// One route's pending record, beside the fixture server's own state.
+    fn pending_record(lane: &Lane) -> crate::service::lane::admin::PendingOperations {
+        crate::service::lane::admin::PendingOperations::new(
+            Directory::open(&lane.service.paths.data.join("client-pending"), true).unwrap(),
+        )
+    }
+
+    /// A signed release feed naming the fixture's second package of the same build.
+    struct Release {
+        document: Vec<u8>,
+        signature: Vec<u8>,
+        archive: Vec<u8>,
+    }
+
+    impl Release {
+        fn of(lane: &Lane) -> Self {
+            #[cfg(target_os = "macos")]
+            const PLATFORM: &str = "darwin-arm64";
+            #[cfg(target_os = "linux")]
+            const PLATFORM: &str = "linux-x86_64";
+            let sha256 = hex(ring::digest::digest(&ring::digest::SHA256, &lane.archive).as_ref());
+            let document = serde_json::json!({
+                "schema": 1,
+                "identity": lane.service.identity,
+                "target": target(),
+                "version": VERSION,
+                "published_at": 1,
+                "archive": {
+                    "name": format!("spaceterm-{VERSION}-{PLATFORM}.tar.gz"),
+                    "size": lane.archive.len(),
+                    "sha256": sha256,
+                    "signature": base64::engine::general_purpose::STANDARD.encode(&lane.signature),
+                },
+            })
+            .to_string()
+            .into_bytes();
+            let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap();
+            let signature = key.sign(&document).as_ref().to_vec();
+            Self {
+                document,
+                signature,
+                archive: lane.archive.clone(),
+            }
+        }
+    }
+
+    impl Source for Release {
+        fn latest(&self) -> Result<Option<feed::Signed>, ServerError> {
+            Ok(Some((self.document.clone(), self.signature.clone())))
+        }
+        fn download(&self, _: &feed::Feed, into: &mut dyn Write) -> Result<(), ServerError> {
+            into.write_all(&self.archive)
+                .map_err(|_| ServerError::StorageUnavailable)
+        }
+    }
+
+    /// The desktop's and the CLI's Update: no return applies, so the server stages its newest
+    /// signed release and previews exactly that candidate.
+    #[test]
+    fn planning_an_update_stages_the_servers_signed_release_and_previews_it() {
+        use crate::service::lane::admin::{self, UpdatePlan};
+        with_lane(|lane| {
+            let served = LaneServer::new(
+                lane.service.clone(),
+                lane.host.clone(),
+                Arc::new(Release::of(&lane)),
+                Box::new(|_| Ok(())),
+            )
+            .unwrap();
+            let switch = Arc::new(Switch::default());
+            switch.up(served);
+            let pending = pending_record(&lane);
+            let (mut session, settled) =
+                admin::open(&client::Lane::over(switch.clone()), &pending).unwrap();
+            assert!(settled.is_empty());
+            let check = admin::check(&mut session).unwrap();
+            let latest = check.latest.clone().expect("the feed names a release");
+            assert_ne!(latest.sha256, check.approved.sha256);
+            assert!(check.staged.is_empty(), "the check stages nothing");
+
+            let plan = admin::plan_update(&mut session).unwrap();
+            let UpdatePlan::Update { candidate, preview } = plan else {
+                panic!("expected an update, got {plan:?}");
+            };
+            assert_eq!(candidate.sha256, latest.sha256);
+            assert_eq!(candidate.version, VERSION);
+            assert_eq!(
+                preview.action,
+                LaneAction::Update {
+                    installation: latest.sha256.clone(),
+                }
+            );
+            assert_eq!(preview.effects.kind, Some(LaneUpdateKind::Update));
+            assert_eq!(preview.effects.to.as_ref().unwrap().sha256, latest.sha256);
+            assert!(preview.token.starts_with("c1-"));
+        });
+    }
+
+    /// A Restart whose receipt never arrives stays in the route's pending record, and the next
+    /// connection after the server returns settles and acknowledges it.
+    #[test]
+    fn an_unconfirmed_restart_stays_pending_until_a_later_connection_settles_it() {
+        use crate::service::lane::admin::{self, Verdict};
+        with_lane(|lane| {
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let (helper_switch, old) = (switch.clone(), lane.lane.clone());
+            // The helper takes the Restart and the server goes away. It returns only after the
+            // flow gave up, as when a server stalls past the client's wait.
+            *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                let (switch, old, op) = (helper_switch.clone(), old.clone(), *op);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let helper = helper_lock(&old);
+                    old.ledger().unwrap().claim(&op).unwrap();
+                    switch.down();
+                    drop(helper);
+                });
+            }));
+            let pending = pending_record(&lane);
+            let route = client::Lane::over(switch.clone());
+            let (mut session, _) = admin::open(&route, &pending).unwrap();
+            let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+            let outcome = admin::execute(
+                &route,
+                session,
+                LaneAction::Restart,
+                preview.token,
+                Duration::from_secs(3),
+                &pending,
+                &mut || Ok(()),
+                &|| None,
+            )
+            .unwrap();
+            assert!(
+                matches!(outcome, Outcome::Unconfirmed { .. }),
+                "{outcome:?}"
+            );
+            assert_eq!(admin::verdict(&outcome), Verdict::Uncertain);
+            let recorded = pending.list().unwrap();
+            assert_eq!(recorded.len(), 1, "the operation stays pending");
+
+            switch.up(lane.restarted());
+            let (_, settled) = admin::open(&route, &pending).unwrap();
+            assert_eq!(settled.len(), 1);
+            assert_eq!(settled[0].operation, recorded[0]);
+            // Start-up can't prove a Restart whose helper ended without recording an outcome,
+            // so it settles as unresolved, which the client reports as uncertain.
+            assert_eq!(settled[0].state, LaneOperationState::Unresolved);
+            assert_eq!(admin::receipt_verdict(&settled[0]), Verdict::Uncertain);
+            assert!(pending.list().unwrap().is_empty(), "settling removes it");
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
         });
     }
 }

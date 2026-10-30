@@ -909,6 +909,14 @@ impl Button {
         self
     }
 
+    /// Publishes whether the content a disclosure button shows is expanded. The state is also the
+    /// button's value, because the macOS adapter announces a focused button's value changes and
+    /// neither its expanded state nor its description.
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.core.expanded = Some(expanded);
+        self
+    }
+
     /// Supplies guidance or status separately from the button's name.
     pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
         self.core.accessibility_description = Some(description.into());
@@ -1362,6 +1370,7 @@ struct ButtonCore {
     accessibility_name: SharedString,
     accessibility_description: Option<SharedString>,
     toggled: Option<bool>,
+    expanded: Option<bool>,
     variant: ButtonVariant,
     size: ButtonSize,
     shape: ButtonShape,
@@ -1397,6 +1406,7 @@ impl ButtonCore {
             accessibility_name,
             accessibility_description: None,
             toggled: None,
+            expanded: None,
             variant: ButtonVariant::default(),
             size: ButtonSize::default(),
             shape: ButtonShape::default(),
@@ -1626,6 +1636,13 @@ impl ButtonCore {
             })
             .when_some(self.toggled, |button, toggled| {
                 button.aria_toggled(accesskit::Toggled::from(toggled))
+            })
+            .when_some(self.expanded, |button, expanded| {
+                button.aria_expanded(expanded).aria_value(if expanded {
+                    "expanded"
+                } else {
+                    "collapsed"
+                })
             })
             .aria_disabled(!enabled)
             .when_some(on_accessibility_activate, |button, handler| {

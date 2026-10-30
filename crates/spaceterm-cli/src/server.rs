@@ -25,19 +25,12 @@ use crate::contract::{
 };
 use crate::state::{CliState, RouteKey};
 use serde::Serialize;
-use spaceterm_server::service::lane::client::{Lane, LaneError, Leftover, Session};
+use spaceterm_server::service::lane::admin::{self, PendingOperations};
+use spaceterm_server::service::lane::client::{Lane, LaneError, Session};
 use spaceterm_server::service::lane::{LaneOperationState, LaneReceipt};
-use spaceterm_server::service::operations::OperationId;
 use spaceterm_server::{CliRoute, ServerConnection, ServerError};
 use std::io::Write;
 use std::time::Duration;
-
-/// The CLI's record of the service operations it admitted and has not acknowledged, per route
-/// and identity, so the next lane connection settles them.
-const PENDING: &str = "service-operations.json";
-const PENDING_FILE: &std::ffi::CStr = c"service-operations.json";
-/// At most this many pending operations are kept. The server holds no more than 16.
-const MAX_PENDING: usize = 16;
 
 /// One finished server command: its envelope and its operational text.
 pub struct Reply {
@@ -336,7 +329,7 @@ pub struct Opened {
 
 /// The pending service operations of one route and identity.
 pub struct Pending {
-    directory: spaceterm_server::Directory,
+    operations: PendingOperations,
 }
 
 impl Pending {
@@ -345,58 +338,25 @@ impl Pending {
         let directory = state
             .identity_dir(route, context.agent().as_ref())
             .map_err(contract::from_server_error)?;
-        Ok(Self { directory })
-    }
-
-    fn change(
-        &self,
-        apply: impl FnOnce(&mut Vec<String>) -> Result<(), Failure>,
-    ) -> Result<Vec<String>, Failure> {
-        let _lock = self
-            .directory
-            .lock("service-operations.lock", false)
-            .map_err(contract::from_server_error)?;
-        let mut pending: Vec<String> = self
-            .directory
-            .read_json(PENDING)
-            .map_err(contract::from_server_error)?
-            .unwrap_or_default();
-        let before = pending.clone();
-        apply(&mut pending)?;
-        if pending != before {
-            self.directory
-                .write_json(PENDING_FILE, &pending)
-                .map_err(contract::from_server_error)?;
-        }
-        Ok(pending)
+        Ok(Self {
+            operations: PendingOperations::new(directory),
+        })
     }
 
     pub fn list(&self) -> Result<Vec<String>, Failure> {
-        self.change(|_| Ok(()))
+        self.operations.list().map_err(contract::from_server_error)
     }
 
-    /// Marks the command dispatched and records an operation, right before its `Execute` is
-    /// sent. `SIGINT` from here on resolves the operation instead of ending the command.
-    pub fn add(&self, operation: &OperationId) -> Result<(), LaneError> {
-        crate::interrupt::dispatch().map_err(|_| LaneError::Interrupted)?;
-        self.change(|pending| {
-            if pending.len() >= MAX_PENDING {
-                return Err(Failure::new(Code::Capacity));
-            }
-            pending.push(operation.to_string());
-            Ok(())
-        })
-        .map(drop)
-        .map_err(|_| LaneError::Server(ServerError::StorageUnavailable))
+    /// The shared record, which the lane flow writes right before each `Execute`.
+    pub fn operations(&self) -> &PendingOperations {
+        &self.operations
     }
+}
 
-    pub fn remove(&self, operation: &str) -> Result<(), Failure> {
-        self.change(|pending| {
-            pending.retain(|v| v != operation);
-            Ok(())
-        })
-        .map(drop)
-    }
+/// Marks the command dispatched right before its `Execute` is sent. `SIGINT` from here on
+/// resolves the operation instead of ending the command.
+pub fn dispatch() -> Result<(), LaneError> {
+    crate::interrupt::dispatch().map_err(|_| LaneError::Interrupted)
 }
 
 /// Opens the lane of `connection` and settles what earlier commands of this identity left on
@@ -412,24 +372,11 @@ pub fn open_lane(
     let lane = connection
         .service_lane()
         .map_err(contract::from_server_error)?;
-    let mut session = lane.session().map_err(contract::from_server_error)?;
-    let mut recovered = Vec::new();
-    for operation in pending.list()? {
-        let Some(id) = OperationId::parse(&operation) else {
-            pending.remove(&operation)?;
-            continue;
-        };
-        match spaceterm_server::service::lane::client::settle_leftover(&mut session, &id)
-            .map_err(lane_failure)?
-        {
-            Leftover::Settled(receipt) => {
-                recovered.push(recovered_operation(&receipt, identity));
-                pending.remove(&operation)?;
-            }
-            Leftover::Gone => pending.remove(&operation)?,
-            Leftover::Pending => {}
-        }
-    }
+    let (session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
+    let mut recovered: Vec<_> = settled
+        .iter()
+        .map(|receipt| recovered_operation(receipt, identity))
+        .collect();
     recovered.extend(settle_journals(context, connection, route));
     remember_connected(context, route);
     Ok(Opened {
