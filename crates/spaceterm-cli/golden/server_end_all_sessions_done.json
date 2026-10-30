@@ -1,0 +1,26 @@
+{
+  "command": "server.end-all-sessions",
+  "data": {
+    "ended": [
+      {
+        "label": "cargo test · repo",
+        "pane": "1515151515151515151515151515151515151515151515151515151515151515",
+        "session": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+      },
+      {
+        "label": "Editor",
+        "pane": "1717171717171717171717171717171717171717171717171717171717171717",
+        "session": "2121212121212121212121212121212121212121212121212121212121212121"
+      }
+    ]
+  },
+  "error": null,
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "ok",
+  "warnings": []
+}

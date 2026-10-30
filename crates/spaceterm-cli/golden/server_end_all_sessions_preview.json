@@ -1,0 +1,39 @@
+{
+  "command": "server.end-all-sessions",
+  "data": {
+    "confirmation": {
+      "effects": {
+        "ends_sessions": 2,
+        "sessions": [
+          {
+            "label": "cargo test · repo",
+            "pane": "1515151515151515151515151515151515151515151515151515151515151515",
+            "session": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+          },
+          {
+            "label": "Editor",
+            "pane": "1717171717171717171717171717171717171717171717171717171717171717",
+            "session": "2121212121212121212121212121212121212121212121212121212121212121"
+          }
+        ]
+      },
+      "expires_at": "2027-01-15T08:10:00Z",
+      "token": "c1-000000006b49d2001efcd2bea66c25dc76cb3175a1461d880146de0931036579d93f0dc2cebb963a"
+    }
+  },
+  "error": {
+    "class": "action_required",
+    "code": "confirmation_required",
+    "details": {},
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "confirmation_required",
+  "warnings": []
+}
