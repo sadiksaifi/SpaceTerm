@@ -219,3 +219,45 @@ fn a_file_manager_that_cannot_show_the_command_is_reported(cx: &mut TestAppConte
         )
     );
 }
+
+#[gpui::test]
+fn a_finished_service_operation_reads_the_command_again(cx: &mut TestAppContext) {
+    let (fixture, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    assert_eq!(presentation(&window, cx).state, "Installed");
+    // An update couldn't repoint the launcher, which stays on the earlier server build.
+    *fixture.files.launcher.lock().unwrap() = Ok(Launcher::Outdated);
+    cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalServerOperations::changed_elsewhere(
+            cx,
+            crate::server_connection::service::ServiceStatus::default(),
+        );
+    });
+    cx.run_until_parked();
+    let outdated = presentation(&window, cx);
+    assert_eq!(
+        (outdated.state, outdated.action),
+        ("Out of date", Some((ToolAction::Install, "Reinstall")))
+    );
+}
+
+#[gpui::test]
+fn a_finished_operation_during_a_read_reads_the_command_again(cx: &mut TestAppContext) {
+    let (fixture, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    let reads = || {
+        fixture
+            .files
+            .reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+    let before = reads();
+    // The read is admitted, then the operation finishes before its answer lands.
+    window.update(cx, |settings, cx| {
+        settings.check_command_line_tool(cx);
+        settings.reread_command_line_tool(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(reads(), before + 2);
+    assert_eq!(presentation(&window, cx).state, "Installed");
+}

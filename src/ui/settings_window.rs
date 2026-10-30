@@ -772,6 +772,8 @@ impl SettingsWindow {
         cx.subscribe(&local_operations, |settings, _, operation, cx| {
             settings.synchronize_local_operations(cx);
             settings.check_local_server(cx);
+            // The operation may have moved the launcher, or failed to.
+            settings.reread_command_line_tool(cx);
             match operation {
                 local_operations::CompletedOperation::Service => settings.check_server_update(cx),
                 local_operations::CompletedOperation::Update => settings.check_server_service(cx),

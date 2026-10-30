@@ -159,6 +159,7 @@ pub(crate) mod testing {
         /// found another program's link there.
         pub(crate) link: Mutex<Result<LinkOutcome, ToolFailure>>,
         pub(crate) links: AtomicUsize,
+        pub(crate) reads: AtomicUsize,
     }
 
     impl ScriptedFiles {
@@ -167,6 +168,7 @@ pub(crate) mod testing {
                 launcher: Mutex::new(launcher),
                 link: Mutex::new(Ok(LinkOutcome::Linked)),
                 links: AtomicUsize::new(0),
+                reads: AtomicUsize::new(0),
             })
         }
 
@@ -177,6 +179,7 @@ pub(crate) mod testing {
 
     impl LauncherFiles for ScriptedFiles {
         fn read(&self) -> Result<Launcher, ToolFailure> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             *self.launcher.lock().unwrap()
         }
         fn link(&self) -> Result<LinkOutcome, ToolFailure> {

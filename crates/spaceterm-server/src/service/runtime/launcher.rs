@@ -54,8 +54,8 @@ pub(super) fn inspect(
 ///
 /// The service lock orders only SpaceTerm's own writers. A missing launcher is created
 /// exclusively, so an entry another program creates first stays. A managed launcher is
-/// replaced by renaming a new link over it; another program that writes this exact path
-/// between the check and the rename loses its entry, because POSIX has no atomic
+/// replaced by renaming a new link over it from [`temporary`]; another program that writes this
+/// exact path between the check and the rename loses its entry, because POSIX has no atomic
 /// compare-and-replace.
 pub(super) fn select(
     home: &Path,
@@ -65,6 +65,8 @@ pub(super) fn select(
 ) -> Result<bool, ServerError> {
     let parent = bin(home)?;
     let launcher = parent.join(identity);
+    let temporary = temporary(&parent, identity);
+    remove_leftover(&temporary, installations)?;
     let before = match std::fs::read_link(&launcher) {
         Ok(target) if managed(&target, installations) => Some(target),
         Ok(_) => return Ok(false),
@@ -88,8 +90,9 @@ pub(super) fn select(
             Err(_) => return Err(ServerError::StorageUnavailable),
         }
     } else {
-        let temporary = parent.join(format!(".launcher-{}", digest(&crate::protocol::random()?)));
+        // Another program's entry under the temporary name stays, and refuses the replacement.
         symlink(&target, &temporary).map_err(|_| ServerError::StorageUnavailable)?;
+        before_rename(&temporary);
         if std::fs::rename(&temporary, &launcher).is_err() {
             // The temporary name is this call's own new link.
             let _ = std::fs::remove_file(&temporary);
@@ -102,16 +105,41 @@ pub(super) fn select(
     Ok(true)
 }
 
+/// The one name a replacement's new link takes before the rename, so an interrupted
+/// replacement leaves at most one leftover per identity.
+fn temporary(parent: &Path, identity: &str) -> PathBuf {
+    parent.join(format!(".launcher-{identity}"))
+}
+
+/// Removes a replacement's leftover new link. Only a link into this identity's installations is
+/// SpaceTerm's own; anything else under that name stays.
+fn remove_leftover(temporary: &Path, installations: &Path) -> Result<(), ServerError> {
+    if std::fs::read_link(temporary).is_ok_and(|target| managed(&target, installations)) {
+        std::fs::remove_file(temporary).map_err(|_| ServerError::StorageUnavailable)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 thread_local! {
     /// Runs on the launcher path just before exclusive creation, as another program could.
     static BEFORE_CREATION: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// Runs on the temporary link just before the rename. A panic here interrupts the
+    /// replacement as a crash would.
+    static BEFORE_RENAME: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 fn before_creation(_launcher: &Path) {
     #[cfg(test)]
     if let Some(intrude) = BEFORE_CREATION.take() {
         intrude(_launcher);
+    }
+}
+
+fn before_rename(_temporary: &Path) {
+    #[cfg(test)]
+    if let Some(interrupt) = BEFORE_RENAME.take() {
+        interrupt(_temporary);
     }
 }
 
@@ -123,11 +151,19 @@ pub(super) fn remove(home: &Path, identity: &str, installations: &Path) -> Resul
         return Ok(());
     }
     let launcher = parent.join(identity);
-    if !std::fs::read_link(&launcher).is_ok_and(|target| managed(&target, installations)) {
+    let leftover = temporary(&parent, identity);
+    let managed_launcher =
+        std::fs::read_link(&launcher).is_ok_and(|target| managed(&target, installations));
+    let managed_leftover =
+        std::fs::read_link(&leftover).is_ok_and(|target| managed(&target, installations));
+    if !managed_launcher && !managed_leftover {
         return Ok(());
     }
     let directory = owned_directory(&parent)?;
-    std::fs::remove_file(&launcher).map_err(|_| ServerError::StorageUnavailable)?;
+    remove_leftover(&leftover, installations)?;
+    if managed_launcher {
+        std::fs::remove_file(&launcher).map_err(|_| ServerError::StorageUnavailable)?;
+    }
     directory
         .sync_all()
         .map_err(|_| ServerError::StorageUnavailable)
@@ -230,5 +266,77 @@ mod tests {
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
         );
+    }
+
+    #[test]
+    fn an_interrupted_replacement_leaves_one_leftover_that_the_next_run_and_uninstall_remove() {
+        let home = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("st-launcher-leftover-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(home.clone());
+        let identity = "spaceterm-development";
+        let installations = home.join(".local/share/spaceterm-development/server/installations");
+        let first = installations.join("a".repeat(64));
+        let second = installations.join("b".repeat(64));
+        let path = home.join(".local/bin").join(identity);
+        let leftover = home.join(".local/bin/.launcher-spaceterm-development");
+        let entries = || std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert!(select(&home, identity, &installations, &first).unwrap());
+
+        // Interrupt two replacements after their new link exists, as a crash would.
+        for _ in 0..2 {
+            let (home, installations, runtime) =
+                (home.clone(), installations.clone(), second.clone());
+            let interrupted = std::thread::spawn(move || {
+                BEFORE_RENAME.set(Some(|_| panic!("interrupted")));
+                select(&home, identity, &installations, &runtime)
+            })
+            .join();
+            assert!(interrupted.is_err());
+            assert_eq!(
+                std::fs::read_link(&path).unwrap(),
+                first.join("bin/spaceterm")
+            );
+            assert_eq!(
+                std::fs::read_link(&leftover).unwrap(),
+                second.join("bin/spaceterm")
+            );
+            assert_eq!(entries(), 2);
+        }
+
+        // The next replacement removes the leftover first.
+        assert!(select(&home, identity, &installations, &second).unwrap());
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            second.join("bin/spaceterm")
+        );
+        assert_eq!(entries(), 1);
+
+        // Uninstall removes a leftover with the launcher.
+        symlink(first.join("bin/spaceterm"), &leftover).unwrap();
+        remove(&home, identity, &installations).unwrap();
+        assert_eq!(entries(), 0);
+
+        // Another program's entry under that name is never removed, and refuses replacement.
+        std::fs::write(&leftover, b"local tool").unwrap();
+        assert!(select(&home, identity, &installations, &first).unwrap());
+        assert_eq!(
+            select(&home, identity, &installations, &second),
+            Err(ServerError::StorageUnavailable)
+        );
+        remove(&home, identity, &installations).unwrap();
+        assert_eq!(std::fs::read(&leftover).unwrap(), b"local tool");
+        assert!(!path.exists());
     }
 }

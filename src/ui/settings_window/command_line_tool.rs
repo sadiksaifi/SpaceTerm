@@ -67,6 +67,9 @@ pub(super) struct CommandLineToolRow {
     pub(super) working: Option<ToolWork>,
     /// Why the last Install or reveal didn't complete. The next action clears it.
     pub(super) failure: Option<ToolFailure>,
+    /// A service operation or update finished while a step ran, so that step's read may predate
+    /// it and the command is read again afterwards.
+    read_outdated: bool,
     /// Returns the background result to GPUI. Dropping the window drops it.
     _operation: Option<Task<()>>,
     /// Waits for the file manager's answer to a reveal.
@@ -80,6 +83,7 @@ impl CommandLineToolRow {
             check: ToolCheck::NotChecked,
             working: None,
             failure: None,
+            read_outdated: false,
             _operation: None,
             _reveal: None,
         }
@@ -253,6 +257,20 @@ impl SettingsWindow {
         self.run_command_line_tool(ToolWork::Check, cx);
     }
 
+    /// Reads the command again after a service operation or update finished. Repointing the
+    /// launcher never blocks those, so one that couldn't follow the new server build shows only
+    /// here. A row not yet read waits for Servers to come into view.
+    pub(super) fn reread_command_line_tool(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.command_line_tool.as_mut() else {
+            return;
+        };
+        if row.working.is_some() {
+            row.read_outdated = true;
+        } else if row.check != ToolCheck::NotChecked {
+            self.check_command_line_tool(cx);
+        }
+    }
+
     /// Runs the row's action. Install runs on the background executor; showing the command asks
     /// the file manager, whose answer arrives later.
     pub(super) fn request_command_line_tool(&mut self, action: ToolAction, cx: &mut Context<Self>) {
@@ -306,6 +324,7 @@ impl SettingsWindow {
                     return;
                 };
                 row.working = None;
+                let mut again = std::mem::take(&mut row.read_outdated);
                 match (work, result) {
                     (_, Ok(status)) => row.check = ToolCheck::Checked(status),
                     (ToolWork::Check, Err(failure)) => row.check = ToolCheck::Failed(failure),
@@ -313,10 +332,11 @@ impl SettingsWindow {
                     // program's file found meanwhile is read again, so the row shows it.
                     (ToolWork::Install, Err(failure)) => {
                         row.failure = Some(failure);
-                        if failure == ToolFailure::Occupied {
-                            settings.check_command_line_tool(cx);
-                        }
+                        again |= failure == ToolFailure::Occupied;
                     }
+                }
+                if again {
+                    settings.check_command_line_tool(cx);
                 }
                 cx.notify();
             });
