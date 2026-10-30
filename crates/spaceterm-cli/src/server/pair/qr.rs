@@ -54,8 +54,8 @@ pub(super) fn write_invitation(
     {
         let side = code.size() + QUIET_ZONE * 2;
         for y in (0..side).step_by(2) {
-            // Fixed RGB colors keep dark modules on white in light and dark themes.
-            write!(output, "\x1b[0;38;2;0;0;0;48;2;255;255;255m")?;
+            // Basic indexed colors also work in terminals without RGB support.
+            write!(output, "\x1b[0;30;47m")?;
             for x in 0..side {
                 let top = code.get_module(x - QUIET_ZONE, y - QUIET_ZONE);
                 let bottom = code.get_module(x - QUIET_ZONE, y + 1 - QUIET_ZONE);
@@ -240,8 +240,8 @@ mod tests {
         assert_eq!(lines.next(), Some(link.as_str()));
         let rows: Vec<Vec<char>> = lines
             .map(|line| {
-                // Explicit colors prevent either terminal theme from inverting the QR.
-                line.strip_prefix("\x1b[0;38;2;0;0;0;48;2;255;255;255m")
+                // Basic ANSI colors work in GNU Screen without true-color support.
+                line.strip_prefix("\x1b[0;30;47m")
                     .unwrap()
                     .strip_suffix("\x1b[0m")
                     .unwrap()
