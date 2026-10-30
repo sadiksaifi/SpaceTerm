@@ -14,6 +14,7 @@ use crate::contract::{
 };
 use base64::Engine;
 use spaceterm_server::service::activation::{ActivationPhase, ActivationStatus};
+use spaceterm_server::service::lane::admin;
 use spaceterm_server::service::lane::client::within;
 use spaceterm_server::service::lane::{
     LaneAction, LaneEffects, LaneReply, LaneRequest, LaneUpdateKind, LaneVersion, MAX_CHUNK,
@@ -25,8 +26,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const COMMAND: &str = "server.update";
-/// How long the flow waits for the updated server to return.
-const RETURN_WAIT: Duration = Duration::from_secs(180);
 /// Each uploaded chunk's decoded size. Base64 keeps the frame under the lane's limit.
 const CHUNK: usize = MAX_CHUNK;
 
@@ -131,28 +130,25 @@ fn running(
             String::new(),
         )
     };
-    let deadline = || Instant::now() + Duration::from_secs(30);
     if check {
-        return match opened.session.call(&LaneRequest::Check, deadline()) {
-            Ok(LaneReply::Check(check)) => {
+        return match admin::check(&mut opened.session) {
+            Ok(check) => {
                 let data = lane_check(check);
                 let text = check_text(&data);
                 Reply::new(&check_envelope(server, data, opened.recovered), text)
             }
-            Ok(_) => fail(Failure::new(Code::ProtocolError), opened.recovered),
             Err(error) => fail(super::lane_failure(error), opened.recovered),
         };
     }
     // When the settled state allows return to the previous runtime, the return is the offered
     // action instead of an update.
-    let probe = opened.session.request(
-        &LaneRequest::Preview {
-            action: LaneAction::Return,
-        },
-        deadline(),
-    );
-    match offered_return(probe) {
-        Ok(Some((token_now, expires_at, effects))) => {
+    match admin::probe_return(&mut opened.session) {
+        Ok(Some(admin::Preview {
+            token: token_now,
+            expires_at,
+            effects,
+            ..
+        })) => {
             let Some(to) = effects.to.as_ref().map(version) else {
                 return fail(Failure::new(Code::ProtocolError), opened.recovered);
             };
@@ -179,7 +175,7 @@ fn running(
             };
         }
         Ok(None) => {}
-        Err(failure) => return fail(failure, opened.recovered),
+        Err(error) => return fail(super::lane_failure(error), opened.recovered),
     }
     // Stage the candidate. Local files stage directly on this machine; a remote server
     // receives them over the lane.
@@ -189,13 +185,9 @@ fn running(
             .map(|v| installed(&v))
             .map_err(contract::from_server_error),
         Some((archive, signature)) => upload(&mut opened.session, archive, signature),
-        None => match opened.session.call(
-            &LaneRequest::StageFetch,
-            Instant::now() + Duration::from_secs(30 * 60),
-        ) {
-            Ok(reply) => staged_version(reply),
-            Err(error) => Err(super::lane_failure(error)),
-        },
+        None => admin::stage_fetch(&mut opened.session)
+            .map(|staged| version(&staged))
+            .map_err(super::lane_failure),
     };
     let candidate = match staged {
         Ok(candidate) => candidate,
@@ -205,17 +197,12 @@ fn running(
         installation: candidate.sha256.clone(),
     };
     let Some(token) = token else {
-        let reply = opened.session.call(
-            &LaneRequest::Preview {
-                action: action.clone(),
-            },
-            deadline(),
-        );
-        return match reply {
-            Ok(LaneReply::Preview {
+        return match admin::preview(&mut opened.session, action.clone()) {
+            Ok(admin::Preview {
                 token,
                 expires_at,
                 effects,
+                ..
             }) => preview(
                 context,
                 routed,
@@ -226,7 +213,6 @@ fn running(
                 expires_at,
                 &effects,
             ),
-            Ok(_) => fail(Failure::new(Code::ProtocolError), opened.recovered),
             Err(error) => fail(super::lane_failure(error), opened.recovered),
         };
     };
@@ -239,41 +225,6 @@ fn running(
         token.to_owned(),
         candidate,
     )
-}
-
-/// The return a server offers, from its reply to `Preview { Return }`. `return_unavailable`
-/// means no return applies, so the update proceeds.
-fn offered_return(
-    reply: Result<LaneReply, spaceterm_server::ServerError>,
-) -> Result<Option<(String, String, LaneEffects)>, Failure> {
-    match reply {
-        Ok(LaneReply::Preview {
-            token,
-            expires_at,
-            effects,
-        }) if effects.kind == Some(LaneUpdateKind::Return) => {
-            Ok(Some((token, expires_at, effects)))
-        }
-        Ok(LaneReply::Error { code }) if code == "return_unavailable" => Ok(None),
-        Ok(LaneReply::Error { code }) => Err(contract::from_lane_code(&code)),
-        Ok(_) => Err(Failure::new(Code::ProtocolError)),
-        Err(error) => Err(contract::from_server_error(error)),
-    }
-}
-
-fn staged_version(reply: LaneReply) -> Result<Version, Failure> {
-    match reply {
-        LaneReply::Staged {
-            installation,
-            version,
-            commit,
-        } => Ok(Version {
-            version,
-            commit,
-            sha256: installation,
-        }),
-        _ => Err(Failure::new(Code::ProtocolError)),
-    }
 }
 
 #[allow(clippy::too_many_arguments, reason = "one preview's parts, used once")]
@@ -410,12 +361,14 @@ fn execute(
         session,
         recovered,
     } = opened;
-    let outcome = lane.perform(
+    let outcome = admin::execute(
+        &lane,
         session,
         action,
         token,
-        context.timeout(RETURN_WAIT),
-        &mut |operation| pending.add(operation),
+        context.timeout(admin::RETURN_WAIT),
+        pending.operations(),
+        &mut super::dispatch,
         &crate::interrupt::settle_by,
     );
     let outcome = match outcome {
@@ -436,14 +389,8 @@ fn execute(
         }
     };
     let Settled {
-        receipt,
-        failure,
-        acknowledged,
-        ..
+        receipt, failure, ..
     } = lifecycle::settle(ServiceAction::Update, outcome);
-    if acknowledged {
-        let _ = pending.remove(&receipt.operation);
-    }
     finish(routed, receipt, failure, Some(candidate), recovered)
 }
 
@@ -551,7 +498,11 @@ fn upload(
         offset += count as u64;
         match reply {
             LaneReply::UploadProgress { next_offset, .. } if next_offset == offset => {}
-            reply @ LaneReply::Staged { .. } if offset == length => return staged_version(reply),
+            reply @ LaneReply::Staged { .. } if offset == length => {
+                return admin::staged(reply)
+                    .map(|staged| version(&staged))
+                    .map_err(super::lane_failure);
+            }
             _ => return Err(Failure::new(Code::ProtocolError)),
         }
     }
@@ -804,48 +755,5 @@ mod tests {
             settle_first(local, check, &mut || recovered = true);
             assert_eq!(recovered, recovers, "local {local}, check {check}");
         }
-    }
-
-    fn effects(kind: LaneUpdateKind) -> LaneEffects {
-        LaneEffects {
-            ends_sessions: 0,
-            sessions: Vec::new(),
-            start_requires_machine: false,
-            from: None,
-            to: None,
-            kind: Some(kind),
-            to_major: None,
-        }
-    }
-
-    #[test]
-    fn a_running_server_offers_return_only_when_its_preview_is_a_return() {
-        let preview = |kind| {
-            Ok(LaneReply::Preview {
-                token: "c1-00".into(),
-                expires_at: "2026-10-30T12:10:00Z".into(),
-                effects: effects(kind),
-            })
-        };
-        assert!(matches!(
-            offered_return(preview(LaneUpdateKind::Return)),
-            Ok(Some((token, _, _))) if token == "c1-00"
-        ));
-        assert_eq!(
-            offered_return(Ok(LaneReply::Error {
-                code: "return_unavailable".into()
-            })),
-            Ok(None)
-        );
-        assert_eq!(
-            offered_return(Ok(LaneReply::Error {
-                code: "not_installed".into()
-            })),
-            Err(Failure::new(Code::NotInstalled))
-        );
-        assert_eq!(
-            offered_return(preview(LaneUpdateKind::Update)),
-            Err(Failure::new(Code::ProtocolError))
-        );
     }
 }

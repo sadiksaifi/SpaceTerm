@@ -23,6 +23,19 @@ pub(crate) fn with_major<T>(major: u16, run: impl FnOnce() -> T) -> T {
 pub(super) fn active() -> bool {
     FIXTURE_TRUST.get()
 }
+
+/// Runs `run` on this thread with fixture signing trust, as [`with_artifact`] does for its own
+/// thread. A fixture server serving connections on other threads needs it there too.
+pub(crate) fn with_fixture_trust<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FIXTURE_TRUST.set(self.0);
+        }
+    }
+    let _restore = Restore(FIXTURE_TRUST.replace(true));
+    run()
+}
 pub(super) fn key() -> Vec<u8> {
     pair().public_key().as_ref().to_vec()
 }
@@ -107,12 +120,5 @@ pub(crate) fn with_artifact<T>(
     let bytes = tar.into_inner().unwrap().finish().unwrap();
     std::fs::write(&archive, &bytes).unwrap();
     std::fs::write(&signature, pair().sign(&bytes).as_ref()).unwrap();
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            FIXTURE_TRUST.set(self.0);
-        }
-    }
-    let _restore = Restore(FIXTURE_TRUST.replace(true));
-    run(&archive, &signature)
+    with_fixture_trust(|| run(&archive, &signature))
 }

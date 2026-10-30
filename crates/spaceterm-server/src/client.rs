@@ -799,6 +799,15 @@ impl ServerConnection {
             self.agent().cloned(),
         ))
     }
+    /// The service operations this handle's Client Identity admitted over its lane and has not
+    /// acknowledged, kept with its other client records for this route.
+    pub fn service_operations(
+        &self,
+    ) -> Result<crate::service::lane::admin::PendingOperations, ServerError> {
+        Ok(crate::service::lane::admin::PendingOperations::new(
+            self.client_directory()?,
+        ))
+    }
     pub fn direct_status(&self) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {
         match self.direct_manage(crate::direct::Management::Status)? {
             crate::direct::ManagementReply::Status(status) => Ok(status),

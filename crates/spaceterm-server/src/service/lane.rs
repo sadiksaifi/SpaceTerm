@@ -1157,6 +1157,8 @@ fn error(failure: &ServerError) -> LaneReply {
 }
 
 #[cfg(feature = "client")]
+pub mod admin;
+#[cfg(feature = "client")]
 pub mod client;
 #[cfg(test)]
 pub(crate) mod tests;
