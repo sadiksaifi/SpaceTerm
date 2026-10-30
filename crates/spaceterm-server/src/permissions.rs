@@ -23,6 +23,8 @@ mod probe;
 pub enum SystemPermission {
     /// Recording audio, which voice tools need.
     Microphone,
+    /// Recording video, which programs need to take photos or join calls.
+    Camera,
     /// Capturing the screen, which a program needs to take screenshots.
     ScreenRecording,
     /// Controlling other applications, which a program needs to click and type. System Settings
@@ -32,12 +34,18 @@ pub enum SystemPermission {
 
 impl SystemPermission {
     /// Every System Permission, in the order the server reports them.
-    pub const ALL: [Self; 3] = [Self::Microphone, Self::ScreenRecording, Self::Accessibility];
+    pub const ALL: [Self; 4] = [
+        Self::Microphone,
+        Self::Camera,
+        Self::ScreenRecording,
+        Self::Accessibility,
+    ];
 
     /// Its name in the contract, which is also its command-line spelling with `-` for `_`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Microphone => "microphone",
+            Self::Camera => "camera",
             Self::ScreenRecording => "screen_recording",
             Self::Accessibility => "accessibility",
         }
@@ -46,7 +54,7 @@ impl SystemPermission {
     /// Whether the system asks the person itself, in a prompt, before a first grant. Otherwise
     /// only System Settings grants it.
     pub const fn prompts(self) -> bool {
-        matches!(self, Self::Microphone)
+        matches!(self, Self::Microphone | Self::Camera)
     }
 }
 
@@ -167,6 +175,9 @@ pub const fn settings_uri(permission: SystemPermission) -> &'static str {
     match permission {
         SystemPermission::Microphone => {
             "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone"
+        }
+        SystemPermission::Camera => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Camera"
         }
         SystemPermission::ScreenRecording => {
             "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"

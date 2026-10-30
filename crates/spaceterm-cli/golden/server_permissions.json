@@ -12,6 +12,10 @@
         "state": "not_requested"
       },
       {
+        "permission": "camera",
+        "state": "not_granted"
+      },
+      {
         "permission": "screen_recording",
         "state": "granted"
       },

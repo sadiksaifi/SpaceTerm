@@ -76,7 +76,7 @@ pub(crate) enum ShortcutSelection {
 pub(crate) enum HostFeature {
     ApplicationMenuBar,
     Updates,
-    MicrophoneAccess,
+    CaptureAccess,
     SystemPermissions,
 }
 

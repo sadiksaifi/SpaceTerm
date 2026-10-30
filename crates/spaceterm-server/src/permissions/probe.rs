@@ -172,10 +172,11 @@ mod tests {
     fn a_report_round_trips_through_its_exact_encoding() {
         let probe = Probe::read(|permission| match permission {
             SystemPermission::Microphone => PermissionState::NotRequested,
+            SystemPermission::Camera => PermissionState::Restricted,
             SystemPermission::ScreenRecording => PermissionState::Granted,
             SystemPermission::Accessibility => PermissionState::NotGranted,
         });
-        let line = "microphone=not_requested screen_recording=granted accessibility=not_granted\n";
+        let line = "microphone=not_requested camera=restricted screen_recording=granted accessibility=not_granted\n";
         assert_eq!(probe.encode(), line);
         assert_eq!(Probe::decode(line.as_bytes()), Some(probe));
     }
@@ -184,11 +185,12 @@ mod tests {
     fn a_report_rejects_any_other_output() {
         for output in [
             &b""[..],
-            b"microphone=granted screen_recording=granted accessibility=granted",
-            b"microphone=granted screen_recording=granted accessibility=maybe\n",
-            b"screen_recording=granted microphone=granted accessibility=granted\n",
-            b"microphone=granted screen_recording=granted accessibility=granted extra\n",
-            b"microphone=granted  screen_recording=granted accessibility=granted\n",
+            b"microphone=granted camera=granted screen_recording=granted accessibility=granted",
+            b"microphone=granted camera=granted screen_recording=granted accessibility=maybe\n",
+            b"camera=granted microphone=granted screen_recording=granted accessibility=granted\n",
+            b"microphone=granted screen_recording=granted accessibility=granted\n",
+            b"microphone=granted camera=granted screen_recording=granted accessibility=granted extra\n",
+            b"microphone=granted  camera=granted screen_recording=granted accessibility=granted\n",
         ] {
             assert_eq!(Probe::decode(output), None, "{output:?}");
         }
@@ -206,6 +208,7 @@ mod tests {
         assert_eq!(
             SystemPermission::ALL.map(|permission| probe.state(permission)),
             [
+                PermissionState::NotGranted,
                 PermissionState::NotGranted,
                 PermissionState::NotGranted,
                 PermissionState::Granted,

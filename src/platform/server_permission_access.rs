@@ -16,9 +16,9 @@ use spaceterm_server::permissions::{
 };
 use spaceterm_server::service::lane::{LaneReply, LaneRequest};
 
-use super::microphone_access::{
-    MicrophoneAccess, MicrophoneAccessError, MicrophoneAuthorization,
-    MicrophoneAuthorizationCompletion,
+use super::capture_access::{
+    CaptureAccess, CaptureAccessError, CaptureAuthorization, CaptureAuthorizationCompletion,
+    CaptureDevice,
 };
 use super::permission_access::{
     AccessibilityNaming, PermissionAccess, PermissionAccessError, PermissionAccessObservation,
@@ -32,7 +32,7 @@ const READ_LIMIT: Duration = Duration::from_secs(10);
 const CHANGE_LIMIT: Duration = Duration::from_secs(30);
 /// How often a waiting Permission Setup preparation checks whether its owner cancelled it.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
-/// How long a microphone prompt may stay unanswered before the request reports the state then.
+/// How long a capture prompt may stay unanswered before the request reports the state then.
 const PROMPT_LIMIT: Duration = Duration::from_secs(600);
 
 /// One request to the server on this machine.
@@ -74,7 +74,7 @@ impl From<Failure> for PermissionAccessError {
     }
 }
 
-impl From<Failure> for MicrophoneAccessError {
+impl From<Failure> for CaptureAccessError {
     fn from(failure: Failure) -> Self {
         match failure {
             Failure::Unavailable => Self::PlatformUnavailable,
@@ -102,7 +102,7 @@ pub(crate) struct ServerPermissionAccess {
     open: SettingsOpener,
     /// The holder System Settings lists before the first report arrives.
     expected_holder: PermissionHolder,
-    /// How often an unanswered microphone request reads again.
+    /// How often an unanswered capture request reads again.
     poll: Duration,
 }
 
@@ -275,12 +275,19 @@ const fn server_permission(permission: SystemPermission) -> server::SystemPermis
     }
 }
 
-const fn microphone_authorization(state: PermissionState) -> MicrophoneAuthorization {
+const fn capture_permission(device: CaptureDevice) -> server::SystemPermission {
+    match device {
+        CaptureDevice::Microphone => server::SystemPermission::Microphone,
+        CaptureDevice::Camera => server::SystemPermission::Camera,
+    }
+}
+
+const fn capture_authorization(state: PermissionState) -> CaptureAuthorization {
     match state {
-        PermissionState::NotRequested => MicrophoneAuthorization::NotDetermined,
-        PermissionState::Granted => MicrophoneAuthorization::Authorized,
-        PermissionState::NotGranted => MicrophoneAuthorization::Denied,
-        PermissionState::Restricted => MicrophoneAuthorization::Restricted,
+        PermissionState::NotRequested => CaptureAuthorization::NotDetermined,
+        PermissionState::Granted => CaptureAuthorization::Authorized,
+        PermissionState::NotGranted => CaptureAuthorization::Denied,
+        PermissionState::Restricted => CaptureAuthorization::Restricted,
     }
 }
 
@@ -434,26 +441,29 @@ impl PermissionAccess for ServerPermissionAccess {
     }
 }
 
-impl MicrophoneAccess for ServerPermissionAccess {
-    fn authorization(&self) -> Result<MicrophoneAuthorization, MicrophoneAccessError> {
-        match self.state(server::SystemPermission::Microphone) {
-            Some(Ok(state)) => Ok(microphone_authorization(state)),
-            None => Ok(MicrophoneAuthorization::NotDetermined),
+impl CaptureAccess for ServerPermissionAccess {
+    fn authorization(
+        &self,
+        device: CaptureDevice,
+    ) -> Result<CaptureAuthorization, CaptureAccessError> {
+        match self.state(capture_permission(device)) {
+            Some(Ok(state)) => Ok(capture_authorization(state)),
+            None => Ok(CaptureAuthorization::NotDetermined),
             Some(Err(failure)) => Err(failure.into()),
         }
     }
 
     /// The server shows the prompt. Its answer reaches the server's next read, so the request
-    /// reads again until the microphone is no longer undecided.
+    /// reads again until the device is no longer undecided.
     fn request_authorization(
         &self,
-        completion: MicrophoneAuthorizationCompletion,
-    ) -> Result<(), MicrophoneAccessError> {
+        device: CaptureDevice,
+        completion: CaptureAuthorizationCompletion,
+    ) -> Result<(), CaptureAccessError> {
         let poll = self.poll;
-        let spawned = self.spawn("spaceterm-microphone-request", move |shared| {
-            let request = LaneRequest::RequestPermission {
-                permission: server::SystemPermission::Microphone,
-            };
+        let permission = capture_permission(device);
+        let spawned = self.spawn("spaceterm-capture-request", move |shared| {
+            let request = LaneRequest::RequestPermission { permission };
             let state = match shared.call(&request, CHANGE_LIMIT) {
                 Ok(LaneReply::PermissionRequested(RequestOutcome::Decided { state })) => state,
                 Ok(LaneReply::PermissionRequested(RequestOutcome::Requested)) => {
@@ -464,7 +474,7 @@ impl MicrophoneAccess for ServerPermissionAccess {
                         let state = read
                             .as_ref()
                             .ok()
-                            .and_then(|report| report.state(server::SystemPermission::Microphone));
+                            .and_then(|report| report.state(permission));
                         shared.record(read);
                         match state {
                             Some(PermissionState::NotRequested) | None
@@ -479,17 +489,17 @@ impl MicrophoneAccess for ServerPermissionAccess {
                     PermissionState::NotGranted
                 }
             };
-            completion(microphone_authorization(state));
+            completion(capture_authorization(state));
         });
         spawned
             .then_some(())
-            .ok_or(MicrophoneAccessError::PlatformUnavailable)
+            .ok_or(CaptureAccessError::PlatformUnavailable)
     }
 
-    fn open_settings(&self) -> Result<(), MicrophoneAccessError> {
-        (self.open)(server::settings_uri(server::SystemPermission::Microphone))
+    fn open_settings(&self, device: CaptureDevice) -> Result<(), CaptureAccessError> {
+        (self.open)(server::settings_uri(capture_permission(device)))
             .then_some(())
-            .ok_or(MicrophoneAccessError::PlatformRejected)
+            .ok_or(CaptureAccessError::PlatformRejected)
     }
 }
 
@@ -549,6 +559,10 @@ mod tests {
                     state: microphone,
                 },
                 PermissionReading {
+                    permission: server::SystemPermission::Camera,
+                    state: PermissionState::NotGranted,
+                },
+                PermissionReading {
                     permission: server::SystemPermission::ScreenRecording,
                     state: screen,
                 },
@@ -602,8 +616,13 @@ mod tests {
             Ok(PermissionAuthorization::NotGranted)
         );
         assert_eq!(
-            MicrophoneAccess::authorization(&access),
-            Ok(MicrophoneAuthorization::Restricted)
+            CaptureAccess::authorization(&access, CaptureDevice::Microphone),
+            Ok(CaptureAuthorization::Restricted)
+        );
+        assert_eq!(
+            CaptureAccess::authorization(&access, CaptureDevice::Camera),
+            Ok(CaptureAuthorization::Denied),
+            "each device reads its own grant"
         );
         assert_eq!(
             access.accessibility_naming(),
@@ -629,8 +648,8 @@ mod tests {
             Err(PermissionAccessError::PlatformUnavailable)
         );
         assert_eq!(
-            MicrophoneAccess::authorization(&access),
-            Err(MicrophoneAccessError::PlatformUnavailable)
+            CaptureAccess::authorization(&access, CaptureDevice::Microphone),
+            Err(CaptureAccessError::PlatformUnavailable)
         );
         assert!(!access.can_reset());
         assert_eq!(
@@ -783,7 +802,10 @@ mod tests {
         settle(&access);
         let (sender, decided) = std::sync::mpsc::channel();
         access
-            .request_authorization(Box::new(move |decision| sender.send(decision).unwrap()))
+            .request_authorization(
+                CaptureDevice::Microphone,
+                Box::new(move |decision| sender.send(decision).unwrap()),
+            )
             .unwrap();
         assert!(
             decided.recv_timeout(Duration::from_millis(50)).is_err(),
@@ -795,7 +817,7 @@ mod tests {
         ));
         assert_eq!(
             decided.recv_timeout(Duration::from_secs(5)).unwrap(),
-            MicrophoneAuthorization::Authorized
+            CaptureAuthorization::Authorized
         );
     }
 
@@ -825,7 +847,15 @@ mod tests {
         let lane = Arc::new(ScriptedLane::default());
         let access = access(&lane);
         settle(&access);
-        assert_eq!(MicrophoneAccess::open_settings(&access), Ok(()));
+        assert_eq!(
+            CaptureAccess::open_settings(&access, CaptureDevice::Microphone),
+            Ok(())
+        );
+        assert_eq!(
+            CaptureAccess::open_settings(&access, CaptureDevice::Camera),
+            Err(CaptureAccessError::PlatformRejected),
+            "the camera opens its own list"
+        );
         assert_eq!(
             PermissionAccess::open_settings(&access, SystemPermission::ScreenRecording),
             Err(PermissionAccessError::PlatformRejected),

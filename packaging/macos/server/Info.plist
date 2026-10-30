@@ -14,6 +14,8 @@
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>SpaceTerm lets programs you run in its terminals use your camera, such as for photos or calls.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Sadik Saifi</string>
 	<key>NSMicrophoneUsageDescription</key>

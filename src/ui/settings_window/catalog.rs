@@ -125,6 +125,8 @@ pub(super) enum SettingsRowId {
     InstalledThemes,
     /// The system's microphone authorization, which voice tools in a Terminal Session inherit.
     MicrophoneAccess,
+    /// The system's camera authorization, which video tools in a Terminal Session inherit.
+    CameraAccess,
     /// The system's Screen Recording authorization, which programs in a Terminal Session inherit
     /// to take screenshots.
     ScreenRecordingAccess,
@@ -203,6 +205,7 @@ impl SettingsRowId {
             Self::SidebarDefaultState
             | Self::InstalledThemes
             | Self::MicrophoneAccess
+            | Self::CameraAccess
             | Self::ScreenRecordingAccess
             | Self::AccessibilityAccess
             | Self::ClipboardWrites
@@ -524,6 +527,25 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "denied",
         ],
         selector: "settings-row-microphone-access",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::CameraAccess,
+        section: SettingsSectionId::Privacy,
+        group: "Permissions",
+        label: "Camera access",
+        keywords: &[
+            "video",
+            "webcam",
+            "call",
+            "record",
+            "permission",
+            "permissions",
+            "privacy",
+            "authorization",
+            "allow",
+            "denied",
+        ],
+        selector: "settings-row-camera-access",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ScreenRecordingAccess,
@@ -1102,7 +1124,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 41] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 42] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1119,6 +1141,7 @@ mod tests {
         SettingsRowId::TerminalBoldAsBright,
         SettingsRowId::InstalledThemes,
         SettingsRowId::MicrophoneAccess,
+        SettingsRowId::CameraAccess,
         SettingsRowId::ScreenRecordingAccess,
         SettingsRowId::AccessibilityAccess,
         SettingsRowId::ClipboardWrites,
@@ -1331,6 +1354,18 @@ mod tests {
 
     /// A person whose program cannot see or control the screen searches for what the program
     /// does, for the permission's name in System Settings, or for a common use of both.
+    /// A person whose video tool shows no picture searches for what they were doing.
+    #[test]
+    fn a_video_query_reaches_camera_access() {
+        for query in ["camera", "webcam", "video"] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&SettingsRowId::CameraAccess),
+                "{query:?} should rank camera access first"
+            );
+        }
+    }
+
     #[test]
     fn a_permission_query_reaches_its_row() {
         for (query, row) in [
@@ -1428,6 +1463,7 @@ mod tests {
                 SettingsRowId::SidebarDefaultState
                     | SettingsRowId::InstalledThemes
                     | SettingsRowId::MicrophoneAccess
+                    | SettingsRowId::CameraAccess
                     | SettingsRowId::ScreenRecordingAccess
                     | SettingsRowId::AccessibilityAccess
                     | SettingsRowId::ClipboardWrites

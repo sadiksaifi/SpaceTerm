@@ -2744,6 +2744,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::TerminalBoldAsBright => "settings-terminal-bold-as-bright",
             SettingsRowId::InstalledThemes => "settings-installed-themes",
             SettingsRowId::MicrophoneAccess => "settings-microphone-access-control",
+            SettingsRowId::CameraAccess => "settings-camera-access-control",
             SettingsRowId::ScreenRecordingAccess => "settings-screen-recording-access-control",
             SettingsRowId::AccessibilityAccess => "settings-accessibility-access-control",
             SettingsRowId::ClipboardWrites => "settings-clipboard-writes",
@@ -4363,7 +4364,7 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
             .clone()
             .without_features(&[
                 HostFeature::Updates,
-                HostFeature::MicrophoneAccess,
+                HostFeature::CaptureAccess,
                 HostFeature::SystemPermissions,
             ]);
         cx.set_global(presentation);

@@ -254,6 +254,7 @@ pub(crate) fn settings(
 fn name(permission: SystemPermission, naming: AccessibilityNaming) -> &'static str {
     match (permission, naming) {
         (SystemPermission::Microphone, _) => "Microphone",
+        (SystemPermission::Camera, _) => "Camera",
         (SystemPermission::ScreenRecording, _) => "Screen Recording",
         (SystemPermission::Accessibility, AccessibilityNaming::Accessibility) => "Accessibility",
         (SystemPermission::Accessibility, AccessibilityNaming::DeviceControl) => "Device Control",
@@ -264,6 +265,7 @@ fn name(permission: SystemPermission, naming: AccessibilityNaming) -> &'static s
 fn pane(permission: SystemPermission, naming: AccessibilityNaming) -> &'static str {
     match (permission, naming) {
         (SystemPermission::Microphone, _) => "Microphone",
+        (SystemPermission::Camera, _) => "Camera",
         (SystemPermission::ScreenRecording, _) => "Screen & System Audio Recording",
         (SystemPermission::Accessibility, AccessibilityNaming::Accessibility) => "Accessibility",
         (SystemPermission::Accessibility, AccessibilityNaming::DeviceControl) => {
@@ -321,6 +323,10 @@ mod tests {
                     state: PermissionState::NotRequested,
                 },
                 PermissionReading {
+                    permission: SystemPermission::Camera,
+                    state: PermissionState::NotGranted,
+                },
+                PermissionReading {
                     permission: SystemPermission::ScreenRecording,
                     state: PermissionState::Granted,
                 },
@@ -359,6 +365,7 @@ mod tests {
         assert_eq!(
             text,
             "Microphone        not requested\n\
+             Camera            not allowed\n\
              Screen Recording  allowed\n\
              Device Control    not allowed\n\
              System Settings lists these permissions under SpaceTerm.\n"
@@ -382,6 +389,19 @@ mod tests {
         assert_eq!(
             text(SystemPermission::Microphone, RequestOutcome::Requested),
             "Answer the system prompt on this Mac.\n"
+        );
+        assert_eq!(
+            text(SystemPermission::Camera, RequestOutcome::Requested),
+            "Answer the system prompt on this Mac.\n"
+        );
+        assert_eq!(
+            text(
+                SystemPermission::Camera,
+                RequestOutcome::Decided {
+                    state: PermissionState::NotGranted
+                }
+            ),
+            "Camera was denied. Turn on SpaceTerm in System Settings > Privacy & Security > Camera. Open it with: spaceterm --server local server permissions settings camera\n"
         );
         assert_eq!(
             text(SystemPermission::Accessibility, RequestOutcome::Requested),

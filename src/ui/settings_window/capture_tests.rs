@@ -1,4 +1,4 @@
-//! Microphone access in the Privacy section, driven through a scripted capability.
+//! Microphone and camera access in the Privacy section, driven through a scripted capability.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -7,35 +7,38 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use crate::appearance::Appearance;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::microphone_access::{
-    MicrophoneAccess, MicrophoneAccessError, MicrophoneAuthorization,
-    MicrophoneAuthorizationCompletion,
+use crate::platform::capture_access::{
+    CaptureAccess, CaptureAccessError, CaptureAuthorization, CaptureAuthorizationCompletion,
+    CaptureDevice,
 };
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
-use super::super::microphone::{
-    CHECK_AGAIN_SELECTOR, CONTROL_SELECTOR, MicrophoneAccessAction, MicrophoneAccessStatus,
-    OPEN_SETTINGS_SELECTOR, REQUEST_SELECTOR,
-};
+use super::super::capture::{CAMERA, CaptureAccessAction, CaptureAccessStatus, MICROPHONE};
 use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow};
 use crate::settings::storage::testing::MemoryStorage;
 
 const ROW_SELECTOR: &str = "settings-row-microphone-access";
+const CONTROL_SELECTOR: &str = MICROPHONE.control;
+const REQUEST_SELECTOR: &str = MICROPHONE.request;
+const OPEN_SETTINGS_SELECTOR: &str = MICROPHONE.open_settings;
+const CHECK_AGAIN_SELECTOR: &str = MICROPHONE.check_again;
 
-/// A capability whose authorization, failures, and pending decisions the test controls.
-struct ScriptedMicrophoneAccess {
-    authorization: Cell<Result<MicrophoneAuthorization, MicrophoneAccessError>>,
-    request_failure: Cell<Option<MicrophoneAccessError>>,
-    open_failure: Cell<Option<MicrophoneAccessError>>,
-    pending: RefCell<Vec<MicrophoneAuthorizationCompletion>>,
+/// A capability whose authorization, failures, and pending decisions the test controls. It
+/// answers every device the same way and records which device each action named.
+struct ScriptedCaptureAccess {
+    authorization: Cell<Result<CaptureAuthorization, CaptureAccessError>>,
+    request_failure: Cell<Option<CaptureAccessError>>,
+    open_failure: Cell<Option<CaptureAccessError>>,
+    pending: RefCell<Vec<CaptureAuthorizationCompletion>>,
     requests: Cell<usize>,
     opened: Cell<usize>,
+    devices: RefCell<Vec<CaptureDevice>>,
 }
 
-impl ScriptedMicrophoneAccess {
-    fn new(authorization: Result<MicrophoneAuthorization, MicrophoneAccessError>) -> Rc<Self> {
+impl ScriptedCaptureAccess {
+    fn new(authorization: Result<CaptureAuthorization, CaptureAccessError>) -> Rc<Self> {
         Rc::new(Self {
             authorization: Cell::new(authorization),
             request_failure: Cell::new(None),
@@ -43,10 +46,11 @@ impl ScriptedMicrophoneAccess {
             pending: RefCell::default(),
             requests: Cell::new(0),
             opened: Cell::new(0),
+            devices: RefCell::default(),
         })
     }
 
-    fn take_completion(&self) -> MicrophoneAuthorizationCompletion {
+    fn take_completion(&self) -> CaptureAuthorizationCompletion {
         self.pending
             .borrow_mut()
             .pop()
@@ -54,16 +58,18 @@ impl ScriptedMicrophoneAccess {
     }
 }
 
-impl MicrophoneAccess for ScriptedMicrophoneAccess {
-    fn authorization(&self) -> Result<MicrophoneAuthorization, MicrophoneAccessError> {
+impl CaptureAccess for ScriptedCaptureAccess {
+    fn authorization(&self, _: CaptureDevice) -> Result<CaptureAuthorization, CaptureAccessError> {
         self.authorization.get()
     }
 
     fn request_authorization(
         &self,
-        completion: MicrophoneAuthorizationCompletion,
-    ) -> Result<(), MicrophoneAccessError> {
+        device: CaptureDevice,
+        completion: CaptureAuthorizationCompletion,
+    ) -> Result<(), CaptureAccessError> {
         self.requests.set(self.requests.get() + 1);
+        self.devices.borrow_mut().push(device);
         if let Some(error) = self.request_failure.get() {
             return Err(error);
         }
@@ -71,14 +77,15 @@ impl MicrophoneAccess for ScriptedMicrophoneAccess {
         Ok(())
     }
 
-    fn open_settings(&self) -> Result<(), MicrophoneAccessError> {
+    fn open_settings(&self, device: CaptureDevice) -> Result<(), CaptureAccessError> {
         self.opened.set(self.opened.get() + 1);
+        self.devices.borrow_mut().push(device);
         self.open_failure.get().map_or(Ok(()), Err)
     }
 }
 
 fn open_settings(
-    access: Option<Rc<dyn MicrophoneAccess>>,
+    access: Option<Rc<dyn CaptureAccess>>,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
     let settings =
@@ -94,7 +101,7 @@ fn open_settings(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             super::super::PermissionCapabilities {
-                microphone: access,
+                capture: access,
                 ..super::super::PermissionCapabilities::default()
             },
             None,
@@ -110,7 +117,7 @@ fn open_settings(
 
 /// Opens Settings on the Privacy section with a scripted capability.
 fn open_privacy<'a>(
-    access: &Rc<ScriptedMicrophoneAccess>,
+    access: &Rc<ScriptedCaptureAccess>,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
     let (window, cx) = open_settings(Some(access.clone()), cx);
@@ -128,14 +135,14 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> MicrophoneAccessStatus {
+fn status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> CaptureAccessStatus {
     window.read_with(cx, |window, _| window.microphone_access.status)
 }
 
 fn action(
     window: &Entity<SettingsWindow>,
     cx: &mut VisualTestContext,
-) -> Option<MicrophoneAccessAction> {
+) -> Option<CaptureAccessAction> {
     window.read_with(cx, |window, _| {
         window.microphone_access.presentation().action
     })
@@ -163,7 +170,7 @@ fn assert_no_action_rendered(cx: &mut VisualTestContext) {
 
 #[gpui::test]
 fn privacy_section_presents_microphone_access_as_a_row_in_its_group(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
     let (window, cx) = open_privacy(&access, cx);
 
     assert_eq!(
@@ -193,7 +200,7 @@ fn privacy_section_presents_microphone_access_as_a_row_in_its_group(cx: &mut Tes
 
 #[gpui::test]
 fn settings_search_reveals_microphone_access_from_another_section(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Denied));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Denied));
     let (window, cx) = open_settings(Some(access), cx);
     assert_eq!(
         window.read_with(cx, |window, _| window.active_section),
@@ -216,17 +223,14 @@ fn settings_search_reveals_microphone_access_from_another_section(cx: &mut TestA
 
 #[gpui::test]
 fn requesting_access_waits_for_the_native_decision_on_the_foreground(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
     let (window, cx) = open_privacy(&access, cx);
 
     click(REQUEST_SELECTOR, cx);
 
     assert_eq!(access.requests.get(), 1);
-    assert_eq!(status(&window, cx), MicrophoneAccessStatus::Requesting);
-    assert_eq!(
-        action(&window, cx),
-        Some(MicrophoneAccessAction::Requesting)
-    );
+    assert_eq!(status(&window, cx), CaptureAccessStatus::Requesting);
+    assert_eq!(action(&window, cx), Some(CaptureAccessAction::Requesting));
     assert!(
         cx.debug_bounds("settings-microphone-access-state-requesting")
             .is_some()
@@ -239,22 +243,22 @@ fn requesting_access_waits_for_the_native_decision_on_the_foreground(cx: &mut Te
     // The system prompt activating and returning the window does not overwrite the pending request.
     access
         .authorization
-        .set(Ok(MicrophoneAuthorization::Authorized));
+        .set(Ok(CaptureAuthorization::Authorized));
     cx.deactivate_window();
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    assert_eq!(status(&window, cx), MicrophoneAccessStatus::Requesting);
+    assert_eq!(status(&window, cx), CaptureAccessStatus::Requesting);
 
     // The decision waits for the foreground task to resume.
     let completion = access.take_completion();
-    completion(MicrophoneAuthorization::Authorized);
-    assert_eq!(status(&window, cx), MicrophoneAccessStatus::Requesting);
+    completion(CaptureAuthorization::Authorized);
+    assert_eq!(status(&window, cx), CaptureAccessStatus::Requesting);
 
     cx.run_until_parked();
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::Authorized)
+        CaptureAccessStatus::Authorization(CaptureAuthorization::Authorized)
     );
     assert_eq!(action(&window, cx), None);
     assert!(
@@ -267,22 +271,19 @@ fn requesting_access_waits_for_the_native_decision_on_the_foreground(cx: &mut Te
 fn a_denial_from_the_prompt_offers_system_settings_rather_than_prompting_again(
     cx: &mut TestAppContext,
 ) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
     let (window, cx) = open_privacy(&access, cx);
 
     click(REQUEST_SELECTOR, cx);
     let completion = access.take_completion();
-    completion(MicrophoneAuthorization::Denied);
+    completion(CaptureAuthorization::Denied);
     cx.run_until_parked();
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::Denied)
+        CaptureAccessStatus::Authorization(CaptureAuthorization::Denied)
     );
-    assert_eq!(
-        action(&window, cx),
-        Some(MicrophoneAccessAction::OpenSettings)
-    );
+    assert_eq!(action(&window, cx), Some(CaptureAccessAction::OpenSettings));
     click(OPEN_SETTINGS_SELECTOR, cx);
     assert_eq!(access.opened.get(), 1);
     assert_eq!(access.requests.get(), 1);
@@ -290,25 +291,25 @@ fn a_denial_from_the_prompt_offers_system_settings_rather_than_prompting_again(
 
 #[gpui::test]
 fn a_request_dropped_without_a_decision_reads_authorization_again(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
     let (window, cx) = open_privacy(&access, cx);
 
     click(REQUEST_SELECTOR, cx);
     access
         .authorization
-        .set(Ok(MicrophoneAuthorization::Restricted));
+        .set(Ok(CaptureAuthorization::Restricted));
     drop(access.take_completion());
     cx.run_until_parked();
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::Restricted)
+        CaptureAccessStatus::Authorization(CaptureAuthorization::Restricted)
     );
 }
 
 #[gpui::test]
 fn denied_access_recovers_through_system_settings(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Denied));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Denied));
     let (window, cx) = open_privacy(&access, cx);
 
     assert!(
@@ -327,24 +328,24 @@ fn denied_access_recovers_through_system_settings(cx: &mut TestAppContext) {
     // Returning from System Settings reads the decision the person made there.
     access
         .authorization
-        .set(Ok(MicrophoneAuthorization::Authorized));
+        .set(Ok(CaptureAuthorization::Authorized));
     cx.deactivate_window();
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::Authorized)
+        CaptureAccessStatus::Authorization(CaptureAuthorization::Authorized)
     );
     assert_eq!(action(&window, cx), None);
 }
 
 #[gpui::test]
 fn a_failed_recovery_keeps_the_denial_and_explains_where_to_go(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Denied));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Denied));
     access
         .open_failure
-        .set(Some(MicrophoneAccessError::PlatformRejected));
+        .set(Some(CaptureAccessError::PlatformRejected));
     let (window, cx) = open_privacy(&access, cx);
     let guidance = explanation(&window, cx);
 
@@ -352,15 +353,12 @@ fn a_failed_recovery_keeps_the_denial_and_explains_where_to_go(cx: &mut TestAppC
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::Denied)
+        CaptureAccessStatus::Authorization(CaptureAuthorization::Denied)
     );
     let failure = explanation(&window, cx);
     assert_ne!(failure, guidance);
     assert!(failure.contains("Privacy & Security > Microphone"));
-    assert_eq!(
-        action(&window, cx),
-        Some(MicrophoneAccessAction::OpenSettings)
-    );
+    assert_eq!(action(&window, cx), Some(CaptureAccessAction::OpenSettings));
 
     access.open_failure.set(None);
     click(OPEN_SETTINGS_SELECTOR, cx);
@@ -369,7 +367,7 @@ fn a_failed_recovery_keeps_the_denial_and_explains_where_to_go(cx: &mut TestAppC
 
 #[gpui::test]
 fn authorized_access_is_confirmed_without_a_fix(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Authorized));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Authorized));
     let (window, cx) = open_privacy(&access, cx);
 
     assert!(
@@ -386,7 +384,7 @@ fn authorized_access_is_confirmed_without_a_fix(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn restricted_access_explains_the_policy_without_prompting(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Restricted));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Restricted));
     let (window, cx) = open_privacy(&access, cx);
 
     assert!(
@@ -403,8 +401,8 @@ fn restricted_access_explains_the_policy_without_prompting(cx: &mut TestAppConte
     // Nothing outside the row can prompt from a restricted state either.
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
-            settings.request_microphone_access(cx);
-            settings.open_microphone_settings(cx);
+            settings.request_capture_access(CaptureDevice::Microphone, cx);
+            settings.open_capture_settings(CaptureDevice::Microphone, cx);
         });
     });
     cx.run_until_parked();
@@ -415,73 +413,67 @@ fn restricted_access_explains_the_policy_without_prompting(cx: &mut TestAppConte
 fn an_unreadable_authorization_reports_a_content_free_failure_and_checks_again(
     cx: &mut TestAppContext,
 ) {
-    let access = ScriptedMicrophoneAccess::new(Err(MicrophoneAccessError::PlatformUnavailable));
+    let access = ScriptedCaptureAccess::new(Err(CaptureAccessError::PlatformUnavailable));
     let (window, cx) = open_privacy(&access, cx);
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Failed(MicrophoneAccessError::PlatformUnavailable)
+        CaptureAccessStatus::Failed(CaptureAccessError::PlatformUnavailable)
     );
     assert!(
         cx.debug_bounds("settings-microphone-access-state-unavailable")
             .is_some()
     );
-    assert_eq!(
-        action(&window, cx),
-        Some(MicrophoneAccessAction::CheckAgain)
-    );
+    assert_eq!(action(&window, cx), Some(CaptureAccessAction::CheckAgain));
     assert!(cx.debug_bounds(REQUEST_SELECTOR).is_none());
 
     access
         .authorization
-        .set(Ok(MicrophoneAuthorization::NotDetermined));
+        .set(Ok(CaptureAuthorization::NotDetermined));
     click(CHECK_AGAIN_SELECTOR, cx);
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::NotDetermined)
+        CaptureAccessStatus::Authorization(CaptureAuthorization::NotDetermined)
     );
     assert!(cx.debug_bounds(REQUEST_SELECTOR).is_some());
 }
 
 #[gpui::test]
 fn a_rejected_request_reports_failure_instead_of_waiting(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
     access
         .request_failure
-        .set(Some(MicrophoneAccessError::PlatformRejected));
+        .set(Some(CaptureAccessError::PlatformRejected));
     let (window, cx) = open_privacy(&access, cx);
 
     click(REQUEST_SELECTOR, cx);
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Failed(MicrophoneAccessError::PlatformRejected)
+        CaptureAccessStatus::Failed(CaptureAccessError::PlatformRejected)
     );
-    assert_eq!(
-        action(&window, cx),
-        Some(MicrophoneAccessAction::CheckAgain)
-    );
+    assert_eq!(action(&window, cx), Some(CaptureAccessAction::CheckAgain));
     assert!(cx.debug_bounds(CHECK_AGAIN_SELECTOR).is_some());
 }
 
 /// Every typed failure produces its independent fixed product copy.
 #[gpui::test]
 fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Authorized));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Authorized));
     let (window, cx) = open_settings(Some(access.clone()), cx);
     for (error, expected) in [
         (
-            MicrophoneAccessError::PlatformUnavailable,
+            CaptureAccessError::PlatformUnavailable,
             "Couldn\u{2019}t check microphone access.",
         ),
         (
-            MicrophoneAccessError::PlatformRejected,
+            CaptureAccessError::PlatformRejected,
             "Microphone access request failed.",
         ),
     ] {
         access.authorization.set(Err(error));
-        cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_microphone_access(cx)));
+        cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_capture_access(cx)));
         assert_eq!(explanation(&window, cx), expected);
     }
 }
@@ -493,7 +485,7 @@ fn a_host_without_the_capability_presents_microphone_access_as_unavailable(
     let (window, cx) = open_settings(None, cx);
     click("settings-navigation-settings-section-privacy", cx);
 
-    assert_eq!(status(&window, cx), MicrophoneAccessStatus::Unsupported);
+    assert_eq!(status(&window, cx), CaptureAccessStatus::Unsupported);
     assert!(cx.debug_bounds(ROW_SELECTOR).is_some());
     assert!(
         cx.debug_bounds("settings-microphone-access-state-unavailable")
@@ -505,7 +497,7 @@ fn a_host_without_the_capability_presents_microphone_access_as_unavailable(
     cx.deactivate_window();
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    assert_eq!(status(&window, cx), MicrophoneAccessStatus::Unsupported);
+    assert_eq!(status(&window, cx), CaptureAccessStatus::Unsupported);
 }
 
 #[gpui::test]
@@ -515,13 +507,13 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
     const DESCRIPTION_SELECTOR: &str = "settings-row-microphone-access-description";
     const LAST_ROW_SELECTOR: &str = "settings-row-accessibility-access";
 
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
     let (window, cx) = open_privacy(&access, cx);
     let states = [
-        Ok(MicrophoneAuthorization::NotDetermined),
-        Ok(MicrophoneAuthorization::Denied),
-        Ok(MicrophoneAuthorization::Restricted),
-        Err(MicrophoneAccessError::PlatformRejected),
+        Ok(CaptureAuthorization::NotDetermined),
+        Ok(CaptureAuthorization::Denied),
+        Ok(CaptureAuthorization::Restricted),
+        Err(CaptureAccessError::PlatformRejected),
     ];
     for width in [super::super::WINDOW_WIDTH, 1100.0, 1400.0] {
         cx.simulate_resize(gpui::size(
@@ -532,7 +524,7 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
         for state in states {
             access.authorization.set(state);
             cx.update(|_, cx| {
-                window.update(cx, |settings, cx| settings.refresh_microphone_access(cx));
+                window.update(cx, |settings, cx| settings.refresh_capture_access(cx));
             });
             cx.run_until_parked();
 
@@ -572,13 +564,11 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
         gpui::px(super::super::WINDOW_WIDTH),
         gpui::px(super::super::WINDOW_HEIGHT),
     ));
-    access
-        .authorization
-        .set(Ok(MicrophoneAuthorization::Denied));
+    access.authorization.set(Ok(CaptureAuthorization::Denied));
     access
         .open_failure
-        .set(Some(MicrophoneAccessError::PlatformRejected));
-    cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_microphone_access(cx)));
+        .set(Some(CaptureAccessError::PlatformRejected));
+    cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_capture_access(cx)));
     cx.run_until_parked();
     click(OPEN_SETTINGS_SELECTOR, cx);
     assert_eq!(
@@ -596,7 +586,7 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
 fn microphone_access_publishes_its_state(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let access = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::Authorized));
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Authorized));
     let (_window, cx) = open_privacy(&access, cx);
     let tree = A11yTree::read(cx);
     assert!(
@@ -613,7 +603,7 @@ fn a_reported_permission_change_refreshes_the_microphone_row(cx: &mut TestAppCon
     use crate::platform::permission_access::PermissionAuthorization::NotGranted;
     use crate::platform::permission_access::testing::ScriptedPermissionAccess;
 
-    let microphone = ScriptedMicrophoneAccess::new(Ok(MicrophoneAuthorization::NotDetermined));
+    let microphone = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
     let system = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
@@ -628,7 +618,7 @@ fn a_reported_permission_change_refreshes_the_microphone_row(cx: &mut TestAppCon
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             super::super::PermissionCapabilities {
-                microphone: Some(microphone.clone()),
+                capture: Some(microphone.clone()),
                 system_permissions: Some(system.clone()),
                 permission_setup: None,
             },
@@ -642,12 +632,43 @@ fn a_reported_permission_change_refreshes_the_microphone_row(cx: &mut TestAppCon
 
     microphone
         .authorization
-        .set(Ok(MicrophoneAuthorization::Authorized));
+        .set(Ok(CaptureAuthorization::Authorized));
     system.report_change();
     cx.run_until_parked();
 
     assert_eq!(
         status(&window, cx),
-        MicrophoneAccessStatus::Authorization(MicrophoneAuthorization::Authorized)
+        CaptureAccessStatus::Authorization(CaptureAuthorization::Authorized)
     );
+}
+
+/// The camera row asks for the camera alone and reads its own state, beside the microphone row.
+#[gpui::test]
+fn the_camera_row_requests_and_recovers_the_camera(cx: &mut TestAppContext) {
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::NotDetermined));
+    let (window, cx) = open_privacy(&access, cx);
+    assert!(cx.debug_bounds(CAMERA.state_not_requested).is_some());
+
+    click(CAMERA.request, cx);
+    assert_eq!(*access.devices.borrow(), [CaptureDevice::Camera]);
+    assert!(cx.debug_bounds(CAMERA.state_requesting).is_some());
+    assert!(
+        cx.debug_bounds(MICROPHONE.state_not_requested).is_some(),
+        "the microphone row keeps its own state"
+    );
+
+    access.authorization.set(Ok(CaptureAuthorization::Denied));
+    access.take_completion()(CaptureAuthorization::Denied);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(CAMERA.state_denied).is_some());
+
+    click(CAMERA.open_settings, cx);
+    assert_eq!(
+        *access.devices.borrow(),
+        [CaptureDevice::Camera, CaptureDevice::Camera]
+    );
+    let explanation = window.read_with(cx, |settings, _| {
+        settings.camera_access.presentation().explanation
+    });
+    assert_eq!(explanation, "Lets terminal programs use the camera.");
 }
