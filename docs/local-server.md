@@ -51,6 +51,8 @@ Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies
 
 Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Try Again and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). The CLI can Stop, Restart and Update a running paired server through [the service lane](adr/0057-administer-servers-over-the-service-lane.md). Network exposure, invitations, unpairing other devices, End All Sessions, Start and setup stay on the server's own machine. Saved addresses are read-only; add the server again to use a different address. [ADR 0056](adr/0056-install-and-pair-servers-from-their-own-command-line.md) describes CLI enrollment and its address override.
 
+To rename a CLI Saved Connection, run `spaceterm connection rename penguin lab`, then select it with `spaceterm --server lab`. Add `--json` for the result envelope. This changes only the CLI's saved name; [ADR 0056](adr/0056-install-and-pair-servers-from-their-own-command-line.md) owns rename behavior and separation from desktop connections.
+
 ### Reach one server over the LAN and a tailnet
 
 A server listens at one of its addresses, or on all interfaces. All Interfaces binds `0.0.0.0` and `[::]` at the same UDP port and answers each client from the address it dialed. It listens on every network the machine is on, including public networks and any network it joins later. Only paired devices are admitted. Choose it in Settings > Servers on the server's machine, or run the service command there:

@@ -90,6 +90,7 @@ pub struct Joining<'a> {
     record: PendingEnrollment,
     enrollment: Enrollment,
     _guard: Lock,
+    deadline: Instant,
 }
 
 impl<'a> PairingClient<'a> {
@@ -100,6 +101,7 @@ impl<'a> PairingClient<'a> {
         name: String,
         client_name: ClientName,
         deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Joining<'a>, Error> {
         if !crate::valid_name(&name) {
             return Err(StoreError::NameTaken.into());
@@ -121,14 +123,16 @@ impl<'a> PairingClient<'a> {
             confirmed: false,
         };
         let guard = self.store.recovery_guard(&route)?.ok_or(Error::Busy)?;
-        self.store.reserve(record.clone())?;
+        self.store
+            .transaction(deadline, cancelled)
+            .reserve(record.clone())?;
         let result = self
             .credentials
             .insert(&credential_key, credential.expose_bytes());
         if let Err(error) = result {
             // A failed insert grants no authority over an existing native item. Recovery
             // checks the generated public key before retiring any item.
-            let _ = self.recover_enrollment(&record, deadline);
+            let _ = self.recover_enrollment(&record, deadline, &|| false);
             return Err(error.into());
         }
         Ok(Joining {
@@ -136,6 +140,7 @@ impl<'a> PairingClient<'a> {
             record,
             enrollment,
             _guard: guard,
+            deadline,
         })
     }
 
@@ -167,7 +172,10 @@ impl<'a> PairingClient<'a> {
             else {
                 continue;
             };
-            if self.recover_enrollment(&current, deadline).is_err() {
+            if self
+                .recover_enrollment(&current, deadline, cancelled)
+                .is_err()
+            {
                 pending += 1;
             }
         }
@@ -187,7 +195,10 @@ impl<'a> PairingClient<'a> {
             else {
                 continue;
             };
-            if self.recover_revocation(&current, deadline).is_err() {
+            if self
+                .recover_revocation(&current, deadline, cancelled)
+                .is_err()
+            {
                 pending += 1;
             }
         }
@@ -206,6 +217,7 @@ impl<'a> PairingClient<'a> {
         &self,
         record: &PendingEnrollment,
         deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(), Error> {
         let bytes = self
             .credentials
@@ -235,13 +247,17 @@ impl<'a> PairingClient<'a> {
                     enrollment.validate_cancellation(&receipt)?;
                 }
             }
-            self.store.confirm_enrollment_cleanup(record.route)?;
+            self.store
+                .transaction(deadline, cancelled)
+                .confirm_enrollment_cleanup(record.route)?;
         }
         if owns_item {
             self.credentials
                 .remove(&record.credential, Interaction::Quiet)?;
         }
-        self.store.retire_enrollment(record.route)?;
+        self.store
+            .transaction(deadline, cancelled)
+            .retire_enrollment(record.route)?;
         Ok(())
     }
 
@@ -249,6 +265,7 @@ impl<'a> PairingClient<'a> {
         &self,
         record: &PendingRevocation,
         deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(), Error> {
         let saved = &record.connection;
         if !record.confirmed {
@@ -260,22 +277,32 @@ impl<'a> PairingClient<'a> {
             {
                 return Err(DirectError::Substituted.into());
             }
-            self.store.confirm_revocation(saved.route)?;
+            self.store
+                .transaction(deadline, cancelled)
+                .confirm_revocation(saved.route)?;
         }
         self.credentials
             .remove(&saved.credential, Interaction::Quiet)?;
-        self.store.retire_pending(saved.route)?;
+        self.store
+            .transaction(deadline, cancelled)
+            .retire_pending(saved.route)?;
         Ok(())
     }
 }
 
 impl Joining<'_> {
-    pub fn submit(&mut self) -> Result<ComparisonCode, Error> {
-        self.client.store.mark_offered(self.record.route)?;
+    pub fn submit(&mut self, cancelled: &dyn Fn() -> bool) -> Result<ComparisonCode, Error> {
+        self.client
+            .store
+            .transaction(self.deadline, cancelled)
+            .mark_offered(self.record.route)?;
         self.record.offered = true;
         Ok(self.client.network.submit(&mut self.enrollment)?)
     }
-    pub fn finish(&mut self) -> Result<Option<SavedConnection>, Error> {
+    pub fn finish(
+        &mut self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<SavedConnection>, Error> {
         let Some(paired) = self.client.network.finish(&mut self.enrollment)? else {
             return Ok(None);
         };
@@ -290,7 +317,15 @@ impl Joining<'_> {
             credential: self.record.credential,
             unpair: UnpairState::Paired,
         };
-        if self.client.store.publish(connection.clone()).is_err() {
+        if let Err(error) = self
+            .client
+            .store
+            .transaction(self.deadline, cancelled)
+            .publish(connection.clone())
+        {
+            if matches!(error, StoreError::Timeout | StoreError::Interrupted) {
+                return Err(error.into());
+            }
             // A rename may have succeeded before its synchronization failed. Only a
             // synchronized reread can settle publication; cancellation must never guess.
             let rows = self.client.store.load().map_err(|_| Error::Unconfirmed)?;
@@ -318,6 +353,6 @@ impl Joining<'_> {
             .into_iter()
             .find(|row| row.route == self.record.route)
             .ok_or(StoreError::NotFound)?;
-        self.client.recover_enrollment(&record, deadline)
+        self.client.recover_enrollment(&record, deadline, &|| false)
     }
 }
