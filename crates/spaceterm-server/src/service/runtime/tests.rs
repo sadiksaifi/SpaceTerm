@@ -510,6 +510,93 @@ fn provision_retains_exact_signed_bytes_and_reuses_verified_installation() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+#[test]
+fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
+    let home = temporary();
+    let service = Service::for_paths(crate::host::Paths {
+        identity: "spaceterm-development".into(),
+        data: home.join(".local/share/spaceterm-development/server"),
+        runtime: home.join("runtime"),
+    })
+    .unwrap();
+    with_artifact(
+        &home.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            let launcher = service.cli_launcher_path().unwrap();
+            assert_eq!(launcher, home.join(".local/bin/spaceterm-development"));
+            assert_eq!(service.cli_launcher(), Ok(CliLauncher::Missing));
+            // Without an approved runtime, the launcher follows the installation just retained.
+            let mut retained = None;
+            assert_eq!(
+                service.link_cli(|| {
+                    let installation =
+                        service.provision(archive, signature, target(), COMMIT, VERSION)?;
+                    retained = Some(installation.directory.clone());
+                    Ok(installation.directory)
+                }),
+                Ok(true)
+            );
+            let installation = retained.unwrap();
+            let executable = installation.join("bin/spaceterm");
+            assert_eq!(std::fs::read_link(&launcher).unwrap(), executable);
+            assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
+
+            // An approved runtime is selected without retaining anything.
+            Directory::open(&service.paths.data, true)
+                .unwrap()
+                .write_json(
+                    c"service.json",
+                    &State {
+                        installation: installation
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        stopped: false,
+                        automatic_start: true,
+                        installed: true,
+                        removing: false,
+                        run: None,
+                        activation: None,
+                    },
+                )
+                .unwrap();
+            std::fs::remove_file(&launcher).unwrap();
+            let unused = || -> Result<PathBuf, ServerError> {
+                panic!("an approved runtime needs no provisioning")
+            };
+            assert_eq!(service.link_cli(unused), Ok(true));
+            assert_eq!(std::fs::read_link(&launcher).unwrap(), executable);
+
+            // A managed link whose installation is gone is replaced.
+            std::fs::remove_file(&launcher).unwrap();
+            let gone = service.installations_directory().join("b".repeat(64));
+            std::os::unix::fs::symlink(gone.join("bin/spaceterm"), &launcher).unwrap();
+            assert_eq!(service.cli_launcher(), Ok(CliLauncher::Stale));
+            assert_eq!(service.link_cli(unused), Ok(true));
+            assert_eq!(std::fs::read_link(&launcher).unwrap(), executable);
+
+            // Another tool's link and a file that is not a link stay in place.
+            std::fs::remove_file(&launcher).unwrap();
+            std::os::unix::fs::symlink("/another/tool", &launcher).unwrap();
+            assert_eq!(service.cli_launcher(), Ok(CliLauncher::Foreign));
+            assert_eq!(service.link_cli(unused), Ok(false));
+            assert_eq!(
+                std::fs::read_link(&launcher).unwrap(),
+                Path::new("/another/tool")
+            );
+            std::fs::remove_file(&launcher).unwrap();
+            std::fs::write(&launcher, b"local tool").unwrap();
+            assert_eq!(service.cli_launcher(), Ok(CliLauncher::NotLink));
+            assert_eq!(service.link_cli(unused), Ok(false));
+            assert_eq!(std::fs::read(&launcher).unwrap(), b"local tool");
+        },
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 fn temporary() -> PathBuf {
     let mut random = [0; 16];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut random).unwrap();

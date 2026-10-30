@@ -26,6 +26,26 @@ fn bin(home: &Path) -> Result<PathBuf, ServerError> {
     Ok(path)
 }
 
+/// A passive read for presentation. Replacement decides again under the service lock.
+pub(super) fn inspect(
+    home: &Path,
+    identity: &str,
+    installations: &Path,
+) -> Result<CliLauncher, ServerError> {
+    let launcher = home.join(".local/bin").join(identity);
+    match std::fs::read_link(&launcher) {
+        Ok(target) if managed(&target, installations) => Ok(if target.is_file() {
+            CliLauncher::Linked
+        } else {
+            CliLauncher::Stale
+        }),
+        Ok(_) => Ok(CliLauncher::Foreign),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CliLauncher::Missing),
+        Err(_) if std::fs::symlink_metadata(&launcher).is_ok() => Ok(CliLauncher::NotLink),
+        Err(_) => Err(ServerError::StorageUnavailable),
+    }
+}
+
 /// Called only with the service lock held. Returns false for a launcher owned by another tool.
 pub(super) fn select(
     home: &Path,

@@ -58,6 +58,21 @@ pub fn verify_candidate_bytes(
     .map(Into::into)
 }
 
+/// What the command-line launcher path holds. Only [`CliLauncher::Missing`] and
+/// [`CliLauncher::Stale`] are ever replaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliLauncher {
+    Missing,
+    /// A link into this identity's retained installations whose executable exists.
+    Linked,
+    /// A link into this identity's retained installations whose executable is gone.
+    Stale,
+    /// A link to anything else, such as another tool.
+    Foreign,
+    /// A file, directory or other entry that is not a link.
+    NotLink,
+}
+
 /// An installer preview carries only bounded service effects and a nonsecret approval token.
 #[cfg(feature = "client")]
 #[derive(Debug)]
@@ -98,9 +113,49 @@ impl Service {
         )?;
         let data = Directory::open(&self.paths.data, true)?;
         let _operation = data.lock("service.lock", false)?;
-        let runtime = Self::state(&data)?
-            .as_ref()
-            .map_or(retained.directory, |state| self.runtime(state));
+        self.select_cli_locked(&data, || Ok(retained.directory))
+    }
+
+    /// Link the command-line launcher exactly as the installer does, for a client acting with
+    /// this account's authority. The launcher follows the approved runtime; without one it
+    /// follows the installation `provision` retains, which runs under the service lock.
+    /// Returns false for a launcher owned by another tool, which stays untouched. Another
+    /// service operation that outlasts the operation grace returns ServiceBusy.
+    pub fn link_cli(
+        &self,
+        provision: impl FnOnce() -> Result<PathBuf, ServerError>,
+    ) -> Result<bool, ServerError> {
+        let data = Directory::open(&self.paths.data, true)?;
+        let _operation = match data.wait_lock("service.lock", OPERATION_GRACE, None)? {
+            LockWait::Locked(lock) => lock,
+            LockWait::Held | LockWait::Cancelled => return Err(ServerError::ServiceBusy),
+        };
+        self.select_cli_locked(&data, provision)
+    }
+
+    /// Read what the command-line launcher path holds, without following it or taking a lock.
+    pub fn cli_launcher(&self) -> Result<CliLauncher, ServerError> {
+        launcher::inspect(
+            self.cli_home()?,
+            &self.identity,
+            &self.paths.data.join("installations"),
+        )
+    }
+
+    /// Where the installer and [`Self::link_cli`] place this identity's launcher.
+    pub fn cli_launcher_path(&self) -> Result<PathBuf, ServerError> {
+        Ok(self.cli_home()?.join(".local/bin").join(&self.identity))
+    }
+
+    fn select_cli_locked(
+        &self,
+        data: &Directory,
+        provision: impl FnOnce() -> Result<PathBuf, ServerError>,
+    ) -> Result<bool, ServerError> {
+        let runtime = match Self::state(data)? {
+            Some(state) => self.runtime(&state),
+            None => provision()?,
+        };
         verify(&runtime, &self.identity)?;
         launcher::select(
             self.cli_home()?,

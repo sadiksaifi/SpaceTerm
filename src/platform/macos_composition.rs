@@ -77,6 +77,7 @@ fn desktop_profile(
                 this_computer: "This Mac",
                 this_computer_phrase: "this Mac",
                 system_directory_selection: "Choose in Finder…",
+                reveal_file: "Show in Finder",
                 read_only_update: (
                     "Move SpaceTerm to Applications",
                     "Install SpaceTerm in Applications to update.",
@@ -147,6 +148,7 @@ fn compose(
         direct_servers.clone(),
     );
     let server_context_paths = startup.server_context_paths();
+    let command_line_tool = command_line_tool(identity, &startup.home_directory);
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
         Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),
@@ -205,6 +207,7 @@ fn compose(
             ssh_setup: Some(ssh_setup),
             direct_servers: Some(direct_servers),
             server_context_paths: Some(server_context_paths),
+            command_line_tool,
         },
         services: Some(Rc::new(super::macos_services::NativeServicesRegistration)),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),
@@ -222,6 +225,23 @@ fn compose(
                 Rc::new(super::macos_appearance::MacosAppearancePlatform),
             )
             .with_status_menu(super::macos_status_menu::install)
+    })
+}
+
+/// This build's command, installed through the account's service and shown in Finder.
+fn command_line_tool(
+    identity: ApplicationIdentity,
+    home: &std::path::Path,
+) -> Option<crate::command_line_tool::CommandLineToolAdapters> {
+    let files =
+        super::account_launcher_files::AccountLauncherFiles::new(identity.directory_name()).ok()?;
+    Some(crate::command_line_tool::CommandLineToolAdapters {
+        files: Arc::new(files),
+        search_path: Arc::new(super::login_shell_search_path::LoginShellSearchPath::new(
+            super::launch_host::user_shell(),
+            home.to_owned(),
+        )),
+        viewer: Arc::new(super::macos_file_viewer::FinderViewer),
     })
 }
 

@@ -16,7 +16,7 @@ mod runtime;
 pub mod tokens;
 #[cfg(feature = "client")]
 pub use runtime::CliUninstall;
-pub use runtime::{CandidateMetadata, verify_candidate_bytes};
+pub use runtime::{CandidateMetadata, CliLauncher, verify_candidate_bytes};
 
 use crate::{
     ServerError,

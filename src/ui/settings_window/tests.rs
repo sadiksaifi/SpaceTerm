@@ -390,6 +390,15 @@ fn open_settings_with_capabilities(
                 update: Some(super::server_update::testing::ScriptedUpdate::new(
                     super::server_update::testing::available(),
                 )),
+                command_line_tool: Some(std::sync::Arc::new(
+                    crate::command_line_tool::testing::tool(
+                        &crate::command_line_tool::testing::ScriptedFiles::new(Ok(
+                            crate::command_line_tool::Launcher::Missing,
+                        )),
+                        &crate::command_line_tool::testing::ScriptedShell::new(None),
+                        &std::sync::Arc::default(),
+                    ),
+                )),
             }),
             window,
             cx,
@@ -2755,6 +2764,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::PairedDevices => return None,
             // The list and its add action span the card, with no control column.
             SettingsRowId::AllServers | SettingsRowId::AddServer => return None,
+            SettingsRowId::CommandLineTool => "settings-row-command-line-tool-control",
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
