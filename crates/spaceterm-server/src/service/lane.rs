@@ -38,10 +38,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-/// How many cancelled Permission Setups the lane remembers. A cancellation can arrive before its
-/// preparation, so it is kept until that preparation ends or newer ones replace it.
-const MAX_CANCELLED_SETUPS: usize = 16;
-
 /// A Permission Setup name: 32 lowercase hexadecimal digits.
 fn setup_name_valid(setup: &str) -> bool {
     setup.len() == 32
@@ -345,8 +341,8 @@ pub struct LaneServer {
     feed: Arc<dyn Source>,
     launch: Box<Launcher>,
     permissions: Arc<dyn SystemPermissions>,
-    /// The Permission Setups cancelled while or before their preparation ran.
-    cancelled_setups: Mutex<std::collections::VecDeque<String>>,
+    /// The Permission Setups whose preparations run, and their cancellations.
+    setups: Mutex<setups::Setups>,
     upload: Mutex<Option<Upload>>,
     /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
@@ -414,7 +410,7 @@ impl LaneServer {
             feed,
             launch,
             permissions,
-            cancelled_setups: Mutex::default(),
+            setups: Mutex::default(),
             upload: Mutex::new(None),
             executing: Mutex::new(()),
             watching: AtomicBool::new(false),
@@ -542,10 +538,8 @@ impl LaneServer {
         (result.unwrap_or_else(|failure| error(&failure)), None)
     }
 
-    fn cancelled_setups(&self) -> std::sync::MutexGuard<'_, std::collections::VecDeque<String>> {
-        self.cancelled_setups
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    fn setups(&self) -> std::sync::MutexGuard<'_, setups::Setups> {
+        self.setups.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Answers a System Permission request. Only the server's own machine sets up or changes
@@ -566,20 +560,29 @@ impl LaneServer {
                 if !setup_name_valid(&setup) {
                     return error(&ServerError::Protocol);
                 }
-                let cancelled = || self.cancelled_setups().contains(&setup);
-                let readiness = permissions.prepare_setup(permission, &cancelled);
-                self.cancelled_setups().retain(|name| *name != setup);
-                readiness.map(LaneReply::PermissionSetup)
+                if let Err(failure) = self.setups().begin(&setup, Instant::now()) {
+                    return error(&failure);
+                }
+                // The admission ends however the preparation returns.
+                struct Finish<'a>(&'a LaneServer, &'a str);
+                impl Drop for Finish<'_> {
+                    fn drop(&mut self) {
+                        self.0.setups().finish(self.1);
+                    }
+                }
+                let _finish = Finish(self, &setup);
+                let cancelled = || self.setups().cancelled(&setup);
+                permissions
+                    .prepare_setup(permission, &cancelled)
+                    .map(LaneReply::PermissionSetup)
             }
             LaneRequest::CancelPermissionSetup { setup } => {
                 if !setup_name_valid(&setup) {
                     return error(&ServerError::Protocol);
                 }
-                let mut cancelled = self.cancelled_setups();
-                if cancelled.len() >= MAX_CANCELLED_SETUPS {
-                    cancelled.pop_front();
+                if let Err(failure) = self.setups().cancel(&setup, Instant::now()) {
+                    return error(&failure);
                 }
-                cancelled.push_back(setup);
                 Ok(LaneReply::PermissionSetupCancelled)
             }
             LaneRequest::ResetPermission { permission } => permissions
@@ -1559,5 +1562,6 @@ pub mod admin;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod network;
+mod setups;
 #[cfg(test)]
 pub(crate) mod tests;

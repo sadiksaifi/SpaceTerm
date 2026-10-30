@@ -95,12 +95,22 @@ impl MacosSystemPermissions {
     }
 
     /// Asks the system for `permission`, after Launch Services learns the server's own bundle.
-    /// A failed registration only leaves System Settings without the bundle's name.
-    fn ask(&self, permission: SystemPermission) -> Result<(), PermissionError> {
+    /// A failed registration only leaves System Settings without the bundle's name. Registration
+    /// can wait, so `cancelled` is read after it, immediately before the request. Returns whether
+    /// the request was made.
+    fn ask(
+        &self,
+        permission: SystemPermission,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<bool, PermissionError> {
         if let Some(own) = &self.own {
             let _ = self.native.register(&own.path);
         }
-        self.native.request(permission)
+        if cancelled() {
+            return Ok(false);
+        }
+        self.native.request(permission)?;
+        Ok(true)
     }
 
     fn probing(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -142,7 +152,7 @@ impl SystemPermissions for MacosSystemPermissions {
         if !ask {
             return Ok(RequestOutcome::Decided { state });
         }
-        self.ask(permission)?;
+        self.ask(permission, &|| false)?;
         Ok(RequestOutcome::Requested)
     }
 
@@ -168,11 +178,11 @@ impl SystemPermissions for MacosSystemPermissions {
                 .reset(tcc_service(permission), &own.identifier)
                 .is_ok()
         });
-        if cancelled() {
-            return Ok(SetupReadiness::Cancelled { cleared });
+        if self.ask(permission, cancelled)? {
+            Ok(SetupReadiness::Ready { cleared })
+        } else {
+            Ok(SetupReadiness::Cancelled { cleared })
         }
-        self.ask(permission)?;
-        Ok(SetupReadiness::Ready { cleared })
     }
 
     fn reset(&self, permission: SystemPermission) -> Result<(), PermissionError> {
@@ -672,7 +682,42 @@ mod tests {
         );
         assert_eq!(
             effects(&scripted),
-            ["probe".to_owned(), format!("reset ScreenCapture {BUNDLE}")]
+            [
+                "probe".to_owned(),
+                format!("reset ScreenCapture {BUNDLE}"),
+                REGISTER.to_owned(),
+            ]
+        );
+    }
+
+    /// A Cancel the server acknowledges while Launch Services registers the bundle still stops
+    /// the request, because the last check follows the registration.
+    #[test]
+    fn a_setup_cancelled_during_registration_makes_no_request() {
+        let (permissions, scripted) = permissions(
+            true,
+            &[(SystemPermission::Accessibility, PermissionState::NotGranted)],
+        );
+        let cancelled_by_registration = || {
+            scripted
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|effect| effect.starts_with("register "))
+        };
+        assert_eq!(
+            permissions.prepare_setup(SystemPermission::Accessibility, &cancelled_by_registration),
+            Ok(SetupReadiness::Cancelled { cleared: true })
+        );
+        assert_eq!(
+            effects(&scripted),
+            [
+                "probe".to_owned(),
+                format!("reset Accessibility {BUNDLE}"),
+                REGISTER.to_owned(),
+            ],
+            "the request never follows a registration the person cancelled during"
         );
     }
 

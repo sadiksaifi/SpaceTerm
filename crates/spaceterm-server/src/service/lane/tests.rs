@@ -498,6 +498,49 @@ fn a_cancellation_reaches_a_waiting_preparation() {
     );
 }
 
+/// Setup A is cancelled while it waits for the probing lock, then more cancellations arrive than
+/// the lane once remembered. A still takes no effect once it runs.
+#[test]
+fn later_cancellations_never_revive_a_waiting_setup() {
+    use crate::permissions::SetupReadiness;
+    let fixture = super::super::tests::Fixture::new();
+    let (started, waiting) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let lane = serving_permissions(
+        &fixture.paths,
+        Arc::new(HeldPreparation {
+            started,
+            release: Mutex::new(released),
+        }),
+    );
+    let [_, _, prepare, _, cancel] = permission_requests();
+    let preparing = std::thread::spawn({
+        let lane = Arc::clone(&lane);
+        move || lane.answer(prepare, &LOCAL_ACTOR)
+    });
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        lane.answer(cancel, &LOCAL_ACTOR),
+        LaneReply::PermissionSetupCancelled
+    );
+    for index in 0..17 {
+        assert_eq!(
+            lane.answer(
+                LaneRequest::CancelPermissionSetup {
+                    setup: format!("{index:032x}"),
+                },
+                &LOCAL_ACTOR,
+            ),
+            LaneReply::PermissionSetupCancelled
+        );
+    }
+    release.send(()).unwrap();
+    assert_eq!(
+        preparing.join().unwrap(),
+        LaneReply::PermissionSetup(SetupReadiness::Cancelled { cleared: false })
+    );
+}
+
 #[test]
 fn a_malformed_setup_name_is_refused() {
     use crate::permissions::{PermissionState, SystemPermission, testing::ScriptedPermissions};
