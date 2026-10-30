@@ -333,6 +333,51 @@ impl Sheet<'_> {
         })
     }
 
+    /// The value of the sheet's field `field` picks, and whether it has keyboard focus.
+    fn field(&mut self, field: fn(&AddServerSheet) -> &Entity<TextInput>) -> (String, bool) {
+        self.cx.update(|window, cx| {
+            let sheet = open_sheet(window, cx).expect("the sheet is open");
+            let input = field(sheet.read(cx)).read(cx);
+            (
+                input.value().to_owned(),
+                input.focus_handle().is_focused(window),
+            )
+        })
+    }
+
+    /// Replaces the refused text in the focused field one keystroke at a time with `text`, as the
+    /// person corrects it. After each keystroke the field `typing` keeps focus and the field
+    /// `kept` keeps its value.
+    fn correct(
+        &mut self,
+        typing: fn(&AddServerSheet) -> &Entity<TextInput>,
+        kept: fn(&AddServerSheet) -> &Entity<TextInput>,
+        text: &str,
+    ) {
+        let (refused, focused) = self.field(typing);
+        assert!(focused, "the refused field has keyboard focus");
+        let (other, _) = self.field(kept);
+        let presentation = self.presented().0;
+        let edits =
+            std::iter::repeat_n(None, refused.chars().count()).chain(text.chars().map(Some));
+        for edit in edits {
+            match edit {
+                None => self.cx.simulate_keystrokes("backspace"),
+                Some(character) => self.cx.simulate_input(&character.to_string()),
+            }
+            self.cx.run_until_parked();
+            let (_, focused) = self.field(typing);
+            assert!(focused, "the corrected field keeps keyboard focus");
+            assert_eq!(self.field(kept).0, other, "the other field is unchanged");
+            assert_eq!(
+                self.presented().0,
+                presentation,
+                "the sheet stays on screen while the person types"
+            );
+        }
+        assert_eq!(self.field(typing).0, text);
+    }
+
     /// Shows an SSH sign-in prompt in the sheet's window, then has the person dismiss it, as the
     /// AskPass presenter reports both.
     fn decline_prompt(&mut self) {
@@ -503,6 +548,28 @@ fn an_address_that_names_no_host_is_refused_before_setup_runs(cx: &mut TestAppCo
     assert!(
         sheet.computers.asked().is_empty(),
         "SSH runs only for a usable address"
+    );
+}
+
+/// Correcting a refused network address keeps keyboard focus in it, so no keystroke reaches the
+/// host.
+#[gpui::test]
+fn correcting_a_refused_address_keeps_focus_in_it(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(|route| vec![Outcome::Finish(Ok(route))], cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.enter_address("not a host");
+    sheet.choose(SheetAction::SetUp.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.correct(|sheet| &sheet.address, |sheet| &sheet.host, "studio.local");
+
+    assert!(!sheet.says("Enter a host name or IP address"));
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+    assert_eq!(
+        sheet.computers.asked()[0].address.as_deref(),
+        Some("studio.local:9231")
     );
 }
 
@@ -1036,6 +1103,31 @@ fn an_invitation_address_that_names_no_host_is_refused_before_join(cx: &mut Test
             .is_focused(window)
     });
     assert!(focused, "the refused address has keyboard focus");
+}
+
+/// Correcting a refused invitation address keeps keyboard focus in it, so no keystroke reaches the
+/// invitation link.
+#[gpui::test]
+fn correcting_a_refused_invitation_address_keeps_focus_in_it(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link.clone())));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+    sheet.choose(SheetAction::Join.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.correct(
+        |sheet| &sheet.endpoint,
+        |sheet| &sheet.link,
+        "public.example",
+    );
+
+    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
+    assert!(!sheet.says("Enter a host name or IP address"));
+    sheet.choose(SheetAction::Join.selector());
+    sheet.settle(|sheet| A11yTree::read(sheet.cx).find("Code").is_some());
+    assert_eq!(sheet.title(), "Join studio");
 }
 
 /// An entered address replaces only the one the invitation names. An address that doesn't reach

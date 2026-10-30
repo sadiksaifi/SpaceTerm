@@ -202,13 +202,23 @@ enum FocusTarget {
     Action(SheetAction),
 }
 
-/// The title and actions one stage presents. A different shape replaces the sheet on screen.
-/// Which actions are available is not part of the shape: it changes in place as the person types.
-#[derive(Clone, Debug, PartialEq)]
+/// The title and actions one stage presents, and where its keyboard focus starts. A different
+/// title or set of actions replaces the sheet on screen. Which actions are available changes in
+/// place as the person types.
+#[derive(Clone, Debug)]
 struct Shape {
     title: SharedString,
     actions: Vec<SheetAction>,
     focus: FocusTarget,
+}
+
+impl Shape {
+    /// Whether `self` must replace `shown` on screen. Focus applies only when a sheet is
+    /// presented, so a change in it alone replaces nothing: the field the person is typing in
+    /// keeps its focus and caret while its problem clears.
+    fn replaces(&self, shown: &Self) -> bool {
+        self.title != shown.title || self.actions != shown.actions
+    }
 }
 
 /// What an invitation link names, read without connecting. It holds no part of the secret.
@@ -878,7 +888,13 @@ impl AddServerSheet {
             return;
         }
         let wanted = self.shape(cx);
-        if wanted == self.shown {
+        let kept = match (&wanted, &self.shown) {
+            (Some(wanted), Some(shown)) => !wanted.replaces(shown),
+            (None, None) => true,
+            _ => false,
+        };
+        if kept {
+            self.shown = wanted;
             self.sync_availability(window, cx);
             cx.notify();
             return;
