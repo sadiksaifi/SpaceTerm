@@ -64,7 +64,7 @@ pub enum Command {
     Connection(ConnectionCommand),
     /// Show Workspaces, Worktrees, Tabs and Panes.
     List(ListArgs),
-    /// Create, rename and kill Workspaces.
+    /// Create, rename, pin, unpin and kill Workspaces.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
     /// Open and close Tabs.
@@ -264,6 +264,19 @@ pub enum WorkspaceCommand {
     /// Rename a Workspace.
     Rename {
         new_name: String,
+        #[arg(long, value_name = "W", value_parser = selector)]
+        workspace: Option<Selector>,
+    },
+    /// Set a Workspace's Pinned Directory.
+    Pin {
+        /// Directory on the selected server. Quote `~/` for a remote server.
+        #[arg(value_name = "DIR")]
+        directory: PathBuf,
+        #[arg(long, value_name = "W", value_parser = selector)]
+        workspace: Option<Selector>,
+    },
+    /// Clear a Workspace's Pinned Directory.
+    Unpin {
         #[arg(long, value_name = "W", value_parser = selector)]
         workspace: Option<Selector>,
     },
@@ -511,6 +524,8 @@ impl Command {
             Self::Workspace(command) => match command {
                 WorkspaceCommand::Create { .. } => "workspace.create",
                 WorkspaceCommand::Rename { .. } => "workspace.rename",
+                WorkspaceCommand::Pin { .. } => "workspace.pin",
+                WorkspaceCommand::Unpin { .. } => "workspace.unpin",
                 WorkspaceCommand::Kill { .. } => "workspace.kill",
             },
             Self::Tab(command) => match command {
