@@ -41,6 +41,8 @@ mod cancellation;
     )
 )]
 mod close_confirmation;
+#[cfg(feature = "desktop")]
+mod command_line_tool;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(

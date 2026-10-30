@@ -6,6 +6,7 @@ mod advanced;
 mod background_image;
 mod catalog;
 mod clipboard;
+mod command_line_tool;
 mod direct_access;
 mod direct_join;
 mod direct_routes;
@@ -87,6 +88,7 @@ use crate::ui::sidebar_window::form::{
 };
 use catalog::SettingsRowId;
 pub(crate) use catalog::SettingsSectionId;
+pub(crate) use command_line_tool::configure_command_line_tool;
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
@@ -212,7 +214,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     let window_drag = composition.window_movement.create();
     let permissions = composition.permissions.clone();
     let theme_registry = composition.theme_registry.clone();
-    let local_server = servers::offered_local_server();
+    let local_server = servers::offered_local_server(command_line_tool::offered(cx));
     let opened = cx.open_window(
         super::sidebar_window::window_options(
             "Settings",
@@ -442,6 +444,8 @@ pub(crate) struct SettingsWindow {
     server_service: Option<servers::ServerServiceRow>,
     /// The server version and its update journey. `None` omits its row.
     server_update: Option<server_update::ServerUpdateRow>,
+    /// This computer's command for the local server's identity. `None` omits its row.
+    command_line_tool: Option<command_line_tool::CommandLineToolRow>,
     /// The desktop's direct network connections. `None` omits their rows.
     direct_routes: Option<direct_routes::DirectRouteRows>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
@@ -761,12 +765,18 @@ impl SettingsWindow {
                         && local_server
                             .as_ref()
                             .is_none_or(|offered| offered.service.is_none()))
+                    || (*row == SettingsRowId::CommandLineTool
+                        && local_server
+                            .as_ref()
+                            .is_none_or(|offered| offered.command_line_tool.is_none()))
             })
             .collect();
         let local_operations = local_operations::LocalServerOperations::get(cx);
         cx.subscribe(&local_operations, |settings, _, operation, cx| {
             settings.synchronize_local_operations(cx);
             settings.check_local_server(cx);
+            // The operation may have moved the launcher, or failed to.
+            settings.reread_command_line_tool(cx);
             match operation {
                 local_operations::CompletedOperation::Service => settings.check_server_update(cx),
                 local_operations::CompletedOperation::Update => settings.check_server_service(cx),
@@ -825,6 +835,10 @@ impl SettingsWindow {
                 .map(|control| {
                     server_update::ServerUpdateRow::new(control, window.window_handle())
                 }),
+            command_line_tool: local_server
+                .as_ref()
+                .and_then(|offered| offered.command_line_tool.clone())
+                .map(command_line_tool::CommandLineToolRow::new),
             local_server: local_server
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
             direct_routes,
@@ -863,6 +877,11 @@ impl SettingsWindow {
             self.check_local_server(cx);
             self.check_server_service(cx);
             self.check_server_update(cx);
+        }
+        if self.active_section == SettingsSectionId::Servers
+            && previous != SettingsSectionId::Servers
+        {
+            self.check_command_line_tool(cx);
         }
         self.sync_server_location(cx);
     }
@@ -1632,6 +1651,7 @@ impl SettingsWindow {
             SettingsRowId::PairedDevices => self.render_paired_devices(appearance, cx),
             SettingsRowId::AllServers => self.render_all_servers(ends, appearance, window, cx),
             SettingsRowId::AddServer => self.render_add_server_row(ends, appearance, cx),
+            SettingsRowId::CommandLineTool => self.render_command_line_tool(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
@@ -2497,6 +2517,10 @@ impl SettingsWindow {
                     .map(|text| (text, CaptionTone::Guidance)),
             ),
             SettingsRowId::ServerWorktreeLocation => (self.server_location_caption(cx).0, None),
+            SettingsRowId::CommandLineTool => {
+                let presentation = self.command_line_tool_presentation(cx)?;
+                (presentation.explanation, presentation.caption)
+            }
             _ => return None,
         })
     }

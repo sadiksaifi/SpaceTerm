@@ -253,6 +253,7 @@ fn open_settings_using(
         connection: Ok(ScriptedServer::new(Ok(connected(1))) as Arc<dyn LocalServerControl>),
         service: None,
         update: None,
+        command_line_tool: None,
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(

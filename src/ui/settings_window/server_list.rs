@@ -42,6 +42,8 @@ pub(super) const SERVER_GROUP: &str = "";
 pub(super) const NETWORK_GROUP: &str = "Network Access";
 /// The card listing every server.
 pub(super) const ALL_SERVERS_GROUP: &str = "All Servers";
+/// The card of this computer's command, which ignores the picker.
+pub(super) const COMMAND_LINE_GROUP: &str = "Command Line";
 /// The card of the selected server's Git and its Server Settings on the Git page.
 pub(super) const GIT_SERVER_GROUP: &str = "Git on server";
 

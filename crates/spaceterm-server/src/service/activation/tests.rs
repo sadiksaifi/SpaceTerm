@@ -171,6 +171,41 @@ fn stopped_activation_changes_only_the_exact_runtime_and_preserves_stop() {
 }
 
 #[test]
+fn a_launcher_that_cannot_follow_an_update_never_blocks_it() {
+    use crate::service::{CliLauncher, CliLink};
+    use std::os::unix::fs::PermissionsExt;
+    with_service(|service, previous, candidate, supervisor| {
+        let bin = service.account_home().unwrap().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let launcher = bin.join("spaceterm-development");
+        let earlier = previous.directory.join("bin/spaceterm");
+        std::os::unix::fs::symlink(&earlier, &launcher).unwrap();
+        assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
+        // Another account could write here, so SpaceTerm refuses to replace the launcher.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        let status = service.activate(approval).unwrap();
+        assert_eq!(status.phase, ActivationPhase::Completed { running: false });
+        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+        assert_eq!(std::fs::read_link(&launcher).unwrap(), earlier);
+        assert_eq!(service.cli_launcher(), Ok(CliLauncher::Outdated));
+
+        // Once the directory is safe again, linking follows the approved runtime.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let unused = || -> Result<PathBuf, ServerError> {
+            panic!("an approved runtime needs no provisioning")
+        };
+        assert_eq!(service.link_cli(unused), Ok(CliLink::Linked));
+        assert_eq!(
+            std::fs::read_link(&launcher).unwrap(),
+            candidate.directory.join("bin/spaceterm")
+        );
+        assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
+    });
+}
+
+#[test]
 fn a_candidate_of_another_protocol_major_activates() {
     runtime::test_support::with_major(crate::protocol::MAJOR + 1, || {
         with_service(|service, _, candidate, supervisor| {
