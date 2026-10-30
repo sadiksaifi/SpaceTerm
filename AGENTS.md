@@ -34,3 +34,14 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - For local server setup or incompatible development state, follow [the local workflow](docs/local-server.md).
 - For Linux work and native verification, use Penguin directly: `ssh penguin` for commands and Remora for its desktop.
 - Repositories live at `~/Projects/{SpaceTerm,zed,accesskit}` on both hosts. Clone missing forks from `github.com/sadiksaifi/{zed,accesskit}`.
+
+## GitHub Project Board
+
+The board has four states:
+
+- `Backlog`: Issue created. Managed by GitHub.
+- `In Progress`: Implementation started. Managed by the agent (you).
+- `In Review`: Work under review by an agent (you), subagent, or external reviewer, or a PR awaiting review. Managed by the agent (you).
+- `Done`: PR merged. Managed by GitHub.
+
+When starting an issue, assign yourself using `gh issue edit <number> --add-assignee @me` and move it to `In Progress`. Keep it there while implementing, even with an open PR. Move it to `In Review` when review begins, even without a PR.
