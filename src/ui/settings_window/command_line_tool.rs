@@ -159,15 +159,18 @@ pub(super) fn present(
                     ),
                 ),
             };
-            let action = status.action().map(|action| {
-                let label = match (action, status.launcher) {
-                    (ToolAction::Install, Launcher::Stale) => "Reinstall",
-                    (ToolAction::Install, _) => "Install",
-                    (ToolAction::Reveal, _) => reveal,
-                };
-                (action, label)
-            });
-            (state, selector, SharedString::from(explanation), action)
+            let action = status.action();
+            let label = match (action, status.launcher) {
+                (ToolAction::Install, Launcher::Stale) => "Reinstall",
+                (ToolAction::Install, _) => "Install",
+                (ToolAction::Reveal, _) => reveal,
+            };
+            (
+                state,
+                selector,
+                SharedString::from(explanation),
+                Some((action, label)),
+            )
         }
     };
     // A command SpaceTerm owns or would install is found by name only from PATH.

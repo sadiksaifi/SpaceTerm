@@ -41,11 +41,11 @@ pub(crate) struct ToolStatus {
 impl ToolStatus {
     /// The one action this status offers: Install where nothing usable is there, and Reveal
     /// wherever a file is.
-    pub(crate) fn action(self) -> Option<ToolAction> {
-        Some(match self.launcher {
+    pub(crate) fn action(self) -> ToolAction {
+        match self.launcher {
             Launcher::Missing | Launcher::Stale => ToolAction::Install,
             Launcher::Installed | Launcher::OtherLink | Launcher::OtherFile => ToolAction::Reveal,
-        })
+        }
     }
 }
 
@@ -319,7 +319,7 @@ mod tests {
             let (files, _, _, tool) = fixture(launcher, Some(&["/usr/bin", DIRECTORY]));
             assert_eq!(
                 tool.status().map(ToolStatus::action),
-                Ok(Some(ToolAction::Install))
+                Ok(ToolAction::Install)
             );
             assert_eq!(
                 tool.install(),
@@ -340,7 +340,7 @@ mod tests {
             assert_eq!(files.links(), 0);
             assert_eq!(
                 tool.status().map(ToolStatus::action),
-                Ok(Some(ToolAction::Reveal))
+                Ok(ToolAction::Reveal)
             );
         }
         // A file that appears between the read and the link is kept by the link itself.
