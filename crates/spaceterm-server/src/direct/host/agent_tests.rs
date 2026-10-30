@@ -315,3 +315,139 @@ fn a_returning_agent_waits_for_its_eviction_release_so_its_new_grant_survives() 
         let _ = server.join().unwrap();
     }
 }
+
+/// Waits until `done` holds, or fails as `what` after five seconds.
+fn within(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+/// Where the paused admissions of a test are.
+#[derive(Default)]
+struct Paused {
+    /// How many admissions of the new name reached their commit.
+    settled: usize,
+    /// Whether the first of them may commit.
+    gate: bool,
+    /// Whether the returning agent began to wait for its identity.
+    waiting: bool,
+}
+
+#[test]
+fn an_admission_never_waits_for_its_identity_while_it_holds_names_another_admission_waits_for() {
+    let (fixture, credential, paired, seen, panes) = full_pairing();
+    let newcomer: crate::protocol::AgentName = "newcomer".parse().unwrap();
+    let new = newcomer.client(&paired.client);
+    let returning = agent(0).client(&paired.client);
+    let paused = Arc::new((Mutex::new(Paused::default()), Condvar::new()));
+    let order = Arc::clone(&paused);
+    fixture.state.lock().unwrap().pause = Some(Arc::new(move |at, client| {
+        let (paused, changed) = &*order;
+        let mut paused = paused.lock().unwrap();
+        match at {
+            Pause::Settled if client == new => {
+                paused.settled += 1;
+                changed.notify_all();
+                if paused.settled == 1 {
+                    drop(changed.wait_while(paused, |paused| !paused.gate).unwrap());
+                }
+            }
+            Pause::Waiting if client == returning => {
+                paused.waiting = true;
+                changed.notify_all();
+            }
+            _ => {}
+        }
+    }));
+    let reached = |what: &str, done: fn(&Paused) -> bool| {
+        let (paused, changed) = &*paused;
+        let (paused, timeout) = changed
+            .wait_timeout_while(
+                paused.lock().unwrap(),
+                std::time::Duration::from_secs(5),
+                |paused| !done(paused),
+            )
+            .unwrap();
+        drop(paused);
+        assert!(!timeout.timed_out(), "{what}");
+    };
+    // The second admission of the new name reserves every idle name, agent 0 among them, and
+    // pauses before its commit.
+    let second = fixture.serve_next_with(Arc::clone(&panes));
+    let second_link = admit(&fixture, &credential, &paired, &newcomer);
+    reached("no first reservation", |paused| paused.settled == 1);
+    // The first admission of the new name evicts agent 0 and disconnects. The new name is then
+    // listed and idle.
+    let first = fixture.serve_next_with(Arc::clone(&panes));
+    let first_link = admit(&fixture, &credential, &paired, &newcomer);
+    assert!(!resolve(&first_link));
+    drop(first_link);
+    let _ = first.join().unwrap();
+    assert_eq!(
+        seen.lock().unwrap().events,
+        vec![Event::Released(returning)]
+    );
+    // Agent 0 returns while the paused admission still holds it. It must not hold the new name
+    // while it waits, or the paused admission could never commit.
+    let third = fixture.serve_next_with(Arc::clone(&panes));
+    let returned = admit(&fixture, &credential, &paired, &agent(0));
+    reached("the returning agent never waited", |paused| paused.waiting);
+    {
+        let (paused, changed) = &*paused;
+        paused.lock().unwrap().gate = true;
+        changed.notify_all();
+    }
+    within("the admissions deadlocked", || {
+        let state = fixture.state.lock().unwrap();
+        state.connections.serves(new) && state.connections.serves(returning)
+    });
+    // The returning agent evicted the oldest name left that holds nothing, and releases it after
+    // it registers.
+    within("no second eviction", || {
+        seen.lock().unwrap().events.len() == 2
+    });
+    assert_eq!(
+        seen.lock().unwrap().events,
+        vec![
+            Event::Released(returning),
+            Event::Released(agent(1).client(&paired.client))
+        ]
+    );
+    drop((second_link, returned));
+    for server in [second, third] {
+        let _ = server.join().unwrap();
+    }
+    assert!(fixture.state.lock().unwrap().retiring.is_empty());
+}
+
+#[test]
+fn stopping_the_host_refuses_an_admission_that_waits_for_its_identity() {
+    let (fixture, credential, paired, _, panes) = full_pairing();
+    let held = agent(0).client(&paired.client);
+    let (waiting, waited) = std::sync::mpsc::channel();
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.hold_retiring(&[held]);
+        state.pause = Some(Arc::new(move |at, client| {
+            if at == Pause::Waiting && client == held {
+                let _ = waiting.send(());
+            }
+        }));
+    }
+    let server = fixture.serve_next_with(panes);
+    let _link = admit(&fixture, &credential, &paired, &agent(0));
+    waited
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let stopped = std::time::Instant::now();
+    fixture.state.lock().unwrap().stopping();
+    // Without the wake, the admission would wait until its deadline and refuse with capacity.
+    assert!(matches!(
+        server.join().unwrap(),
+        Err(ServerError::Direct(DirectError::Disabled))
+    ));
+    assert!(stopped.elapsed() < super::super::quic::HANDSHAKE_LIMIT);
+}

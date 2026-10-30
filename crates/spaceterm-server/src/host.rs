@@ -722,6 +722,11 @@ fn serve_runtime_ready(
     drop(listener);
     // Ticks no longer run, so replies they would have answered are refused now.
     panes.lock().unwrap_or_else(|e| e.into_inner()).stopping();
+    // An admission waiting for an identity that another admission holds is refused, so joining
+    // its thread never waits for a reservation.
+    if let Some(state) = &direct {
+        state.lock().unwrap_or_else(|e| e.into_inner()).stopping();
+    }
     let threads: Vec<_> = connections
         .into_iter()
         .chain(network)

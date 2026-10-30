@@ -57,6 +57,11 @@ pub(crate) struct State {
     /// returning agent waits for them.
     retiring: std::collections::BTreeMap<[u8; 32], usize>,
     retired_agent: Arc<Condvar>,
+    /// Set when the host stops, so no admission waits for a held identity any longer.
+    stopping: bool,
+    /// Runs as an admission reaches each [`Pause`], so a test can order concurrent admissions.
+    #[cfg(test)]
+    pub(super) pause: Option<PauseHook>,
 }
 impl State {
     pub(crate) fn open(paths: &crate::host::Paths) -> Result<Shared, DirectError> {
@@ -88,6 +93,9 @@ impl State {
             revoked: None,
             retiring: Default::default(),
             retired_agent: Arc::default(),
+            stopping: false,
+            #[cfg(test)]
+            pause: None,
         };
         state.listen();
         Ok(Arc::new(Mutex::new(state)))
@@ -1338,6 +1346,12 @@ impl State {
             .map(storage::Device::clients)
             .unwrap_or_default()
     }
+    /// Refuses every admission that waits for a held identity, and every later one, so stopping
+    /// the host never waits for a reservation that its own admissions hold.
+    pub(crate) fn stopping(&mut self) {
+        self.stopping = true;
+        self.retired_agent.notify_all();
+    }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
         self.retired.clear();
@@ -1460,14 +1474,16 @@ pub(crate) fn serve(
     let carrier = stream.into_carrier();
     // A new name past the limit may evict only a name that holds nothing. The idle names stay
     // held while the pane service reports which hold something, and the two locks are never
-    // nested.
+    // nested. An admission waits for its own identity before it reserves, and never while it
+    // holds a reservation, so two admissions never wait for each other.
+    let deadline = std::time::Instant::now() + super::quic::HANDSHAKE_LIMIT;
     let (evicted, registered, reserved) = loop {
-        let reserved = match &agent {
-            Some(agent) => state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .reserve_evictable(&paired, agent)?,
-            None => None,
+        let reserved = {
+            let mut locked = after_retirement(&state, client, deadline)?;
+            match &agent {
+                Some(agent) => locked.reserve_evictable(&paired, agent)?,
+                None => None,
+            }
         }
         .map(|clients| Retirement {
             state: Arc::clone(&state),
@@ -1485,7 +1501,14 @@ pub(crate) fn serve(
             }
             _ => Default::default(),
         };
-        let mut locked = after_retirement(&state, client);
+        #[cfg(test)]
+        pause(&state, Pause::Settled, client);
+        let mut locked = state.lock().unwrap_or_else(|e| e.into_inner());
+        // Another admission reserved this identity, or began its eviction, after the wait. The
+        // admission releases its own reservations before it waits again.
+        if locked.retiring.contains_key(&client) {
+            continue;
+        }
         // Another admission filled the list or evicted this name after the reservation, so the
         // eviction it now needs was never reserved.
         if let Some(agent) = &agent
@@ -1616,14 +1639,62 @@ impl LaneStop {
     }
 }
 
-/// Locks `state` once no release of `client`'s control grants after an eviction is still
-/// running. A returning agent's new grants therefore always follow that release.
-fn after_retirement(state: &Shared, client: [u8; 32]) -> MutexGuard<'_, State> {
-    let state = state.lock().unwrap_or_else(|e| e.into_inner());
+/// Locks `state` once no admission reserves `client` and no release of its control grants after
+/// an eviction is still running. A returning agent's new grants therefore always follow that
+/// release. The caller holds no reservation while it waits. Refuses with `Capacity` once
+/// `deadline` passes, which also bounds an admission that keeps starting over, and with
+/// `Disabled` once the host stops.
+fn after_retirement(
+    state: &Shared,
+    client: [u8; 32],
+    deadline: std::time::Instant,
+) -> Result<MutexGuard<'_, State>, DirectError> {
+    #[cfg(test)]
+    pause(state, Pause::Waiting, client);
+    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
     let retired = Arc::clone(&state.retired_agent);
-    retired
-        .wait_while(state, |state| state.retiring.contains_key(&client))
+    loop {
+        if state.stopping {
+            return Err(DirectError::Disabled);
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(DirectError::Capacity);
+        }
+        if !state.retiring.contains_key(&client) {
+            return Ok(state);
+        }
+        state = retired
+            .wait_timeout(state, deadline - now)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+/// What a test runs as an admission reaches a [`Pause`], with the admission's Client Identity.
+#[cfg(test)]
+pub(super) type PauseHook = Arc<dyn Fn(Pause, [u8; 32]) + Send + Sync>;
+
+/// Where an admission runs the test's [`State::pause`], with its Client Identity.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Pause {
+    /// Before it waits for its own identity, holding no reservation.
+    Waiting,
+    /// After the pane service reported its reserved names, before it commits.
+    Settled,
+}
+
+#[cfg(test)]
+fn pause(state: &Shared, at: Pause, client: [u8; 32]) {
+    let pause = state
+        .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .pause
+        .clone();
+    if let Some(pause) = pause {
+        pause(at, client);
+    }
 }
 
 /// Agent identities held in `retiring`: the idle names an admission may evict, or an evicted
