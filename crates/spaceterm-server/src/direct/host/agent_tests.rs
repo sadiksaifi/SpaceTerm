@@ -432,22 +432,28 @@ fn stopping_the_host_refuses_an_admission_that_waits_for_its_identity() {
         let mut state = fixture.state.lock().unwrap();
         state.hold_retiring(&[held]);
         state.pause = Some(Arc::new(move |at, client| {
-            if at == Pause::Waiting && client == held {
-                let _ = waiting.send(());
+            if let Pause::BeforeWait { deadline } = at
+                && client == held
+            {
+                let _ = waiting.send(deadline);
             }
         }));
     }
     let server = fixture.serve_next_with(panes);
     let _link = admit(&fixture, &credential, &paired, &agent(0));
-    waited
+    let deadline = waited
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap();
-    let stopped = std::time::Instant::now();
+    let started = deadline - super::super::quic::HANDSHAKE_LIMIT;
+    // The hook holds the state lock until wait_timeout atomically releases it and waits.
     fixture.state.lock().unwrap().stopping();
-    // Without the wake, the admission would wait until its deadline and refuse with capacity.
+    // Without the wake, the admission can still refuse with Disabled at its deadline.
     assert!(matches!(
         server.join().unwrap(),
         Err(ServerError::Direct(DirectError::Disabled))
     ));
-    assert!(stopped.elapsed() < super::super::quic::HANDSHAKE_LIMIT);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "shutdown did not wake the admission before its deadline"
+    );
 }
