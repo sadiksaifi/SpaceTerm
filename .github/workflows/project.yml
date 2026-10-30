@@ -1,0 +1,122 @@
+name: Project
+
+on:
+  issues:
+    types: [assigned, unassigned]
+  # Run trusted default-branch code for fork PRs, without checking out PR code.
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, closed]
+
+permissions:
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: project-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            // Keep repository reads on GITHUB_TOKEN; the PAT has only project scope.
+            const repository = getOctokit(process.env.REPOSITORY_TOKEN);
+            const projectId = 'PVT_kwHOBSqz-84BpZjm';
+            const { owner, repo } = context.repo;
+            const number = context.payload.issue?.number ?? context.payload.pull_request.number;
+            const { node: project } = await github.graphql(`
+              query($id: ID!) {
+                node(id: $id) {
+                  ... on ProjectV2 {
+                    field(name: "Status") {
+                      ... on ProjectV2SingleSelectField { id options { id name } }
+                    }
+                  }
+                }
+              }
+            `, { id: projectId });
+            const field = project?.field;
+            const options = new Map(field?.options.map(option => [option.name, option.id]));
+            for (const name of ['Backlog', 'In progress', 'In review', 'Done']) {
+              if (!options.has(name)) throw new Error(`Missing project status: ${name}`);
+            }
+
+            async function setStatus(contentId, status) {
+              // Adding an existing item returns that item, so retries do not duplicate it.
+              const { addProjectV2ItemById: { item } } = await github.graphql(`
+                mutation($project: ID!, $content: ID!) {
+                  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
+                    item { id }
+                  }
+                }
+              `, { project: projectId, content: contentId });
+              await github.graphql(`
+                mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $project, itemId: $item, fieldId: $field,
+                    value: {singleSelectOptionId: $option}
+                  }) { projectV2Item { id } }
+                }
+              `, { project: projectId, item: item.id, field: field.id, option: options.get(status) });
+            }
+
+            if (context.eventName === 'issues') {
+              const { repository: { issue } } = await repository.graphql(`
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    issue(number: $number) { id state assignees(first: 1) { totalCount } }
+                  }
+                }
+              `, { owner, repo, number });
+              // Read current state so delayed events and re-runs cannot reopen completed work.
+              if (issue.state === 'OPEN') {
+                await setStatus(issue.id, issue.assignees.totalCount ? 'In progress' : 'Backlog');
+              }
+              return;
+            }
+
+            let cursor = null;
+            let pullRequest;
+            const issues = [];
+            do {
+              const result = await repository.graphql(`
+                query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      id state merged
+                      closingIssuesReferences(first: 100, after: $cursor, excludeUserLinked: true) {
+                        nodes {
+                          id state
+                          repository { nameWithOwner }
+                          assignees(first: 1) { totalCount }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                      }
+                    }
+                  }
+                }
+              `, { owner, repo, number, cursor });
+              pullRequest = result.repository.pullRequest;
+              // Built-in workflows own Done for merged PRs and their closed issues.
+              if (pullRequest.merged) return;
+              const references = pullRequest.closingIssuesReferences;
+              issues.push(...references.nodes);
+              cursor = references.pageInfo.hasNextPage ? references.pageInfo.endCursor : null;
+            } while (cursor);
+
+            const reviewing = pullRequest.state === 'OPEN';
+            if (reviewing) await setStatus(pullRequest.id, 'In review');
+            for (const issue of issues) {
+              // This workflow manages only this repository and never moves closed issues.
+              if (issue.repository.nameWithOwner !== `${owner}/${repo}` || issue.state !== 'OPEN') continue;
+              const status = reviewing ? 'In review'
+                : issue.assignees.totalCount ? 'In progress' : 'Backlog';
+              await setStatus(issue.id, status);
+            }
