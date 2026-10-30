@@ -1,11 +1,16 @@
 //! `server pair`: let another device pair with this server, on the server's own machine.
 //!
-//! It prints a one-use Invitation Link as its only stdout line, waits for that invitation's
-//! claim, then asks the person to type the Comparison Code the joining device shows. A match
-//! approves the claim. A mismatch rejects it. The invitation is withdrawn on end of input,
+//! It prints a one-use Invitation Link and, when stdout supports it, the same link as a QR
+//! code, then waits for that invitation's claim and asks the person to type the Comparison
+//! Code the joining device shows. A match approves the claim. A mismatch rejects it.
+//! The invitation is withdrawn on end of input,
 //! interrupt, timeout and every failure, so no link outlives the command.
+mod qr;
+
 use super::{Context, Reply};
-use crate::contract::{self, Code, Envelope, Failure, Warning, WarningCode, WarningDetails};
+use crate::contract::{
+    self, Code, Envelope, Failure, OutputError, Warning, WarningCode, WarningDetails,
+};
 use spaceterm_server::ServerConnection;
 use spaceterm_server::direct::{ClaimId, PairingClaim};
 use std::io::Write;
@@ -18,6 +23,17 @@ const LIFETIME: Duration = Duration::from_secs(5 * 60);
 const POLL: Duration = Duration::from_secs(2);
 /// The longest Comparison Code line the command reads.
 const CODE_LIMIT: usize = 32;
+const WAITING: &str = "Open this Invitation Link on the device that joins. Waiting for it. Ctrl-C withdraws the invitation.\n";
+const COMPARISON_PROMPT: &str = " wants to pair. Type the Comparison Code it shows: ";
+
+/// Keep the QR visible through the waiting message, the longest device name and code entry.
+fn prompt_rows(columns: u16) -> usize {
+    let columns = usize::from(columns).max(1);
+    let name_columns = spaceterm_server::pane::control::MAX_CLIENT_NAME_CHARS * 2;
+    WAITING.trim_end().len().div_ceil(columns)
+        + (name_columns + COMPARISON_PROMPT.len() + CODE_LIMIT).div_ceil(columns)
+        + 1 // The cursor after the entered code's newline.
+}
 
 /// What pairing needs from the server. The running server's account IPC provides it.
 pub trait Invitations {
@@ -59,8 +75,8 @@ impl Invitations for ServerConnection {
 
 /// The person at the terminal.
 pub trait Person {
-    /// Shows the Invitation Link, the command's only stdout line.
-    fn show_link(&mut self, link: &str) -> Result<(), Failure>;
+    /// Shows the Invitation Link and, when supported, its QR rendering on stdout.
+    fn show_link(&mut self, link: &str) -> Result<(), OutputError>;
     /// Says something on stderr.
     fn say(&mut self, text: &str);
     /// Reads the typed Comparison Code before `deadline`. `None` is end of input, an
@@ -70,14 +86,13 @@ pub trait Person {
     fn sleep(&mut self, duration: Duration);
 }
 
-struct Terminal;
+struct Terminal<W> {
+    output: W,
+}
 
-impl Person for Terminal {
-    fn show_link(&mut self, link: &str) -> Result<(), Failure> {
-        let mut out = std::io::stdout().lock();
-        writeln!(out, "{link}")
-            .and_then(|()| out.flush())
-            .map_err(|_| Failure::new(Code::OutputFailed))
+impl<W: Write> Person for Terminal<W> {
+    fn show_link(&mut self, link: &str) -> Result<(), OutputError> {
+        qr::write_invitation(&mut self.output, link, qr::terminal_size()).map_err(OutputError::from)
     }
     fn say(&mut self, text: &str) {
         let _ = write!(std::io::stderr().lock(), "{text}");
@@ -101,6 +116,7 @@ impl Person for Terminal {
 pub enum Paired {
     Approved { device: String },
     Failed { failure: Failure, withdrawn: bool },
+    BrokenPipe,
 }
 
 /// The invitation flow, with the server and the person supplied.
@@ -123,12 +139,15 @@ pub fn pair(
         let withdrawn = server.withdraw(&invitation).is_ok();
         Paired::Failed { failure, withdrawn }
     };
-    if let Err(failure) = person.show_link(&link) {
-        return failed(failure);
+    match person.show_link(&link) {
+        Ok(()) => {}
+        Err(OutputError::BrokenPipe) => {
+            let _ = server.withdraw(&invitation);
+            return Paired::BrokenPipe;
+        }
+        Err(OutputError::Failed) => return failed(Failure::new(Code::OutputFailed)),
     }
-    person.say(
-        "Open this Invitation Link on the device that joins. Waiting for it. Ctrl-C withdraws the invitation.\n",
-    );
+    person.say(WAITING);
     let deadline = Instant::now() + limit.min(lifetime).min(LIFETIME);
     let claim = loop {
         if person.interrupted() {
@@ -148,7 +167,7 @@ pub fn pair(
         person.sleep(POLL);
     };
     person.say(&format!(
-        "{} wants to pair. Type the Comparison Code it shows: ",
+        "{}{COMPARISON_PROMPT}",
         claim.device_name.as_str()
     ));
     // The code is entered within the invitation's own lifetime.
@@ -174,8 +193,8 @@ pub fn pair(
     }
 }
 
-/// A successful pairing's reply. The Invitation Link was the command's only stdout line, so
-/// the reply adds nothing to stdout.
+/// A successful pairing's reply. The invitation was already shown, so the reply adds
+/// nothing to stdout.
 fn approved(server: Option<crate::contract::ServerRef>) -> Reply {
     Reply::new(
         &Envelope::ok(COMMAND, server, contract::Empty {}),
@@ -188,7 +207,7 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         return Reply::failure(COMMAND, None, failure);
     }
     // Pairing needs a person at a terminal, so it creates no invitation without one.
-    if context.global.json || !context.interactive() || !super::terminal_stdout() {
+    if !context.interactive() {
         return Reply::failure(COMMAND, None, Failure::new(Code::InteractionRequired));
     }
     if let Some(address) = address
@@ -206,14 +225,26 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         Ok(cooperation) => cooperation,
         Err(failure) => return Reply::failure(COMMAND, server, failure),
     };
-    match pair(
+    let paired = pair(
         &connection,
-        &mut Terminal,
+        &mut Terminal {
+            output: std::io::stdout().lock(),
+        },
         address,
         context.timeout(LIFETIME),
-    ) {
+    );
+    reply(server, paired, &mut std::io::stderr().lock())
+}
+
+fn reply(
+    server: Option<crate::contract::ServerRef>,
+    paired: Paired,
+    stderr: &mut dyn Write,
+) -> Reply {
+    match paired {
+        Paired::BrokenPipe => Reply::broken_pipe(COMMAND, server),
         Paired::Approved { device } => {
-            let _ = writeln!(std::io::stderr().lock(), "Paired {device}.");
+            let _ = writeln!(stderr, "Paired {device}.");
             approved(server)
         }
         Paired::Failed { failure, withdrawn } => {
@@ -232,7 +263,7 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
             let mut reply = Reply::new(&envelope, String::new());
             // The link already went to stdout; the rest of the story belongs on stderr.
             if !text.is_empty() {
-                let _ = write!(std::io::stderr().lock(), "\n{text}");
+                let _ = write!(stderr, "\n{text}");
             }
             reply.stdout.clear();
             reply
@@ -248,6 +279,7 @@ mod tests {
     struct Server {
         claims: Vec<PairingClaim>,
         log: RefCell<Vec<String>>,
+        withdrawal_fails: bool,
     }
     impl Invitations for Server {
         fn invite(&self, advertise: Option<&str>) -> Result<(ClaimId, String, Duration), Failure> {
@@ -271,7 +303,11 @@ mod tests {
         }
         fn withdraw(&self, _: &ClaimId) -> Result<(), Failure> {
             self.log.borrow_mut().push("withdraw".into());
-            Ok(())
+            if self.withdrawal_fails {
+                Err(Failure::new(Code::StorageUnavailable))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -282,7 +318,7 @@ mod tests {
         link: Option<String>,
     }
     impl Person for Typist {
-        fn show_link(&mut self, link: &str) -> Result<(), Failure> {
+        fn show_link(&mut self, link: &str) -> Result<(), OutputError> {
             self.link = Some(link.to_owned());
             Ok(())
         }
@@ -325,6 +361,7 @@ mod tests {
         let server = Server {
             claims: vec![claim()],
             log: RefCell::default(),
+            withdrawal_fails: false,
         };
         let mut person = typist(Some(format!(" {} ", claim().comparison_code())));
         let paired = pair(
@@ -351,6 +388,7 @@ mod tests {
         let server = Server {
             claims: vec![claim()],
             log: RefCell::default(),
+            withdrawal_fails: false,
         };
         let wrong = if claim().comparison_code().to_string() == "000000" {
             "111111"
@@ -372,6 +410,29 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_reader_attempts_withdrawal_and_exits_silently_with_141() {
+        for withdrawal_fails in [false, true] {
+            let server = Server {
+                claims: Vec::new(),
+                log: RefCell::default(),
+                withdrawal_fails,
+            };
+            let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            drop(reader);
+            let paired = pair(&server, &mut Terminal { output: writer }, None, LIFETIME);
+            assert_eq!(*server.log.borrow(), ["invite -", "withdraw"]);
+            assert_eq!(paired, Paired::BrokenPipe);
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            let reply = reply(None, paired, &mut stderr);
+            let exit = reply.write(contract::Mode::default(), &mut stdout, &mut stderr);
+            assert_eq!(exit, contract::EXIT_BROKEN_PIPE);
+            assert_eq!(reply.exit(), contract::EXIT_BROKEN_PIPE);
+            assert!(stdout.is_empty());
+            assert!(stderr.is_empty());
+        }
+    }
+
+    #[test]
     fn a_successful_pairing_prints_nothing_more_on_stdout() {
         let reply = approved(None);
         assert!(reply.stdout.is_empty());
@@ -383,6 +444,7 @@ mod tests {
         let server = Server {
             claims: vec![claim()],
             log: RefCell::default(),
+            withdrawal_fails: false,
         };
         // The claim arrives at the end of the invitation's lifetime, and no code follows.
         assert_eq!(
@@ -403,6 +465,7 @@ mod tests {
         let waiting = || Server {
             claims: Vec::new(),
             log: RefCell::default(),
+            withdrawal_fails: false,
         };
         let server = waiting();
         let mut person = typist(None);
@@ -429,6 +492,7 @@ mod tests {
         let server = Server {
             claims: vec![claim()],
             log: RefCell::default(),
+            withdrawal_fails: false,
         };
         assert_eq!(
             pair(&server, &mut typist(None), None, LIFETIME),

@@ -41,6 +41,7 @@ pub struct Reply {
     envelope: Envelope<serde_json::Value>,
     /// Operational output for stdout in text mode. It may name servers, devices and paths.
     stdout: String,
+    broken_pipe: bool,
 }
 
 impl Reply {
@@ -48,6 +49,7 @@ impl Reply {
         Self {
             envelope: envelope.erased(),
             stdout,
+            broken_pipe: false,
         }
     }
 
@@ -76,19 +78,37 @@ impl Reply {
     }
 
     pub fn exit(&self) -> u8 {
-        self.envelope.exit()
+        if self.broken_pipe {
+            contract::EXIT_BROKEN_PIPE
+        } else {
+            self.envelope.exit()
+        }
+    }
+
+    fn broken_pipe(command: &str, server: Option<ServerRef>) -> Self {
+        let mut reply = Self::failure(command, server, Failure::new(Code::OutputFailed));
+        reply.broken_pipe = true;
+        reply
     }
 
     /// Writes the reply through [`contract::render`] and returns the exit status.
-    pub fn write(&self, mode: contract::Mode) -> u8 {
+    pub fn write(
+        &self,
+        mode: contract::Mode,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+    ) -> u8 {
+        if self.broken_pipe {
+            return contract::EXIT_BROKEN_PIPE;
+        }
         contract::render(
             &self.envelope,
             &self.stdout,
             "",
             mode,
             crate::interrupt::finish(self.envelope.exit()),
-            &mut std::io::stdout().lock(),
-            &mut std::io::stderr().lock(),
+            stdout,
+            stderr,
         )
     }
 }
@@ -229,10 +249,6 @@ impl Context<'_> {
             None => RecoveredIdentity::Base,
         }
     }
-}
-
-fn terminal_stdout() -> bool {
-    terminal(libc::STDOUT_FILENO)
 }
 
 fn terminal(fd: libc::c_int) -> bool {

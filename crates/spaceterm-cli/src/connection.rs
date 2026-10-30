@@ -5,8 +5,8 @@ use crate::args::{ConnectionCommand, Global};
 use crate::contract::Mode;
 use crate::contract::{
     self, Code, ComparisonEvent, Confirmation, ConnectionAdd, ConnectionList, ConnectionRemove,
-    Details, Empty, Envelope, Failure, ListedConnection, Revocation, UsageDetails, UsageKind,
-    Warning, WarningCode, WarningDetails,
+    Details, Empty, Envelope, Failure, ListedConnection, OutputError, Revocation, UsageDetails,
+    UsageKind, Warning, WarningCode, WarningDetails,
 };
 use crate::state::{CliState, RouteKey};
 use connections::enrollment::{self, PairingClient, PairingNetwork};
@@ -52,20 +52,6 @@ impl HeldOutcomes for NativeHeld<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OutputError {
-    BrokenPipe,
-    Failed,
-}
-impl From<std::io::Error> for OutputError {
-    fn from(error: std::io::Error) -> Self {
-        if error.kind() == std::io::ErrorKind::BrokenPipe {
-            Self::BrokenPipe
-        } else {
-            Self::Failed
-        }
-    }
-}
 pub trait InteractionIo {
     fn interactive(&self) -> bool;
     fn interrupted(&self) -> bool;
