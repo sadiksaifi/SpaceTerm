@@ -18,6 +18,7 @@ pub(crate) mod local_operations;
 mod microphone;
 mod notices;
 mod permission_access;
+pub(crate) mod remote_admin;
 mod server_card;
 mod server_facts;
 mod server_list;
@@ -472,6 +473,8 @@ pub(crate) struct SettingsWindow {
         crate::server_context::ServerKey,
         crate::server_context::ObservedServerStatus,
     >,
+    /// Each paired server's Status, Stop, Restart and Update work, and its last outcome.
+    remote_admin: remote_admin::RemoteAdministration,
     /// How Servers names the server for this account on this computer.
     this_computer: &'static str,
 }
@@ -836,6 +839,7 @@ impl SettingsWindow {
             check_progress: server_card::DelayedProgress::default(),
             operation_progress: server_card::DelayedProgress::default(),
             retained_status: std::collections::BTreeMap::new(),
+            remote_admin: remote_admin::RemoteAdministration::default(),
             this_computer,
         };
         // Servers and Git present the retained selection, which loads after the window opens.

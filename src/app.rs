@@ -1035,6 +1035,11 @@ pub(crate) fn open(
         // Both enrollment methods publish into this paired connection registry.
         if let Some(direct) = direct_servers.clone() {
             crate::ui::direct_servers::install(direct, cx);
+            // Paired server cards stop, restart and update each server over its service lane.
+            crate::ui::settings_window::remote_admin::install(
+                crate::ui::settings_window::remote_admin::lane_source(),
+                cx,
+            );
         }
         // The Settings window supplies prompts for each explicit setup attempt.
         if let Some(factory) = ssh_setup.clone() {
