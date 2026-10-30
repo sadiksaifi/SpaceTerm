@@ -2032,6 +2032,7 @@ impl AddServerSheet {
                 .into_any_element()
             })
             .debug_selector(selector)
+            .expanded(shown)
             .accessibility_description(if shown { DISCLOSURE_HIDE } else { hint })
             .on_activate(move |_, _, cx| {
                 let _ = owner.update(cx, |sheet, cx| {

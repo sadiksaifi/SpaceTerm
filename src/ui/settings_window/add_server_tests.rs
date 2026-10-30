@@ -433,6 +433,43 @@ impl Sheet<'_> {
         self.cx.run_until_parked();
     }
 
+    /// What assistive technology reads from the focused node: its help, expanded state and value.
+    fn announced(&mut self) -> (String, Option<bool>, String) {
+        let tree = A11yTree::read(self.cx);
+        let node = tree.focused().expect("a node has keyboard focus");
+        (
+            node["aria"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            node["aria"]["expanded"].as_bool(),
+            node["aria"]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+
+    /// Opens and folds the focused Network Address disclosure with Space. Its help, expanded state
+    /// and value follow each change while it keeps focus, so assistive technology announces the
+    /// new state in place. `hint` is its help while folded.
+    fn toggle_disclosure_in_place(&mut self, hint: &str) {
+        let folded = (hint.to_owned(), Some(false), "collapsed".to_owned());
+        let expanded = (
+            DISCLOSURE_HIDE.to_owned(),
+            Some(true),
+            "expanded".to_owned(),
+        );
+        let disclosure = ("Button".to_owned(), "Network Address".to_owned());
+        assert_eq!(self.announced(), folded);
+        self.press_space();
+        assert_eq!(self.focus(), disclosure);
+        assert_eq!(self.announced(), expanded);
+        self.press_space();
+        assert_eq!(self.focus(), disclosure);
+        assert_eq!(self.announced(), folded);
+    }
+
     /// Presses Tab until the Network Address disclosure has keyboard focus.
     fn tab_to_disclosure(&mut self) {
         for _ in 0..6 {
@@ -1268,6 +1305,19 @@ fn the_keyboard_opens_the_invitation_address_with_focus_on_its_disclosure(cx: &m
         sheet.field(|sheet| &sheet.endpoint).1,
         "Tab moves into the shown address"
     );
+}
+
+/// Both disclosures announce their new state in place while they keep keyboard focus.
+#[gpui::test]
+fn the_network_address_disclosures_announce_their_state_in_place(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.tab_to_disclosure();
+    sheet.toggle_disclosure_in_place(ADDRESS_DISCLOSURE_DESCRIPTION);
+
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
+    sheet.tab_to_disclosure();
+    sheet.toggle_disclosure_in_place(ENDPOINT_DISCLOSURE_DESCRIPTION);
 }
 
 /// Select All and a retyped address after a refused Join stay in the address, as the person
