@@ -745,8 +745,8 @@ pub use credentials::{CredentialError, StoreKind, native};
 
 mod store;
 pub use store::{
-    ConnectionStore, PendingEnrollment, PendingRevocation, RemovalConfirmation, SavedConnection,
-    StoreError, UnpairState, valid_name,
+    ConnectionStore, ConnectionTransaction, PendingEnrollment, PendingRevocation,
+    RemovalConfirmation, SavedConnection, StoreError, UnpairState, valid_name,
 };
 
 pub mod enrollment;

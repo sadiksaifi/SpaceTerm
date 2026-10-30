@@ -12,6 +12,10 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
+fn transaction(store: &ConnectionStore) -> connections::ConnectionTransaction<'_> {
+    store.transaction(Instant::now() + Duration::from_secs(30), &|| false)
+}
+
 struct Fixture {
     root: PathBuf,
     store: ConnectionStore,
@@ -80,7 +84,7 @@ impl Fixture {
             credential: key,
             unpair: UnpairState::Paired,
         };
-        self.store
+        transaction(&self.store)
             .commit_guarded(|rows| {
                 rows.push(connection.clone());
                 Ok(())
@@ -459,8 +463,7 @@ fn remove_requires_the_exact_unexpired_record_then_keeps_offline_revocation_pend
         .fail_revocation
         .store(false, Ordering::Relaxed);
     let other = fixture.insert(2, "other");
-    let preview = fixture
-        .store
+    let preview = transaction(&fixture.store)
         .preview_remove(&other.name, unix_now().unwrap())
         .unwrap();
     let output = fixture.run(&ConnectionCommand::Remove {
@@ -476,18 +479,18 @@ fn remove_requires_the_exact_unexpired_record_then_keeps_offline_revocation_pend
 fn stale_and_expired_removal_tokens_change_nothing() {
     let mut fixture = Fixture::new();
     let saved = fixture.insert(1, "penguin");
-    let preview = fixture.store.preview_remove(&saved.name, 1).unwrap();
+    let preview = transaction(&fixture.store)
+        .preview_remove(&saved.name, 1)
+        .unwrap();
     let output = fixture.run(&ConnectionCommand::Remove {
         name: saved.name.clone(),
         confirm: Some(format!("c1-{}", hex(&preview.token))),
     });
     assert_eq!(output.envelope["error"]["code"], "changed");
-    let preview = fixture
-        .store
+    let preview = transaction(&fixture.store)
         .preview_remove(&saved.name, unix_now().unwrap())
         .unwrap();
-    fixture
-        .store
+    transaction(&fixture.store)
         .commit_guarded(|rows| {
             rows[0].endpoint = "quic://new.example:9443".into();
             Ok(())
@@ -666,8 +669,7 @@ fn server_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_
     first.route = [0xaa; 32];
     second.route = [0xaa; 32];
     second.route[31] = 1;
-    fixture
-        .store
+    transaction(&fixture.store)
         .commit_guarded(|rows| {
             *rows = vec![first, second];
             Ok(())
@@ -689,8 +691,7 @@ fn server_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_
 fn confirmed_removal_has_the_frozen_envelope() {
     let mut fixture = Fixture::new();
     let connection = fixture.insert(1, "penguin");
-    let preview = fixture
-        .store
+    let preview = transaction(&fixture.store)
         .preview_remove(&connection.name, unix_now().unwrap())
         .unwrap();
     let output = fixture.run(&ConnectionCommand::Remove {
@@ -721,15 +722,16 @@ fn a_live_join_is_skipped_by_recovery_and_a_published_join_is_never_cancelled() 
             "penguin".into(),
             "Fixture CLI".into(),
             Instant::now() + Duration::from_secs(5),
+            &|| false,
         )
         .unwrap();
-    join.submit().unwrap();
+    join.submit(&|| false).unwrap();
     assert_eq!(
         second.recover(Instant::now() + Duration::from_secs(1)),
         Ok(0)
     );
     assert!(fixture.network.cancels.lock().unwrap().is_empty());
-    join.finish().unwrap().unwrap();
+    join.finish(&|| false).unwrap().unwrap();
     drop(join);
     assert_eq!(
         second.recover(Instant::now() + Duration::from_secs(1)),
@@ -787,7 +789,7 @@ fn concurrent_connection_add_processes_preserve_the_desktop_fixture() {
 }
 
 #[test]
-fn interruption_after_confirmed_publication_reports_the_saved_connection_without_unpairing() {
+fn interruption_after_enrollment_cancels_before_publishing_the_saved_connection() {
     let mut fixture = Fixture::new();
     fixture
         .network
@@ -796,10 +798,10 @@ fn interruption_after_confirmed_publication_reports_the_saved_connection_without
     let output = fixture.run(&add("penguin"));
     assert_eq!(output.exit, 130);
     assert_eq!(output.envelope["error"]["code"], "interrupted");
-    assert_eq!(output.envelope["data"]["connection"]["name"], "penguin");
-    assert_eq!(fixture.store.load().unwrap().len(), 1);
+    assert!(fixture.store.load().unwrap().is_empty());
     assert!(fixture.store.pending_enrollments().unwrap().is_empty());
-    assert!(fixture.network.cancels.lock().unwrap().is_empty());
+    assert_eq!(fixture.network.cancels.lock().unwrap().len(), 1);
+    assert!(fixture.credentials.values.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -964,4 +966,96 @@ fn rename_rejects_invalid_names_remote_routes_and_interruption_before_effects() 
         assert!(fixture.credentials.values.lock().unwrap().is_empty());
         assert!(!output.envelope.to_string().contains("private"));
     }
+}
+
+#[test]
+fn contended_connection_commands_time_out_without_late_store_writes() {
+    for command in [
+        ConnectionCommand::Rename {
+            old: "penguin".into(),
+            new: "lab".into(),
+        },
+        ConnectionCommand::Remove {
+            name: "penguin".into(),
+            confirm: None,
+        },
+        ConnectionCommand::Remove {
+            name: "penguin".into(),
+            confirm: Some(String::new()),
+        },
+        add("lab"),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.insert(1, "penguin");
+        let command = match command {
+            ConnectionCommand::Remove {
+                name,
+                confirm: Some(_),
+            } => {
+                let preview = transaction(&fixture.store)
+                    .preview_remove(&name, unix_now().unwrap())
+                    .unwrap();
+                ConnectionCommand::Remove {
+                    name,
+                    confirm: Some(format!("c1-{}", hex(&preview.token))),
+                }
+            }
+            other => other,
+        };
+        let before = std::fs::read(fixture.store_path()).unwrap();
+        let directory =
+            spaceterm_server::Directory::open(fixture.store_path().parent().unwrap(), false)
+                .unwrap();
+        let lock = directory.lock("connections.lock", false).unwrap();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            drop(lock);
+        });
+        let started = Instant::now();
+        let output = fixture.run_with(
+            &command,
+            Global {
+                timeout: Some(Duration::from_secs(1)),
+                ..global()
+            },
+        );
+        let elapsed = started.elapsed();
+        let during = std::fs::read(fixture.store_path()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(output.exit, 6, "{}", output.envelope);
+        assert!(
+            elapsed < Duration::from_millis(1800),
+            "lock wait exceeded deadline: {elapsed:?}"
+        );
+        assert_eq!(during, before);
+        assert_eq!(std::fs::read(fixture.store_path()).unwrap(), before);
+        assert!(fixture.network.submits.lock().unwrap().is_empty());
+        assert!(fixture.network.revocations.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn contended_rename_observes_cancellation_without_a_late_write() {
+    let mut fixture = Fixture::new();
+    fixture.insert(1, "penguin");
+    let before = std::fs::read(fixture.store_path()).unwrap();
+    let directory =
+        spaceterm_server::Directory::open(fixture.store_path().parent().unwrap(), false).unwrap();
+    let lock = directory.lock("connections.lock", false).unwrap();
+    let interrupted = fixture.io.interrupted.clone();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        interrupted.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(400));
+        drop(lock);
+    });
+    let output = fixture.run(&ConnectionCommand::Rename {
+        old: "penguin".into(),
+        new: "lab".into(),
+    });
+    let during = std::fs::read(fixture.store_path()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(output.exit, 130);
+    assert_eq!(during, before);
+    assert_eq!(std::fs::read(fixture.store_path()).unwrap(), before);
 }
