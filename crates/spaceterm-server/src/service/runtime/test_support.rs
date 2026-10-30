@@ -89,25 +89,34 @@ pub(crate) fn with_artifact<T>(
     let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION,"protocol_major":FIXTURE_MAJOR.get(),"capabilities":["workspace_policy"]}).to_string();
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(encoder);
+    let layout = super::Layout::host(identity).unwrap();
+    let packaged = |path: PathBuf| format!("server/{}", path.display());
     let mut entries = vec![
         ("server/build.json".to_owned(), manifest.into_bytes(), 0o644),
         (
-            "server/bin/spaceterm".to_owned(),
+            packaged(layout.executable()),
             b"signed fixture executable".to_vec(),
             0o755,
         ),
         (
-            "server/share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
+            packaged(layout.resources().join("terminfo/x/xterm-spaceterm")),
             b"signed terminfo".to_vec(),
             0o644,
         ),
     ];
-    for name in serde_json::from_str::<Vec<String>>(include_str!(
+    for name in serde_json::from_str::<Vec<PathBuf>>(include_str!(
         "../../../../../packaging/server-resources.json"
     ))
     .unwrap()
     {
-        entries.push((format!("server/{name}"), b"signed resource".to_vec(), 0o644));
+        entries.push((
+            packaged(layout.resource(&name).unwrap()),
+            b"signed resource".to_vec(),
+            0o644,
+        ));
+    }
+    for name in layout.bundle_files() {
+        entries.push((packaged(name), b"signed bundle file".to_vec(), 0o644));
     }
     for (name, bytes, mode) in entries {
         let mut header = tar::Header::new_gnu();

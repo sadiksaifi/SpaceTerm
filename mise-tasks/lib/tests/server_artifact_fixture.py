@@ -47,8 +47,8 @@ def prepare(
     directory = root / "target/server-artifact-fixture"
     shutil.rmtree(directory, ignore_errors=True)
     tree = directory / "server"
-    (tree / "bin").mkdir(parents=True)
-    executable = tree / "bin/spaceterm"
+    executable = tree / server_package.executable_path(expected["target"], expected["identity"])
+    executable.parent.mkdir(parents=True)
     source = f"""
 #include <stdio.h>
 #include <string.h>
@@ -76,8 +76,10 @@ int main(int argc, char **argv) {{
         capture_output=True,
         check=True,
     )
+    populate(root, tree, expected)
     if sys.platform == "darwin":
-        identifier = f"io.github.sadiksaifi.{expected['identity']}.server"
+        identifier = server_package.server_identifier(expected["identity"])
+        executable = tree / server_package.signed_path(expected["target"], expected["identity"])
         if release_tag:
             if fingerprint is None or credentials is None:
                 raise ValueError(
@@ -130,15 +132,18 @@ int main(int argc, char **argv) {{
         (local / "artifact.sha256").write_text(release.sha256(archive) + "\n")
         target = "x86_64-unknown-linux-gnu" if sys.platform == "darwin" else "aarch64-apple-darwin"
         foreign = directory / "foreign/server"
-        (foreign / "bin").mkdir(parents=True)
-        executable = foreign / "bin/spaceterm"
+        executable = foreign / server_package.executable_path(target, expected["identity"])
+        executable.parent.mkdir(parents=True)
         if target == "aarch64-apple-darwin":
             header = bytes.fromhex("cffaedfe0c0000010000000002000000") + bytes(16)
         else:
             header = b"\x7fELF\x02\x01\x01" + bytes(9) + bytes.fromhex("03003e00") + bytes(44)
         executable.write_bytes(header)
         executable.chmod(0o755)
-        other_archive, other_signature = archive_tree(root, foreign, {**expected, "target": target})
+        foreign_expected = {**expected, "target": target}
+        populate(root, foreign, foreign_expected)
+        seal_foreign(foreign, foreign_expected)
+        other_archive, other_signature = archive_tree(root, foreign, foreign_expected)
         output = catalog / target
         output.mkdir()
         shutil.copyfile(other_archive, output / "artifact.tar.gz")
@@ -148,8 +153,9 @@ int main(int argc, char **argv) {{
     return archive, signature
 
 
-def archive_tree(root, tree, expected):
-    resources = tree / "share/spaceterm"
+def populate(root, tree, expected):
+    """Place the resources, and on macOS the Info.plist, in the target's layout."""
+    resources = tree / server_package.resource_directory(expected["target"], expected["identity"])
     shutil.copytree(root / "assets/shell-integration", resources / "shell-integration")
     shutil.copyfile(root / "assets/THIRD-PARTY-NOTICES.txt", resources / "THIRD-PARTY-NOTICES.txt")
     subprocess.run(
@@ -163,6 +169,19 @@ def archive_tree(root, tree, expected):
         check=True,
         capture_output=True,
     )
+    if expected["target"] == "aarch64-apple-darwin":
+        info = tree / server_package.bundle_directory(expected["identity"]) / "Contents/Info.plist"
+        info.write_bytes(plistlib.dumps(server_package.server_info(expected["identity"])))
+
+
+def seal_foreign(tree, expected):
+    """Stand in for the seal a foreign target's codesign writes, which catalogs never execute."""
+    for name in server_package.bundle_files(expected["target"], expected["identity"]):
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        (tree / name).write_bytes(b"foreign bundle seal")
+
+
+def archive_tree(root, tree, expected):
     (tree / "build.json").write_text(json.dumps(expected))
     archive = tree.parent / "artifact.tar.gz"
     signature = tree.parent / "artifact.sig"

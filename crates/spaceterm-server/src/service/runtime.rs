@@ -9,10 +9,13 @@ use std::{
 
 mod files;
 mod launcher;
+mod layout;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+
+pub use layout::{Layout, bundle_identifier, bundle_name};
 
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 512 * 1024 * 1024;
@@ -608,7 +611,8 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut requirement = format!("identifier \"io.github.sadiksaifi.{identity}.server\"");
+        let layout = Layout::host(identity).ok_or(ServerError::RuntimeUnavailable)?;
+        let mut requirement = format!("identifier \"{}\"", bundle_identifier(identity));
         if identity == "spaceterm" {
             let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
             let signer = template
@@ -625,7 +629,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
                 "--strict".into(),
                 "-R".into(),
                 format!("={requirement}").into(),
-                path.join("bin/spaceterm").into_os_string(),
+                path.join(layout.signed()).into_os_string(),
             ],
         )
         .map_err(|_| ServerError::RuntimeUnavailable)?;
@@ -639,19 +643,20 @@ fn verify_executable(path: &Path, expected: &Build) -> Result<(), ServerError> {
     let bytes = if test_support::active() {
         test_support::native_build(&expected.identity)
     } else {
-        executable_build(path)?
+        executable_build(path, &expected.identity)?
     };
     #[cfg(not(test))]
-    let bytes = executable_build(path)?;
+    let bytes = executable_build(path, &expected.identity)?;
     let reported = Build::parse(&bytes, &expected.identity)?;
     if reported != *expected {
         return Err(ServerError::RuntimeUnavailable);
     }
     Ok(())
 }
-fn executable_build(path: &Path) -> Result<Vec<u8>, ServerError> {
+fn executable_build(path: &Path, identity: &str) -> Result<Vec<u8>, ServerError> {
+    let layout = Layout::host(identity).ok_or(ServerError::RuntimeUnavailable)?;
     let bytes = execute(
-        Command::new(path.join("bin/spaceterm"))
+        Command::new(path.join(layout.executable()))
             .args(["server", "provision", "build-info"])
             .env_clear()
             .current_dir(path),
@@ -790,6 +795,8 @@ fn contents_for_target(
     target: &str,
     mut visit: impl FnMut(&Path, bool, u32, &[u8]) -> Result<(), ServerError>,
 ) -> Result<Build, ServerError> {
+    let layout = Layout::for_target(target, identity).ok_or(ServerError::RuntimeUnavailable)?;
+    let main = layout.executable();
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut names = BTreeSet::new();
     let mut expanded = 0u64;
@@ -830,7 +837,7 @@ fn contents_for_target(
             .header()
             .mode()
             .map_err(|_| ServerError::RuntimeUnavailable)?;
-        let expected_mode = if directory || path == Path::new("bin/spaceterm") {
+        let expected_mode = if directory || path == main {
             0o755
         } else {
             0o644
@@ -860,7 +867,7 @@ fn contents_for_target(
         if path == Path::new("build.json") {
             manifest = Some(Build::parse_for_target(&signed, identity, target)?);
         }
-        if path == Path::new("bin/spaceterm") && !directory {
+        if path == main && !directory {
             executable = true;
         }
         visit(path, directory, mode, &signed)?;
@@ -869,20 +876,17 @@ fn contents_for_target(
         "../../../../packaging/server-resources.json"
     ))
     .map_err(|_| ServerError::RuntimeUnavailable)?
-    .into_iter()
-    .collect();
-    required.extend([PathBuf::from("build.json"), PathBuf::from("bin/spaceterm")]);
+    .iter()
+    .map(|listed| layout.resource(listed))
+    .collect::<Option<_>>()
+    .ok_or(ServerError::RuntimeUnavailable)?;
+    required.extend([PathBuf::from("build.json"), main]);
+    required.extend(layout.bundle_files());
+    let terminfo_entries = ["terminfo/x/xterm-spaceterm", "terminfo/78/xterm-spaceterm"]
+        .map(|entry| layout.resources().join(entry));
     let terminfo: Vec<_> = files
         .iter()
-        .filter(|path| {
-            matches!(
-                path.to_str(),
-                Some(
-                    "share/spaceterm/terminfo/x/xterm-spaceterm"
-                        | "share/spaceterm/terminfo/78/xterm-spaceterm"
-                )
-            )
-        })
+        .filter(|path| terminfo_entries.contains(path))
         .cloned()
         .collect();
     if terminfo.is_empty() {

@@ -2,13 +2,17 @@
 use super::*;
 use std::os::unix::fs::{DirBuilderExt, symlink};
 
-fn managed(target: &Path, installations: &Path) -> bool {
+/// Whether `target` is the executable of one of `identity`'s retained installations.
+fn managed(target: &Path, identity: &str, installations: &Path) -> bool {
+    let Some(executable) = Layout::host(identity).map(Layout::executable) else {
+        return false;
+    };
     let Ok(relative) = target.strip_prefix(installations) else {
         return false;
     };
-    let parts: Vec<_> = relative.components().collect();
-    matches!(parts.as_slice(), [std::path::Component::Normal(digest), std::path::Component::Normal(bin), std::path::Component::Normal(executable)]
-        if digest.to_str().is_some_and(digest_valid) && *bin == "bin" && *executable == "spaceterm")
+    let mut parts = relative.components();
+    matches!(parts.next(), Some(std::path::Component::Normal(digest)) if digest.to_str().is_some_and(digest_valid))
+        && parts.as_path() == executable
 }
 
 fn bin(home: &Path) -> Result<PathBuf, ServerError> {
@@ -39,12 +43,16 @@ pub(super) fn inspect(
     let blocked = || {
         let temporary = temporary(&home.join(".local/bin"), identity);
         std::fs::symlink_metadata(&temporary).is_ok()
-            && !std::fs::read_link(&temporary).is_ok_and(|target| managed(&target, installations))
+            && !std::fs::read_link(&temporary)
+                .is_ok_and(|target| managed(&target, identity, installations))
     };
     match std::fs::read_link(&launcher) {
-        Ok(target) if managed(&target, installations) => Ok(
+        Ok(target) if managed(&target, identity, installations) => Ok(
             if target.is_file()
-                && approved.is_none_or(|runtime| target == runtime.join("bin/spaceterm"))
+                && approved.is_none_or(|runtime| {
+                    Layout::host(identity)
+                        .is_some_and(|layout| target == runtime.join(layout.executable()))
+                })
             {
                 CliLauncher::Linked
             } else if blocked() {
@@ -79,16 +87,20 @@ pub(super) fn select(
     let parent = bin(home)?;
     let launcher = parent.join(identity);
     let temporary = temporary(&parent, identity);
-    remove_leftover(&temporary, installations)?;
+    remove_leftover(&temporary, identity, installations)?;
     let before = match std::fs::read_link(&launcher) {
-        Ok(target) if managed(&target, installations) => Some(target),
+        Ok(target) if managed(&target, identity, installations) => Some(target),
         Ok(_) => return Ok(CliLink::Kept),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) if std::fs::symlink_metadata(&launcher).is_ok() => return Ok(CliLink::Kept),
         Err(_) => return Err(ServerError::StorageUnavailable),
     };
-    let target = runtime.join("bin/spaceterm");
-    if !managed(&target, installations) {
+    let target = runtime.join(
+        Layout::host(identity)
+            .ok_or(ServerError::UnsafeStorage)?
+            .executable(),
+    );
+    if !managed(&target, identity, installations) {
         return Err(ServerError::UnsafeStorage);
     }
     if before.as_ref() == Some(&target) {
@@ -134,8 +146,12 @@ pub(super) fn temporary(parent: &Path, identity: &str) -> PathBuf {
 
 /// Removes a replacement's leftover new link. Only a link into this identity's installations is
 /// SpaceTerm's own; anything else under that name stays.
-fn remove_leftover(temporary: &Path, installations: &Path) -> Result<(), ServerError> {
-    if std::fs::read_link(temporary).is_ok_and(|target| managed(&target, installations)) {
+fn remove_leftover(
+    temporary: &Path,
+    identity: &str,
+    installations: &Path,
+) -> Result<(), ServerError> {
+    if std::fs::read_link(temporary).is_ok_and(|target| managed(&target, identity, installations)) {
         std::fs::remove_file(temporary).map_err(|_| ServerError::StorageUnavailable)?;
     }
     Ok(())
@@ -174,14 +190,14 @@ pub(super) fn remove(home: &Path, identity: &str, installations: &Path) -> Resul
     let launcher = parent.join(identity);
     let leftover = temporary(&parent, identity);
     let managed_launcher =
-        std::fs::read_link(&launcher).is_ok_and(|target| managed(&target, installations));
+        std::fs::read_link(&launcher).is_ok_and(|target| managed(&target, identity, installations));
     let managed_leftover =
-        std::fs::read_link(&leftover).is_ok_and(|target| managed(&target, installations));
+        std::fs::read_link(&leftover).is_ok_and(|target| managed(&target, identity, installations));
     if !managed_launcher && !managed_leftover {
         return Ok(());
     }
     let directory = owned_directory(&parent)?;
-    remove_leftover(&leftover, installations)?;
+    remove_leftover(&leftover, identity, installations)?;
     if managed_launcher {
         std::fs::remove_file(&launcher).map_err(|_| ServerError::StorageUnavailable)?;
     }
@@ -193,6 +209,10 @@ pub(super) fn remove(home: &Path, identity: &str, installations: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn executable() -> PathBuf {
+        Layout::host("spaceterm-development").unwrap().executable()
+    }
 
     #[test]
     fn installer_selects_only_its_managed_link_and_uninstall_preserves_other_launchers() {
@@ -219,17 +239,14 @@ mod tests {
             select(&home, "spaceterm-development", &installations, &first),
             Ok(CliLink::Linked)
         );
-        assert_eq!(
-            std::fs::read_link(&path).unwrap(),
-            first.join("bin/spaceterm")
-        );
+        assert_eq!(std::fs::read_link(&path).unwrap(), first.join(executable()));
         assert_eq!(
             select(&home, "spaceterm-development", &installations, &second),
             Ok(CliLink::Linked)
         );
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
-            second.join("bin/spaceterm")
+            second.join(executable())
         );
         remove(&home, "spaceterm-development", &installations).unwrap();
         assert!(!path.is_symlink());
@@ -340,13 +357,10 @@ mod tests {
             })
             .join();
             assert!(interrupted.is_err());
-            assert_eq!(
-                std::fs::read_link(&path).unwrap(),
-                first.join("bin/spaceterm")
-            );
+            assert_eq!(std::fs::read_link(&path).unwrap(), first.join(executable()));
             assert_eq!(
                 std::fs::read_link(&leftover).unwrap(),
-                second.join("bin/spaceterm")
+                second.join(executable())
             );
             assert_eq!(entries(), 2);
         }
@@ -358,12 +372,12 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
-            second.join("bin/spaceterm")
+            second.join(executable())
         );
         assert_eq!(entries(), 1);
 
         // Uninstall removes a leftover with the launcher.
-        symlink(first.join("bin/spaceterm"), &leftover).unwrap();
+        symlink(first.join(executable()), &leftover).unwrap();
         remove(&home, identity, &installations).unwrap();
         assert_eq!(entries(), 0);
 

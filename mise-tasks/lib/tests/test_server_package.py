@@ -19,7 +19,7 @@ from spaceterm_tasks import ROOT, TaskError, release, server_package
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
 
-from tests.server_artifact_fixture import archive_tree
+from tests.server_artifact_fixture import archive_tree, populate
 
 
 class ResourcePolicyTests(unittest.TestCase):
@@ -229,6 +229,7 @@ class ServerArchiveTests(unittest.TestCase):
         (tree / "bin").mkdir(parents=True)
         (tree / "bin/spaceterm").write_bytes(b"native executable fixture")
         (tree / "bin/spaceterm").chmod(0o755)
+        populate(ROOT, tree, self.info)
         archive, signature = archive_tree(ROOT, tree, self.info)
         run = subprocess.run
         client = self.root / "client"

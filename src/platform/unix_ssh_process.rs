@@ -301,7 +301,11 @@ mod tests {
             ("setup-direct-status", "ssh-direct-status"),
         ] {
             let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
-            assert!(script.ends_with(&format!("exec \"$root/installations/$digest/bin/spaceterm\" server provision '{command}'\n")), "{script}");
+            assert!(
+                script.ends_with(&format!("exec \"$path\" server provision '{command}'\n")),
+                "{script}"
+            );
+            assert!(script.contains("Darwin) executable='SpaceTerm Development Server.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
         }
     }
 
@@ -812,6 +816,23 @@ mod tests {
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
+
+/// Sets shell `variable` to the identity's server executable within a package, in the layout
+/// of the machine the script runs on.
+#[cfg(feature = "desktop")]
+fn executable_case(identity: &str, variable: &str) -> String {
+    use spaceterm_server::service::Layout;
+    let executable = |target| {
+        Layout::for_target(target, identity)
+            .map(|layout| quote(&layout.executable().to_string_lossy()))
+            .unwrap_or_else(|| "''".to_owned())
+    };
+    format!(
+        "case \"$(uname -s)\" in\nDarwin) {variable}={};;\n*) {variable}={};;\nesac\n",
+        executable("aarch64-apple-darwin"),
+        executable("x86_64-unknown-linux-gnu"),
+    )
+}
 #[cfg(feature = "desktop")]
 impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
     /// This script selects only the approved digest in a fixed account/build namespace.
@@ -862,10 +883,22 @@ esac
 digest=$(sed -n 's/.*"installation"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$policy")
 [ "${#digest}" = 64 ] || exit 74
 case "$digest" in *[!0-9a-f]*) exit 74;; esac
-[ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm" ] || exit 74
+[ ! -L "$root/installations" ] || exit 74
 "#);
+        script.push_str(&executable_case(identity, "executable"));
+        script.push_str(
+            r#"path="$root/installations/$digest"
+rest=$executable
+while :; do
+[ ! -L "$path" ] || exit 74
+[ -n "$rest" ] || break
+path="$path/${rest%%/*}"
+case "$rest" in */*) rest=${rest#*/};; *) rest=;; esac
+done
+"#,
+        );
         script.push_str(&format!(
-            "exec \"$root/installations/$digest/bin/spaceterm\" server provision {}{}\n",
+            "exec \"$path\" server provision {}{}\n",
             quote(match action {
                 "setup-start" => "ssh-start",
                 "setup-direct-status" => "ssh-direct-status",
@@ -903,7 +936,7 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
 #[cfg(feature = "desktop")]
 fn transfer_script(
     action: &str,
-    _identity: &str,
+    identity: &str,
     archive_length: usize,
     signature: &[u8],
     digest: &str,
@@ -918,12 +951,13 @@ fn transfer_script(
     } else {
         ""
     };
+    let executable = executable_case(identity, "executable");
     let authorize = match linger {
         Some(true) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm\" server provision ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
+            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/$executable\" server provision ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
         ),
         Some(false) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/bin/spaceterm\" server provision ssh-enable-linger || exit 77\nfi\n",
+            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/$executable\" server provision ssh-enable-linger || exit 77\nfi\n",
         ),
         None => String::new(),
     };
@@ -940,7 +974,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
 mkdir "$work/runtime"
 tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-{authorize}"$work/runtime/server/bin/spaceterm" server provision {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+{executable}{authorize}"$work/runtime/server/$executable" server provision {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
 "#,
         quote(&signature),
         quote(action),

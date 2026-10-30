@@ -16,7 +16,10 @@ mod runtime;
 pub mod tokens;
 #[cfg(feature = "client")]
 pub use runtime::CliUninstall;
-pub use runtime::{CandidateMetadata, CliLauncher, CliLink, verify_candidate_bytes};
+pub use runtime::{
+    CandidateMetadata, CliLauncher, CliLink, Layout, bundle_identifier, bundle_name,
+    verify_candidate_bytes,
+};
 
 use crate::{
     ServerError,
@@ -925,7 +928,8 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), ServerError>
     }
     check_cleanup(&state)?;
     let executable = std::env::current_exe().map_err(|_| ServerError::RuntimeUnavailable)?;
-    if executable != service.runtime(&state).join("bin/spaceterm") {
+    let layout = runtime::Layout::host(identity).ok_or(ServerError::RuntimeUnavailable)?;
+    if executable != service.runtime(&state).join(layout.executable()) {
         return Err(ServerError::RuntimeUnavailable);
     }
     runtime::verify(&service.runtime(&state), identity)?;

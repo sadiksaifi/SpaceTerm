@@ -17,7 +17,7 @@ from spaceterm_tasks import ROOT, server_package
 from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
 from spaceterm_tasks.server_builds import _source
 
-from tests.server_artifact_fixture import archive_tree
+from tests.server_artifact_fixture import archive_tree, populate, seal_foreign
 
 ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 
@@ -121,7 +121,7 @@ class LinuxPrefixTests(unittest.TestCase):
         artifacts = {}
         for target in server_package.TARGETS.values():
             tree = self.private / "server-packages" / target / "server"
-            executable = tree / "bin/spaceterm"
+            executable = tree / server_package.executable_path(target, "spaceterm-development")
             executable.parent.mkdir(parents=True)
             info = {
                 "schema": 1,
@@ -161,6 +161,8 @@ int main(int argc, char **argv) {{
                     bytes.fromhex("cffaedfe0c0000010000000002000000") + bytes(16)
                 )
                 executable.chmod(0o755)
+            populate(ROOT, tree, info)
+            seal_foreign(tree, info)
             artifacts[target] = [str(path) for path in archive_tree(ROOT, tree, info)]
         return artifacts
 

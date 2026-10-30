@@ -369,6 +369,17 @@ install_linux() {
 # Checksums arrive over HTTPS before any downloaded executable runs. The retained CLI then
 # authenticates the original Ed25519 signature and every resource before publishing a runtime.
 # [Signing] Add the Developer ID requirement check with the signing and notarization rollout.
+# The identity's server executable within a package, in this machine's layout. A macOS package
+# is an app-like bundle named for its identity, so System Permissions follow the bundle.
+server_executable() {
+    case "$(uname -s):$headless_identity" in
+        Darwin:spaceterm) printf '%s' 'SpaceTerm Server.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm-preflight) printf '%s' 'SpaceTerm Preflight Server.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm-development) printf '%s' 'SpaceTerm Development Server.app/Contents/MacOS/spaceterm' ;;
+        *) printf '%s' bin/spaceterm ;;
+    esac
+}
+
 retain_headless() {
     mkdir "$work/runtime" 2>/dev/null || die "could not prepare the CLI installation"
     # Refuse links and parent paths before extraction. The Rust verifier enforces the complete
@@ -384,14 +395,13 @@ retain_headless() {
     fi
     tar -xzf "$headless_archive" -C "$work/runtime" 2>/dev/null || die "could not unpack the CLI archive"
     runtime="$work/runtime/server"
-    [ -x "$runtime/bin/spaceterm" ] || die "the CLI executable is missing"
-    if [ -n "${headless_identity:-}" ]; then
-        compiled_identity="$("$runtime/bin/spaceterm" server provision build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
-        [ "$compiled_identity" = "$headless_identity" ] || die "the CLI archive has a different application identity"
-    fi
+    executable="$runtime/$(server_executable)"
+    [ -x "$executable" ] || die "the CLI executable is missing"
+    compiled_identity="$("$executable" server provision build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
+    [ "$compiled_identity" = "$headless_identity" ] || die "the CLI archive has a different application identity"
     cp "$headless_archive" "$runtime/artifact.tar.gz" 2>/dev/null || die "could not stage the CLI archive"
     cp "$headless_signature" "$runtime/artifact.sig" 2>/dev/null || die "could not stage the CLI signature"
-    "$runtime/bin/spaceterm" server provision retain "$runtime" \
+    "$executable" server provision retain "$runtime" \
         || die "the signed CLI installation could not be retained"
 }
 
@@ -399,10 +409,11 @@ headless_uninstall() {
     root="$HOME/.local/share/$headless_identity/server"
     launcher="$HOME/.local/bin/$headless_identity"
     runtime=""
+    relative="$(server_executable)"
     if [ -L "$launcher" ]; then
         linked="$(readlink "$launcher")"
         case "$linked" in
-            "$root/installations/"*/bin/spaceterm) runtime="${linked%/bin/spaceterm}" ;;
+            "$root/installations/"*/"$relative") runtime="${linked%/"$relative"}" ;;
         esac
     fi
     if [ -z "$runtime" ] && [ -f "$root/service.json" ] && [ ! -L "$root/service.json" ]; then
@@ -417,15 +428,22 @@ headless_uninstall() {
     digest="$(basename "$runtime")"
     [ "${#digest}" -eq 64 ] || die "the CLI launcher is unmanaged"
     case "$digest" in *[!0-9a-f]*) die "the CLI launcher is unmanaged" ;; esac
-    for directory in "$HOME/.local" "$HOME/.local/share" "${root%/server}" "$root" "$root/installations" "$runtime" "$runtime/bin" "$runtime/bin/spaceterm"; do
+    for directory in "$HOME/.local" "$HOME/.local/share" "${root%/server}" "$root" "$root/installations" "$runtime"; do
         [ ! -L "$directory" ] || die "the CLI installation has unsafe links"
     done
+    executable="$runtime"
+    rest="$relative"
+    while [ -n "$rest" ]; do
+        executable="$executable/${rest%%/*}"
+        [ ! -L "$executable" ] || die "the CLI installation has unsafe links"
+        case "$rest" in */*) rest="${rest#*/}" ;; *) rest="" ;; esac
+    done
     if [ -n "$headless_confirm" ]; then
-        "$runtime/bin/spaceterm" server provision uninstall --confirm "$headless_confirm"
+        "$executable" server provision uninstall --confirm "$headless_confirm"
         return
     fi
     status=0
-    preview="$("$runtime/bin/spaceterm" server provision uninstall)" || status=$?
+    preview="$("$executable" server provision uninstall)" || status=$?
     printf '%s\n' "$preview"
     case "$status" in
         0) return ;;
@@ -444,7 +462,7 @@ headless_uninstall() {
         die "review the preview, then run this installer with --headless --uninstall --confirm $token"
     fi
     case "$answer" in
-        y|Y|yes|YES) "$runtime/bin/spaceterm" server provision uninstall --confirm "$token" ;;
+        y|Y|yes|YES) "$executable" server provision uninstall --confirm "$token" ;;
         *) die "uninstall cancelled" ;;
     esac
 }

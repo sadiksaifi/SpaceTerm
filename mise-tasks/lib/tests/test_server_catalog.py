@@ -15,7 +15,7 @@ from spaceterm_tasks import ROOT, TaskError, release, server_package
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.server_catalog import stage_catalog, verify_catalog
 
-from tests.server_artifact_fixture import archive_tree
+from tests.server_artifact_fixture import archive_tree, populate, seal_foreign
 
 
 class ServerCatalogTests(unittest.TestCase):
@@ -37,8 +37,6 @@ class ServerCatalogTests(unittest.TestCase):
     ):
         directory = Path(tempfile.mkdtemp(dir=self.root))
         tree = directory / "server"
-        executable = tree / "bin/spaceterm"
-        executable.parent.mkdir(parents=True)
         # Signed foreign executables are opaque to the catalog. These headers declare
         # the supported machine; native producers separately verify their executables.
         if native_target == "aarch64-apple-darwin":
@@ -56,6 +54,10 @@ class ServerCatalogTests(unittest.TestCase):
             capabilities=["workspace_policy"],
         )
         info.update(changed)
+        # The tree follows the native target's layout, whatever the signed document declares.
+        laid_out = {**info, "target": native_target}
+        executable = tree / server_package.executable_path(native_target, info["identity"])
+        executable.parent.mkdir(parents=True)
         if native_target == self.target:
             source = f"""
 #include <stdio.h>
@@ -85,8 +87,9 @@ int main(int argc, char **argv) {{
                 capture_output=True,
                 check=True,
             )
+            populate(ROOT, tree, laid_out)
             if sys.platform == "darwin":
-                identifier = f"io.github.sadiksaifi.{info['identity']}.server"
+                identifier = server_package.server_identifier(info["identity"])
                 subprocess.run(
                     [
                         "codesign",
@@ -96,7 +99,7 @@ int main(int argc, char **argv) {{
                         "--identifier",
                         identifier,
                         "--timestamp=none",
-                        str(executable),
+                        str(tree / server_package.signed_path(native_target, info["identity"])),
                     ],
                     check=True,
                     capture_output=True,
@@ -104,6 +107,8 @@ int main(int argc, char **argv) {{
         else:
             executable.write_bytes(header)
             executable.chmod(0o755)
+            populate(ROOT, tree, laid_out)
+            seal_foreign(tree, laid_out)
         return (*archive_tree(ROOT, tree, info), info)
 
     def test_collected_mac_artifact_must_match_the_current_source_snapshot(self):
@@ -234,7 +239,8 @@ int main(int argc, char **argv) {{
         data = (
             struct.pack("<6h", 0x021E, len(names), 0, 1, 0, 0) + names + struct.pack("<i", 100000)
         )
-        terminfo = next((tree / "share/spaceterm/terminfo").rglob("xterm-spaceterm"))
+        resources = tree / server_package.resource_directory(target, self.identity)
+        terminfo = next((resources / "terminfo").rglob("xterm-spaceterm"))
         local, local_signature, _ = self.artifact(self.target)
         for truncated in (False, True):
             terminfo.write_bytes(data[:-1] if truncated else data)
@@ -277,9 +283,11 @@ int main(int argc, char **argv) {{
                 archive, signature, _ = self.artifact(self.target)
                 tree = archive.parent / "server"
                 if corrupt_machine:
-                    (tree / "bin/spaceterm").write_bytes(b"wrong native machine")
+                    executable = server_package.executable_path(self.target, self.identity)
+                    (tree / executable).write_bytes(b"wrong native machine")
                 else:
-                    (tree / "share/spaceterm/shell-integration/zsh/.zshenv").unlink()
+                    resources = server_package.resource_directory(self.target, self.identity)
+                    (tree / resources / "shell-integration/zsh/.zshenv").unlink()
                 write_archive(tree, archive)
                 release.sign_ed25519(
                     server_package.artifact_signing_seed(self.identity), archive, signature

@@ -163,9 +163,17 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                     serde_json::from_slice(&entries[0].1).unwrap();
                 manifest["target"] = remote_target.into();
                 entries[0].1 = serde_json::to_vec(&manifest).unwrap();
+                relayout(entries, target(), remote_target);
+                let executable = format!(
+                    "server/{}",
+                    Layout::for_target(remote_target, "spaceterm-development")
+                        .unwrap()
+                        .executable()
+                        .display()
+                );
                 entries
                     .iter_mut()
-                    .find(|(name, _, _)| name == "server/bin/spaceterm")
+                    .find(|(name, _, _)| *name == executable)
                     .unwrap()
                     .1 = b"must never execute".to_vec();
             });
@@ -538,7 +546,8 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
                 Ok(CliLink::Linked)
             );
             let installation = retained.unwrap();
-            let executable = installation.join("bin/spaceterm");
+            let executable =
+                installation.join(Layout::host("spaceterm-development").unwrap().executable());
             assert_eq!(std::fs::read_link(&launcher).unwrap(), executable);
             assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
 
@@ -573,7 +582,11 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
             // A managed link whose installation is gone is replaced.
             std::fs::remove_file(&launcher).unwrap();
             let gone = service.installations_directory().join("b".repeat(64));
-            std::os::unix::fs::symlink(gone.join("bin/spaceterm"), &launcher).unwrap();
+            std::os::unix::fs::symlink(
+                gone.join(Layout::host("spaceterm-development").unwrap().executable()),
+                &launcher,
+            )
+            .unwrap();
             assert_eq!(service.cli_launcher(), Ok(CliLauncher::Stale));
             assert_eq!(service.link_cli(unused), Ok(CliLink::Linked));
             assert_eq!(std::fs::read_link(&launcher).unwrap(), executable);
@@ -676,7 +689,8 @@ fn existing_tampered_or_substituted_installations_are_left_unchanged() {
             .unwrap();
             let resource = installed
                 .directory
-                .join("share/spaceterm/shell-integration/zsh/.zshenv");
+                .join(Layout::host("spaceterm-development").unwrap().resources())
+                .join("shell-integration/zsh/.zshenv");
             std::fs::write(&resource, b"tampered").unwrap();
             assert_eq!(
                 provision(
@@ -749,7 +763,8 @@ fn unsafe_store_and_unverified_extra_retained_resources_are_refused() {
             .unwrap();
             let extra = installed
                 .directory
-                .join("share/spaceterm/shell-integration/zsh/extra");
+                .join(Layout::host("spaceterm-development").unwrap().resources())
+                .join("shell-integration/zsh/extra");
             std::fs::write(&extra, b"unverified code").unwrap();
             std::fs::set_permissions(&extra, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert_eq!(
@@ -781,6 +796,43 @@ fn changed_preparation_directory_survives_cleanup_and_publication_refusal() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Moves a fixture's members from `from`'s layout into `to`'s, as a package built for `to` lays
+/// them out.
+fn relayout(entries: &mut Vec<(String, Vec<u8>, u32)>, from: &str, to: &str) {
+    let from = Layout::for_target(from, "spaceterm-development").unwrap();
+    let to = Layout::for_target(to, "spaceterm-development").unwrap();
+    let placed = |path: &Path| {
+        if path == from.executable() {
+            return Some(to.executable());
+        }
+        path.strip_prefix(from.resources())
+            .ok()
+            .map(|relative| to.resources().join(relative))
+    };
+    let bundle = from.bundle_files();
+    entries.retain(|(name, _, _)| {
+        !bundle
+            .iter()
+            .any(|file| Path::new(name) == Path::new("server").join(file))
+    });
+    for (name, _, _) in entries.iter_mut() {
+        if let Some(path) = Path::new(name.as_str())
+            .strip_prefix("server")
+            .ok()
+            .and_then(placed)
+        {
+            *name = format!("server/{}", path.display());
+        }
+    }
+    for file in to.bundle_files() {
+        entries.push((
+            format!("server/{}", file.display()),
+            b"signed bundle file".to_vec(),
+            0o644,
+        ));
+    }
+}
+
 fn rewrite(
     archive: &Path,
     signature: &Path,
@@ -807,9 +859,14 @@ fn rewrite(
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode);
         header.set_size(data.len() as u64);
-        header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
-        header.set_cksum();
-        tar.append(&header, data.as_slice()).unwrap();
+        if path.len() < 100 {
+            header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
+            header.set_cksum();
+            tar.append(&header, data.as_slice()).unwrap();
+        } else {
+            tar.append_data(&mut header, &path, data.as_slice())
+                .unwrap();
+        }
     }
     std::fs::write(archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
     test_support::sign(archive, signature);
