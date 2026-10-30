@@ -20,14 +20,16 @@ pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 pub const STAGE_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// How long a Stop is followed: until the server closes the lane.
 pub const STOP_WAIT: Duration = Duration::from_secs(90);
-/// How long a Restart, Update or Return is followed: until the server returns.
+/// How long any other action is followed: until it settles, or until a server that replaces
+/// itself, as Restart, Update and Return do, returns.
 pub const RETURN_WAIT: Duration = Duration::from_secs(180);
 
-/// How long an action is followed after its `Execute`.
+/// How long an action is followed after its `Execute`. Only Stop ends the lane it is followed
+/// over, so every other action, including one added later, is followed until it settles.
 pub fn wait(action: &LaneAction) -> Duration {
     match action {
         LaneAction::Stop => STOP_WAIT,
-        LaneAction::Restart | LaneAction::Update { .. } | LaneAction::Return => RETURN_WAIT,
+        _ => RETURN_WAIT,
     }
 }
 
@@ -248,9 +250,9 @@ pub fn plan_update(session: &mut Session) -> Result<UpdatePlan, LaneError> {
     Ok(UpdatePlan::Update { candidate, preview })
 }
 
-/// Executes a confirmed preview and follows it under [`Lane::perform`]. The operation is
-/// recorded in `pending` right before its `Execute`, after `dispatch` allows it, and removed
-/// once its receipt settled and was acknowledged.
+/// Executes a confirmed preview of any action and follows it under [`Lane::perform`]. The
+/// operation is recorded in `pending` right before its `Execute`, after `dispatch` allows it,
+/// and removed once its receipt settled and was acknowledged.
 #[allow(
     clippy::too_many_arguments,
     reason = "one execution's parts, used once"
@@ -292,9 +294,12 @@ pub enum Verdict {
     Failed(Option<String>),
     /// The server settled the operation without performing it.
     NotPerformed,
-    /// Nothing proves whether the action happened. The receipt is unresolved, or no settled
-    /// receipt arrived in time, or a Stop closed the lane before its outcome could be read.
+    /// Nothing proves whether the action happened: the receipt is unresolved, or no settled
+    /// receipt arrived in time.
     Uncertain,
+    /// The server closed the lane after a Stop was admitted, or may have been. The server is
+    /// stopping or stopped, and only its own machine can read the outcome.
+    Shutdown,
 }
 
 /// What a settled receipt establishes.
@@ -311,7 +316,8 @@ pub fn receipt_verdict(receipt: &LaneReceipt) -> Verdict {
 pub fn verdict(outcome: &Outcome) -> Verdict {
     match outcome {
         Outcome::Settled { receipt, .. } => receipt_verdict(receipt),
-        Outcome::Shutdown { .. } | Outcome::Unconfirmed { .. } => Verdict::Uncertain,
+        Outcome::Shutdown { .. } => Verdict::Shutdown,
+        Outcome::Unconfirmed { .. } => Verdict::Uncertain,
     }
 }
 
@@ -399,7 +405,7 @@ mod tests {
                 operation: "00".into(),
                 boot: String::new(),
             }),
-            Verdict::Uncertain
+            Verdict::Shutdown
         );
         assert_eq!(
             verdict(&Outcome::Unconfirmed {
@@ -409,6 +415,21 @@ mod tests {
             }),
             Verdict::Uncertain
         );
+    }
+
+    /// A new action needs no change here: only Stop is followed for the shorter wait.
+    #[test]
+    fn only_stop_is_followed_for_the_shorter_wait() {
+        assert_eq!(wait(&LaneAction::Stop), STOP_WAIT);
+        for action in [
+            LaneAction::Restart,
+            LaneAction::Return,
+            LaneAction::Update {
+                installation: "00".into(),
+            },
+        ] {
+            assert_eq!(wait(&action), RETURN_WAIT, "{action:?}");
+        }
     }
 
     #[test]

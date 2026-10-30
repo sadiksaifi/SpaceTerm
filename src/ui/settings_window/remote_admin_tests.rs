@@ -184,12 +184,22 @@ fn a_return_confirmation_names_the_version_it_returns_to() {
 /// The CLI contract's uncertain outcome reads as uncertain, never as success or failure.
 #[test]
 fn an_outcome_the_client_cannot_confirm_says_so() {
-    let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Uncertain));
+    let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Shutdown));
     assert_eq!(
         stop,
         "penguin closed its connection while stopping, so SpaceTerm can\u{2019}t confirm the \
          stop finished. Check on its own computer with \u{201C}spaceterm server status\u{201D}, \
          and start it again there."
+    );
+    assert_eq!(tone, CaptionTone::Warning);
+
+    // A Stop that ran out of time with the lane open proves no shutdown, so it reads as any
+    // other uncertain change.
+    let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Uncertain));
+    assert_eq!(
+        stop,
+        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its stop. Check Now asks \
+         penguin again."
     );
     assert_eq!(tone, CaptionTone::Warning);
 
@@ -510,4 +520,102 @@ fn check_now_offers_the_servers_update_and_update_follows_it_to_the_end(cx: &mut
         footnote(&servers)
     );
     assert!(state(&servers).operation.is_none(), "nothing is underway");
+}
+
+/// A Stop that runs out of time while the server keeps its connection proves no shutdown: the
+/// card says the outcome is unknown, and a later disconnect doesn't read as Stopped.
+#[gpui::test]
+fn a_stop_without_an_observed_shutdown_reads_as_uncertain(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Ok(Prepared {
+        preview: preview(LaneAction::Stop, effects(1)),
+        settled: Vec::new(),
+    });
+    *remote.perform.lock().unwrap() = Ok(Performed {
+        outcome: Outcome::Unconfirmed {
+            operation: "0123456789abcdef0123456789abcdef".into(),
+            boot: "a".into(),
+            last: Some(receipt(LaneAction::Stop, LaneOperationState::Running, "a")),
+        },
+        settled: Vec::new(),
+    });
+    let servers = open_penguin(&remote, cx);
+
+    click(STOP_SELECTOR, servers.cx);
+    answer(CONFIRM_SELECTOR, servers.cx);
+    servers.cx.run_until_parked();
+
+    let note = footnote(&servers);
+    assert!(
+        note.contains("SpaceTerm couldn\u{2019}t confirm whether penguin finished its stop."),
+        "got {note:?}"
+    );
+    assert!(!note.contains("closed its connection"), "got {note:?}");
+    servers.direct.disconnect(&servers.routes[0]);
+    settle(servers.cx, |_| true);
+    assert_eq!(state(&servers).state.as_ref(), "Not connected");
+}
+
+/// A reading belongs to the link it was read over. Once the connection is replaced, as after an
+/// update made from the CLI, the facts the new connection observes take precedence, and the old
+/// update offer goes.
+#[gpui::test]
+fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    *remote.read.lock().unwrap() = Ok(Reading {
+        status: status(version("1.2.0", "aaaaaaaaaa")),
+        check: LaneCheck {
+            approved: version("1.2.0", "aaaaaaaaaa"),
+            latest: Some(version("1.3.0", "bbbbbbbbbb")),
+            staged: Vec::new(),
+        },
+        settled: Vec::new(),
+    });
+    let servers = open_penguin(&remote, cx);
+    let route = servers.routes[0];
+    let subtitle = |servers: &Servers<'_>| {
+        servers
+            .window
+            .read_with(servers.cx, |settings, cx| settings.server_subtitle(cx))
+    };
+
+    click(
+        super::super::server_card::VERSION_CHECK_SELECTOR,
+        servers.cx,
+    );
+    servers.cx.run_until_parked();
+    assert_eq!(
+        subtitle(&servers).as_ref(),
+        "Version 1.2.0 \u{b7} 1.3.0 is available"
+    );
+
+    // Someone updated penguin from its own command line, and SpaceTerm's connection to it is
+    // replaced.
+    let before = servers.direct.server(&route).expect("a connection");
+    servers.direct.connect(&route);
+    let direct = servers.direct.clone();
+    settle(servers.cx, |_| {
+        direct
+            .server(&route)
+            .is_some_and(|server| !server.same_handle(&before))
+            && direct.status(&route)
+                == Some(crate::direct_connections::DirectRouteStatus::Connected)
+    });
+    servers.cx.run_until_parked();
+    let key = super::super::server_list::ServerChoice::Direct(route).key();
+    let observed = servers.cx.update(|_, cx| {
+        super::super::server_selection::facts(&key, cx).and_then(|facts| facts.version)
+    });
+
+    // The card shows what the new connection observed, never the old link's version.
+    let expected = observed.map_or_else(
+        || "Version unknown".to_owned(),
+        |version| format!("Version {version}"),
+    );
+    assert_eq!(subtitle(&servers).as_ref(), expected);
+    assert!(!subtitle(&servers).contains("1.2.0"));
+    assert!(
+        servers.cx.debug_bounds(UPDATE_SELECTOR).is_none(),
+        "the update the old reading offered is gone"
+    );
 }

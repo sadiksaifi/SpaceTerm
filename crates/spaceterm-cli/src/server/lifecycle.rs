@@ -372,7 +372,8 @@ pub fn settle(action: ServiceAction, outcome: Outcome) -> Settled {
                         .unwrap_or(Failure::new(Code::OperationFailed)),
                 ),
                 Verdict::NotPerformed => Some(Failure::new(Code::OperationFailed)),
-                Verdict::Uncertain => Some(unconfirmed(&receipt)),
+                // A settled receipt is never a shutdown, which only a lost lane reports.
+                Verdict::Uncertain | Verdict::Shutdown => Some(unconfirmed(&receipt)),
             };
             Settled {
                 receipt: receipt_of(&receipt),

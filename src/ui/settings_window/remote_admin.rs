@@ -346,6 +346,9 @@ pub(super) enum Settlement {
     NotPerformed,
     /// Nothing proves whether the change happened.
     Uncertain,
+    /// The server closed the lane after Stop was admitted, or may have been: it is stopping or
+    /// stopped, and only its own computer can read the outcome.
+    Shutdown,
 }
 
 impl Settlement {
@@ -358,6 +361,7 @@ impl Settlement {
             ),
             Verdict::NotPerformed => Self::NotPerformed,
             Verdict::Uncertain => Self::Uncertain,
+            Verdict::Shutdown => Self::Shutdown,
         }
     }
 }
@@ -385,6 +389,9 @@ pub(super) enum Work {
 struct RouteAdmin {
     status: Option<LaneStatus>,
     check: Option<LaneCheck>,
+    /// The connection and its link generation when `status` and `check` were read. A reconnect
+    /// may reach a server that restarted or updated since, so a reading belongs to that link.
+    read_over: Option<(ServerConnection, u64)>,
     work: Option<Work>,
     ended: Option<Ended>,
     /// The last earlier operation a connection settled, until the person asks something else.
@@ -530,8 +537,9 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
             CaptionTone::Guidance,
         ),
         // The server closes the lane as it stops, so its own record of the stop is readable
-        // only on its computer.
-        Ended::Changed(Act::Stop, Settlement::Uncertain) => (
+        // only on its computer. A Stop that ran out of time with the lane open reads as any
+        // other uncertain change.
+        Ended::Changed(_, Settlement::Shutdown) => (
             format!(
                 "{name} closed its connection while stopping, so SpaceTerm can\u{2019}t confirm \
                  the stop finished. Check on its own computer with \u{201C}spaceterm server \
@@ -589,7 +597,8 @@ fn earlier_message(name: &str, act: &Act, settlement: &Settlement) -> (String, C
             format!("SpaceTerm confirmed that an earlier {noun} of {name} finished."),
             CaptionTone::Guidance,
         ),
-        Settlement::Uncertain => (
+        // A settled receipt is never a shutdown, which only a lost lane reports.
+        Settlement::Uncertain | Settlement::Shutdown => (
             format!("{name} couldn\u{2019}t confirm whether an earlier {noun} finished."),
             CaptionTone::Warning,
         ),
@@ -633,10 +642,10 @@ impl SettingsWindow {
         &self,
         route: &DirectRouteId,
         cx: &App,
-    ) -> Option<Arc<dyn RemoteServerControl>> {
+    ) -> Option<(Arc<dyn RemoteServerControl>, ServerConnection)> {
         let source = installed(cx)?;
         let server = self.direct_routes.as_ref()?.connections.server(route)?;
-        Some(source(server))
+        Some((source(server.clone()), server))
     }
 
     /// Whether `route` can take a lane step now: SpaceTerm holds a connection to it that is
@@ -669,26 +678,37 @@ impl SettingsWindow {
         self.remote(route)?.work.as_ref()
     }
 
-    /// The server's own version, as its last lane read reported it.
+    /// `route`'s lane work, with a reading only while SpaceTerm's connection is still the link
+    /// it was read over. Once the connection is replaced or reconnects, the facts it observes
+    /// take precedence.
+    fn current_reading(&self, route: &DirectRouteId) -> Option<&RouteAdmin> {
+        let admin = self.remote(route)?;
+        let (read_over, link) = admin.read_over.as_ref()?;
+        let current = self.direct_routes.as_ref()?.connections.server(route)?;
+        (read_over.same_handle(&current) && *link == current.link_generation()).then_some(admin)
+    }
+
+    /// The server's own version, as its last lane read over the current link reported it.
     pub(super) fn remote_version(&self, route: &DirectRouteId) -> Option<SharedString> {
-        let status = self.remote(route)?.status.as_ref()?;
+        let status = self.current_reading(route)?.status.as_ref()?;
         Some(status.runtime.version.clone().into())
     }
 
-    /// The newer release the server's last update check found, if any.
+    /// The newer release the server's last update check over the current link found, if any.
     pub(super) fn remote_available(&self, route: &DirectRouteId) -> Option<SharedString> {
-        let check = self.remote(route)?.check.as_ref()?;
+        let check = self.current_reading(route)?.check.as_ref()?;
         let latest = check.latest.as_ref()?;
         (latest.sha256 != check.approved.sha256).then(|| latest.version.clone().into())
     }
 
-    /// Whether the last change SpaceTerm made to `route` stopped it, or may have.
+    /// Whether the last change SpaceTerm made to `route` stopped it, or closed the lane while
+    /// stopping. A Stop whose outcome is merely unknown doesn't count.
     pub(super) fn remote_stopped(&self, route: &DirectRouteId) -> bool {
         matches!(
             self.remote(route).and_then(|admin| admin.ended.as_ref()),
             Some(Ended::Changed(
                 Act::Stop,
-                Settlement::Done | Settlement::Uncertain
+                Settlement::Done | Settlement::Shutdown
             ))
         )
     }
@@ -770,7 +790,7 @@ impl SettingsWindow {
                 admin.ended,
                 Some(Ended::Changed(
                     Act::Stop,
-                    Settlement::Done | Settlement::Uncertain
+                    Settlement::Done | Settlement::Shutdown
                 ))
             );
             if !stopped {
@@ -792,9 +812,11 @@ impl SettingsWindow {
         if !self.remote_ready(&route, cx) {
             return;
         }
-        let Some(control) = self.remote_control(&route, cx) else {
+        let Some((control, server)) = self.remote_control(&route, cx) else {
             return;
         };
+        // Taken before the read, so a link that changes while it runs leaves it stale.
+        let read_over = (server.clone(), server.link_generation());
         let task = cx.spawn(async move |settings, cx| {
             let read = cx.background_spawn(async move { control.read() }).await;
             let _ = settings.update(cx, |settings, cx| {
@@ -804,6 +826,7 @@ impl SettingsWindow {
                     Ok(reading) => {
                         admin.status = Some(reading.status);
                         admin.check = Some(reading.check);
+                        admin.read_over = Some(read_over);
                         admin.earlier = earlier(&reading.settled);
                     }
                     Err(failure) => admin.ended = Some(Ended::Refused(failure)),
@@ -831,7 +854,7 @@ impl SettingsWindow {
         if !self.remote_ready(&route, cx) {
             return;
         }
-        let Some(control) = self.remote_control(&route, cx) else {
+        let Some((control, _)) = self.remote_control(&route, cx) else {
             return;
         };
         let task = cx.spawn(async move |settings, cx| {
@@ -938,7 +961,7 @@ impl SettingsWindow {
     /// Executes the change the person confirmed and follows it until it settles. The server
     /// refuses it if what its preview observed has changed.
     fn perform_remote(&mut self, route: DirectRouteId, preview: Preview, cx: &mut Context<Self>) {
-        let Some(control) = self.remote_control(&route, cx) else {
+        let Some((control, _)) = self.remote_control(&route, cx) else {
             let admin = self.remote_mut(route);
             admin.ended = Some(Ended::Refused(RemoteFailure::Unreachable));
             return;
@@ -960,6 +983,7 @@ impl SettingsWindow {
                         // The server changed, so what the last read said no longer holds.
                         admin.status = None;
                         admin.check = None;
+                        admin.read_over = None;
                     }
                     Err(failure) => admin.ended = Some(Ended::Refused(failure)),
                 }
