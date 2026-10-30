@@ -844,7 +844,7 @@ fn workspace_pin_and_unpin_report_the_committed_pin() {
 #[test]
 fn workspace_pin_ambiguity_lists_choices_without_dispatch() {
     let mut initial = fixture().inventory;
-    initial.workspaces[1].tabs[0].panes[0].starting_directory = "/tools".into();
+    initial.workspaces[1].pinned_directory = Some("/tools".into());
     let script = Rc::new(RefCell::new(Script {
         inventories: VecDeque::from([initial]),
         ..Default::default()
