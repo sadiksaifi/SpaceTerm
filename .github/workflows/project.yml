@@ -162,7 +162,7 @@ jobs:
             }
             for (const issue of work.issues) {
               const current = await readIssue(issue.id);
-              if (current.state === 'CLOSED' || currentPr?.merged) {
+              if (current.state === 'CLOSED') {
                 await setStatus(issue.id, 'Done');
               } else if (currentPr?.state === 'CLOSED') {
                 await setStatus(issue.id, assignedStatus(current));
