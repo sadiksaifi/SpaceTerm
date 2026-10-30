@@ -1,10 +1,11 @@
 //! The CLI's account-private Saved Connections and exact recovery requests.
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use spaceterm_server::direct::{Endpoint, PairedDevice, ServerPin};
-use spaceterm_server::{Directory, Lock, ServerError};
+use spaceterm_server::{Directory, Lock, LockWait, ServerError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum UnpairState {
@@ -25,6 +26,8 @@ pub struct SavedConnection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
+    Timeout,
+    Interrupted,
     Unavailable,
     Changed,
     NameTaken,
@@ -75,6 +78,13 @@ pub struct ConnectionStore {
     root: PathBuf,
 }
 
+/// Mutations bounded by one command's deadline and cancellation authority.
+pub struct ConnectionTransaction<'a> {
+    store: &'a ConnectionStore,
+    deadline: Instant,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
 impl ConnectionStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -114,12 +124,52 @@ impl ConnectionStore {
             .map_err(|_| StoreError::Unavailable)
     }
 
+    pub fn transaction<'a>(
+        &'a self,
+        deadline: Instant,
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> ConnectionTransaction<'a> {
+        ConnectionTransaction {
+            store: self,
+            deadline,
+            cancelled,
+        }
+    }
+}
+
+impl ConnectionTransaction<'_> {
     /// The lock covers the current read, the caller's change, and atomic publication.
     pub fn commit_guarded<T>(
         &self,
         change: impl FnOnce(&mut Vec<SavedConnection>) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         self.change(|document| change(&mut document.connections))
+    }
+
+    /// Rename one active CLI connection without accessing its immutable credential.
+    pub fn rename(&self, old: &str, new: &str) -> Result<SavedConnection, StoreError> {
+        if !valid_name(new) {
+            return Err(StoreError::NameTaken);
+        }
+        self.change(|document| {
+            let index = document
+                .connections
+                .iter()
+                .position(|row| row.name == old)
+                .ok_or(StoreError::NotFound)?;
+            if document.connections.iter().any(|row| row.name == new)
+                || document.enrollments.iter().any(|row| row.name == new)
+            {
+                return Err(StoreError::NameTaken);
+            }
+            let connection = &mut document.connections[index];
+            connection.name = new.to_owned();
+            let renamed = connection.clone();
+            document
+                .confirmations
+                .retain(|row| row.connection.route != renamed.route);
+            Ok(renamed)
+        })
     }
 
     pub fn reserve(&self, enrollment: PendingEnrollment) -> Result<(), StoreError> {
@@ -276,20 +326,40 @@ impl ConnectionStore {
         })
     }
 
+    fn checkpoint(&self) -> Result<(), StoreError> {
+        if (self.cancelled)() {
+            Err(StoreError::Interrupted)
+        } else if Instant::now() >= self.deadline {
+            Err(StoreError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+
     fn change<T>(
         &self,
         change: impl FnOnce(&mut Document) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let directory = Directory::open(&self.root, true).map_err(|_| StoreError::Unavailable)?;
-        let _lock = directory
-            .lock("connections.lock", false)
-            .map_err(|_| StoreError::Unavailable)?;
+        self.checkpoint()?;
+        let directory =
+            Directory::open(&self.store.root, true).map_err(|_| StoreError::Unavailable)?;
+        let limit = self.deadline.saturating_duration_since(Instant::now());
+        let _lock = match directory
+            .wait_lock("connections.lock", limit, Some(self.cancelled))
+            .map_err(|_| StoreError::Unavailable)?
+        {
+            LockWait::Locked(lock) => lock,
+            LockWait::Held => return Err(StoreError::Timeout),
+            LockWait::Cancelled => return Err(StoreError::Interrupted),
+        };
+        self.checkpoint()?;
         directory
-            .verify_path(&self.root)
+            .verify_path(&self.store.root)
             .map_err(|_| StoreError::Unavailable)?;
         let mut document = read(&directory)?;
         let result = change(&mut document)?;
         validate(&document)?;
+        self.checkpoint()?;
         directory
             .write_json(c"connections.json", &document)
             .map_err(|_| StoreError::Unavailable)?;
@@ -402,6 +472,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
+    fn transaction(store: &ConnectionStore) -> ConnectionTransaction<'_> {
+        store.transaction(Instant::now() + std::time::Duration::from_secs(30), &|| {
+            false
+        })
+    }
+
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -438,22 +514,131 @@ mod tests {
     }
 
     #[test]
+    fn rename_changes_only_the_name_and_invalidates_removal_previews() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let mut expected = saved(1);
+        transaction(&store)
+            .commit_guarded(|rows| {
+                rows.push(expected.clone());
+                Ok(())
+            })
+            .unwrap();
+        let preview = transaction(&store)
+            .preview_remove(&expected.name, 1)
+            .unwrap();
+        expected.name = "penguin".into();
+        assert_eq!(
+            transaction(&store).rename("server-1", "penguin").unwrap(),
+            expected
+        );
+        assert_eq!(store.load().unwrap(), vec![expected]);
+        transaction(&store).rename("penguin", "server-1").unwrap();
+        assert_eq!(
+            transaction(&store).confirm_remove("server-1", &preview.token, 2),
+            Err(StoreError::Changed)
+        );
+    }
+
+    #[test]
+    fn deadline_and_cancellation_are_checked_again_before_publication() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        for expected in [StoreError::Timeout, StoreError::Interrupted] {
+            let fixture = Fixture::new();
+            let store = fixture.store();
+            transaction(&store)
+                .commit_guarded(|rows| {
+                    rows.push(saved(1));
+                    Ok(())
+                })
+                .unwrap();
+            let before = std::fs::read(store.root.join("connections.json")).unwrap();
+            let cancelled = AtomicBool::new(false);
+            let deadline = Instant::now()
+                + if expected == StoreError::Timeout {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_secs(5)
+                };
+            let result = store
+                .transaction(deadline, &|| cancelled.load(Ordering::Relaxed))
+                .commit_guarded(|rows| {
+                    rows[0].name = "must-not-publish".into();
+                    if expected == StoreError::Timeout {
+                        std::thread::sleep(Duration::from_millis(100));
+                    } else {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                    Ok(())
+                });
+            assert_eq!(result, Err(expected));
+            assert_eq!(
+                std::fs::read(store.root.join("connections.json")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn failed_renames_preserve_the_document_including_reserved_enrollments() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        transaction(&store)
+            .commit_guarded(|rows| {
+                rows.extend([saved(1), saved(2)]);
+                Ok(())
+            })
+            .unwrap();
+        let connection = saved(3);
+        transaction(&store)
+            .reserve(PendingEnrollment {
+                route: connection.route,
+                name: connection.name,
+                endpoint: connection.endpoint,
+                pin: connection.paired.pin,
+                claim: [8; 32],
+                credential: connection.credential,
+                public_key: [9; 32],
+                offered: false,
+                confirmed: false,
+            })
+            .unwrap();
+        let before = std::fs::read(store.root.join("connections.json")).unwrap();
+        for (old, new, error) in [
+            ("server-1", "server-2", StoreError::NameTaken),
+            ("server-1", "server-1", StoreError::NameTaken),
+            ("server-1", "server-3", StoreError::NameTaken),
+            ("missing", "available", StoreError::NotFound),
+            ("server-1", "local", StoreError::NameTaken),
+        ] {
+            assert_eq!(transaction(&store).rename(old, new), Err(error));
+            assert_eq!(
+                std::fs::read(store.root.join("connections.json")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
     fn absent_store_is_passive_and_removal_retains_only_restricted_cleanup() {
         let fixture = Fixture::new();
         let store = fixture.store();
         assert!(store.load().unwrap().is_empty());
         assert!(!store.root.exists());
-        store
+        transaction(&store)
             .commit_guarded(|rows| {
                 rows.push(saved(1));
                 Ok(())
             })
             .unwrap();
-        let removed = store.remove("server-1").unwrap();
+        let removed = transaction(&store).remove("server-1").unwrap();
         assert!(store.load().unwrap().is_empty());
         assert_eq!(store.pending().unwrap()[0].paired, removed.paired);
-        store.confirm_revocation(removed.route).unwrap();
-        store.retire_pending(removed.route).unwrap();
+        transaction(&store)
+            .confirm_revocation(removed.route)
+            .unwrap();
+        transaction(&store).retire_pending(removed.route).unwrap();
         assert!(store.pending().unwrap().is_empty());
         assert_eq!(
             std::fs::metadata(store.root.join("connections.json"))
@@ -475,6 +660,9 @@ mod tests {
             .parse()
             .unwrap();
         ConnectionStore::new(root.into())
+            .transaction(Instant::now() + std::time::Duration::from_secs(30), &|| {
+                false
+            })
             .commit_guarded(|rows| {
                 rows.push(saved(id));
                 Ok(())

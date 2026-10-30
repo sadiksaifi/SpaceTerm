@@ -454,7 +454,7 @@ fn change(message: &zbus::Message) -> Option<Change> {
     })
 }
 
-fn file_uri(path: &Path) -> String {
+pub(super) fn file_uri(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut uri = String::from("file://");

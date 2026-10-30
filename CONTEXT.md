@@ -49,6 +49,9 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients contr
 
 **SpaceTerm CLI**: The headless `spaceterm` program that runs a SpaceTerm Server or acts as a command-line SpaceTerm Client.
 
+**Command Line Tool**: The link in the account's `~/.local/bin`, named for the build identity, that runs that identity's SpaceTerm CLI from any terminal.
+_Avoid_: shim, alias, CLI install
+
 **Workspace Window**: A desktop SpaceTerm Client's single main Operating-System Window presenting its Workspace Attachments.
 
 **Workspace Attachment**: A SpaceTerm Client's association with a server-owned Workspace for presentation.

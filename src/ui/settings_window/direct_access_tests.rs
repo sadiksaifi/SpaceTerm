@@ -351,6 +351,7 @@ fn open_servers_with<'a>(
         connection: Ok(Arc::new(ScriptedLocal(Arc::clone(access))) as Arc<dyn LocalServerControl>),
         service: None,
         update: None,
+        command_line_tool: None,
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
