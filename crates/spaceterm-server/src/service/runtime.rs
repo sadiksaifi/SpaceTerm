@@ -58,8 +58,8 @@ pub fn verify_candidate_bytes(
     .map(Into::into)
 }
 
-/// What the command-line launcher path holds. Only [`CliLauncher::Missing`] and
-/// [`CliLauncher::Stale`] are ever replaced.
+/// What the command-line launcher path holds. Only [`CliLauncher::Missing`] and SpaceTerm's
+/// own links are ever replaced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CliLauncher {
     Missing,
@@ -67,10 +67,25 @@ pub enum CliLauncher {
     Linked,
     /// A link into this identity's retained installations whose executable is gone.
     Stale,
+    /// A link into another of this identity's installations than the approved runtime, such as
+    /// one an update couldn't repoint.
+    Outdated,
     /// A link to anything else, such as another tool.
     Foreign,
     /// A file, directory or other entry that is not a link.
     NotLink,
+}
+
+/// What keeping an existing launcher on the approved runtime did. Never fatal to the service
+/// operation that asked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Repoint {
+    /// The managed launcher names the approved runtime.
+    Followed,
+    /// There is no launcher, or another tool owns it.
+    Untouched,
+    /// The managed launcher stays on its earlier installation.
+    Failed(ServerError),
 }
 
 /// An installer preview carries only bounded service effects and a nonsecret approval token.
@@ -134,11 +149,18 @@ impl Service {
     }
 
     /// Read what the command-line launcher path holds, without following it or taking a lock.
+    /// Unreadable service policy makes no launcher Outdated.
     pub fn cli_launcher(&self) -> Result<CliLauncher, ServerError> {
+        let approved = self
+            .read()
+            .ok()
+            .flatten()
+            .map(|(_, state)| self.runtime(&state));
         launcher::inspect(
             self.cli_home()?,
             &self.identity,
             &self.paths.data.join("installations"),
+            approved.as_deref(),
         )
     }
 
@@ -181,17 +203,27 @@ impl Service {
 
     /// Keep an existing managed launcher on the policy's approved runtime. The service lock
     /// must be held. Services do not create a new PATH launcher as a side effect.
-    pub(super) fn repoint_cli_locked(&self, runtime: &Path) -> Result<(), ServerError> {
-        let home = self.cli_home()?;
-        if home.join(".local/bin").join(&self.identity).is_symlink() {
-            launcher::select(
-                home,
-                &self.identity,
-                &self.paths.data.join("installations"),
-                runtime,
-            )?;
+    ///
+    /// The launcher never blocks a service operation: a failure leaves it on its earlier
+    /// installation, where [`Self::cli_launcher`] reads it as Outdated or Stale and a client
+    /// offers to link it again.
+    pub(super) fn repoint_cli_locked(&self, runtime: &Path) -> Repoint {
+        let Ok(home) = self.cli_home() else {
+            return Repoint::Failed(ServerError::UnsafeStorage);
+        };
+        if !home.join(".local/bin").join(&self.identity).is_symlink() {
+            return Repoint::Untouched;
         }
-        Ok(())
+        match launcher::select(
+            home,
+            &self.identity,
+            &self.paths.data.join("installations"),
+            runtime,
+        ) {
+            Ok(true) => Repoint::Followed,
+            Ok(false) => Repoint::Untouched,
+            Err(error) => Repoint::Failed(error),
+        }
     }
 
     /// Preview an uninstall or confirm its exact service and live Session observation.

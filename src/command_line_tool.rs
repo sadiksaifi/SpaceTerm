@@ -18,6 +18,9 @@ pub(crate) enum Launcher {
     Installed,
     /// SpaceTerm's link, naming a server build that is gone. Installing replaces it.
     Stale,
+    /// SpaceTerm's link, naming a kept server build other than the one this account's server
+    /// uses, such as one an update couldn't repoint. Installing replaces it.
+    Outdated,
     /// A link SpaceTerm didn't create. It is never replaced.
     OtherLink,
     /// A file, directory or other entry that is not a link. It is never replaced.
@@ -29,7 +32,7 @@ impl Launcher {
     /// wherever a file is.
     pub(crate) fn action(self) -> ToolAction {
         match self {
-            Self::Missing | Self::Stale => ToolAction::Install,
+            Self::Missing | Self::Stale | Self::Outdated => ToolAction::Install,
             Self::Installed | Self::OtherLink | Self::OtherFile => ToolAction::Reveal,
         }
     }
@@ -126,7 +129,7 @@ impl CommandLineTool {
         match self.adapters.files.read()? {
             Launcher::Installed => {}
             Launcher::OtherLink | Launcher::OtherFile => return Err(ToolFailure::Occupied),
-            Launcher::Missing | Launcher::Stale => {
+            Launcher::Missing | Launcher::Stale | Launcher::Outdated => {
                 if self.adapters.files.link()? == LinkOutcome::Kept {
                     return Err(ToolFailure::Occupied);
                 }
@@ -237,8 +240,8 @@ mod tests {
     }
 
     #[test]
-    fn installing_links_a_missing_or_stale_launcher_and_reports_it_installed() {
-        for launcher in [Launcher::Missing, Launcher::Stale] {
+    fn installing_links_a_missing_stale_or_outdated_launcher_and_reports_it_installed() {
+        for launcher in [Launcher::Missing, Launcher::Stale, Launcher::Outdated] {
             let (files, _, tool) = fixture(launcher);
             assert_eq!(tool.status().map(Launcher::action), Ok(ToolAction::Install));
             assert_eq!(tool.install(), Ok(Launcher::Installed));

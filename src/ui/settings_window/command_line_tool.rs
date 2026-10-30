@@ -135,6 +135,14 @@ pub(super) fn present(
                         "\u{201C}{name}\u{201D} names a server build that is no longer installed."
                     ),
                 ),
+                Launcher::Outdated => (
+                    "Out of date",
+                    "settings-command-line-tool-state-outdated",
+                    format!(
+                        "\u{201C}{name}\u{201D} runs a different server build than this \
+                         computer\u{2019}s server."
+                    ),
+                ),
                 Launcher::Installed => (
                     "Installed",
                     "settings-command-line-tool-state-installed",
@@ -159,7 +167,7 @@ pub(super) fn present(
             };
             let action = launcher.action();
             let label = match (action, launcher) {
-                (ToolAction::Install, Launcher::Stale) => "Reinstall",
+                (ToolAction::Install, Launcher::Stale | Launcher::Outdated) => "Reinstall",
                 (ToolAction::Install, _) => "Install",
                 (ToolAction::Reveal, _) => reveal,
             };
@@ -175,7 +183,9 @@ pub(super) fn present(
     // for a command SpaceTerm owns or would install.
     let ours = matches!(
         check,
-        ToolCheck::Checked(Launcher::Missing | Launcher::Stale | Launcher::Installed)
+        ToolCheck::Checked(
+            Launcher::Missing | Launcher::Stale | Launcher::Outdated | Launcher::Installed
+        )
     );
     let caption = match failure {
         Some(failure) => Some((failure_text(failure, name), CaptionTone::Error)),
@@ -393,6 +403,11 @@ mod tests {
             (stale.state, stale.action),
             ("Broken", Some((ToolAction::Install, "Reinstall")))
         );
+        let outdated = checked(Launcher::Outdated);
+        assert_eq!(
+            (outdated.state, outdated.action),
+            ("Out of date", Some((ToolAction::Install, "Reinstall")))
+        );
         let installed = checked(Launcher::Installed);
         assert_eq!(
             (
@@ -425,7 +440,12 @@ mod tests {
 
     #[test]
     fn the_row_names_the_directory_path_must_include_without_claiming_it_does() {
-        for launcher in [Launcher::Missing, Launcher::Stale, Launcher::Installed] {
+        for launcher in [
+            Launcher::Missing,
+            Launcher::Stale,
+            Launcher::Outdated,
+            Launcher::Installed,
+        ] {
             assert_eq!(
                 checked(launcher).caption,
                 Some((

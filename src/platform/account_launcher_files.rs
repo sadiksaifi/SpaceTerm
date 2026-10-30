@@ -25,6 +25,7 @@ impl LauncherFiles for AccountLauncherFiles {
             CliLauncher::Missing => Launcher::Missing,
             CliLauncher::Linked => Launcher::Installed,
             CliLauncher::Stale => Launcher::Stale,
+            CliLauncher::Outdated => Launcher::Outdated,
             CliLauncher::Foreign => Launcher::OtherLink,
             CliLauncher::NotLink => Launcher::OtherFile,
         })

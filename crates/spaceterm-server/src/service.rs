@@ -379,7 +379,8 @@ impl Service {
         self.supervisor.install(&self.runtime(&state))?;
         state.installed = true;
         data.write_json(c"service.json", &state)?;
-        self.repoint_cli_locked(&self.runtime(&state))?;
+        // A launcher failure never blocks the service; clients read it as Outdated.
+        self.repoint_cli_locked(&self.runtime(&state));
         drop(instance);
         if state.stopped {
             self.supervisor.stop()?;
