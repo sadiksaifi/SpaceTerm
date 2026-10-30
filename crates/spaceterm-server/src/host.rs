@@ -469,11 +469,11 @@ impl crate::service::lane::LaneHost for HostLane {
         decide: &mut dyn FnMut(
             &crate::service::lane::network::NetworkPlan,
         ) -> Result<bool, ServerError>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Option<crate::service::lane::network::ListenerView>, ServerError> {
         let state = self.direct.as_ref().ok_or(ServerError::Unsupported)?;
         crate::direct::host::change_network(state, access, caller, decide)
     }
-    fn listener(&self) -> Result<crate::service::lane::network::ListenerProgress, ServerError> {
+    fn listener(&self) -> Result<crate::service::lane::network::ListenerView, ServerError> {
         let state = self.direct.as_ref().ok_or(ServerError::Unsupported)?;
         Ok(crate::direct::host::listener(state))
     }

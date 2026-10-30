@@ -23,7 +23,8 @@ use crate::protocol::Preamble;
 use crate::storage::Directory;
 use base64::Engine;
 use network::{
-    LISTEN_LIMIT, LaneNetworkEffects, ListenerProgress, NetworkAccess, NetworkCaller, NetworkPlan,
+    Followed, LISTEN_LIMIT, LaneNetworkEffects, ListenerProgress, ListenerView, NetworkAccess,
+    NetworkCaller, NetworkPlan,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -257,17 +258,18 @@ pub trait LaneHost: Send + Sync {
         false
     }
     /// Plans `access` for `caller` under the direct-network lock, and applies it in the same
-    /// hold when `decide` returns true. A server without Network Access is `Unsupported`.
+    /// hold when `decide` returns true. An applied change returns the listener it left, read in
+    /// that hold. A server without Network Access is `Unsupported`.
     fn change_network(
         &self,
         _access: NetworkAccess,
         _caller: Option<&NetworkCaller>,
         _decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, ServerError>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Option<ListenerView>, ServerError> {
         Err(ServerError::Unsupported)
     }
-    /// Whether Network Access accepts connections now.
-    fn listener(&self) -> Result<ListenerProgress, ServerError> {
+    /// The listener now.
+    fn listener(&self) -> Result<ListenerView, ServerError> {
         Err(ServerError::Unsupported)
     }
 }
@@ -690,14 +692,19 @@ impl LaneServer {
         if settled {
             return;
         }
-        // A change that turns access on is done only once its listener accepts. One that waits
-        // for the listener it replaces to retire settles on a watcher, because this thread may
-        // hold one of that listener's connections.
-        if result.is_ok() && !refused && enables {
-            match self.host.listener() {
-                Ok(ListenerProgress::Listening) => {}
-                Ok(ListenerProgress::Starting) => return self.watch_listener(*id),
-                Ok(ListenerProgress::Stopped) | Err(_) => {
+        // A change that turns access on is done only once the listener it applied accepts. One
+        // that waits for the listener it replaces to retire settles on a watcher, because this
+        // thread may hold one of that listener's connections.
+        if let Ok(applied) = &result
+            && !refused
+            && enables
+        {
+            match applied.map(|v| (v, v.progress)) {
+                Some((_, ListenerProgress::Listening)) => {}
+                Some((applied, ListenerProgress::Starting)) => {
+                    return self.watch_listener(*id, applied);
+                }
+                Some((_, ListenerProgress::Stopped)) | None => {
                     let _ = self
                         .ledger()
                         .and_then(|mut v| v.mark(id, State::Unresolved));
@@ -705,6 +712,7 @@ impl LaneServer {
                 }
             }
         }
+        let result = result.map(drop);
         // Once the change started, `AddressUnavailable` means the host could not ready the new
         // listener and changed nothing. Any other failure is a commit it could not confirm.
         let state = match result {
@@ -726,11 +734,12 @@ impl LaneServer {
         let _ = self.ledger().and_then(|mut v| v.mark(id, state));
     }
 
-    /// Settles an applied Network Access change once its listener accepts: done when it listens
-    /// within [`LISTEN_LIMIT`], unresolved when it stops or the limit passes, because the policy
-    /// was saved. The watcher holds no strong reference, so it never keeps a stopping server
-    /// alive; start-up recovery then settles the record.
-    fn watch_listener(self: &Arc<Self>, id: OperationId) {
+    /// Settles an applied Network Access change once the listener it applied accepts: done when
+    /// that listener listens within [`LISTEN_LIMIT`]. It is unresolved, because the policy was
+    /// saved, when that listener stops, when a later policy change replaces it first, or when
+    /// the limit passes. The watcher holds no strong reference, so it never keeps a stopping
+    /// server alive; start-up recovery then settles the record.
+    fn watch_listener(self: &Arc<Self>, id: OperationId, applied: ListenerView) {
         let lane = Arc::downgrade(self);
         let until = Instant::now() + LISTEN_LIMIT;
         let watched = std::thread::Builder::new()
@@ -744,9 +753,9 @@ impl LaneServer {
                     if lane.host.stopping() {
                         return;
                     }
-                    let state = match lane.host.listener() {
-                        Ok(ListenerProgress::Listening) => State::Done,
-                        Ok(ListenerProgress::Starting) if Instant::now() < until => continue,
+                    let state = match lane.host.listener().map(|now| applied.follow(&now)) {
+                        Ok(Followed::Accepting) => State::Done,
+                        Ok(Followed::Waiting) if Instant::now() < until => continue,
                         _ => State::Unresolved,
                     };
                     let _ = lane.ledger().and_then(|mut v| v.mark(&id, state));

@@ -54,10 +54,10 @@ impl LaneHost for Direct {
         access: NetworkAccess,
         caller: Option<&NetworkCaller>,
         decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, ServerError>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Option<crate::service::lane::network::ListenerView>, ServerError> {
         change_network(&self.0, access, caller, decide)
     }
-    fn listener(&self) -> Result<crate::service::lane::network::ListenerProgress, ServerError> {
+    fn listener(&self) -> Result<crate::service::lane::network::ListenerView, ServerError> {
         Ok(listener(&self.0))
     }
 }
@@ -770,7 +770,7 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
     );
 }
 
-/// A host whose listener reports `Starting` once after a change, then stops, as when another
+/// A host whose listener reports `Starting` as a change applies it, then stops, as when another
 /// socket takes a narrowed address before the server binds it.
 struct Stalling {
     direct: Direct,
@@ -798,15 +798,20 @@ impl LaneHost for Stalling {
         access: NetworkAccess,
         caller: Option<&NetworkCaller>,
         decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, ServerError>,
-    ) -> Result<(), ServerError> {
-        self.direct.change_network(access, caller, decide)
-    }
-    fn listener(&self) -> Result<crate::service::lane::network::ListenerProgress, ServerError> {
+    ) -> Result<Option<crate::service::lane::network::ListenerView>, ServerError> {
         use crate::service::lane::network::ListenerProgress;
-        Ok(match self.reads.fetch_add(1, Ordering::SeqCst) {
-            0 => ListenerProgress::Starting,
-            _ => ListenerProgress::Stopped,
-        })
+        let applied = self.direct.change_network(access, caller, decide)?;
+        Ok(applied.map(|mut applied| {
+            applied.progress = ListenerProgress::Starting;
+            applied
+        }))
+    }
+    fn listener(&self) -> Result<crate::service::lane::network::ListenerView, ServerError> {
+        use crate::service::lane::network::ListenerProgress;
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let mut now = self.direct.listener()?;
+        now.progress = ListenerProgress::Stopped;
+        Ok(now)
     }
 }
 
@@ -858,4 +863,79 @@ fn an_applied_change_whose_listener_never_accepts_settles_unresolved_not_done() 
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(resolve(), LaneOperationState::Unresolved);
+}
+
+#[test]
+fn a_narrowing_that_a_later_change_supersedes_before_it_listens_settles_unresolved() {
+    let fixture = Fixture::new();
+    let every = fixture.listen_at(Ipv4Addr::UNSPECIFIED.into());
+    // A device's lane sits in a release fetch, so the every-interface listener a narrowing
+    // retires keeps routing to its connection and the narrowed bind waits.
+    let lane = crate::service::lane::tests::serving_with_feed(
+        &fixture.paths,
+        Arc::new(Direct(Arc::clone(&fixture.state))),
+        Arc::new(crate::service::lane::tests::SlowFeed(Duration::from_secs(
+            8,
+        ))),
+    );
+    let _serving = Serving::start(&fixture, &lane);
+    let credential = DeviceCredential::generate().unwrap();
+    let other = fixture.enroll(&credential);
+    let endpoint = format!(
+        "quic://{}",
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), every.port())
+    );
+    let mut busy = open_lane(&endpoint, &other, &credential);
+    let fetching = std::thread::spawn(move || {
+        let _ = call(&mut busy, &LaneRequest::StageFetch);
+        busy
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let narrowed =
+        NetworkAccess::Address(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), every.port()));
+    let (token, _) = preview(lane.answer(
+        LaneRequest::Preview {
+            action: network(narrowed),
+        },
+        &LOCAL,
+    ));
+    assert!(matches!(
+        lane.answer(execute(&token, narrowed, 7), &LOCAL),
+        LaneReply::Accepted { .. }
+    ));
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    assert!(matches!(status.listener, ListenerState::Starting { .. }));
+    // Settings restores every interface before the narrowed listener binds, which revives the
+    // listener the narrowing retired.
+    fixture
+        .management(Management::SetPolicy {
+            enabled: true,
+            policy: Some(NetworkPolicy::every_interface(every.port()).unwrap()),
+        })
+        .unwrap();
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    assert_eq!(status.listener, ListenerState::Listening { addr: every });
+    // That listener accepts, but the narrowing never did, so it is not done.
+    let resolve = || {
+        let LaneReply::Receipt(receipt) = lane.answer(
+            LaneRequest::Resolve {
+                operation: OperationId([7; 16]).to_string(),
+            },
+            &LOCAL,
+        ) else {
+            panic!("expected a receipt");
+        };
+        receipt.state
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while resolve() == LaneOperationState::Running {
+        assert!(Instant::now() < deadline, "the watcher never settled");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(resolve(), LaneOperationState::Unresolved);
+    drop(fetching.join());
 }

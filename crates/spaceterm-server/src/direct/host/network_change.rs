@@ -3,40 +3,36 @@
 //! change it describes is the change `SetPolicy` makes in the same hold.
 use super::*;
 use crate::service::lane::network::{
-    LaneCallerEffect, LaneNetworkSetting, ListenerProgress, NetworkAccess, NetworkCaller,
-    NetworkPlan,
+    LaneCallerEffect, LaneNetworkSetting, ListenerProgress, ListenerView, NetworkAccess,
+    NetworkCaller, NetworkPlan,
 };
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
 /// Plans `access` for `caller` under `state`'s lock, and applies it in the same hold when
-/// `decide` returns true.
+/// `decide` returns true. An applied change returns the listener it left, read in that hold, so
+/// a later change can't be mistaken for it.
 pub(crate) fn change_network(
     state: &Shared,
     access: NetworkAccess,
     caller: Option<&NetworkCaller>,
     decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, ServerError>,
-) -> Result<(), ServerError> {
+) -> Result<Option<ListenerView>, ServerError> {
     let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
     let (plan, target) = state.plan_network(access, caller)?;
-    if decide(&plan)? {
-        state.apply_network(target)?;
+    if !decide(&plan)? {
+        return Ok(None);
     }
-    Ok(())
+    state.apply_network(target)?;
+    Ok(Some(state.listener_view()))
 }
 
-/// Whether `state`'s Network Access accepts connections now.
-pub(crate) fn listener(state: &Shared) -> ListenerProgress {
-    match state
+/// `state`'s listener now.
+pub(crate) fn listener(state: &Shared) -> ListenerView {
+    state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .status()
-        .listener
-    {
-        ListenerState::Listening { .. } => ListenerProgress::Listening,
-        ListenerState::Starting { .. } => ListenerProgress::Starting,
-        ListenerState::Off | ListenerState::Failed(_) => ListenerProgress::Stopped,
-    }
+        .listener_view()
 }
 
 /// What a plan applies: the policy `SetPolicy` saves and whether exposure is on.
@@ -46,6 +42,19 @@ struct Target {
 }
 
 impl State {
+    fn listener_view(&self) -> ListenerView {
+        let (progress, address) = match self.status().listener {
+            ListenerState::Listening { addr } => (ListenerProgress::Listening, Some(addr)),
+            ListenerState::Starting { addr } => (ListenerProgress::Starting, Some(addr)),
+            ListenerState::Off | ListenerState::Failed(_) => (ListenerProgress::Stopped, None),
+        };
+        ListenerView {
+            generation: self.generation,
+            progress,
+            address,
+        }
+    }
+
     /// Plans `access` for `caller`, validated as `SetPolicy` validates it.
     fn plan_network(
         &mut self,

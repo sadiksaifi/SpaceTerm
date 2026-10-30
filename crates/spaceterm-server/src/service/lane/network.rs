@@ -38,6 +38,44 @@ pub enum ListenerProgress {
     Stopped,
 }
 
+/// One reading of the host's listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenerView {
+    /// The host's listener generation. Every policy change that replaces the listener starts a
+    /// new one, so a later reading of the same generation is the listener a change applied.
+    pub generation: [u8; 32],
+    pub progress: ListenerProgress,
+    /// Where it listens, or waits to.
+    pub address: Option<SocketAddr>,
+}
+
+/// What a later reading shows of the listener a change applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Followed {
+    /// That listener accepts connections.
+    Accepting,
+    /// That listener still waits to bind.
+    Waiting,
+    /// It stopped, or a later policy change replaced it before it accepted.
+    Lost,
+}
+
+impl ListenerView {
+    /// What `now` shows of the listener this reading was taken of, as a change applied it. A
+    /// reading of another generation or address is a replacement, which proves nothing about
+    /// the change, even when it listens.
+    pub fn follow(&self, now: &ListenerView) -> Followed {
+        if now.generation != self.generation || now.address != self.address {
+            return Followed::Lost;
+        }
+        match now.progress {
+            ListenerProgress::Listening => Followed::Accepting,
+            ListenerProgress::Starting => Followed::Waiting,
+            ListenerProgress::Stopped => Followed::Lost,
+        }
+    }
+}
+
 /// The Network Access a change asks for. `All` listens on every interface at the current port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -220,6 +258,40 @@ mod tests {
             last_connected_at: None,
         });
         assert_ne!(base, other.observation(&[1; 32], &[2; 32], b"all"));
+    }
+
+    #[test]
+    fn only_the_applied_listener_settles_a_change() {
+        let at: SocketAddr = "127.0.0.1:9231".parse().unwrap();
+        let reading = |generation, progress, address| ListenerView {
+            generation: [generation; 32],
+            progress,
+            address,
+        };
+        let applied = reading(1, ListenerProgress::Starting, Some(at));
+        assert_eq!(applied.follow(&applied), Followed::Waiting);
+        assert_eq!(
+            applied.follow(&reading(1, ListenerProgress::Listening, Some(at))),
+            Followed::Accepting
+        );
+        assert_eq!(
+            applied.follow(&reading(1, ListenerProgress::Stopped, Some(at))),
+            Followed::Lost
+        );
+        // A later change's listener accepts, but not the one this change applied.
+        let every = Some("0.0.0.0:9231".parse().unwrap());
+        assert_eq!(
+            applied.follow(&reading(2, ListenerProgress::Listening, every)),
+            Followed::Lost
+        );
+        assert_eq!(
+            applied.follow(&reading(2, ListenerProgress::Listening, Some(at))),
+            Followed::Lost
+        );
+        assert_eq!(
+            applied.follow(&reading(1, ListenerProgress::Listening, every)),
+            Followed::Lost
+        );
     }
 
     #[test]
