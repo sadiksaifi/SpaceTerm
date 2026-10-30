@@ -3852,6 +3852,27 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Presents the File Preview of a local file that `spaceterm open --preview` named in this
+    /// Pane's Terminal Session, which a worker already revalidated. It touches no file here.
+    /// `false` when the Pane has no local file authority, its desktop has no File Preview, or
+    /// presentation failed at once.
+    pub(crate) fn preview_prepared_local_file(
+        &mut self,
+        prepared: crate::terminal::native_services::PreparedFilePreview,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.file_preview_available
+            || !self.terminal_session.local_file_capabilities.are_enabled()
+        {
+            return false;
+        }
+        let submitted = self
+            .file_preview
+            .preview_prepared_in_window(prepared, window, cx);
+        self.follow_file_preview(submitted, cx)
+    }
+
     fn preview_context_link(
         &mut self,
         link: &crate::terminal::HyperlinkTarget,
@@ -3864,8 +3885,22 @@ impl TerminalPane {
             self.file_preview.dismiss();
             return;
         };
-        match self.file_preview.preview_in_window(&target, window, cx) {
-            Ok(None) => {}
+        let submitted = self.file_preview.preview_in_window(&target, window, cx);
+        self.follow_file_preview(submitted, cx);
+    }
+
+    /// Follows one submitted preview to its deferred failure. Whether the preview was presented
+    /// or handed to a deferred adapter.
+    fn follow_file_preview(
+        &mut self,
+        submitted: Result<
+            Option<crate::terminal::native_services::file_preview::FilePreviewCompletion>,
+            crate::terminal::native_services::file_preview::FilePreviewError,
+        >,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match submitted {
+            Ok(None) => true,
             Ok(Some(completion)) => {
                 self._file_preview_task = Some(cx.spawn(async move |this, cx| {
                     let Some(failure) = completion.failure().await else {
@@ -3877,8 +3912,12 @@ impl TerminalPane {
                         }
                     });
                 }));
+                true
             }
-            Err(_) => self.present_file_preview_failure(cx),
+            Err(_) => {
+                self.present_file_preview_failure(cx);
+                false
+            }
         }
     }
 

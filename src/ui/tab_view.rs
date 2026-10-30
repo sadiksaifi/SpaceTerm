@@ -2786,6 +2786,29 @@ impl TabView {
             })
     }
 
+    /// Presents the prepared File Preview for the server Pane `server`. `false` when this Tab
+    /// holds no such Pane or the Pane cannot preview a local file.
+    pub(crate) fn preview_shared_local_file(
+        &mut self,
+        server: spaceterm_server::hierarchy::Id,
+        prepared: crate::terminal::native_services::PreparedFilePreview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(terminal) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.local_pane(server))
+            .and_then(|pane_id| self.tab.pane(pane_id))
+            .cloned()
+        else {
+            return false;
+        };
+        terminal.update(cx, |terminal, cx| {
+            terminal.preview_prepared_local_file(prepared, window, cx)
+        })
+    }
+
     /// Focuses the Pane one accepted split of this client's own created, and asks the server for
     /// it. Only the client that asked for the split does this.
     pub(crate) fn focus_shared_pane_explicitly(

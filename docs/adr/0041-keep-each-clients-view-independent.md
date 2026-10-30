@@ -10,6 +10,8 @@ The server owns terminal content and Scrollback; clients present independent vie
 
 Membership reconciliation is independent of keyboard ownership. A later Workspace or Tab selection, sidebar edit, Terminal Find or chooser focus wins over an older operation's completion. Pane navigation focuses the rendered terminal or replacement screen. Explicit Workspace opening selects its restored Focused Pane; passive sidebar navigation starts no shell. An initiating split validates the restored allocation and reveals the resulting layout before requesting membership. Another client's membership never inherits this client's viewport limits.
 
+Only this desktop's own account can move its view from outside it: `spaceterm show` and `spaceterm open --preview` ask the desktop on the same machine over the Desktop Channel under [ADR 0060](0060-open-files-and-show-work-in-the-desktop-over-the-desktop-channel.md). The server relays no view change between clients.
+
 Architecture and transport changes preserve released shortcuts, focus, layout and interaction outcomes unless the owner approves a product change. [ADR 0037](0037-resolve-shared-mutations-at-the-server.md) owns optimistic mutation presentation and uncertainty.
 
 [ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) moves scrolling, Selection and Terminal Find onto each client's Scrollback Cache.

@@ -6170,6 +6170,7 @@ dependencies = [
  "serde_json_lenient",
  "sha2",
  "smallvec",
+ "socket2",
  "spaceterm-connections",
  "spaceterm-directories",
  "spaceterm-server",

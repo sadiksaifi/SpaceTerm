@@ -198,6 +198,13 @@ fn main() -> ExitCode {
             &mut std::io::stderr().lock(),
         ));
     }
+    if let Some(output) = spaceterm_cli::desktop::start(&cli) {
+        return ExitCode::from(output.write(
+            (&cli.global).into(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ));
+    }
     if let Some(output) = spaceterm_cli::work::start::start(&cli) {
         return ExitCode::from(output.write(
             (&cli.global).into(),

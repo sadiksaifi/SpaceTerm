@@ -5,6 +5,4 @@ edition = "2024"
 
 [dependencies]
 thiserror = "=2.0.19"
-
-[target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.189"

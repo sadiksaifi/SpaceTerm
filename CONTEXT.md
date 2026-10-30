@@ -96,6 +96,8 @@ _Avoid_: shim, alias, CLI install
 
 **Account-local Connection**: A connection authorized by the operating system as belonging to the SpaceTerm Server's owning account.
 
+**Desktop Channel**: The account-local connection on which `spaceterm` asks the desktop on its machine to open a local file or show work in that desktop's own view.
+
 **Paired Device**: A client device deliberately enrolled for direct-network access to a SpaceTerm Server.
 
 **Add Server**: The Settings-owned journey that enrolls a remote SpaceTerm Server through SSH Setup or an Invitation Link.

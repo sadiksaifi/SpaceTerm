@@ -108,7 +108,7 @@ fn selected(cli: &Cli) -> Output {
                     route: selected.key(),
                     agent: agent.as_ref(),
                     deadline,
-                    mutating: !matches!(cli.command, Command::List(_)),
+                    mutating: !matches!(cli.command, Command::List(_) | Command::Show(_)),
                 },
                 &mut connect,
             ) {
@@ -124,6 +124,7 @@ fn selected(cli: &Cli) -> Output {
                 cli,
                 &Route {
                     identity,
+                    deadline,
                     local,
                     name: &server.name,
                     route: &server.route,
@@ -199,6 +200,8 @@ fn prompt(cli: &Cli, output: &Output) -> Result<Option<bool>, Failure> {
 
 pub struct Route<'a> {
     pub identity: &'a str,
+    /// When this pass gives up.
+    pub deadline: Instant,
     pub local: bool,
     pub name: &'a str,
     pub route: &'a str,
@@ -214,6 +217,7 @@ pub fn run_connected(
 ) -> Output {
     let Route {
         identity,
+        deadline,
         local,
         name: server_name,
         route,
@@ -245,6 +249,7 @@ pub fn run_connected(
         agent,
         now: jiff::Timestamp::now().as_second(),
         confirmation,
+        desktop: &crate::desktop::LocalDesktop { identity, deadline },
     };
     execute::run(
         &cli.command,
@@ -376,6 +381,7 @@ mod tests {
                             agent: false,
                             now: 100,
                             confirmation,
+                            desktop: &crate::desktop::NoDesktop,
                         },
                         &mut Writer {
                             state: &state,

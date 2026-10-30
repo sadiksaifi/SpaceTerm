@@ -107,6 +107,9 @@ mod worktrees;
 #[cfg(feature = "desktop")]
 mod desktop_profile;
 
+/// The account-local channel from `spaceterm` to the desktop on this machine.
+pub mod desktop_channel;
+
 #[cfg(test)]
 #[cfg(feature = "desktop")]
 mod architecture_tests;
