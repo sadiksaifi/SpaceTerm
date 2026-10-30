@@ -60,6 +60,14 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
                 .write_all(include_bytes!(concat!(env!("OUT_DIR"), "/build-info.json")))
                 .map_err(Error::Output)?;
         }
+        ProvisionCommand::PermissionReport => {
+            let report = spaceterm_server::permissions::probe_report()
+                .ok_or(Error::Failure(Failure::new(Code::Unsupported)))?;
+            std::io::stdout()
+                .lock()
+                .write_all(report.as_bytes())
+                .map_err(Error::Output)?;
+        }
         ProvisionCommand::Check => {
             crate::check::run()?;
             std::io::stdout()

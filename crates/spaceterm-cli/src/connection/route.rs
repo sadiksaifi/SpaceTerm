@@ -73,6 +73,7 @@ pub fn validate_command(command: &Command, selector: &str) -> Result<(), Failure
             | ServerCommand::Pair { .. }
             | ServerCommand::Start
             | ServerCommand::EndAllSessions(_)
+            | ServerCommand::Permissions { .. }
             | ServerCommand::Unpair { .. }
             | ServerCommand::Run { .. }
             | ServerCommand::Provision(_),

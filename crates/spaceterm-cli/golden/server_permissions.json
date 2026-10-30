@@ -1,0 +1,33 @@
+{
+  "command": "server.permissions",
+  "data": {
+    "accessibility_naming": "device_control",
+    "holder": {
+      "holder": "server",
+      "name": "SpaceTerm Server"
+    },
+    "permissions": [
+      {
+        "permission": "microphone",
+        "state": "not_requested"
+      },
+      {
+        "permission": "screen_recording",
+        "state": "granted"
+      },
+      {
+        "permission": "accessibility",
+        "state": "not_granted"
+      }
+    ]
+  },
+  "error": null,
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "abababababababababababababababababababababababababababababababab",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "ok",
+  "warnings": []
+}

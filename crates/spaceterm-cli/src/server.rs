@@ -2,14 +2,15 @@
 //!
 //! Status, Stop, Restart, Update and Network Access changes reach a running server through its
 //! service lane, locally over account IPC and remotely over the paired connection, so they work
-//! across protocol majors. Setup, Start, pairing, Unpair and End All Sessions stay on the server's
-//! own machine. While the server is
+//! across protocol majors. Setup, Start, pairing, Unpair, End All Sessions and System Permissions
+//! stay on the server's own machine. While the server is
 //! stopped, local Status and Update read and change the service directly.
 pub mod end_all_sessions;
 pub mod lifecycle;
 pub mod network;
 pub mod offline_token;
 pub mod pair;
+pub mod permissions;
 pub mod setup;
 pub mod status;
 pub mod unpair;
@@ -144,6 +145,7 @@ pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
         ServerCommand::Network { access, confirm } => {
             network::run(&context, access, confirm.as_deref())
         }
+        ServerCommand::Permissions { action } => permissions::run(&context, action.as_ref()),
         ServerCommand::EndAllSessions(confirm) => {
             end_all_sessions::run(&context, confirm.confirm.as_deref())
         }
@@ -167,6 +169,11 @@ fn path(command: &ServerCommand) -> &'static str {
         ServerCommand::Restart(_) => "server.restart",
         ServerCommand::Update { .. } => "server.update",
         ServerCommand::Network { .. } => "server.network",
+        ServerCommand::Permissions { action } => match action {
+            None => "server.permissions",
+            Some(crate::args::PermissionsCommand::Request { .. }) => "server.permissions.request",
+            Some(crate::args::PermissionsCommand::Settings { .. }) => "server.permissions.settings",
+        },
         ServerCommand::EndAllSessions(_) => "server.end-all-sessions",
         ServerCommand::Unpair { .. } => "server.unpair",
         ServerCommand::Run { .. } => "server.run",

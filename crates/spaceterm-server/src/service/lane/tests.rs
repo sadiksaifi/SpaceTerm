@@ -120,6 +120,7 @@ pub(crate) fn serving_with_feed(
         host,
         feed,
         Box::new(|_| Ok(())),
+        Arc::new(crate::permissions::Unsupported),
     )
     .unwrap()
 }
@@ -171,6 +172,7 @@ impl Lane {
             self.host.clone(),
             Arc::new(NoFeed),
             Box::new(|_| Ok(())),
+            Arc::new(crate::permissions::Unsupported),
         )
         .unwrap()
     }
@@ -217,6 +219,7 @@ fn with_lane(run: impl FnOnce(Lane)) {
                     }
                     Ok(())
                 }),
+                Arc::new(crate::permissions::Unsupported),
             )
             .unwrap();
             // A second package of the same build: a different gzip timestamp, re-signed.
@@ -294,6 +297,143 @@ fn lane_messages_keep_their_frozen_json_shape() {
         })
         .unwrap(),
         serde_json::json!({ "reply": "error", "code": "unsupported" })
+    );
+}
+
+/// A lane whose System Permissions are `permissions`.
+fn serving_permissions(
+    paths: &crate::host::Paths,
+    permissions: Arc<dyn crate::permissions::SystemPermissions>,
+) -> Arc<LaneServer> {
+    LaneServer::new(
+        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
+        Arc::new(Host::default()),
+        Arc::new(NoFeed),
+        Box::new(|_| Ok(())),
+        permissions,
+    )
+    .unwrap()
+}
+
+const LOCAL_ACTOR: Actor = Actor {
+    pairing: None,
+    client: [8; 32],
+};
+
+fn permission_requests() -> [LaneRequest; 5] {
+    use crate::permissions::SystemPermission;
+    [
+        LaneRequest::Permissions,
+        LaneRequest::RequestPermission {
+            permission: SystemPermission::Microphone,
+        },
+        LaneRequest::OpenPermissionSettings {
+            permission: SystemPermission::ScreenRecording,
+        },
+        LaneRequest::PreparePermissionSetup {
+            permission: SystemPermission::Accessibility,
+        },
+        LaneRequest::ResetPermission {
+            permission: SystemPermission::Accessibility,
+        },
+    ]
+}
+
+#[test]
+fn a_paired_caller_reaches_no_system_permission() {
+    use crate::permissions::{PermissionState, testing::ScriptedPermissions};
+    let fixture = super::super::tests::Fixture::new();
+    let permissions = ScriptedPermissions::granting(PermissionState::Granted);
+    let lane = serving_permissions(&fixture.paths, permissions.clone());
+    for request in permission_requests() {
+        assert_eq!(
+            lane.answer(request, &ACTOR),
+            LaneReply::Error {
+                code: "local_only".into()
+            }
+        );
+    }
+    assert!(
+        permissions.calls.lock().unwrap().is_empty(),
+        "the system is asked nothing for a paired caller"
+    );
+}
+
+#[test]
+fn a_local_caller_reads_and_changes_the_servers_own_permissions() {
+    use crate::permissions::{
+        PermissionState, RequestOutcome, SetupReadiness, SystemPermission,
+        testing::ScriptedPermissions,
+    };
+    let fixture = super::super::tests::Fixture::new();
+    let permissions = ScriptedPermissions::granting(PermissionState::NotGranted);
+    let lane = serving_permissions(&fixture.paths, permissions.clone());
+    let [read, request, open, prepare, reset] = permission_requests();
+    let LaneReply::Permissions(report) = lane.answer(read, &LOCAL_ACTOR) else {
+        panic!("expected a report");
+    };
+    assert_eq!(
+        report.state(SystemPermission::Microphone),
+        Some(PermissionState::NotGranted)
+    );
+    assert_eq!(
+        lane.answer(request, &LOCAL_ACTOR),
+        LaneReply::PermissionRequested(RequestOutcome::Requested)
+    );
+    assert_eq!(
+        lane.answer(open, &LOCAL_ACTOR),
+        LaneReply::PermissionSettingsOpened
+    );
+    assert_eq!(
+        lane.answer(prepare, &LOCAL_ACTOR),
+        LaneReply::PermissionSetup(SetupReadiness::Ready { cleared: true })
+    );
+    assert_eq!(lane.answer(reset, &LOCAL_ACTOR), LaneReply::PermissionReset);
+    assert_eq!(
+        *permissions.calls.lock().unwrap(),
+        [
+            ("request", SystemPermission::Microphone),
+            ("open_settings", SystemPermission::ScreenRecording),
+            ("prepare_setup", SystemPermission::Accessibility),
+            ("reset", SystemPermission::Accessibility),
+        ]
+    );
+}
+
+#[test]
+fn a_platform_without_system_permissions_answers_unsupported() {
+    let fixture = super::super::tests::Fixture::new();
+    let lane = serving_permissions(&fixture.paths, Arc::new(crate::permissions::Unsupported));
+    for request in permission_requests() {
+        assert_eq!(
+            lane.answer(request, &LOCAL_ACTOR),
+            LaneReply::Error {
+                code: "unsupported".into()
+            }
+        );
+    }
+}
+
+#[test]
+fn permission_messages_keep_their_json_shape() {
+    use crate::permissions::{RequestOutcome, SystemPermission};
+    assert_eq!(
+        serde_json::to_value(LaneRequest::RequestPermission {
+            permission: SystemPermission::ScreenRecording
+        })
+        .unwrap(),
+        serde_json::json!({ "request": "request_permission", "permission": "screen_recording" })
+    );
+    assert_eq!(
+        serde_json::to_value(LaneReply::PermissionRequested(RequestOutcome::Decided {
+            state: crate::permissions::PermissionState::NotRequested
+        }))
+        .unwrap(),
+        serde_json::json!({
+            "reply": "permission_requested",
+            "outcome": "decided",
+            "state": "not_requested",
+        })
     );
 }
 
@@ -931,9 +1071,14 @@ mod flow {
                     std::thread::sleep(Duration::from_millis(1500));
                     drop(helper);
                     // The helper ends before the new server starts, so start-up settles it.
-                    let new =
-                        LaneServer::new(service, host, Arc::new(NoFeed), Box::new(|_| Ok(())))
-                            .unwrap();
+                    let new = LaneServer::new(
+                        service,
+                        host,
+                        Arc::new(NoFeed),
+                        Box::new(|_| Ok(())),
+                        Arc::new(crate::permissions::Unsupported),
+                    )
+                    .unwrap();
                     *next.lock().unwrap() = Some(hex(&new.boot));
                     switch.up(new);
                 });
@@ -1349,6 +1494,7 @@ mod flow {
                 lane.host.clone(),
                 Arc::new(Release::of(&lane)),
                 Box::new(|_| Ok(())),
+                Arc::new(crate::permissions::Unsupported),
             )
             .unwrap();
             let switch = Arc::new(Switch::default());

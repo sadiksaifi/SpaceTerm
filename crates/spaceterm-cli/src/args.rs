@@ -134,6 +134,12 @@ pub enum ServerCommand {
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
     },
+    /// Show the System Permissions programs in this machine's Terminal Sessions inherit, or set
+    /// one up. Only this machine's own server has them.
+    Permissions {
+        #[command(subcommand)]
+        action: Option<PermissionsCommand>,
+    },
     /// End every Terminal Session on this machine, retaining the server and organization.
     EndAllSessions(Confirm),
     /// Revoke another Paired Device.
@@ -158,6 +164,55 @@ pub enum ServerCommand {
     },
     #[command(hide = true, subcommand)]
     Provision(ProvisionCommand),
+}
+
+/// Setting up one System Permission on this machine.
+#[derive(Debug, Subcommand)]
+pub enum PermissionsCommand {
+    /// Ask the system for a permission: a prompt for the microphone, otherwise an entry in System
+    /// Settings to turn on.
+    Request { permission: PermissionName },
+    /// Open System Settings at the list that holds a permission.
+    Settings { permission: PermissionName },
+}
+
+/// A System Permission as the command line names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum PermissionName {
+    Microphone,
+    ScreenRecording,
+    /// Device Control on macOS 27 and later.
+    #[value(alias = "device-control")]
+    Accessibility,
+}
+
+impl PermissionName {
+    pub const fn permission(self) -> spaceterm_server::permissions::SystemPermission {
+        use spaceterm_server::permissions::SystemPermission;
+        match self {
+            Self::Microphone => SystemPermission::Microphone,
+            Self::ScreenRecording => SystemPermission::ScreenRecording,
+            Self::Accessibility => SystemPermission::Accessibility,
+        }
+    }
+
+    pub const fn of(permission: spaceterm_server::permissions::SystemPermission) -> Self {
+        use spaceterm_server::permissions::SystemPermission;
+        match permission {
+            SystemPermission::Microphone => Self::Microphone,
+            SystemPermission::ScreenRecording => Self::ScreenRecording,
+            SystemPermission::Accessibility => Self::Accessibility,
+        }
+    }
+
+    /// The spelling a printed command uses.
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::Microphone => "microphone",
+            Self::ScreenRecording => "screen-recording",
+            Self::Accessibility => "accessibility",
+        }
+    }
 }
 
 /// Steps the installer, the runtime verifier, SSH Setup and the service helper run.
@@ -194,6 +249,8 @@ pub enum ProvisionCommand {
     },
     BuildInfo,
     Check,
+    /// Report this process's own System Permissions, as the server's probe child.
+    PermissionReport,
     ServiceRun {
         #[arg(long)]
         operation: String,
@@ -541,6 +598,11 @@ impl Command {
                 ServerCommand::Restart(_) => "server.restart",
                 ServerCommand::Update { .. } => "server.update",
                 ServerCommand::Network { .. } => "server.network",
+                ServerCommand::Permissions { action } => match action {
+                    None => "server.permissions",
+                    Some(PermissionsCommand::Request { .. }) => "server.permissions.request",
+                    Some(PermissionsCommand::Settings { .. }) => "server.permissions.settings",
+                },
                 ServerCommand::EndAllSessions(_) => "server.end-all-sessions",
                 ServerCommand::Unpair { .. } => "server.unpair",
                 ServerCommand::Run { .. } => "server.run",

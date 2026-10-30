@@ -19,6 +19,10 @@ use super::tokens::Tokens;
 use super::{RetainedInstallation, Service, runtime};
 use crate::ServerError;
 use crate::hierarchy::Id;
+use crate::permissions::{
+    PermissionError, PermissionsReport, RequestOutcome, SetupReadiness, SystemPermission,
+    SystemPermissions,
+};
 use crate::protocol::Preamble;
 use crate::storage::Directory;
 use base64::Engine;
@@ -34,6 +38,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+/// The contract code for an action only the server's own machine takes.
+pub const LOCAL_ONLY: &str = "local_only";
 /// The largest lane frame, in bytes.
 pub const MAX_FRAME: usize = 128 * 1024;
 /// The largest decoded `UploadChunk::data`, in bytes.
@@ -76,6 +82,25 @@ pub enum LaneRequest {
     },
     Acknowledge {
         operation: String,
+    },
+    /// Reads the server's System Permissions. This and the requests below answer only a caller
+    /// on the server's own machine, and refuse a paired one with `local_only`.
+    Permissions,
+    /// Asks the system for one System Permission.
+    RequestPermission {
+        permission: SystemPermission,
+    },
+    /// Opens System Settings at one System Permission's list.
+    OpenPermissionSettings {
+        permission: SystemPermission,
+    },
+    /// Prepares a Permission Setup of one System Permission.
+    PreparePermissionSetup {
+        permission: SystemPermission,
+    },
+    /// Forgets the system's decision for one System Permission and this server alone.
+    ResetPermission {
+        permission: SystemPermission,
     },
 }
 
@@ -122,6 +147,11 @@ pub enum LaneReply {
     },
     Receipt(LaneReceipt),
     Acknowledged,
+    Permissions(PermissionsReport),
+    PermissionRequested(RequestOutcome),
+    PermissionSettingsOpened,
+    PermissionSetup(SetupReadiness),
+    PermissionReset,
     /// `code` is a code from the CLI output contract.
     Error {
         code: String,
@@ -299,6 +329,7 @@ pub struct LaneServer {
     tokens: Tokens,
     feed: Arc<dyn Source>,
     launch: Box<Launcher>,
+    permissions: Arc<dyn SystemPermissions>,
     upload: Mutex<Option<Upload>>,
     /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
@@ -345,6 +376,7 @@ impl LaneServer {
             host,
             Arc::new(feed::Releases::new(&paths.identity)),
             Box::new(move |op| super::helper::launch(&owned, op)),
+            crate::permissions::native(&paths.identity),
         )
     }
 
@@ -353,6 +385,7 @@ impl LaneServer {
         host: Arc<dyn LaneHost>,
         feed: Arc<dyn Source>,
         launch: Box<Launcher>,
+        permissions: Arc<dyn SystemPermissions>,
     ) -> Result<Arc<Self>, ServerError> {
         let server = service.passive_server_id()?.ok_or(ServerError::NotSetUp)?;
         let lane = Self {
@@ -363,6 +396,7 @@ impl LaneServer {
             tokens: Tokens::default(),
             feed,
             launch,
+            permissions,
             upload: Mutex::new(None),
             executing: Mutex::new(()),
             watching: AtomicBool::new(false),
@@ -479,8 +513,45 @@ impl LaneServer {
             LaneRequest::Preview { action } => self.preview(&action, actor),
             LaneRequest::Resolve { operation } => self.resolve(&operation),
             LaneRequest::Acknowledge { operation } => self.acknowledge(&operation, actor),
+            LaneRequest::Permissions
+            | LaneRequest::RequestPermission { .. }
+            | LaneRequest::OpenPermissionSettings { .. }
+            | LaneRequest::PreparePermissionSetup { .. }
+            | LaneRequest::ResetPermission { .. } => {
+                return (self.permission(request, actor), None);
+            }
         };
         (result.unwrap_or_else(|failure| error(&failure)), None)
+    }
+
+    /// Answers a System Permission request. Only the server's own machine sets up or changes
+    /// these grants, so a paired caller is refused before the system is asked anything.
+    fn permission(&self, request: LaneRequest, actor: &Actor) -> LaneReply {
+        if actor.pairing.is_some() {
+            return LaneReply::Error {
+                code: LOCAL_ONLY.to_owned(),
+            };
+        }
+        let permissions = self.permissions.as_ref();
+        let reply = match request {
+            LaneRequest::Permissions => permissions.read().map(LaneReply::Permissions),
+            LaneRequest::RequestPermission { permission } => permissions
+                .request(permission)
+                .map(LaneReply::PermissionRequested),
+            LaneRequest::OpenPermissionSettings { permission } => permissions
+                .open_settings(permission)
+                .map(|()| LaneReply::PermissionSettingsOpened),
+            LaneRequest::PreparePermissionSetup { permission } => permissions
+                .prepare_setup(permission)
+                .map(LaneReply::PermissionSetup),
+            LaneRequest::ResetPermission { permission } => permissions
+                .reset(permission)
+                .map(|()| LaneReply::PermissionReset),
+            _ => Err(PermissionError::Unsupported),
+        };
+        reply.unwrap_or_else(|failure| LaneReply::Error {
+            code: failure.code().to_owned(),
+        })
     }
 
     fn stage_upload(

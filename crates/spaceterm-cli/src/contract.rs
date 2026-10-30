@@ -814,6 +814,7 @@ codes! {
     CommandFailed = "command_failed", Failed, false, "The command exited with a nonzero status.";
     OutputFailed = "output_failed", Failed, false, "SpaceTerm couldn\u{2019}t write the output.";
     OperationFailed = "operation_failed", Failed, false, "The server did not perform the operation.";
+    PermissionFailed = "permission_failed", Failed, false, "The system didn\u{2019}t complete the permission operation.";
     Interrupted = "interrupted", Interrupted, false, "Interrupted.";
     // ServerError.
     NotSetUp = "not_set_up", Unavailable, false, "The server is not set up.";
@@ -1509,6 +1510,29 @@ pub struct ServerStatus {
     pub devices: Vec<Device>,
     pub held_outcomes: Vec<HeldOutcomes>,
     pub lane_major: u16,
+}
+
+/// `server.permissions`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServerPermissions {
+    pub permissions: Vec<spaceterm_server::permissions::PermissionReading>,
+    pub accessibility_naming: spaceterm_server::permissions::AccessibilityNaming,
+    /// Whose entry System Settings lists the permissions under.
+    pub holder: spaceterm_server::permissions::PermissionHolder,
+}
+
+/// `server.permissions.request`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PermissionRequested {
+    pub permission: spaceterm_server::permissions::SystemPermission,
+    #[serde(flatten)]
+    pub outcome: spaceterm_server::permissions::RequestOutcome,
+}
+
+/// `server.permissions.settings`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct PermissionSettings {
+    pub permission: spaceterm_server::permissions::SystemPermission,
 }
 
 /// `data` of `unreachable` from `server.status`.
