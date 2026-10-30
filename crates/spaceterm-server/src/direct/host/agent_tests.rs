@@ -1,10 +1,23 @@
-//! The agent names a pairing admitted stay bounded without blocking a new name.
+//! The agent names a pairing admitted stay bounded, and only a name that holds nothing is
+//! evicted.
 use super::*;
 use crate::direct::DeviceCredential;
 use crate::direct::tests::{Fixture, Quiet};
 
 fn agent(index: usize) -> crate::protocol::AgentName {
     format!("agent-{index}").parse().unwrap()
+}
+
+/// Admits `agent` as a connection would, with every idle name it could evict settled.
+fn admit_settled(
+    state: &mut State,
+    paired: &PairedDevice,
+    agent: &crate::protocol::AgentName,
+) -> Result<Option<[u8; 32]>, DirectError> {
+    let reserved = state.reserve_evictable(paired, agent)?.unwrap_or_default();
+    let admitted = state.admit_agent(paired, agent, &reserved.iter().copied().collect());
+    state.release_retiring(&reserved);
+    admitted
 }
 
 #[test]
@@ -14,7 +27,7 @@ fn a_new_agent_name_past_the_limit_evicts_the_least_recently_admitted_idle_name(
     let paired = fixture.enroll(&DeviceCredential::generate().unwrap());
     let mut state = fixture.state.lock().unwrap();
     for index in 0..storage::MAX_AGENTS {
-        assert_eq!(state.admit_agent(&paired, &agent(index)), Ok(None));
+        assert_eq!(admit_settled(&mut state, &paired, &agent(index)), Ok(None));
     }
     // Agent 0 is the oldest name, but it has a live connection.
     let generation = state.generation;
@@ -29,10 +42,8 @@ fn a_new_agent_name_past_the_limit_evicts_the_least_recently_admitted_idle_name(
         )
         .unwrap();
     // Admitting a known name again makes it the most recent, and evicts nothing.
-    assert_eq!(state.admit_agent(&paired, &agent(1)), Ok(None));
-    let evicted = state
-        .admit_agent(&paired, &agent(storage::MAX_AGENTS))
-        .unwrap();
+    assert_eq!(admit_settled(&mut state, &paired, &agent(1)), Ok(None));
+    let evicted = admit_settled(&mut state, &paired, &agent(storage::MAX_AGENTS)).unwrap();
     assert_eq!(evicted, Some(agent(2).client(&paired.client)));
     let agents = |state: &State| {
         state
@@ -51,8 +62,13 @@ fn a_new_agent_name_past_the_limit_evicts_the_least_recently_admitted_idle_name(
     assert_eq!(known.last(), Some(&agent(storage::MAX_AGENTS)));
     // An evicted agent that returns is admitted again.
     assert_eq!(
-        state.admit_agent(&paired, &agent(2)),
+        admit_settled(&mut state, &paired, &agent(2)),
         Ok(Some(agent(3).client(&paired.client)))
+    );
+    assert!(
+        state
+            .retiring
+            .contains_key(&agent(3).client(&paired.client))
     );
     // The bounded list survives a reload.
     drop(state);
@@ -120,6 +136,9 @@ impl crate::connection::service::PaneService for Panes {
         seen.grants.remove(&client);
         seen.events.push(Event::Released(client));
     }
+    fn holds(&self, client: [u8; 32]) -> bool {
+        self.0.lock().unwrap().outcomes.contains(&client)
+    }
     fn input(&mut self, _: &crate::connection::service::Peer, _: crate::protocol::Input) {}
     fn view(&mut self, _: &crate::connection::service::Peer, _: crate::protocol::View) {}
     fn effect_done(
@@ -136,7 +155,7 @@ impl crate::connection::service::PaneService for Panes {
 }
 
 /// A pairing whose agent names fill its limit, and a pane service in which the oldest name,
-/// agent 0, holds a retained outcome and a control grant.
+/// agent 0, holds a control grant.
 fn full_pairing() -> (
     Fixture,
     DeviceCredential,
@@ -151,12 +170,11 @@ fn full_pairing() -> (
     {
         let mut state = fixture.state.lock().unwrap();
         for index in 0..storage::MAX_AGENTS {
-            assert_eq!(state.admit_agent(&paired, &agent(index)), Ok(None));
+            assert_eq!(admit_settled(&mut state, &paired, &agent(index)), Ok(None));
         }
     }
     let seen = Arc::new(Mutex::new(Seen::default()));
     let oldest = agent(0).client(&paired.client);
-    seen.lock().unwrap().outcomes.insert(oldest);
     seen.lock().unwrap().grants.insert(oldest);
     let panes = crate::direct::tests::service(Panes(Arc::clone(&seen)));
     (fixture, credential, paired, seen, panes)
@@ -205,34 +223,62 @@ fn claim(link: &crate::connection::link::ServerLink) {
 }
 
 #[test]
-fn an_evicted_agent_keeps_its_outcome_and_resolves_it_when_it_returns() {
+fn a_name_that_holds_an_outcome_is_never_evicted_and_a_full_list_of_them_refuses_a_new_name() {
     let (fixture, credential, paired, seen, panes) = full_pairing();
     let oldest = agent(0).client(&paired.client);
-    let newcomer: crate::protocol::AgentName = "newcomer".parse().unwrap();
+    let settled = agent(1).client(&paired.client);
+    seen.lock().unwrap().outcomes.insert(oldest);
     let first = fixture.serve_next_with(Arc::clone(&panes));
-    let link = admit(&fixture, &credential, &paired, &newcomer);
-    // Any reply follows the eviction's release, which runs before serving.
+    let link = admit(&fixture, &credential, &paired, &"newcomer".parse().unwrap());
+    // Any reply follows the eviction's release, which runs before serving. The oldest name
+    // holds an outcome, so the oldest settled name goes instead.
     assert!(!resolve(&link));
     {
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.events, vec![Event::Released(oldest)]);
-        assert!(seen.outcomes.contains(&oldest) && !seen.grants.contains(&oldest));
+        assert_eq!(seen.events, vec![Event::Released(settled)]);
+        assert!(seen.outcomes.contains(&oldest) && seen.grants.contains(&oldest));
     }
-    // The returning agent is admitted again and resolves its real outcome.
+    // Agent 0 is still listed, so its pairing's revocation can still free its outcome.
     let second = fixture.serve_next_with(Arc::clone(&panes));
-    let returned = admit(&fixture, &credential, &paired, &agent(0));
-    assert!(resolve(&returned));
-    assert_eq!(
-        seen.lock().unwrap().events,
-        vec![
-            Event::Released(oldest),
-            Event::Released(agent(1).client(&paired.client)),
-        ]
-    );
-    drop((link, returned));
+    let kept = admit(&fixture, &credential, &paired, &agent(0));
+    assert!(resolve(&kept));
+    drop((link, kept));
     for server in [first, second] {
         let _ = server.join().unwrap();
     }
+    // Once every listed name holds an outcome, a new name is refused and nothing is evicted.
+    let listed = |state: &State| {
+        state
+            .record
+            .devices
+            .iter()
+            .find(|device| device.info.pairing == paired.pairing)
+            .unwrap()
+            .agents
+            .clone()
+    };
+    let before = listed(&fixture.state.lock().unwrap());
+    assert_eq!(before.len(), storage::MAX_AGENTS);
+    seen.lock()
+        .unwrap()
+        .outcomes
+        .extend(before.iter().map(|known| known.client(&paired.client)));
+    let refused = fixture.serve_next_with(Arc::clone(&panes));
+    let connection = DirectConnection::connect(&fixture.endpoint(), &paired, &credential).unwrap();
+    let late: crate::protocol::AgentName = "late".parse().unwrap();
+    let _ = connection.admit(crate::protocol::Caller {
+        client: &paired.client,
+        name: &format!("Test{}", late.name_suffix()).into(),
+        agent: Some(&late),
+    });
+    assert!(matches!(
+        refused.join().unwrap(),
+        Err(ServerError::Direct(DirectError::Capacity))
+    ));
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(listed(&state), before);
+    assert!(state.retiring.is_empty());
+    assert_eq!(seen.lock().unwrap().events, vec![Event::Released(settled)]);
 }
 
 #[test]
@@ -240,17 +286,17 @@ fn a_returning_agent_waits_for_its_eviction_release_so_its_new_grant_survives() 
     let (fixture, credential, paired, seen, panes) = full_pairing();
     let oldest = agent(0).client(&paired.client);
     let newcomer: crate::protocol::AgentName = "newcomer".parse().unwrap();
-    // Holding the pane service delays the eviction's release past the direct-network lock.
+    // Holding the pane service delays the eviction, which holds every idle name until it ends.
     let held = panes.lock().unwrap();
     let first = fixture.serve_next_with(Arc::clone(&panes));
     let link = admit(&fixture, &credential, &paired, &newcomer);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !fixture.state.lock().unwrap().retiring.contains(&oldest) {
+    while !fixture.state.lock().unwrap().retiring.contains_key(&oldest) {
         assert!(std::time::Instant::now() < deadline, "no eviction");
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    // The evicted agent returns while its release is still pending. It is not registered, and
-    // so cannot claim, until the release ends.
+    // The evicted agent returns while its eviction and release are still pending. It is not
+    // registered, and so cannot claim, until the release ends.
     let second = fixture.serve_next_with(Arc::clone(&panes));
     let returned = admit(&fixture, &credential, &paired, &agent(0));
     std::thread::sleep(std::time::Duration::from_millis(200));

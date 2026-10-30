@@ -1499,6 +1499,9 @@ impl HostCommands for SharedWorkspaceHost {
             .retain(|(owner, _), _| *owner != client);
         self.publish();
     }
+    fn holds(&self, client: Id) -> bool {
+        self.state.holds(client) || self.runs.holds(&client)
+    }
     fn release_control(&mut self, client: Id) {
         self.prototype.release_control(client);
         for host in self.panes.values_mut() {
@@ -1580,11 +1583,14 @@ mod tests {
             retained_outcome(&memory, device, 1),
             "an outcome is retained before its reply"
         );
+        assert!(HostCommands::holds(&host, device));
+        assert!(!HostCommands::holds(&host, [2; 32]));
         let release = memory.hold();
         assert!(matches!(
             host.request(device, device, Request::Acknowledge { sequence: 1 }),
             Reply::Unchanged
         ));
+        assert!(!HostCommands::holds(&host, device));
         assert!(
             retained_outcome(&memory, device, 1),
             "the write is still held"

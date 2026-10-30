@@ -4,16 +4,21 @@
 //! `interrupted` envelope and exits 130, and nothing happened. From [`dispatch`] on, and while a
 //! [`Cooperation`] lives, `SIGINT` is only recorded. The command then resolves what it dispatched
 //! for at most [`GRACE`], through [`limit`], and its result, rendered after [`finish`], reports
-//! the confirmed outcome with exit 130, or 7 when it could not be confirmed.
+//! the confirmed outcome with exit 130, or 7 when it could not be confirmed. Writing that result
+//! may take [`OUTPUT_GRACE`] more, so a command that settles at the last instant still reports.
 //!
 //! A command that never called [`install`], such as a unit test, is never interrupted.
 use crate::contract::{self, Code, Empty, Envelope, Failure, Mode};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long a command keeps resolving what it dispatched after `SIGINT`.
 pub const GRACE: Duration = Duration::from_secs(5);
+
+/// How long the final result may take to write from [`finish`] on, when that is later than
+/// [`GRACE`] after `SIGINT`. A reader that stops draining then cannot hold the process longer.
+pub const OUTPUT_GRACE: Duration = Duration::from_secs(1);
 
 /// What decides how `SIGINT` ends the command.
 struct Phase {
@@ -23,14 +28,49 @@ struct Phase {
     dispatched: bool,
     /// Live [`Cooperation`]s: code that withdraws what it opened when interrupted.
     cooperating: u32,
-    /// The final result's exit status while output is being written.
-    finishing: Option<u8>,
-    interrupted: Option<Instant>,
+    /// The final result's exit status, and when its output started.
+    finishing: Option<(u8, Instant)>,
 }
 
 static PHASE: Mutex<Option<Phase>> = Mutex::new(None);
 /// Counted by the signal itself, so dispatch and output cancellation need no handler-thread wake.
 static INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+/// The [`monotonic`] time of the first `SIGINT` plus one, or 0 before it. The signal itself
+/// records it, so the settlement instant is known as soon as [`interrupted`] reports it.
+static FIRST_INTERRUPT: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds on the clock `Instant` reads. `clock_gettime` is async-signal-safe.
+fn monotonic() -> u64 {
+    #[cfg(target_os = "macos")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_os = "macos"))]
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: writes only the live timespec above.
+    unsafe { libc::clock_gettime(CLOCK, &mut now) };
+    (now.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(now.tv_nsec as u64)
+}
+
+/// When the first `SIGINT` arrived.
+fn first_interrupt() -> Option<Instant> {
+    let recorded = FIRST_INTERRUPT.load(Ordering::SeqCst).checked_sub(1)?;
+    let ago = Duration::from_nanos(monotonic().saturating_sub(recorded));
+    let now = Instant::now();
+    Some(now.checked_sub(ago).unwrap_or(now))
+}
+
+/// Whether output that started at `finished` must now be cancelled: after a second `SIGINT`,
+/// or once both [`GRACE`] after the first and [`OUTPUT_GRACE`] after `finished` passed.
+fn output_expired(finished: Instant) -> bool {
+    INTERRUPTS.load(Ordering::SeqCst) > 1
+        || first_interrupt()
+            .is_some_and(|at| Instant::now() >= (at + GRACE).max(finished + OUTPUT_GRACE))
+}
 
 fn phase() -> std::sync::MutexGuard<'static, Option<Phase>> {
     PHASE.lock().unwrap_or_else(|e| e.into_inner())
@@ -39,10 +79,17 @@ fn phase() -> std::sync::MutexGuard<'static, Option<Phase>> {
 /// Takes over `SIGINT` for the command at `command`, before any effect.
 pub fn install(command: &str, mode: Mode) -> Result<(), Failure> {
     let storage = || Failure::new(Code::StorageUnavailable);
-    // SAFETY: the signal callback only increments a static atomic. Dispatch observes SIGINT
-    // even before the interrupt thread wakes to process it.
+    // SAFETY: the signal callback only reads the clock with async-signal-safe
+    // `clock_gettime` and updates static atomics. Dispatch and `settle_by` observe SIGINT even
+    // before the interrupt thread wakes to process it.
     unsafe {
         signal_hook::low_level::register(signal_hook::consts::SIGINT, || {
+            let _ = FIRST_INTERRUPT.compare_exchange(
+                0,
+                monotonic().saturating_add(1),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
             INTERRUPTS.fetch_add(1, Ordering::SeqCst);
         })
     }
@@ -55,7 +102,6 @@ pub fn install(command: &str, mode: Mode) -> Result<(), Failure> {
         dispatched: false,
         cooperating: 0,
         finishing: None,
-        interrupted: None,
     });
     std::thread::Builder::new()
         .name("spaceterm-interrupt".into())
@@ -66,9 +112,8 @@ pub fn install(command: &str, mode: Mode) -> Result<(), Failure> {
                 }
                 let guard = phase();
                 if let Some(phase) = guard.as_ref()
-                    && let Some(exit) = phase.finishing
-                    && (INTERRUPTS.load(Ordering::SeqCst) > 1
-                        || phase.interrupted.is_some_and(|at| at.elapsed() >= GRACE))
+                    && let Some((exit, finished)) = phase.finishing
+                    && output_expired(finished)
                 {
                     exit_output(exit);
                 }
@@ -85,10 +130,8 @@ fn interrupted_now() {
     let Some(phase) = guard.as_mut() else {
         return;
     };
-    let repeated = INTERRUPTS.load(Ordering::SeqCst) > 1;
-    let at = *phase.interrupted.get_or_insert_with(Instant::now);
-    if let Some(exit) = phase.finishing {
-        if repeated || at.elapsed() >= GRACE {
+    if let Some((exit, finished)) = phase.finishing {
+        if output_expired(finished) {
             exit_output(exit);
         }
         return;
@@ -210,13 +253,7 @@ pub fn interrupted() -> bool {
 
 /// When an interrupted command must stop resolving: [`GRACE`] after `SIGINT`.
 pub fn settle_by() -> Option<Instant> {
-    if !interrupted() {
-        return None;
-    }
-    phase()
-        .as_ref()
-        .and_then(|phase| phase.interrupted)
-        .map(|at| at + GRACE)
+    first_interrupt().map(|at| at + GRACE)
 }
 
 /// `deadline`, or earlier once the command was interrupted.
@@ -228,11 +265,12 @@ pub fn limit(deadline: Instant) -> Instant {
 pub const TICK: Duration = Duration::from_millis(100);
 
 /// Marks the final result as being written, and reports whether `SIGINT` arrived, which
-/// [`crate::contract::render`] then reports. Every command calls it once, as it renders.
+/// [`crate::contract::render`] then reports. Every command calls it once, as it renders. Its
+/// output has at least [`OUTPUT_GRACE`] from now.
 pub fn finish(exit: u8) -> bool {
     let mut guard = phase();
     if let Some(phase) = guard.as_mut() {
-        phase.finishing = Some(exit);
+        phase.finishing = Some((exit, Instant::now()));
     }
     interrupted()
 }

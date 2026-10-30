@@ -44,6 +44,10 @@ struct Host {
     sessions: Mutex<Vec<Id>>,
     fenced: AtomicBool,
     stopping: AtomicBool,
+    /// Runs once inside the next fence release, before the fence clears.
+    releasing: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Told each time a fence is set.
+    fencing: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 impl LaneHost for Host {
     fn fence(
@@ -53,9 +57,16 @@ impl LaneHost for Host {
         let sessions = self.sessions.lock().unwrap();
         admit(&sessions)?;
         self.fenced.store(true, Ordering::SeqCst);
+        if let Some(fencing) = self.fencing.lock().unwrap().as_ref() {
+            let _ = fencing.send(());
+        }
         Ok(())
     }
     fn release_fence(&self) {
+        let releasing = self.releasing.lock().unwrap().take();
+        if let Some(releasing) = releasing {
+            releasing();
+        }
         self.fenced.store(false, Ordering::SeqCst);
     }
     fn stopping(&self) -> bool {
@@ -406,6 +417,52 @@ fn a_settled_outcome_is_resolved_then_acknowledged_by_its_own_actor() {
             assert!(Instant::now() < deadline, "the fence was never released");
             std::thread::sleep(Duration::from_millis(50));
         }
+    });
+}
+
+#[test]
+fn a_settling_fence_watcher_never_clears_the_fence_of_an_operation_admitted_meanwhile() {
+    use std::sync::mpsc;
+    with_lane(|lane| {
+        // An earlier operation settled, and its watcher still owns the fence.
+        lane.host.fenced.store(true, Ordering::SeqCst);
+        lane.lane.watching.store(true, Ordering::SeqCst);
+        let (entered, releasing) = mpsc::channel();
+        let (resume, paused) = mpsc::channel::<()>();
+        *lane.host.releasing.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            paused.recv().unwrap();
+        }));
+        let (fencing, fenced) = mpsc::channel();
+        *lane.host.fencing.lock().unwrap() = Some(fencing);
+        let (token, _) = preview(&lane.lane, LaneAction::Stop);
+        let watcher = {
+            let lane = Arc::clone(&lane.lane);
+            std::thread::spawn(move || lane.release_if_settled())
+        };
+        // The watcher found every record settled and is clearing the fence.
+        releasing.recv().unwrap();
+        let executing = {
+            let lane = Arc::clone(&lane.lane);
+            std::thread::spawn(move || execute(&lane, LaneAction::Stop, &token, 1))
+        };
+        // The new Execute admits nothing and sets no fence until the release ends.
+        assert_eq!(
+            fenced.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        resume.send(()).unwrap();
+        assert!(watcher.join().unwrap());
+        let accepted = executing.join().unwrap();
+        assert!(
+            matches!(accepted, LaneReply::Accepted { .. }),
+            "{accepted:?}"
+        );
+        fenced.recv().unwrap();
+        // The new operation keeps its fence and has a watcher of its own.
+        assert!(lane.host.fenced.load(Ordering::SeqCst));
+        assert!(lane.lane.watching.load(Ordering::SeqCst));
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
     });
 }
 
@@ -785,6 +842,28 @@ mod flow {
             panic!("expected a preview");
         };
         (session, token)
+    }
+
+    #[test]
+    fn within_waits_only_until_its_deadline_once_one_is_set() {
+        use crate::service::lane::client::within;
+        let status = || Err::<(), _>(ServerError::Changed);
+        // Quick work reports its own result, with a deadline or without.
+        assert_eq!(
+            within("test", &|| None, status),
+            Some(Err(ServerError::Changed))
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        assert!(within("test", &|| Some(until), status).is_some());
+        // Stalled work is abandoned at the deadline.
+        let started = Instant::now();
+        let until = started + Duration::from_millis(300);
+        let stalled = within("test", &|| Some(until), move || {
+            std::thread::sleep(Duration::from_secs(5));
+            status()
+        });
+        assert!(stalled.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

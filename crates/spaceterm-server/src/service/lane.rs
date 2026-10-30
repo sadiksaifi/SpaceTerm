@@ -260,8 +260,9 @@ pub struct LaneServer {
     feed: Arc<dyn Source>,
     launch: Box<Launcher>,
     upload: Mutex<Option<Upload>>,
-    /// Held for each whole `Execute`.
+    /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
+    /// A fence watcher runs. The watcher clears it only under `executing`.
     watching: AtomicBool,
 }
 
@@ -598,12 +599,7 @@ impl LaneServer {
                     let Some(lane) = lane.upgrade() else {
                         return;
                     };
-                    if lane.host.stopping() {
-                        return;
-                    }
-                    if lane.settled().unwrap_or(false) {
-                        lane.host.release_fence();
-                        lane.watching.store(false, Ordering::SeqCst);
+                    if lane.host.stopping() || lane.release_if_settled() {
                         return;
                     }
                 }
@@ -611,6 +607,19 @@ impl LaneServer {
         if watched.is_err() {
             self.watching.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Clears the membership fence and ends the watch once every record is terminal. It holds
+    /// `executing`, so no Execute admits an operation and sets its fence between the check and
+    /// the release. An operation admitted after the release finds no watcher and starts one.
+    fn release_if_settled(&self) -> bool {
+        let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.settled().unwrap_or(false) {
+            return false;
+        }
+        self.host.release_fence();
+        self.watching.store(false, Ordering::SeqCst);
+        true
     }
 
     /// Settles what can be settled and reports whether every record is terminal.
