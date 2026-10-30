@@ -367,11 +367,13 @@ pub(super) struct AddServerSheet {
     host_invalid: bool,
     /// Whether the typed address was refused when the person last chose Set Up.
     address_invalid: bool,
-    /// Whether the optional network address is shown.
+    /// Whether the optional network address is shown. A refused address shows it; only the
+    /// person's disclosure hides it.
     address_shown: bool,
     /// Whether the typed invitation address was refused when the person last chose Join.
     endpoint_invalid: bool,
-    /// Whether the invitation's optional network address is shown.
+    /// Whether the invitation's optional network address is shown. A refused address shows it;
+    /// only the person's disclosure hides it.
     endpoint_shown: bool,
     /// What the link in the field names, or why it can't be used. `None` while it is empty.
     preview: Option<Result<Preview, DirectError>>,
@@ -699,6 +701,16 @@ impl AddServerSheet {
             .then_some(*join)
     }
 
+    /// Whether the refused network address takes keyboard focus ahead of a usable host.
+    fn address_needs_focus(&self) -> bool {
+        self.address_invalid && self.address_shown && !self.host_invalid
+    }
+
+    /// Whether the refused invitation address takes keyboard focus ahead of a usable link.
+    fn endpoint_needs_focus(&self) -> bool {
+        self.endpoint_invalid && self.endpoint_shown && self.link_usable()
+    }
+
     /// Whether the link in the field names an invitation Join can use.
     fn link_usable(&self) -> bool {
         matches!(self.preview, Some(Ok(_)))
@@ -714,9 +726,9 @@ impl AddServerSheet {
             return;
         }
         let field = match self.method {
-            Method::Ssh if self.address_invalid && !self.host_invalid => &self.address,
+            Method::Ssh if self.address_needs_focus() => &self.address,
             Method::Ssh => &self.host,
-            Method::Invitation if self.endpoint_invalid && self.link_usable() => &self.endpoint,
+            Method::Invitation if self.endpoint_needs_focus() => &self.endpoint,
             Method::Invitation => &self.link,
         };
         field.read(cx).focus_handle().focus(window, cx);
@@ -756,12 +768,8 @@ impl AddServerSheet {
                     Method::Invitation => (SheetAction::Join, FocusTarget::Link),
                 };
                 let focus = match focus {
-                    FocusTarget::Host if self.address_invalid && !self.host_invalid => {
-                        FocusTarget::Address
-                    }
-                    FocusTarget::Link if self.endpoint_invalid && self.link_usable() => {
-                        FocusTarget::Endpoint
-                    }
+                    FocusTarget::Host if self.address_needs_focus() => FocusTarget::Address,
+                    FocusTarget::Link if self.endpoint_needs_focus() => FocusTarget::Endpoint,
                     focus => focus,
                 };
                 Shape {
@@ -1954,8 +1962,8 @@ impl AddServerSheet {
             self.host_invalid.then_some(HOST_INVALID),
         );
         // The network address is optional, so it stays folded away until the person asks for it
-        // or it needs attention.
-        let shown = self.address_shown || self.address_invalid;
+        // or Set Up refuses it. Only the disclosure folds it, so an edit never hides it.
+        let shown = self.address_shown;
         let disclosure = Self::disclosure(
             appearance,
             ADDRESS_DISCLOSURE_SELECTOR,
@@ -2126,8 +2134,8 @@ impl AddServerSheet {
             _ => None,
         };
         // The network address is optional, so it stays folded away until the person asks for it
-        // or it needs attention.
-        let shown = self.endpoint_shown || self.endpoint_invalid;
+        // or Join refuses it. Only the disclosure folds it, so an edit never hides it.
+        let shown = self.endpoint_shown;
         let disclosure = Self::disclosure(
             appearance,
             ENDPOINT_DISCLOSURE_SELECTOR,
