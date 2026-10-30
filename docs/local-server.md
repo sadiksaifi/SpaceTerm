@@ -32,6 +32,15 @@ When startup has no usable Server state, recovery fills the window beneath its w
 
 Linux first setup can return an authorization requirement before service registration. The caller must obtain explicit scoped linger authorization through the existing service control, then retry startup. Cancellation before service mutation preserves the previous policy; admitted service registration or Start is observed to completion without claiming rollback.
 
+To end the local server's Terminal Sessions while keeping it running, preview the action and copy its exact token:
+
+```sh
+spaceterm --server local server end-all-sessions
+spaceterm --server local server end-all-sessions --confirm TOKEN
+```
+
+Use `--json` to read the preview from `data.confirmation`, including `token`, `expires_at` and `effects.sessions`. A preview exits 3; confirmation succeeds with exit 0 and reports `data.ended`. A wrong, expired or stale token reports `changed` and ends nothing. A paired server selector reports `local_only` and exits 5. [ADR 0048](adr/0048-end-all-sessions-from-the-selected-servers-settings.md) owns the action and its confirmation scope.
+
 ## Add a remote server
 
 Use Settings > Servers > Add Server with SSH Setup or an Invitation Link. [ADR 0029](adr/0029-enroll-remote-servers-through-add-server.md) owns setup authority, consent, completion and cancellation. Both methods save a paired QUIC connection. Configure normal OpenSSH destinations outside SpaceTerm; SSH configuration is used only for setup.

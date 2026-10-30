@@ -1,6 +1,6 @@
-//! Confirmation tokens for actions confirmed on the server's own machine without a running
-//! server: an Update or Return of a stopped server, and Unpair. No server holds a registry, so a
-//! token carries its issue time, bound with the exact observation into its digest. It expires
+//! Confirmation tokens for actions confirmed on the server's own machine without a token
+//! registry: an offline Update or Return, Unpair, or End All Sessions. Each token carries its
+//! issue time, bound with the exact observation into its digest. It expires
 //! after [`LIFETIME`], like a service-lane token (spec 6.3).
 use crate::contract::{Code, Failure};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -54,7 +54,11 @@ pub fn verify(
 ) -> Result<(), Failure> {
     let changed = || Failure::new(Code::Changed);
     let body = token.strip_prefix(PREFIX).ok_or_else(changed)?;
-    if body.len() != 16 + 64 || !body.bytes().all(|v| v.is_ascii_hexdigit()) {
+    if body.len() != 16 + 64
+        || !body
+            .bytes()
+            .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+    {
         return Err(changed());
     }
     let issued = u64::from_str_radix(&body[..16], 16).map_err(|_| changed())?;
@@ -100,6 +104,10 @@ mod tests {
             changed
         );
         assert_eq!(verify("unpair", b"device", "c1-00", now), changed);
+        let mut changed_case = issued.token.clone();
+        changed_case.replace_range(3..19, &changed_case[3..19].to_ascii_uppercase());
+        assert_ne!(changed_case, issued.token);
+        assert_eq!(verify("unpair", b"device", &changed_case, now), changed);
         // The issue time is bound into the digest, so editing it is refused.
         let mut forged = issued.token.clone();
         forged.replace_range(3..19, &format!("{:016x}", 1_800_000_500u64));
