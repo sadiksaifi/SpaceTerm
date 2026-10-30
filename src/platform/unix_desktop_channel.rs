@@ -279,7 +279,12 @@ mod tests {
                 .unwrap()
                 .with_peer(|_| Ok(effective_user().wrapping_add(1)));
             let accepted = std::thread::spawn(move || listener.accept().unwrap().is_none());
-            let client = connect_at(&endpoint.0, Duration::from_secs(5)).unwrap();
+            // The desktop may close the connection before a client could configure it, so this
+            // client connects without the CLI's own checks.
+            let client = UnixStream::connect(endpoint.0.join(SOCKET)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let request = Request::Open {
                 session: SessionContext {
                     server: [1; 32],
