@@ -56,6 +56,9 @@ enum IdentityValue {
     Fixture(u64),
     #[cfg(test)]
     FixturePath(PathBuf),
+    /// Another identity, recording where its last copy is released.
+    #[cfg(test)]
+    Released(Box<IdentityValue>, Arc<tests::ReleaseRecorder>),
 }
 
 /// Equality retains the object, so removal cannot recycle its identity into a successor.

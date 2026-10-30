@@ -647,7 +647,9 @@ impl FilePreviewPanel for Panel {
         window: &gpui::Window,
         cx: &mut gpui::App,
     ) -> Result<FilePreviewSubmission, FilePreviewError> {
-        let (target, _) = prepared.into_parts();
+        let target = prepared
+            .into_target()
+            .ok_or(FilePreviewError::StaleTarget)?;
         self.preview_with_parent(target, || window.export_external_parent(), cx)
     }
     fn dismiss(&mut self) {

@@ -12304,7 +12304,8 @@ mod shared_repositories {
                 },
                 PaneLifecycleDependencies::testing(),
             );
-            let threads = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let checks = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let releases = Arc::new(std::sync::Mutex::new(Vec::new()));
             let (harness, cx) = harness_constructing(
                 cx,
                 live(),
@@ -12314,18 +12315,47 @@ mod shared_repositories {
                     .with_client_filesystem(crate::runtime::local_filesystem()),
                 LocalFilesystemAuthority::testing_observed(
                     &crate::runtime::local_filesystem(),
-                    Arc::clone(&threads),
+                    Arc::clone(&checks),
+                    Arc::clone(&releases),
                 ),
             );
             let window_thread = std::thread::current().id();
             let reply = ask(&harness, open(LOCAL, FEATURE_PANE, &files.file(), true), cx);
             assert_eq!(reply, Reply::Done);
             assert_eq!(*preview.0.borrow(), [files.file()]);
-            let threads = threads.lock().unwrap();
-            assert!(!threads.is_empty(), "the worker checked the file");
+            // A refused preview returns its file the same way.
+            let mut ended = live();
+            ended.revision = 2;
+            if let Some(close) = &mut ended.close {
+                close.sessions[0].session = Some([43; 32]);
+            }
+            harness.publish(ended, cx);
+            assert_eq!(
+                ask(&harness, open(LOCAL, ROOT_PANE, &files.file(), true), cx),
+                Reply::Refused(Refusal::NotShown)
+            );
+            let checks = checks.lock().unwrap().clone();
+            assert!(!checks.is_empty(), "the worker checked the file");
             assert!(
-                threads.iter().all(|thread| *thread != window_thread),
-                "the window's thread touched the file"
+                checks.iter().all(|thread| *thread != window_thread),
+                "the window's thread checked the file"
+            );
+            // Every handle the checks opened closes, and none on the window's thread.
+            let started = Instant::now();
+            while releases.lock().unwrap().len() < checks.len() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "a file handle stayed open"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                releases
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|thread| *thread != window_thread),
+                "the window's thread closed a file handle"
             );
         }
 

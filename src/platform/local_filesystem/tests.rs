@@ -55,33 +55,72 @@ impl LocalFilesystemAuthority {
         )
     }
 
-    /// `inner`, with each identity check also recording the thread that made it.
+    /// `inner`, recording the thread of each identity check in `checks`, and the thread that
+    /// releases each retained identity, and so closes its handle, in `releases`.
     pub(crate) fn testing_observed(
         inner: &Self,
-        threads: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+        checks: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+        releases: Arc<Mutex<Vec<std::thread::ThreadId>>>,
     ) -> Self {
-        struct Observed(
-            Arc<dyn LocalIdentitySource>,
-            Arc<Mutex<Vec<std::thread::ThreadId>>>,
-        );
+        struct Observed {
+            inner: Arc<dyn LocalIdentitySource>,
+            checks: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+            releases: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+        }
         impl LocalIdentitySource for Observed {
             fn identify(
                 &self,
                 path: &Path,
             ) -> Result<LocalIdentityObservation, LocalFilesystemError> {
-                self.1.lock().unwrap().push(std::thread::current().id());
-                self.0.identify(path)
+                self.checks
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::current().id());
+                let mut observation = self.inner.identify(path)?;
+                let LocalObjectIdentity(value, permit) = observation.identity;
+                observation.identity = LocalObjectIdentity(
+                    IdentityValue::Released(
+                        Box::new(value),
+                        Arc::new(ReleaseRecorder(Arc::clone(&self.releases))),
+                    ),
+                    permit,
+                );
+                Ok(observation)
             }
         }
         Self::new(
             inner.paths,
-            Arc::new(Observed(Arc::clone(&inner.identity), threads)),
+            Arc::new(Observed {
+                inner: Arc::clone(&inner.identity),
+                checks,
+                releases,
+            }),
         )
     }
 
     pub(crate) fn same_source(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
     }
+}
+
+/// Records the thread that drops the last copy of an observed identity.
+pub(crate) struct ReleaseRecorder(Arc<Mutex<Vec<std::thread::ThreadId>>>);
+
+impl Drop for ReleaseRecorder {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().push(std::thread::current().id());
+    }
+}
+
+// Observation never changes which object an identity names.
+impl PartialEq for ReleaseRecorder {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for ReleaseRecorder {}
+impl std::hash::Hash for ReleaseRecorder {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
 struct Fixture(PathBuf);

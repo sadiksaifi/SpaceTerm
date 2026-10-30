@@ -257,32 +257,64 @@ impl FilePreviewTarget {
 
     /// Authorizes and revalidates `link` for a File Preview whose presentation must not touch
     /// the filesystem, as on a thread other than the window's. The filesystem work happens here.
+    /// The target's open file handle returns through `release` to be closed, because closing it
+    /// can block too, as on a network mount.
     #[cfg(feature = "desktop")]
     pub(crate) fn prepare(
         link: &HyperlinkTarget,
         local_file_capabilities: TerminalLocalFileCapabilities,
+        release: std::sync::mpsc::Sender<FilePreviewTarget>,
     ) -> Option<PreparedFilePreview> {
         let target = Self::from_link(link, local_file_capabilities)?;
         let path = target.revalidated_path()?;
-        Some(PreparedFilePreview { target, path })
+        Some(PreparedFilePreview {
+            target: Some(target),
+            path,
+            release,
+        })
     }
 }
 
 /// A File Preview target already revalidated, with the canonical path it resolved to. Presenting
-/// it does no filesystem work on the window's thread; a deferred adapter still revalidates at its
-/// own final handoff.
+/// its path does no filesystem work on the window's thread. However it ends, the target and its
+/// open file handle go back to the thread that prepared it, unless a deferred adapter takes the
+/// target to revalidate at its own final handoff.
 #[cfg(feature = "desktop")]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreparedFilePreview {
-    target: FilePreviewTarget,
+    target: Option<FilePreviewTarget>,
     path: PathBuf,
+    release: std::sync::mpsc::Sender<FilePreviewTarget>,
+}
+
+#[cfg(feature = "desktop")]
+impl std::fmt::Debug for PreparedFilePreview {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedFilePreview { .. }")
+    }
 }
 
 #[cfg(feature = "desktop")]
 impl PreparedFilePreview {
-    /// The authorized target, which a deferred adapter revalidates, and its canonical path.
-    pub(crate) fn into_parts(self) -> (FilePreviewTarget, PathBuf) {
-        (self.target, self.path)
+    /// The canonical path to present.
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The authorized target, for a deferred adapter that revalidates and owns it on its own
+    /// thread.
+    #[allow(dead_code, reason = "only a deferred preview adapter takes the target")]
+    pub(crate) fn into_target(mut self) -> Option<FilePreviewTarget> {
+        self.target.take()
+    }
+}
+
+#[cfg(feature = "desktop")]
+impl Drop for PreparedFilePreview {
+    fn drop(&mut self) {
+        if let Some(target) = self.target.take() {
+            // The preparing thread waits for it. Should it be gone, the handle closes here.
+            let _ = self.release.send(target);
+        }
     }
 }
 

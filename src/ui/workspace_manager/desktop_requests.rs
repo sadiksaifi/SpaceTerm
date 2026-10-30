@@ -234,7 +234,14 @@ impl WorkspaceManager {
             .name("desktop-file".into())
             .spawn(move || {
                 let _slot = slot;
-                let _ = validated.send(validate(&filesystem, &path, preview));
+                let (release, returned) = std::sync::mpsc::channel();
+                let _ = validated.send(validate(&filesystem, &path, preview, release));
+                // A prepared preview sends its file back however it ends, presented, refused or
+                // expired, so its handle closes here and never on the window's thread. The slot
+                // stays held until then.
+                while let Ok(target) = returned.recv() {
+                    drop(target);
+                }
             });
         if worker.is_err() {
             return Task::ready(Some(Reply::Refused(Refusal::Busy)));
@@ -325,6 +332,7 @@ fn validate(
     filesystem: &LocalFilesystemAuthority,
     path: &std::path::Path,
     preview: bool,
+    release: std::sync::mpsc::Sender<FilePreviewTarget>,
 ) -> Result<Validated, Refusal> {
     let text = path.to_str().ok_or(Refusal::FileUnavailable)?;
     if !filesystem.path_semantics().is_absolute(path) {
@@ -335,9 +343,13 @@ fn validate(
         .and_then(HyperlinkTarget::from_local_file)
         .ok_or(Refusal::FileUnavailable)?;
     if preview {
-        return FilePreviewTarget::prepare(&target, TerminalLocalFileCapabilities::Enabled)
-            .map(Validated::Preview)
-            .ok_or(Refusal::FileUnavailable);
+        return FilePreviewTarget::prepare(
+            &target,
+            TerminalLocalFileCapabilities::Enabled,
+            release,
+        )
+        .map(Validated::Preview)
+        .ok_or(Refusal::FileUnavailable);
     }
     target
         .activation_url(TerminalLocalFileCapabilities::Enabled)

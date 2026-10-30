@@ -52,8 +52,8 @@ pub(crate) trait FilePreviewPanel {
         _: &gpui::Window,
         _: &mut gpui::App,
     ) -> Result<FilePreviewSubmission, FilePreviewError> {
-        let (_, path) = prepared.into_parts();
-        self.preview_file(&path)
+        // Dropping `prepared` returns its file handle to the thread that prepared it.
+        self.preview_file(prepared.path())
             .map(|()| FilePreviewSubmission::Presented)
     }
     fn dismiss(&mut self);
