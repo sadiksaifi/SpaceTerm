@@ -50,9 +50,12 @@ pub(crate) struct State {
     wake: Option<Arc<dyn Wake>>,
     /// Runs after each revocation, whichever transport asked for it.
     revoked: Option<Revoked>,
-    /// Evicted agent identities whose control grants are still being released, and the signal
-    /// that one finished. The release runs outside this lock, so a returning agent waits for it.
-    retiring: std::collections::BTreeSet<[u8; 32]>,
+    /// Agent identities that may not register yet, each with the number of [`Retirement`]s that
+    /// hold it, and the signal that one ended. An admission that would evict a name holds every
+    /// idle name while the pane service reports which of them hold nothing, and an evicted
+    /// identity is held while its control grants are released. Both run outside this lock, so a
+    /// returning agent waits for them.
+    retiring: std::collections::BTreeMap<[u8; 32], usize>,
     retired_agent: Arc<Condvar>,
 }
 impl State {
@@ -332,19 +335,68 @@ impl State {
             )
             .map_err(|_| DirectError::Capacity)
     }
+    /// Whether admitting `agent` under `paired` now evicts another name.
+    pub(crate) fn evicts(
+        &mut self,
+        paired: &PairedDevice,
+        agent: &crate::protocol::AgentName,
+    ) -> Result<bool, DirectError> {
+        self.authorized(paired)?;
+        let device = self
+            .record
+            .devices
+            .iter()
+            .find(|device| device.info.pairing == paired.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?;
+        Ok(!device.agents.contains(agent) && device.agents.len() >= storage::MAX_AGENTS)
+    }
+    /// The agent identities that admitting `agent` under `paired` could evict: every listed name
+    /// with no live connection, from least to most recently admitted. They are held in
+    /// `retiring` until the caller releases them, so none registers, and none can gain an edit
+    /// outcome or a run receipt, while the pane service reports which of them hold one. `None`
+    /// when `agent` evicts nothing.
+    pub(crate) fn reserve_evictable(
+        &mut self,
+        paired: &PairedDevice,
+        agent: &crate::protocol::AgentName,
+    ) -> Result<Option<Vec<[u8; 32]>>, DirectError> {
+        if !self.evicts(paired, agent)? {
+            return Ok(None);
+        }
+        let idle: Vec<_> = self
+            .record
+            .devices
+            .iter()
+            .filter(|device| device.info.pairing == paired.pairing)
+            .flat_map(|device| {
+                device
+                    .agents
+                    .iter()
+                    .map(|known| known.client(&device.info.client))
+            })
+            .filter(|client| !self.connections.serves(*client))
+            .collect();
+        self.hold_retiring(&idle);
+        Ok(Some(idle))
+    }
     /// Records that `paired` admitted `agent`, before the agent's connection can create any
     /// state, so revoking the pairing retires the agent too. Callers hold this lock through
     /// [`Self::register`], so no revocation falls between the two.
     ///
     /// The pairing's names are kept from least to most recently admitted. A new name past
-    /// [`storage::MAX_AGENTS`] evicts the least recently admitted name with no live connection,
-    /// and returns its Client Identity. The caller releases that identity's control grants
-    /// through [`Retirement`], so revocation never needs a name it forgot. An evicted agent that
-    /// returns is admitted again once that release ends.
+    /// [`storage::MAX_AGENTS`] evicts the least recently admitted name whose identity is in
+    /// `settled` and has no live connection, and returns its Client Identity. `settled` holds
+    /// the identities from [`Self::reserve_evictable`] that keep no edit outcome or run receipt,
+    /// because revocation reaches only listed names and nothing else would ever free those. The
+    /// new name is refused with `Capacity` when no listed name is settled and idle. The caller
+    /// releases the evicted identity's control grants through [`Retirement`], so revocation
+    /// never needs a name it forgot. An evicted agent that returns is admitted again once that
+    /// release ends.
     pub(crate) fn admit_agent(
         &mut self,
         paired: &PairedDevice,
         agent: &crate::protocol::AgentName,
+        settled: &std::collections::BTreeSet<[u8; 32]>,
     ) -> Result<Option<[u8; 32]>, DirectError> {
         self.authorized(paired)?;
         let device = self
@@ -362,7 +414,8 @@ impl State {
         if agents.len() >= storage::MAX_AGENTS {
             let index = agents
                 .iter()
-                .position(|known| !self.connections.serves(known.client(&device.info.client)))
+                .map(|known| known.client(&device.info.client))
+                .position(|client| settled.contains(&client) && !self.connections.serves(client))
                 .ok_or(DirectError::Capacity)?;
             evicted = Some(agents.remove(index).client(&device.info.client));
         }
@@ -375,9 +428,29 @@ impl State {
             .agents = agents;
         self.commit(next)?;
         if let Some(evicted) = evicted {
-            self.retiring.insert(evicted);
+            self.hold_retiring(&[evicted]);
         }
         Ok(evicted)
+    }
+    /// Holds each of `clients` in `retiring` once more.
+    fn hold_retiring(&mut self, clients: &[[u8; 32]]) {
+        for client in clients {
+            *self.retiring.entry(*client).or_default() += 1;
+        }
+    }
+    /// Ends one hold of each of `clients` in `retiring`, and wakes the agents waiting on them.
+    fn release_retiring(&mut self, clients: &[[u8; 32]]) {
+        for client in clients {
+            if let std::collections::btree_map::Entry::Occupied(mut held) =
+                self.retiring.entry(*client)
+            {
+                *held.get_mut() -= 1;
+                if *held.get() == 0 {
+                    held.remove();
+                }
+            }
+        }
+        self.retired_agent.notify_all();
     }
     /// The enrolled public key of `paired`'s device.
     fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
@@ -1385,28 +1458,69 @@ pub(crate) fn serve(
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
-    let (evicted, registered) = {
+    // A new name past the limit may evict only a name that holds nothing. The idle names stay
+    // held while the pane service reports which hold something, and the two locks are never
+    // nested.
+    let (evicted, registered, reserved) = loop {
+        let reserved = match &agent {
+            Some(agent) => state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reserve_evictable(&paired, agent)?,
+            None => None,
+        }
+        .map(|clients| Retirement {
+            state: Arc::clone(&state),
+            clients,
+        });
+        let settled = match &reserved {
+            Some(reserved) if !reserved.clients.is_empty() => {
+                let panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+                reserved
+                    .clients
+                    .iter()
+                    .filter(|client| !panes.holds(**client))
+                    .copied()
+                    .collect()
+            }
+            _ => Default::default(),
+        };
         let mut locked = after_retirement(&state, client);
+        // Another admission filled the list or evicted this name after the reservation, so the
+        // eviction it now needs was never reserved.
+        if let Some(agent) = &agent
+            && reserved.is_none()
+            && locked.evicts(&paired, agent)?
+        {
+            continue;
+        }
         let evicted = match &agent {
-            Some(agent) => locked.admit_agent(&paired, agent)?,
+            Some(agent) => locked.admit_agent(&paired, agent, &settled)?,
             None => None,
         };
-        let registered = locked.register(
-            &paired,
-            generation,
-            connection,
-            client,
-            Some(outbox.clone()),
-            Box::new(carrier.sever()),
-        );
-        (evicted, registered)
+        // Unregisters when serving ends, also when the release below panics.
+        let registered = locked
+            .register(
+                &paired,
+                generation,
+                connection,
+                client,
+                Some(outbox.clone()),
+                Box::new(carrier.sever()),
+            )
+            .map(|()| Registered {
+                state: Arc::clone(&state),
+                connection,
+            });
+        break (evicted, registered, reserved);
     };
+    drop(reserved);
     // The direct-network lock is released first, as for a revocation. The evicted identity
-    // keeps its outcomes and run receipts, and loses only its control grants.
+    // holds no outcome or run receipt, and loses its control grants.
     if let Some(evicted) = evicted {
         let _retirement = Retirement {
             state: Arc::clone(&state),
-            client: evicted,
+            clients: vec![evicted],
         };
         environment
             .panes
@@ -1414,12 +1528,7 @@ pub(crate) fn serve(
             .unwrap_or_else(|e| e.into_inner())
             .release_control(evicted);
     }
-    registered?;
-    // Unregisters when serving ends, also when it panics.
-    let _registered = Registered {
-        state: Arc::clone(&state),
-        connection,
-    };
+    let _registered = registered?;
     state
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -1513,22 +1622,26 @@ fn after_retirement(state: &Shared, client: [u8; 32]) -> MutexGuard<'_, State> {
     let state = state.lock().unwrap_or_else(|e| e.into_inner());
     let retired = Arc::clone(&state.retired_agent);
     retired
-        .wait_while(state, |state| state.retiring.contains(&client))
+        .wait_while(state, |state| state.retiring.contains_key(&client))
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// An evicted agent identity whose control grants are being released. Dropping it, also when
-/// the release panics, lets that agent be admitted again.
+/// Agent identities held in `retiring`: the idle names an admission may evict, or an evicted
+/// identity whose control grants are being released. Dropping it, also when that work panics,
+/// lets those agents be admitted again.
 struct Retirement {
     state: Shared,
-    client: [u8; 32],
+    clients: Vec<[u8; 32]>,
 }
 
 impl Drop for Retirement {
     fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.retiring.remove(&self.client);
-        state.retired_agent.notify_all();
+        if !self.clients.is_empty() {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .release_retiring(&self.clients);
+        }
     }
 }
 

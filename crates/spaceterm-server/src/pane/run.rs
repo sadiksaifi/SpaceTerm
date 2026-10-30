@@ -308,6 +308,13 @@ impl RunTable {
         retire && self.receipts.remove(run).is_some()
     }
 
+    /// Whether `client` has a receipt, pending or settled, that it has not acknowledged.
+    pub fn holds(&self, client: &[u8; 32]) -> bool {
+        self.receipts
+            .values()
+            .any(|entry| entry.admission.client == *client)
+    }
+
     /// Forgets every receipt of a revoked Client Identity.
     pub fn forget(&mut self, client: &[u8; 32]) {
         self.receipts
@@ -480,12 +487,15 @@ mod tests {
         let mut table = admitted(at);
         let run = RunId([1; 16]);
         assert!(!table.acknowledge(&CLIENT, &run), "a pending run stays");
+        assert!(table.holds(&CLIENT));
         table.session_ended(&PANE);
         assert_eq!(table.receipt(&[8; 32], &run), None);
         assert!(!table.acknowledge(&[8; 32], &run));
+        assert!(table.holds(&CLIENT) && !table.holds(&[8; 32]));
 
         assert!(table.acknowledge(&CLIENT, &run));
         assert_eq!(table.receipt(&CLIENT, &run), None);
+        assert!(!table.holds(&CLIENT));
     }
 
     #[test]

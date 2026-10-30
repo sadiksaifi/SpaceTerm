@@ -612,6 +612,12 @@ impl State {
                 d.pending.last().map_or(d.retired + 1, |o| o.sequence + 1)
             })
     }
+    /// Whether `device` retains an edit outcome it has not acknowledged.
+    pub fn holds(&self, device: Id) -> bool {
+        self.devices
+            .iter()
+            .any(|d| d.device == device && !d.pending.is_empty())
+    }
     /// Forgets a revoked device's record and every outcome it retains. A revoked identity never
     /// connects again, so nothing would acknowledge them. Returns `false`, changing nothing, while
     /// the device's Worktree write is still in progress.

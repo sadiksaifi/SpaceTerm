@@ -454,6 +454,11 @@ pub trait HostCommands: Send {
     /// Releases only this identity's live and dormant control grants, and keeps its edit
     /// outcomes and run receipts.
     fn release_control(&mut self, _client: [u8; 32]) {}
+    /// Whether this identity keeps an unacknowledged edit outcome or run receipt. See
+    /// `PaneService::holds`.
+    fn holds(&self, _client: [u8; 32]) -> bool {
+        false
+    }
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
     /// Starts read `id` of `connection`. Returns its reply when it settles at once. Otherwise the
     /// read runs on another thread, which wakes the host when it settles, and the next
@@ -1424,6 +1429,9 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     fn release_control(&mut self, client: [u8; 32]) {
         self.host.release_control(client);
         self.bell.ring();
+    }
+    fn holds(&self, client: [u8; 32]) -> bool {
+        self.host.holds(client)
     }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         let dispatch = self.dispatch(peer, id, operation);

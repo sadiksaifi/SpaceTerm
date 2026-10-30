@@ -454,7 +454,10 @@ fn a_settling_fence_watcher_never_clears_the_fence_of_an_operation_admitted_mean
         resume.send(()).unwrap();
         assert!(watcher.join().unwrap());
         let accepted = executing.join().unwrap();
-        assert!(matches!(accepted, LaneReply::Accepted { .. }), "{accepted:?}");
+        assert!(
+            matches!(accepted, LaneReply::Accepted { .. }),
+            "{accepted:?}"
+        );
         fenced.recv().unwrap();
         // The new operation keeps its fence and has a watcher of its own.
         assert!(lane.host.fenced.load(Ordering::SeqCst));
