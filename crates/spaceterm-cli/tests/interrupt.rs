@@ -269,6 +269,80 @@ fn stalled_output_is_interruptible() {
     }
 }
 
+// The child plays a command that resolves until exactly its settlement instant, as a lane
+// flow, an offline activation or a local Stop does, and only then renders its result.
+#[test]
+#[ignore = "child process for a_result_rendered_at_the_settlement_instant_is_written_whole"]
+fn late_result_child() {
+    use spaceterm_cli::{contract, interrupt};
+    use std::io::Write;
+    if std::env::var_os("SPACETERM_TEST_LATE_RESULT").is_none() {
+        return;
+    }
+    let mode = contract::Mode {
+        json: true,
+        ..Default::default()
+    };
+    interrupt::install("server.restart", mode).unwrap();
+    interrupt::dispatch().unwrap();
+    std::io::stderr().write_all(b"ready\n").unwrap();
+    while !interrupt::interrupted() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // The signal records its own arrival, so the settlement instant is known at once.
+    let settle_by = interrupt::settle_by().expect("an interrupt reports its settlement instant");
+    assert!(settle_by <= Instant::now() + interrupt::GRACE);
+    std::thread::sleep(settle_by.saturating_duration_since(Instant::now()));
+    let envelope = contract::Envelope::ok(
+        "server.restart",
+        None,
+        serde_json::json!({ "operation": "0f".repeat(16) }),
+    );
+    let interrupted = interrupt::finish(envelope.exit());
+    // A reader that drains slowly, past the interrupt thread's next check.
+    std::thread::sleep(interrupt::TICK * 3);
+    std::process::exit(contract::render(
+        &envelope,
+        "",
+        "",
+        mode,
+        interrupted,
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    ) as i32);
+}
+
+#[test]
+#[ignore = "process interrupt checks; run mise run cli:io:test"]
+fn a_result_rendered_at_the_settlement_instant_is_written_whole() {
+    use std::io::BufRead;
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "late_result_child", "--ignored", "--nocapture"])
+        .env("SPACETERM_TEST_LATE_RESULT", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut process = Process(Some(child));
+    let mut stderr = std::io::BufReader::new(process.0.as_mut().unwrap().stderr.take().unwrap());
+    let mut ready = String::new();
+    stderr.read_line(&mut ready).unwrap();
+    assert_eq!(ready, "ready\n");
+    process.interrupt();
+    // The pipe is drained while the child runs, so only the output bound could cut it short.
+    let (output, elapsed) = process.wait(Duration::from_secs(8));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(130), "{stdout}");
+    assert!(elapsed >= Duration::from_millis(4900), "{elapsed:?}");
+    let envelope: serde_json::Value = stdout
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .unwrap_or_else(|| panic!("no envelope in {stdout}"));
+    assert_eq!(envelope["error"]["code"], "interrupted");
+    assert_eq!(envelope["data"]["operation"], "0f".repeat(16));
+}
+
 // Each child installs the real signal handler and runs the send handler. The transport holds
 // the paste outcome until SIGINT arrives, then delivers it inside the settlement grace.
 #[test]
