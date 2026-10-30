@@ -845,6 +845,28 @@ mod flow {
     }
 
     #[test]
+    fn within_waits_only_until_its_deadline_once_one_is_set() {
+        use crate::service::lane::client::within;
+        let status = || Err::<(), _>(ServerError::Changed);
+        // Quick work reports its own result, with a deadline or without.
+        assert_eq!(
+            within("test", &|| None, status),
+            Some(Err(ServerError::Changed))
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        assert!(within("test", &|| Some(until), status).is_some());
+        // Stalled work is abandoned at the deadline.
+        let started = Instant::now();
+        let until = started + Duration::from_millis(300);
+        let stalled = within("test", &|| Some(until), move || {
+            std::thread::sleep(Duration::from_secs(5));
+            status()
+        });
+        assert!(stalled.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
     fn a_restart_settles_after_the_server_returns_with_a_new_boot() {
         with_lane(|lane| {
             let switch = Arc::new(Switch::default());

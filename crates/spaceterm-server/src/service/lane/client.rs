@@ -17,8 +17,10 @@ const POLL: Duration = Duration::from_secs(1);
 /// A session idle this long is replaced before `Execute`. The server closes a lane that stays
 /// silent for 30 s, for example while a person answers a confirmation prompt.
 const STALE: Duration = Duration::from_secs(20);
-/// How often the flow reads its deadline again while a connection or request blocks.
+/// How often [`within`] reads its deadline again while its work blocks.
 const CHECK: Duration = Duration::from_millis(100);
+/// The thread name of lane I/O that [`within`] runs.
+const LANE_IO: &str = "spaceterm-lane-io";
 
 /// Opens and admits a fresh service-lane connection.
 pub(crate) trait Connector: Send + Sync {
@@ -66,8 +68,10 @@ impl Session {
     ) -> Result<Self, ServerError> {
         let connector = Arc::clone(connector);
         let fixed = deadline();
-        let stream =
-            within(deadline, move || connector.connect(fixed)).ok_or(ServerError::Protocol)??;
+        let stream = within(LANE_IO, &|| Some(deadline()), move || {
+            connector.connect(fixed)
+        })
+        .ok_or(ServerError::Protocol)??;
         Ok(Self {
             stream: Some(stream),
             used: Instant::now(),
@@ -99,7 +103,7 @@ impl Session {
         let mut stream = self.stream.take().ok_or(ServerError::Protocol)?;
         self.used = Instant::now();
         let fixed = deadline();
-        let (stream, reply) = within(deadline, move || {
+        let (stream, reply) = within(LANE_IO, &|| Some(deadline()), move || {
             let reply = stream
                 .send(&bytes, fixed)
                 .and_then(|()| stream.receive(MAX_FRAME, fixed));
@@ -131,24 +135,29 @@ fn frame(request: &LaneRequest) -> Result<Vec<u8>, ServerError> {
     Ok(bytes)
 }
 
-/// Runs blocking lane I/O on its own thread, so the caller stops waiting as soon as
-/// `deadline()` passes. The deadline is read again every [`CHECK`], so an interrupt that moves it
-/// closer ends the wait while a stalled server holds the request. Abandoned I/O ends at its own
-/// fixed deadline. `None` means the deadline passed first.
-fn within<T: Send + 'static>(
-    deadline: &dyn Fn() -> Instant,
+/// Runs blocking `work` on its own thread named `name`, so the caller stops waiting as soon as
+/// `deadline()` passes. `deadline()` is read again every [`CHECK`], so an interrupt that sets it
+/// or moves it closer ends the wait while a stalled server or activation still holds `work`.
+/// `None` from `deadline()` means no deadline yet. Abandoned work runs on until it ends by
+/// itself, such as lane I/O at its own fixed deadline. `None` means the deadline passed first.
+pub fn within<T: Send + 'static>(
+    name: &str,
+    deadline: &dyn Fn() -> Option<Instant>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
-        .name("spaceterm-lane-io".into())
+        .name(name.into())
         .spawn(move || {
             let _ = sender.send(work());
         })
         .ok()?;
     loop {
-        let left = deadline().checked_duration_since(Instant::now())?;
-        match receiver.recv_timeout(left.min(CHECK)) {
+        let wait = match deadline() {
+            None => CHECK,
+            Some(until) => until.checked_duration_since(Instant::now())?.min(CHECK),
+        };
+        match receiver.recv_timeout(wait) {
             Ok(value) => return Some(value),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return None,

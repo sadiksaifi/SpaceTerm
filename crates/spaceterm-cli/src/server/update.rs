@@ -14,6 +14,7 @@ use crate::contract::{
 };
 use base64::Engine;
 use spaceterm_server::service::activation::{ActivationPhase, ActivationStatus};
+use spaceterm_server::service::lane::client::within;
 use spaceterm_server::service::lane::{
     LaneAction, LaneEffects, LaneReply, LaneRequest, LaneUpdateKind, LaneVersion, MAX_CHUNK,
     Offline,
@@ -624,10 +625,9 @@ fn stopped(
         if let Err(failure) = crate::interrupt::dispatch() {
             return fail(failure);
         }
-        let returned = within_grace(
-            move || service.return_to_previous(approval),
-            &crate::interrupt::settle_by,
-        );
+        let returned = within(ACTIVATION, &crate::interrupt::settle_by, move || {
+            service.return_to_previous(approval)
+        });
         return offline_activated(routed, ServiceAction::Return, returned, to);
     }
     let staged = match files {
@@ -669,44 +669,18 @@ fn stopped(
     if let Err(failure) = crate::interrupt::dispatch() {
         return fail(failure);
     }
-    let activated = within_grace(
-        move || service.activate(approval),
-        &crate::interrupt::settle_by,
-    );
+    let activated = within(ACTIVATION, &crate::interrupt::settle_by, move || {
+        service.activate(approval)
+    });
     offline_activated(routed, ServiceAction::Update, activated, to)
 }
 
 type Activated = Result<ActivationStatus, spaceterm_server::ServerError>;
 
-/// Runs a dispatched activation and waits for its result. Once `settle_by` reports an interrupt,
-/// the wait ends at that instant. `None` means the result did not arrive in time, so only a
-/// later `server update` or `server start` can settle the activation.
-fn within_grace(
-    activate: impl FnOnce() -> Activated + Send + 'static,
-    settle_by: &dyn Fn() -> Option<Instant>,
-) -> Option<Activated> {
-    use std::sync::mpsc::RecvTimeoutError;
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("spaceterm-activation".into())
-        .spawn(move || {
-            let _ = sender.send(activate());
-        })
-        .ok()?;
-    loop {
-        let wait = match settle_by() {
-            None => crate::interrupt::TICK,
-            Some(until) => until
-                .checked_duration_since(Instant::now())?
-                .min(crate::interrupt::TICK),
-        };
-        match receiver.recv_timeout(wait) {
-            Ok(activated) => return Some(activated),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return None,
-        }
-    }
-}
+/// The thread that runs a dispatched offline activation. Once `settle_by` reports an interrupt,
+/// [`within`] waits for its result only until that instant. A result that did not arrive by then
+/// is settled by a later `server update` or `server start`.
+const ACTIVATION: &str = "spaceterm-activation";
 
 /// The reply of an offline activation, or an unresolved one when its result never arrived.
 fn offline_activated(
@@ -842,30 +816,6 @@ mod tests {
             kind: Some(kind),
             to_major: None,
         }
-    }
-
-    #[test]
-    fn an_interrupted_offline_activation_waits_only_until_its_settlement_instant() {
-        let status = || Err(spaceterm_server::ServerError::Changed);
-        // A quick activation reports its own result, interrupted or not.
-        assert_eq!(
-            within_grace(status, &|| None),
-            Some(Err(spaceterm_server::ServerError::Changed))
-        );
-        let until = Instant::now() + Duration::from_secs(5);
-        assert!(within_grace(status, &|| Some(until)).is_some());
-        // A stalled one is abandoned at the settlement instant.
-        let started = Instant::now();
-        let until = started + Duration::from_millis(300);
-        let stalled = within_grace(
-            move || {
-                std::thread::sleep(Duration::from_secs(5));
-                status()
-            },
-            &|| Some(until),
-        );
-        assert!(stalled.is_none());
-        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
