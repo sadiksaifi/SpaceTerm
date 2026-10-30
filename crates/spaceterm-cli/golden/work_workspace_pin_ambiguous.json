@@ -11,7 +11,7 @@
         "worktree": null
       },
       {
-        "directory": "",
+        "directory": "/tools",
         "id": "0202020202020202020202020202020202020202020202020202020202020202",
         "label": "tools",
         "level": "workspace",
