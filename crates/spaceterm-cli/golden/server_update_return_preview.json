@@ -1,0 +1,39 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.update",
+  "status": "confirmation_required",
+  "server": {
+    "name": "local",
+    "route": "local",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "confirmation": {
+      "token": "c1-efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "expires_at": "2026-10-30T12:10:00Z",
+      "effects": {
+        "from": {
+          "version": "0.8.0",
+          "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "to": {
+          "version": "0.7.0",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "kind": "return",
+        "ends_sessions": 0,
+        "sessions": []
+      }
+    }
+  },
+  "error": {
+    "code": "confirmation_required",
+    "class": "action_required",
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}

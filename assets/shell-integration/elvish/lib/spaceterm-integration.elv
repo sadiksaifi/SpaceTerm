@@ -25,7 +25,15 @@ if (and (has-env SPACETERM_PROMPT_OWNER) (re:match '^[0-9a-f]+$' $E:SPACETERM_PR
   set spaceterm-owner = ';spaceterm='$E:SPACETERM_PROMPT_OWNER
 }
 
+# The user's configuration may set PATH after this module loads, so the server's own CLI goes
+# first at the first prompt.
+var spaceterm-cli-path = (has-env SPACETERM_CLI)
 fn spaceterm-prompt {
+  if $spaceterm-cli-path {
+    set spaceterm-cli-path = $false
+    var dir = (str:trim-right (re:replace '[^/]*$' '' $E:SPACETERM_CLI) /)
+    set paths = [$dir (each {|entry| if (not-eq $entry $dir) { put $entry } } $paths)]
+  }
   printf "\e]7;file://localhost%s\a\e]133;A;redraw=1%s\a" (spaceterm-encode $pwd) $spaceterm-owner
 }
 fn spaceterm-command {|_| printf "\e]133;B\a\e]133;C%s\a" $spaceterm-owner }

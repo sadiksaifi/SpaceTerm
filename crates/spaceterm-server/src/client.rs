@@ -57,6 +57,53 @@ struct ClientCache {
     scope: std::sync::OnceLock<ClientScope>,
 }
 
+/// Where a CLI connection goes.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one route is built per command and moved into its connection"
+)]
+pub enum CliRoute {
+    /// The server of this account on this machine, over account IPC.
+    Local,
+    /// A paired server over QUIC. `route` is the Saved Connection's route ID.
+    Paired {
+        route: [u8; 32],
+        paired: crate::direct::PairedDevice,
+        connector: Arc<dyn crate::direct::DirectConnector>,
+    },
+}
+
+/// A CLI handle's identity on its route: the base identity, or an agent derived from it.
+#[derive(Clone)]
+struct CliIdentity {
+    /// `cli/routes/<route>`, under `clients`.
+    route: String,
+    agent: Option<crate::protocol::AgentName>,
+}
+
+impl CliIdentity {
+    fn new(route: Option<&[u8; 32]>, agent: Option<crate::protocol::AgentName>) -> Self {
+        let route = route.map_or_else(
+            || "local".to_owned(),
+            |route| route.iter().map(|b| format!("{b:02x}")).collect(),
+        );
+        Self {
+            route: format!("cli/routes/{route}"),
+            agent,
+        }
+    }
+    fn base_account(&self) -> String {
+        format!("{}/base", self.route)
+    }
+    /// The identity's directory under `clients`.
+    fn account(&self) -> String {
+        match &self.agent {
+            None => self.base_account(),
+            Some(agent) => format!("{}/agents/{}", self.route, agent.as_str()),
+        }
+    }
+}
+
 /// Resolving this handle never reads or writes storage and never starts a process.
 #[derive(Clone)]
 pub struct ServerConnection {
@@ -67,6 +114,8 @@ pub struct ServerConnection {
     development: Option<String>,
     computer: std::sync::Arc<dyn crate::computer_name::ComputerName>,
     direct: Option<std::sync::Arc<DirectRoute>>,
+    /// Present for a CLI handle, which keeps its state under `clients/cli`.
+    cli: Option<Arc<CliIdentity>>,
     shared: std::sync::Arc<SharedLink>,
     client_cache: std::sync::Arc<ClientCache>,
 }
@@ -137,6 +186,18 @@ impl ServerConnection {
             .ok_or(ServerError::AuthenticationRefused)
     }
 
+    /// The server ID this handle admitted to, or bound to at construction for a paired route.
+    /// It is a nonsecret fence.
+    pub fn admitted_server_id(&self) -> Result<[u8; 32], ServerError> {
+        self.client_scope().map(|scope| scope.server)
+    }
+
+    /// The Client Identity the server admitted this handle as: for a CLI agent, the one derived
+    /// from the base identity. It is a nonsecret fence that grants nothing.
+    pub fn admitted_client_id(&self) -> Result<[u8; 32], ServerError> {
+        self.client_scope().map(|scope| scope.client)
+    }
+
     fn scope_for(&self, client: [u8; 32], server: [u8; 32]) -> ClientScope {
         ClientScope {
             application: self.identity.clone(),
@@ -184,12 +245,35 @@ impl ServerConnection {
         }
         Ok(directory)
     }
+    /// The Client Identity the server admits this handle as: an agent's is derived from the
+    /// base one.
     fn client_id(&self) -> Result<[u8; 32], ServerError> {
+        let base = self.base_client_id()?;
+        Ok(self.effective_client(&base))
+    }
+    fn effective_client(&self, base: &[u8; 32]) -> [u8; 32] {
+        match self.agent() {
+            Some(agent) => agent.client(base),
+            None => *base,
+        }
+    }
+    /// The identity this handle presents in its Hello: the pairing's on a paired route, else
+    /// the retained local one. A CLI agent shares its route's base identity.
+    fn base_client_id(&self) -> Result<[u8; 32], ServerError> {
         if let Some(direct) = &self.direct {
             self.client_directory()?;
             return Ok(direct.paired.client);
         }
-        let directory = self.client_directory()?;
+        let directory = match &self.cli {
+            Some(cli) if cli.agent.is_some() => {
+                self.client_directory()?;
+                Directory::open(
+                    &self.paths.data.join("clients").join(cli.base_account()),
+                    true,
+                )?
+            }
+            _ => self.client_directory()?,
+        };
         let _lock = directory.lock("identity.lock", false)?;
         if let Some(record) = directory.read_json::<ClientIdentity>("client.json")? {
             if record.format != "account-local-1" || record.client == [0; 32] {
@@ -209,6 +293,12 @@ impl ServerConnection {
     }
     /// What other clients call this one while it controls a Pane.
     fn client_name(&self) -> crate::pane::control::ClientName {
+        if let Some(cli) = &self.cli {
+            return crate::pane::control::ClientName::for_cli(
+                self.computer.as_ref(),
+                cli.agent.as_ref(),
+            );
+        }
         crate::pane::control::ClientName::for_computer(
             self.computer.as_ref(),
             self.development.as_deref(),
@@ -263,6 +353,20 @@ impl ServerConnection {
     pub fn shared_journal(&self) -> Result<crate::hierarchy::ClientJournal, ServerError> {
         crate::hierarchy::ClientJournal::open(
             self.client_directory()?,
+            self.server_id()?,
+            self.client_id()?,
+        )
+    }
+    /// The journal writer of this handle's identity under `lock`, which the caller took on the
+    /// identity directory's `operations.lock`. A CLI holds that lock from sequence allocation
+    /// through acknowledgement.
+    pub fn shared_journal_locked(
+        &self,
+        lock: crate::storage::Lock,
+    ) -> Result<crate::hierarchy::ClientJournal, ServerError> {
+        crate::hierarchy::ClientJournal::open_locked(
+            self.client_directory()?,
+            lock,
             self.server_id()?,
             self.client_id()?,
         )
@@ -340,6 +444,39 @@ impl ServerConnection {
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
         Self::with_paths(Paths::for_identity(directory_name)?)
     }
+    /// A CLI connection in the `clients/cli` namespace, as the base identity of `route` or as
+    /// `agent`. It never reads the desktop's client record, Saved Connections or credentials.
+    pub fn for_cli(
+        identity: &str,
+        route: CliRoute,
+        agent: Option<crate::protocol::AgentName>,
+    ) -> Result<Self, ServerError> {
+        Self::for_identity(identity)?.into_cli(route, agent)
+    }
+    fn into_cli(
+        self,
+        route: CliRoute,
+        agent: Option<crate::protocol::AgentName>,
+    ) -> Result<Self, ServerError> {
+        let mut handle = self;
+        handle.development = None;
+        match route {
+            CliRoute::Local => {
+                let cli = CliIdentity::new(None, agent);
+                handle.account = cli.account();
+                handle.cli = Some(Arc::new(cli));
+                Ok(handle)
+            }
+            CliRoute::Paired {
+                route,
+                paired,
+                connector,
+            } => {
+                handle.cli = Some(Arc::new(CliIdentity::new(Some(&route), agent)));
+                handle.with_direct(route, paired, connector)
+            }
+        }
+    }
     pub(crate) fn with_paths(paths: Paths) -> Result<Self, ServerError> {
         let development = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT")
             .map(|name| name.into_string().map_err(|_| ServerError::Unsupported))
@@ -355,9 +492,13 @@ impl ServerConnection {
             development,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         })
+    }
+    fn agent(&self) -> Option<&crate::protocol::AgentName> {
+        self.cli.as_ref().and_then(|cli| cli.agent.as_ref())
     }
     /// Whether this route has owning-machine local file authority.
     pub fn is_account_local(&self) -> bool {
@@ -386,26 +527,40 @@ impl ServerConnection {
                 return Err(ServerError::AuthenticationRefused);
             }
             // `with_direct` fixed the pin's build to this handle's identity.
-            let carrier = connection.admit((&direct.paired.client, &self.client_name()))?;
+            let carrier = connection.admit(protocol::Caller {
+                client: &direct.paired.client,
+                name: &self.client_name(),
+                agent: self.agent(),
+            })?;
             return Ok((
                 carrier,
-                self.scope_for(direct.paired.client, direct.paired.pin.server),
+                self.scope_for(
+                    self.effective_client(&direct.paired.client),
+                    direct.paired.pin.server,
+                ),
             ));
         }
         crate::service::check_admission(&self.paths, crate::service::OPERATION_LIMIT, cancelled)?;
         let mut stream = host::connect(&self.paths)?;
-        let client = self.client_id()?;
+        let base = self.base_client_id()?;
         let server = self.server_id()?;
         protocol::admit_client(
             &mut stream,
-            (&client, &self.client_name()),
+            protocol::Caller {
+                client: &base,
+                name: &self.client_name(),
+                agent: self.agent(),
+            },
             &server,
             &self.identity,
             &[protocol::MAJOR],
         )?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| ServerError::Protocol)?;
-        Ok((Box::new(carrier), self.scope_for(client, server)))
+        Ok((
+            Box::new(carrier),
+            self.scope_for(self.effective_client(&base), server),
+        ))
     }
     /// Opens a new connection of its own, separate from the shared one. `events` receives its
     /// pushed inventory and health. Dropping every handle of the link closes it.
@@ -425,6 +580,19 @@ impl ServerConnection {
     /// none is live. A link that ended is never reused; its pending requests already failed.
     pub fn link(&self) -> Result<ServerLink, ServerError> {
         self.link_with(None)
+    }
+    /// Closes the shared connection, including links retained by this handle's clones.
+    /// The route owner must disable its connector before disconnecting to prevent reconnects.
+    pub fn disconnect(&self) {
+        let link = self
+            .shared
+            .link
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(link) = link {
+            link.close();
+        }
     }
     /// [`Self::link`] for a worker that may stop while admission waits for a Restart or Update.
     /// `cancelled` ends that wait with ServiceBusy.
@@ -539,7 +707,7 @@ impl ServerConnection {
         crate::client_view::retained_revision(
             &directory,
             direct.paired.pin.server,
-            direct.paired.client,
+            self.effective_client(&direct.paired.client),
         )
     }
     /// Removes the Workspace Inventory copy the paired route `route` retained, without network
@@ -573,7 +741,10 @@ impl ServerConnection {
         {
             return Err(ServerError::AuthenticationRefused);
         }
-        self.account = direct_account(&self.account, &route);
+        self.account = match &self.cli {
+            Some(cli) => cli.account(),
+            None => direct_account(&self.account, &route),
+        };
         self.direct = Some(std::sync::Arc::new(DirectRoute {
             id: route,
             paired,
@@ -584,7 +755,10 @@ impl ServerConnection {
             .direct
             .as_ref()
             .ok_or(ServerError::AuthenticationRefused)?;
-        self.bind_scope(self.scope_for(direct.paired.client, direct.paired.pin.server))?;
+        self.bind_scope(self.scope_for(
+            self.effective_client(&direct.paired.client),
+            direct.paired.pin.server,
+        ))?;
         Ok(self)
     }
     fn direct_manage(
@@ -605,6 +779,26 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
+    /// This handle's service lane, which answers across protocol majors. Opening it never starts
+    /// a server.
+    pub fn service_lane(&self) -> Result<crate::service::lane::client::Lane, ServerError> {
+        if let Some(direct) = &self.direct {
+            self.client_directory()?;
+            return Ok(crate::service::lane::client::Lane::paired(
+                std::sync::Arc::clone(&direct.connector),
+                direct.paired.clone(),
+                self.client_name(),
+                self.agent().cloned(),
+            ));
+        }
+        Ok(crate::service::lane::client::Lane::local(
+            self.paths.clone(),
+            self.server_id()?,
+            self.base_client_id()?,
+            self.client_name(),
+            self.agent().cloned(),
+        ))
+    }
     pub fn direct_status(&self) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {
         match self.direct_manage(crate::direct::Management::Status)? {
             crate::direct::ManagementReply::Status(status) => Ok(status),
@@ -622,12 +816,12 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
-    /// Opens an invitation that advertises `address`, or the server's own choice.
+    /// Opens an invitation that advertises an authority, or the server's own choice.
     pub fn invite_device(
         &self,
-        address: Option<std::net::IpAddr>,
+        advertise: Option<String>,
     ) -> Result<crate::direct::Invitation, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::Invite { address })? {
+        match self.direct_manage(crate::direct::Management::Invite { advertise })? {
             crate::direct::ManagementReply::Invitation(text) => {
                 crate::direct::Invitation::parse(&text)
             }
@@ -645,8 +839,9 @@ impl ServerConnection {
     }
     pub fn pairing_claims(
         &self,
+        invitation: Option<crate::direct::ClaimId>,
     ) -> Result<Vec<crate::direct::PairingClaim>, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::Claims)? {
+        match self.direct_manage(crate::direct::Management::Claims { invitation })? {
             crate::direct::ManagementReply::Claims(claims) => Ok(claims),
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
@@ -704,6 +899,70 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    /// A CLI agent keeps its state under `clients/cli`, presents its route's base identity, and
+    /// is admitted as the identity the server derives from it.
+    #[test]
+    fn a_cli_agent_is_admitted_as_its_derived_identity_and_stays_in_the_cli_namespace() {
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-cli-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        };
+        let server_id = Directory::open(&paths.data, true)
+            .unwrap()
+            .read_or_create()
+            .unwrap()
+            .server;
+        let agent: protocol::AgentName = "agent-1".parse().unwrap();
+        let base = ServerConnection::with_paths(paths.clone())
+            .unwrap()
+            .into_cli(CliRoute::Local, None)
+            .unwrap();
+        let handle = ServerConnection::with_paths(paths.clone())
+            .unwrap()
+            .into_cli(CliRoute::Local, Some(agent.clone()))
+            .unwrap();
+        let base_id = base.client_id().unwrap();
+        assert_eq!(handle.client_id().unwrap(), agent.client(&base_id));
+        assert!(handle.client_name().as_str().ends_with(" CLI agent-1"));
+        Directory::open(&paths.runtime, true).unwrap();
+        let listener = UnixListener::bind(paths.socket()).unwrap();
+        std::fs::set_permissions(paths.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let identity = paths.identity.clone();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            protocol::admit_server(&mut stream, &server_id, &identity)
+                .unwrap()
+                .work()
+        });
+        let link = handle.connect(Arc::new(|_: LinkEvent| {})).unwrap();
+        let admitted = peer.join().unwrap();
+        assert_eq!(admitted.client, agent.client(&base_id));
+        assert_eq!(admitted.agent, Some(agent));
+        assert_eq!(handle.admitted_client_id().unwrap(), admitted.client);
+        assert_eq!(handle.admitted_server_id().unwrap(), server_id);
+        link.close();
+        let clients = paths.data.join("clients");
+        assert!(clients.join("cli/routes/local/base/client.json").is_file());
+        assert!(clients.join("cli/routes/local/agents/agent-1").is_dir());
+        assert!(
+            !clients
+                .join("cli/routes/local/agents/agent-1/client.json")
+                .exists()
+        );
+        assert!(
+            !clients.join("desktop").exists(),
+            "the CLI never touches the desktop's state"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn local_status_admits_major_two_and_binds_the_scope_without_an_operation() {
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};
@@ -725,7 +984,9 @@ mod tests {
         let pin = server.server_id().unwrap();
         let peer = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            protocol::admit_server(&mut stream, &pin, &paths.identity).unwrap();
+            protocol::admit_server(&mut stream, &pin, &paths.identity)
+                .unwrap()
+                .work();
             stream.set_nonblocking(false).unwrap();
             let mut received = Vec::new();
             std::io::Read::read_to_end(&mut stream, &mut received).unwrap();
@@ -738,7 +999,7 @@ mod tests {
         assert_eq!(
             server.refresh(),
             Ok(AuthenticatedStatus {
-                protocol_major: 3,
+                protocol_major: protocol::MAJOR,
                 development_pane: true,
             })
         );
@@ -784,8 +1045,10 @@ mod tests {
                     sockets.send(stream.try_clone().unwrap()).unwrap();
                     let identity = identity.clone();
                     std::thread::spawn(move || {
-                        let (_, client, name) =
-                            protocol::admit_server(&mut stream, &pin, &identity).unwrap();
+                        let protocol::Admitted { client, name, .. } =
+                            protocol::admit_server(&mut stream, &pin, &identity)
+                                .unwrap()
+                                .work();
                         let (sync, _) = crate::connection::sync::SyncWorker::spawn().unwrap();
                         let environment = host::Environment::for_tests(
                             crate::direct::tests::service(crate::direct::tests::Refusing),
@@ -856,6 +1119,11 @@ mod tests {
         );
         assert!(answers(&server.clone().link().unwrap()));
         assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        server.clone().disconnect();
+        assert_eq!(
+            third.health(),
+            Health::Closed(crate::connection::link::LinkError::Closed)
+        );
         // A paired route's Reconnect creates a new handle. Its first link must not share a
         // generation with an earlier handle's first link, or facts read over that link stay.
         let other = ServerConnection::with_paths(paths.clone()).unwrap();
@@ -976,7 +1244,7 @@ mod tests {
         root: &std::path::Path,
         paired: crate::direct::PairedDevice,
     ) -> ServerConnection {
-        let mut local = ServerConnection::for_development_client("first", 3).unwrap();
+        let mut local = ServerConnection::for_development_client("first", protocol::MAJOR).unwrap();
         local.paths = Paths {
             identity: "spaceterm-development".into(),
             data: root.join("data"),
@@ -1045,7 +1313,7 @@ mod tests {
     #[test]
     fn local_and_direct_workspace_owners_stay_distinct_when_server_and_client_ids_collide() {
         let paired = paired_identity();
-        let local = ServerConnection::for_development_client("first", 3).unwrap();
+        let local = ServerConnection::for_development_client("first", protocol::MAJOR).unwrap();
         // Supply the admitted identity at the transport boundary without starting a server.
         local
             .bind_scope(local.scope_for(paired.client, paired.pin.server))
@@ -1061,7 +1329,8 @@ mod tests {
     fn workspace_owners_ignore_storage_paths_and_development_client_environment_names() {
         let paired = paired_identity();
         let original = direct_fixture(std::path::Path::new("/first"), paired.clone());
-        let mut relaunched = ServerConnection::for_development_client("second", 3).unwrap();
+        let mut relaunched =
+            ServerConnection::for_development_client("second", protocol::MAJOR).unwrap();
         relaunched.paths.data = std::path::PathBuf::from("/second");
         let relaunched = relaunched
             .with_direct([3; 32], paired, Arc::new(NoConnect))
@@ -1097,7 +1366,8 @@ mod tests {
             u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
         ));
         let local = |name| {
-            let mut connection = ServerConnection::for_development_client(name, 3).unwrap();
+            let mut connection =
+                ServerConnection::for_development_client(name, protocol::MAJOR).unwrap();
             connection.paths = Paths {
                 identity: "spaceterm-development".into(),
                 data: root.join("data"),
@@ -1167,6 +1437,7 @@ mod tests {
         let mutation = Mutation::CreateWorkspace {
             name: "Remote original".into(),
             directory: None,
+            control: crate::hierarchy::CreateControl::Creator,
         };
         first
             .shared_journal()
@@ -1306,6 +1577,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
@@ -1343,6 +1615,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
@@ -1378,6 +1651,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             direct: None,
+            cli: None,
             shared: std::sync::Arc::default(),
             client_cache: std::sync::Arc::default(),
         };
@@ -1391,6 +1665,7 @@ mod tests {
         let mutation = crate::hierarchy::Mutation::CreateWorkspace {
             name: "Original".into(),
             directory: None,
+            control: crate::hierarchy::CreateControl::Creator,
         };
         {
             let mut journal = first.shared_journal().unwrap();

@@ -2134,7 +2134,7 @@ def prepare_binary(args, output):
         except TaskError:
             raise SmokeFailure("source_build_failed") from None
     require(binary.is_file() and os.access(binary, os.X_OK), "source_executable_missing")
-    destination = output / "source" / "bin" / "spaceterm"
+    destination = output / "source" / "bin" / "spaceterm-desktop"
     destination.parent.mkdir(parents=True)
     try:
         # A source build can contain gigabytes of debug symbols. The prefix only reads it.
@@ -2146,10 +2146,10 @@ def prepare_binary(args, output):
     try:
         server = build_executable(
             "--package",
-            "spaceterm-server-host",
+            "spaceterm-cli",
             "--no-default-features",
             "--locked",
-            binary="spaceterm-server",
+            binary="spaceterm",
             env=environment,
         )
         # Reuse Development's resource layout, confined to this run's evidence directory.
@@ -2157,7 +2157,7 @@ def prepare_binary(args, output):
     except TaskError:
         raise SmokeFailure("server_source_build_failed") from None
     destination.unlink()
-    destination = prefix / "bin" / "spaceterm"
+    destination = prefix / "bin" / "spaceterm-desktop"
     with destination.open("rb") as executable:
         digest = hashlib.file_digest(executable, "sha256").hexdigest()
     expected = (
@@ -2174,7 +2174,7 @@ def prepare_binary(args, output):
     }
     (output / "binary-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
     require(proof["passed"], "source_executable_hash_mismatch")
-    server = prefix / "bin" / "spaceterm-server"
+    server = prefix / "bin" / "spaceterm"
     with server.open("rb") as executable:
         server_digest = hashlib.file_digest(executable, "sha256").hexdigest()
     (output / "server-binary-proof.json").write_text(
@@ -2273,7 +2273,7 @@ def main():
     # A fresh directory keeps stale workload signals from satisfying a later run.
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     binary = None if args.isolation_only else prepare_binary(args, run_output)
-    server_binary = binary.parent / "spaceterm-server" if binary is not None else None
+    server_binary = binary.parent / "spaceterm" if binary is not None else None
     backends = ("x11", "wayland") if args.backend == "both" else (args.backend,)
     status = 0
     for backend in backends:

@@ -14,6 +14,7 @@ pub(crate) mod host;
 mod network;
 mod quic;
 mod storage;
+pub(crate) use storage::observe;
 #[cfg(test)]
 pub(crate) mod tests;
 mod wire;
@@ -321,6 +322,11 @@ impl Invitation {
     pub fn endpoint(&self) -> &str {
         &self.payload.endpoint
     }
+    /// Connect through a different authority while retaining the invitation's pinned identity.
+    pub fn with_address(mut self, address: &str) -> Result<Self, DirectError> {
+        self.payload.endpoint = Endpoint::parse(address)?.url();
+        client::invitation(self.payload.clone())
+    }
     pub fn server_pin(&self) -> &ServerPin {
         &self.payload.pin
     }
@@ -374,7 +380,15 @@ impl DirectConnection {
         paired: &PairedDevice,
         credential: &DeviceCredential,
     ) -> Result<Self, DirectError> {
-        client::connect(endpoint, paired, credential)
+        client::connect(endpoint, paired, credential, None)
+    }
+    pub fn connect_until(
+        endpoint: &str,
+        paired: &PairedDevice,
+        credential: &DeviceCredential,
+        deadline: std::time::Instant,
+    ) -> Result<Self, DirectError> {
+        client::connect(endpoint, paired, credential, Some(deadline))
     }
 }
 
@@ -387,6 +401,7 @@ pub struct Enrollment {
     prepared: Option<(wire::Invite, ClientName)>,
     admitted: Option<PairingClaim>,
     exchanges: Vec<[u8; 32]>,
+    deadline: Option<std::time::Instant>,
 }
 impl Enrollment {
     /// Reconstructs only an original claim for observation or cancellation. Opens nothing.
@@ -413,6 +428,7 @@ impl Enrollment {
             prepared: None,
             admitted: None,
             exchanges: Vec::new(),
+            deadline: None,
         })
     }
     /// Preallocates the exact claim without opening a socket. Retain its ID, endpoint,
@@ -424,6 +440,10 @@ impl Enrollment {
         credential: &DeviceCredential,
     ) -> Result<Self, DirectError> {
         client::prepare(invitation, name, credential)
+    }
+    /// Bound every transport exchange by the caller's monotonic deadline.
+    pub fn set_deadline(&mut self, deadline: std::time::Instant) {
+        self.deadline = Some(deadline);
     }
     /// Submits the prepared original. Repeating the same claim and name is idempotent.
     /// A resumed cleanup has no invitation and cannot submit a replacement claim.
@@ -452,6 +472,21 @@ impl Enrollment {
         client::finish(self)
     }
     /// Cancels this exact proved claim; if approval won, revokes only its enrolled pairing.
+    pub fn validate_cancellation(&self, receipt: &RevocationReceipt) -> Result<(), DirectError> {
+        let operation = crypto::hash(&wire::transcript(
+            "cancel",
+            &self.pin,
+            &self.claim,
+            &receipt.target,
+        )?);
+        if receipt.server != self.pin.server
+            || receipt.target == [0; 32]
+            || receipt.operation != operation
+        {
+            return Err(DirectError::Substituted);
+        }
+        Ok(())
+    }
     pub fn cancel(&mut self) -> Result<Option<RevocationReceipt>, DirectError> {
         client::cancel(self)
     }
@@ -467,5 +502,24 @@ pub fn revoke(
     operation: OperationId,
     target: PairingId,
 ) -> Result<RevocationReceipt, DirectError> {
-    client::revoke(endpoint, actor, credential, operation, target)
+    client::revoke(endpoint, actor, credential, operation, target, None)
+}
+
+/// Restricted revocation bounded by the command's deadline.
+pub fn revoke_until(
+    endpoint: &str,
+    actor: &PairedDevice,
+    credential: &DeviceCredential,
+    operation: OperationId,
+    target: PairingId,
+    deadline: std::time::Instant,
+) -> Result<RevocationReceipt, DirectError> {
+    client::revoke(
+        endpoint,
+        actor,
+        credential,
+        operation,
+        target,
+        Some(deadline),
+    )
 }

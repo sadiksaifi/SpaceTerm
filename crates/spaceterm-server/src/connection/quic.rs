@@ -1523,6 +1523,14 @@ impl Driver {
     }
 
     /// Waits for datagrams, QUIC's next timer or `deadline`, whichever comes first.
+    /// A second handle on a server connection's bell. A client has none.
+    fn ring(&self) -> Option<UnixStream> {
+        match &self.side {
+            Side::Server { route, .. } => route.ring.try_clone().ok(),
+            Side::Client { .. } => None,
+        }
+    }
+
     fn wait(&self, deadline: Instant) -> Result<(), QuicError> {
         let now = Instant::now();
         if now >= deadline {
@@ -1613,6 +1621,8 @@ pub struct QuicStream {
     l0: Option<StreamId>,
     /// L0 bytes read past the last preamble message, which the carrier reads first.
     read: Vec<u8>,
+    /// Set by [`Self::sever`]'s handle. The carrier keeps it.
+    severed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl QuicStream {
@@ -1621,6 +1631,24 @@ impl QuicStream {
             driver,
             l0: None,
             read: Vec::new(),
+            severed: Arc::default(),
+        }
+    }
+
+    /// A handle that ends this connection's L0 reads and writes, and later its carrier's
+    /// receiving. A server connection's bell wakes a read waiting on it.
+    pub fn sever(&self) -> QuicSever {
+        QuicSever {
+            severed: Arc::clone(&self.severed),
+            ring: self.driver.ring(),
+        }
+    }
+
+    fn check_severed(&self) -> Result<(), QuicError> {
+        if self.severed.load(std::sync::atomic::Ordering::Acquire) {
+            Err(QuicError::Closed)
+        } else {
+            Ok(())
         }
     }
 
@@ -1734,6 +1762,7 @@ impl QuicStream {
     pub fn send_bytes(&mut self, mut bytes: &[u8], deadline: Instant) -> Result<(), QuicError> {
         let id = self.l0()?;
         loop {
+            self.check_severed()?;
             match self.driver.connection.send_stream(id).write(bytes) {
                 Ok(count) => bytes = &bytes[count..],
                 Err(noq_proto::WriteError::Blocked) => {}
@@ -1754,6 +1783,7 @@ impl QuicStream {
     fn receive_exact(&mut self, count: usize, deadline: Instant) -> Result<Vec<u8>, QuicError> {
         let id = self.l0()?;
         loop {
+            self.check_severed()?;
             if self.read.len() >= count {
                 let rest = self.read.split_off(count);
                 return Ok(std::mem::replace(&mut self.read, rest));
@@ -1838,6 +1868,14 @@ impl crate::protocol::Preamble for QuicStream {
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, crate::ServerError> {
         self.receive_prefixed(max, deadline)
             .map_err(|_| crate::ServerError::Protocol)
+    }
+
+    /// A service-lane frame is larger than the admission window. Reading a frame that exceeds
+    /// the window would wait for bytes the peer cannot send until the window grows.
+    fn admitted(&mut self) {
+        self.driver
+            .connection
+            .set_receive_window(VarInt::from_u32(ADMITTED_WINDOW));
     }
 }
 
@@ -1927,6 +1965,7 @@ impl QuicCarrier {
             mut driver,
             l0,
             read,
+            severed,
         } = stream;
         // Admission proved the peer, so the connection may now hold frames.
         driver
@@ -1958,7 +1997,7 @@ impl QuicCarrier {
             inbound: VecDeque::new(),
             inbound_bytes: 0,
             labelled: [true, false, false],
-            severed: Arc::default(),
+            severed,
             sent: 0,
             closing: false,
             violation: None,
@@ -1968,13 +2007,9 @@ impl QuicCarrier {
     /// A handle that severs this connection's receiving. A server connection's bell wakes its
     /// thread.
     pub fn sever(&self) -> QuicSever {
-        let ring = match &self.driver.side {
-            Side::Server { route, .. } => route.ring.try_clone().ok(),
-            Side::Client { .. } => None,
-        };
         QuicSever {
             severed: Arc::clone(&self.severed),
-            ring,
+            ring: self.driver.ring(),
         }
     }
 

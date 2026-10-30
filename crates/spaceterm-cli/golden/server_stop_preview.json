@@ -1,0 +1,31 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.stop",
+  "status": "confirmation_required",
+  "server": {
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "confirmation": {
+      "token": "c1-abababababababababababababababababababababababababababababababab",
+      "expires_at": "2026-10-30T12:10:00Z",
+      "effects": {
+        "ends_sessions": 1,
+        "sessions": [
+          "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+        ],
+        "start_requires_machine": true
+      }
+    }
+  },
+  "error": {
+    "code": "confirmation_required",
+    "class": "action_required",
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}

@@ -8350,6 +8350,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator: None,
                 }],
@@ -8470,6 +8471,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator: None,
                 }],
@@ -8617,6 +8619,7 @@ fn server_inventory(
                         current_directory: None,
                         repository_directory: None,
                         presentation: None,
+                        observers: Default::default(),
                         confirmed_directory: None,
                         creator: None,
                     }],
@@ -9179,6 +9182,7 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(earlier_edits.submitted(), Vec::new());
@@ -9431,6 +9435,7 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator: None,
                 }],
@@ -9679,6 +9684,7 @@ fn shared_close_inventory(
         current_directory: None,
         repository_directory: None,
         presentation: None,
+        observers: Default::default(),
         confirmed_directory: None,
         creator: None,
     };
@@ -10653,6 +10659,7 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
                 current_directory: None,
                 repository_directory: None,
                 presentation: None,
+                observers: Default::default(),
                 confirmed_directory: None,
                 creator: None,
             }],
@@ -11537,6 +11544,7 @@ mod shared_repositories {
             current_directory: None,
             repository_directory: None,
             presentation: None,
+            observers: Default::default(),
             confirmed_directory: Some(PathBuf::from(directory)),
             creator: None,
         }
@@ -11665,6 +11673,122 @@ mod shared_repositories {
             .tabs
             .retain(|tab| tab.id == FEATURE_TAB);
         inventory
+    }
+
+    /// A Reveal moves the view only from the Focused Pane, and only while nothing newer was
+    /// selected.
+    mod reveal {
+        use super::*;
+        use spaceterm_server::hierarchy::{Placement, WorktreeMembership};
+
+        const NEW_TAB: [u8; 32] = [26; 32];
+        const NEW_PANE: [u8; 32] = [27; 32];
+        const TARGET: Placement = Placement {
+            workspace: WORKSPACE,
+            tab: NEW_TAB,
+            pane: NEW_PANE,
+        };
+
+        fn with_new_tab() -> Inventory {
+            let mut inventory = published(1, "main", false);
+            inventory.revision = 2;
+            inventory.workspaces[0].tabs.push(Tab {
+                worktree: Some(MAIN_ROOT.into()),
+                worktree_membership: WorktreeMembership::Following,
+                worktree_repository: Some(MAIN_ROOT.into()),
+                id: NEW_TAB,
+                root_pane: NEW_PANE,
+                panes: vec![pane(NEW_PANE, MAIN_ROOT)],
+            });
+            inventory
+        }
+
+        fn tabs(harness: &Harness, cx: &mut VisualTestContext) -> Entity<TabManager> {
+            harness.manager.read_with(cx, |manager, _| {
+                manager
+                    .workspaces
+                    .workspace(harness.shared)
+                    .expect("the shared Workspace")
+                    .payload()
+                    .clone()
+            })
+        }
+
+        /// The shared Workspace is active with its Root Tab's Pane focused.
+        fn opened(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let (harness, cx) = harness(cx, published(1, "main", false));
+            let tabs = tabs(&harness, cx);
+            cx.update(|window, cx| {
+                window.activate_window();
+                harness.manager.update(cx, |manager, cx| {
+                    manager.activate_workspace(harness.shared, window, cx);
+                });
+                tabs.update(cx, |tabs, cx| {
+                    tabs.open_accepted_shared(ROOT_PANE, window, cx)
+                });
+            });
+            cx.run_until_parked();
+            (harness, cx)
+        }
+
+        fn focused(harness: &Harness, cx: &mut VisualTestContext) -> Option<[u8; 32]> {
+            let tabs = tabs(harness, cx);
+            tabs.read_with(cx, |tabs, cx| tabs.focused_server_pane(cx))
+        }
+
+        fn reveal(harness: &Harness, origin: (TabId, PaneId), cx: &mut VisualTestContext) {
+            cx.update(|window, cx| {
+                harness.manager.update(cx, |manager, cx| {
+                    manager.request_reveal(harness.shared, origin, TARGET, window, cx);
+                });
+            });
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        fn a_reveal_from_the_focused_pane_opens_its_target_once_published(cx: &mut TestAppContext) {
+            let (harness, cx) = opened(cx);
+            assert_eq!(focused(&harness, cx), Some(ROOT_PANE));
+            let origin =
+                tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            reveal(&harness, origin, cx);
+            assert_eq!(
+                focused(&harness, cx),
+                Some(ROOT_PANE),
+                "it waits for publication"
+            );
+            harness.publish(with_new_tab(), cx);
+            assert_eq!(focused(&harness, cx), Some(NEW_PANE));
+        }
+
+        #[gpui::test]
+        fn a_newer_selection_wins_over_a_reveal(cx: &mut TestAppContext) {
+            let (harness, cx) = opened(cx);
+            let tabs = tabs(&harness, cx);
+            let origin = tabs.read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            reveal(&harness, origin, cx);
+            cx.update(|window, cx| {
+                tabs.update(cx, |tabs, cx| {
+                    tabs.open_accepted_shared(FEATURE_PANE, window, cx)
+                });
+            });
+            cx.run_until_parked();
+            harness.publish(with_new_tab(), cx);
+            assert_eq!(focused(&harness, cx), Some(FEATURE_PANE));
+        }
+
+        /// A forged `SPACETERM_PANE` makes the server reveal on that Pane's channel. Unless it is
+        /// the Focused Pane, the desktop drops it.
+        #[gpui::test]
+        fn a_reveal_from_another_pane_is_dropped(cx: &mut TestAppContext) {
+            let (harness, cx) = opened(cx);
+            let (tab, pane) =
+                tabs(&harness, cx).read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
+            let other = PaneId::new(pane.get().wrapping_add(1000));
+            reveal(&harness, (tab, other), cx);
+            harness.publish(with_new_tab(), cx);
+            assert_eq!(focused(&harness, cx), Some(ROOT_PANE));
+        }
     }
 
     struct Harness {
@@ -12013,6 +12137,7 @@ mod shared_repositories {
         assert_eq!(
             edits.submitted(),
             [Mutation::Worktree(Operation::Create {
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
                 workspace: WORKSPACE,
                 root: MAIN_ROOT.into(),
                 path: "/srv/home/topic-new".into(),
@@ -12255,6 +12380,7 @@ mod shared_repositories {
         let (_, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         edits.submit_for_recovery(spaceterm_server::hierarchy::Mutation::Worktree(
             Operation::Create {
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
                 workspace: WORKSPACE,
                 root: MAIN_ROOT.into(),
                 path: "/srv/home/topic-unanswered".into(),
@@ -13144,6 +13270,7 @@ mod shared_repositories {
                 source: Some([72; 32]),
                 root: MAIN_ROOT.into(),
                 path: FEATURE_ROOT.into(),
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             })]
         );
     }
@@ -14612,6 +14739,7 @@ fn sidebar_new_workspace_menu_should_offer_saved_servers_and_add_server(cx: &mut
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14659,6 +14787,7 @@ fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
         vec![Mutation::CreateWorkspace {
             name: "fresh workspace".to_owned(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14696,6 +14825,7 @@ fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
 
@@ -14902,6 +15032,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(PathBuf::from("/srv/other")),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14948,6 +15079,7 @@ fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut Tes
             vec![Mutation::CreateWorkspace {
                 name: String::new(),
                 directory: Some(PathBuf::from("/srv/new")),
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             }]
         )
     );
@@ -15192,6 +15324,7 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(PathBuf::from("/srv/app")),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert!(

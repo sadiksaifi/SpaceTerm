@@ -1,0 +1,30 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.unpair",
+  "status": "confirmation_required",
+  "server": {
+    "name": "local",
+    "route": "local",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "confirmation": {
+      "token": "c1-1212121212121212121212121212121212121212121212121212121212121212",
+      "expires_at": "2026-10-30T12:10:00Z",
+      "effects": {
+        "device": {
+          "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+          "name": "Laptop"
+        }
+      }
+    }
+  },
+  "error": {
+    "code": "confirmation_required",
+    "class": "action_required",
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}

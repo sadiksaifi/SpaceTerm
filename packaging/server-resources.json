@@ -3,6 +3,7 @@
   "share/spaceterm/shell-integration/VERSION",
   "share/spaceterm/shell-integration/bash/spaceterm.bash",
   "share/spaceterm/shell-integration/elvish/lib/spaceterm-integration.elv",
+  "share/spaceterm/shell-integration/elvish/rc.elv",
   "share/spaceterm/shell-integration/fish/vendor_conf.d/spaceterm-shell-integration.fish",
   "share/spaceterm/shell-integration/nushell/vendor/autoload/spaceterm.nu",
   "share/spaceterm/shell-integration/sh/spaceterm.sh",

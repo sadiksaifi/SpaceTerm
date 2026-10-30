@@ -1,0 +1,23 @@
+{
+  "command": "pane.release",
+  "data": {
+    "released": false,
+    "target": [
+      {
+        "id": "0202020202020202020202020202020202020202020202020202020202020202",
+        "label": "Terminal",
+        "level": "pane",
+        "source": "flag"
+      }
+    ]
+  },
+  "error": null,
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "ok",
+  "warnings": []
+}

@@ -31,7 +31,8 @@ pub(crate) struct SocketIdentity {
     inode: libc::ino_t,
 }
 
-pub(crate) struct Directory(File);
+/// An account-private directory, opened without following symbolic links.
+pub struct Directory(File);
 /// An exclusive lock that ends when this guard drops.
 ///
 /// flock belongs to the open file description, not the descriptor. A child that another thread
@@ -59,8 +60,8 @@ impl Lock {
         unsafe { std::ptr::read(&lock.0) }
     }
 }
-/// How often [`Directory::wait_lock`] observes cancellation. The lock itself wakes it at once.
-const CANCEL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+/// How often [`Directory::wait_lock`] retries contention and observes cancellation.
+const LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 /// How a bounded wait for a lock ended.
 pub enum LockWait {
     Locked(Lock),
@@ -135,7 +136,7 @@ impl Directory {
         }
         private(&self.0, true)
     }
-    pub fn socket_identity(
+    pub(crate) fn socket_identity(
         &self,
         name: &std::ffi::CStr,
     ) -> Result<Option<SocketIdentity>, ServerError> {
@@ -169,7 +170,7 @@ impl Directory {
             inode: metadata.st_ino,
         }))
     }
-    pub fn remove_socket(
+    pub(crate) fn remove_socket(
         &self,
         name: &std::ffi::CStr,
         expected: SocketIdentity,
@@ -188,7 +189,7 @@ impl Directory {
     }
     /// Removes one private record. A record that is already absent is removed.
     #[cfg(feature = "client")]
-    pub(crate) fn remove(&self, name: &std::ffi::CStr) -> Result<(), ServerError> {
+    pub fn remove(&self, name: &std::ffi::CStr) -> Result<(), ServerError> {
         // SAFETY: descriptor and terminated single-component name remain live for this call.
         if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0
             && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
@@ -201,7 +202,7 @@ impl Directory {
     }
     /// Publish a prepared private socket without replacing any existing ready endpoint.
     /// Caller holds server.lock. Both names must remain beneath this retained directory.
-    pub fn publish_socket(
+    pub(crate) fn publish_socket(
         &self,
         pending: &std::ffi::CStr,
         expected: SocketIdentity,
@@ -305,39 +306,19 @@ impl Directory {
     }
     /// Wait at most `limit` for an exclusive lock that another holder may keep for a long time.
     ///
-    /// A helper thread blocks in flock, so the waiter wakes as soon as the holder releases the
-    /// lock, never on a polling interval. `cancelled`, when given, is observed every
-    /// [`CANCEL_INTERVAL`]; without it the waiter blocks until the lock or the limit. A waiter
-    /// that returns before the helper acquires leaves it blocked until the holder releases; the
-    /// helper then releases the lock at once.
+    /// Nonblocking attempts run on the caller's thread, with at most [`LOCK_RETRY_INTERVAL`]
+    /// between attempts and cancellation checks. Returning on timeout or cancellation leaves
+    /// no helper that could acquire the lock after the caller has given up.
     pub fn wait_lock(
         &self,
         name: &str,
         limit: std::time::Duration,
         cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<LockWait, ServerError> {
+        let deadline = std::time::Instant::now() + limit;
         if let Some(lock) = self.try_lock(name)? {
             return Ok(LockWait::Locked(lock));
         }
-        let file = self.file(name, true)?;
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new()
-            .name("spaceterm-lock-wait".to_owned())
-            .spawn(move || {
-                let result = loop {
-                    // SAFETY: flock acts only on the supplied live descriptor.
-                    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                        break Ok(Lock(file));
-                    }
-                    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                        break Err(ServerError::StorageUnavailable);
-                    }
-                };
-                // A waiter that already returned dropped its receiver. The lock then drops here.
-                let _ = sender.send(result);
-            })
-            .map_err(|_| ServerError::StorageUnavailable)?;
-        let deadline = std::time::Instant::now() + limit;
         loop {
             if cancelled.is_some_and(|cancelled| cancelled()) {
                 return Ok(LockWait::Cancelled);
@@ -346,21 +327,14 @@ impl Directory {
             if remaining.is_zero() {
                 return Ok(LockWait::Held);
             }
-            let slice = match cancelled {
-                Some(_) => remaining.min(CANCEL_INTERVAL),
-                None => remaining,
-            };
-            match receiver.recv_timeout(slice) {
-                Ok(result) => return result.map(LockWait::Locked),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(ServerError::StorageUnavailable);
-                }
+            if let Some(lock) = self.try_lock(name)? {
+                return Ok(LockWait::Locked(lock));
             }
+            std::thread::sleep(remaining.min(LOCK_RETRY_INTERVAL));
         }
     }
     /// Validate and synchronize retained state before setup or authentication accepts it.
-    pub fn read(&self) -> Result<Record, ServerError> {
+    pub(crate) fn read(&self) -> Result<Record, ServerError> {
         let (record, file) = self.read_visible()?;
         // A previous publication may have renamed successfully but failed to sync its directory.
         // Visible bytes alone do not confirm durability, including after reopening the store.
@@ -401,7 +375,7 @@ impl Directory {
         }
         Ok((record, file))
     }
-    pub fn read_or_create(&self) -> Result<Record, ServerError> {
+    pub(crate) fn read_or_create(&self) -> Result<Record, ServerError> {
         match self.read() {
             Ok(record) => Ok(record),
             Err(ServerError::NotSetUp) => {
@@ -417,14 +391,14 @@ impl Directory {
         }
     }
     /// Caller holds setup.lock. Publish once after fsync so crashes never truncate the old identity.
-    pub fn write(&self, record: &Record) -> Result<(), ServerError> {
+    pub(crate) fn write(&self, record: &Record) -> Result<(), ServerError> {
         if let Some(value) = &record.organization {
             value.validate()?;
         }
         let bytes = serde_json::to_vec(record).map_err(|_| ServerError::StorageUnavailable)?;
         self.write_bytes(c"identity.json", &bytes)
     }
-    pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
+    pub fn read_json<T: serde::de::DeserializeOwned>(
         &self,
         name: &str,
     ) -> Result<Option<T>, ServerError> {
@@ -447,7 +421,7 @@ impl Directory {
             .map_err(|_| ServerError::StorageUnavailable)?;
         Ok(Some(value))
     }
-    pub(crate) fn write_json<T: Serialize>(
+    pub fn write_json<T: Serialize>(
         &self,
         name: &std::ffi::CStr,
         value: &T,
@@ -790,6 +764,7 @@ mod tests {
                         current_directory: None,
                         repository_directory: None,
                         presentation: None,
+                        observers: Default::default(),
                         confirmed_directory: None,
                         creator: None,
                     }],
@@ -997,6 +972,7 @@ mod tests {
                 Mutation::CreateWorkspace {
                     name: "Draft".into(),
                     directory: None,
+                    control: crate::hierarchy::CreateControl::Creator,
                 }
             ),
             Err(ServerError::StorageUnavailable)
@@ -1110,6 +1086,7 @@ mod tests {
         let creation = crate::hierarchy::Mutation::CreateTab {
             workspace: organization.workspace,
             source: None,
+            control: crate::hierarchy::CreateControl::Creator,
         };
         let accepted = shared
             .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)

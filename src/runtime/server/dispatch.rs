@@ -270,6 +270,9 @@ impl DevelopmentPaneHost {
     }
 }
 impl HostCommands for DevelopmentPaneHost {
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.live_session().into_iter().collect()
+    }
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
         self.organization = store.read()?;
         self.store = Some(store);
@@ -361,6 +364,9 @@ impl HostCommands for DevelopmentPaneHost {
         }
     }
     fn revoked(&mut self, client: [u8; 32]) {
+        self.release_control(client);
+    }
+    fn release_control(&mut self, client: [u8; 32]) {
         if let Some(dormant) = &mut self.dormant
             && dormant.device == Some(client)
         {
@@ -420,6 +426,10 @@ pub trait HostCommands: Send {
     }
     /// The host is stopping; refuse every deferred reply still owed. See `PaneService::stopping`.
     fn stopping(&mut self) {}
+    /// The live Terminal Sessions. See `PaneService::sessions`.
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
     /// Records the Client Name an admitted client supplied, before any of its requests.
     fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
     /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
@@ -441,6 +451,14 @@ pub trait HostCommands: Send {
     fn acknowledge(&mut self, _client: [u8; 32], _sequence: u64) {}
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
+    /// Releases only this identity's live and dormant control grants, and keeps its edit
+    /// outcomes and run receipts.
+    fn release_control(&mut self, _client: [u8; 32]) {}
+    /// Whether this identity keeps an unacknowledged edit outcome or run receipt. See
+    /// `PaneService::holds`.
+    fn holds(&self, _client: [u8; 32]) -> bool {
+        false
+    }
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
     /// Starts read `id` of `connection`. Returns its reply when it settles at once. Otherwise the
     /// read runs on another thread, which wakes the host when it settles, and the next
@@ -494,8 +512,99 @@ pub trait HostCommands: Send {
     ) -> Result<(), Refusal> {
         Err(Refusal::Unsupported)
     }
+    /// Writes one command at the prompt of the Terminal Session the request's lease controls,
+    /// as `Operation::Run` describes.
+    fn run(&mut self, _request: RunRequest, _answer: RunAnswer) -> Result<(), Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// The receipt `device` holds for `run`. It never writes the run's command again.
+    fn run_status(
+        &mut self,
+        _device: [u8; 32],
+        _run: protocol::RunId,
+    ) -> Result<protocol::RunReply, Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// Retires a settled receipt of `device`.
+    fn run_acknowledge(&mut self, _device: [u8; 32], _run: protocol::RunId) -> Result<(), Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// Starts observing `pane`'s running Terminal Session, fenced by `session` when given. It
+    /// changes nothing about the Pane.
+    fn observe_start(
+        &mut self,
+        _pane: [u8; 32],
+        _session: Option<[u8; 32]>,
+    ) -> Result<protocol::ObserveReply, Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// Drains `pane` for an observer channel of `session`. It never carries effects or
+    /// accessibility.
+    fn observe_session(&mut self, _pane: [u8; 32], _session: [u8; 32]) -> Observed {
+        Observed::Gone {
+            last: None,
+            event: PaneEvent::Ended,
+        }
+    }
+    /// Whether `session` is still `pane`'s running Terminal Session.
+    fn observer_live(&self, _pane: [u8; 32], _session: [u8; 32]) -> bool {
+        false
+    }
+    /// Reads Scrollback rows of `session` for an observer. `reply` runs exactly once, on the
+    /// Pane's terminal worker, unless this refuses the read.
+    fn observer_scrollback_page(
+        &mut self,
+        _pane: [u8; 32],
+        _session: [u8; 32],
+        _read: ScrollbackRead,
+        _reply: PageReply,
+    ) -> Result<(), Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    /// The observers of each Terminal Session. A session without a visible observer publishes
+    /// frames only for its controller.
+    fn observers(&mut self, _observers: &BTreeMap<[u8; 32], Observers>) {}
+    /// The size of `pane`'s running Terminal Session.
+    fn session_size(&self, _pane: [u8; 32]) -> Option<PaneSize> {
+        None
+    }
+    /// Receipts that settled since the last call, each with the channel that admitted it.
+    fn take_settled_runs(&mut self) -> Vec<spaceterm_server::pane::run::Settled> {
+        Vec::new()
+    }
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
+}
+
+/// The size of a Session that a claim without a size starts: 120 by 40.
+pub const DEFAULT_SIZE: PaneSize = PaneSize {
+    columns: 120,
+    rows: 40,
+    cell_width: 8,
+    cell_height: 16,
+};
+
+/// The observer channels of one Terminal Session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Observers {
+    /// Whether any of them is visible.
+    pub visible: bool,
+    /// The Client Identities observing it.
+    pub clients: std::collections::BTreeSet<[u8; 32]>,
+}
+
+/// Answers a run admission once the Terminal Session's worker accepts or refuses it.
+pub type RunAnswer = Box<dyn FnOnce(Result<protocol::RunReply, Refusal>) + Send>;
+
+/// A run to admit, as `Operation::Run` names it on a channel.
+pub struct RunRequest {
+    pub device: [u8; 32],
+    pub connection: [u8; 32],
+    pub lease: pane::Lease,
+    pub channel: protocol::Channel,
+    pub run: protocol::RunId,
+    pub command: String,
+    pub session: [u8; 32],
 }
 
 /// How soon a host's timed work runs again while it waits on another thread for a journal or Git
@@ -610,6 +719,15 @@ struct Connection {
     client: [u8; 32],
     outbox: Outbox,
     channels: BTreeMap<Channel, Bound>,
+    observers: BTreeMap<Channel, Watch>,
+}
+
+/// An observer channel: it presents one Terminal Session without its lease.
+struct Watch {
+    pane: [u8; 32],
+    session: [u8; 32],
+    visible: bool,
+    publication: Publication,
 }
 
 /// A channel bound to the lease its claim attached.
@@ -645,6 +763,11 @@ impl<H: HostCommands> Served<H> {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn host(&self) -> &H {
+        &self.host
+    }
+
     /// Rings the bell when an observation drained a change that only the host's timed work
     /// pushes, so the host's next tick carries it.
     fn ring_for_observed_change(&mut self) {
@@ -657,14 +780,115 @@ impl<H: HostCommands> Served<H> {
     fn reroute(&self) {
         let mut routes: BTreeMap<[u8; 32], Vec<Outbox>> = BTreeMap::new();
         for connection in self.connections.values() {
-            for bound in connection.channels.values() {
+            let sessions = connection
+                .channels
+                .values()
+                .map(|bound| bound.lease.session)
+                .chain(connection.observers.values().map(|watch| watch.session));
+            for session in sessions {
                 routes
-                    .entry(bound.lease.session)
+                    .entry(session)
                     .or_default()
                     .push(connection.outbox.clone());
             }
         }
         self.routes.replace(routes);
+    }
+
+    /// Tells the host which Terminal Sessions observers show, after every change to them.
+    fn update_observers(&mut self) {
+        let mut observers: BTreeMap<[u8; 32], Observers> = BTreeMap::new();
+        for connection in self.connections.values() {
+            for watch in connection.observers.values() {
+                let session = observers.entry(watch.session).or_default();
+                session.visible |= watch.visible;
+                session.clients.insert(connection.client);
+            }
+        }
+        self.host.observers(&observers);
+    }
+
+    fn watch(&mut self, peer: &Peer, channel: Channel) -> Option<&mut Watch> {
+        self.connections
+            .get_mut(&peer.connection)?
+            .observers
+            .get_mut(&channel)
+    }
+
+    fn observing(&self, peer: &Peer, channel: Channel) -> bool {
+        self.connections
+            .get(&peer.connection)
+            .is_some_and(|connection| connection.observers.contains_key(&channel))
+    }
+
+    /// Opens an observer channel on `pane`. A Pane without a running Session leaves the channel
+    /// closed.
+    fn observe(
+        &mut self,
+        peer: &Peer,
+        channel: Channel,
+        pane: [u8; 32],
+        session: Option<[u8; 32]>,
+    ) -> Result<ReplyBody, Refusal> {
+        let reply = self.host.observe_start(pane, session);
+        let Some(connection) = self.connections.get_mut(&peer.connection) else {
+            return Err(Refusal::Stale);
+        };
+        let session = match &reply {
+            Ok(protocol::ObserveReply::Observing { session, .. }) => *session,
+            _ => {
+                connection.outbox.close(channel);
+                return reply.map(ReplyBody::Observe);
+            }
+        };
+        let publication =
+            Publication::bind(&connection.outbox, channel).map_err(|_| Refusal::Capacity)?;
+        connection.observers.insert(
+            channel,
+            Watch {
+                pane,
+                session,
+                visible: false,
+                publication,
+            },
+        );
+        self.reroute();
+        self.update_observers();
+        reply.map(ReplyBody::Observe)
+    }
+
+    /// Closes an observer channel.
+    fn unwatch(&mut self, peer: &Peer, channel: Channel) {
+        if let Some(connection) = self.connections.get_mut(&peer.connection)
+            && connection.observers.remove(&channel).is_some()
+        {
+            connection.outbox.close(channel);
+            self.reroute();
+            self.update_observers();
+        }
+    }
+
+    /// Pushes what changed for one observer channel, and forgets it once its Session ended.
+    fn publish_watch(&mut self, connection: [u8; 32], channel: Channel) {
+        let Some((pane, session)) = self
+            .connections
+            .get(&connection)
+            .and_then(|connection| connection.observers.get(&channel))
+            .map(|watch| (watch.pane, watch.session))
+        else {
+            return;
+        };
+        let observed = self.host.observe_session(pane, session);
+        let Some(connection) = self.connections.get_mut(&connection) else {
+            return;
+        };
+        if let Some(watch) = connection.observers.get_mut(&channel)
+            && !watch.publication.publish(observed)
+        {
+            connection.observers.remove(&channel);
+            self.reroute();
+            self.update_observers();
+        }
     }
 
     /// Pushes what changed for one bound channel, and forgets the binding once it ended.
@@ -697,6 +921,27 @@ impl<H: HostCommands> Served<H> {
             .collect();
         for (connection, channel) in bound {
             self.publish_channel(connection, channel);
+        }
+        let watched: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| connection.observers.keys().map(|channel| (*id, *channel)))
+            .collect();
+        for (connection, channel) in watched {
+            self.publish_watch(connection, channel);
+        }
+    }
+
+    /// Sends each settled run's receipt to the channel that admitted it. A channel that closed
+    /// meanwhile no longer needs it; its client resolves the run with `RunStatus`.
+    fn deliver_runs(&mut self) {
+        for settled in self.host.take_settled_runs() {
+            if let Some(connection) = self.connections.get(&settled.connection) {
+                let _ = connection.outbox.pane(
+                    settled.channel,
+                    PaneEvent::RunFinished(Box::new(settled.receipt)),
+                );
+            }
         }
     }
 
@@ -778,6 +1023,21 @@ impl<H: HostCommands> Served<H> {
                     .map(move |(channel, _)| (*id, *channel))
             })
             .collect();
+        let unwatched: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| {
+                connection
+                    .observers
+                    .iter()
+                    .filter(|(_, watch)| !self.host.observer_live(watch.pane, watch.session))
+                    .map(move |(channel, _)| (*id, *channel))
+            })
+            .collect();
+        for (connection, channel) in unwatched {
+            // Publication delivers the last event and forgets the channel.
+            self.publish_watch(connection, channel);
+        }
         for (connection, channel) in dead {
             self.publish_channel(connection, channel);
             // A host that still answers `Live` for a lease it no longer knows is not trusted.
@@ -800,6 +1060,12 @@ impl<H: HostCommands> Served<H> {
     }
 
     fn claim(&mut self, peer: &Peer, claim: Claim) -> Result<ReplyBody, Refusal> {
+        // A claim without a size keeps the running Session's size, and starts a fresh one at
+        // the server default.
+        let size = claim
+            .size
+            .or_else(|| self.host.session_size(claim.pane))
+            .unwrap_or(DEFAULT_SIZE);
         let channel = claim.channel;
         let pane = claim.pane;
         // A new claim of a Pane this connection already holds replaces that binding. The host
@@ -825,7 +1091,7 @@ impl<H: HostCommands> Served<H> {
                 attachment: claim.attachment,
                 pane: claim.pane,
                 claim: claim.claim,
-                size: claim.size,
+                size,
                 style: claim.style,
             },
         );
@@ -932,6 +1198,9 @@ impl<H: HostCommands> Served<H> {
             events,
             ..
         } = input;
+        if self.observing(peer, channel) {
+            return Some(InputOutcome::Discarded(Refusal::Unsupported));
+        }
         let Ok(lease) = self.lease(peer, channel) else {
             return Some(InputOutcome::Discarded(Refusal::Stale));
         };
@@ -1149,6 +1418,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
                 client: peer.client,
                 outbox,
                 channels: BTreeMap::new(),
+                observers: BTreeMap::new(),
             },
         );
     }
@@ -1156,8 +1426,16 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.host.revoked(client);
         self.bell.ring();
     }
+    fn release_control(&mut self, client: [u8; 32]) {
+        self.host.release_control(client);
+        self.bell.ring();
+    }
+    fn holds(&self, client: [u8; 32]) -> bool {
+        self.host.holds(client)
+    }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         let dispatch = self.dispatch(peer, id, operation);
+        self.deliver_runs();
         // A claim, close, release or edit may have ended another channel's binding.
         self.bell.ring();
         dispatch
@@ -1168,6 +1446,15 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     /// The connection already applied `view` to the outbox. A revealed channel receives the
     /// current screen again.
     fn view(&mut self, peer: &Peer, view: protocol::View) {
+        if let Some(watch) = self.watch(peer, view.channel) {
+            watch.publication.view(view.visible);
+            watch.visible = view.visible;
+            self.update_observers();
+            if view.visible {
+                self.publish_watch(peer.connection, view.channel);
+            }
+            return;
+        }
         let Some(bound) = self.bound(peer, view.channel) else {
             return;
         };
@@ -1217,9 +1504,14 @@ impl<H: HostCommands> ConnectionService for Served<H> {
             return;
         }
         let channels: Vec<_> = connection.channels.keys().copied().collect();
+        let watched: Vec<_> = connection.observers.keys().copied().collect();
         for channel in channels {
             self.publish_channel(peer.connection, channel);
         }
+        for channel in watched {
+            self.publish_watch(peer.connection, channel);
+        }
+        self.deliver_runs();
         self.ring_for_observed_change();
     }
     /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
@@ -1234,6 +1526,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
             self.host.rung();
         }
         let host = self.host.tick(now);
+        self.deliver_runs();
         self.sweep();
         self.ring_for_observed_change();
         self.answer_reads();
@@ -1266,10 +1559,14 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.reads.retain(|read| read.connection != peer.connection);
         self.connections.remove(&peer.connection);
         self.reroute();
+        self.update_observers();
         self.host.disconnected(peer.connection);
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
         self.host.shutdown()
+    }
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.host.sessions()
     }
 }
 
@@ -1285,6 +1582,18 @@ impl<H: HostCommands> Served<H> {
         {
             let read = ScrollbackRead { epoch, start, rows };
             return self.scrollback_page(peer, id, channel, read);
+        }
+        if let Some(channel) = channel_of(&operation)
+            && self.observing(peer, channel)
+        {
+            // An observer channel only presents and reads. Release ends the observation.
+            return Dispatch::reply(match operation {
+                Operation::Release { .. } => {
+                    self.unwatch(peer, channel);
+                    Ok(ReplyBody::Done)
+                }
+                _ => Err(Refusal::Unsupported),
+            });
         }
         Dispatch::reply(match operation {
             Operation::Claim(claim) => self.claim(peer, claim),
@@ -1368,6 +1677,51 @@ impl<H: HostCommands> Served<H> {
             // Scrollback pages reply from the terminal worker. Direct-network administration never
             // reaches the service.
             Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
+            Operation::Observe {
+                channel,
+                pane,
+                session,
+            } => self.observe(peer, channel, pane, session),
+            Operation::Run {
+                channel,
+                run,
+                command,
+                session,
+            } => {
+                let lease = match self.lease(peer, channel) {
+                    Ok(lease) => lease,
+                    Err(refusal) => return Dispatch::reply(Err(refusal)),
+                };
+                let Some(connection) = self.connections.get(&peer.connection) else {
+                    return Dispatch::reply(Err(Refusal::Stale));
+                };
+                let outbox = connection.outbox.clone();
+                let answer = Box::new(move |result: Result<protocol::RunReply, Refusal>| {
+                    let _ = outbox.reply_or_refuse(id, result.map(ReplyBody::Run));
+                });
+                return match self.host.run(
+                    RunRequest {
+                        device: peer.client,
+                        connection: peer.connection,
+                        lease,
+                        channel,
+                        run,
+                        command,
+                        session,
+                    },
+                    answer,
+                ) {
+                    Ok(()) => Dispatch::Deferred,
+                    Err(refusal) => Dispatch::reply(Err(refusal)),
+                };
+            }
+            Operation::RunStatus { run } => {
+                self.host.run_status(peer.client, run).map(ReplyBody::Run)
+            }
+            Operation::RunAcknowledge { run } => self
+                .host
+                .run_acknowledge(peer.client, run)
+                .map(|()| ReplyBody::Done),
         })
     }
 
@@ -1380,17 +1734,30 @@ impl<H: HostCommands> Served<H> {
         channel: Channel,
         read: ScrollbackRead,
     ) -> Dispatch {
-        let (Ok(lease), Some(connection)) = (
-            self.lease(peer, channel),
-            self.connections.get(&peer.connection),
-        ) else {
+        let Some(connection) = self.connections.get(&peer.connection) else {
             return Dispatch::reply(Err(Refusal::Stale));
         };
         let outbox = connection.outbox.clone();
+        let watched = connection
+            .observers
+            .get(&channel)
+            .map(|watch| (watch.pane, watch.session));
         let reply = Box::new(move |result: Result<protocol::Page, Refusal>| {
             // A connection that ended no longer owes the reply.
             let _ = outbox.reply_or_refuse(id, result.map(ReplyBody::Page));
         });
+        if let Some((pane, session)) = watched {
+            return match self
+                .host
+                .observer_scrollback_page(pane, session, read, reply)
+            {
+                Ok(()) => Dispatch::Deferred,
+                Err(refusal) => Dispatch::reply(Err(refusal)),
+            };
+        }
+        let Ok(lease) = self.lease(peer, channel) else {
+            return Dispatch::reply(Err(Refusal::Stale));
+        };
         match self
             .host
             .scrollback_page(peer.client, peer.connection, &lease, read, reply)
@@ -1398,6 +1765,22 @@ impl<H: HostCommands> Served<H> {
             Ok(()) => Dispatch::Deferred,
             Err(refusal) => Dispatch::reply(Err(refusal)),
         }
+    }
+}
+
+/// The channel an operation acts on, other than a claim, an observation or a Scrollback page.
+fn channel_of(operation: &Operation) -> Option<Channel> {
+    match operation {
+        Operation::Release { channel }
+        | Operation::Close { channel }
+        | Operation::ClearScrollback { channel }
+        | Operation::Style { channel, .. }
+        | Operation::Graphics { channel, .. }
+        | Operation::Accessibility { channel, .. }
+        | Operation::AccessibilitySelection { channel, .. }
+        | Operation::EndAccessibility { channel }
+        | Operation::Run { channel, .. } => Some(*channel),
+        _ => None,
     }
 }
 

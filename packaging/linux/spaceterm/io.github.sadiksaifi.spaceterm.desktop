@@ -2,7 +2,7 @@
 Type=Application
 Name=SpaceTerm
 Comment=Terminal multiplexer
-Exec=spaceterm %u
+Exec=spaceterm-desktop %u
 MimeType=x-scheme-handler/spaceterm;
 Icon=io.github.sadiksaifi.spaceterm
 Terminal=false

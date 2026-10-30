@@ -110,7 +110,9 @@ mod desktop_profile;
 mod architecture_tests;
 
 #[cfg(feature = "desktop")]
-mod direct_connections;
+use spaceterm_connections as direct_connections;
+#[cfg(feature = "desktop")]
+mod direct_connection_storage;
 #[cfg(feature = "desktop")]
 mod directory_selection;
 mod local_path;

@@ -129,9 +129,17 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
     /// The desktop's direct network connections. Construction has no effects: nothing reads
     /// saved routes, asks for a credential, or connects until the first Workspace Window opens.
     pub(crate) fn direct_servers(&self) -> crate::direct_connections::DirectConnections {
-        crate::direct_connections::DirectConnections::native(
+        crate::direct_connections::DirectConnections::with_credentials(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
-            Arc::clone(&self.paths),
+            Arc::new(spaceterm_connections::records::PrivateRecords::new(
+                Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
+                    Arc::clone(&self.paths),
+                )),
+            )),
+            spaceterm_connections::native(
+                crate::application_identity::ApplicationIdentity::current().directory_name(),
+            )
+            .unwrap_or_else(|_| Arc::new(spaceterm_connections::credentials::Unavailable)),
         )
     }
 

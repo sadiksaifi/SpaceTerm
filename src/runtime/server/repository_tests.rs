@@ -630,6 +630,7 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
             mutation: Mutation::CreateTab {
                 workspace,
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     ) else {
@@ -765,7 +766,8 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
                 sequence: 2,
                 mutation: Mutation::CreateTab {
                     workspace,
-                    source: None
+                    source: None,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 }
             }
         ),
@@ -875,6 +877,7 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
             root: git.0.clone(),
             path: git.0.clone(),
             source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     ) else {
         panic!("open a Tab in the Worktree")
@@ -1022,6 +1025,7 @@ fn a_repaired_tab_promoted_to_root_tab_keeps_its_missing_worktree() {
             root: git.0.clone(),
             path: tree.clone(),
             source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     ) else {
         panic!("open a Tab in the linked Worktree")
@@ -1215,6 +1219,7 @@ fn worktree_write_retries_resolve_the_original_and_never_recreate_removed_state(
     let workspace = create_shared(&mut host, 1);
     let tree = git.0.join("created");
     let mutation = Mutation::Worktree(Operation::Create {
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
         workspace,
         root: git.0.clone(),
         path: tree.clone(),
@@ -1853,6 +1858,7 @@ fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
         &mut host,
         2,
         Operation::Create {
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
             workspace,
             root: git.0.clone(),
             path: alias.join("created"),
@@ -1925,6 +1931,7 @@ fn creations_git_refuses_should_answer_why_without_creating_anything() {
                 &mut host,
                 sequence,
                 Operation::Create {
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                     workspace,
                     root: git.0.clone(),
                     path: git.0.join("refused"),

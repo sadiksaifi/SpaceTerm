@@ -14,25 +14,17 @@ Installed Preflight exercises the persistent service lifecycle. `mise run prefli
 
 ## Controls without the desktop
 
-The desktop installation includes a CLI fallback for use without a status area or graphical login. For a standard installation, open its command help with:
+Install the headless CLI as described in [Install the command line](#install-the-command-line). Run `spaceterm server --help` for service controls. Development and Preflight use their own launcher names under [ADR 0012](adr/0012-derive-one-application-identity-from-the-build.md). The desktop executable has no service-command parser. macOS service setup requires a logged-in Aqua session. Linux service setup requires linger authorization.
 
-```sh
-# macOS
-"/Applications/SpaceTerm.app/Contents/MacOS/SpaceTerm" --help
-
-# Linux
-"$HOME/.local/lib/spaceterm/bin/spaceterm" --help
-```
-
-For Preflight on macOS, use "SpaceTerm Preflight" for both the app and executable names. On Linux, the Preflight executable is `~/.local/lib/spaceterm-preflight/bin/spaceterm`, linked from `~/.local/bin/spaceterm-preflight`. For a custom installation, use the desktop executable inside that app or installation directory. The help names the compiled application identity and lists the service commands and confirmation flag. These service commands run without opening the client or initializing its graphical interface. Headless installations expose the same commands through `bin/spaceterm-server` in their installation directory. Source builds use `mise run server:service --help` for the Development identity.
+`mise run server:service status` builds the source CLI and reads the Development service. The task also accepts `setup`, `start`, `stop`, `restart` and `update`. Setup accepts `--network` and `--automatic-start`; a destructive preview supplies `--confirm TOKEN` for the repeated action. These commands administer installed service state separately from the foreground `development` run. [.mise.toml](../.mise.toml) owns the task's arguments; [the CLI command tree](../crates/spaceterm-cli/src/args.rs) owns the `spaceterm server …` grammar.
 
 ## Signed server artifacts
 
 For installed applications, the desktop startup adapter in [src/local_startup.rs](../src/local_startup.rs) prepares or reuses the account service on a worker. Existing service policy selects the approved installation. Launch does not select a newer artifact or reverse Stop.
 
-Fresh service setup requires an independently signed server archive and signature for the desktop's application identity and native target. The signed manifest declares its protocol major and capabilities. The client requires protocol major 3 and the `workspace_policy` capability; client and server versions and commits may differ. Packaged candidates carry this pair in their resources. Signing happens during candidate preparation, never during app launch.
+Fresh service setup requires an independently signed server archive and signature for the desktop's application identity and native target. The signed manifest declares its protocol major and capabilities. The client requires protocol major 4 and the `workspace_policy` capability; client and server versions and commits may differ. Packaged candidates carry this pair in their resources. Signing happens during candidate preparation, never during app launch.
 
-The default Development command does not use a Server Candidate. Explicit source clients that exercise installed service startup must supply both `SPACETERM_SERVER_ARCHIVE` and `SPACETERM_SERVER_SIGNATURE` when compiling and launching. Prepare an artifact with `mise run server:package --identity spaceterm-development`, then point those variables at its archive and adjacent `.sig` file. Compilation pins the complete archive SHA256. A client compiled without a pair has no candidate until rebuilt, even if a pair appears at launch. Existing approved service policy needs neither variable. A sibling `spaceterm-server` executable is never an approved retained service runtime.
+The default Development command does not use a Server Candidate. Explicit source clients that exercise installed service startup must supply both `SPACETERM_SERVER_ARCHIVE` and `SPACETERM_SERVER_SIGNATURE` when compiling and launching. Prepare an artifact with `mise run server:package --identity spaceterm-development`, then point those variables at its archive and adjacent `.sig` file. Compilation pins the complete archive SHA256. A client compiled without a pair has no candidate until rebuilt, even if a pair appears at launch. Existing approved service policy needs neither variable. A sibling `spaceterm` executable is never an approved retained service runtime.
 
 Packaging prepares the signed server before compiling the desktop. The same variables can select an existing signed pair without recompressing it or matching its version to the client. Package verification compares the embedded archive with the digest reported by the desktop's `--build-info`. A running client refuses a different archive placed at its installation path and asks for a client restart.
 
@@ -48,7 +40,7 @@ Setup rejects SSH executable or runtime configuration paths containing whitespac
 
 Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies the QUIC address with UDP port 9231. The optional Network Address disclosure accepts a DNS name or IP address and an optional UDP port. SSH aliases and ProxyJump can reach a machine without making its QUIC endpoint reachable; use the override when the client needs a different address. Network exposure requires approval of the reachable address and the server's listener. Installation and startup do not complete setup until credentials and the connection are saved, SSH resources close and QUIC admission succeeds. If setup fails, review its reported service and pairing effects before retrying.
 
-Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Try Again and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). Manage network exposure, invitations, other devices, End All Sessions, the native service and server updates on the server's own machine. Saved addresses are read-only; add the server again to use a different address.
+Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Try Again and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). The CLI can Stop, Restart and Update a running paired server through [the service lane](adr/0057-administer-servers-over-the-service-lane.md). Network exposure, invitations, unpairing other devices, End All Sessions, Start and setup stay on the server's own machine. Saved addresses are read-only; add the server again to use a different address. [ADR 0056](adr/0056-install-and-pair-servers-from-their-own-command-line.md) describes CLI enrollment and its address override.
 
 ### Reach one server over the LAN and a tailnet
 
@@ -56,18 +48,37 @@ A server listens at one of its addresses, or on all interfaces. All Interfaces b
 
 ```sh
 # Preflight on Linux
-"$HOME/.local/bin/spaceterm-preflight" service-network-access spaceterm-preflight all
+"$HOME/.local/bin/spaceterm-preflight" server setup --network all
 ```
 
-Run it without a value to show where the server listens. It also takes `off`, an IP address, `IP:PORT`, or `[IPV6]:PORT`, and refuses an address the machine doesn't have. Widening from one address to all interfaces at the same port keeps connected devices. Any other change disconnects devices connected over the network; their pairings stay.
+Run `spaceterm-preflight server status` to show where the server listens. `server setup --network` also takes `off`, an IP address, `IP:PORT`, or `[IPV6]:PORT`, and refuses an address the machine doesn't have. Widening from one address to all interfaces at the same port keeps connected devices. Any other change disconnects devices connected over the network; their pairings stay.
 
 With all interfaces, add the server once per route, for example once by its LAN address and once by its MagicDNS name. SSH setup enrolls the address that client reached or its Network Address override, so it reaches the server over any route SSH reaches. An invitation link carries one address. Invite Device offers the server's addresses and starts with the one its routing table suggests; without that suggestion the server picks its first address that no container or virtual machine bridge holds. A device on a network the link's address doesn't reach can't use the link, and a saved address can't change, so add that device with SSH setup and the route's name instead.
 
+## Install the command line
+
+The desktop executable is `spaceterm-desktop` on Linux. The headless `spaceterm` executable runs the server and controls it. A headless installation needs no desktop, graphics driver or credential store to run its local server commands.
+
+```sh
+curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless
+spaceterm server setup --network off
+```
+
+For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `--identity spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
+
+```sh
+curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall
+```
+
+Uninstall previews any Terminal Sessions it would end. Workspaces, paired devices and retained signed installations stay on disk. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. [ADR 0054](adr/0054-use-one-headless-executable.md) owns the installer's service and launcher removal.
+
+[Signing] Developer ID signing, hardened runtime, notarization and the installer's Developer ID requirement check are future work. Ed25519 authenticates the package and feed independently.
+
 ## Cross-target artifact catalogs
 
-Standard Development and Preflight commands build signed headless packages for both supported targets from the current working tree, including uncommitted edits. Cargo and Zig build the foreign server locally; they require neither a foreign desktop build nor an SSH builder. The pinned tools and Rust targets live in [.mise.toml](../.mise.toml) and [rust-toolchain.toml](../rust-toolchain.toml).
+Standard Development and Preflight commands prepare signed headless packages for both supported targets from the current working tree, including uncommitted edits. macOS builds natively on a Mac so the CLI can use Security.framework. Cargo and Zig cross-build Linux locally. A Linux host needs `SPACETERM_SERVER_ARTIFACTS` pointing at a Mac-built catalog. Its macOS artifact must carry the same signed source digest as the Linux checkout. The pinned tools and Rust targets live in [.mise.toml](../.mise.toml) and [rust-toolchain.toml](../rust-toolchain.toml).
 
-Catalog preparation refuses source changes during its two builds and keeps separate Cargo outputs under `target/server`. `mise run server:catalog --help` describes standalone preparation. Matching-host packages receive native executable, signature and PTY checks. Foreign packages receive signature, static target, dependency and resource checks; acceptance also requires native verification on their own targets. Release packaging retains native production signing.
+Catalog preparation refuses source changes during preparation and keeps separate Cargo outputs under `$CARGO_TARGET_DIR/server`, or `target/server` when no target directory is set. `mise run server:catalog --help` describes standalone preparation. Matching-host packages receive native executable, signature and PTY checks. Foreign packages receive signature, static target, dependency and resource checks; acceptance also requires native verification on their own targets. Release packaging retains native production signing.
 
 Clients read `server-artifacts` in their installation resources. Each target contains `artifact.tar.gz`, raw `artifact.sig` and lowercase `artifact.sha256`. Before offering installation, verification checks signature, identity, target, complete digest, resources and protocol requirements and retains those verified bytes. A missing package and failed verification have distinct results. A usable approved installation requires no replacement catalog. Source clients may select an isolated catalog through `SPACETERM_SERVER_ARTIFACTS`.
 
@@ -85,15 +96,13 @@ Consent, cancellation, credential and save-failure tests have separate function 
 
 ## Connections
 
-Each client holds one SpaceTerm Protocol connection per server: the account-local Unix socket, or QUIC for a paired server. Every Pane, edit, inventory read and Settings read of that client shares it. Two uses open a connection of their own: each open directory picker, so the server cancels its reads when the picker closes, and the check for running Terminal Sessions when the client quits. Pings on the live connection judge its health, so a client opens a new connection only after the previous one ends. [ADR 0050](adr/0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns the exchange. A server of another protocol major refuses admission with a typed incompatibility; replace both together.
+Each desktop client holds one work connection per server: the account-local Unix socket, or QUIC for a paired server. Every Pane, edit, inventory read and Settings read of that client shares it. Two uses open a connection of their own: each open directory picker, so the server cancels its reads when the picker closes, and the check for running Terminal Sessions when the client quits. Pings on the live connection judge its health, so a client opens a new connection only after the previous one ends. [ADR 0050](adr/0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns the exchange. A different work major refuses work admission; [the service lane](adr/0057-administer-servers-over-the-service-lane.md) remains available for CLI administration across that mismatch.
 
 ## Paired connections
 
-Saved QUIC routes and restricted unpair recovery live in `direct-device-connections.json` in private client data, outside the Settings Document. Routes saved over WSS, before QUIC, are dropped when the client loads that file; add those servers again. An unpair request still pending over WSS is dropped with its route and leaves a Servers notice; unpair that device again on the server's machine. Each pairing has a separate native credential. The account server keeps listener policy, trust and pairing grants in `direct.json`. Invitations are never retained. [ADR 0028](adr/0028-use-spaceterm-protocol-over-every-client-connection.md) owns enrollment and [ADR 0052](adr/0052-carry-paired-connections-over-quic.md) the transport; [ADR 0038](adr/0038-unpair-devices-without-blocking-local-connection-removal.md) owns removal and recovery.
+Desktop Saved Connections and restricted unpair recovery live in `direct-device-connections.json` in private client data, outside the Settings Document. [ADR 0058](adr/0058-derive-agent-identities-at-admission.md) owns the CLI's separate connection and journal layout. The account server keeps listener policy, trust and pairing grants in `direct.json`. Invitations are never retained. [ADR 0028](adr/0028-use-spaceterm-protocol-over-every-client-connection.md) owns enrollment and [ADR 0052](adr/0052-carry-paired-connections-over-quic.md) the transport; [ADR 0038](adr/0038-unpair-devices-without-blocking-local-connection-removal.md) owns removal and recovery.
 
-On macOS, Release and Development keep each credential in the login Keychain through the Security framework. The Keychain binds an item to the build that created it, because neither identity is signed by an Apple team. After an update or rebuild, the Keychain may ask for its password. The first connection attempt after launch shows that request; later automatic retries never ask, and Resume asks again.
-
-Preflight is ad hoc signed, so every build would ask. Preflight instead creates and reads its items by running `/usr/bin/security`, which every build can run without a prompt. The credentials stay in the login Keychain, but they lose per-application protection: any process running as your account can read them without a prompt. Pair Preflight only with servers whose terminal access you would grant to every program in your account. A pairing that an older Preflight build created asks once, at launch or on Resume, and "Always Allow" ends the prompts. [The Preflight store](../src/direct_connections/credentials/macos/security_tool.rs) explains the mechanism.
+[ADR 0004](adr/0004-resolve-application-directories-by-xdg-convention.md) owns native credential storage, the Preflight Keychain policy and CLI failures when access is unavailable. In the desktop, the first connection attempt after launch can request Keychain approval. Later automatic retries do not prompt; Resume explicitly requests access again.
 
 `mise run server:direct:build` prepares the two-host verification helper. Its help defines the exact idle Development scope for `server:direct:smoke`; executing the built helper preserves its signature. `server:direct:credentials:native:test` separately verifies and removes two randomly scoped native-store items. `mise run test:native:macos` verifies the Preflight store in a throwaway Keychain.
 
@@ -101,9 +110,9 @@ Preflight is ad hoc signed, so every build would ask. Preflight instead creates 
 
 Settings > Servers owns account-local Update Server. Status controls and local incompatibility recovery open the same journey. Staging verifies the exact pinned artifact before confirmation; Cancel leaves the approved runtime and Terminal Sessions running. Confirmation binds the observed installation, run and Stop policy. A changed observation requires fresh confirmation. Updating ends every client's Terminal Sessions, preserves server identity and organization and respects deliberate Stop.
 
-Finish Update resumes the original admitted local operation. Headless controls expose `service-update`, `service-recover-update` and `service-return-update`; their help explains exact snapshot tokens. Recovery never selects newer bytes, repeats uncertain Stop or Start dispatch or silently returns to a previous runtime. [ADR 0040](adr/0040-keep-one-server-runtime-version-active.md) owns activation.
+Finish Update resumes the original admitted local operation. `spaceterm server update` settles interrupted activation before it selects a new candidate. It previews a return to the previous runtime when that is the available recovery action. Recovery never selects newer bytes, repeats uncertain Stop or Start dispatch or silently returns to a previous runtime. [ADR 0040](adr/0040-keep-one-server-runtime-version-active.md) owns activation.
 
-Update waits for the old server to exit. On Linux, systemd never limits the stop, so SpaceTerm caps the wait at 90 seconds, systemd's stock default stop timeout. On macOS, the wait matches the LaunchAgent's exit timeout. A slower stop leaves the update unfinished. Finish Update or `service-recover-update` completes it after the old server exits, without stopping the server again; until then recovery refuses. An interrupted Stop dispatch may require finishing the original run through the local service manager before Finish Update. Recovery waits for the next desktop launch or local service invocation; no permanent helper runs. Unresolved process cleanup blocks return to a previous runtime.
+Update waits for the old server to exit. On Linux, systemd never limits the stop, so SpaceTerm caps the wait at 90 seconds, systemd's stock default stop timeout. On macOS, the wait matches the LaunchAgent's exit timeout. A slower stop leaves the update unfinished. Finish Update or `spaceterm server update` completes it after the old server exits, without stopping the server again; until then recovery refuses. An interrupted Stop dispatch may require finishing the original run through the local service manager before Finish Update. Recovery waits for the next desktop launch or local service invocation; no permanent helper runs. Unresolved process cleanup blocks return to a previous runtime.
 
 ## Measure terminal latency
 
@@ -115,7 +124,7 @@ The pixel tasks type commands into the focused Pane and force a steady cursor th
 
 The workload task reports keystroke-to-pixels p99 with the other Pane idle, then while `bench:workload` draws in it, and the difference. Each miss, an echo not seen within 1 second, counts as 1000 ms in that p99. #670 requires a difference of at most 10 ms. In `scroll` and `partial` modes, the task fails if the workload Pane stops drawing during the measurement.
 
-`bench:latency:protocol` creates a probe Workspace with its own client identity and closes it afterwards. A paired run enrolls a fresh pairing and revokes it afterwards, including after an interrupt; it also withdraws an invitation that no approved claim used. `--owner-host` runs the owner side through SSH on the server's machine, which needs this repository at the same commit. Without it, the server must run on this machine. `--expose ADDRESS` enables that server's network exposure for the run and then restores the previous address and enabled state. When no address was configured before, the probe's address stays configured, disabled. An exposure change other than widening to all interfaces disconnects every paired client, so the task changes nothing when exposure is already enabled at that address. The probe's protocol calls live in [one module](../crates/spaceterm-server-host/examples/latency_probe/protocol.rs).
+`bench:latency:protocol` creates a probe Workspace with its own client identity and closes it afterwards. A paired run enrolls a fresh pairing and revokes it afterwards, including after an interrupt; it also withdraws an invitation that no approved claim used. `--owner-host` runs the owner side through SSH on the server's machine, which needs this repository at the same commit. Without it, the server must run on this machine. `--expose ADDRESS` enables that server's network exposure for the run and then restores the previous address and enabled state. When no address was configured before, the probe's address stays configured, disabled. An exposure change other than widening to all interfaces disconnects every paired client, so the task changes nothing when exposure is already enabled at that address. The probe's protocol calls live in [one module](../crates/spaceterm-cli/examples/latency_probe/protocol.rs).
 
 `bench:latency:quic` measures a paired request's round trip over QUIC on loopback, in a release build, without a desktop or installed server.
 
@@ -145,4 +154,4 @@ Run `mise run server:reset --identity spaceterm-development` to preview exact pa
 
 The selected identity, organization, pairing grants, outcomes, attachments and views leave active use; exact bytes remain in a private `reset-*` archive. Settings, Commands, repositories, signed installations, service registration, Stop intent, SSH trust, native credentials and signing keys are outside that task's scope.
 
-After reset, `mise run server:setup-state` recreates Development state without starting a server or reversing Stop. Its CLI equivalent is `setup-state IDENTITY` in a client-enabled server build. Explicit Start is required for a stopped service, and its approved runtime must support the current state and protocol.
+After reset, `spaceterm-development server setup --network off` recreates Development state using the installed CLI. It preserves deliberate Stop. Explicit `spaceterm-development server start` is required for a stopped service, and its approved runtime must support the current state and protocol.

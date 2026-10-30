@@ -116,7 +116,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod directory_tests;
 mod dispatch;
-pub use dispatch::{HostCommands, HostRead, Served, SettledRead};
+pub use dispatch::{HostCommands, HostRead, Observers, RunAnswer, RunRequest, Served, SettledRead};
 pub use publish::{Observation, Observed};
 pub use screen_encoder::ScreenCapture;
 #[cfg(test)]
@@ -124,6 +124,8 @@ pub use screen_encoder::ScreenCapture;
 mod effect_tests;
 mod effects;
 use self::effects::NativeEffects;
+#[cfg(test)]
+mod agent_io_tests;
 mod graphics;
 #[cfg(test)]
 mod graphics_tests;
@@ -132,6 +134,7 @@ mod input_tests;
 mod metadata;
 #[cfg(test)]
 mod metadata_tests;
+mod observe;
 mod pane_host;
 #[cfg(test)]
 mod pane_host_tests;
@@ -174,6 +177,29 @@ pub struct DevelopmentPaneHost {
     names: Arc<std::sync::Mutex<control::ClientNames>>,
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
     notifier: Option<dispatch::SessionNotifiers>,
+    /// What each started Terminal Session tells the CLI inside it about this server.
+    session_context: Option<Arc<ServerSessionContext>>,
+}
+
+/// What every Terminal Session of one server tells `spaceterm` inside it: the server's build
+/// identity and ID, and the server's own CLI executable.
+#[derive(Clone)]
+pub struct ServerSessionContext {
+    pub identity: String,
+    pub server: [u8; 32],
+    pub cli: std::path::PathBuf,
+}
+
+impl ServerSessionContext {
+    /// The context of the server `identity` that this process runs, whose executable is its
+    /// own CLI.
+    pub fn current(identity: &str) -> Result<Self, ServerError> {
+        Ok(Self {
+            identity: identity.to_owned(),
+            server: spaceterm_server::local_server_id(identity)?,
+            cli: std::env::current_exe().map_err(|_| ServerError::StartupFailed)?,
+        })
+    }
 }
 /// A Pane the running server keeps after its Session ended, with the control grant it had.
 #[derive(Clone, Copy)]
@@ -198,6 +224,8 @@ struct OwnedPane {
     graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
     /// Whether the controlling client shows this Pane, so its Terminal Session publishes frames.
     presentable: bool,
+    /// Whether an observer shows this Pane, which also makes its Terminal Session publish.
+    observed: bool,
     ended: bool,
     /// Why the shell's exit keeps the Pane. `None` with `ended` closes the Pane.
     end: Option<pane::SessionEnd>,
@@ -222,6 +250,13 @@ fn nonce() -> Result<[u8; 32], ServerError> {
     Ok(bytes)
 }
 impl DevelopmentPaneHost {
+    /// This Pane's running Terminal Session, if one has not ended.
+    pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
+        self.pane
+            .as_ref()
+            .filter(|pane| !pane.ended)
+            .map(|pane| pane.lease.session)
+    }
     pub fn new(
         factory: NativeTerminalSessionFactory,
         directory: ValidatedLocalDirectory,
@@ -240,6 +275,7 @@ impl DevelopmentPaneHost {
             directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
+            session_context: None,
         })
     }
     /// Native composition for the explicitly launched local Development host.
@@ -275,6 +311,7 @@ impl DevelopmentPaneHost {
             directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
+            session_context: None,
         })
     }
 }

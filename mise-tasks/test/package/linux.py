@@ -108,14 +108,14 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
 }}))
 binary = sys.argv[sys.argv.index("--bin") + 1]
-assert binary == "spaceterm", "the desktop builds no sibling server executable"
+assert binary == "spaceterm-desktop", "the desktop builds no sibling server executable"
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
                   "executable": os.environ["BUILD_EXECUTABLE"]}}))
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
         self.record = Path(self.directory.name) / "build.json"
-        self.artifact = self.root / "target/release/spaceterm"
+        self.artifact = self.root / "target/release/spaceterm-desktop"
         self.env = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
@@ -199,22 +199,30 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         self.assertTrue(all(name.split("/")[0] == "spaceterm-preflight" for name in members))
         identifier = "io.github.sadiksaifi.spaceterm-preflight"
         for name in (
-            "spaceterm-preflight/bin/spaceterm",
+            "spaceterm-preflight/bin/spaceterm-desktop",
             "spaceterm-preflight/share/spaceterm/server-artifact/artifact.tar.gz",
             "spaceterm-preflight/share/spaceterm/server-artifact/artifact.sig",
             "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz",
             "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.sig",
             "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.sha256",
             "spaceterm-preflight/share/spaceterm/THIRD-PARTY-NOTICES.txt",
+            "spaceterm-preflight/share/spaceterm/shell-integration/elvish/rc.elv",
             "spaceterm-preflight/share/spaceterm/terminfo/x/xterm-spaceterm",
             f"spaceterm-preflight/share/applications/{identifier}.desktop",
             f"spaceterm-preflight/share/icons/hicolor/scalable/apps/{identifier}.svg",
         ):
             self.assertIn(name, members)
-        self.assertNotIn("spaceterm-preflight/bin/spaceterm-server", members)
-        executable = members["spaceterm-preflight/bin/spaceterm"]
+        self.assertNotIn("spaceterm-preflight/bin/spaceterm", members)
+        executable = members["spaceterm-preflight/bin/spaceterm-desktop"]
         self.assertEqual((executable.mode, executable.uid, executable.uname), (0o755, 0, ""))
         with tarfile.open(archive, "r:gz") as source:
+            rc = source.extractfile(
+                "spaceterm-preflight/share/spaceterm/shell-integration/elvish/rc.elv"
+            )
+            assert rc is not None
+            self.assertEqual(
+                rc.read(), (ROOT / "assets/shell-integration/elvish/rc.elv").read_bytes()
+            )
             packaged = source.extractfile(executable)
             assert packaged is not None
             self.assertEqual(packaged.read(), self.artifact.read_bytes())
@@ -248,8 +256,8 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         result = self.package("v0.0.1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         members = self.members(self.root / "dist/spaceterm-linux-x86_64.tar.gz")
-        self.assertIn("spaceterm/bin/spaceterm", members)
-        self.assertNotIn("spaceterm/bin/spaceterm-server", members)
+        self.assertIn("spaceterm/bin/spaceterm-desktop", members)
+        self.assertNotIn("spaceterm/bin/spaceterm", members)
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
 
     def test_release_archive_rejects_an_executable_of_another_version(self):

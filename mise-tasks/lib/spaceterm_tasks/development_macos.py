@@ -68,8 +68,8 @@ def stage_bundle(executable, server, *, catalog=None):
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))
         shutil.copyfile(executable, contents / "MacOS" / name)
         (contents / "MacOS" / name).chmod(0o755)
-        shutil.copyfile(server, contents / "MacOS" / "spaceterm-server")
-        (contents / "MacOS" / "spaceterm-server").chmod(0o755)
+        shutil.copyfile(server, contents / "MacOS" / "spaceterm")
+        (contents / "MacOS" / "spaceterm").chmod(0o755)
         resources = contents / "Resources"
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
         shutil.copyfile(NOTICES, resources / NOTICES.name)
@@ -87,7 +87,7 @@ def stage_bundle(executable, server, *, catalog=None):
                 "--sign",
                 "-",
                 "--timestamp=none",
-                str(contents / "MacOS/spaceterm-server"),
+                str(contents / "MacOS/spaceterm"),
             ],
             "codesign could not sign the Development Server",
         )
@@ -116,10 +116,10 @@ def launch():
         catalog = prepare(Path(temporary) / "catalog", "spaceterm-development")
         server = build_executable(
             "--package",
-            "spaceterm-server-host",
+            "spaceterm-cli",
             "--no-default-features",
             "--locked",
-            binary="spaceterm-server",
+            binary="spaceterm",
             env=environment,
         )
         bundle = stage_bundle(
@@ -136,9 +136,10 @@ def launch():
         output = os.ttyname(0) if os.isatty(0) else os.devnull
         return supervise(
             [
-                str(bundle / "Contents/MacOS/spaceterm-server"),
-                "development-serve",
-                "spaceterm-development",
+                str(bundle / "Contents/MacOS/spaceterm"),
+                "server",
+                "run",
+                "--owned",
             ],
             ["open", "-W", "-n", "--stdout", output, "--stderr", output, str(bundle)],
             environment,

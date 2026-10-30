@@ -1,8 +1,8 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
 use spaceterm_server::hierarchy::{
-    CloseInventory, ConfirmedControl, ConfirmedPane, Id, Inventory, Mutation, Outcome,
-    RetainedOutcome, State,
+    CloseInventory, ConfirmedControl, ConfirmedPane, CreateControl, Id, Inventory, Mutation,
+    Outcome, RetainedOutcome, State,
 };
 use spaceterm_server::protocol::PaneEvent;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,9 +11,13 @@ use std::time::Instant;
 #[cfg(test)]
 #[path = "shared/close_control_tests.rs"]
 mod close_control_tests;
+#[cfg(test)]
+#[path = "shared/create_control_tests.rs"]
+mod create_control_tests;
 mod edits;
 mod journal;
 mod publication;
+mod runs;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
@@ -61,6 +65,8 @@ pub struct SharedWorkspaceHost {
     repositories: super::repositories::ServerRepositories,
     state: State,
     panes: BTreeMap<Id, DevelopmentPaneHost>,
+    /// Distinct observer clients of each running Terminal Session, never retained.
+    observers: BTreeMap<Id, super::Observers>,
     /// Pane identities introduced in this server run, independent of their control grants.
     fresh_panes: BTreeSet<Id>,
     /// Retains organization off the lock. Absent until [`HostCommands::restore`].
@@ -89,6 +95,12 @@ pub struct SharedWorkspaceHost {
     blocked: Option<Refusal>,
     organization_prepared: bool,
     attachment_generations: BTreeMap<(Id, Id), (u64, u64)>,
+    /// Every run receipt, until its client acknowledges it.
+    runs: spaceterm_server::pane::run::RunTable,
+    /// Runs recorded before their worker answered.
+    admitting_runs: Vec<runs::Admitting>,
+    /// Receipts that settled and wait for [`HostCommands::take_settled_runs`].
+    settled_runs: Vec<spaceterm_server::pane::run::Settled>,
 }
 /// The settled answer to an edit, or the Worktree write it still waits for.
 enum Answer {
@@ -113,6 +125,15 @@ impl SharedWorkspaceHost {
             sync,
         ))
     }
+    /// Names this server to the CLI in each Terminal Session started from now on.
+    pub fn with_session_context(mut self, context: super::ServerSessionContext) -> Self {
+        let context = Arc::new(context);
+        for host in self.panes.values_mut() {
+            host.session_context = Some(Arc::clone(&context));
+        }
+        self.prototype.session_context = Some(context);
+        self
+    }
     /// A host with a sync worker of its own.
     #[cfg(test)]
     pub(super) fn new(prototype: DevelopmentPaneHost) -> Self {
@@ -129,6 +150,7 @@ impl SharedWorkspaceHost {
             repositories,
             state,
             panes: BTreeMap::new(),
+            observers: BTreeMap::new(),
             fresh_panes: BTreeSet::new(),
             journal: None,
             sync,
@@ -143,6 +165,9 @@ impl SharedWorkspaceHost {
             blocked: None,
             organization_prepared: false,
             attachment_generations: BTreeMap::new(),
+            runs: Default::default(),
+            admitting_runs: Vec::new(),
+            settled_runs: Vec::new(),
         }
     }
     /// Prepare the first organization once, without starting a Terminal Session.
@@ -356,6 +381,37 @@ impl SharedWorkspaceHost {
     }
     fn inventory(&self) -> Inventory {
         let mut inventory = self.state.inventory.clone();
+        let names = self
+            .prototype
+            .names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for pane in inventory
+            .workspaces
+            .iter_mut()
+            .flat_map(|w| &mut w.tabs)
+            .flat_map(|t| &mut t.panes)
+        {
+            let observers = self
+                .panes
+                .get(&pane.id)
+                .and_then(|host| host.pane.as_ref())
+                .and_then(|live| self.observers.get(&live.lease.session));
+            pane.observers = observers.map_or_else(Default::default, |observers| {
+                let shown = observers
+                    .clients
+                    .iter()
+                    .take(spaceterm_server::hierarchy::MAX_OBSERVER_NAMES)
+                    .map(|client| names.name(*client))
+                    .collect::<Vec<_>>();
+                spaceterm_server::hierarchy::PaneObservers {
+                    others: u32::try_from(observers.clients.len() - shown.len())
+                        .unwrap_or(u32::MAX),
+                    names: shown,
+                }
+            });
+        }
+        drop(names);
         let sessions = inventory
             .workspaces
             .iter()
@@ -423,6 +479,7 @@ impl SharedWorkspaceHost {
                 directories: super::directories::DirectoryOperations::default(),
                 names: Arc::clone(&self.prototype.names),
                 notifier: self.prototype.notifier.clone(),
+                session_context: self.prototype.session_context.clone(),
             };
             self.panes.insert(id, host);
         }
@@ -599,10 +656,45 @@ impl SharedWorkspaceHost {
             .outcome(device, sequence)
             .ok_or(Refusal::Failed)?
             .clone();
+        let revision = self.commit(next)?;
+        self.reveal(&outcome);
         Ok(Answer::Outcome {
             outcome: Box::new(outcome),
-            revision: self.commit(next)?,
+            revision,
         })
+    }
+    /// Sends `Effect::Reveal` for work created for an origin Pane's Controlling Client, on the
+    /// origin Pane's channel only. The client decides whether to show it.
+    fn reveal(&mut self, record: &RetainedOutcome) {
+        let Some(CreateControl::OriginController { pane: origin }) =
+            record.mutation.create_control()
+        else {
+            return;
+        };
+        let Outcome::Accepted { target } = record.outcome else {
+            return;
+        };
+        let Some(placement) = self.state.inventory.placement(target) else {
+            return;
+        };
+        // The created Pane's controller is the origin's, revalidated at commit.
+        let Some(controller) = self
+            .state
+            .pane(placement.pane)
+            .and_then(|(_, _, pane)| pane.creator)
+        else {
+            return;
+        };
+        if let Some(host) = self.panes.get_mut(&origin) {
+            host.send_server_effect(
+                controller,
+                pane::effects::Effect::Reveal(Box::new(pane::effects::Reveal {
+                    workspace: placement.workspace,
+                    tab: placement.tab,
+                    pane: placement.pane,
+                })),
+            );
+        }
     }
     /// The recorded outcome of an Original Operation.
     fn resolve(&mut self, device: Id, sequence: u64) -> Result<Answer, Refusal> {
@@ -1045,7 +1137,10 @@ impl SharedWorkspaceHost {
     }
     /// When timed work is next due, without running it.
     fn due(&self, now: Instant) -> Option<Instant> {
-        let waiting = !self.settled() || self.writes.busy() || !self.waiting.is_empty();
+        let waiting = !self.settled()
+            || self.writes.busy()
+            || !self.waiting.is_empty()
+            || !self.admitting_runs.is_empty();
         // A failed synchronization reads the record back from storage on each retry, and a stuck
         // process or full disk rarely recovers within milliseconds, so it retries once a second.
         let soon = if self.blocked.is_some() {
@@ -1081,6 +1176,12 @@ impl SharedWorkspaceHost {
     }
 }
 impl HostCommands for SharedWorkspaceHost {
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.panes
+            .values()
+            .filter_map(DevelopmentPaneHost::live_session)
+            .collect()
+    }
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
         self.retain_in(Box::new(store))
     }
@@ -1286,7 +1387,99 @@ impl HostCommands for SharedWorkspaceHost {
             host.disconnected(connection);
         }
     }
+    fn run(&mut self, request: super::RunRequest, answer: super::RunAnswer) -> Result<(), Refusal> {
+        let reply = self.admit_run(request, answer);
+        self.rearm();
+        reply
+    }
+    fn run_status(
+        &mut self,
+        device: Id,
+        run: spaceterm_server::protocol::RunId,
+    ) -> Result<spaceterm_server::protocol::RunReply, Refusal> {
+        self.run_receipt(device, run)
+    }
+    fn run_acknowledge(
+        &mut self,
+        device: Id,
+        run: spaceterm_server::protocol::RunId,
+    ) -> Result<(), Refusal> {
+        self.retire_run(device, run)
+    }
+    fn observe_start(
+        &mut self,
+        pane: Id,
+        session: Option<Id>,
+    ) -> Result<spaceterm_server::protocol::ObserveReply, Refusal> {
+        if let Some(host) = self.panes.get_mut(&pane) {
+            return host.observe_start(session);
+        }
+        // A Pane whose shell never started has no host yet.
+        let known = self.state.inventory.workspaces.iter().any(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .any(|tab| tab.panes.iter().any(|candidate| candidate.id == pane))
+        });
+        if !known {
+            return Err(Refusal::Missing);
+        }
+        Ok(spaceterm_server::protocol::ObserveReply::NoSession {
+            state: spaceterm_server::protocol::SessionState::NotStarted,
+        })
+    }
+    fn observe_session(&mut self, pane: Id, session: Id) -> super::publish::Observed {
+        match self.panes.get_mut(&pane) {
+            Some(host) => host.observe_session(session),
+            None => super::publish::Observed::Gone {
+                last: None,
+                event: PaneEvent::Ended,
+            },
+        }
+    }
+    fn session_size(&self, pane: Id) -> Option<PaneSize> {
+        let pane = self.panes.get(&pane)?.pane.as_ref()?;
+        (!pane.ended && !pane.failed).then_some(pane.size)
+    }
+    fn observer_live(&self, pane: Id, session: Id) -> bool {
+        self.panes
+            .get(&pane)
+            .is_some_and(|host| host.observer_live(session))
+    }
+    fn observer_scrollback_page(
+        &mut self,
+        pane: Id,
+        session: Id,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        self.panes
+            .get_mut(&pane)
+            .ok_or(Refusal::Missing)?
+            .observer_scrollback_page(session, read, reply)
+    }
+    fn observers(&mut self, observers: &BTreeMap<Id, super::Observers>) {
+        let changed = self.observers != *observers;
+        self.observers.clone_from(observers);
+        for host in self.panes.values_mut() {
+            if let Some(session) = host.pane.as_ref().map(|pane| pane.lease.session) {
+                host.set_observed(
+                    session,
+                    observers
+                        .get(&session)
+                        .is_some_and(|observers| observers.visible),
+                );
+            }
+        }
+        if changed {
+            self.publish();
+        }
+    }
+    fn take_settled_runs(&mut self) -> Vec<spaceterm_server::pane::run::Settled> {
+        self.drain_settled_runs()
+    }
     fn revoked(&mut self, client: Id) {
+        self.runs.forget(&client);
         // First, because reading back an uncertain journal restores the state from storage.
         self.forget(client);
         self.prototype.revoked(client);
@@ -1304,6 +1497,16 @@ impl HostCommands for SharedWorkspaceHost {
         }
         self.attachment_generations
             .retain(|(owner, _), _| *owner != client);
+        self.publish();
+    }
+    fn holds(&self, client: Id) -> bool {
+        self.state.holds(client) || self.runs.holds(&client)
+    }
+    fn release_control(&mut self, client: Id) {
+        self.prototype.release_control(client);
+        for host in self.panes.values_mut() {
+            host.release_control(client);
+        }
         self.publish();
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
@@ -1380,11 +1583,14 @@ mod tests {
             retained_outcome(&memory, device, 1),
             "an outcome is retained before its reply"
         );
+        assert!(HostCommands::holds(&host, device));
+        assert!(!HostCommands::holds(&host, [2; 32]));
         let release = memory.hold();
         assert!(matches!(
             host.request(device, device, Request::Acknowledge { sequence: 1 }),
             Reply::Unchanged
         ));
+        assert!(!HostCommands::holds(&host, device));
         assert!(
             retained_outcome(&memory, device, 1),
             "the write is still held"
@@ -1486,6 +1692,24 @@ mod tests {
         host.sync.flush().unwrap();
         assert!(retained_outcome(&memory, connected, 1));
         assert!((1..=70).all(|n| !retained_outcome(&memory, [n; 32], 1)));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_evicted_agent_loses_only_its_control_and_still_resolves_its_outcome() {
+        let (mut host, memory) = journaled();
+        let agent = [3; 32];
+        assert!(accepted(&edit(&mut host, agent, 1, "Agent")));
+        host.release_control(agent);
+        host.sync.flush().unwrap();
+        assert!(!host.forgetting.contains(&agent));
+        assert!(retained_outcome(&memory, agent, 1));
+        // The returning agent's lost reply resolves to its original outcome.
+        let Reply::Outcome(resolved) = host.request(agent, agent, Request::Resolve { sequence: 1 })
+        else {
+            panic!("the evicted agent's outcome is retained");
+        };
+        assert!(matches!(resolved.outcome, Outcome::Accepted { .. }));
         host.shutdown().unwrap();
     }
 
@@ -1609,7 +1833,8 @@ mod tests {
                     sequence: 1,
                     mutation: Mutation::CreateTab {
                         workspace,
-                        source: None
+                        source: None,
+                        control: spaceterm_server::hierarchy::CreateControl::Creator,
                     },
                 }
             ),
@@ -2002,6 +2227,7 @@ mod tests {
                     tab: tab.id,
                     source: pane,
                     axis: Axis::Down,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 },
             },
         ) else {

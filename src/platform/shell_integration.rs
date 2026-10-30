@@ -136,10 +136,25 @@ pub fn plan_shell_integration(
                 xdg_root,
             ));
             environment.push((OsString::from("XDG_DATA_DIRS"), xdg));
+            if kind == ShellKind::Elvish {
+                let rc = resource_root.join("shell-integration/elvish/rc.elv");
+                if !rc.is_file() {
+                    return empty_plan(ShellIntegrationStatus::MissingResources);
+                }
+                arguments.extend([OsString::from("-rc"), rc.into_os_string()]);
+            }
             if kind == ShellKind::Nushell {
                 arguments.extend([
                     OsString::from("--execute"),
                     OsString::from("use spaceterm *; install"),
+                ]);
+            }
+            // Fish 4 marks its prompts itself, without the Prompt Owner. SpaceTerm's integration
+            // marks them instead, and fish reads its features only at startup.
+            if kind == ShellKind::Fish {
+                arguments.extend([
+                    OsString::from("--features"),
+                    OsString::from("no-mark-prompt"),
                 ]);
             }
         }
@@ -296,6 +311,7 @@ mod tests {
             fish.status,
             ShellIntegrationStatus::Applied(ShellKind::Fish)
         );
+        assert_eq!(fish.arguments, ["--features", "no-mark-prompt"]);
         assert!(fish.environment.iter().any(|(name, value)| {
             name == "XDG_DATA_DIRS"
                 && value
@@ -344,6 +360,15 @@ mod tests {
         assert_eq!(
             elvish.status,
             ShellIntegrationStatus::Applied(ShellKind::Elvish)
+        );
+        assert_eq!(
+            elvish.arguments,
+            [
+                OsString::from("-rc"),
+                resources
+                    .join("shell-integration/elvish/rc.elv")
+                    .into_os_string(),
+            ]
         );
         assert!(elvish.environment.iter().any(|(name, value)| {
             name == "XDG_DATA_DIRS"

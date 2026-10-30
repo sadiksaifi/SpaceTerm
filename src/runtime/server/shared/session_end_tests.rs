@@ -479,6 +479,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
         Mutation::CreateWorkspace {
             name: "Second".into(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     );
     let inventory = shared_inventory(&mut selected);
@@ -494,6 +495,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
             tab: second_tab.id,
             source: second,
             axis: Axis::Right,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     );
     let first_session = start(&mut selected, 1, first);
@@ -740,6 +742,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
         Mutation::CreateWorkspace {
             name: "Repair".into(),
             directory: Some(root.clone()),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     );
     let before = shared_inventory(&mut host).workspaces;

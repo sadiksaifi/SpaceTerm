@@ -1521,7 +1521,10 @@ pub(super) fn present(
                                 }
                                 PaneEvent::Failed => return Err(ServerError::StartupFailed),
                                 // The link settles input outcomes before they reach the inbox.
-                                PaneEvent::Input { .. } => {}
+                                // Progress and run receipts are for CLI channels only.
+                                PaneEvent::Input { .. }
+                                | PaneEvent::Progress { .. }
+                                | PaneEvent::RunFinished(_) => {}
                             }
                             continue;
                         }

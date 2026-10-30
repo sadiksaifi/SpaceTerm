@@ -134,11 +134,21 @@ impl DevelopmentPaneHost {
             control: nonce().map_err(|_| Refusal::Failed)?,
             connection,
         };
+        let mut plan = LocalTerminalLaunchPlan::new(directory).without_client_effects();
+        if let (Some(context), Some(organization)) = (&self.session_context, &self.organization) {
+            plan = plan.in_session(crate::platform::shell_launch::SessionEnvironment {
+                identity: context.identity.clone(),
+                server: context.server,
+                pane: organization.pane,
+                session: lease.session,
+                cli: context.cli.clone(),
+            });
+        }
         let runtime = self
             .factory
             .start_runtime(
                 geometry(size),
-                LocalTerminalLaunchPlan::new(directory).without_client_effects(),
+                plan,
                 appearance(style, 1).map_err(|_| Refusal::Failed)?,
             )
             .map_err(|_| Refusal::Failed)?;
@@ -159,6 +169,7 @@ impl DevelopmentPaneHost {
             screen: None,
             graphics_transfer: None,
             presentable: true,
+            observed: false,
             ended: false,
             end: None,
             failed: false,
@@ -364,7 +375,7 @@ impl DevelopmentPaneHost {
 impl OwnedPane {
     pub(super) fn invalidate_input(&mut self) {
         self.presentable = false;
-        self.runtime.set_presentable(false);
+        self.apply_presentable();
         self.graphics_transfer = None;
         self.accessibility.disconnect();
         self.runtime.end_server_accessibility_demand();
@@ -708,7 +719,7 @@ impl OwnedPane {
         self.lease.connection = connection;
         self.connected = true;
         self.presentable = true;
-        self.runtime.set_presentable(true);
+        self.apply_presentable();
         self.runtime.resize(geometry(size));
         self.size = size;
         if let Some(appearance) = appearance {

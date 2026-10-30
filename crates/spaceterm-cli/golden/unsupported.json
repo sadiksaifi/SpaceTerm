@@ -1,0 +1,15 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "tab.create",
+  "status": "error",
+  "server": null,
+  "data": {},
+  "error": {
+    "code": "unsupported",
+    "class": "unavailable",
+    "message": "This operation isn’t supported.",
+    "retryable": false,
+    "details": {}
+  },
+  "warnings": []
+}

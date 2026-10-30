@@ -1,0 +1,19 @@
+{
+  "command": "pane.run",
+  "data": {},
+  "error": {
+    "class": "target",
+    "code": "not_at_prompt",
+    "details": {},
+    "message": "The shell is not waiting at an empty prompt.",
+    "retryable": true
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "error",
+  "warnings": []
+}

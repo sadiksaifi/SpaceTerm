@@ -2,12 +2,20 @@
 pub mod activation;
 mod command;
 pub mod control;
+pub mod feed;
+pub mod helper;
+pub mod lane;
+pub mod lane_codes;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod operations;
 mod registration;
 mod runtime;
+pub mod tokens;
+#[cfg(feature = "client")]
+pub use runtime::CliUninstall;
 pub use runtime::{CandidateMetadata, verify_candidate_bytes};
 
 use crate::{
@@ -149,6 +157,10 @@ trait Supervisor: Send + Sync {
     fn enable_linger(&self, _authorization: LingerAuthorization) -> Result<(), ServerError> {
         Err(ServerError::Unsupported)
     }
+    /// Whether boot startup is authorized, where the service manager has that notion.
+    fn linger_authorized(&self) -> Result<Option<bool>, ServerError> {
+        Ok(None)
+    }
 }
 
 impl Service {
@@ -157,7 +169,12 @@ impl Service {
         self.supervisor.startup()
     }
     pub fn for_identity(identity: &str) -> Result<Self, ServerError> {
-        let paths = Paths::for_identity(identity)?;
+        Self::for_paths(Paths::for_identity(identity)?)
+    }
+    /// The service of the account whose server state lives at `paths`.
+    pub(crate) fn for_paths(paths: Paths) -> Result<Self, ServerError> {
+        let identity = paths.identity.clone();
+        let identity = identity.as_str();
         #[cfg(target_os = "macos")]
         let supervisor = std::sync::Arc::new(macos::LaunchAgent::new(&paths, identity)?);
         #[cfg(target_os = "linux")]
@@ -170,6 +187,19 @@ impl Service {
             identity,
             supervisor,
         }
+    }
+    /// Where this account's signed installations are retained.
+    pub fn installations_directory(&self) -> PathBuf {
+        self.paths.data.join("installations")
+    }
+    /// The owning account's home, from its account record rather than the environment.
+    pub fn account_home(&self) -> Option<PathBuf> {
+        self.paths.data.ancestors().nth(4).map(Path::to_owned)
+    }
+    /// Whether Linux boot startup is authorized for this account. `None` where startup follows
+    /// login instead. This never requests authorization.
+    pub fn linger(&self) -> Result<Option<bool>, ServerError> {
+        self.supervisor.linger_authorized()
     }
     /// Explicitly authorize Linux boot startup for this account. This does not start a server.
     pub fn enable_linger(&self, authorization: LingerAuthorization) -> Result<(), ServerError> {
@@ -349,6 +379,7 @@ impl Service {
         self.supervisor.install(&self.runtime(&state))?;
         state.installed = true;
         data.write_json(c"service.json", &state)?;
+        self.repoint_cli_locked(&self.runtime(&state))?;
         drop(instance);
         if state.stopped {
             self.supervisor.stop()?;
@@ -647,13 +678,21 @@ impl Service {
     ) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
-        let recovering = Self::state(&data)?.is_some_and(|s| {
+        self.apply_control_locked(&data, action, observed_running)
+    }
+    fn apply_control_locked(
+        &self,
+        data: &Directory,
+        action: control::Action,
+        observed_running: Option<bool>,
+    ) -> Result<ServiceStatus, ServerError> {
+        let recovering = Self::state(data)?.is_some_and(|s| {
             s.activation
                 .as_ref()
                 .is_some_and(activation::Operation::pending)
         });
-        self.resume_activation(&data)?;
-        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        self.resume_activation(data)?;
+        let mut state = Self::state(data)?.ok_or(ServerError::NotInstalled)?;
         if recovering {
             return self.snapshot(&state);
         }
@@ -682,10 +721,10 @@ impl Service {
                 Err(error) => return Err(error),
             }
         }
-        self.stop_locked(&data, &mut state)?;
+        self.stop_locked(data, &mut state)?;
         match action {
             control::Action::Stop => {}
-            control::Action::Restart => self.start_locked(&data, &mut state, true)?,
+            control::Action::Restart => self.start_locked(data, &mut state, true)?,
             control::Action::Uninstall => {
                 state.removing = true;
                 data.write_json(c"service.json", &state)?;
@@ -885,7 +924,7 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), ServerError>
     }
     check_cleanup(&state)?;
     let executable = std::env::current_exe().map_err(|_| ServerError::RuntimeUnavailable)?;
-    if executable != service.runtime(&state).join("bin/spaceterm-server") {
+    if executable != service.runtime(&state).join("bin/spaceterm") {
         return Err(ServerError::RuntimeUnavailable);
     }
     runtime::verify(&service.runtime(&state), identity)?;
@@ -1138,7 +1177,7 @@ mod tests {
             ));
             let paths = Paths {
                 identity: "spaceterm-development".into(),
-                data: root.join("data"),
+                data: root.join(".local/share/spaceterm-development/server"),
                 runtime: root.join("runtime"),
             };
             let data = Directory::open(&paths.data, true).unwrap();
@@ -2636,7 +2675,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut wire = protocol::Wire::new(&mut stream);
                 let hello: serde_json::Value = wire.read()?;
-                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "server":hello["server"]}))
+                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "server":hello["server"], "server_major":protocol::MAJOR, "client":hello["client"]}))
             }));
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())
@@ -2703,7 +2742,7 @@ mod tests {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());
-            let sibling = fixture.root.join("spaceterm-server");
+            let sibling = fixture.root.join("spaceterm");
             std::fs::write(&sibling, b"unverified sibling").unwrap();
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())

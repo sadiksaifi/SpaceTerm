@@ -22,6 +22,21 @@ from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
 from tests.server_artifact_fixture import archive_tree
 
 
+class ResourcePolicyTests(unittest.TestCase):
+    def test_policy_matches_tracked_assets(self):
+        tracked = subprocess.run(
+            ["git", "ls-files", "assets/shell-integration", "assets/THIRD-PARTY-NOTICES.txt"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        self.assertCountEqual(
+            json.loads((ROOT / "packaging/server-resources.json").read_text()),
+            ["share/spaceterm/" + name.removeprefix("assets/") for name in tracked],
+        )
+
+
 class ServerArchiveTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -34,13 +49,19 @@ class ServerArchiveTests(unittest.TestCase):
         self.commit = "a" * 40
         self.info = {
             "schema": 1,
-            "protocol_major": 3,
+            "source_sha256": None,
+            "protocol_major": 4,
             "capabilities": ["workspace_policy"],
             "identity": "spaceterm-preflight",
             "target": "x86_64-unknown-linux-gnu",
             "commit": self.commit,
             "version": "dev.aaaaaaaaaaaa",
         }
+
+    def test_linux_cannot_produce_a_mac_cli_without_its_native_frameworks(self):
+        with patch.object(server_package, "host_target", return_value="x86_64-unknown-linux-gnu"):
+            with self.assertRaisesRegex(TaskError, "native macOS build"):
+                server_package.package("spaceterm-development", target="aarch64-apple-darwin")
 
     def test_dirty_source_manifest_is_bound_to_its_commit_and_nonproduction_identity(self):
         for identity in ("spaceterm-development", "spaceterm-preflight", "spaceterm"):
@@ -177,8 +198,8 @@ class ServerArchiveTests(unittest.TestCase):
     def test_signed_package_with_missing_or_extra_resources_is_refused(self):
         tree = self.root / "server"
         (tree / "bin").mkdir(parents=True)
-        (tree / "bin/spaceterm-server").write_bytes(b"never executed")
-        (tree / "bin/spaceterm-server").chmod(0o755)
+        (tree / "bin/spaceterm").write_bytes(b"never executed")
+        (tree / "bin/spaceterm").chmod(0o755)
         (tree / "build.json").write_text(json.dumps(self.info))
         resources = tree / "share/spaceterm"
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
@@ -206,8 +227,8 @@ class ServerArchiveTests(unittest.TestCase):
     def test_desktop_artifact_rejects_wrong_exact_build_before_staging(self):
         tree = self.root / "server"
         (tree / "bin").mkdir(parents=True)
-        (tree / "bin/spaceterm-server").write_bytes(b"native executable fixture")
-        (tree / "bin/spaceterm-server").chmod(0o755)
+        (tree / "bin/spaceterm").write_bytes(b"native executable fixture")
+        (tree / "bin/spaceterm").chmod(0o755)
         archive, signature = archive_tree(ROOT, tree, self.info)
         run = subprocess.run
         client = self.root / "client"
@@ -219,6 +240,7 @@ class ServerArchiveTests(unittest.TestCase):
                 output = json.dumps(
                     {
                         "schema": 1,
+                        "source_sha256": None,
                         "identity": self.info["identity"],
                         "target": self.info["target"],
                         "version": "99.0.0",
@@ -227,10 +249,10 @@ class ServerArchiveTests(unittest.TestCase):
                 ).encode()
             elif arguments[0] == "objdump":
                 output = b"elf64-x86-64" if arguments[1] == "-f" else b""
-            elif arguments[1:] == ["--build-info"]:
+            elif arguments[1:] == ["server", "provision", "build-info"]:
                 server_queries.append(arguments[0])
                 output = json.dumps(self.info).encode()
-            elif arguments[1:] == ["--check"]:
+            elif arguments[1:] == ["server", "provision", "check"]:
                 output = b"Server checks passed.\n"
             else:
                 return run(arguments, **kwargs)

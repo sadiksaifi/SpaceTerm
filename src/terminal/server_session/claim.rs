@@ -507,7 +507,8 @@ mod tests {
                         sequence,
                         mutation: Mutation::CreateTab {
                             workspace,
-                            source: None
+                            source: None,
+                            control: spaceterm_server::hierarchy::CreateControl::Creator,
                         },
                     }
                 ),
@@ -706,7 +707,8 @@ mod tests {
                             sequence: 1,
                             mutation: Mutation::CreateTab {
                                 workspace,
-                                source: None
+                                source: None,
+                                control: spaceterm_server::hierarchy::CreateControl::Creator,
                             },
                         }
                     ),

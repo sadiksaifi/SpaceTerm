@@ -239,9 +239,13 @@ impl CaptionLayout {
         window: &Window,
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
+        let observers_width = caption.observed_by.as_ref().map_or(px(0.0), |label| {
+            measure_caption_segment(label, window, appearance).min(width * 0.5)
+                + appearance.spacing(PANE_REPOSITORY_LEADING_GAP)
+        });
         Self::from_metrics(
             caption.has_multiple_panes,
-            width,
+            (width - observers_width).max(px(0.0)),
             controls_reveal,
             CaptionMetrics::measure(&caption.text, window, appearance),
             appearance.spacing_scale,
@@ -419,9 +423,22 @@ fn minimum_pane_width(appearance: &super::appearance::ChromeAppearance) -> f32 {
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TabViewEvent {
-    UserClosePaneRequested { tab_id: TabId, pane_id: PaneId },
-    CloseTabRequested { tab_id: TabId },
-    PresentationChanged { tab_id: TabId },
+    UserClosePaneRequested {
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
+    CloseTabRequested {
+        tab_id: TabId,
+    },
+    PresentationChanged {
+        tab_id: TabId,
+    },
+    /// This Tab's Focused Pane asked to show work the server created for it.
+    RevealRequested {
+        tab_id: TabId,
+        origin: PaneId,
+        target: spaceterm_server::hierarchy::Placement,
+    },
 }
 
 impl std::fmt::Debug for TabViewEvent {
@@ -430,6 +447,7 @@ impl std::fmt::Debug for TabViewEvent {
             Self::UserClosePaneRequested { .. } => "TabViewEvent::UserClosePaneRequested",
             Self::CloseTabRequested { .. } => "TabViewEvent::CloseTabRequested",
             Self::PresentationChanged { .. } => "TabViewEvent::PresentationChanged",
+            Self::RevealRequested { .. } => "TabViewEvent::RevealRequested",
         })
     }
 }
@@ -474,6 +492,7 @@ pub(crate) struct TabView {
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     pane_captions: BTreeMap<PaneId, PaneCaptionText>,
+    pane_observers: BTreeMap<PaneId, gpui::SharedString>,
     pane_attention: BTreeMap<PaneId, u32>,
     resizing_split_id: Option<SplitId>,
     pane_drag: Option<PaneDrag>,
@@ -578,6 +597,7 @@ impl TabView {
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             pane_captions: BTreeMap::from([(initial_pane_id, initial_caption)]),
+            pane_observers: BTreeMap::new(),
             pane_attention: BTreeMap::from([(initial_pane_id, 0)]),
             resizing_split_id: None,
             pane_drag: None,
@@ -656,6 +676,15 @@ impl TabView {
                     view.release_shared_pane(pane_id, window, cx);
                 }
                 TerminalPaneEvent::Exited => view.close_pane(pane_id, window, cx),
+                // Only the Focused Pane may move the view; a Reveal from any other is dropped.
+                TerminalPaneEvent::Reveal(target) if pane_id == view.tab.focused_pane_id() => {
+                    cx.emit(TabViewEvent::RevealRequested {
+                        tab_id: view.tab.id(),
+                        origin: pane_id,
+                        target: *target,
+                    });
+                }
+                TerminalPaneEvent::Reveal(_) => {}
             },
         )
         .detach();
@@ -1150,6 +1179,7 @@ impl TabView {
                 zoomed: false,
                 attention,
                 has_multiple_panes: true,
+                observed_by: self.pane_observers.get(&pane_id).cloned(),
                 shared: self.shared_caption_controls(pane_id),
             },
             card_width,
@@ -1854,6 +1884,7 @@ impl TabView {
                     zoomed,
                     attention: self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0,
                     has_multiple_panes,
+                    observed_by: self.pane_observers.get(&pane_id).cloned(),
                     shared: self.shared_caption_controls(pane_id),
                 },
                 controls_reveal: hovers
@@ -2457,6 +2488,26 @@ impl TabView {
                 }
                 Err(error) => eprintln!("failed to present a shared Pane: {error}"),
             }
+        }
+        let observers = server_tab
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let pane_id = self.shared.as_ref()?.local_pane(pane.id)?;
+                let first = pane.observers.names.first()?;
+                let others = pane.observers.others as u64 + pane.observers.names.len() as u64 - 1;
+                let label = if others == 0 {
+                    format!("Observed by {}", first.as_str())
+                } else {
+                    format!("Observed by {} and {others} others", first.as_str())
+                };
+                Some((pane_id, label.into()))
+            })
+            .collect();
+        if self.pane_observers != observers {
+            self.pane_observers = observers;
+            changed = true;
+            cx.notify();
         }
         changed |= self.remove_absent_shared_panes(server_tab, window, cx);
         let retired = self
@@ -3733,20 +3784,21 @@ pub(crate) struct TabIdentity {
 
 impl TabIdentity {
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
-        // A caption without a label has no directory, and its `name` is already what the Terminal
-        // Session is doing. Otherwise `name` is the directory leaf and `label` the activity.
-        let (activity, place) = if caption.label.is_empty() {
-            (caption.name, gpui::SharedString::default())
+        let (activity, directory) = if caption.label.is_empty() {
+            (caption.name.as_ref(), "")
         } else {
-            (caption.label, caption.name)
+            (caption.label.as_ref(), caption.name.as_ref())
         };
-        let activity = if activity.is_empty() { title } else { activity };
-        // Saying the same word twice adds nothing, so the activity keeps it.
-        let place = if place == activity {
-            gpui::SharedString::default()
-        } else {
-            place
-        };
+        let label = spaceterm_server::labels::Label::from_parts(
+            if activity.is_empty() {
+                title.as_ref()
+            } else {
+                activity
+            },
+            directory,
+        );
+        let place = label.place().to_owned().into();
+        let activity = label.activity.into();
         Self {
             remote: caption.origin.remote,
             progress: caption.progress,
@@ -3856,6 +3908,7 @@ struct PaneCaption {
     zoomed: bool,
     attention: bool,
     has_multiple_panes: bool,
+    observed_by: Option<gpui::SharedString>,
     /// Present when a SpaceTerm Server owns the Pane, which changes what its controls offer.
     shared: Option<SharedCaptionControls>,
 }
@@ -4028,6 +4081,7 @@ fn render_pane_caption_content(
         attention,
         has_multiple_panes,
         shared,
+        observed_by,
     } = caption;
     let color = paint.foreground;
     let button_paint = |value: crate::appearance::SemanticPaint| {
@@ -4279,6 +4333,22 @@ fn render_pane_caption_content(
                 ))
             },
         )
+        .when_some(observed_by, |row, label| {
+            row.child(
+                div()
+                    .id(("pane-observers", pane_id.get()))
+                    .debug_selector(move || format!("pane-caption-observers-{}", pane_id.get()))
+                    .role(gpui::accesskit::Role::Label)
+                    .aria_label(label.clone())
+                    .ml(appearance.spacing(PANE_REPOSITORY_LEADING_GAP))
+                    .max_w(relative(0.5))
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .truncate()
+                    .text_color(gpui_color(paint.secondary))
+                    .child(label),
+            )
+        })
         .child(controls_slot.child(controls_clip.child(controls)))
         .into_any_element()
 }

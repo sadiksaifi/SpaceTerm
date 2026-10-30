@@ -34,7 +34,7 @@ impl UserService {
         }
     }
     fn contents(&self, runtime: &Path) -> Result<Vec<u8>, ServerError> {
-        let executable = runtime.join("bin/spaceterm-server");
+        let executable = runtime.join("bin/spaceterm");
         let executable = executable.to_str().ok_or(ServerError::RuntimeUnavailable)?;
         // Unit strings have C escapes, percent specifiers, and (in ExecStart) dollar expansion.
         let mut quoted = String::new();
@@ -53,7 +53,7 @@ impl UserService {
         }
         // Only the main process gets SIGTERM. It closes admissions, drains started Git writes,
         // and shuts down its Terminal Sessions before exiting. No manager SIGKILL bypasses that.
-        Ok(format!("[Unit]\nDescription=SpaceTerm account server ({})\nStartLimitIntervalSec=60\nStartLimitBurst=3\n\n[Service]\nType=exec\nExecStart=\"{quoted}\" service-serve {}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=infinity\nKillMode=mixed\nSendSIGKILL=no\nUMask=0077\n\n[Install]\nWantedBy=default.target\n", self.identity, self.identity).into_bytes())
+        Ok(format!("[Unit]\nDescription=SpaceTerm account server ({})\nStartLimitIntervalSec=60\nStartLimitBurst=3\n\n[Service]\nType=exec\nExecStart=\"{quoted}\" server run --service --identity {}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=infinity\nKillMode=mixed\nSendSIGKILL=no\nUMask=0077\n\n[Install]\nWantedBy=default.target\n", self.identity, self.identity).into_bytes())
     }
     fn manager(&self, program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
         let mut command = Command::new(program);
@@ -331,14 +331,17 @@ impl Supervisor for UserService {
             .get("data")
             .and_then(|v| v.as_array())
             .ok_or(ServerError::ServiceUnavailable)?;
-        let executable = runtime.join("bin/spaceterm-server");
+        let executable = runtime.join("bin/spaceterm");
         let expected = executable.to_str().ok_or(ServerError::RuntimeUnavailable)?;
         if entries.len() != 1
             || entries[0].get(0).and_then(|v| v.as_str()) != Some(expected)
             || entries[0].get(1)
                 != Some(&serde_json::json!([
                     expected,
-                    "service-serve",
+                    "server",
+                    "run",
+                    "--service",
+                    "--identity",
                     self.identity
                 ]))
         {
@@ -353,6 +356,13 @@ impl Supervisor for UserService {
     }
     fn prepare_start(&self) -> Result<(), ServerError> {
         self.linger()
+    }
+    fn linger_authorized(&self) -> Result<Option<bool>, ServerError> {
+        match self.linger() {
+            Ok(()) => Ok(Some(true)),
+            Err(ServerError::AuthorizationRequired) => Ok(Some(false)),
+            Err(error) => Err(error),
+        }
     }
     fn start(&self) -> Result<(), ServerError> {
         start_unit(&self.name, &self.registration().path(), |args| {

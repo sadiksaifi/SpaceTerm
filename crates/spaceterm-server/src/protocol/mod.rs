@@ -13,13 +13,16 @@ pub mod screen;
 #[cfg(test)]
 mod tests;
 
-pub use admission::MAJOR;
 pub(crate) use admission::*;
+pub use admission::{AgentName, InvalidAgentName, Lane, MAJOR};
 pub use frame::{DecodeError, Kind, RawFrame, WireMessage};
 pub use message::{
     Acknowledge, Cancel, Channel, ClientMessage, EffectDone, Fatal, Frame, FrameAck, Input,
     InputEvent, InputOutcome, InventoryRevision, PaneEvent, PaneMessage, Ping, Pong, Refusal,
     Reply, Request, RequestId, ServerMessage, View,
 };
-pub use operation::{Claim, ClaimReply, Operation, ReplyBody, Restored, Takeover};
+pub use operation::{
+    Claim, ClaimReply, HistoryPosition, MAX_RUN_COMMAND_BYTES, ObserveReply, Operation, ReplyBody,
+    Restored, RunDoubt, RunId, RunReceipt, RunRefusal, RunReply, RunState, SessionState, Takeover,
+};
 pub use screen::{Page, ScreenUpdate};

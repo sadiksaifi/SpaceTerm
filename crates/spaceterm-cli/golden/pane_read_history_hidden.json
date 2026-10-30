@@ -1,0 +1,19 @@
+{
+  "command": "pane.read",
+  "data": {},
+  "error": {
+    "class": "target",
+    "code": "history_hidden",
+    "details": {},
+    "message": "The Scrollback is hidden by the alternate screen.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "local",
+    "route": "local"
+  },
+  "status": "error",
+  "warnings": []
+}

@@ -64,7 +64,7 @@ fn expected_open(path: &str) -> Mutation {
         workspace: WORKSPACE,
         source: None,
         root: MAIN_ROOT.into(),
-        path: path.into(),
+        path: path.into(), control: spaceterm_server::hierarchy::CreateControl::Creator,
     })
 }
 
@@ -311,7 +311,7 @@ fn worktree_fallback_never_closes_a_reassigned_original_anchor(cx: &mut TestAppC
 
 #[test]
 fn worktree_fallback_destination_prefers_main_and_excludes_bare_missing_and_target() {
-    use crate::ui::workspace_manager::worktrees::fallback::destination;
+    use spaceterm_server::organize::fallback_destination as destination;
     let mut listing = WorktreeInventory {
         main_root: MAIN_ROOT.into(),
         current: None,

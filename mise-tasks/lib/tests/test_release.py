@@ -92,6 +92,59 @@ class FeedTests(unittest.TestCase):
                         verify_feed(feed, archive, "0.1.0")
 
 
+class ServerFeedTests(unittest.TestCase):
+    def test_standalone_cli_assets_bind_both_target_archives_and_feeds(self):
+        seed = bytes(range(32))
+        public = release.derived_public_key(seed)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive, signature = root / "candidate.tar.gz", root / "candidate.sig"
+            archive.write_bytes(b"signed candidate fixture")
+            release.sign_ed25519(seed, archive, signature)
+            for target, platform in (
+                ("aarch64-apple-darwin", "darwin-arm64"),
+                ("x86_64-unknown-linux-gnu", "linux-x86_64"),
+            ):
+                with self.subTest(target=target):
+                    directory = root / platform
+                    directory.mkdir()
+                    assets = release.sign_server_release(
+                        seed,
+                        archive,
+                        signature,
+                        {"identity": "spaceterm", "target": target, "version": "1.2.3"},
+                        1234,
+                        directory,
+                    )
+                    self.assertEqual(
+                        {p.name for p in assets},
+                        {
+                            f"spaceterm-1.2.3-{platform}.tar.gz",
+                            f"spaceterm-1.2.3-{platform}.tar.gz.sig",
+                            f"spaceterm-{platform}.json",
+                            f"spaceterm-{platform}.json.sig",
+                        },
+                    )
+                    selected, detached, feed, raw = assets
+                    release.verify_ed25519(public, selected, detached)
+                    release.verify_ed25519(public, feed, raw)
+                    document = json.loads(feed.read_bytes())
+                    self.assertEqual(
+                        document["archive"],
+                        {
+                            "name": selected.name,
+                            "size": 24,
+                            "sha256": release.sha256(archive),
+                            "signature": base64.b64encode(signature.read_bytes()).decode(),
+                        },
+                    )
+                    self.assertEqual(document["target"], target)
+                    self.assertEqual(selected.read_bytes(), archive.read_bytes())
+                    selected.write_bytes(b"changed")
+                    with self.assertRaises(TaskError):
+                        release.verify_ed25519(public, selected, detached)
+
+
 class CaskTests(unittest.TestCase):
     DIGEST = "a" * 64
 

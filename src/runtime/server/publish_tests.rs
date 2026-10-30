@@ -33,6 +33,7 @@ fn live(screen: Option<ScreenCapture>) -> Observed {
         effects: Vec::new(),
         line: pane::LineState::default(),
         accessibility: None,
+        progress: Default::default(),
     })
 }
 
@@ -247,6 +248,7 @@ fn line_states_and_effects_are_sent_as_they_change() {
             effects,
             line,
             accessibility: None,
+            progress: Default::default(),
         }));
     }
 
@@ -272,6 +274,7 @@ fn an_accessibility_revision_travels_as_an_event_only_without_a_new_screen() {
             effects: Vec::new(),
             line: pane::LineState::default(),
             accessibility: Some(revision),
+            progress: Default::default(),
         })
     };
 
@@ -543,7 +546,7 @@ mod wakes {
                 },
                 pane: self.pane,
                 claim,
-                size: size(),
+                size: Some(size()),
                 style: None,
             });
             match self.served.request(peer, RequestId(1), operation) {
@@ -962,4 +965,34 @@ mod wakes {
             });
         }
     }
+}
+
+#[test]
+fn input_progress_newer_than_a_screen_is_delivered_with_it() {
+    let outbox = outbox();
+    let mut publication = Publication::bind(&outbox, CHANNEL).unwrap();
+    outbox.view(CHANNEL, true);
+    publication.view(true);
+    let observation = || Observation {
+        screen: Some(capture(1, "pasted text", 1)),
+        effects: Vec::new(),
+        line: pane::LineState::default(),
+        accessibility: None,
+        progress: crate::terminal::session::Progress {
+            input: 2,
+            output_bytes: 11,
+        },
+    };
+    assert!(publication.publish(Observed::Live(observation())));
+    let messages = drain(&outbox);
+    assert_eq!(frames(&messages)[0].input, 1);
+    assert!(events(messages).iter().any(|event| matches!(
+        event,
+        PaneEvent::Progress {
+            input: 2,
+            output_bytes: 11
+        }
+    )));
+    assert!(publication.publish(Observed::Live(observation())));
+    assert!(drain(&outbox).is_empty(), "unchanged progress is sent once");
 }

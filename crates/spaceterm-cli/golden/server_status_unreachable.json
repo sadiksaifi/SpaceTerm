@@ -1,0 +1,21 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.status",
+  "status": "error",
+  "server": {
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "last_connected_at": "2026-10-30T11:00:00Z"
+  },
+  "error": {
+    "code": "unreachable",
+    "class": "unavailable",
+    "message": "The server is unreachable.",
+    "retryable": true,
+    "details": {}
+  },
+  "warnings": []
+}

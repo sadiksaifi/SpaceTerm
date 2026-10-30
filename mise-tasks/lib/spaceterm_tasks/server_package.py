@@ -1,6 +1,6 @@
 """Independent server artifacts authenticated by identity-scoped Ed25519 trust.
 
-Supported layouts are server/bin/spaceterm-server and server/share/spaceterm on
+Supported layouts are server/bin/spaceterm and server/share/spaceterm on
 Apple Silicon macOS 26 and x86_64 glibc Linux (Ubuntu 22.04 or newer). Installation
 only retains an exact verified artifact. It never selects an active version or
 writes server identity, organization, credentials, stopped intent, or services.
@@ -37,12 +37,21 @@ from spaceterm_tasks.packaging import (
 
 TARGETS = {"darwin": "aarch64-apple-darwin", "linux": "x86_64-unknown-linux-gnu"}
 IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
-MAX_ARCHIVE = 256 * 1024 * 1024
+MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
-# The SpaceTerm Protocol major that `crates/spaceterm-server-host/build.rs` stamps into server builds.
-PROTOCOL_MAJOR = 3
-BUILD_KEYS = {"schema", "identity", "target", "commit", "version", "protocol_major", "capabilities"}
+# The SpaceTerm Protocol major that `crates/spaceterm-cli/build.rs` stamps into server builds.
+PROTOCOL_MAJOR = 4
+BUILD_KEYS = {
+    "schema",
+    "identity",
+    "target",
+    "commit",
+    "version",
+    "protocol_major",
+    "capabilities",
+    "source_sha256",
+}
 
 
 def artifact_public_key(identity):
@@ -106,6 +115,10 @@ def document(data):
                 for capability in value["capabilities"]
             )
             or len(set(value["capabilities"])) != len(value["capabilities"])
+            or (
+                value["source_sha256"] is not None
+                and not re.fullmatch(r"[0-9a-f]{64}", value["source_sha256"])
+            )
             or value["identity"] not in IDENTITIES
             or value["target"] not in TARGETS.values()
             or not re.fullmatch(r"[0-9a-f]{40}", value["commit"])
@@ -129,7 +142,10 @@ def document(data):
 def build_info(executable):
     try:
         result = subprocess.run(
-            [executable, "--build-info"], env={}, capture_output=True, timeout=10
+            [executable, "server", "provision", "build-info"],
+            env={},
+            capture_output=True,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise TaskError("the server build identity query failed") from None
@@ -174,11 +190,7 @@ def unpack_verified(
                     or member.name in names
                     or not (member.isfile() or member.isdir())
                     or member.mode
-                    != (
-                        0o755
-                        if member.isdir() or member.name == "server/bin/spaceterm-server"
-                        else 0o644
-                    )
+                    != (0o755 if member.isdir() or member.name == "server/bin/spaceterm" else 0o644)
                 ):
                     raise TaskError("the server archive layout is invalid")
                 names.add(member.name)
@@ -330,7 +342,7 @@ def verify_macho_identity(output, identifier):
 
 def verify_cross_build(tree, expected):
     """Inspect a local cross-build; native execution checks belong to its target host."""
-    executable = tree / "bin/spaceterm-server"
+    executable = tree / "bin/spaceterm"
     library = checked(
         ["rustc", "--print", "target-libdir"], "Rust host tools are unavailable", text=True
     ).strip()
@@ -400,7 +412,7 @@ def verify_tree(tree, expected, *, native=True):
     if resources != shell | {"share/spaceterm/THIRD-PARTY-NOTICES.txt"}:
         raise TaskError("the server resource policy differs from the tracked resources")
     if not terminfo or files != resources | terminfo | {
-        "bin/spaceterm-server",
+        "bin/spaceterm",
         "build.json",
     }:
         raise TaskError("the server resources do not match the supported layout")
@@ -413,7 +425,7 @@ def verify_tree(tree, expected, *, native=True):
     }
     if directories != required_directories:
         raise TaskError("the server directories do not match the supported layout")
-    executable = tree / "bin/spaceterm-server"
+    executable = tree / "bin/spaceterm"
     if not native:
         # Catalogs authenticate foreign bytes without executing them. Local cross-builds
         # receive the additional static producer checks in verify_cross_build.
@@ -479,7 +491,11 @@ def verify_tree(tree, expected, *, native=True):
     )
     try:
         result = subprocess.run(
-            [executable, "--check"], env={}, cwd=tree, capture_output=True, timeout=15
+            [executable, "server", "provision", "check"],
+            env={},
+            cwd=tree,
+            capture_output=True,
+            timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise TaskError("the installed server headless check failed") from None
@@ -590,6 +606,8 @@ def package(identity, release_tag=None, *, target=None):
     if target not in TARGETS.values():
         raise TaskError("the server package target is unsupported")
     native = target == native_target
+    if target == TARGETS["darwin"] and not native:
+        raise TaskError("macOS CLI packages require a native macOS build for Keychain access")
     if release_tag and not native:
         raise TaskError("release server packages require their native target host")
     if identity not in IDENTITIES or (identity == "spaceterm") != bool(release_tag):
@@ -603,14 +621,18 @@ def package(identity, release_tag=None, *, target=None):
         environment["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
         if release_tag:
             macos_signing.signing_credentials(signer(), os.environ)
+    from spaceterm_tasks.server_builds import _source
+
+    source = _source(ROOT)[2]
+    environment["SPACETERM_SERVER_SOURCE_STATE"] = source
     seed = artifact_signing_seed(identity)
     executable, metadata = build_executable(
         "--release",
         "--locked",
         "--package",
-        "spaceterm-server-host",
+        "spaceterm-cli",
         "--no-default-features",
-        binary="spaceterm-server",
+        binary="spaceterm",
         env=environment,
         target=(
             "x86_64-unknown-linux-gnu.2.35"
@@ -629,6 +651,8 @@ def package(identity, release_tag=None, *, target=None):
         expected["identity"] != identity
         or expected["commit"] != commit
         or expected["target"] != target
+        or expected["source_sha256"] != source
+        or _source(ROOT)[2] != source
     ):
         raise TaskError("Cargo returned a different server build")
     if native and build_info(executable) != expected:
@@ -638,7 +662,7 @@ def package(identity, release_tag=None, *, target=None):
         directory = Path(temporary)
         tree = directory / "server"
         (tree / "bin").mkdir(parents=True)
-        server = tree / "bin/spaceterm-server"
+        server = tree / "bin/spaceterm"
         shutil.copyfile(executable, server)
         server.chmod(0o755)
         resources = tree / "share/spaceterm"
@@ -703,12 +727,15 @@ def package(identity, release_tag=None, *, target=None):
         verify_tree(tree, expected, native=native)
         if not native:
             verify_cross_build(tree, expected)
-        name = f"{identity}-server-{commit}-{target}.tar.gz"
+        platform = "darwin-arm64" if target == TARGETS["darwin"] else "linux-x86_64"
+        name = f"{identity}-{expected['version']}-{platform}.tar.gz"
         archive = directory / name
         signature = directory / f"{name}.sig"
         write_archive(tree, archive)
         release.sign_ed25519(seed, archive, signature)
         verify(archive, signature, expected, native=native)
+        if _source(ROOT)[2] != source:
+            raise TaskError("source changed during server packaging; retry the command")
         archive.replace(DIST / name)
         signature.replace(DIST / signature.name)
     print(f"Created signed server candidate {name}; nothing published")
@@ -758,6 +785,15 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
     if release_tag:
         require_clean_checkout()
     source = os.environ.get("SPACETERM_SERVER_ARTIFACTS")
+    if source is not None and not release_tag and host_target() == TARGETS["linux"]:
+        from spaceterm_tasks.server_builds import _source
+        from spaceterm_tasks.server_catalog import collect_target
+
+        digest = _source(ROOT)[2]
+        with tempfile.TemporaryDirectory(prefix="spaceterm-native-catalog-") as temporary:
+            collect_target(source, Path(temporary) / "mac", identity, TARGETS["darwin"], digest)
+        if _source(ROOT)[2] != digest:
+            raise TaskError("source changed while reading the Mac-built server catalog")
     automatic = catalog_destination is not None and not release_tag and source is None
     if automatic:
         from spaceterm_tasks.server_builds import prepare

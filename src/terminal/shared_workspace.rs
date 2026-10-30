@@ -917,6 +917,7 @@ mod tests {
                 mutation: Mutation::CreateWorkspace {
                     name: name.into(),
                     directory: None,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 },
             })
             .unwrap()
@@ -958,6 +959,7 @@ mod tests {
             Mutation::CreateWorkspace {
                 name: "Kept".into(),
                 directory: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         );
         let spaceterm_server::hierarchy::Outcome::Accepted { target } = created.outcome else {
@@ -984,6 +986,7 @@ mod tests {
             Mutation::CreateTab {
                 workspace: [9; 32],
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         );
         let published = edits.snapshot().unseen;

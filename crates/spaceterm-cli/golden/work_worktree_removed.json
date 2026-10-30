@@ -1,0 +1,32 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "worktree.remove",
+  "status": "ok",
+  "server": {
+    "name": "fixture",
+    "route": "local",
+    "id": "0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "data": {
+    "closed": [
+      "1616161616161616161616161616161616161616161616161616161616161616"
+    ],
+    "revision": 8,
+    "target": [
+      {
+        "id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "label": "api",
+        "level": "workspace",
+        "source": "flag"
+      },
+      {
+        "label": "feature/x",
+        "level": "worktree",
+        "path": "/trees/feature",
+        "source": "flag"
+      }
+    ]
+  },
+  "error": null,
+  "warnings": []
+}

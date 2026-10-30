@@ -89,7 +89,7 @@ fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claim
                     &archive,
                     &signature,
                     &pin,
-                    crate::protocol::MAJOR,
+                    Some(crate::protocol::MAJOR),
                     &["workspace_policy"]
                 ),
                 Err(ServerError::RuntimeUnavailable)
@@ -165,7 +165,7 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                 entries[0].1 = serde_json::to_vec(&manifest).unwrap();
                 entries
                     .iter_mut()
-                    .find(|(name, _, _)| name == "server/bin/spaceterm-server")
+                    .find(|(name, _, _)| name == "server/bin/spaceterm")
                     .unwrap()
                     .1 = b"must never execute".to_vec();
             });
@@ -237,7 +237,6 @@ fn retained_candidate_revalidates_declared_compatibility_and_signature() {
                 verify_candidate_installation(
                     &installation.directory,
                     "spaceterm-development",
-                    crate::protocol::MAJOR,
                     &["workspace_policy"]
                 ),
                 Ok(())
@@ -246,16 +245,6 @@ fn retained_candidate_revalidates_declared_compatibility_and_signature() {
                 verify_candidate_installation(
                     &installation.directory,
                     "spaceterm-development",
-                    crate::protocol::MAJOR + 1,
-                    &["workspace_policy"]
-                ),
-                Err(ServerError::IncompatibleProtocol)
-            );
-            assert_eq!(
-                verify_candidate_installation(
-                    &installation.directory,
-                    "spaceterm-development",
-                    crate::protocol::MAJOR,
                     &["future_required"]
                 ),
                 Err(ServerError::MissingRequiredCapability)
@@ -265,7 +254,6 @@ fn retained_candidate_revalidates_declared_compatibility_and_signature() {
                 verify_candidate_installation(
                     &installation.directory,
                     "spaceterm-development",
-                    crate::protocol::MAJOR,
                     &["workspace_policy"]
                 ),
                 Err(ServerError::RuntimeUnavailable)
@@ -300,7 +288,7 @@ fn signed_candidate_discovery_distinguishes_required_major_and_capability() {
                     archive,
                     signature,
                     &pin,
-                    major,
+                    Some(major),
                     &required,
                 );
                 assert!(matches!(result, Err(error) if error == expected));
@@ -338,7 +326,7 @@ fn signed_candidate_can_reuse_an_independent_release_and_deduplicates_whole_arch
                 archive,
                 signature,
                 &pin,
-                crate::protocol::MAJOR,
+                Some(crate::protocol::MAJOR),
                 &["workspace_policy"],
             )
             .unwrap();
@@ -348,7 +336,7 @@ fn signed_candidate_can_reuse_an_independent_release_and_deduplicates_whole_arch
                 archive,
                 signature,
                 &pin,
-                crate::protocol::MAJOR,
+                Some(crate::protocol::MAJOR),
                 &["workspace_policy"],
             )
             .unwrap();
@@ -367,7 +355,7 @@ fn signed_candidate_can_reuse_an_independent_release_and_deduplicates_whole_arch
                 archive,
                 signature,
                 &changed_pin,
-                crate::protocol::MAJOR,
+                Some(crate::protocol::MAJOR),
                 &["workspace_policy"],
             )
             .unwrap();
@@ -419,7 +407,7 @@ fn matching_digest_never_bypasses_signature_or_signed_compatibility_validation()
                         archive,
                         signature,
                         &pin,
-                        crate::protocol::MAJOR,
+                        Some(crate::protocol::MAJOR),
                         &["workspace_policy"]
                     )
                     .is_err()
@@ -434,7 +422,7 @@ fn matching_digest_never_bypasses_signature_or_signed_compatibility_validation()
                     archive,
                     signature,
                     &pin,
-                    crate::protocol::MAJOR,
+                    Some(crate::protocol::MAJOR),
                     &["workspace_policy"]
                 )
                 .is_err()
@@ -467,7 +455,7 @@ fn candidate_pin_covers_resources_and_build_metadata_before_retention() {
                     archive,
                     signature,
                     &pin,
-                    crate::protocol::MAJOR,
+                    Some(crate::protocol::MAJOR),
                     &["workspace_policy"]
                 ),
                 Err(ServerError::CandidateChanged)
@@ -889,5 +877,46 @@ fn publication_refuses_an_existing_empty_destination() {
     drop(prepared);
     assert_eq!(std::fs::metadata(destination).unwrap().ino(), inode);
     assert!(!preparation_path.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn native_update_inspection_accepts_a_signed_new_major_without_weakening_pins() {
+    let root = temporary();
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            rewrite(archive, signature, |entries| {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&entries[0].1).unwrap();
+                manifest["protocol_major"] = (crate::protocol::MAJOR + 1).into();
+                entries[0].1 = serde_json::to_vec(&manifest).unwrap();
+            });
+            let service = Service::for_identity("spaceterm-development").unwrap();
+            let pin = digest(&std::fs::read(archive).unwrap());
+            assert_eq!(
+                service
+                    .inspect_update_candidate(archive, signature, &pin)
+                    .unwrap()
+                    .protocol_major,
+                crate::protocol::MAJOR + 1
+            );
+            assert_eq!(
+                service.inspect_candidate(
+                    archive,
+                    signature,
+                    &pin,
+                    crate::protocol::MAJOR,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::IncompatibleProtocol)
+            );
+            assert_eq!(
+                service.inspect_update_candidate(archive, signature, &"0".repeat(64)),
+                Err(ServerError::CandidateChanged)
+            );
+        },
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

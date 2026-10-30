@@ -42,9 +42,9 @@ impl TerminalSubscription {
 pub(crate) type SubscriptionNotifier = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
-pub(super) struct TerminalEventPublisher(Arc<Mutex<EventState>>);
+pub(super) struct TerminalEventPublisher(pub(super) Arc<Mutex<EventState>>);
 
-struct EventState {
+pub(super) struct EventState {
     events: async_channel::Sender<TerminalSessionEvent>,
     notifier: Option<SubscriptionNotifier>,
     screen: Option<Arc<ScreenSnapshot>>,
@@ -52,6 +52,9 @@ struct EventState {
     stopped: bool,
     line: LineState,
     client_effects: std::collections::VecDeque<ClientEffectRequest>,
+    pub(super) progress: super::run::Progress,
+    pub(super) run_observations:
+        std::collections::VecDeque<spaceterm_server::pane::run::Observation>,
 }
 
 impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublisher {
@@ -64,6 +67,8 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
             stopped: false,
             line: LineState::default(),
             client_effects: std::collections::VecDeque::new(),
+            progress: super::run::Progress::default(),
+            run_observations: std::collections::VecDeque::new(),
         })))
     }
 }
@@ -185,7 +190,7 @@ impl TerminalEventPublisher {
 }
 
 /// Calls the notifier after releasing the event state, so a notifier never runs under it.
-fn notify(state: std::sync::MutexGuard<'_, EventState>) {
+pub(super) fn notify(state: std::sync::MutexGuard<'_, EventState>) {
     let notifier = state.notifier.clone();
     drop(state);
     if let Some(notifier) = notifier {

@@ -88,6 +88,29 @@ pub enum Operation {
     Direct(crate::direct::Management),
     /// Stops the server. Account-local connections only.
     Shutdown,
+    /// Opens an observer channel on any Pane. It never claims, resizes, starts a shell, focuses
+    /// or receives effects. `session` fences the observed Terminal Session when given.
+    Observe {
+        channel: Channel,
+        pane: crate::hierarchy::Id,
+        session: Option<crate::hierarchy::Id>,
+    },
+    /// Runs one command at the prompt of the channel's Session, as one bracketed paste.
+    /// `command` is at most [`MAX_RUN_COMMAND_BYTES`] and holds no C0 or C1 control character.
+    Run {
+        channel: Channel,
+        run: RunId,
+        command: String,
+        session: crate::hierarchy::Id,
+    },
+    /// The receipt of a run, without resending its input.
+    RunStatus {
+        run: RunId,
+    },
+    /// Retires a settled run's receipt.
+    RunAcknowledge {
+        run: RunId,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,7 +120,8 @@ pub struct Claim {
     pub attachment: crate::attachments::Attachment,
     pub pane: crate::hierarchy::Id,
     pub claim: AttachmentClaim,
-    pub size: crate::pane::PaneSize,
+    /// `None` keeps the running Session's size; a fresh Session starts at the server default.
+    pub size: Option<crate::pane::PaneSize>,
     pub style: Option<PresentationStyle>,
 }
 
@@ -113,6 +137,96 @@ pub enum ReplyBody {
     Directory(Result<directories::Value, directories::Error>),
     Worktree(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
+    Observe(ObserveReply),
+    Run(RunReply),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ObserveReply {
+    /// The channel observes this Session. Frames follow while the channel is visible.
+    Observing {
+        session: crate::hierarchy::Id,
+        history: super::screen::History,
+    },
+    /// The Pane has no running Session. The channel stays unbound.
+    NoSession { state: SessionState },
+}
+
+/// Why a Pane has no running Terminal Session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionState {
+    NotStarted,
+    Ended(crate::pane::SessionEnd),
+}
+
+/// The longest command `Operation::Run` accepts, in bytes.
+pub const MAX_RUN_COMMAND_BYTES: usize = 16 * 1024;
+
+/// Names one run. The client chooses it before dispatch, so a lost reply can be resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RunId(pub [u8; 16]);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunReply {
+    /// The command was written at `start`.
+    Admitted {
+        start: HistoryPosition,
+    },
+    Refused(RunRefusal),
+    Receipt(RunReceipt),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunRefusal {
+    NotAtPrompt,
+    InputPending,
+    NoIntegration {
+        /// The launch installed integration, but its first owner-marked prompt has not arrived.
+        first_prompt_pending: bool,
+    },
+    NoBracketedPaste,
+    SessionChanged,
+    RunPending,
+    Capacity,
+}
+
+/// One history row: `row` of history `epoch` (see [`super::screen::History`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryPosition {
+    pub epoch: u64,
+    pub row: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunReceipt {
+    pub run: RunId,
+    pub session: crate::hierarchy::Id,
+    pub state: RunState,
+    /// Where the finish was observed, once it was.
+    pub end: Option<HistoryPosition>,
+}
+
+/// A run's state. `Finished` without an exit status never means success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunState {
+    Admitted,
+    Running,
+    Finished {
+        exit_status: Option<i32>,
+        duration_ms: u64,
+    },
+    Unconfirmed(RunDoubt),
+    SessionEnded,
+    TakenOver,
+}
+
+/// Why the server cannot bind a finish to its run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunDoubt {
+    NoExitStatus,
+    NoCommandStart,
+    CmdlineMismatch,
+    IntegrationLost,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,7 +266,10 @@ impl Operation {
     /// Checks the semantic bounds postcard cannot express.
     pub fn validate(&self) -> Result<(), Fatal> {
         match self {
-            Self::Claim(claim) => check(claim.size.validate().is_ok()),
+            Self::Claim(claim) => check(claim.size.is_none_or(|size| size.validate().is_ok())),
+            Self::Run { command, .. } => check(
+                command.len() <= MAX_RUN_COMMAND_BYTES && !command.chars().any(|c| c.is_control()),
+            ),
             Self::ScrollbackPage { rows, .. } => check((1..=limits::MAX_PAGE_ROWS).contains(rows)),
             _ => Ok(()),
         }

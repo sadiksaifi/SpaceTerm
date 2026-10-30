@@ -236,6 +236,7 @@ impl WorkspaceManager {
                 source,
                 root,
                 path,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             }));
         if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("open the Worktree", reason, window, cx);

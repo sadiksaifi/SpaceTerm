@@ -149,6 +149,7 @@ pub(super) fn create_shared(host: &mut SharedWorkspaceHost, sequence: u64) -> [u
             mutation: Mutation::CreateWorkspace {
                 name: "Build".into(),
                 directory: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     ) else {
@@ -289,6 +290,7 @@ fn shared_close_rejects_membership_changes_and_confirmations_from_another_boot()
             mutation: Mutation::CreateTab {
                 workspace,
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     );
@@ -320,11 +322,13 @@ fn shared_close_rejects_new_ancestor_deletion_after_a_sibling_closes() {
                 tab,
                 source: pane,
                 axis: Axis::Down,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             }
         } else {
             Mutation::CreateTab {
                 workspace,
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             }
         };
         let Reply::Outcome(result) = host.request(
@@ -497,7 +501,7 @@ fn opening_the_legacy_pane_cannot_consume_a_shared_edits_operation_identity() {
         Reply::Attached { .. }
     ));
     assert!(
-        matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into(), directory: None } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
+        matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into(), directory: None, control: spaceterm_server::hierarchy::CreateControl::Creator, } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
     );
     host.shutdown().unwrap();
 }
@@ -514,6 +518,7 @@ fn shared_membership_preserves_independent_pane_grants_and_lazy_startup() {
             mutation: Mutation::CreateWorkspace {
                 name: "Build".into(),
                 directory: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     );
@@ -552,6 +557,7 @@ fn shared_membership_preserves_independent_pane_grants_and_lazy_startup() {
                 tab: t.id,
                 source: first,
                 axis: Axis::Down,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     ) else {
@@ -580,6 +586,7 @@ fn shared_membership_preserves_independent_pane_grants_and_lazy_startup() {
             mutation: Mutation::CreateTab {
                 workspace: w.id,
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     ) else {

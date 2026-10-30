@@ -26,7 +26,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
                 panic!("own Pane starts");
             };
             assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
-                sequence: 1, mutation: Mutation::CreateTab { workspace, source: None },
+                sequence: 1, mutation: Mutation::CreateTab { workspace, source: None, control: spaceterm_server::hierarchy::CreateControl::Creator, },
             }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
             let target = if close_tab {
                 CloseTarget::Tab { workspace, tab }

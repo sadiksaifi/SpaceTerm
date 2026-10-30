@@ -2,7 +2,7 @@ use super::*;
 use crate::connection::Wake;
 use crate::connection::quic::{QuicListener, QuicStream};
 use crate::connection::registry::{PairedConnections, Sever};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 const MAX_PENDING: usize = 32;
 /// Why a listener did not bind.
@@ -14,6 +14,8 @@ enum Bind {
 /// How often a `Starting` listener tries its address again while it waits.
 const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 pub(crate) type Shared = Arc<Mutex<State>>;
+/// What a revocation also forgets outside this store.
+pub(crate) type Revoked = Box<dyn Fn(&PairingId) + Send>;
 
 struct PendingInvitation {
     id: ClaimId,
@@ -46,6 +48,20 @@ pub(crate) struct State {
     network: Arc<dyn network::Adapter>,
     /// Wakes the host's accept loop when the listener changes.
     wake: Option<Arc<dyn Wake>>,
+    /// Runs after each revocation, whichever transport asked for it.
+    revoked: Option<Revoked>,
+    /// Agent identities that may not register yet, each with the number of [`Retirement`]s that
+    /// hold it, and the signal that one ended. An admission that would evict a name holds every
+    /// idle name while the pane service reports which of them hold nothing, and an evicted
+    /// identity is held while its control grants are released. Both run outside this lock, so a
+    /// returning agent waits for them.
+    retiring: std::collections::BTreeMap<[u8; 32], usize>,
+    retired_agent: Arc<Condvar>,
+    /// Set when the host stops, so no admission waits for a held identity any longer.
+    stopping: bool,
+    /// Runs as an admission reaches each [`Pause`], so a test can order concurrent admissions.
+    #[cfg(test)]
+    pub(super) pause: Option<PauseHook>,
 }
 impl State {
     pub(crate) fn open(paths: &crate::host::Paths) -> Result<Shared, DirectError> {
@@ -74,6 +90,12 @@ impl State {
             released: Default::default(),
             network,
             wake: None,
+            revoked: None,
+            retiring: Default::default(),
+            retired_agent: Arc::default(),
+            stopping: false,
+            #[cfg(test)]
+            pause: None,
         };
         state.listen();
         Ok(Arc::new(Mutex::new(state)))
@@ -83,6 +105,10 @@ impl State {
             listener.set_wake(Arc::clone(&wake));
         }
         self.wake = Some(wake);
+    }
+    /// Runs `revoked` after every revocation, so state outside this store forgets the pairing.
+    pub(crate) fn on_revoke(&mut self, revoked: Revoked) {
+        self.revoked = Some(revoked);
     }
     fn listener_changed(&self) {
         if let Some(wake) = &self.wake {
@@ -277,24 +303,37 @@ impl State {
         }
         Ok(())
     }
-    /// Registers a paired connection of listener `generation`, so revocation reaches it through
-    /// `sever`. The authorization check and the registration share this lock with every
-    /// revocation.
-    pub(crate) fn register(
+    /// Whether `paired`, admitted on listener `generation`, still holds its authority: the
+    /// pairing is not revoked and Network Access has not changed since.
+    pub(crate) fn current(
         &mut self,
         paired: &PairedDevice,
         generation: [u8; 32],
-        connection: [u8; 32],
-        outbox: crate::connection::outbox::Outbox,
-        sever: Box<dyn Sever>,
     ) -> Result<(), DirectError> {
         self.authorized(paired)?;
         if generation != self.generation {
             return Err(DirectError::Disabled);
         }
+        Ok(())
+    }
+    /// Registers a paired connection of listener `generation`, so revocation reaches it through
+    /// `sever`. The authorization check and the registration share this lock with every
+    /// revocation. `client` is the connection's effective Client Identity. A service-lane
+    /// connection has no `outbox`.
+    pub(crate) fn register(
+        &mut self,
+        paired: &PairedDevice,
+        generation: [u8; 32],
+        connection: [u8; 32],
+        client: [u8; 32],
+        outbox: Option<crate::connection::outbox::Outbox>,
+        sever: Box<dyn Sever>,
+    ) -> Result<(), DirectError> {
+        self.current(paired, generation)?;
         self.connections
             .register(
                 connection,
+                client,
                 crate::connection::service::Pairing {
                     pairing: paired.pairing,
                     generation,
@@ -303,6 +342,123 @@ impl State {
                 sever,
             )
             .map_err(|_| DirectError::Capacity)
+    }
+    /// Whether admitting `agent` under `paired` now evicts another name.
+    pub(crate) fn evicts(
+        &mut self,
+        paired: &PairedDevice,
+        agent: &crate::protocol::AgentName,
+    ) -> Result<bool, DirectError> {
+        self.authorized(paired)?;
+        let device = self
+            .record
+            .devices
+            .iter()
+            .find(|device| device.info.pairing == paired.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?;
+        Ok(!device.agents.contains(agent) && device.agents.len() >= storage::MAX_AGENTS)
+    }
+    /// The agent identities that admitting `agent` under `paired` could evict: every listed name
+    /// with no live connection, from least to most recently admitted. They are held in
+    /// `retiring` until the caller releases them, so none registers, and none can gain an edit
+    /// outcome or a run receipt, while the pane service reports which of them hold one. `None`
+    /// when `agent` evicts nothing.
+    pub(crate) fn reserve_evictable(
+        &mut self,
+        paired: &PairedDevice,
+        agent: &crate::protocol::AgentName,
+    ) -> Result<Option<Vec<[u8; 32]>>, DirectError> {
+        if !self.evicts(paired, agent)? {
+            return Ok(None);
+        }
+        let idle: Vec<_> = self
+            .record
+            .devices
+            .iter()
+            .filter(|device| device.info.pairing == paired.pairing)
+            .flat_map(|device| {
+                device
+                    .agents
+                    .iter()
+                    .map(|known| known.client(&device.info.client))
+            })
+            .filter(|client| !self.connections.serves(*client))
+            .collect();
+        self.hold_retiring(&idle);
+        Ok(Some(idle))
+    }
+    /// Records that `paired` admitted `agent`, before the agent's connection can create any
+    /// state, so revoking the pairing retires the agent too. Callers hold this lock through
+    /// [`Self::register`], so no revocation falls between the two.
+    ///
+    /// The pairing's names are kept from least to most recently admitted. A new name past
+    /// [`storage::MAX_AGENTS`] evicts the least recently admitted name whose identity is in
+    /// `settled` and has no live connection, and returns its Client Identity. `settled` holds
+    /// the identities from [`Self::reserve_evictable`] that keep no edit outcome or run receipt,
+    /// because revocation reaches only listed names and nothing else would ever free those. The
+    /// new name is refused with `Capacity` when no listed name is settled and idle. The caller
+    /// releases the evicted identity's control grants through [`Retirement`], so revocation
+    /// never needs a name it forgot. An evicted agent that returns is admitted again once that
+    /// release ends.
+    pub(crate) fn admit_agent(
+        &mut self,
+        paired: &PairedDevice,
+        agent: &crate::protocol::AgentName,
+        settled: &std::collections::BTreeSet<[u8; 32]>,
+    ) -> Result<Option<[u8; 32]>, DirectError> {
+        self.authorized(paired)?;
+        let device = self
+            .record
+            .devices
+            .iter()
+            .find(|device| device.info.pairing == paired.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?;
+        if device.agents.last() == Some(agent) {
+            return Ok(None);
+        }
+        let mut agents = device.agents.clone();
+        agents.retain(|known| known != agent);
+        let mut evicted = None;
+        if agents.len() >= storage::MAX_AGENTS {
+            let index = agents
+                .iter()
+                .map(|known| known.client(&device.info.client))
+                .position(|client| settled.contains(&client) && !self.connections.serves(client))
+                .ok_or(DirectError::Capacity)?;
+            evicted = Some(agents.remove(index).client(&device.info.client));
+        }
+        agents.push(agent.clone());
+        let mut next = self.record.clone();
+        next.devices
+            .iter_mut()
+            .find(|device| device.info.pairing == paired.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?
+            .agents = agents;
+        self.commit(next)?;
+        if let Some(evicted) = evicted {
+            self.hold_retiring(&[evicted]);
+        }
+        Ok(evicted)
+    }
+    /// Holds each of `clients` in `retiring` once more.
+    fn hold_retiring(&mut self, clients: &[[u8; 32]]) {
+        for client in clients {
+            *self.retiring.entry(*client).or_default() += 1;
+        }
+    }
+    /// Ends one hold of each of `clients` in `retiring`, and wakes the agents waiting on them.
+    fn release_retiring(&mut self, clients: &[[u8; 32]]) {
+        for client in clients {
+            if let std::collections::btree_map::Entry::Occupied(mut held) =
+                self.retiring.entry(*client)
+            {
+                *held.get_mut() -= 1;
+                if *held.get() == 0 {
+                    held.remove();
+                }
+            }
+        }
+        self.retired_agent.notify_all();
     }
     /// The enrolled public key of `paired`'s device.
     fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
@@ -386,14 +542,14 @@ impl State {
         &mut self,
         actor: Option<PairingId>,
         request: Management,
-    ) -> Result<(ManagementReply, Option<[u8; 32]>), DirectError> {
+    ) -> Result<(ManagementReply, Vec<[u8; 32]>), DirectError> {
         // Only authenticated owning-account IPC grants administration authority.
         // Refuse before recovery, expiry or mutation can affect retained state.
         if actor.is_some()
             && !matches!(
                 &request,
                 Management::Status
-                    | Management::Claims
+                    | Management::Claims { .. }
                     | Management::Devices
                     | Management::Revoke { .. }
             )
@@ -576,6 +732,7 @@ impl State {
                         claim: operation,
                         info: info.clone(),
                         revoked: false,
+                        agents: Vec::new(),
                     });
                     self.commit(next)?;
                     if changed_policy && !self.widen() {
@@ -612,13 +769,13 @@ impl State {
                     let cancellation = crypto::hash(&wire::transcript(
                         "cancel", &self.pin, &operation, &pairing,
                     )?);
-                    let (_, client) = self.revoke(Some(pairing), cancellation, pairing)?;
+                    let (_, clients) = self.revoke(Some(pairing), cancellation, pairing)?;
                     return Ok((
                         ManagementReply::SetupCancelled {
                             pin: self.pin.clone(),
                             operation,
                         },
-                        Some(client),
+                        clients,
                     ));
                 }
                 self.cancel_reservation(operation, None, true)?;
@@ -649,7 +806,7 @@ impl State {
                 next.enabled = enabled;
                 self.commit(next)?;
                 if self.widen() {
-                    return Ok((ManagementReply::Status(self.status()), None));
+                    return Ok((ManagementReply::Status(self.status()), Vec::new()));
                 }
                 self.generation = generation;
                 // Network administration arrives only over IPC. Any other change retires all
@@ -664,30 +821,23 @@ impl State {
                 self.listen();
                 ManagementReply::Status(self.status())
             }
-            Management::Invite { address } => {
+            Management::Invite { advertise } => {
                 let status = self.status();
-                let endpoint = match status.listener {
-                    // A listener on every interface advertises one concrete address: the one
-                    // the owner chose among the available ones, otherwise its own choice.
-                    ListenerState::Listening { addr } if addr.ip().is_unspecified() => {
-                        let snapshot = network::snapshot(self.network.as_ref())?;
-                        let advertised = match address {
-                            Some(address) => Some(address)
-                                .filter(|address| snapshot.addresses.available.contains(address)),
-                            None => snapshot.advertised(),
-                        }
-                        .ok_or(DirectError::InvalidAddress)?;
-                        std::net::SocketAddr::new(advertised, addr.port())
-                    }
-                    ListenerState::Listening { addr } => {
-                        if address.is_some_and(|address| address != addr.ip()) {
-                            return Err(DirectError::InvalidAddress);
-                        }
-                        addr
-                    }
-                    _ => return Err(DirectError::Disabled),
+                let ListenerState::Listening { addr } = status.listener else {
+                    return Err(DirectError::Disabled);
                 };
-                let endpoint = format!("quic://{endpoint}");
+                let endpoint = if let Some(authority) = advertise {
+                    super::Endpoint::parse(&authority)?.url()
+                } else {
+                    let address = if addr.ip().is_unspecified() {
+                        network::snapshot(self.network.as_ref())?
+                            .advertised()
+                            .ok_or(DirectError::InvalidAddress)?
+                    } else {
+                        addr.ip()
+                    };
+                    format!("quic://{}", std::net::SocketAddr::new(address, addr.port()))
+                };
                 if self.invitations.len() >= MAX_PENDING {
                     return Err(DirectError::Capacity);
                 }
@@ -720,10 +870,13 @@ impl State {
                 }
                 ManagementReply::Rejected
             }
-            Management::Claims => ManagementReply::Claims(
+            Management::Claims { invitation } => ManagementReply::Claims(
                 self.claims
                     .iter()
-                    .filter(|c| c.decision.is_none())
+                    .filter(|c| {
+                        c.decision.is_none()
+                            && invitation.is_none_or(|id| c.claim.invitation_id == id)
+                    })
                     .map(|c| c.claim.clone())
                     .collect(),
             ),
@@ -757,6 +910,7 @@ impl State {
                     claim: claim.id,
                     info: info.clone(),
                     revoked: false,
+                    agents: Vec::new(),
                 });
                 self.commit(next)?;
                 self.claims[index].decision = Some(Ok(info.clone()));
@@ -783,11 +937,11 @@ impl State {
                     .collect(),
             ),
             Management::Revoke { operation, target } => {
-                let (receipt, client) = self.revoke(actor, operation, target)?;
-                return Ok((ManagementReply::Revoked(receipt), Some(client)));
+                let (receipt, clients) = self.revoke(actor, operation, target)?;
+                return Ok((ManagementReply::Revoked(receipt), clients));
             }
         };
-        Ok((reply, None))
+        Ok((reply, Vec::new()))
     }
     fn check_setup(
         &self,
@@ -862,7 +1016,7 @@ impl State {
         actor: Option<PairingId>,
         operation: OperationId,
         target: PairingId,
-    ) -> Result<(RevocationReceipt, [u8; 32]), DirectError> {
+    ) -> Result<(RevocationReceipt, Vec<[u8; 32]>), DirectError> {
         if actor.is_some_and(|actor| actor != target) {
             return Err(DirectError::AuthenticationRefused);
         }
@@ -876,7 +1030,7 @@ impl State {
             .iter()
             .find(|d| d.info.pairing == target)
             .ok_or(DirectError::AuthenticationRefused)?;
-        let client = device.info.client;
+        let clients = device.clients();
         let receipt = if let Some(original) = self
             .record
             .revocations
@@ -898,7 +1052,7 @@ impl State {
                         operation,
                         target,
                     },
-                    client,
+                    clients,
                 ));
             }
             if let Some(actor) = actor {
@@ -935,7 +1089,10 @@ impl State {
             receipt
         };
         self.connections.revoke(target);
-        Ok((receipt, client))
+        if let Some(revoked) = &self.revoked {
+            revoked(&target);
+        }
+        Ok((receipt, clients))
     }
     pub(super) fn challenge(&self) -> Result<wire::Challenge, DirectError> {
         if !matches!(self.listener_state, ListenerState::Listening { .. }) {
@@ -961,19 +1118,19 @@ impl State {
             proof,
         })
     }
-    /// Authenticates one pairing exchange, and names the client whose grants a revocation or
-    /// cancellation in it retired.
+    /// Authenticates one pairing exchange, and names the clients whose grants a revocation or
+    /// cancellation in it retired: the pairing's own and its agents'.
     pub(super) fn authenticate_and_resolve(
         &mut self,
         challenge: &wire::Challenge,
         authentication: &wire::Authentication,
-    ) -> (Result<wire::Answer, DirectError>, Option<[u8; 32]>) {
+    ) -> (Result<wire::Answer, DirectError>, Vec<[u8; 32]>) {
         let answer = self.authenticate(challenge, authentication);
         let retired = match &answer {
             Ok(wire::Answer::Revoked(receipt) | wire::Answer::Cancelled(Some(receipt))) => {
-                self.revocation_client(receipt.target)
+                self.revocation_clients(receipt.target)
             }
-            _ => None,
+            _ => Vec::new(),
         };
         (answer, retired)
     }
@@ -1180,12 +1337,20 @@ impl State {
             }
         }
     }
-    pub(crate) fn revocation_client(&self, target: PairingId) -> Option<[u8; 32]> {
+    /// The Client Identities a revocation of `target` retires: the pairing's own and its agents'.
+    pub(crate) fn revocation_clients(&self, target: PairingId) -> Vec<[u8; 32]> {
         self.record
             .devices
             .iter()
             .find(|d| d.info.pairing == target)
-            .map(|d| d.info.client)
+            .map(storage::Device::clients)
+            .unwrap_or_default()
+    }
+    /// Refuses every admission that waits for a held identity, and every later one, so stopping
+    /// the host never waits for a reservation that its own admissions hold.
+    pub(crate) fn stopping(&mut self) {
+        self.stopping = true;
+        self.retired_agent.notify_all();
     }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
@@ -1198,15 +1363,17 @@ impl State {
     }
     pub(crate) fn pending_releases(&mut self) -> Result<Vec<[u8; 32]>, DirectError> {
         self.recover()?;
-        let clients: Vec<_> = self
+        let devices: Vec<_> = self
             .record
             .devices
             .iter()
             .filter(|d| d.revoked && !self.released.contains(&d.info.client))
-            .map(|d| d.info.client)
             .collect();
-        self.released.extend(clients.iter().copied());
-        Ok(clients)
+        self.released.extend(devices.iter().map(|d| d.info.client));
+        Ok(devices
+            .into_iter()
+            .flat_map(storage::Device::clients)
+            .collect())
     }
 }
 
@@ -1214,6 +1381,7 @@ impl State {
 /// for a paired device admission and then the protocol connection over a
 /// [`crate::connection::quic::QuicCarrier`]. Every action's device key must be the key of the
 /// certificate the client proved in the handshake.
+#[allow(clippy::too_many_arguments, reason = "one connection's whole context")]
 pub(crate) fn serve(
     mut stream: QuicStream,
     generation: [u8; 32],
@@ -1221,6 +1389,7 @@ pub(crate) fn serve(
     environment: &crate::host::Environment,
     waker: crate::connection::io::Waker,
     wake: Arc<dyn Wake>,
+    stopping: &LaneStop,
 ) -> Result<(), ServerError> {
     use super::client::Messages;
     // A connection the listener accepted before its policy changed never joins the new one.
@@ -1262,15 +1431,14 @@ pub(crate) fn serve(
         let (answer, retired) = if key == Some(device) {
             state.authenticate_and_resolve(&challenge, &authentication)
         } else {
-            (Err(DirectError::AuthenticationRefused), None)
+            (Err(DirectError::AuthenticationRefused), Vec::new())
         };
         drop(state);
-        if let Some(client) = retired {
-            environment
-                .panes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .revoked(client);
+        if !retired.is_empty() {
+            let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+            for client in retired {
+                panes.revoked(client);
+            }
         }
         answer
     };
@@ -1282,22 +1450,108 @@ pub(crate) fn serve(
         return Ok(());
     }
     let paired = paired.ok_or(ServerError::AuthenticationRefused)?;
-    let (_, client, name) = crate::protocol::admit_direct_server(&mut stream, &paired)?;
+    let crate::protocol::Admitted {
+        client,
+        agent,
+        name,
+        ..
+    } = match crate::protocol::admit_direct_server(&mut stream, &paired)? {
+        crate::protocol::Admission::Work(admitted) => admitted,
+        crate::protocol::Admission::Service(actor) => {
+            return serve_lane(
+                stream,
+                &paired,
+                generation,
+                &state,
+                environment,
+                actor,
+                stopping,
+            );
+        }
+    };
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
-    state.lock().unwrap_or_else(|e| e.into_inner()).register(
-        &paired,
-        generation,
-        connection,
-        outbox.clone(),
-        Box::new(carrier.sever()),
-    )?;
-    // Unregisters when serving ends, also when it panics.
-    let _registered = Registered {
-        state: Arc::clone(&state),
-        connection,
+    // A new name past the limit may evict only a name that holds nothing. The idle names stay
+    // held while the pane service reports which hold something, and the two locks are never
+    // nested. An admission waits for its own identity before it reserves, and never while it
+    // holds a reservation, so two admissions never wait for each other.
+    let deadline = std::time::Instant::now() + super::quic::HANDSHAKE_LIMIT;
+    let (evicted, registered, reserved) = loop {
+        let reserved = {
+            let mut locked = after_retirement(&state, client, deadline)?;
+            match &agent {
+                Some(agent) => locked.reserve_evictable(&paired, agent)?,
+                None => None,
+            }
+        }
+        .map(|clients| Retirement {
+            state: Arc::clone(&state),
+            clients,
+        });
+        let settled = match &reserved {
+            Some(reserved) if !reserved.clients.is_empty() => {
+                let panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+                reserved
+                    .clients
+                    .iter()
+                    .filter(|client| !panes.holds(**client))
+                    .copied()
+                    .collect()
+            }
+            _ => Default::default(),
+        };
+        #[cfg(test)]
+        pause(&state, Pause::Settled, client);
+        let mut locked = state.lock().unwrap_or_else(|e| e.into_inner());
+        // Another admission reserved this identity, or began its eviction, after the wait. The
+        // admission releases its own reservations before it waits again.
+        if locked.retiring.contains_key(&client) {
+            continue;
+        }
+        // Another admission filled the list or evicted this name after the reservation, so the
+        // eviction it now needs was never reserved.
+        if let Some(agent) = &agent
+            && reserved.is_none()
+            && locked.evicts(&paired, agent)?
+        {
+            continue;
+        }
+        let evicted = match &agent {
+            Some(agent) => locked.admit_agent(&paired, agent, &settled)?,
+            None => None,
+        };
+        // Unregisters when serving ends, also when the release below panics.
+        let registered = locked
+            .register(
+                &paired,
+                generation,
+                connection,
+                client,
+                Some(outbox.clone()),
+                Box::new(carrier.sever()),
+            )
+            .map(|()| Registered {
+                state: Arc::clone(&state),
+                connection,
+            });
+        break (evicted, registered, reserved);
     };
+    drop(reserved);
+    // The direct-network lock is released first, as for a revocation. The evicted identity
+    // holds no outcome or run receipt, and loses its control grants.
+    if let Some(evicted) = evicted {
+        let _retirement = Retirement {
+            state: Arc::clone(&state),
+            clients: vec![evicted],
+        };
+        environment
+            .panes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .release_control(evicted);
+    }
+    let _registered = registered?;
     state
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -1312,6 +1566,160 @@ pub(crate) fn serve(
     };
     crate::host::serve_admitted(Box::new(carrier), peer, name, outbox, waker, environment);
     Ok(())
+}
+
+/// Serves a paired service-lane connection. It is registered for its whole life, so revoking its
+/// pairing or changing Network Access severs it, and each request first checks that the pairing
+/// still holds its authority. Stopping the host severs it through `stopping`.
+fn serve_lane(
+    mut stream: QuicStream,
+    paired: &PairedDevice,
+    generation: [u8; 32],
+    state: &Shared,
+    environment: &crate::host::Environment,
+    actor: crate::service::operations::Actor,
+    stopping: &LaneStop,
+) -> Result<(), ServerError> {
+    let lane = environment.lane.as_ref().ok_or(ServerError::Unsupported)?;
+    let connection = crate::protocol::random()?;
+    state.lock().unwrap_or_else(|e| e.into_inner()).register(
+        paired,
+        generation,
+        connection,
+        actor.client,
+        None,
+        Box::new(stream.sever()),
+    )?;
+    let _registered = Registered {
+        state: Arc::clone(state),
+        connection,
+    };
+    stopping.watch(Box::new(stream.sever()));
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .note_connection(paired)?;
+    lane.serve(&mut stream, actor, &|| {
+        state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current(paired, generation)
+            .map_err(ServerError::from)
+    })
+}
+
+/// How the host stops a network connection's service lane. A work connection stops on its wake
+/// instead, so this severs only a lane that [`Self::watch`] registered.
+#[derive(Clone, Default)]
+pub(crate) struct LaneStop(Arc<Mutex<LaneStopState>>);
+
+#[derive(Default)]
+struct LaneStopState {
+    stopped: bool,
+    sever: Option<Box<dyn Sever>>,
+}
+
+impl LaneStop {
+    /// Severs `sever` when the host stops, or at once if it already stopped.
+    fn watch(&self, sever: Box<dyn Sever>) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.stopped {
+            sever.sever();
+        }
+        state.sever = Some(sever);
+    }
+
+    /// Severs the watched lane, and any lane watched later.
+    pub(crate) fn stop(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.stopped = true;
+        if let Some(sever) = &state.sever {
+            sever.sever();
+        }
+    }
+}
+
+/// Locks `state` once no admission reserves `client` and no release of its control grants after
+/// an eviction is still running. A returning agent's new grants therefore always follow that
+/// release. The caller holds no reservation while it waits. Refuses with `Capacity` once
+/// `deadline` passes, which also bounds an admission that keeps starting over, and with
+/// `Disabled` once the host stops.
+fn after_retirement(
+    state: &Shared,
+    client: [u8; 32],
+    deadline: std::time::Instant,
+) -> Result<MutexGuard<'_, State>, DirectError> {
+    #[cfg(test)]
+    pause(state, Pause::Waiting, client);
+    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+    let retired = Arc::clone(&state.retired_agent);
+    loop {
+        if state.stopping {
+            return Err(DirectError::Disabled);
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(DirectError::Capacity);
+        }
+        if !state.retiring.contains_key(&client) {
+            return Ok(state);
+        }
+        #[cfg(test)]
+        if let Some(pause) = &state.pause {
+            pause(Pause::BeforeWait { deadline }, client);
+        }
+        state = retired
+            .wait_timeout(state, deadline - now)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+/// What a test runs as an admission reaches a [`Pause`], with the admission's Client Identity.
+#[cfg(test)]
+pub(super) type PauseHook = Arc<dyn Fn(Pause, [u8; 32]) + Send + Sync>;
+
+/// Where an admission runs the test's [`State::pause`], with its Client Identity.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Pause {
+    /// Before it waits for its own identity, holding no reservation.
+    Waiting,
+    /// Immediately before the condition-variable wait, holding the state lock.
+    BeforeWait { deadline: std::time::Instant },
+    /// After the pane service reported its reserved names, before it commits.
+    Settled,
+}
+
+#[cfg(test)]
+fn pause(state: &Shared, at: Pause, client: [u8; 32]) {
+    let pause = state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pause
+        .clone();
+    if let Some(pause) = pause {
+        pause(at, client);
+    }
+}
+
+/// Agent identities held in `retiring`: the idle names an admission may evict, or an evicted
+/// identity whose control grants are being released. Dropping it, also when that work panics,
+/// lets those agents be admitted again.
+struct Retirement {
+    state: Shared,
+    clients: Vec<[u8; 32]>,
+}
+
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        if !self.clients.is_empty() {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .release_retiring(&self.clients);
+        }
+    }
 }
 
 /// A paired connection's place in the registry, removed when it drops.
@@ -1334,6 +1742,12 @@ mod network_tests;
 
 #[cfg(test)]
 mod connection_time_tests;
+
+#[cfg(test)]
+mod lane_tests;
+
+#[cfg(test)]
+mod agent_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1522,7 +1936,8 @@ mod tests {
             &paired,
             generation,
             [5; 32],
-            outbox,
+            paired.client,
+            Some(outbox),
             Box::new(super::super::tests::Quiet),
         );
         let empty = state.connections.is_empty();

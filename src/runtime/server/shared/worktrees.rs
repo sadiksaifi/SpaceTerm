@@ -386,7 +386,9 @@ impl SharedWorkspaceHost {
                 source,
                 root,
                 path,
+                control,
             } => {
+                let creator = control.creator(device, &self.inventory());
                 let selected = next
                     .inventory
                     .workspaces
@@ -394,7 +396,7 @@ impl SharedWorkspaceHost {
                     .find(|w| w.id == workspace)
                     .ok_or(Refusal::Missing)
                     .and_then(|w| starting_directory(w, source, &path))
-                    .and_then(|start| next.add_worktree_tab(device, workspace, root, path, start));
+                    .and_then(|start| next.add_worktree_tab(creator, workspace, root, path, start));
                 let outcome = match selected {
                     Ok(target) => Outcome::Accepted { target },
                     Err(_) => Outcome::WorktreeFailed(Error::Unavailable),
@@ -402,6 +404,9 @@ impl SharedWorkspaceHost {
                 next.finish_worktree(device, sequence, outcome)?;
                 self.commit_retained(next)?;
                 self.writes.operation = None;
+                if let Some(record) = self.state.outcome(device, sequence).cloned() {
+                    self.reveal(&record);
+                }
             }
             preparing::Prepared::Write(write) => {
                 let checked = (|| {
@@ -421,7 +426,7 @@ impl SharedWorkspaceHost {
                         // Reserve capacity before Git starts, without publishing a speculative Tab.
                         next.clone()
                             .add_worktree_tab(
-                                device,
+                                Some(device),
                                 *workspace,
                                 root.clone(),
                                 path.clone(),
@@ -506,11 +511,15 @@ impl SharedWorkspaceHost {
             Err(error) => Outcome::WorktreeFailed(error),
             Ok(path) => {
                 if let Mutation::Worktree(Operation::Create {
-                    workspace, root, ..
+                    workspace,
+                    root,
+                    control,
+                    ..
                 }) = operation
                 {
+                    let creator = control.creator(device, &self.inventory());
                     match path.and_then(|path| {
-                        next.add_worktree_tab(device, workspace, root, path.clone(), path)
+                        next.add_worktree_tab(creator, workspace, root, path.clone(), path)
                             .ok()
                     }) {
                         Some(target) => Outcome::Accepted { target },
@@ -524,6 +533,9 @@ impl SharedWorkspaceHost {
         next.finish_worktree(device, sequence, outcome)?;
         self.commit_retained(next)?;
         self.writes.operation = None;
+        if let Some(record) = self.state.outcome(device, sequence).cloned() {
+            self.reveal(&record);
+        }
         self.repositories.refresh();
         Ok(())
     }
@@ -546,6 +558,102 @@ mod tests {
 
     mod close_fallback {
         include!("worktrees/close_fallback_tests.rs");
+    }
+
+    #[test]
+    fn created_worktree_tabs_apply_creation_control_and_reveal_to_the_origin() {
+        use crate::runtime::server::tests::{effects, focus};
+        for (name, policy, expected) in [
+            ("origin", 0, Some([1; 32])),
+            ("unclaimed", 1, None),
+            ("creator", 2, Some([3; 32])),
+        ] {
+            let git = GitFixture::new();
+            let mut prototype = host();
+            prototype.directory = git.0.clone();
+            let mut host = SharedWorkspaceHost::new(prototype);
+            let workspace = create_shared(&mut host, 1);
+            let initial = shared_inventory(&mut host);
+            let origin = initial.workspaces[0].tabs[0].root_pane;
+            let Reply::Attached { lease } = host.request(
+                [1; 32],
+                [1; 32],
+                Request::SelectPane {
+                    pane: origin,
+                    explicit: true,
+                    size: size(),
+                    style: None,
+                },
+            ) else {
+                panic!("the desktop starts the origin Pane")
+            };
+            focus(&mut host, lease, 1, FocusTarget::Terminal);
+            let control = match policy {
+                0 => CreateControl::OriginController { pane: origin },
+                1 => CreateControl::Unclaimed,
+                _ => CreateControl::Creator,
+            };
+            assert!(matches!(
+                host.request(
+                    [3; 32],
+                    [3; 32],
+                    Request::Mutate {
+                        sequence: 1,
+                        mutation: Mutation::Worktree(Operation::Create {
+                            workspace,
+                            root: git.0.clone(),
+                            path: git.0.join(name),
+                            branch: Branch::New {
+                                name: name.into(),
+                                base: BranchName::Local("main".into())
+                            },
+                            control,
+                        }),
+                    }
+                ),
+                Reply::MutationPending
+            ));
+            host.finish_worktrees(true).unwrap();
+            let record = host.state.outcome([3; 32], 1).unwrap();
+            let Outcome::Accepted { target } = record.outcome else {
+                panic!("Worktree creation succeeds")
+            };
+            let updated = shared_inventory(&mut host);
+            let tabs = &updated.workspaces[0].tabs;
+            assert_eq!(tabs.len(), initial.workspaces[0].tabs.len() + 1);
+            let tab = tabs.iter().find(|t| t.id == target).unwrap();
+            let pane = tab.panes.iter().find(|p| p.id == tab.root_pane).unwrap();
+            assert_eq!(pane.creator, expected);
+            let reveals: Vec<_> = effects(&mut host, lease, usize::from(policy == 0))
+                .into_iter()
+                .filter_map(|request| match request.effect {
+                    pane::effects::Effect::Reveal(reveal) => Some(reveal),
+                    _ => None,
+                })
+                .collect();
+            if policy == 0 {
+                assert_eq!(reveals.len(), 1);
+                assert_eq!((reveals[0].tab, reveals[0].pane), (tab.id, pane.id));
+            } else {
+                assert!(reveals.is_empty());
+            }
+            let selected = host.request(
+                [1; 32],
+                [1; 32],
+                Request::SelectPane {
+                    pane: pane.id,
+                    explicit: true,
+                    size: size(),
+                    style: None,
+                },
+            );
+            if policy == 2 {
+                assert!(matches!(selected, Reply::Takeover { .. }));
+            } else {
+                assert!(matches!(selected, Reply::Attached { .. }));
+            }
+            host.shutdown().unwrap();
+        }
     }
 
     /// Revokes the device while `operation` is in progress, and checks that its record is
@@ -584,6 +692,7 @@ mod tests {
         use spaceterm_server::worktree::{Branch, BranchName};
         let git = GitFixture::new();
         revoke_during(&git, |workspace| Operation::Create {
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
             workspace,
             root: git.0.clone(),
             path: git.0.join("created"),
@@ -604,6 +713,7 @@ mod tests {
             source: None,
             root: git.0.clone(),
             path: tree.clone(),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         });
     }
 
@@ -628,6 +738,7 @@ mod tests {
                 root: git.0.clone(),
                 path: tree.clone(),
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         ) else {
             panic!("Worktree Tab");
@@ -649,6 +760,7 @@ mod tests {
                     tab,
                     source,
                     axis: Axis::Right,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 },
             },
         ) else {
@@ -699,6 +811,7 @@ mod tests {
             tab,
             source,
             axis: Axis::Down,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         };
         assert!(
             matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 6, mutation: mutation.clone() }), Reply::Outcome(record) if record.outcome == Outcome::Invalid)
@@ -736,6 +849,7 @@ mod tests {
                 root: git.0.clone(),
                 path: tree.clone(),
                 source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         ) else {
             panic!("open Worktree");
@@ -833,6 +947,7 @@ mod tests {
                     root: git.0.clone(),
                     path: tree.clone(),
                     source: Some(source),
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                 },
             ) else {
                 panic!("open Worktree Tab");
@@ -993,6 +1108,7 @@ mod tests {
         let other = Mutation::CreateWorkspace {
             name: "Other client".into(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         };
         assert!(matches!(
             host.request(
@@ -1103,6 +1219,7 @@ mod tests {
                 &mut host,
                 2,
                 Operation::Create {
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                     workspace,
                     root: git.0.clone(),
                     path: git.0.join("other"),
@@ -1131,6 +1248,7 @@ mod tests {
         let mut original = SharedWorkspaceHost::new(prototype);
         let workspace = create_shared(&mut original, 1);
         let operation = Operation::Create {
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
             workspace,
             root: git.0.clone(),
             path: git.0.join("interrupted"),

@@ -149,11 +149,11 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
         self.assertEqual(sorted(path.name for path in self.install_dir.iterdir()), ["spaceterm"])
 
     def run_installed(self):
-        process = subprocess.Popen([str(self.home / ".local/bin/spaceterm")])
+        process = subprocess.Popen([str(self.home / ".local/bin/spaceterm-desktop")])
         self.addCleanup(process.wait)
         self.addCleanup(process.kill)
         deadline = time.monotonic() + 5
-        while os.readlink(f"/proc/{process.pid}/exe") != str(self.target / "bin/spaceterm"):
+        while os.readlink(f"/proc/{process.pid}/exe") != str(self.target / "bin/spaceterm-desktop"):
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.01)
 
@@ -168,13 +168,13 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
                 f"{RELEASES}/download/v0.3.0/SpaceTerm-0.3.0-linux-x86_64.tar.gz",
             ],
         )
-        launcher = self.home / ".local/bin/spaceterm"
-        self.assertEqual(os.readlink(launcher), str(self.target / "bin/spaceterm"))
+        launcher = self.home / ".local/bin/spaceterm-desktop"
+        self.assertEqual(os.readlink(launcher), str(self.target / "bin/spaceterm-desktop"))
         icon = self.data_home / f"icons/hicolor/scalable/apps/{APPLICATION_ID}.svg"
         self.assertTrue(icon.is_symlink() and icon.is_file())
         entry = self.data_home / f"applications/{APPLICATION_ID}.desktop"
         subprocess.run(["desktop-file-validate", str(entry)], check=True)
-        executable = str(self.target / "bin/spaceterm").replace("$", "\\\\$")
+        executable = str(self.target / "bin/spaceterm-desktop").replace("$", "\\\\$")
         executable = executable.replace('"', '\\\\"')
         self.assertIn(f'Exec="{executable}" %u\n', entry.read_text())
         self.assert_no_leftovers()
@@ -182,7 +182,7 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
     def test_installed_desktop_entry_delivers_an_invitation_as_one_argument(self):
         self.installed()
         recorded = self.root / "invitation-arguments.json"
-        executable = self.target / "bin/spaceterm"
+        executable = self.target / "bin/spaceterm-desktop"
         executable.write_text(
             "#!/usr/bin/python3\nimport json, sys\nfrom pathlib import Path\n"
             f"Path({str(recorded)!r}).write_text(json.dumps(sys.argv[1:]))\n"
@@ -284,8 +284,8 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
             ["spaceterm", "spaceterm-preflight"],
         )
         self.assertEqual(
-            os.readlink(self.home / ".local/bin/spaceterm-preflight"),
-            str(self.install_dir / "spaceterm-preflight/bin/spaceterm"),
+            os.readlink(self.home / ".local/bin/spaceterm-preflight-desktop"),
+            str(self.install_dir / "spaceterm-preflight/bin/spaceterm-desktop"),
         )
         self.assertTrue(
             (
@@ -303,7 +303,7 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
         result = self.install("--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(list(self.install_dir.iterdir()), [])
-        self.assertFalse(os.path.lexists(self.home / ".local/bin/spaceterm"))
+        self.assertFalse(os.path.lexists(self.home / ".local/bin/spaceterm-desktop"))
         self.assertFalse((self.data_home / f"applications/{APPLICATION_ID}.desktop").exists())
         icon = self.data_home / f"icons/hicolor/scalable/apps/{APPLICATION_ID}.svg"
         self.assertFalse(os.path.lexists(icon))
@@ -320,7 +320,7 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
         result = self.install("--uninstall")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("quit SpaceTerm", result.stderr)
-        self.assertTrue((staging / "tree/bin/spaceterm").is_file())
+        self.assertTrue((staging / "tree/bin/spaceterm-desktop").is_file())
 
     def test_installer_refuses_a_path_desktop_launchers_cannot_run(self):
         install_dir = self.home / "percent%path"

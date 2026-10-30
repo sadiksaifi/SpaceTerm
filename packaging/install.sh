@@ -10,7 +10,10 @@
 # desktop entry and icon under XDG_DATA_HOME. SPACETERM_INSTALL_DIR selects a directory other
 # than ~/.local/lib. SpaceTerm updates this installation itself.
 #
-# Options (Linux):
+# Options:
+#   --headless      install the headless command line without a desktop or service
+#   --identity NAME select spaceterm-development or spaceterm-preflight for local archives
+#   --signature FILE  detached signature for a local headless archive
 #   --archive FILE  install a local archive, such as SpaceTerm Preflight, without downloading
 #   --uninstall     remove the installation and leave settings and other user data in place
 
@@ -75,11 +78,12 @@ latest_release() {
     download --silent --show-error "$RELEASES/latest/download/SHA256SUMS" \
         --output "$work/SHA256SUMS" || die "could not download the release checksums"
     suffix="$(printf '%s' "$1" | sed 's/\./\\./g')"
-    entry="$(grep -E "^[0-9a-f]{64}  SpaceTerm-[0-9]+\.[0-9]+\.[0-9]+-$suffix\$" "$work/SHA256SUMS")" \
+    asset_prefix="${3:-SpaceTerm}"
+    entry="$(grep -E "^[0-9a-f]{64}  $asset_prefix-[0-9]+\.[0-9]+\.[0-9]+-$suffix\$" "$work/SHA256SUMS")" \
         || die "the release checksums do not list a SpaceTerm $2"
     expected="${entry%%  *}"
     archive="${entry#*  }"
-    version="${archive#SpaceTerm-}"
+    version="${archive#"$asset_prefix"-}"
     version="${version%-"$1"}"
 }
 
@@ -154,7 +158,7 @@ install_macos() {
 # matches the installed executable whichever launcher or symlink started it. A process the
 # updater replaced but has not relaunched runs from the updater's staging directory.
 ensure_not_running_linux() {
-    executable="$target/bin/spaceterm"
+    executable="$target/bin/spaceterm-desktop"
     replaced="$(dirname "$target")/.$(basename "$target").update/"
     for link in /proc/[0-9]*/exe; do
         case "$(readlink "$link" 2>/dev/null || true)" in
@@ -246,8 +250,8 @@ uninstall_linux() {
     fi
     ensure_not_running_linux
     step "Removing $display_name"
-    launcher="$bin_dir/$name"
-    if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$target/bin/spaceterm" ]; then
+    launcher="$bin_dir/$name-desktop"
+    if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$target/bin/spaceterm-desktop" ]; then
         rm -f "$launcher"
     fi
     icon="$data_home/icons/hicolor/scalable/apps/$application_id.svg"
@@ -313,7 +317,7 @@ install_linux() {
     tar -xzf "$work/$archive" -C "$staging" --no-same-owner --no-same-permissions \
         || die "could not unpack $archive"
     set -- "$staging"/*
-    [ "$#" -eq 1 ] && [ -x "$1/bin/spaceterm" ] && [ -d "$1/share/spaceterm" ] \
+    [ "$#" -eq 1 ] && [ -x "$1/bin/spaceterm-desktop" ] && [ -d "$1/share/spaceterm" ] \
         || die "the archive does not contain one SpaceTerm installation"
     name="$(basename "$1")"
     case "$name" in
@@ -335,16 +339,16 @@ install_linux() {
     rm -rf "$install_dir/.$name.update"
 
     mkdir -p "$bin_dir" "$data_home/applications" "$data_home/icons/hicolor/scalable/apps"
-    launcher="$bin_dir/$name"
+    launcher="$bin_dir/$name-desktop"
     if [ -e "$launcher" ] && [ ! -L "$launcher" ]; then
         warn "$launcher exists and is not a link, so it was left in place"
     else
-        ln -sfn "$target/bin/spaceterm" "$launcher"
+        ln -sfn "$target/bin/spaceterm-desktop" "$launcher"
     fi
     # The icon follows the installation, which updates replace.
     ln -sfn "$target/share/icons/hicolor/scalable/apps/$application_id.svg" \
         "$data_home/icons/hicolor/scalable/apps/$application_id.svg"
-    exec="$(exec_value "$target/bin/spaceterm")"
+    exec="$(exec_value "$target/bin/spaceterm-desktop")"
     entry="$data_home/applications/$application_id.desktop"
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
@@ -362,9 +366,164 @@ install_linux() {
     esac
 }
 
+# Checksums arrive over HTTPS before any downloaded executable runs. The retained CLI then
+# authenticates the original Ed25519 signature and every resource before publishing a runtime.
+# [Signing] Add the Developer ID requirement check with the signing and notarization rollout.
+retain_headless() {
+    mkdir "$work/runtime" 2>/dev/null || die "could not prepare the CLI installation"
+    # Refuse links and parent paths before extraction. The Rust verifier enforces the complete
+    # signed layout before retention; tar never writes outside this private staging directory.
+    tar -tzf "$headless_archive" > "$work/members" 2>/dev/null || die "could not read the CLI archive"
+    if grep -Ev '^server(/|$)' "$work/members" >/dev/null \
+        || grep -E '(^|/)\.\.?(/|$)' "$work/members" >/dev/null; then
+        die "the CLI archive layout is invalid"
+    fi
+    tar -tvzf "$headless_archive" > "$work/kinds" 2>/dev/null || die "could not read the CLI archive"
+    if cut -c 1 "$work/kinds" | grep -Ev '^[-d]$' >/dev/null; then
+        die "the CLI archive must contain only files and directories"
+    fi
+    tar -xzf "$headless_archive" -C "$work/runtime" 2>/dev/null || die "could not unpack the CLI archive"
+    runtime="$work/runtime/server"
+    [ -x "$runtime/bin/spaceterm" ] || die "the CLI executable is missing"
+    if [ -n "${headless_identity:-}" ]; then
+        compiled_identity="$("$runtime/bin/spaceterm" server provision build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
+        [ "$compiled_identity" = "$headless_identity" ] || die "the CLI archive has a different application identity"
+    fi
+    cp "$headless_archive" "$runtime/artifact.tar.gz" 2>/dev/null || die "could not stage the CLI archive"
+    cp "$headless_signature" "$runtime/artifact.sig" 2>/dev/null || die "could not stage the CLI signature"
+    "$runtime/bin/spaceterm" server provision retain "$runtime" \
+        || die "the signed CLI installation could not be retained"
+}
+
+headless_uninstall() {
+    root="$HOME/.local/share/$headless_identity/server"
+    launcher="$HOME/.local/bin/$headless_identity"
+    runtime=""
+    if [ -L "$launcher" ]; then
+        linked="$(readlink "$launcher")"
+        case "$linked" in
+            "$root/installations/"*/bin/spaceterm) runtime="${linked%/bin/spaceterm}" ;;
+        esac
+    fi
+    if [ -z "$runtime" ] && [ -f "$root/service.json" ] && [ ! -L "$root/service.json" ]; then
+        digest="$(sed -n 's/.*"installation"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$root/service.json")"
+        [ "${#digest}" -eq 64 ] || die "the service installation could not be read"
+        runtime="$root/installations/$digest"
+    fi
+    if [ -z "$runtime" ]; then
+        step "The CLI launcher and service are already uninstalled"
+        return
+    fi
+    digest="$(basename "$runtime")"
+    [ "${#digest}" -eq 64 ] || die "the CLI launcher is unmanaged"
+    case "$digest" in *[!0-9a-f]*) die "the CLI launcher is unmanaged" ;; esac
+    for directory in "$HOME/.local" "$HOME/.local/share" "${root%/server}" "$root" "$root/installations" "$runtime" "$runtime/bin" "$runtime/bin/spaceterm"; do
+        [ ! -L "$directory" ] || die "the CLI installation has unsafe links"
+    done
+    if [ -n "$headless_confirm" ]; then
+        "$runtime/bin/spaceterm" server provision uninstall --confirm "$headless_confirm"
+        return
+    fi
+    status=0
+    preview="$("$runtime/bin/spaceterm" server provision uninstall)" || status=$?
+    printf '%s\n' "$preview"
+    case "$status" in
+        0) return ;;
+        3) ;;
+        *) die "the service could not be uninstalled" ;;
+    esac
+    token="$(printf '%s\n' "$preview" | sed -n 's/.*--confirm \(c1-[0-9a-f]\{64\}\).*/\1/p')"
+    [ -n "$token" ] || die "the uninstall preview has no confirmation token"
+    if [ -t 0 ]; then
+        printf 'Uninstall this server? [y/N] ' >&2
+        IFS= read -r answer
+    elif ( : </dev/tty ) 2>/dev/null; then
+        printf 'Uninstall this server? [y/N] ' >/dev/tty
+        IFS= read -r answer </dev/tty
+    else
+        die "review the preview, then run this installer with --headless --uninstall --confirm $token"
+    fi
+    case "$answer" in
+        y|Y|yes|YES) "$runtime/bin/spaceterm" server provision uninstall --confirm "$token" ;;
+        *) die "uninstall cancelled" ;;
+    esac
+}
+
+install_headless() {
+    # Installer steps always act on this account, independently of CLI work preferences.
+    SPACETERM_SERVER=local
+    export SPACETERM_SERVER
+    headless_archive=""
+    headless_signature=""
+    headless_identity=spaceterm
+    headless_confirm=""
+    headless_remove=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --headless) shift ;;
+            --uninstall) headless_remove=true; shift ;;
+            --archive) [ "$#" -ge 2 ] || die "--archive takes one file"; headless_archive="$2"; shift 2 ;;
+            --signature) [ "$#" -ge 2 ] || die "--signature takes one file"; headless_signature="$2"; shift 2 ;;
+            --identity) [ "$#" -ge 2 ] || die "--identity takes one name"; headless_identity="$2"; shift 2 ;;
+            --confirm) [ "$#" -ge 2 ] || die "--confirm takes one token"; headless_confirm="$2"; shift 2 ;;
+            *) die "unknown option" ;;
+        esac
+    done
+    case "$headless_identity" in spaceterm|spaceterm-preflight|spaceterm-development) ;; *) die "unsupported CLI identity" ;; esac
+    case "${HOME:-}" in /*) ;; *) die "an absolute HOME is required" ;; esac
+    if "$headless_remove"; then
+        [ -z "$headless_archive$headless_signature" ] || die "uninstall takes no archive"
+        headless_uninstall
+        return
+    fi
+    [ -z "$headless_confirm" ] || die "--confirm requires --uninstall"
+    case "$(uname -s):$(uname -m)" in
+        Darwin:arm64)
+            [ "$(sw_vers -productVersion | cut -d . -f 1)" -ge "$MINIMUM_MACOS_MAJOR" ] || die "SpaceTerm requires macOS $MINIMUM_MACOS_MAJOR or newer"
+            headless_target=darwin-arm64 ;;
+        Linux:x86_64)
+            # Headless installs need no Vulkan loader, GPU or display server.
+            glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+            case "$glibc" in "glibc "*) ;; *) die "SpaceTerm requires glibc 2.35 or newer" ;; esac
+            glibc="${glibc#glibc }"; major="${glibc%%.*}"; minor="${glibc#*.}"; minor="${minor%%.*}"
+            if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 35 ]; }; then die "SpaceTerm requires glibc 2.35 or newer"; fi
+            headless_target=linux-x86_64 ;;
+        *) die "SpaceTerm requires Apple silicon macOS or x86_64 glibc Linux" ;;
+    esac
+    require_commands tar gzip readlink sed
+    if [ -n "$headless_archive" ]; then
+        [ -f "$headless_archive" ] && [ -f "$headless_signature" ] || die "a local CLI archive requires its detached --signature"
+        work="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-install.XXXXXX")"
+        cp "$headless_archive" "$work/artifact.tar.gz"
+        cp "$headless_signature" "$work/artifact.sig"
+        headless_archive="$work/artifact.tar.gz"
+        headless_signature="$work/artifact.sig"
+    else
+        [ "$headless_identity" = spaceterm ] && [ -z "$headless_signature" ] || die "nonproduction CLI installs require a local archive and signature"
+        require_commands curl
+        latest_release "$headless_target.tar.gz" "CLI archive" spaceterm
+        if [ "$(uname -s)" = Darwin ]; then download_release shasum -a 256; else download_release sha256sum; fi
+        headless_archive="$work/$archive"
+        headless_signature="$work/$archive.sig"
+        download --silent --show-error "$RELEASES/download/v$version/$archive.sig" --output "$headless_signature" || die "could not download the CLI signature"
+        expected_signature="$(sed -n "s/^\([0-9a-f]\{64\}\)  $archive.sig$/\1/p" "$work/SHA256SUMS")"
+        if [ "$(uname -s)" = Darwin ]; then actual_signature="$(shasum -a 256 "$headless_signature" | cut -d ' ' -f 1)"; else actual_signature="$(sha256sum "$headless_signature" | cut -d ' ' -f 1)"; fi
+        [ "$actual_signature" = "$expected_signature" ] || die "the CLI signature differs from the published checksum"
+    fi
+    retain_headless
+    step "Installed the $headless_identity CLI. Run $headless_identity server setup to configure the server."
+}
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+for option in "$@"; do
+    if [ "$option" = --headless ]; then
+        install_headless "$@"
+        exit 0
+    fi
+done
 
 case "$(uname -s)" in
     Darwin) install_macos "$@" ;;

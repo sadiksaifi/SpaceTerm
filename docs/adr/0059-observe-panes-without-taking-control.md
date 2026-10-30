@@ -1,0 +1,13 @@
+# Observe Panes without taking control
+
+`pane read` opens an Observation for every Pane, including one the caller controls. Observation never grants control. An observer channel receives screen frames, Line Mode, input and output progress, and Scrollback. It never resizes, starts a shell, focuses another client or receives native effects or accessibility state. It can page history, declare a view and acknowledge frames. Input, resize, focus, style, Scrollback clearing, close and accessibility operations are refused on that channel. Release closes the channel. [The observer adapter](../../src/runtime/server/observe.rs) supplies these facts without effects; [the served connection](../../src/runtime/server/dispatch.rs) enforces channel operations.
+
+A Pane without a running Terminal Session returns its not-started or ended state. Reading starts no replacement Session. Taking Over a Pane leaves observations open. Pairing revocation follows [ADR 0028](0028-use-spaceterm-protocol-over-every-client-connection.md).
+
+While an observer channel is open, the desktop Pane Caption shows `Observed by <Client Name>`. This caption is separate from the Controlling Client named by [ADR 0022](0022-give-one-client-control-of-each-pane.md). Client Names identify the observers without implying an input or sizing grant.
+
+A capture freezes one history boundary and screen frame. Its opaque cursors bind the server, Pane, Terminal Session, history epoch and row. A cursor from another target or Session is refused. Discarded history reports a gap; an epoch change reports a reset. Byte and row caps never advance a forward cursor past omitted rows. Captures report coalescing and contain text or synthesized SGR, without OSC sequences, hyperlinks or clipboard data.
+
+Waits scan the screen and newly added history. Idle means no PTY output, independent of frame coalescing. A Session that ends or changes during a wait returns a changed-session result. Reading never scrolls the desktop: scroll position remains Client View State under [ADR 0041](0041-keep-each-clients-view-independent.md). [ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns frame publication and Scrollback history semantics.
+
+Run admission queues work on the Terminal Session worker and returns a deferred reply. [The host polls that reply](../../src/runtime/server/shared/runs.rs), so worker delays and PTY writes do not hold the PaneService lock. [ADR 0055](0055-define-the-cli-output-contract-and-scope-model.md) owns prompt readiness and Session fences. [ADR 0058](0058-derive-agent-identities-at-admission.md) owns run journals, concurrent runs and receipt retention.

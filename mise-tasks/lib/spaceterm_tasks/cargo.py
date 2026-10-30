@@ -12,7 +12,7 @@ from spaceterm_tasks.processes import OWN_GROUP, stop_group, terminating_signals
 
 def build_executable(
     *cargo_args,
-    binary="spaceterm",
+    binary="spaceterm-desktop",
     example=False,
     env=None,
     portable_linux=False,

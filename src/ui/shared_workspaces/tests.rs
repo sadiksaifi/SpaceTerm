@@ -54,6 +54,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
         current_directory: None,
         repository_directory: None,
         presentation: None,
+        observers: Default::default(),
         confirmed_directory: None,
         creator: None,
     }
@@ -234,6 +235,7 @@ fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut T
         vec![Mutation::CreateTab {
             workspace: WORKSPACE,
             source: Some(ROOT_PANE),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }],
         "New Tab should ask the server"
     );
@@ -332,6 +334,7 @@ fn a_split_in_a_shared_workspace_should_ask_the_server_for_the_pane(cx: &mut Tes
             tab: ROOT_TAB,
             source: ROOT_PANE,
             axis: Axis::Down,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }],
         "Split Down should ask the server"
     );
@@ -1849,6 +1852,7 @@ mod edits {
         let missing_tab = Mutation::CreateTab {
             workspace: [9; 32],
             source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         };
         edits.submit_for_recovery(missing_tab.clone());
         edits.answer(Outcome::Missing);
@@ -1903,6 +1907,7 @@ mod edits {
         edits.submit_for_recovery(Mutation::CreateTab {
             workspace: WORKSPACE,
             source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         });
         edits.answer(Outcome::Accepted { target: SECOND_TAB });
 

@@ -1,0 +1,28 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "workspace.rename",
+  "status": "ok",
+  "server": {
+    "name": "fixture",
+    "route": "local",
+    "id": "0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "data": {
+    "revision": 8,
+    "target": [
+      {
+        "id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "label": "api",
+        "level": "workspace",
+        "source": "flag"
+      }
+    ],
+    "workspace": {
+      "id": "0101010101010101010101010101010101010101010101010101010101010101",
+      "label": "api-v2",
+      "line": "api-v2"
+    }
+  },
+  "error": null,
+  "warnings": []
+}

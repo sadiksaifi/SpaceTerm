@@ -1,0 +1,56 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "pane.read",
+  "status": "error",
+  "server": {
+    "name": "local",
+    "route": "local",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "candidates": [
+      {
+        "level": "tab",
+        "id": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "label": "cargo test",
+        "directory": "/home/build/api",
+        "worktree": null,
+        "panes": 1
+      }
+    ],
+    "recovered_operations": [
+      {
+        "operation": "7",
+        "identity": "base",
+        "kind": "mutation",
+        "outcome": {
+          "state": "applied",
+          "target": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+        }
+      }
+    ]
+  },
+  "error": {
+    "code": "ambiguous_target",
+    "class": "target",
+    "message": "More than one Tab matches.",
+    "retryable": false,
+    "details": {
+      "level": "tab",
+      "count": 2,
+      "ids": [
+        "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+      ]
+    }
+  },
+  "warnings": [
+    {
+      "code": "recovered_operation",
+      "message": "SpaceTerm settled an earlier command first. See data.recovered_operations.",
+      "details": {
+        "count": 1
+      }
+    }
+  ]
+}

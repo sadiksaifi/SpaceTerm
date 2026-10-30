@@ -312,10 +312,23 @@ impl TabChromePresentation {
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum TabManagerEvent {
-    ClosePaneRequested { tab_id: TabId, pane_id: PaneId },
-    CloseTabRequested { tab_id: TabId },
-    FinalTabCloseRequested { final_tab_id: TabId },
+    ClosePaneRequested {
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
+    CloseTabRequested {
+        tab_id: TabId,
+    },
+    FinalTabCloseRequested {
+        final_tab_id: TabId,
+    },
     PresentationChanged,
+    /// The Active Tab's Focused Pane asked to show work the server created for it.
+    RevealRequested {
+        tab_id: TabId,
+        origin: PaneId,
+        target: spaceterm_server::hierarchy::Placement,
+    },
 }
 
 impl std::fmt::Debug for TabManagerEvent {
@@ -325,6 +338,7 @@ impl std::fmt::Debug for TabManagerEvent {
             Self::CloseTabRequested { .. } => "TabManagerEvent::CloseTabRequested",
             Self::FinalTabCloseRequested { .. } => "TabManagerEvent::FinalTabCloseRequested",
             Self::PresentationChanged => "TabManagerEvent::PresentationChanged",
+            Self::RevealRequested { .. } => "TabManagerEvent::RevealRequested",
         })
     }
 }
@@ -535,6 +549,18 @@ impl TabManager {
                     cx.emit(TabManagerEvent::PresentationChanged);
                     cx.notify();
                 }
+                TabViewEvent::RevealRequested {
+                    tab_id,
+                    origin,
+                    target,
+                } if manager.active && manager.tabs.active_tab_id() == *tab_id => {
+                    cx.emit(TabManagerEvent::RevealRequested {
+                        tab_id: *tab_id,
+                        origin: *origin,
+                        target: *target,
+                    });
+                }
+                TabViewEvent::RevealRequested { .. } => {}
             },
         )
         .detach();
@@ -728,6 +754,24 @@ impl TabManager {
             self.tabs.active_tab_id(),
             self.tabs.active_tab().read(cx).focus_epoch(),
         )
+    }
+
+    /// The server identity of the Active Tab's Focused Pane, when the server owns it.
+    #[cfg(test)]
+    pub(crate) fn focused_server_pane(&self, cx: &App) -> Option<spaceterm_server::hierarchy::Id> {
+        let view = self.tabs.active_tab().read(cx);
+        view.shared_server_pane(view.focused_pane_id())
+    }
+
+    /// Whether a Tab of this strip holds the server Pane `pane`.
+    pub(crate) fn presents_shared_pane(
+        &self,
+        pane: spaceterm_server::hierarchy::Id,
+        cx: &App,
+    ) -> bool {
+        self.tabs
+            .iter()
+            .any(|(_, view)| view.read(cx).holds_shared_pane(pane))
     }
 
     pub(crate) fn active_terminal_identity(&self, cx: &App) -> (TabId, PaneId) {

@@ -21,21 +21,21 @@ use crate::ssh::process::{
     SshProcessSpawnRequest,
 };
 
-#[path = "../../../crates/spaceterm-server-host/examples/support/repository.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/repository.rs"]
 #[expect(
     dead_code,
     reason = "acceptance uses inventory and owning-server mutation helpers"
 )]
 mod repository;
-#[path = "../../../crates/spaceterm-server-host/examples/support/mod.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/mod.rs"]
 #[expect(
     dead_code,
     reason = "acceptance uses Pane claims, terminal commands and directory requests"
 )]
 mod support;
-#[path = "../../../crates/spaceterm-server-host/examples/support/terminal_semantics.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/terminal_semantics.rs"]
 mod terminal_semantics;
-#[path = "../../../crates/spaceterm-server-host/examples/support/worktree.rs"]
+#[path = "../../../crates/spaceterm-cli/examples/support/worktree.rs"]
 #[expect(
     dead_code,
     reason = "acceptance uses journaled writes and exact removal review"
@@ -112,6 +112,7 @@ fn native_server_owned_work(
             Mutation::CreateWorkspace {
                 name: "QUIC native semantics".into(),
                 directory: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         ),
     )?;
@@ -300,6 +301,7 @@ fn native_server_owned_work(
                 server,
                 &connection,
                 Mutation::Worktree(Operation::Create {
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
                     workspace,
                     root: path.clone(),
                     path: worktree.clone(),
@@ -687,7 +689,7 @@ struct ObservedCredentials {
 impl ObservedCredentials {
     fn new(fail_insert: bool) -> Arc<Self> {
         Arc::new(Self {
-            store: crate::direct_connections::credentials::native(identity()),
+            store: crate::direct_connections::credentials::native(identity()).unwrap(),
             keys: Mutex::default(),
             inserts: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
@@ -696,6 +698,9 @@ impl ObservedCredentials {
     }
 }
 impl CredentialStore for ObservedCredentials {
+    fn kind(&self) -> spaceterm_connections::StoreKind {
+        self.store.kind()
+    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -772,7 +777,11 @@ impl NativeFixture {
         let credentials = ObservedCredentials::new(fail_credentials);
         let direct = DirectConnections::with_credentials(
             identity(),
-            Arc::clone(&paths),
+            Arc::new(spaceterm_connections::records::PrivateRecords::new(
+                Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
+                    Arc::clone(&paths),
+                )),
+            )),
             credentials.clone(),
         );
         direct.resume_retained();
@@ -1230,6 +1239,33 @@ fn setup_with_approvals(
 }
 
 #[test]
+fn disconnecting_a_saved_route_closes_its_retained_server_handle() {
+    use spaceterm_server::connection::link::{Health, LinkError, LinkEvent, ServerLink};
+
+    let (connections, routes) = spaceterm_connections::tests::connected_routes(&["Setup"]);
+    let route = routes[0];
+    let server = connections.server(&route).unwrap();
+    let link = ServerLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), Instant::now());
+    server.adopt(link.clone());
+    assert!(server.refresh().is_ok());
+    let pending = link
+        .request(spaceterm_server::protocol::Operation::Direct(
+            spaceterm_server::direct::Management::Status,
+        ))
+        .unwrap();
+
+    connections.disconnect(&route);
+
+    assert_eq!(link.health(), Health::Closed(LinkError::Closed));
+    assert!(pending.wait().is_err());
+    assert!(server.refresh().is_err());
+    assert_eq!(
+        connections.status(&route),
+        Some(DirectRouteStatus::Disconnected)
+    );
+}
+
+#[test]
 #[ignore = "requires compiled and installed Preflight; one SSH authentication spans approved setup, then QUIC owns work, reconnect and exact pairing cleanup"]
 fn native_server_setup_acceptance() {
     let mut fixture = NativeFixture::new("accept", configured_catalog(), false);
@@ -1327,7 +1363,7 @@ fn native_server_setup_acceptance() {
         !server.is_account_local(),
         "setup returned local file authority"
     );
-    assert_eq!(server.refresh().unwrap().protocol_major, 3);
+    assert_eq!(server.refresh().unwrap().protocol_major, 4);
     let spawns = fixture.adapter.seal();
     let counts = backend.process_counts();
     assert_eq!(counts.active(), 0);
@@ -1365,7 +1401,11 @@ fn native_server_setup_acceptance() {
     fixture.direct.disconnect(&route);
     let relaunched = DirectConnections::with_credentials(
         identity(),
-        Arc::clone(&fixture.paths),
+        Arc::new(spaceterm_connections::records::PrivateRecords::new(
+            Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
+                Arc::clone(&fixture.paths),
+            )),
+        )),
         fixture.credentials.clone(),
     );
     relaunched.resume_retained();
@@ -1379,7 +1419,7 @@ fn native_server_setup_acceptance() {
         relaunched.status(&route) == Some(DirectRouteStatus::Connected)
     });
     let server = relaunched.server(&route).unwrap();
-    assert_eq!(server.refresh().unwrap().protocol_major, 3);
+    assert_eq!(server.refresh().unwrap().protocol_major, 4);
     assert!(
         server
             .paired_devices()
@@ -1499,7 +1539,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                     cycle,
                                     "refresh-protocol",
                                     started,
-                                    if status.protocol_major == 3 {
+                                    if status.protocol_major == 4 {
                                         Ok(())
                                     } else {
                                         Err(ServerError::Protocol)
@@ -1665,7 +1705,7 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
                 flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
             let mut archive = tar::Builder::new(compressed);
             let helper = format!(
-                "#!/bin/sh\ncase $1 in ssh-enable-linger) exit {};; ssh-enable-linger-password) IFS= read -r password; test \"$password\" = fixture;; ssh-install) test -f \"$3\" && test -f \"$4\";; *) exit 91;; esac\n",
+                "#!/bin/sh\n[ \"$1:$2\" = server:provision ] || exit 91\nshift 2\ncase $1 in ssh-enable-linger) if [ \"${{2-}}\" = --password-stdin ]; then IFS= read -r password; test \"$password\" = fixture; else exit {}; fi;; ssh-install) test -f \"$2\" && test -f \"$3\";; *) exit 91;; esac\n",
                 if authorization_required { 1 } else { 0 },
             );
             let mut header = tar::Header::new_gnu();
@@ -1673,11 +1713,7 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
             header.set_mode(0o755);
             header.set_cksum();
             archive
-                .append_data(
-                    &mut header,
-                    "server/bin/spaceterm-server",
-                    helper.as_bytes(),
-                )
+                .append_data(&mut header, "server/bin/spaceterm", helper.as_bytes())
                 .unwrap();
             archive.into_inner().unwrap().finish().unwrap();
         }
@@ -1908,8 +1944,8 @@ for signum in (signal.SIGHUP,signal.SIGTERM,signal.SIGINT):
     signal.signal(signum,interrupted)
 try:
     write(replacement)
-    result=subprocess.run([binary,'setup-start',application],input=request,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
-    assert result.returncode!=0 and result.stderr.strip()==b'The server changed. Review and confirm again.'
+    result=subprocess.run([binary,'server','provision','ssh-start'],input=request,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
+    assert result.returncode!=0 and b'(changed)' in result.stderr
     assert open(policy_path,'rb').read()==policy
 finally:
     current=os.stat(identity_path,follow_symlinks=False)
@@ -1922,7 +1958,7 @@ raise SystemExit(86)
 "#;
         let quoted = format!("'{}'", replace_and_start.replace('\'', "'\\''"));
         format!(
-            "{prefix}python3 -c {quoted} \"$root/identity.json\" \"$policy\" \"$root/installations/$digest/bin/spaceterm-server\" '{identity}'\n"
+            "{prefix}python3 -c {quoted} \"$root/identity.json\" \"$policy\" \"$root/installations/$digest/bin/spaceterm\" '{identity}'\n"
         )
     }
     fn install(

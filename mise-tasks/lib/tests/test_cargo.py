@@ -27,7 +27,7 @@ class CargoArtifactTests(unittest.TestCase):
                 {
                     "reason": "compiler-artifact",
                     "package_id": "selected",
-                    "target": {"name": "spaceterm-server"},
+                    "target": {"name": "spaceterm"},
                     "executable": str(executable),
                 }
             ]
@@ -35,9 +35,7 @@ class CargoArtifactTests(unittest.TestCase):
                 stdout=io.StringIO("\n".join(map(json.dumps, messages))), wait=lambda: 0
             )
             with patch.object(cargo.subprocess, "Popen", return_value=process):
-                result = cargo.build_executable(
-                    binary="spaceterm-server", metadata="build-info.json"
-                )
+                result = cargo.build_executable(binary="spaceterm", metadata="build-info.json")
             self.assertEqual(result, (executable.resolve(), b"selected"))
 
     def test_metadata_without_selected_package_build_script_fails_closed(self):
@@ -47,10 +45,10 @@ class CargoArtifactTests(unittest.TestCase):
             message = {
                 "reason": "compiler-artifact",
                 "package_id": "selected",
-                "target": {"name": "spaceterm-server"},
+                "target": {"name": "spaceterm"},
                 "executable": str(executable),
             }
             process = SimpleNamespace(stdout=io.StringIO(json.dumps(message)), wait=lambda: 0)
             with patch.object(cargo.subprocess, "Popen", return_value=process):
                 with self.assertRaisesRegex(TaskError, "metadata"):
-                    cargo.build_executable(binary="spaceterm-server", metadata="build-info.json")
+                    cargo.build_executable(binary="spaceterm", metadata="build-info.json")

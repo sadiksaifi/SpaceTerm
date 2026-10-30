@@ -55,18 +55,18 @@ class ServerSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "project"
             project(root)
-            crate = root / "crates/spaceterm-server-host"
+            crate = root / "crates/spaceterm-cli"
             (crate / "src").mkdir(parents=True)
             (root / "build").mkdir()
             (root / "assets").mkdir()
             shutil.copyfile(ROOT / "build/identity.rs", root / "build/identity.rs")
-            shutil.copyfile(ROOT / "crates/spaceterm-server-host/build.rs", crate / "build.rs")
+            shutil.copyfile(ROOT / "crates/spaceterm-cli/build.rs", crate / "build.rs")
             (root / "Cargo.toml").write_text(
-                '[workspace]\nmembers = ["crates/spaceterm-server-host"]\nresolver = "3"\n'
+                '[workspace]\nmembers = ["crates/spaceterm-cli"]\nresolver = "3"\n'
             )
             (crate / "Cargo.toml").write_text(
-                '[package]\nname = "spaceterm-server-host"\nversion = "0.0.0"\nedition = "2024"\n'
-                '[[bin]]\nname = "spaceterm-server"\npath = "src/main.rs"\n'
+                '[package]\nname = "spaceterm-cli"\nversion = "0.0.0"\nedition = "2024"\n'
+                '[[bin]]\nname = "spaceterm"\npath = "src/main.rs"\n'
             )
             (crate / "src/main.rs").write_text(
                 'fn main() { print!("{}", include_str!(concat!(env!("OUT_DIR"), "/build-info.json"))); }'
@@ -84,10 +84,10 @@ class ServerSourceTests(unittest.TestCase):
                 environment.pop("SPACETERM_RELEASE_TAG", None)
                 executable, metadata = cargo.build_executable(
                     "--package",
-                    "spaceterm-server-host",
+                    "spaceterm-cli",
                     "--locked",
                     "--offline",
-                    binary="spaceterm-server",
+                    binary="spaceterm",
                     env=environment,
                     metadata="build-info.json",
                 )
@@ -99,6 +99,9 @@ class ServerSourceTests(unittest.TestCase):
 
             with (
                 patch("spaceterm_tasks.server_builds.ROOT", root),
+                patch(
+                    "spaceterm_tasks.server_builds.host_target", return_value="aarch64-apple-darwin"
+                ),
                 patch.object(cargo, "ROOT", root),
                 patch("spaceterm_tasks.server_builds.package", build_metadata),
             ):
@@ -120,6 +123,9 @@ class ServerSourceTests(unittest.TestCase):
 
             with (
                 patch("spaceterm_tasks.server_builds.ROOT", root),
+                patch(
+                    "spaceterm_tasks.server_builds.host_target", return_value="aarch64-apple-darwin"
+                ),
                 patch("spaceterm_tasks.server_builds.package", changed_build),
                 self.assertRaisesRegex(TaskError, "source changed during server catalog"),
             ):

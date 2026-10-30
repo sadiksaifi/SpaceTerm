@@ -47,6 +47,7 @@ fn inventory() -> Inventory {
                     current_directory: None,
                     repository_directory: None,
                     presentation: None,
+                    observers: Default::default(),
                     confirmed_directory: None,
                     creator: None,
                 }],
@@ -882,6 +883,7 @@ fn new_workspace_presents_a_pending_creation_without_server_authority(cx: &mut T
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }],
         "the server allocates the automatic name"
     );
@@ -932,6 +934,7 @@ fn new_workspace_without_a_window_creates_once_the_server_presents_its_workspace
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }],
         "one request creates one Workspace"
     );
@@ -968,6 +971,7 @@ fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestApp
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(chosen.clone()),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.workspace_count(cx), 2);
@@ -1437,6 +1441,7 @@ fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(project.clone()),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }]
     );
     assert!(
@@ -1768,6 +1773,7 @@ fn with_hidden_tab(
             current_directory: None,
             repository_directory: None,
             presentation: presentation.map(Box::new),
+            observers: Default::default(),
             confirmed_directory: None,
             creator: None,
         }],
@@ -1903,6 +1909,7 @@ fn with_detached_workspace() -> Inventory {
         current_directory: None,
         repository_directory: None,
         presentation: presentation.map(Box::new),
+        observers: Default::default(),
         confirmed_directory: None,
         creator: None,
     };
@@ -2055,5 +2062,39 @@ fn a_pane_another_client_controls_keeps_showing_its_sessions_progress(cx: &mut T
         session_statuses(cx).contains(&"Busy, 60%".to_owned()),
         "the server's live progress still shows: {:?}",
         session_statuses(cx)
+    );
+}
+
+#[gpui::test]
+fn observer_caption_renders_names_and_clears_without_a_control_change(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("pane-caption-observers-1").is_none());
+    for (names, others, expected) in [
+        (vec!["Build CLI"], 0, "Observed by Build CLI"),
+        (
+            vec!["Build CLI", "Review CLI"],
+            2,
+            "Observed by Build CLI and 3 others",
+        ),
+    ] {
+        let mut value = serde_json::to_value(inventory()).unwrap();
+        value["workspaces"][0]["tabs"][0]["panes"][0]["observers"] =
+            serde_json::json!({ "names": names, "others": others });
+        harness
+            .edits
+            .set_inventory(serde_json::from_value(value).unwrap());
+        sync(&harness, cx);
+        assert!(cx.debug_bounds("pane-caption-observers-1").is_some());
+        assert!(A11yTree::read(cx).find(expected).is_some(), "{expected}");
+    }
+    harness.edits.set_inventory(inventory());
+    sync(&harness, cx);
+    assert!(cx.debug_bounds("pane-caption-observers-1").is_none());
+    assert!(
+        A11yTree::read(cx)
+            .find("Observed by Build CLI and 3 others")
+            .is_none()
     );
 }

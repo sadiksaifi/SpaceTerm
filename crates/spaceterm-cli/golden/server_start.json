@@ -1,0 +1,15 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "server.start",
+  "status": "ok",
+  "server": {
+    "name": "local",
+    "route": "local",
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "data": {
+    "running": true
+  },
+  "error": null,
+  "warnings": []
+}

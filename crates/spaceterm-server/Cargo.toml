@@ -29,3 +29,5 @@ thiserror = "2.0.17"
 bytes = "1"
 noq-udp = { version = "=1.4.0", default-features = false }
 noq-proto = { version = "=1.4.0", default-features = false, features = ["rustls-ring"] }
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+jiff = { version = "=0.2.38", default-features = false, features = ["std"] }

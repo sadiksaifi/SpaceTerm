@@ -21,6 +21,13 @@ READY = b"spaceterm-development-ready-v1\n"
 def source_environment(environment):
     result = dict(environment)
     for name in (
+        "SPACETERM_SERVER",
+        "SPACETERM_AS",
+        "SPACETERM_IDENTITY",
+        "SPACETERM_SERVER_ID",
+        "SPACETERM_PANE",
+        "SPACETERM_SESSION",
+        "SPACETERM_CLI",
         "SPACETERM_PACKAGED",
         "SPACETERM_RELEASE_TAG",
         "SPACETERM_SERVER_ARCHIVE",

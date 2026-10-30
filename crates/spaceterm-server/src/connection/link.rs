@@ -713,15 +713,43 @@ impl ChannelHandle {
     }
 
     /// Claims a Pane for this channel, once. Frames may arrive before the reply. A reply other
-    /// than `ClaimReply::Attached` leaves the channel unbound; drop the handle.
+    /// than `ClaimReply::Attached` leaves the channel unbound; drop the handle. A `size` of `None`
+    /// keeps the running Session's size.
     pub fn claim(
         &self,
         attachment: crate::attachments::Attachment,
         pane: crate::hierarchy::Id,
         claim: AttachmentClaim,
-        size: PaneSize,
+        size: impl Into<Option<PaneSize>>,
         style: Option<PresentationStyle>,
     ) -> Result<PendingReply, LinkError> {
+        self.bind(Operation::Claim(Claim {
+            channel: self.channel,
+            attachment,
+            pane,
+            claim,
+            size: size.into(),
+            style,
+        }))
+    }
+
+    /// Observes a Pane on this channel, once, without control. `session` fences the observed
+    /// Terminal Session. A reply other than `ObserveReply::Observing` leaves the channel unbound;
+    /// drop the handle. Dropping an observing handle sends `Release`, which ends the observation.
+    pub fn observe(
+        &self,
+        pane: crate::hierarchy::Id,
+        session: Option<crate::hierarchy::Id>,
+    ) -> Result<PendingReply, LinkError> {
+        self.bind(Operation::Observe {
+            channel: self.channel,
+            pane,
+            session,
+        })
+    }
+
+    /// Sends the operation that binds this channel, once.
+    fn bind(&self, operation: Operation) -> Result<PendingReply, LinkError> {
         let slot = Arc::new(ReplySlot::default());
         let mut state = self.link.lock();
         state.usable()?;
@@ -733,14 +761,6 @@ impl ChannelHandle {
             return Err(LinkError::Unclaimed);
         }
         state.send_releases();
-        let operation = Operation::Claim(Claim {
-            channel: self.channel,
-            attachment,
-            pane,
-            claim,
-            size,
-            style,
-        });
         let id = state.send_request(operation, Waiter::Slot(Arc::clone(&slot)))?;
         if let Some(channel) = state.channels.get_mut(&self.channel) {
             channel.claimed = true;

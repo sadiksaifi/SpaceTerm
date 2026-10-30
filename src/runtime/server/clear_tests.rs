@@ -55,6 +55,7 @@ fn clear_under_lease(preserve_prompt: bool) {
                 tab: tab.id,
                 source: tab.root_pane,
                 axis: Axis::Down,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             },
         },
     ) else {

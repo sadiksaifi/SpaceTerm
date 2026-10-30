@@ -195,7 +195,7 @@ def atomic_write(path: Path, contents: str) -> None:
 
 
 def register(prefix: Path, root: Path = ROOT) -> None:
-    executable = prefix / "bin" / "spaceterm"
+    executable = prefix / "bin" / "spaceterm-desktop"
     if not prefix.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
         raise ValueError("a staged Development executable is required")
     destination = desktop_registry() / DESKTOP_ENTRY.name
@@ -228,10 +228,10 @@ def stage_prefix(
     staging = Path(tempfile.mkdtemp(prefix=".prefix.", dir=parent))
     try:
         (staging / "bin").mkdir()
-        shutil.copyfile(executable, staging / "bin" / "spaceterm")
+        shutil.copyfile(executable, staging / "bin" / "spaceterm-desktop")
+        (staging / "bin" / "spaceterm-desktop").chmod(0o755)
+        shutil.copyfile(server, staging / "bin" / "spaceterm")
         (staging / "bin" / "spaceterm").chmod(0o755)
-        shutil.copyfile(server, staging / "bin" / "spaceterm-server")
-        (staging / "bin" / "spaceterm-server").chmod(0o755)
         resources = staging / "share" / "spaceterm"
         shutil.copytree(root / SHELL_INTEGRATION, resources / "shell-integration")
         compiled = subprocess.run(
@@ -271,10 +271,10 @@ def launch(backend: str | None = None) -> int | None:
         catalog = prepare(Path(temporary) / "catalog", "spaceterm-development")
         server = build_executable(
             "--package",
-            "spaceterm-server-host",
+            "spaceterm-cli",
             "--no-default-features",
             "--locked",
-            binary="spaceterm-server",
+            binary="spaceterm",
             env=environment,
         )
         prefix = stage_prefix(
@@ -287,7 +287,7 @@ def launch(backend: str | None = None) -> int | None:
                 "could not register the Development desktop entry; run mise doctor project"
             ) from None
         return supervise(
-            [str(prefix / "bin/spaceterm-server"), "development-serve", "spaceterm-development"],
-            [str(prefix / "bin/spaceterm"), "--new-instance"],
+            [str(prefix / "bin/spaceterm"), "server", "run", "--owned"],
+            [str(prefix / "bin/spaceterm-desktop"), "--new-instance"],
             environment,
         )

@@ -250,6 +250,8 @@ pub(crate) struct Environment {
     pub(crate) sync: SyncWorker,
     pub(crate) management: Option<Arc<dyn DirectManagement>>,
     pub(crate) stop: Arc<Stop>,
+    /// Answers service-lane connections. `None` refuses them as unsupported.
+    pub(crate) lane: Option<Arc<crate::service::lane::LaneServer>>,
 }
 
 #[cfg(test)]
@@ -273,6 +275,7 @@ impl Environment {
                 stopping: AtomicBool::new(false),
                 wake: Arc::new(|| {}),
             }),
+            lane: None,
         }
     }
 }
@@ -283,6 +286,8 @@ struct HostService {
     inner: Box<dyn PaneService>,
     paths: Paths,
     stop: Arc<Stop>,
+    /// The membership fence: set while an admitted service operation is unsettled.
+    fence: Arc<AtomicBool>,
 }
 impl PaneService for HostService {
     fn restore(
@@ -297,7 +302,21 @@ impl PaneService for HostService {
     fn revoked(&mut self, client: [u8; 32]) {
         self.inner.revoked(client)
     }
+    fn release_control(&mut self, client: [u8; 32]) {
+        self.inner.release_control(client)
+    }
+    fn holds(&self, client: [u8; 32]) -> bool {
+        self.inner.holds(client)
+    }
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.inner.sessions()
+    }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        // The fence and its check share this service's lock, so no Session starts between an
+        // admitted operation's observation and its outcome.
+        if self.fence.load(Ordering::Acquire) && matches!(operation, Operation::Claim(_)) {
+            return Dispatch::reply(Err(Refusal::ServiceBusy));
+        }
         let shutdown = matches!(operation, Operation::Shutdown);
         if shutdown && crate::service::retain_stop(&self.paths).is_err() {
             return Dispatch::reply(Err(Refusal::StorageUnavailable));
@@ -379,18 +398,110 @@ impl DirectManagement for HostDirect {
             .unwrap_or_else(|e| e.into_inner())
             .manage(actor, request);
         let (reply, retired) = result?;
-        if let Some(client) = retired {
-            self.panes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .revoked(client);
+        if !retired.is_empty() {
+            let mut panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+            for client in retired {
+                panes.revoked(client);
+            }
         }
         Ok(reply)
     }
 }
 
+/// The lane's view of this host: its Terminal Sessions, its membership fence and its paired
+/// devices.
+struct HostLane {
+    panes: SharedPaneService,
+    fence: Arc<AtomicBool>,
+    direct: Option<crate::direct::host::Shared>,
+    stop: Arc<Stop>,
+}
+impl HostLane {
+    fn manage(
+        &self,
+        request: crate::direct::Management,
+    ) -> Result<Option<crate::direct::ManagementReply>, ServerError> {
+        let Some(state) = &self.direct else {
+            return Ok(None);
+        };
+        let (reply, _) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .manage(None, request)?;
+        Ok(Some(reply))
+    }
+}
+impl crate::service::lane::LaneHost for HostLane {
+    fn fence(
+        &self,
+        admit: &mut dyn FnMut(&[[u8; 32]]) -> Result<(), ServerError>,
+    ) -> Result<(), ServerError> {
+        let panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        admit(&panes.sessions())?;
+        self.fence.store(true, Ordering::Release);
+        Ok(())
+    }
+    fn release_fence(&self) {
+        let _panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        self.fence.store(false, Ordering::Release);
+    }
+    fn stopping(&self) -> bool {
+        self.stop.stopping()
+    }
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.panes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sessions()
+    }
+    fn devices(&self) -> Result<Vec<crate::service::lane::LaneDevice>, ServerError> {
+        let Some(crate::direct::ManagementReply::Devices(devices)) =
+            self.manage(crate::direct::Management::Devices)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(devices.iter().map(crate::service::lane::device).collect())
+    }
+    fn network(&self) -> Result<crate::service::lane::LaneNetwork, ServerError> {
+        let off = crate::service::lane::LaneNetwork {
+            enabled: false,
+            bind: None,
+            listening: false,
+            addresses: Vec::new(),
+        };
+        let Some(crate::direct::ManagementReply::Status(status)) =
+            self.manage(crate::direct::Management::Status)?
+        else {
+            return Ok(off);
+        };
+        Ok(crate::service::lane::LaneNetwork {
+            enabled: status.enabled,
+            bind: status.policy.as_ref().map(|policy| policy.bind.to_string()),
+            listening: matches!(
+                status.listener,
+                crate::direct::ListenerState::Listening { .. }
+            ),
+            addresses: status
+                .network_addresses
+                .map(|addresses| addresses.available)
+                .unwrap_or_default(),
+        })
+    }
+}
+
+/// Every revocation, over IPC or the network, forgets the revoked pairing's settled service
+/// operations in the ledger under `data`, so they never hold its capacity. An unsettled one stays
+/// orphaned until it settles.
+pub(crate) fn forget_service_operations(data: std::path::PathBuf) -> crate::direct::host::Revoked {
+    Box::new(move |pairing| {
+        if let Ok(data) = Directory::open(&data, false) {
+            let _ = crate::service::operations::Ledger::in_directory(data).forget_pairing(pairing);
+        }
+    })
+}
+
 /// One serving thread and what ends it: its socket's read side and its I/O thread's wake pipe.
-struct Running {
+pub(crate) struct Running {
     thread: std::thread::JoinHandle<()>,
     /// Set by the thread just before it rings the host's bell and ends.
     done: Arc<AtomicBool>,
@@ -400,7 +511,7 @@ struct Running {
 impl Running {
     /// A connection still in admission sees its socket close. An admitted one stops reading,
     /// writes its pending replies and says goodbye.
-    fn stop(self) -> std::thread::JoinHandle<()> {
+    pub(crate) fn stop(self) -> std::thread::JoinHandle<()> {
         (self.sever)();
         self.wake.wake();
         self.thread
@@ -456,15 +567,22 @@ fn serve_runtime_ready(
         Some(build) => build(sync.clone())?,
         None => Box::new(NoPanes),
     };
+    let fence = Arc::new(AtomicBool::new(false));
     let mut panes: Box<dyn PaneService> = Box::new(HostService {
         inner,
         paths: paths.clone(),
         stop: Arc::clone(&stop),
+        fence: Arc::clone(&fence),
     });
-    panes.restore(crate::organization::OrganizationStore(Directory::open(
-        &paths.data,
-        false,
-    )?))?;
+    {
+        // A Git write can outlive a crashed server through its inherited lock. Restore only
+        // after that original child exits, before publishing an endpoint or admitting work.
+        let _writes = data.lock("worktree.lock", false)?;
+        panes.restore(crate::organization::OrganizationStore(Directory::open(
+            &paths.data,
+            false,
+        )?))?;
+    }
     panes.ticker(Arc::clone(&stop.wake));
     let socket = paths.socket();
     if let Some(identity) = runtime.socket_identity(c"s")? {
@@ -506,11 +624,22 @@ fn serve_runtime_ready(
     // A failed direct-network store never prevents owning-account admission.
     let direct = crate::direct::host::State::open(paths).ok();
     if let Some(state) = &direct {
-        state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .set_wake(Arc::clone(&stop.wake));
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        state.set_wake(Arc::clone(&stop.wake));
+        state.on_revoke(forget_service_operations(paths.data.clone()));
     }
+    // The lane settles what an earlier run left in the service-operation ledger before any
+    // connection is accepted. A server without service state answers no lane.
+    let lane = crate::service::lane::LaneServer::start(
+        paths,
+        Arc::new(HostLane {
+            panes: Arc::clone(&panes),
+            fence,
+            direct: direct.clone(),
+            stop: Arc::clone(&stop),
+        }),
+    )
+    .ok();
     let environment = Environment {
         panes: Arc::clone(&panes),
         sync: sync.clone(),
@@ -521,6 +650,7 @@ fn serve_runtime_ready(
             }) as Arc<dyn DirectManagement>
         }),
         stop: Arc::clone(&stop),
+        lane,
     };
     SIGNAL_WAKE.store(ring.as_raw_fd(), Ordering::Release);
     let readiness = ready();
@@ -592,6 +722,11 @@ fn serve_runtime_ready(
     drop(listener);
     // Ticks no longer run, so replies they would have answered are refused now.
     panes.lock().unwrap_or_else(|e| e.into_inner()).stopping();
+    // An admission waiting for an identity that another admission holds is refused, so joining
+    // its thread never waits for a reservation.
+    if let Some(state) = &direct {
+        state.lock().unwrap_or_else(|e| e.into_inner()).stopping();
+    }
     let threads: Vec<_> = connections
         .into_iter()
         .chain(network)
@@ -778,7 +913,16 @@ fn serve_local(
     wake: Arc<dyn Wake>,
     environment: &Environment,
 ) -> Result<(), ServerError> {
-    let (_, client, name) = protocol::admit_server(&mut stream, &server, identity)?;
+    let protocol::Admitted { client, name, .. } =
+        match protocol::admit_server(&mut stream, &server, identity)? {
+            protocol::Admission::Work(admitted) => admitted,
+            // Account authority never changes while the server runs. Stopping severs this
+            // socket's reading, which ends the lane's wait for a request.
+            protocol::Admission::Service(actor) => {
+                let lane = environment.lane.as_ref().ok_or(ServerError::Unsupported)?;
+                return lane.serve(&mut stream, actor, &|| Ok(()));
+            }
+        };
     let peer = Peer {
         client,
         connection: protocol::random()?,
@@ -797,8 +941,8 @@ fn serve_local(
 }
 
 /// Serves one QUIC connection. Its handshake and pairing exchange wait under deadlines, and an
-/// admitted connection stops on the wake, so stopping needs no sever.
-fn spawn_network(
+/// admitted work connection stops on the wake. Stopping severs an admitted service lane.
+pub(crate) fn spawn_network(
     stream: crate::connection::quic::QuicStream,
     generation: [u8; 32],
     state: &crate::direct::host::Shared,
@@ -810,6 +954,8 @@ fn spawn_network(
     let outbox_wake = Arc::clone(&wake);
     let done = Arc::new(AtomicBool::new(false));
     let finished = Arc::clone(&done);
+    let lane = crate::direct::host::LaneStop::default();
+    let stopping = lane.clone();
     let thread = std::thread::Builder::new()
         .name("spaceterm-network".into())
         .spawn(move || {
@@ -824,13 +970,14 @@ fn spawn_network(
                 &environment,
                 waker,
                 outbox_wake,
+                &stopping,
             );
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
         thread,
         done,
-        sever: Box::new(|| {}),
+        sever: Box::new(move || lane.stop()),
         wake,
     })
 }
@@ -1189,6 +1336,7 @@ mod tests {
         ));
         let restored = Arc::new(AtomicBool::new(false));
         let mut host: Box<dyn PaneService> = Box::new(HostService {
+            fence: Arc::default(),
             inner: Box::new(Restoring(Arc::clone(&restored))),
             paths: Paths {
                 identity: "spaceterm-development".into(),

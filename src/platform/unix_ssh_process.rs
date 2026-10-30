@@ -295,15 +295,13 @@ mod tests {
     #[test]
     fn discovery_commands_quote_the_action_and_application_identity() {
         let adapter = UnixSshProcessAdapter;
-        for action in ["ssh-discover", "setup-start", "setup-direct-status"] {
+        for (action, command) in [
+            ("ssh-discover", "ssh-discover"),
+            ("setup-start", "ssh-start"),
+            ("setup-direct-status", "ssh-direct-status"),
+        ] {
             let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
-            assert!(
-                script.ends_with(&format!(
-                    "exec \"$root/installations/$digest/bin/spaceterm-server\" '{action}' '{}'\n",
-                    IDENTITY
-                )),
-                "{script}"
-            );
+            assert!(script.ends_with(&format!("exec \"$root/installations/$digest/bin/spaceterm\" server provision '{command}'\n")), "{script}");
         }
     }
 
@@ -828,6 +826,7 @@ impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
             r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+unset SPACETERM_SERVER SPACETERM_AS
 uid=$(id -u)
 [ "$uid" -gt 0 ] || exit 71
 root="$HOME/.local/share/{}/server"
@@ -863,12 +862,18 @@ esac
 digest=$(sed -n 's/.*"installation"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$policy")
 [ "${#digest}" = 64 ] || exit 74
 case "$digest" in *[!0-9a-f]*) exit 74;; esac
-[ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm-server" ] || exit 74
+[ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm" ] || exit 74
 "#);
         script.push_str(&format!(
-            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}{}\n",
-            quote(action),
-            quote(identity),
+            "exec \"$root/installations/$digest/bin/spaceterm\" server provision {}{}\n",
+            quote(match action {
+                "setup-start" => "ssh-start",
+                "setup-direct-status" => "ssh-direct-status",
+                "setup-direct-prepare" => "ssh-direct-prepare",
+                "setup-direct" => "ssh-direct",
+                "setup-direct-cancel" => "ssh-direct-cancel",
+                action => action,
+            }),
             argument
                 .map(|argument| format!(" {}", quote(argument)))
                 .unwrap_or_default()
@@ -898,7 +903,7 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
 #[cfg(feature = "desktop")]
 fn transfer_script(
     action: &str,
-    identity: &str,
+    _identity: &str,
     archive_length: usize,
     signature: &[u8],
     digest: &str,
@@ -914,13 +919,11 @@ fn transfer_script(
         ""
     };
     let authorize = match linger {
-        Some(true) => format!(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger-password {} || exit 77\nunset authorization\nfi\n",
-            quote(identity)
+        Some(true) => String::from(
+            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm\" server provision ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
         ),
-        Some(false) => format!(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger {} || exit 77\nfi\n",
-            quote(identity)
+        Some(false) => String::from(
+            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/bin/spaceterm\" server provision ssh-enable-linger || exit 77\nfi\n",
         ),
         None => String::new(),
     };
@@ -928,6 +931,7 @@ fn transfer_script(
         r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+unset SPACETERM_SERVER SPACETERM_AS
 umask 077
 work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-{work}.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
@@ -936,11 +940,10 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
 mkdir "$work/runtime"
 tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-{authorize}"$work/runtime/server/bin/spaceterm-server" {} {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+{authorize}"$work/runtime/server/bin/spaceterm" server provision {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
 "#,
         quote(&signature),
         quote(action),
-        quote(identity),
         quote(digest)
     )
 }

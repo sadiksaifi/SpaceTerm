@@ -8,12 +8,13 @@ use std::{
 };
 
 mod files;
+mod launcher;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
-const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
+const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 512 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const TARGET: &str = "aarch64-apple-darwin";
@@ -51,13 +52,215 @@ pub fn verify_candidate_bytes(
         signature,
         expected_sha256,
         target,
-        required_major,
+        Some(required_major),
         required_capabilities,
     )
     .map(Into::into)
 }
 
+/// An installer preview carries only bounded service effects and a nonsecret approval token.
+#[cfg(feature = "client")]
+#[derive(Debug)]
+pub enum CliUninstall {
+    Preview {
+        token: String,
+        expires_at: u64,
+        sessions: Vec<crate::hierarchy::Id>,
+    },
+    Completed,
+}
+
+#[cfg(feature = "client")]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UninstallConfirmation {
+    token: String,
+    expires_at: u64,
+    observation: String,
+}
+
 impl Service {
+    /// Retain an installer-selected signed package and select its CLI under the service lock.
+    /// The unpacked installation must carry its original artifact.tar.gz and artifact.sig.
+    /// This never registers or starts a service, or opens a credential store.
+    pub fn retain_cli(&self, installation: &Path) -> Result<bool, ServerError> {
+        let archive = source(&installation.join("artifact.tar.gz"), MAX_ARCHIVE)?;
+        let signature = source(&installation.join("artifact.sig"), 64)?;
+        authenticate(&archive, &signature, &self.identity)?;
+        let info = contents(&archive, &self.identity, |_, _, _, _| Ok(()))?;
+        info.require_compatibility(Some(crate::protocol::MAJOR), &["workspace_policy"])?;
+        let retained = retain(
+            &self.paths.data.join("installations"),
+            &self.identity,
+            &archive,
+            &signature,
+            &info,
+        )?;
+        let data = Directory::open(&self.paths.data, true)?;
+        let _operation = data.lock("service.lock", false)?;
+        let runtime = Self::state(&data)?
+            .as_ref()
+            .map_or(retained.directory, |state| self.runtime(state));
+        verify(&runtime, &self.identity)?;
+        launcher::select(
+            self.cli_home()?,
+            &self.identity,
+            &self.paths.data.join("installations"),
+            &runtime,
+        )
+    }
+
+    fn cli_home(&self) -> Result<&Path, ServerError> {
+        let suffix = Path::new(".local/share")
+            .join(&self.identity)
+            .join("server");
+        if !self.paths.data.ends_with(suffix) {
+            return Err(ServerError::UnsafeStorage);
+        }
+        self.paths
+            .data
+            .ancestors()
+            .nth(4)
+            .ok_or(ServerError::UnsafeStorage)
+    }
+
+    /// Keep an existing managed launcher on the policy's approved runtime. The service lock
+    /// must be held. Services do not create a new PATH launcher as a side effect.
+    pub(super) fn repoint_cli_locked(&self, runtime: &Path) -> Result<(), ServerError> {
+        let home = self.cli_home()?;
+        if home.join(".local/bin").join(&self.identity).is_symlink() {
+            launcher::select(
+                home,
+                &self.identity,
+                &self.paths.data.join("installations"),
+                runtime,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Preview an uninstall or confirm its exact service and live Session observation.
+    /// A preview is retained for ten minutes. Neither preview nor retention starts a server.
+    #[cfg(feature = "client")]
+    pub fn uninstall_cli(&self, confirmation: Option<&str>) -> Result<CliUninstall, ServerError> {
+        // Admission waits for the service lock, so establish this passive link first.
+        let initial = self.passive_status()?;
+        let link = if initial.running {
+            Some(
+                crate::ServerConnection::for_cli(&self.identity, crate::CliRoute::Local, None)?
+                    .link()?,
+            )
+        } else {
+            None
+        };
+        let data = Directory::open(&self.paths.data, true)?;
+        let _operation = data.lock("service.lock", false)?;
+        data.verify_path(&self.paths.data)?;
+        let state = Self::state(&data)?;
+        let status = self.passive_status()?;
+        if status.running != initial.running {
+            return Err(ServerError::Changed);
+        }
+        let sessions = if let Some(link) = link {
+            if !matches!(link.health(), crate::connection::link::Health::Live) {
+                return Err(ServerError::Changed);
+            }
+            let (_, revision) = link.next_inventory(0).map_err(|_| ServerError::Protocol)?;
+            let close = revision
+                .inventory
+                .close
+                .as_ref()
+                .ok_or(ServerError::Protocol)?;
+            close
+                .sessions
+                .iter()
+                .filter_map(|pane| pane.session)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let observation =
+            activation::confirmation_token(&(&self.identity, &state, &status, &sessions))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| ServerError::StorageUnavailable)?
+            .as_secs();
+        if let Some(token) = confirmation {
+            let preview = data
+                .read_json::<UninstallConfirmation>("cli-uninstall.json")?
+                .ok_or(ServerError::Changed)?;
+            if preview.token != token
+                || preview.observation != observation
+                || now > preview.expires_at
+            {
+                return Err(ServerError::Changed);
+            }
+            data.remove(c"cli-uninstall.json")?;
+        } else if status.running {
+            let token = format!(
+                "c1-{}",
+                crate::protocol::random()?
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            let expires_at = now + 600;
+            data.write_json(
+                c"cli-uninstall.json",
+                &UninstallConfirmation {
+                    token: token.clone(),
+                    expires_at,
+                    observation,
+                },
+            )?;
+            return Ok(CliUninstall::Preview {
+                token,
+                expires_at,
+                sessions,
+            });
+        }
+        if state.is_some() {
+            self.apply_control_locked(&data, control::Action::Uninstall, Some(status.running))?;
+        }
+        launcher::remove(
+            self.cli_home()?,
+            &self.identity,
+            &self.paths.data.join("installations"),
+        )?;
+        Ok(CliUninstall::Completed)
+    }
+
+    /// Authenticate an update for this native target without comparing protocol majors.
+    /// Activation still verifies that the native executable reports its own signed manifest.
+    pub fn inspect_update_candidate(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        expected_sha256: &str,
+    ) -> Result<CandidateMetadata, ServerError> {
+        let (_, _, info) = update_candidate(&self.identity, archive, signature, expected_sha256)?;
+        Ok(info.into())
+    }
+
+    /// Retain an authenticated native update, including an update across protocol majors.
+    /// This stages files only. It does not select, stop or start a runtime.
+    pub fn provision_update_candidate(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        expected_sha256: &str,
+    ) -> Result<RetainedInstallation, ServerError> {
+        let (bytes, signature, info) =
+            update_candidate(&self.identity, archive, signature, expected_sha256)?;
+        retain(
+            &self.paths.data.join("installations"),
+            &self.identity,
+            &bytes,
+            &signature,
+            &info,
+        )
+    }
+
     /// Authenticate a signed remote-target candidate without executing or extracting it.
     pub fn inspect_candidate_for_target(
         &self,
@@ -74,7 +277,7 @@ impl Service {
             signature,
             expected_sha256,
             target,
-            required_major,
+            Some(required_major),
             required_capabilities,
         )?;
         Ok(info.into())
@@ -131,7 +334,7 @@ impl Service {
             archive,
             signature,
             expected_sha256,
-            required_major,
+            Some(required_major),
             required_capabilities,
         )?;
         Ok(info.into())
@@ -160,7 +363,27 @@ impl Service {
             archive,
             signature,
             expected_sha256,
-            required_major,
+            Some(required_major),
+            required_capabilities,
+        )
+    }
+
+    /// Verify and retain a candidate of any protocol major for remote administration, which
+    /// reaches the server over the version-stable service lane.
+    pub fn stage_candidate(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        expected_sha256: &str,
+        required_capabilities: &[&str],
+    ) -> Result<RetainedInstallation, ServerError> {
+        provision_candidate(
+            &self.paths.data.join("installations"),
+            &self.identity,
+            archive,
+            signature,
+            expected_sha256,
+            None,
             required_capabilities,
         )
     }
@@ -217,7 +440,11 @@ fn public_key(identity: &str) -> Result<Vec<u8>, ServerError> {
         .decode(key.trim())
         .map_err(|_| ServerError::RuntimeUnavailable)
 }
-fn authenticate(bytes: &[u8], signature: &[u8], identity: &str) -> Result<(), ServerError> {
+pub(super) fn authenticate(
+    bytes: &[u8],
+    signature: &[u8],
+    identity: &str,
+) -> Result<(), ServerError> {
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key(identity)?)
         .verify(bytes, signature)
         .map_err(|_| ServerError::RuntimeUnavailable)
@@ -226,24 +453,21 @@ pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
     verify_installation(path, identity, None)
 }
 
-/// Recheck authenticated retained declarations at activation admission and dispatch.
+/// Recheck authenticated retained declarations at activation admission and dispatch. Any
+/// protocol major activates: the candidate's own build information must be self-consistent and
+/// native, and the service lane reaches it across majors.
 pub(super) fn verify_candidate_installation(
     path: &Path,
     identity: &str,
-    required_major: u16,
     required_capabilities: &[&str],
 ) -> Result<(), ServerError> {
-    verify_installation(
-        path,
-        identity,
-        Some((required_major, required_capabilities)),
-    )
+    verify_installation(path, identity, Some((None, required_capabilities)))
 }
 
 fn verify_installation(
     path: &Path,
     identity: &str,
-    candidate_requirements: Option<(u16, &[&str])>,
+    candidate_requirements: Option<(Option<u16>, &[&str])>,
 ) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
     let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
@@ -284,7 +508,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
                 "--strict".into(),
                 "-R".into(),
                 format!("={requirement}").into(),
-                path.join("bin/spaceterm-server").into_os_string(),
+                path.join("bin/spaceterm").into_os_string(),
             ],
         )
         .map_err(|_| ServerError::RuntimeUnavailable)?;
@@ -310,8 +534,8 @@ fn verify_executable(path: &Path, expected: &Build) -> Result<(), ServerError> {
 }
 fn executable_build(path: &Path) -> Result<Vec<u8>, ServerError> {
     let bytes = execute(
-        Command::new(path.join("bin/spaceterm-server"))
-            .arg("--build-info")
+        Command::new(path.join("bin/spaceterm"))
+            .args(["server", "provision", "build-info"])
             .env_clear()
             .current_dir(path),
     )
@@ -342,6 +566,7 @@ struct Build {
     version: String,
     protocol_major: u16,
     capabilities: Vec<String>,
+    source_sha256: Option<String>,
 }
 impl From<Build> for CandidateMetadata {
     fn from(info: Build) -> Self {
@@ -354,12 +579,13 @@ impl From<Build> for CandidateMetadata {
     }
 }
 impl Build {
+    /// `None` accepts any protocol major.
     fn require_compatibility(
         &self,
-        required_major: u16,
+        required_major: Option<u16>,
         required_capabilities: &[&str],
     ) -> Result<(), ServerError> {
-        if self.protocol_major != required_major {
+        if required_major.is_some_and(|major| self.protocol_major != major) {
             return Err(ServerError::IncompatibleProtocol);
         }
         if required_capabilities
@@ -412,6 +638,10 @@ impl Build {
             || info.target != target
             || info.version.len() > 64
             || !version
+            || info
+                .source_sha256
+                .as_deref()
+                .is_some_and(|value| !digest_valid(value))
             || info.protocol_major == 0
             || info.capabilities.len() > 32
             || info.capabilities.iter().any(|value| {
@@ -483,7 +713,7 @@ fn contents_for_target(
             .header()
             .mode()
             .map_err(|_| ServerError::RuntimeUnavailable)?;
-        let expected_mode = if directory || path == Path::new("bin/spaceterm-server") {
+        let expected_mode = if directory || path == Path::new("bin/spaceterm") {
             0o755
         } else {
             0o644
@@ -513,7 +743,7 @@ fn contents_for_target(
         if path == Path::new("build.json") {
             manifest = Some(Build::parse_for_target(&signed, identity, target)?);
         }
-        if path == Path::new("bin/spaceterm-server") && !directory {
+        if path == Path::new("bin/spaceterm") && !directory {
             executable = true;
         }
         visit(path, directory, mode, &signed)?;
@@ -524,10 +754,7 @@ fn contents_for_target(
     .map_err(|_| ServerError::RuntimeUnavailable)?
     .into_iter()
     .collect();
-    required.extend([
-        PathBuf::from("build.json"),
-        PathBuf::from("bin/spaceterm-server"),
-    ]);
+    required.extend([PathBuf::from("build.json"), PathBuf::from("bin/spaceterm")]);
     let terminfo: Vec<_> = files
         .iter()
         .filter(|path| {
@@ -662,7 +889,7 @@ fn provision_candidate(
     archive: &Path,
     signature: &Path,
     expected_sha256: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<RetainedInstallation, ServerError> {
     let (bytes, signature, info) = candidate(
@@ -676,12 +903,28 @@ fn provision_candidate(
     retain(parent, identity, &bytes, &signature, &info)
 }
 
+fn update_candidate(
+    identity: &str,
+    archive: &Path,
+    signature: &Path,
+    expected_sha256: &str,
+) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
+    let bytes = source(archive, MAX_ARCHIVE)?;
+    let signature = source(signature, 64)?;
+    authenticate(&bytes, &signature, identity)?;
+    if !digest_valid(expected_sha256) || digest(&bytes) != expected_sha256 {
+        return Err(ServerError::CandidateChanged);
+    }
+    let info = contents(&bytes, identity, |_, _, _, _| Ok(()))?;
+    Ok((bytes, signature, info))
+}
+
 fn candidate(
     identity: &str,
     archive: &Path,
     signature: &Path,
     expected_sha256: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     candidate_for_target(
@@ -700,7 +943,7 @@ fn candidate_for_target(
     signature: &Path,
     expected_sha256: &str,
     target: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     let bytes = source(archive, MAX_ARCHIVE)?;
@@ -723,7 +966,7 @@ fn verified_candidate_build(
     signature: &[u8],
     expected_sha256: &str,
     target: &str,
-    required_major: u16,
+    required_major: Option<u16>,
     required_capabilities: &[&str],
 ) -> Result<Build, ServerError> {
     if archive.len() as u64 > MAX_ARCHIVE || signature.len() > 64 {

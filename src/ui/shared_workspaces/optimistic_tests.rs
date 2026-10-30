@@ -263,6 +263,7 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
         source.submit(Mutation::CreateTab {
             workspace,
             source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         });
         server.finish(true, true);
         model.poll();
@@ -384,6 +385,7 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
     });
     server.finish(true, true);
     model.poll();
@@ -483,6 +485,7 @@ fn optimistic_rapid_identical_actions_keep_distinct_server_identities_and_result
     let mutation = Mutation::CreateTab {
         workspace,
         source: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
     };
     let first = source.submit_waiting(mutation.clone()).unwrap();
     let second = source.submit_waiting(mutation).unwrap();
@@ -539,6 +542,7 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
             tab: tab.id,
             source: tab.root_pane,
             axis: Axis::Right,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
         SharedSubmission::Submitted
     );
@@ -567,7 +571,8 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
     assert_eq!(
         source.submit(Mutation::CreateTab {
             workspace,
-            source: None
+            source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
         SharedSubmission::Submitted
     );
@@ -580,7 +585,8 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
             workspace,
             tab: provisional_tab,
             source: provisional_pane,
-            axis: Axis::Down
+            axis: Axis::Down,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
         SharedSubmission::Submitted
     );
@@ -616,7 +622,8 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
             workspace,
             tab: real.id,
             source: real.root_pane,
-            axis: Axis::Down
+            axis: Axis::Down,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }
     );
     assert_ne!(real.id, provisional_tab);
@@ -641,6 +648,7 @@ fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
     });
     let projected = source.presentation_inventory().unwrap();
     let tab = projected.workspaces[0].tabs.last().unwrap();
@@ -650,6 +658,7 @@ fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
             tab: tab.id,
             source: tab.root_pane,
             axis: Axis::Right,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         })
         .unwrap();
     source.submit(Mutation::RenameWorkspace {
@@ -681,6 +690,7 @@ fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
     source.submit(Mutation::CreateWorkspace {
         name: "Second".into(),
         directory: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
     });
     server.finish(true, true);
     model.poll();
@@ -756,7 +766,8 @@ fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
     assert_eq!(
         source.submit(Mutation::CreateTab {
             workspace,
-            source: None
+            source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
         SharedSubmission::Submitted,
         "reviewing the retained drafts releases admission capacity"
@@ -808,6 +819,7 @@ fn optimistic_lost_ack_binds_committed_membership_and_keeps_the_original() {
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
     });
     model.poll();
     let committed = server.finish(false, true);
@@ -828,6 +840,7 @@ fn optimistic_lost_ack_binds_committed_membership_and_keeps_the_original() {
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
     });
     assert_eq!(
         server.dispatched().len(),
@@ -857,7 +870,8 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
         assert_eq!(
             source.submit(Mutation::CreateTab {
                 workspace,
-                source: None
+                source: None,
+                control: spaceterm_server::hierarchy::CreateControl::Creator,
             }),
             SharedSubmission::Submitted
         );
@@ -865,7 +879,8 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
     assert_eq!(
         source.submit(Mutation::CreateTab {
             workspace,
-            source: None
+            source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
         SharedSubmission::Refused(SharedRefusalReason::Pending)
     );
@@ -874,7 +889,8 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
     assert_eq!(
         source.submit(Mutation::CreateTab {
             workspace,
-            source: None
+            source: None,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
         SharedSubmission::Refused(SharedRefusalReason::Offline)
     );
@@ -1072,6 +1088,7 @@ fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mu
         Mutation::CreateTab {
             workspace: harness.server.inventory().workspaces[0].id,
             source: Some(bound_source),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
         "binding may retire the view alias only after queued intent owns its canonical source"
     );

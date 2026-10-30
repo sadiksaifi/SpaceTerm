@@ -5,6 +5,7 @@ struct TerminalSessionProcess {
     planner: ShellLaunchPlanner,
     directory: std::path::PathBuf,
     prompt_owner: Option<crate::terminal::metadata::PromptOwner>,
+    session: Option<crate::platform::shell_launch::SessionEnvironment>,
     directory_guard: Option<(
         crate::domain::ValidatedLocalDirectory,
         LocalFilesystemAuthority,
@@ -18,7 +19,10 @@ impl TerminalSessionProcess {
                 crate::platform::shell_launch::ShellLaunchFailure::DirectoryUnavailable
             })?;
         }
-        let launch = self.planner.local(&self.directory)?;
+        let mut launch = self.planner.local(&self.directory)?;
+        if let Some(session) = &self.session {
+            launch = launch.with_session_environment(session);
+        }
         Ok(match self.prompt_owner {
             Some(owner) => launch.with_environment_value(
                 crate::terminal::metadata::PromptOwner::ENVIRONMENT,
@@ -34,6 +38,13 @@ struct TerminalSessionLaunch {
     fallback_title: String,
     process: TerminalSessionProcess,
     restricted: bool,
+}
+
+pub(super) struct StartedPty {
+    owner: NativePtyOwner,
+    terminal_name: &'static str,
+    restricted: bool,
+    integration_expected: bool,
 }
 
 impl TerminalSessionLaunch {
@@ -60,6 +71,7 @@ impl TerminalSessionLaunch {
                 planner,
                 directory: directory.to_owned(),
                 prompt_owner,
+                session: None,
                 directory_guard: None,
             },
         }
@@ -74,6 +86,7 @@ impl TerminalSessionLaunch {
 pub struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedLocalDirectory,
     restricted: bool,
+    session: Option<crate::platform::shell_launch::SessionEnvironment>,
 }
 
 impl LocalTerminalLaunchPlan {
@@ -81,11 +94,21 @@ impl LocalTerminalLaunchPlan {
         Self {
             working_directory,
             restricted: false,
+            session: None,
         }
     }
 
     pub fn without_client_effects(mut self) -> Self {
         self.restricted = true;
+        self
+    }
+
+    /// A server's Terminal Session, whose shell learns where it runs.
+    pub fn in_session(
+        mut self,
+        session: crate::platform::shell_launch::SessionEnvironment,
+    ) -> Self {
+        self.session = Some(session);
         self
     }
 
@@ -146,6 +169,7 @@ impl NativeTerminalSessionFactory {
             self.local_filesystem.clone(),
         ));
         launch.restricted = local.restricted;
+        launch.process.session = local.session;
         TerminalRuntime::start_launch(
             Arc::clone(&self.native_pty_adapter_factory),
             geometry,
@@ -222,9 +246,15 @@ impl TerminalRuntime {
                     close_handle.confirm_unstarted();
                 })?;
                 let terminal_name = prepared.terminal_name();
+                let integration_expected = prepared.integration_expected();
                 let owner =
                     NativePtyOwner::start(factory.as_ref(), prepared, size, output, close_handle)?;
-                Ok((owner, terminal_name, launch.restricted))
+                Ok(StartedPty {
+                    owner,
+                    terminal_name,
+                    restricted: launch.restricted,
+                    integration_expected,
+                })
             },
         )
     }
@@ -254,8 +284,12 @@ impl TerminalRuntime {
             LocalFilesystemAuthority::testing(),
             test_terminal_appearance_update(),
             move |size, output, close_handle| {
-                start_native_pty(size, output, close_handle)
-                    .map(|owner| (owner, identity::TERM_FALLBACK, false))
+                start_native_pty(size, output, close_handle).map(|owner| StartedPty {
+                    owner,
+                    terminal_name: identity::TERM_FALLBACK,
+                    restricted: false,
+                    integration_expected: false,
+                })
             },
         )
         .map(|(runtime, subscription)| (runtime, subscription.events, subscription.accessibility))
@@ -271,10 +305,8 @@ impl TerminalRuntime {
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
             &NativePtyCloseHandle,
-        ) -> Result<
-            (NativePtyOwner, &'static str, bool),
-            NativePtyStartupFailure,
-        > + Send
+        ) -> Result<StartedPty, NativePtyStartupFailure>
+        + Send
         + 'static,
     ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         let (command_tx, command_rx) = mpsc::channel();
@@ -302,7 +334,7 @@ impl TerminalRuntime {
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
                 let _completion = WorkerEventLifetime(worker_events.clone());
-                let (native_pty, terminal_name, restricted) = match start_native_pty(
+                let StartedPty { owner: native_pty, terminal_name, restricted, integration_expected } = match start_native_pty(
                     pty_size(geometry),
                     native_pty_output,
                     &worker_native_pty_close,
@@ -335,6 +367,7 @@ impl TerminalRuntime {
                         fallback_title,
                         terminal_name,
                         restricted,
+                        integration_expected,
                         local_filesystem,
                         initial_appearance,
                     },
@@ -388,6 +421,7 @@ mod directory_tests {
             planner: test_launch_planner(),
             directory: root.clone(),
             prompt_owner: None,
+            session: None,
             directory_guard: Some((directory, filesystem)),
         };
         std::fs::rename(&root, root.with_extension("old")).unwrap();

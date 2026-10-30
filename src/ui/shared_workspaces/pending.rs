@@ -451,9 +451,9 @@ fn close_references(target: CloseTarget) -> Vec<Id> {
 fn references(mutation: &Mutation) -> Vec<Id> {
     match mutation {
         Mutation::CreateWorkspace { .. } => vec![],
-        Mutation::CreateTab { workspace, source } => {
-            std::iter::once(*workspace).chain(*source).collect()
-        }
+        Mutation::CreateTab {
+            workspace, source, ..
+        } => std::iter::once(*workspace).chain(*source).collect(),
         Mutation::SplitPane {
             workspace,
             tab,
@@ -473,7 +473,9 @@ fn references(mutation: &Mutation) -> Vec<Id> {
 
 fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
     match mutation {
-        Mutation::CreateTab { workspace, source }
+        Mutation::CreateTab {
+            workspace, source, ..
+        }
         | Mutation::Worktree(Operation::OpenTab {
             workspace, source, ..
         }) => {
@@ -508,13 +510,17 @@ fn new_pane(id: Id, source: Option<Id>, axis: Axis, directory: std::path::PathBu
         current_directory: None,
         repository_directory: None,
         presentation: None,
+        observers: Default::default(),
         confirmed_directory: None,
         creator: None,
     }
 }
 
 fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Creation>) {
-    if let Mutation::CreateWorkspace { name, directory } = mutation {
+    if let Mutation::CreateWorkspace {
+        name, directory, ..
+    } = mutation
+    {
         if let Some(ids) = creation {
             let tab = ids.tab.expect("a Workspace projection has a Tab");
             inventory.workspaces.push(Workspace {

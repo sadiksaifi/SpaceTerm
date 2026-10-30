@@ -247,7 +247,6 @@ impl Service {
         runtime::verify_candidate_installation(
             &candidate.directory,
             &self.identity,
-            crate::protocol::MAJOR,
             &["workspace_policy"],
         )?;
         let previous = self.describe_approved(&state)?;
@@ -292,7 +291,6 @@ impl Service {
             runtime::verify_candidate_installation(
                 &approval.candidate.directory,
                 &self.identity,
-                crate::protocol::MAJOR,
                 &["workspace_policy"],
             )?;
             state.activation = Some(Operation {
@@ -562,6 +560,7 @@ impl Service {
                     data.write_json(c"service.json", &state)?;
                 }
                 Step::Approved => {
+                    self.repoint_cli_locked(&self.runtime(&state))?;
                     self.require_quiescent(&state)?;
                     self.verify_choice(&operation.candidate.installation(self))?;
                     if state.stopped {
@@ -602,7 +601,10 @@ impl Service {
                         .step = Step::Returned;
                     data.write_json(c"service.json", &state)?;
                 }
-                Step::Completed | Step::Returned => return Ok(()),
+                Step::Completed | Step::Returned => {
+                    self.repoint_cli_locked(&self.runtime(&state))?;
+                    return Ok(());
+                }
             }
         }
     }

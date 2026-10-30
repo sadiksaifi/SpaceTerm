@@ -7,6 +7,7 @@ pub(super) enum Prepared {
         source: Option<Id>,
         root: PathBuf,
         path: PathBuf,
+        control: CreateControl,
     },
     Write(Box<Write>),
 }
@@ -79,7 +80,7 @@ impl RemovalPlan {
                 .all(|t| self.review.tabs.iter().any(|a| a.tab == t.id))
             {
                 next.add_worktree_tab(
-                    device,
+                    Some(device),
                     workspace.id,
                     self.review.root.clone(),
                     self.fallback.clone(),
@@ -109,6 +110,7 @@ pub(super) fn prepare(
             source,
             root,
             path,
+            control,
         } => {
             let list = list(&git, &root, &token)?;
             if !list.worktrees.iter().any(|r| {
@@ -126,6 +128,7 @@ pub(super) fn prepare(
                 source,
                 root,
                 path,
+                control,
             })
         }
         Operation::Create {
@@ -133,6 +136,7 @@ pub(super) fn prepare(
             root,
             path,
             branch,
+            ..
         } => {
             if !inventory.workspaces.iter().any(|w| w.id == workspace) {
                 return Err(Error::Missing);

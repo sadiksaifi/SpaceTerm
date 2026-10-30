@@ -29,6 +29,16 @@ pub enum Effect {
         exit_status: Option<i32>,
         duration_ms: u64,
     },
+    /// Shows a Pane created for the origin Pane's Controlling Client. Boxed to keep effects
+    /// small; postcard encodes it as the bare struct.
+    Reveal(Box<Reveal>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reveal {
+    pub workspace: crate::hierarchy::Id,
+    pub tab: crate::hierarchy::Id,
+    pub pane: crate::hierarchy::Id,
 }
 
 impl std::fmt::Debug for Effect {
@@ -39,6 +49,7 @@ impl std::fmt::Debug for Effect {
             Self::PermissionSetup { .. } => "PermissionSetup { .. }",
             Self::Bell => "Bell",
             Self::CommandFinished { .. } => "CommandFinished { .. }",
+            Self::Reveal(_) => "Reveal { .. }",
         })
     }
 }

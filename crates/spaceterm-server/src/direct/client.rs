@@ -55,14 +55,6 @@ pub(super) fn valid_build(build: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
-fn exchange(
-    endpoint: &str,
-    pin: &ServerPin,
-    credential: &DeviceCredential,
-    action: wire::Action,
-) -> Result<(QuicStream, wire::Answer), DirectError> {
-    exchange_checked(endpoint, pin, credential, action, None, None)
-}
 fn exchange_checked(
     endpoint: &str,
     pin: &ServerPin,
@@ -70,10 +62,16 @@ fn exchange_checked(
     action: wire::Action,
     expected_name: Option<&str>,
     exchanges: Option<&mut Vec<[u8; 32]>>,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(QuicStream, wire::Answer), DirectError> {
-    let mut stream = quic::dial(endpoint, pin, credential)?;
+    let deadline = Some(
+        deadline
+            .unwrap_or_else(|| std::time::Instant::now() + quic::HANDSHAKE_LIMIT)
+            .min(std::time::Instant::now() + quic::HANDSHAKE_LIMIT),
+    );
+    let mut stream = quic::dial_until(endpoint, pin, credential, deadline)?;
     let answer = exchange_on(
-        &mut stream,
+        &mut quic::DeadlineMessages::new(&mut stream, deadline),
         pin,
         credential,
         action,
@@ -100,7 +98,8 @@ pub(super) fn exchange_on(
     if challenge.pin != *pin {
         return Err(DirectError::WrongServer);
     }
-    if challenge.major != crate::protocol::MAJOR {
+    // Major 4 froze authentication for the service lane. Work admission checks its own major.
+    if challenge.major < 4 {
         return Err(DirectError::IncompatibleProtocol);
     }
     if ClientName::from(challenge.server_name.as_str()).as_str() != challenge.server_name {
@@ -144,14 +143,18 @@ pub(super) fn connect(
     endpoint: &str,
     paired: &PairedDevice,
     credential: &DeviceCredential,
+    deadline: Option<std::time::Instant>,
 ) -> Result<DirectConnection, DirectError> {
-    let (stream, answer) = exchange(
+    let (stream, answer) = exchange_checked(
         endpoint,
         &paired.pin,
         credential,
         wire::Action::Connect {
             paired: paired.clone(),
         },
+        None,
+        None,
+        deadline,
     )?;
     if !matches!(answer, wire::Answer::Connected) {
         return Err(DirectError::AuthenticationRefused);
@@ -180,6 +183,7 @@ pub(super) fn prepare(
         prepared: Some((invitation.payload.clone(), name)),
         admitted: None,
         exchanges: Vec::new(),
+        deadline: None,
     })
 }
 pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, DirectError> {
@@ -199,6 +203,7 @@ pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, Dire
         },
         Some(&invitation.server_name),
         Some(&mut enrollment.exchanges),
+        enrollment.deadline,
     )?;
     match answer {
         wire::Answer::Claim(claim)
@@ -228,7 +233,7 @@ pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, Dire
     }
 }
 pub(super) fn finish(enrollment: &Enrollment) -> Result<Option<PairedDevice>, DirectError> {
-    let (_, answer) = exchange(
+    let (_, answer) = exchange_checked(
         &enrollment.endpoint,
         &enrollment.pin,
         &enrollment.credential,
@@ -236,6 +241,9 @@ pub(super) fn finish(enrollment: &Enrollment) -> Result<Option<PairedDevice>, Di
             claim: enrollment.claim,
             key: crypto::public(enrollment.credential.expose_bytes())?,
         },
+        None,
+        None,
+        enrollment.deadline,
     )?;
     match answer {
         wire::Answer::Enrollment(paired) => Ok(paired),
@@ -248,8 +256,9 @@ pub(super) fn revoke(
     credential: &DeviceCredential,
     operation: OperationId,
     target: PairingId,
+    deadline: Option<std::time::Instant>,
 ) -> Result<RevocationReceipt, DirectError> {
-    let (_, answer) = exchange(
+    let (_, answer) = exchange_checked(
         endpoint,
         &actor.pin,
         credential,
@@ -258,6 +267,9 @@ pub(super) fn revoke(
             operation,
             target,
         },
+        None,
+        None,
+        deadline,
     )?;
     match answer {
         wire::Answer::Revoked(receipt)
@@ -271,7 +283,7 @@ pub(super) fn revoke(
     }
 }
 pub(super) fn cancel(enrollment: &Enrollment) -> Result<Option<RevocationReceipt>, DirectError> {
-    let (_, answer) = exchange(
+    let (_, answer) = exchange_checked(
         &enrollment.endpoint,
         &enrollment.pin,
         &enrollment.credential,
@@ -279,6 +291,9 @@ pub(super) fn cancel(enrollment: &Enrollment) -> Result<Option<RevocationReceipt
             claim: enrollment.claim,
             key: crypto::public(enrollment.credential.expose_bytes())?,
         },
+        None,
+        None,
+        enrollment.deadline,
     )?;
     match answer {
         wire::Answer::Cancelled(receipt) => Ok(receipt),
@@ -296,9 +311,9 @@ impl DirectConnection {
         not(any(feature = "client", test)),
         allow(dead_code, reason = "the desktop admits and carries the connection")
     )]
-    pub(crate) fn admit(
+    pub(crate) fn admit<'a>(
         self,
-        client: (&[u8; 32], &ClientName),
+        client: impl Into<crate::protocol::Caller<'a>>,
     ) -> Result<Box<dyn crate::connection::carrier::Carrier>, ServerError> {
         let mut stream = *self.stream;
         crate::protocol::admit_transport(
@@ -309,5 +324,24 @@ impl DirectConnection {
             &[crate::protocol::MAJOR],
         )?;
         Ok(Box::new(stream.into_carrier()))
+    }
+    /// Admits this client to the service lane on the authenticated connection, whatever the
+    /// server's work major, and returns the stream the lane's JSON frames travel on.
+    #[cfg_attr(
+        not(any(feature = "client", test)),
+        allow(dead_code, reason = "the CLI administers paired servers over the lane")
+    )]
+    pub(crate) fn admit_service_lane(
+        self,
+        caller: crate::protocol::Caller<'_>,
+    ) -> Result<Box<crate::connection::quic::QuicStream>, ServerError> {
+        let mut stream = self.stream;
+        crate::protocol::admit_service_lane(
+            stream.as_mut(),
+            caller,
+            &self.paired.pin.server,
+            &self.paired.pin.build,
+        )?;
+        Ok(stream)
     }
 }

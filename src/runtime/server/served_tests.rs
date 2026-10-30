@@ -86,6 +86,7 @@ impl HostCommands for Host {
                 effects: Vec::new(),
                 line: pane::LineState::default(),
                 accessibility: None,
+                progress: Default::default(),
             })
         } else {
             Observed::Gone {
@@ -124,7 +125,7 @@ fn claim(served: &mut Served<Host>, channel: u32, pane: u8) -> Lease {
         },
         pane: [pane; 32],
         claim: AttachmentClaim::Select { explicit: true },
-        size: super::tests::size(),
+        size: Some(super::tests::size()),
         style: None,
     });
     match served.request(&PEER, RequestId(channel), operation) {

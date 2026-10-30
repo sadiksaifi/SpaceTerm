@@ -3,6 +3,8 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
+mod run;
+pub(crate) use run::{Progress, RunAdmission, RunReply};
 mod scrollback;
 pub(crate) use scrollback::ScrollbackReply;
 mod publication;
@@ -1192,6 +1194,8 @@ struct ReaderEventBatch {
 
 enum Command {
     ReadScrollback(scrollback::ScrollbackRead),
+    /// Writes one command at the owning shell's empty prompt, or refuses it.
+    Run(String, RunReply),
     ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
     RouteClientEffects,
@@ -1300,6 +1304,7 @@ impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::ReadScrollback(..) => "ReadScrollback",
+            Self::Run(..) => "Run",
             Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
             Self::RouteClientEffects => "RouteClientEffects",
@@ -1372,6 +1377,7 @@ struct TerminalWorker {
     osc52_filter: Osc52Filter<Option<u64>>,
     permission_requests: PermissionRequestFilter,
     clipboard: WorkerClipboard,
+    progress: run::ProgressCounter,
 }
 
 enum TerminalFocusTarget {
@@ -1387,6 +1393,7 @@ struct TerminalWorkerContext {
     fallback_title: String,
     terminal_name: &'static str,
     restricted: bool,
+    integration_expected: bool,
     initial_appearance: TerminalAppearanceUpdate,
 }
 
@@ -1497,6 +1504,7 @@ impl TerminalWorker {
             fallback_title,
             terminal_name,
             restricted,
+            integration_expected,
             local_filesystem,
             initial_appearance,
         } = context;
@@ -1545,6 +1553,7 @@ impl TerminalWorker {
             );
             return;
         }
+        emulator.expect_integration(integration_expected);
         let graphics_commands = output.commands.clone();
         emulator.set_graphics_budget_wakeup(move || {
             let _ = graphics_commands.send(Command::GraphicsBudgetAvailable);
@@ -1569,6 +1578,7 @@ impl TerminalWorker {
             osc52_filter: Osc52Filter::default(),
             permission_requests: PermissionRequestFilter::default(),
             clipboard,
+            progress: run::ProgressCounter::default(),
         };
 
         worker.run_commands();
@@ -1598,6 +1608,7 @@ impl TerminalWorker {
             if !self.process_command(command) {
                 break;
             }
+            self.publish_progress();
             if !compression_step {
                 self.observe_compression_activity(Instant::now(), postpone_compression);
             }
@@ -1773,6 +1784,7 @@ impl TerminalWorker {
     fn process_command(&mut self, command: Command) -> bool {
         match command {
             Command::ReadScrollback(read) => self.read_scrollback(read),
+            Command::Run(command, reply) => self.process_run(&command, reply),
             Command::ServerAccessibilitySelection(selection, reply) => {
                 match self.emulator.set_accessibility_selection_refs(selection) {
                     Ok(changed) => {
@@ -2467,6 +2479,10 @@ impl TerminalWorker {
         requested: &mut Option<(PermissionRequest, Option<u64>)>,
         focus_reports: &mut Vec<u8>,
     ) -> bool {
+        self.progress.output_bytes = self
+            .progress
+            .output_bytes
+            .saturating_add(bytes.len() as u64);
         let emulator = &mut self.emulator;
         self.permission_requests.feed_with_context(
             bytes,
@@ -2489,6 +2505,7 @@ impl TerminalWorker {
             ));
             return false;
         }
+        self.deliver_run_observations();
         for event in self.emulator.take_attention_events() {
             let effect = match event {
                 AttentionEvent::Bell => spaceterm_server::pane::effects::Effect::Bell,
@@ -2631,12 +2648,14 @@ impl TerminalWorker {
     }
 
     fn apply_emulator_action(&mut self, action: EmulatorAction) -> bool {
+        self.emulator.note_input(action.bytes.len());
         self.write_pending_pty_responses()
             && (action.bytes.is_empty() || self.write_pty(&action.bytes))
             && (!action.screen_changed || self.publish_visible_screen_change())
     }
 
     fn apply_terminal_input_action(&mut self, action: EmulatorAction) -> bool {
+        self.emulator.note_input(action.bytes.len());
         if !self.write_pending_pty_responses() {
             return false;
         }

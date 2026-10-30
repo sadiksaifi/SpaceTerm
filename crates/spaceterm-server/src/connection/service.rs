@@ -73,6 +73,15 @@ pub trait PaneService: Send {
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox);
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
+    /// Releases only the live and dormant control grants of an agent identity whose name its
+    /// pairing evicted. Only an identity for which [`Self::holds`] is false is evicted.
+    fn release_control(&mut self, _client: [u8; 32]) {}
+    /// Whether this identity keeps an edit outcome or a run receipt that it has not
+    /// acknowledged. A pairing never evicts the agent name of such an identity, because its
+    /// revocation reaches only the names it still lists.
+    fn holds(&self, _client: [u8; 32]) -> bool {
+        false
+    }
     /// Every operation except `Operation::Direct`, which goes to [`DirectManagement`], and
     /// account administration from paired peers, which the connection refuses.
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch;
@@ -105,6 +114,11 @@ pub trait PaneService: Send {
     }
     fn disconnected(&mut self, peer: &Peer);
     fn shutdown(&mut self) -> Result<(), ServerError>;
+    /// The live Terminal Sessions, which a Stop, Restart or Update ends. Reading them changes
+    /// nothing.
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
 }
 
 /// The host's direct-network administration, answering `Operation::Direct`. It runs on the sync
