@@ -69,8 +69,8 @@ pub(crate) mod repository_watch;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod unix_desktop_channel;
 
-/// The watch sets a server's Git facts reader uses: kqueue on macOS, which needs no Apple
-/// framework, and inotify through `notify` on Linux.
+/// The watch sets a server's Git facts reader uses: kqueue on macOS, which needs no FSEvents, and
+/// inotify through `notify` on Linux.
 pub(crate) fn server_watch_sets() -> std::sync::Arc<dyn crate::repository_status::WatchSets> {
     #[cfg(target_os = "macos")]
     return std::sync::Arc::new(kqueue_watch::KqueueWatchSets);

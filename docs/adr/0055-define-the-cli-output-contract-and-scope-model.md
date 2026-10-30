@@ -12,7 +12,7 @@ Targeting selects one server first: `--server`, then `SPACETERM_SERVER`, then `l
 
 `show` uses this resolver and asks the desktop on this machine to present its target; `open` uses only the Session context. [ADR 0060](0060-open-files-and-show-work-in-the-desktop-over-the-desktop-channel.md) owns both.
 
-Destructive commands require an explicit ID, exact handle or validated current context at the acted-on level. A singleton or substring cannot choose that target. Confirmation binds the exact action and its affected work; changed observations require a new preview. Local connection-store commands reject a remote server selector before effects.
+Destructive commands require an explicit ID, exact handle or validated current context at the acted-on level. A singleton or substring cannot choose that target. Confirmation binds the exact action and its affected work; changed observations require a new preview. Local connection-store commands reject a remote server selector before effects. So do `server permissions` and its `request` and `settings` subcommands, which report `local_only` under [ADR 0061](0061-own-system-permissions-in-the-server-package.md).
 
 ## Paths and creation
 

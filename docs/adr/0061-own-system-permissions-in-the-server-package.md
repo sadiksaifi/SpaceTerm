@@ -1,0 +1,34 @@
+# Own System Permissions in the server package
+
+macOS attributes a program's privacy checks to its responsible process. launchd makes a LaunchAgent its own responsible process, and the shells and programs it starts inherit that responsibility. Programs in a Terminal Session therefore receive the grants of their SpaceTerm Server, not of a desktop that presents them. The server holds microphone, Screen Recording and Accessibility, which System Settings calls Device Control from macOS 27. Apple DTS describes the attribution in [forum thread 756510](https://developer.apple.com/forums/thread/756510): a launchd job "should include `AssociatedBundleIdentifiers`" to name another app, and "the exact algorithm it uses for this is not documented". Disclaiming responsibility for a child is private API, so SpaceTerm does not use it.
+
+## Package
+
+TCC tracks a bare executable by its path. Each server version lives at its own `installations/<digest>` path under [ADR 0040](0040-keep-one-server-runtime-version-active.md), so a bare executable would lose its grants on every update. TCC tracks a bundle by its identifier and checks the designated requirement recorded at grant time. The macOS server package is therefore an app-like bundle, as Apple recommends for daemons in [Signing a daemon with a restricted entitlement](https://developer.apple.com/documentation/xcode/signing-a-daemon-with-a-restricted-entitlement). Each identity has its own bundle: `SpaceTerm Server.app`, `SpaceTerm Preflight Server.app` or `SpaceTerm Development Server.app`. Each holds `Contents/MacOS/spaceterm` and `Contents/Resources`. Its bundle identifier is `io.github.sadiksaifi.<identity>.server`, the code signing identifier the server package already used. [The tracked Info.plist](../../packaging/macos/server/Info.plist) carries the usage strings TCC requires before it prompts, and `LSUIElement`. Linux keeps `bin/spaceterm` beside `share/spaceterm`. [The layout module](../../crates/spaceterm-server/src/service/runtime/layout.rs) and [the packaging script](../../mise-tasks/lib/spaceterm_tasks/server_package.py) own both layouts.
+
+[TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements) states that "macOS checks that this version of the app satisfies the original DR". Release server bundles are signed with the pinned certificate of [ADR 0009](0009-distribute-tagged-releases-with-signed-updates.md). Their requirement, `identifier "io.github.sadiksaifi.spaceterm.server" and certificate leaf = H"<pinned SHA-1>"`, is the same in every version, so a grant should survive an update. ADR 0009 requires that retention to be verified. Preflight and Development server packages are signed ad hoc, so their requirement names one build's code directory hash, and each new build loses the grant. Permission Setup then removes the stale entry. The foreground Development server runs as a child of `mise run dev`, so it inherits the grants of the terminal application that started that command.
+
+[Signing] Developer ID signing, the hardened runtime and notarization are tracked in #733 and #687. With the hardened runtime, the server bundle also needs the `com.apple.security.device.audio-input` and `com.apple.security.device.camera` entitlements. Nothing here depends on them.
+
+## Operations
+
+[The server's System Permissions](../../crates/spaceterm-server/src/permissions.rs) are the only code that reads or changes these grants.
+
+- **Reads.** A read runs in a probe child, `spaceterm server provision permission-report`. The child inherits the server's responsibility, and a fresh process holds no cached Screen Recording answer.
+- **Requests.** A request runs in the server itself. For the microphone it calls `AVCaptureDevice requestAccessForMediaType:`. For Screen Recording it calls `CGRequestScreenCaptureAccess`. For Accessibility it calls `AXIsProcessTrustedWithOptions` with the prompt option. Each request lists the server in System Settings and may show the system's own prompt. An Aqua LaunchAgent belongs to the GUI login session, so its prompts appear there. [TN2083](https://developer.apple.com/library/archive/technotes/tn2083/_index.html) describes Aqua agents as having "access to all GUI services".
+- **Opening System Settings.** The server links no AppKit. It opens the privacy list through Launch Services with `/usr/bin/open`, and TN2083 calls Launch Services daemon-safe.
+- **Resets.** A reset runs `/usr/bin/tccutil reset <service> <bundle identifier>`. It runs only while launchd runs the server from its own bundle, so it never reaches another application's grant.
+
+The desktop's Setup Guide no longer offers an application to drag into a list. A Permission Setup asks the server to clear its stale entry and request the permission again, opens System Settings at that list, and names the entry to turn on.
+
+## Only on the server's own machine
+
+These grants are set up only on the server's machine, through that machine's desktop Settings or its `spaceterm` CLI.
+
+- **Service lane.** The lane carries `permissions`, `request_permission`, `open_permission_settings`, `prepare_permission_setup` and `reset_permission`. [The lane](../../crates/spaceterm-server/src/service/lane.rs) answers them only for an account-local caller. It refuses a paired caller with `local_only` before the system is asked anything.
+- **CLI.** `spaceterm server permissions` shows each permission's state and who holds it. `request PERMISSION` asks for one permission, and `settings PERMISSION` opens its list. [Route validation](../../crates/spaceterm-cli/src/connection/route.rs) refuses a remote `--server` with `local_only` before any credential or transport is opened.
+- **Desktop.** Settings > Privacy presents the account-local server's grants through [the desktop adapter](../../src/platform/server_permission_access.rs), and a paired server's card offers none.
+
+As [ADR 0027](0027-trust-paired-clients-equally.md) says of every machine-only action, this is not a security boundary. It keeps setup where System Settings and the prompts appear.
+
+Linux has no TCC. Its server answers these requests with `unsupported`, and its desktop composes no permission rows.
