@@ -1,10 +1,11 @@
-//! The service-operation ledger: one record per Stop, Restart, Update or Return that the service
-//! lane admitted, from admission through its outcome. It lives in `service-operations.json`
-//! beside the server identity, under `service-operations.lock`, so an outcome survives the server
-//! that admitted it and the helper that performed it.
+//! The service-operation ledger: one record per Stop, Restart, Update, Return or Network Access
+//! change that the service lane admitted, from admission through its outcome. It lives in
+//! `service-operations.json` beside the server identity, under `service-operations.lock`, so an
+//! outcome survives the server that admitted it and the helper that performed it.
 //!
 //! Every change is a compare-and-set under that lock. The server admits and launches a record,
-//! the helper alone moves it to `Running`, and whichever side last holds evidence settles it. A
+//! the helper alone moves it to `Running`, and whichever side last holds evidence settles it. The
+//! lane claims and settles a Network Access change itself, because no helper performs one. A
 //! record that reached a terminal state never changes again.
 use crate::ServerError;
 use crate::storage::Directory;
@@ -71,6 +72,8 @@ pub enum Action {
     Restart,
     Update,
     Return,
+    /// The lane applies it in-process. No helper claims it.
+    Network(super::lane::network::NetworkAccess),
 }
 
 /// Who asked for an operation. Only the same actor acknowledges its record, and revoking a
@@ -225,8 +228,9 @@ impl Ledger {
         })
     }
 
-    /// The helper's claim: `Admitted` or `Launched` becomes `Running`. `None` means the record
-    /// was settled without it, so the helper must do nothing.
+    /// The helper's claim, or the lane's for a Network Access change: `Admitted` or `Launched`
+    /// becomes `Running`. `None` means the record was settled without it, so the claimant must
+    /// do nothing.
     pub(crate) fn claim(&mut self, operation: &OperationId) -> Result<Option<Record>, ServerError> {
         self.change(|records| {
             let record = records
@@ -344,6 +348,10 @@ impl Ledger {
                         },
                         Action::Restart if earlier => State::Done,
                         Action::Restart | Action::Stop => State::Unresolved,
+                        // The server that applied it ended before it recorded the outcome.
+                        Action::Network(_) if earlier => State::Unresolved,
+                        // The lane is applying it now.
+                        Action::Network(_) => continue,
                     },
                     _ => continue,
                 };
@@ -598,6 +606,36 @@ mod tests {
         ledger.claim(&OperationId([5; 16])).unwrap();
         ledger.recover_at_start(&[5; 32], &IDLE).unwrap();
         assert_eq!(state(&ledger, 5), State::Unresolved);
+    }
+
+    #[test]
+    fn a_network_access_change_settles_only_once_its_server_ended() {
+        let fixture = Fixture::new();
+        let mut ledger = fixture.ledger();
+        let network = Action::Network(super::super::lane::network::NetworkAccess::All);
+        let id = OperationId([1; 16]);
+        ledger.admit(record(1, network, 1)).unwrap();
+        ledger.claim(&id).unwrap();
+        // The server that claimed it is applying it now.
+        ledger.settle(&[1; 32], &IDLE, None).unwrap();
+        assert_eq!(ledger.resolve(&id).unwrap().unwrap().state, State::Running);
+        // That server ended before it recorded the outcome.
+        ledger.recover_at_start(&[2; 32], &IDLE).unwrap();
+        assert_eq!(
+            ledger.resolve(&id).unwrap().unwrap().state,
+            State::Unresolved
+        );
+        // One that never started the change was not performed.
+        ledger.admit(record(2, network, 2)).unwrap();
+        ledger.recover_at_start(&[3; 32], &IDLE).unwrap();
+        assert_eq!(
+            ledger
+                .resolve(&OperationId([2; 16]))
+                .unwrap()
+                .unwrap()
+                .state,
+            State::NotPerformed(NotPerformed::ServerRestarted)
+        );
     }
 
     #[test]

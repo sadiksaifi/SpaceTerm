@@ -1,0 +1,26 @@
+{
+  "command": "server.network",
+  "data": {
+    "network": {
+      "bind": "192.0.2.4:9231",
+      "enabled": true
+    },
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "action": "network",
+      "boot": "1111111111111111111111111111111111111111111111111111111111111111",
+      "code": null,
+      "operation": "0123456789abcdef0123456789abcdef",
+      "state": "done"
+    }
+  },
+  "error": null,
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "status": "ok",
+  "warnings": []
+}

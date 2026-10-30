@@ -1,10 +1,12 @@
 //! The administration steps every SpaceTerm Client shares over a server's service lane: settle
 //! the operations this identity left pending, read Status and the update check, preview Stop,
-//! Restart, Update or Return, and execute a confirmed preview until it settles.
+//! Restart, Update, Return or a Network Access change, and execute a confirmed preview until it
+//! settles.
 //!
 //! The CLI and the desktop present each result their own way. Both take the same steps here, so
 //! a confirmation, a dispatched operation and its settlement mean the same on either.
 use super::client::{Lane, LaneError, Leftover, Outcome, Session, settle_leftover};
+use super::network::{LaneNetworkEffects, NetworkAccess};
 use super::{
     LaneAction, LaneCheck, LaneEffects, LaneOperationState, LaneReceipt, LaneReply, LaneRequest,
     LaneStatus, LaneUpdateKind, LaneVersion,
@@ -23,12 +25,18 @@ pub const STOP_WAIT: Duration = Duration::from_secs(90);
 /// How long any other action is followed: until it settles, or until a server that replaces
 /// itself, as Restart, Update and Return do, returns.
 pub const RETURN_WAIT: Duration = Duration::from_secs(180);
+/// How long a Network Access change is followed. It covers the server's own
+/// [`super::network::LISTEN_LIMIT`] for the new listener, and a reconnect after it. One the new
+/// listener no longer serves never reconnects, so waiting as long as for a server that replaces
+/// itself only delays an unconfirmed outcome.
+pub const NETWORK_WAIT: Duration = Duration::from_secs(30);
 
 /// How long an action is followed after its `Execute`. Only Stop ends the lane it is followed
 /// over, so every other action, including one added later, is followed until it settles.
 pub fn wait(action: &LaneAction) -> Duration {
     match action {
         LaneAction::Stop => STOP_WAIT,
+        LaneAction::Network { .. } => NETWORK_WAIT,
         _ => RETURN_WAIT,
     }
 }
@@ -162,6 +170,41 @@ fn previewed(action: LaneAction, reply: LaneReply) -> Result<Preview, LaneError>
             effects,
         } => Ok(Preview {
             action,
+            token,
+            expires_at,
+            effects,
+        }),
+        _ => Err(LaneError::Server(ServerError::Protocol)),
+    }
+}
+
+/// A server's preview of a Network Access change, which carries its own effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkPreview {
+    pub access: NetworkAccess,
+    pub token: String,
+    pub expires_at: String,
+    pub effects: LaneNetworkEffects,
+}
+
+/// Asks the server to preview a change of its Network Access to `access`.
+pub fn preview_network(
+    session: &mut Session,
+    access: NetworkAccess,
+) -> Result<NetworkPreview, LaneError> {
+    let reply = session.call(
+        &LaneRequest::Preview {
+            action: LaneAction::Network { access },
+        },
+        Instant::now() + REQUEST_LIMIT,
+    )?;
+    match reply {
+        LaneReply::NetworkPreview {
+            token,
+            expires_at,
+            effects,
+        } => Ok(NetworkPreview {
+            access,
             token,
             expires_at,
             effects,
@@ -417,10 +460,19 @@ mod tests {
         );
     }
 
-    /// A new action needs no change here: only Stop is followed for the shorter wait.
+    /// A new action needs no change here: only Stop and Network Access changes are followed
+    /// for a shorter wait.
     #[test]
-    fn only_stop_is_followed_for_the_shorter_wait() {
+    fn only_stop_and_network_access_are_followed_for_a_shorter_wait() {
         assert_eq!(wait(&LaneAction::Stop), STOP_WAIT);
+        assert_eq!(
+            wait(&LaneAction::Network {
+                access: NetworkAccess::All
+            }),
+            NETWORK_WAIT
+        );
+        // A change settles within the server's listener limit, and the caller then reconnects.
+        assert!(NETWORK_WAIT >= super::super::network::LISTEN_LIMIT + Duration::from_secs(10));
         for action in [
             LaneAction::Restart,
             LaneAction::Return,

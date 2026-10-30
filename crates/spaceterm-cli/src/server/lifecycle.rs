@@ -156,8 +156,15 @@ fn preview(
         );
     }
     let text = format!(
-        "{summary}Confirm with: spaceterm {} --confirm {token}\n",
-        command.replace('.', " ")
+        "{summary}Confirm with: {}\n",
+        context.command_line(
+            &routed.server,
+            &[
+                command.split('.').collect::<Vec<_>>(),
+                vec!["--confirm", &token]
+            ]
+            .concat()
+        )
     );
     Reply::new(
         &preview_envelope(
@@ -404,7 +411,9 @@ pub fn settle(action: ServiceAction, outcome: Outcome) -> Settled {
 fn unconfirmed(receipt: &LaneReceipt) -> Failure {
     match receipt.action {
         LaneAction::Update { .. } | LaneAction::Return => Failure::new(Code::ActivationUnresolved),
-        LaneAction::Stop | LaneAction::Restart => Failure::new(Code::OutcomeUnconfirmed),
+        LaneAction::Stop | LaneAction::Restart | LaneAction::Network { .. } => {
+            Failure::new(Code::OutcomeUnconfirmed)
+        }
     }
 }
 
@@ -416,6 +425,7 @@ pub fn receipt_of(receipt: &LaneReceipt) -> Receipt {
             LaneAction::Restart => ServiceAction::Restart,
             LaneAction::Update { .. } => ServiceAction::Update,
             LaneAction::Return => ServiceAction::Return,
+            LaneAction::Network { .. } => ServiceAction::Network,
         },
         state: match receipt.state {
             LaneOperationState::Admitted => ReceiptState::Admitted,

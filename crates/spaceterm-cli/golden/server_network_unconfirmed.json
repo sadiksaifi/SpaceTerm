@@ -1,0 +1,29 @@
+{
+  "command": "server.network",
+  "data": {
+    "network": null,
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "action": "network",
+      "boot": "1111111111111111111111111111111111111111111111111111111111111111",
+      "code": null,
+      "operation": "0123456789abcdef0123456789abcdef",
+      "state": "launched"
+    }
+  },
+  "error": {
+    "class": "unconfirmed",
+    "code": "outcome_unconfirmed",
+    "details": {},
+    "message": "SpaceTerm couldn’t confirm the outcome.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "status": "error",
+  "warnings": []
+}

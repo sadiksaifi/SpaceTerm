@@ -122,6 +122,14 @@ pub enum ServerCommand {
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
     },
+    /// Change the server's Network Access, on its own machine or from a Paired Device.
+    Network {
+        /// `all`, `off`, an IP, or an address with a port.
+        #[arg(value_name = "all|IP|IP:PORT|[IPV6]:PORT|off", value_parser = network)]
+        access: Network,
+        #[arg(long, value_name = "TOKEN")]
+        confirm: Option<String>,
+    },
     /// End every Terminal Session on this machine, retaining the server and organization.
     EndAllSessions(Confirm),
     /// Revoke another Paired Device.
@@ -512,6 +520,7 @@ impl Command {
                 ServerCommand::Stop(_) => "server.stop",
                 ServerCommand::Restart(_) => "server.restart",
                 ServerCommand::Update { .. } => "server.update",
+                ServerCommand::Network { .. } => "server.network",
                 ServerCommand::EndAllSessions(_) => "server.end-all-sessions",
                 ServerCommand::Unpair { .. } => "server.unpair",
                 ServerCommand::Run { .. } => "server.run",

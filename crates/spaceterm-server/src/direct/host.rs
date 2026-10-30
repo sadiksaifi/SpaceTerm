@@ -14,6 +14,18 @@ enum Bind {
 /// How often a `Starting` listener tries its address again while it waits.
 const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 pub(crate) type Shared = Arc<Mutex<State>>;
+/// The listener a policy change moves to, readied before the change commits.
+enum Prepared {
+    /// The current listener, widened if needed. Its connections and generation stay.
+    Keep,
+    /// A listener already bound at the new address.
+    Fresh(QuicListener),
+    /// The current listener on every interface holds the narrower new address, which binds
+    /// once that listener retires.
+    Deferred,
+    /// Exposure turns off.
+    Off,
+}
 /// What a revocation also forgets outside this store.
 pub(crate) type Revoked = Box<dyn Fn(&PairingId) + Send>;
 
@@ -126,7 +138,9 @@ impl State {
     }
     /// Listens at `address`: takes back a retired listener there, or binds a new one. A bind
     /// that a retired listener's live connections still block waits as `Starting` until they
-    /// end; [`Self::retry_listen`] then binds again.
+    /// end, within [`crate::connection::quic::RETIRE_LIMIT`]; [`Self::retry_listen`] then binds
+    /// again. Only a bind refused after every retired listener finished counts against
+    /// `STALL_AFTER`, so retirement never uses up the time the bind itself has.
     fn open_at(&mut self, address: std::net::SocketAddr) -> ListenerState {
         let revived = self
             .retired
@@ -144,6 +158,7 @@ impl State {
                 ListenerState::Listening { addr: address }
             }
             Err(Bind::InUse) if !self.retired.is_empty() => {
+                self.starting_since = None;
                 ListenerState::Starting { addr: address }
             }
             // A connection that just ended may still hold the socket for a moment.
@@ -159,25 +174,16 @@ impl State {
             Err(_) => ListenerState::Failed(DirectError::Transport),
         }
     }
-    /// Binds again while `Starting`, once retired listeners finished. Returns when to try
-    /// again, if still waiting.
+    /// Binds again while `Starting`. Every turn tries the bind, so an address a retired
+    /// listener just released binds at once; [`Self::open_at`] decides when waiting has failed.
+    /// Returns when to try again, if still waiting.
     pub(crate) fn retry_listen(&mut self) -> Option<std::time::Instant> {
         let ListenerState::Starting { addr } = self.listener_state else {
             self.starting_since = None;
             return None;
         };
-        if self
-            .starting_since
-            .is_some_and(|since| since.elapsed() >= crate::protocol::limits::STALL_AFTER)
-            && self.retired.iter().all(QuicListener::finished)
-        {
-            self.listener_state = ListenerState::Failed(DirectError::Transport);
-            return None;
-        }
         self.listener_state = self.open_at(addr);
         if matches!(self.listener_state, ListenerState::Starting { .. }) {
-            self.starting_since
-                .get_or_insert_with(std::time::Instant::now);
             Some(std::time::Instant::now() + LISTEN_RETRY)
         } else {
             self.starting_since = None;
@@ -185,42 +191,93 @@ impl State {
             None
         }
     }
-    /// Keeps the listener, its connections and its generation when the saved exposure covers the
-    /// address it listens at, as when exposure widens from one address to every interface at the
-    /// same port. Nothing that was reachable becomes unreachable, so nothing is retired. Returns
-    /// false when the listener must start over instead.
-    fn widen(&mut self) -> bool {
-        let ListenerState::Listening { addr } = self.listener_state else {
-            return false;
+    /// Readies the listener `next` needs before anything is committed or retired, so a change
+    /// whose address can't be bound leaves the current listener and its connections as they are.
+    /// A listener whose saved exposure covers the address it listens at stays, widened in place
+    /// when exposure widens from one address to every interface at the same port. Otherwise a new
+    /// listener binds now. Only this server's own listener on every interface can hold an
+    /// address it covers, so a narrowing that it blocks defers the bind until it retires.
+    fn prepare_listener(&mut self, next: &storage::Record) -> Result<Prepared, DirectError> {
+        let Some(policy) = next.policy.clone().filter(|_| next.enabled) else {
+            return Ok(Prepared::Off);
         };
-        let Some(policy) = self.record.policy.clone().filter(|_| self.record.enabled) else {
-            return false;
-        };
-        if !policy.covers(addr) {
-            return false;
+        if let ListenerState::Listening { addr } = self.listener_state
+            && policy.covers(addr)
+        {
+            if policy.bind == addr {
+                return Ok(Prepared::Keep);
+            }
+            // Connections of an earlier address that still end hold its port, so the wildcard
+            // can't bind.
+            self.retired.retain(|listener| !listener.finished());
+            if self
+                .retired
+                .iter()
+                .any(|listener| listener.address().port() == addr.port())
+            {
+                return Err(DirectError::AddressUnavailable);
+            }
+            // A failed widening keeps the listener at its old address.
+            self.listener
+                .as_ref()
+                .ok_or(DirectError::AddressUnavailable)?
+                .widen()
+                .map_err(|_| DirectError::AddressUnavailable)?;
+            self.listener_state = ListenerState::Listening { addr: policy.bind };
+            self.listener_changed();
+            return Ok(Prepared::Keep);
         }
-        if policy.bind == addr {
-            return true;
-        }
-        // Connections of an earlier address that still end hold its port, so the wildcard can't
-        // bind; then this starts over without closing anything first.
-        self.retired.retain(|listener| !listener.finished());
-        if self
+        if let Some(index) = self
             .retired
             .iter()
-            .any(|listener| listener.address().port() == addr.port())
+            .position(|listener| listener.address() == policy.bind && listener.revive())
         {
-            return false;
+            return Ok(Prepared::Fresh(self.retired.remove(index)));
         }
-        let Some(listener) = &self.listener else {
-            return false;
+        self.retired.retain(|listener| !listener.finished());
+        match self.bind(policy.bind) {
+            Ok(listener) => Ok(Prepared::Fresh(listener)),
+            Err(Bind::InUse) if self.holds(policy.bind) => Ok(Prepared::Deferred),
+            Err(_) => Err(DirectError::AddressUnavailable),
+        }
+    }
+    /// Whether one of this server's own listeners on every interface holds `address`'s port.
+    /// No other socket can then hold `address`, so it binds once that listener retires.
+    fn holds(&self, address: std::net::SocketAddr) -> bool {
+        !address.ip().is_unspecified()
+            && self.listener.iter().chain(&self.retired).any(|listener| {
+                let own = listener.address();
+                own.port() == address.port() && own.ip().is_unspecified()
+            })
+    }
+    /// Moves to the listener [`Self::prepare_listener`] readied, after the record committed.
+    /// Anything but `Keep` starts a new generation, which ends every paired connection.
+    fn switch_listener(&mut self, prepared: Prepared, generation: [u8; 32]) {
+        let fresh = match prepared {
+            Prepared::Keep => return,
+            Prepared::Fresh(listener) => Some(listener),
+            Prepared::Deferred | Prepared::Off => None,
         };
-        if listener.widen().is_err() {
-            return false;
+        self.generation = generation;
+        self.connections.retire_generation(generation);
+        self.invitations.clear();
+        for pending in &mut self.claims {
+            if pending.decision.is_none() {
+                pending.decision = Some(Err(DirectError::AlreadyDecided));
+            }
         }
-        self.listener_state = ListenerState::Listening { addr: policy.bind };
+        let Some(listener) = fresh else {
+            self.listen();
+            return;
+        };
+        let Some(addr) = self.record.policy.as_ref().map(|policy| policy.bind) else {
+            return;
+        };
         self.listener_changed();
-        true
+        self.retire_listener();
+        self.starting_since = None;
+        self.listener = Some(listener);
+        self.listener_state = ListenerState::Listening { addr };
     }
     /// Stops taking connections. A listener with live connections keeps routing to them until
     /// they end; one without closes its socket now.
@@ -318,14 +375,19 @@ impl State {
     }
     /// Registers a paired connection of listener `generation`, so revocation reaches it through
     /// `sever`. The authorization check and the registration share this lock with every
-    /// revocation. `client` is the connection's effective Client Identity. A service-lane
-    /// connection has no `outbox`.
+    /// revocation. `client` is the connection's effective Client Identity, and `route` the
+    /// server address it reached. A service-lane connection has no `outbox`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one connection's whole registration"
+    )]
     pub(crate) fn register(
         &mut self,
         paired: &PairedDevice,
         generation: [u8; 32],
         connection: [u8; 32],
         client: [u8; 32],
+        route: Option<std::net::SocketAddr>,
         outbox: Option<crate::connection::outbox::Outbox>,
         sever: Box<dyn Sever>,
     ) -> Result<(), DirectError> {
@@ -338,6 +400,7 @@ impl State {
                     pairing: paired.pairing,
                     generation,
                 },
+                route,
                 outbox,
                 sever,
             )
@@ -734,18 +797,13 @@ impl State {
                         revoked: false,
                         agents: Vec::new(),
                     });
+                    let prepared = if changed_policy {
+                        self.prepare_listener(&next)?
+                    } else {
+                        Prepared::Keep
+                    };
                     self.commit(next)?;
-                    if changed_policy && !self.widen() {
-                        self.generation = generation;
-                        self.connections.retire_generation(generation);
-                        self.invitations.clear();
-                        for pending in &mut self.claims {
-                            if pending.decision.is_none() {
-                                pending.decision = Some(Err(DirectError::AlreadyDecided));
-                            }
-                        }
-                        self.listen();
-                    }
+                    self.switch_listener(prepared, generation);
                     info
                 };
                 ManagementReply::Setup(PairedDevice {
@@ -804,21 +862,12 @@ impl State {
                     next.policy = Some(policy);
                 }
                 next.enabled = enabled;
-                self.commit(next)?;
-                if self.widen() {
-                    return Ok((ManagementReply::Status(self.status()), Vec::new()));
-                }
-                self.generation = generation;
-                // Network administration arrives only over IPC. Any other change retires all
+                // Network administration runs with account-local authority, over IPC or for a
+                // previewed service-lane change. A change that keeps no listener retires all
                 // QUIC authority.
-                self.connections.retire_generation(generation);
-                self.invitations.clear();
-                for pending in &mut self.claims {
-                    if pending.decision.is_none() {
-                        pending.decision = Some(Err(DirectError::AlreadyDecided));
-                    }
-                }
-                self.listen();
+                let prepared = self.prepare_listener(&next)?;
+                self.commit(next)?;
+                self.switch_listener(prepared, generation);
                 ManagementReply::Status(self.status())
             }
             Management::Invite { advertise } => {
@@ -1470,6 +1519,7 @@ pub(crate) fn serve(
         }
     };
     let connection = crate::protocol::random()?;
+    let route = stream.destination();
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
     // A new name past the limit may evict only a name that holds nothing. The idle names stay
@@ -1528,6 +1578,7 @@ pub(crate) fn serve(
                 generation,
                 connection,
                 client,
+                route,
                 Some(outbox.clone()),
                 Box::new(carrier.sever()),
             )
@@ -1582,11 +1633,13 @@ fn serve_lane(
 ) -> Result<(), ServerError> {
     let lane = environment.lane.as_ref().ok_or(ServerError::Unsupported)?;
     let connection = crate::protocol::random()?;
+    let route = stream.destination();
     state.lock().unwrap_or_else(|e| e.into_inner()).register(
         paired,
         generation,
         connection,
         actor.client,
+        route,
         None,
         Box::new(stream.sever()),
     )?;
@@ -1599,7 +1652,7 @@ fn serve_lane(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .note_connection(paired)?;
-    lane.serve(&mut stream, actor, &|| {
+    lane.serve(&mut stream, actor, route, &|| {
         state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1736,6 +1789,12 @@ impl Drop for Registered {
             .unregister(self.connection);
     }
 }
+
+mod network_change;
+pub(crate) use network_change::{change_network, listener};
+
+#[cfg(test)]
+mod network_change_tests;
 
 #[cfg(test)]
 mod network_tests;
@@ -1937,6 +1996,7 @@ mod tests {
             generation,
             [5; 32],
             paired.client,
+            None,
             Some(outbox),
             Box::new(super::super::tests::Quiet),
         );

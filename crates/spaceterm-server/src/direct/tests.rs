@@ -1377,6 +1377,7 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
             challenge.generation,
             [5; 32],
             paired.client,
+            None,
             Some(outbox.clone()),
             Box::new(Quiet),
         )
@@ -1419,6 +1420,7 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
             challenge.generation,
             [6; 32],
             paired.client,
+            None,
             Some(Outbox::new(Arc::new(|| {}))),
             Box::new(Quiet)
         ),

@@ -1,0 +1,42 @@
+{
+  "command": "server.network",
+  "data": {
+    "confirmation": {
+      "effects": {
+        "caller": "reconnects",
+        "disconnects": [
+          {
+            "id": "6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c",
+            "name": "Studio desktop"
+          }
+        ],
+        "ends_connections": true,
+        "from": {
+          "bind": "0.0.0.0:9231",
+          "enabled": true
+        },
+        "to": {
+          "bind": "192.0.2.4:9231",
+          "enabled": true
+        }
+      },
+      "expires_at": "2026-10-30T12:10:00Z",
+      "token": "c1-abababababababababababababababababababababababababababababababab"
+    }
+  },
+  "error": {
+    "class": "action_required",
+    "code": "confirmation_required",
+    "details": {},
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "status": "confirmation_required",
+  "warnings": []
+}

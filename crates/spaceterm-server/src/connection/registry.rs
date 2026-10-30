@@ -22,6 +22,8 @@ struct Entry {
     /// The connection's effective Client Identity: the pairing's own or one of its agents'.
     client: [u8; 32],
     pairing: Pairing,
+    /// The server address the connection reached, when the system reported it.
+    route: Option<std::net::SocketAddr>,
     outbox: Option<Outbox>,
     sever: Box<dyn Sever>,
 }
@@ -44,6 +46,7 @@ impl PairedConnections {
         connection: [u8; 32],
         client: [u8; 32],
         pairing: Pairing,
+        route: Option<std::net::SocketAddr>,
         outbox: Option<Outbox>,
         sever: Box<dyn Sever>,
     ) -> Result<(), Full> {
@@ -54,6 +57,7 @@ impl PairedConnections {
             connection,
             client,
             pairing,
+            route,
             outbox,
             sever,
         });
@@ -62,6 +66,17 @@ impl PairedConnections {
 
     pub fn unregister(&mut self, connection: [u8; 32]) {
         self.entries.retain(|entry| entry.connection != connection);
+    }
+
+    /// The pairing and route of every live connection of listener `generation`.
+    pub fn routes(
+        &self,
+        generation: [u8; 32],
+    ) -> impl Iterator<Item = (PairingId, Option<std::net::SocketAddr>)> + '_ {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.pairing.generation == generation)
+            .map(|entry| (entry.pairing.pairing, entry.route))
     }
 
     /// Whether a live connection admitted as `client`.
@@ -135,6 +150,7 @@ mod tests {
                         pairing,
                         generation,
                     },
+                    None,
                     Some(outboxes[index].clone()),
                     Box::new(Count(Arc::clone(&severed))),
                 )

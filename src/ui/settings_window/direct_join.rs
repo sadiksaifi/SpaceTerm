@@ -36,6 +36,7 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         | DirectError::Revoked
         | DirectError::InvalidRequest
         | DirectError::InvalidAddress
+        | DirectError::AddressUnavailable
         | DirectError::PolicyChanged
         | DirectError::AlreadyDecided => "The server refused pairing.",
     }

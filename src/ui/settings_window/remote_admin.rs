@@ -304,6 +304,9 @@ pub(super) enum Act {
     Restart,
     Update(Option<SharedString>),
     Return(Option<SharedString>),
+    /// A Network Access change. Only the CLI makes one, so the card names it only as an earlier
+    /// operation a connection settled.
+    NetworkAccess,
 }
 
 impl Act {
@@ -314,6 +317,7 @@ impl Act {
             LaneAction::Restart => Self::Restart,
             LaneAction::Update { .. } => Self::Update(to),
             LaneAction::Return => Self::Return(to),
+            LaneAction::Network { .. } => Self::NetworkAccess,
         }
     }
 
@@ -324,6 +328,7 @@ impl Act {
             Self::Restart => "restart",
             Self::Update(_) => "update",
             Self::Return(_) => "return to the previous version",
+            Self::NetworkAccess => "Network Access change",
         }
     }
 
@@ -334,6 +339,7 @@ impl Act {
             Self::Restart => "restart",
             Self::Update(_) => "update",
             Self::Return(_) => "return to its previous version",
+            Self::NetworkAccess => "change its Network Access",
         }
     }
 }
@@ -470,6 +476,14 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
                 confirm: wording.confirm_label().to_owned(),
             }
         }
+        // The card offers no Network Access change, and a Network preview arrives as its own
+        // reply, so this names the change plainly should one ever reach it.
+        LaneAction::Network { .. } => RemoteConfirmation {
+            title: "Change Network Access",
+            message: format!("Change Network Access on {name}?"),
+            detail: "Paired connections to it may end.".to_owned(),
+            confirm: "Change".to_owned(),
+        },
         LaneAction::Update { .. } | LaneAction::Return => {
             let unnamed = LaneVersion {
                 version: String::new(),
@@ -562,6 +576,10 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
                 || format!("{name} returned to its previous version."),
                 |to| format!("{name} returned to {to}."),
             ),
+            CaptionTone::Guidance,
+        ),
+        Ended::Changed(Act::NetworkAccess, Settlement::Done) => (
+            format!("{name} changed its Network Access."),
             CaptionTone::Guidance,
         ),
         Ended::Changed(act, Settlement::Uncertain) => (
@@ -720,6 +738,8 @@ impl SettingsWindow {
             Work::Performing(Act::Restart) => Some("Restarting\u{2026}"),
             Work::Performing(Act::Update(_)) => Some("Updating\u{2026}"),
             Work::Performing(Act::Return(_)) => Some("Restoring\u{2026}"),
+            // The card never performs a Network Access change.
+            Work::Performing(Act::NetworkAccess) => None,
             Work::Preparing(Change::Update) => Some("Preparing\u{2026}"),
             Work::Reading | Work::Preparing(_) | Work::Confirming => None,
         }
@@ -751,6 +771,7 @@ impl SettingsWindow {
             Work::Performing(Act::Return(to)) => {
                 named(to, "Restoring", "Restoring the previous version\u{2026}")
             }
+            Work::Performing(Act::NetworkAccess) => return None,
             Work::Preparing(Change::Update) => named(
                 &self.remote_available(route),
                 "Preparing the update to",
