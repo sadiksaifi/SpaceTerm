@@ -25,6 +25,9 @@ pub(crate) enum Launcher {
     OtherLink,
     /// A file, directory or other entry that is not a link. It is never replaced.
     OtherFile,
+    /// SpaceTerm's link needs replacing, but another program's entry holds the temporary name
+    /// replacement uses. That entry is never removed.
+    Blocked,
 }
 
 impl Launcher {
@@ -33,7 +36,9 @@ impl Launcher {
     pub(crate) fn action(self) -> ToolAction {
         match self {
             Self::Missing | Self::Stale | Self::Outdated => ToolAction::Install,
-            Self::Installed | Self::OtherLink | Self::OtherFile => ToolAction::Reveal,
+            Self::Installed | Self::OtherLink | Self::OtherFile | Self::Blocked => {
+                ToolAction::Reveal
+            }
         }
     }
 }
@@ -41,7 +46,8 @@ impl Launcher {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolAction {
     Install,
-    /// Shows the launcher in the file manager.
+    /// Shows the launcher in the file manager, or for [`Launcher::Blocked`] the entry that
+    /// blocks it.
     Reveal,
 }
 
@@ -63,6 +69,8 @@ pub(crate) enum ToolFailure {
     StorageUnavailable,
     /// Another program's file or link is at the launcher path, so nothing was installed.
     Occupied,
+    /// Another program's entry holds the temporary name replacement uses, so nothing changed.
+    Blocked,
     /// The file manager is missing, refused or didn't answer.
     RevealUnavailable,
 }
@@ -73,6 +81,8 @@ pub(crate) enum LinkOutcome {
     Linked,
     /// Another program's file or link was there, or arrived meanwhile, and stays.
     Kept,
+    /// Another program's entry holds the temporary name, and stays.
+    Blocked,
 }
 
 /// The file manager's answer to a reveal.
@@ -86,6 +96,8 @@ pub(crate) trait LauncherFiles: Send + Sync {
     fn link(&self) -> Result<LinkOutcome, ToolFailure>;
     /// The launcher's path.
     fn launcher(&self) -> PathBuf;
+    /// The temporary name a replacement links from.
+    fn temporary(&self) -> PathBuf;
 }
 
 /// The desktop's file manager.
@@ -129,18 +141,27 @@ impl CommandLineTool {
         match self.adapters.files.read()? {
             Launcher::Installed => {}
             Launcher::OtherLink | Launcher::OtherFile => return Err(ToolFailure::Occupied),
+            Launcher::Blocked => return Err(ToolFailure::Blocked),
             Launcher::Missing | Launcher::Stale | Launcher::Outdated => {
-                if self.adapters.files.link()? == LinkOutcome::Kept {
-                    return Err(ToolFailure::Occupied);
+                match self.adapters.files.link()? {
+                    LinkOutcome::Linked => {}
+                    LinkOutcome::Kept => return Err(ToolFailure::Occupied),
+                    LinkOutcome::Blocked => return Err(ToolFailure::Blocked),
                 }
             }
         }
         self.status()
     }
 
-    /// Shows the launcher in the file manager. Only a launcher whose action is Reveal offers this.
-    pub(crate) fn reveal(&self) -> Reveal {
-        self.adapters.viewer.reveal(&self.adapters.files.launcher())
+    /// Shows `launcher`'s entry in the file manager: the entry blocking a blocked launcher, and
+    /// the launcher otherwise. Only a launcher whose action is Reveal offers this.
+    pub(crate) fn reveal(&self, launcher: Launcher) -> Reveal {
+        let path = if launcher == Launcher::Blocked {
+            self.adapters.files.temporary()
+        } else {
+            self.adapters.files.launcher()
+        };
+        self.adapters.viewer.reveal(&path)
     }
 }
 
@@ -188,12 +209,16 @@ pub(crate) mod testing {
             match outcome {
                 Ok(LinkOutcome::Linked) => *self.launcher.lock().unwrap() = Ok(Launcher::Installed),
                 Ok(LinkOutcome::Kept) => *self.launcher.lock().unwrap() = Ok(Launcher::OtherLink),
+                Ok(LinkOutcome::Blocked) => *self.launcher.lock().unwrap() = Ok(Launcher::Blocked),
                 Err(_) => {}
             }
             outcome
         }
         fn launcher(&self) -> PathBuf {
             Path::new(DIRECTORY).join("spaceterm-development")
+        }
+        fn temporary(&self) -> PathBuf {
+            Path::new(DIRECTORY).join(".launcher-spaceterm-development")
         }
     }
 
@@ -284,7 +309,7 @@ mod tests {
         assert_eq!(tool.status(), Err(ToolFailure::UnsafeStorage));
         assert_eq!(tool.install(), Err(ToolFailure::UnsafeStorage));
         assert_eq!(
-            futures_lite::future::block_on(tool.reveal()),
+            futures_lite::future::block_on(tool.reveal(Launcher::Installed)),
             Err(ToolFailure::RevealUnavailable)
         );
         *files.launcher.lock().unwrap() = Ok(Launcher::Missing);
@@ -293,9 +318,30 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_launcher_is_never_linked_and_reveals_the_entry_that_blocks_it() {
+        let (files, viewer, tool) = fixture(Launcher::Outdated);
+        *files.link.lock().unwrap() = Ok(LinkOutcome::Blocked);
+        assert_eq!(tool.install(), Err(ToolFailure::Blocked));
+        assert_eq!(tool.status(), Ok(Launcher::Blocked));
+        assert_eq!(tool.install(), Err(ToolFailure::Blocked));
+        assert_eq!(files.links(), 1);
+        assert_eq!(
+            futures_lite::future::block_on(tool.reveal(Launcher::Blocked)),
+            Ok(())
+        );
+        assert_eq!(
+            *viewer.shown.lock().unwrap(),
+            [Path::new(DIRECTORY).join(".launcher-spaceterm-development")]
+        );
+    }
+
+    #[test]
     fn reveal_shows_the_launcher_itself() {
         let (_, viewer, tool) = fixture(Launcher::Installed);
-        assert_eq!(futures_lite::future::block_on(tool.reveal()), Ok(()));
+        assert_eq!(
+            futures_lite::future::block_on(tool.reveal(Launcher::Installed)),
+            Ok(())
+        );
         assert_eq!(
             *viewer.shown.lock().unwrap(),
             [Path::new(DIRECTORY).join("spaceterm-development")]

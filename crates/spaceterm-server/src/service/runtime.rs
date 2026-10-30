@@ -70,10 +70,24 @@ pub enum CliLauncher {
     /// A link into another of this identity's installations than the approved runtime, such as
     /// one an update couldn't repoint.
     Outdated,
+    /// A stale or outdated managed link that can't be replaced, because another tool's entry
+    /// holds the temporary name at [`Service::cli_temporary_path`].
+    Blocked,
     /// A link to anything else, such as another tool.
     Foreign,
     /// A file, directory or other entry that is not a link.
     NotLink,
+}
+
+/// The outcome of linking the command-line launcher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliLink {
+    /// The launcher names the selected runtime.
+    Linked,
+    /// Another tool's launcher is there and stays.
+    Kept,
+    /// Another tool's entry holds the temporary name a replacement needs, and stays.
+    Blocked,
 }
 
 /// What keeping an existing launcher on the approved runtime did. Never fatal to the service
@@ -84,6 +98,9 @@ pub(super) enum Repoint {
     Followed,
     /// There is no launcher, or another tool owns it.
     Untouched,
+    /// Another tool's entry holds the temporary name, so the launcher stays on its earlier
+    /// installation.
+    Blocked,
     /// The managed launcher stays on its earlier installation.
     Failed(ServerError),
 }
@@ -128,18 +145,22 @@ impl Service {
         )?;
         let data = Directory::open(&self.paths.data, true)?;
         let _operation = data.lock("service.lock", false)?;
-        self.select_cli_locked(&data, || Ok(retained.directory))
+        match self.select_cli_locked(&data, || Ok(retained.directory))? {
+            CliLink::Linked => Ok(true),
+            CliLink::Kept => Ok(false),
+            CliLink::Blocked => Err(ServerError::StorageUnavailable),
+        }
     }
 
     /// Link the command-line launcher exactly as the installer does, for a client acting with
     /// this account's authority. The launcher follows the approved runtime; without one it
     /// follows the installation `provision` retains, which runs under the service lock.
-    /// Returns false for a launcher owned by another tool, which stays untouched. Another
+    /// Another tool's launcher, or its entry at the temporary name, stays untouched. Another
     /// service operation that outlasts the operation grace returns ServiceBusy.
     pub fn link_cli(
         &self,
         provision: impl FnOnce() -> Result<PathBuf, ServerError>,
-    ) -> Result<bool, ServerError> {
+    ) -> Result<CliLink, ServerError> {
         let data = Directory::open(&self.paths.data, true)?;
         let _operation = match data.wait_lock("service.lock", OPERATION_GRACE, None)? {
             LockWait::Locked(lock) => lock,
@@ -169,11 +190,19 @@ impl Service {
         Ok(self.cli_home()?.join(".local/bin").join(&self.identity))
     }
 
+    /// The temporary name a replacement links from, which [`CliLauncher::Blocked`] names.
+    pub fn cli_temporary_path(&self) -> Result<PathBuf, ServerError> {
+        Ok(launcher::temporary(
+            &self.cli_home()?.join(".local/bin"),
+            &self.identity,
+        ))
+    }
+
     fn select_cli_locked(
         &self,
         data: &Directory,
         provision: impl FnOnce() -> Result<PathBuf, ServerError>,
-    ) -> Result<bool, ServerError> {
+    ) -> Result<CliLink, ServerError> {
         let runtime = match Self::state(data)? {
             Some(state) => self.runtime(&state),
             None => provision()?,
@@ -220,8 +249,9 @@ impl Service {
             &self.paths.data.join("installations"),
             runtime,
         ) {
-            Ok(true) => Repoint::Followed,
-            Ok(false) => Repoint::Untouched,
+            Ok(CliLink::Linked) => Repoint::Followed,
+            Ok(CliLink::Kept) => Repoint::Untouched,
+            Ok(CliLink::Blocked) => Repoint::Blocked,
             Err(error) => Repoint::Failed(error),
         }
     }

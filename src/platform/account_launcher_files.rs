@@ -3,11 +3,12 @@ use std::path::PathBuf;
 
 use crate::command_line_tool::{Launcher, LauncherFiles, LinkOutcome, ToolFailure};
 use crate::server_connection::ServerError;
-use crate::server_connection::service::{CliLauncher, Service};
+use crate::server_connection::service::{CliLauncher, CliLink, Service};
 
 pub(crate) struct AccountLauncherFiles {
     service: Service,
     launcher: PathBuf,
+    temporary: PathBuf,
 }
 
 impl AccountLauncherFiles {
@@ -15,7 +16,12 @@ impl AccountLauncherFiles {
     pub(crate) fn new(identity: &str) -> Result<Self, ServerError> {
         let service = Service::for_identity(identity)?;
         let launcher = service.cli_launcher_path()?;
-        Ok(Self { service, launcher })
+        let temporary = service.cli_temporary_path()?;
+        Ok(Self {
+            service,
+            launcher,
+            temporary,
+        })
     }
 }
 
@@ -28,6 +34,7 @@ impl LauncherFiles for AccountLauncherFiles {
             CliLauncher::Outdated => Launcher::Outdated,
             CliLauncher::Foreign => Launcher::OtherLink,
             CliLauncher::NotLink => Launcher::OtherFile,
+            CliLauncher::Blocked => Launcher::Blocked,
         })
     }
 
@@ -43,15 +50,19 @@ impl LauncherFiles for AccountLauncherFiles {
                     .map(|installation| installation.directory)
             })
             .map_err(failure)?;
-        Ok(if linked {
-            LinkOutcome::Linked
-        } else {
-            LinkOutcome::Kept
+        Ok(match linked {
+            CliLink::Linked => LinkOutcome::Linked,
+            CliLink::Kept => LinkOutcome::Kept,
+            CliLink::Blocked => LinkOutcome::Blocked,
         })
     }
 
     fn launcher(&self) -> PathBuf {
         self.launcher.clone()
+    }
+
+    fn temporary(&self) -> PathBuf {
+        self.temporary.clone()
     }
 }
 

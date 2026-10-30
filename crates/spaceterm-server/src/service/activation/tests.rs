@@ -172,7 +172,7 @@ fn stopped_activation_changes_only_the_exact_runtime_and_preserves_stop() {
 
 #[test]
 fn a_launcher_that_cannot_follow_an_update_never_blocks_it() {
-    use crate::service::CliLauncher;
+    use crate::service::{CliLauncher, CliLink};
     use std::os::unix::fs::PermissionsExt;
     with_service(|service, previous, candidate, supervisor| {
         let bin = service.account_home().unwrap().join(".local/bin");
@@ -196,7 +196,7 @@ fn a_launcher_that_cannot_follow_an_update_never_blocks_it() {
         let unused = || -> Result<PathBuf, ServerError> {
             panic!("an approved runtime needs no provisioning")
         };
-        assert_eq!(service.link_cli(unused), Ok(true));
+        assert_eq!(service.link_cli(unused), Ok(CliLink::Linked));
         assert_eq!(
             std::fs::read_link(&launcher).unwrap(),
             candidate.directory.join("bin/spaceterm")

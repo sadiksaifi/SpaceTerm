@@ -535,7 +535,7 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
                     retained = Some(installation.directory.clone());
                     Ok(installation.directory)
                 }),
-                Ok(true)
+                Ok(CliLink::Linked)
             );
             let installation = retained.unwrap();
             let executable = installation.join("bin/spaceterm");
@@ -567,7 +567,7 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
             let unused = || -> Result<PathBuf, ServerError> {
                 panic!("an approved runtime needs no provisioning")
             };
-            assert_eq!(service.link_cli(unused), Ok(true));
+            assert_eq!(service.link_cli(unused), Ok(CliLink::Linked));
             assert_eq!(std::fs::read_link(&launcher).unwrap(), executable);
 
             // A managed link whose installation is gone is replaced.
@@ -575,14 +575,14 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
             let gone = service.installations_directory().join("b".repeat(64));
             std::os::unix::fs::symlink(gone.join("bin/spaceterm"), &launcher).unwrap();
             assert_eq!(service.cli_launcher(), Ok(CliLauncher::Stale));
-            assert_eq!(service.link_cli(unused), Ok(true));
+            assert_eq!(service.link_cli(unused), Ok(CliLink::Linked));
             assert_eq!(std::fs::read_link(&launcher).unwrap(), executable);
 
             // Another tool's link and a file that is not a link stay in place.
             std::fs::remove_file(&launcher).unwrap();
             std::os::unix::fs::symlink("/another/tool", &launcher).unwrap();
             assert_eq!(service.cli_launcher(), Ok(CliLauncher::Foreign));
-            assert_eq!(service.link_cli(unused), Ok(false));
+            assert_eq!(service.link_cli(unused), Ok(CliLink::Kept));
             assert_eq!(
                 std::fs::read_link(&launcher).unwrap(),
                 Path::new("/another/tool")
@@ -590,7 +590,7 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
             std::fs::remove_file(&launcher).unwrap();
             std::fs::write(&launcher, b"local tool").unwrap();
             assert_eq!(service.cli_launcher(), Ok(CliLauncher::NotLink));
-            assert_eq!(service.link_cli(unused), Ok(false));
+            assert_eq!(service.link_cli(unused), Ok(CliLink::Kept));
             assert_eq!(std::fs::read(&launcher).unwrap(), b"local tool");
         },
     );

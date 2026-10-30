@@ -35,14 +35,26 @@ pub(super) fn inspect(
     approved: Option<&Path>,
 ) -> Result<CliLauncher, ServerError> {
     let launcher = home.join(".local/bin").join(identity);
+    // A replacement needs the temporary name, which another program's entry may hold.
+    let blocked = || {
+        let temporary = temporary(&home.join(".local/bin"), identity);
+        std::fs::symlink_metadata(&temporary).is_ok()
+            && !std::fs::read_link(&temporary).is_ok_and(|target| managed(&target, installations))
+    };
     match std::fs::read_link(&launcher) {
-        Ok(target) if managed(&target, installations) => Ok(if !target.is_file() {
-            CliLauncher::Stale
-        } else if approved.is_some_and(|runtime| target != runtime.join("bin/spaceterm")) {
-            CliLauncher::Outdated
-        } else {
-            CliLauncher::Linked
-        }),
+        Ok(target) if managed(&target, installations) => Ok(
+            if target.is_file()
+                && approved.is_none_or(|runtime| target == runtime.join("bin/spaceterm"))
+            {
+                CliLauncher::Linked
+            } else if blocked() {
+                CliLauncher::Blocked
+            } else if !target.is_file() {
+                CliLauncher::Stale
+            } else {
+                CliLauncher::Outdated
+            },
+        ),
         Ok(_) => Ok(CliLauncher::Foreign),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CliLauncher::Missing),
         Err(_) if std::fs::symlink_metadata(&launcher).is_ok() => Ok(CliLauncher::NotLink),
@@ -50,7 +62,8 @@ pub(super) fn inspect(
     }
 }
 
-/// Called only with the service lock held. Returns false for a launcher owned by another tool.
+/// Called only with the service lock held. Another tool's launcher is kept, and another tool's
+/// entry at the temporary name blocks a replacement; neither is touched.
 ///
 /// The service lock orders only SpaceTerm's own writers. A missing launcher is created
 /// exclusively, so an entry another program creates first stays. A managed launcher is
@@ -62,16 +75,16 @@ pub(super) fn select(
     identity: &str,
     installations: &Path,
     runtime: &Path,
-) -> Result<bool, ServerError> {
+) -> Result<CliLink, ServerError> {
     let parent = bin(home)?;
     let launcher = parent.join(identity);
     let temporary = temporary(&parent, identity);
     remove_leftover(&temporary, installations)?;
     let before = match std::fs::read_link(&launcher) {
         Ok(target) if managed(&target, installations) => Some(target),
-        Ok(_) => return Ok(false),
+        Ok(_) => return Ok(CliLink::Kept),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) if std::fs::symlink_metadata(&launcher).is_ok() => return Ok(false),
+        Err(_) if std::fs::symlink_metadata(&launcher).is_ok() => return Ok(CliLink::Kept),
         Err(_) => return Err(ServerError::StorageUnavailable),
     };
     let target = runtime.join("bin/spaceterm");
@@ -79,19 +92,27 @@ pub(super) fn select(
         return Err(ServerError::UnsafeStorage);
     }
     if before.as_ref() == Some(&target) {
-        return Ok(true);
+        return Ok(CliLink::Linked);
     }
     let directory = owned_directory(&parent)?;
     if before.is_none() {
         before_creation(&launcher);
         match symlink(&target, &launcher) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(CliLink::Kept);
+            }
             Err(_) => return Err(ServerError::StorageUnavailable),
         }
     } else {
-        // Another program's entry under the temporary name stays, and refuses the replacement.
-        symlink(&target, &temporary).map_err(|_| ServerError::StorageUnavailable)?;
+        match symlink(&target, &temporary) {
+            Ok(()) => {}
+            // Another program's entry under the temporary name stays.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(CliLink::Blocked);
+            }
+            Err(_) => return Err(ServerError::StorageUnavailable),
+        }
         before_rename(&temporary);
         if std::fs::rename(&temporary, &launcher).is_err() {
             // The temporary name is this call's own new link.
@@ -102,12 +123,12 @@ pub(super) fn select(
     directory
         .sync_all()
         .map_err(|_| ServerError::StorageUnavailable)?;
-    Ok(true)
+    Ok(CliLink::Linked)
 }
 
 /// The one name a replacement's new link takes before the rename, so an interrupted
 /// replacement leaves at most one leftover per identity.
-fn temporary(parent: &Path, identity: &str) -> PathBuf {
+pub(super) fn temporary(parent: &Path, identity: &str) -> PathBuf {
     parent.join(format!(".launcher-{identity}"))
 }
 
@@ -194,12 +215,18 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(home.clone());
-        assert!(select(&home, "spaceterm-development", &installations, &first).unwrap());
+        assert_eq!(
+            select(&home, "spaceterm-development", &installations, &first),
+            Ok(CliLink::Linked)
+        );
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
             first.join("bin/spaceterm")
         );
-        assert!(select(&home, "spaceterm-development", &installations, &second).unwrap());
+        assert_eq!(
+            select(&home, "spaceterm-development", &installations, &second),
+            Ok(CliLink::Linked)
+        );
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
             second.join("bin/spaceterm")
@@ -207,7 +234,10 @@ mod tests {
         remove(&home, "spaceterm-development", &installations).unwrap();
         assert!(!path.is_symlink());
         symlink("/another/tool", &path).unwrap();
-        assert!(!select(&home, "spaceterm-development", &installations, &first).unwrap());
+        assert_eq!(
+            select(&home, "spaceterm-development", &installations, &first),
+            Ok(CliLink::Kept)
+        );
         remove(&home, "spaceterm-development", &installations).unwrap();
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
@@ -215,7 +245,10 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"local tool").unwrap();
-        assert!(!select(&home, "spaceterm-development", &installations, &first).unwrap());
+        assert_eq!(
+            select(&home, "spaceterm-development", &installations, &first),
+            Ok(CliLink::Kept)
+        );
         remove(&home, "spaceterm-development", &installations).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"local tool");
         use std::os::unix::fs::PermissionsExt;
@@ -252,14 +285,14 @@ mod tests {
         BEFORE_CREATION.set(Some(|launcher| {
             std::fs::write(launcher, b"local tool").unwrap();
         }));
-        assert!(
-            !select(
+        assert_eq!(
+            select(
                 &home,
                 "spaceterm-development",
                 &installations,
                 &installations.join("a".repeat(64))
-            )
-            .unwrap()
+            ),
+            Ok(CliLink::Kept)
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"local tool");
         assert_eq!(
@@ -292,7 +325,10 @@ mod tests {
         let path = home.join(".local/bin").join(identity);
         let leftover = home.join(".local/bin/.launcher-spaceterm-development");
         let entries = || std::fs::read_dir(path.parent().unwrap()).unwrap().count();
-        assert!(select(&home, identity, &installations, &first).unwrap());
+        assert_eq!(
+            select(&home, identity, &installations, &first),
+            Ok(CliLink::Linked)
+        );
 
         // Interrupt two replacements after their new link exists, as a crash would.
         for _ in 0..2 {
@@ -316,7 +352,10 @@ mod tests {
         }
 
         // The next replacement removes the leftover first.
-        assert!(select(&home, identity, &installations, &second).unwrap());
+        assert_eq!(
+            select(&home, identity, &installations, &second),
+            Ok(CliLink::Linked)
+        );
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
             second.join("bin/spaceterm")
@@ -328,12 +367,21 @@ mod tests {
         remove(&home, identity, &installations).unwrap();
         assert_eq!(entries(), 0);
 
-        // Another program's entry under that name is never removed, and refuses replacement.
+        // Another program's entry under that name is never removed. It blocks the replacement,
+        // and the launcher reads as blocked so a client can show that entry.
         std::fs::write(&leftover, b"local tool").unwrap();
-        assert!(select(&home, identity, &installations, &first).unwrap());
+        assert_eq!(
+            select(&home, identity, &installations, &first),
+            Ok(CliLink::Linked)
+        );
         assert_eq!(
             select(&home, identity, &installations, &second),
-            Err(ServerError::StorageUnavailable)
+            Ok(CliLink::Blocked)
+        );
+        assert_eq!(std::fs::read(&leftover).unwrap(), b"local tool");
+        assert_eq!(
+            inspect(&home, identity, &installations, Some(&second)),
+            Ok(CliLauncher::Blocked)
         );
         remove(&home, identity, &installations).unwrap();
         assert_eq!(std::fs::read(&leftover).unwrap(), b"local tool");

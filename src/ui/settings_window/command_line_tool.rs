@@ -147,6 +147,14 @@ pub(super) fn present(
                          computer\u{2019}s server."
                     ),
                 ),
+                Launcher::Blocked => (
+                    "Blocked",
+                    "settings-command-line-tool-state-blocked",
+                    format!(
+                        "Something else is using SpaceTerm\u{2019}s temporary name \
+                         {DIRECTORY}/.launcher-{name}. Move it to update \u{201C}{name}\u{201D}."
+                    ),
+                ),
                 Launcher::Installed => (
                     "Installed",
                     "settings-command-line-tool-state-installed",
@@ -235,6 +243,9 @@ fn failure_text(failure: ToolFailure, name: &str) -> SharedString {
         ToolFailure::Occupied => SharedString::from(format!(
             "Another program\u{2019}s file is at {DIRECTORY}/{name}. SpaceTerm left it in place."
         )),
+        ToolFailure::Blocked => SharedString::from(format!(
+            "Something else is using SpaceTerm\u{2019}s temporary name {DIRECTORY}/.launcher-{name}."
+        )),
         ToolFailure::RevealUnavailable => {
             SharedString::new_static("The file manager couldn\u{2019}t show the command.")
         }
@@ -283,8 +294,11 @@ impl SettingsWindow {
         match action {
             ToolAction::Install => self.run_command_line_tool(ToolWork::Install, cx),
             ToolAction::Reveal => {
+                let ToolCheck::Checked(launcher) = row.check else {
+                    return;
+                };
                 row.failure = None;
-                let shown = row.tool.reveal();
+                let shown = row.tool.reveal(launcher);
                 row._reveal = Some(cx.spawn(async move |settings, cx| {
                     let shown = shown.await;
                     let _ = settings.update(cx, |settings, cx| {
@@ -332,7 +346,7 @@ impl SettingsWindow {
                     // program's file found meanwhile is read again, so the row shows it.
                     (ToolWork::Install, Err(failure)) => {
                         row.failure = Some(failure);
-                        again |= failure == ToolFailure::Occupied;
+                        again |= matches!(failure, ToolFailure::Occupied | ToolFailure::Blocked);
                     }
                 }
                 if again {
@@ -440,6 +454,20 @@ mod tests {
                 Some((ToolAction::Reveal, "Show in Finder")),
                 "Run \u{201C}spaceterm-development\u{201D} in any terminal."
             )
+        );
+        let blocked = checked(Launcher::Blocked);
+        assert_eq!(
+            (blocked.state, blocked.action, blocked.caption),
+            (
+                "Blocked",
+                Some((ToolAction::Reveal, "Show in Finder")),
+                None
+            )
+        );
+        assert!(
+            blocked
+                .explanation
+                .contains("temporary name ~/.local/bin/.launcher-spaceterm-development")
         );
         for (launcher, state) in [
             (Launcher::OtherLink, "Other link"),
