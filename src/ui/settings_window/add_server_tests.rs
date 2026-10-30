@@ -1005,6 +1005,87 @@ fn a_delivered_invitation_names_its_server_and_address_and_waits_for_join(cx: &m
     );
 }
 
+/// The invitation's network address starts folded away, and one that names no host is refused
+/// before anything is joined. It stays shown with keyboard focus, and the link stays for another
+/// try.
+#[gpui::test]
+fn an_invitation_address_that_names_no_host_is_refused_before_join(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link)));
+    assert!(
+        sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_none(),
+        "the optional network address starts folded away"
+    );
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+
+    sheet.choose(SheetAction::Join.selector());
+
+    assert!(sheet.says("Enter a host name or IP address"));
+    assert_eq!(sheet.title(), "Add Server", "nothing was joined");
+    assert!(!sheet.disabled("Join"), "the link stays for another try");
+    let focused = sheet.cx.update(|window, cx| {
+        let sheet = open_sheet(window, cx).expect("the sheet is open");
+        sheet
+            .read(cx)
+            .endpoint
+            .read(cx)
+            .focus_handle()
+            .is_focused(window)
+    });
+    assert!(focused, "the refused address has keyboard focus");
+}
+
+/// An entered address replaces only the one the invitation names. An address that doesn't reach
+/// the server pauses the join with the usual network failure, and the saved connection keeps the
+/// invitation's pinned identity.
+#[gpui::test]
+fn an_entered_invitation_address_replaces_only_where_join_connects(cx: &mut TestAppContext) {
+    let (direct, link) = crate::direct_connections::tests::lost_claim_invitation("studio");
+    let pin = Invitation::parse(&link).unwrap().server_pin().clone();
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link)));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "Public.EXAMPLE");
+
+    sheet.choose(SheetAction::Join.selector());
+    sheet.settle(|sheet| {
+        sheet
+            .says("SpaceTerm couldn\u{2019}t reach the server. Check your network, then try again.")
+    });
+    assert_eq!(sheet.title(), "Pairing Paused");
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected().is_some());
+
+    let Some(ServerChoice::Direct(route)) = sheet.selected() else {
+        panic!("the joined server is selected")
+    };
+    let route = direct.route(&route).expect("the joined server is saved");
+    assert_eq!(route.endpoint, "quic://public.example:9231");
+    assert_eq!(route.paired.pin, pin, "the invitation's pin stays");
+}
+
+/// A link delivered later doesn't take an address entered for an earlier one.
+#[gpui::test]
+fn a_delivered_link_starts_without_an_earlier_address(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "public.example");
+
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("annex"))));
+
+    assert!(sheet.says("annex"));
+    assert!(sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_none());
+    let entered = sheet.cx.update(|window, cx| {
+        let sheet = open_sheet(window, cx).expect("the sheet is open");
+        sheet.read(cx).endpoint.read(cx).value().to_owned()
+    });
+    assert!(entered.is_empty());
+}
+
 #[gpui::test]
 fn a_link_that_isnt_an_invitation_says_so_and_cant_join(cx: &mut TestAppContext) {
     let (mut sheet, _) = open_settings(|_| Vec::new(), cx);

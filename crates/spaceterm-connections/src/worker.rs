@@ -120,10 +120,20 @@ impl DirectConnections {
 
     /// Invitation parsing is local. All network and native credential work belongs to
     /// the requested join's worker, and the invitation is never retained in a record.
-    pub fn join(&self, text: Zeroizing<String>, name: ClientName) -> Result<JoinId, DirectError> {
-        let invitation = direct::Invitation::parse(&text)?;
+    /// `endpoint` replaces only the address the invitation advertises. The invitation's
+    /// server pin still decides which server enrollment accepts.
+    pub fn join(
+        &self,
+        text: Zeroizing<String>,
+        endpoint: Option<direct::Endpoint>,
+        name: ClientName,
+    ) -> Result<JoinId, DirectError> {
+        let mut invitation = direct::Invitation::parse(&text)?;
         if invitation.server_pin().build != self.0.identity {
             return Err(DirectError::WrongServer);
+        }
+        if let Some(endpoint) = endpoint {
+            invitation = invitation.with_address(&endpoint.authority())?;
         }
         let id = random_id()?;
         let now = Instant::now();
@@ -1046,17 +1056,17 @@ pub(super) mod enrollment_tests {
         id: JoinId,
     }
 
-    impl LiveJoin {
-        fn new(label: &str, stage: EnrollmentStage) -> Self {
-            let expires = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                + 60;
-            Self::with_server_expiry(label, stage, expires)
-        }
+    /// A registry whose network loses its first reply at one stage, and an invitation it hasn't
+    /// joined yet.
+    struct Unjoined {
+        owner: DirectConnections,
+        credentials: Arc<Credentials>,
+        network: Arc<EnrollmentNetwork>,
+        text: Zeroizing<String>,
+    }
 
-        fn with_server_expiry(label: &str, stage: EnrollmentStage, expires: u64) -> Self {
+    impl Unjoined {
+        fn new(label: &str, stage: EnrollmentStage, expires: u64) -> Self {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
             let credentials = Arc::new(Credentials::default());
             let network = Arc::new(EnrollmentNetwork {
@@ -1086,15 +1096,45 @@ pub(super) mod enrollment_tests {
                 "spaceterm://pair/{}",
                 URL_SAFE_NO_PAD.encode(&payload)
             ));
-            let id = owner.join(text, "Test device".into()).unwrap();
-            let result = Self {
+            Self {
                 owner,
                 credentials,
                 network,
+                text,
+            }
+        }
+
+        /// Joins the invitation, through `endpoint` when one is given, and waits for the lost
+        /// reply to pause it.
+        fn join(self, endpoint: Option<direct::Endpoint>) -> LiveJoin {
+            let stage = self.network.lost;
+            let id = self
+                .owner
+                .join(self.text, endpoint, "Test device".into())
+                .unwrap();
+            let result = LiveJoin {
+                owner: self.owner,
+                credentials: self.credentials,
+                network: self.network,
                 id,
             };
             result.wait(|status| matches!(status, JoinStatus::Retryable { stage: value } if *value == stage));
             result
+        }
+    }
+
+    impl LiveJoin {
+        fn new(label: &str, stage: EnrollmentStage) -> Self {
+            let expires = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 60;
+            Self::with_server_expiry(label, stage, expires)
+        }
+
+        fn with_server_expiry(label: &str, stage: EnrollmentStage, expires: u64) -> Self {
+            Unjoined::new(label, stage, expires).join(None)
         }
 
         fn wait(&self, predicate: impl Fn(&JoinStatus) -> bool) {
@@ -1124,6 +1164,44 @@ pub(super) mod enrollment_tests {
     pub fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConnections, JoinId) {
         let fixture = LiveJoin::new(label, stage);
         (fixture.owner, fixture.id)
+    }
+
+    /// An unjoined registry whose network loses the first claim, as an unreachable address does,
+    /// and accepts the next one.
+    pub fn lost_claim_invitation(label: &str) -> (DirectConnections, Zeroizing<String>) {
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        let fixture = Unjoined::new(label, EnrollmentStage::Claim, expires);
+        (fixture.owner, fixture.text)
+    }
+
+    #[test]
+    fn an_entered_endpoint_replaces_only_the_address_and_keeps_the_pin() {
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        let endpoint = direct::Endpoint::parse("Public.EXAMPLE:9443").unwrap();
+        let fixture =
+            Unjoined::new("Server 1", EnrollmentStage::Claim, expires).join(Some(endpoint));
+
+        // The lost claim paused the join as any unreachable address does, and cancellation
+        // authority already names the entered address with the invitation's pin.
+        let Authority::Enrollment { endpoint, pin, .. } = fixture.original().authority else {
+            panic!("join must retain its original enrollment authority")
+        };
+        assert_eq!(endpoint, "quic://public.example:9443");
+        assert_eq!(pin, fixture.network.paired.pin);
+
+        fixture.owner.retry_join(fixture.id).unwrap();
+        fixture.wait(|status| matches!(status, JoinStatus::Approved(id) if *id == fixture.id));
+        let route = fixture.owner.route(&fixture.id).unwrap();
+        assert_eq!(route.endpoint, "quic://public.example:9443");
+        assert_eq!(route.paired, fixture.network.paired);
     }
 
     #[test]
