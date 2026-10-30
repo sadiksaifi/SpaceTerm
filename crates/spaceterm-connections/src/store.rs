@@ -122,6 +122,32 @@ impl ConnectionStore {
         self.change(|document| change(&mut document.connections))
     }
 
+    /// Rename one active CLI connection without accessing its immutable credential.
+    pub fn rename(&self, old: &str, new: &str) -> Result<SavedConnection, StoreError> {
+        if !valid_name(new) {
+            return Err(StoreError::NameTaken);
+        }
+        self.change(|document| {
+            let index = document
+                .connections
+                .iter()
+                .position(|row| row.name == old)
+                .ok_or(StoreError::NotFound)?;
+            if document.connections.iter().any(|row| row.name == new)
+                || document.enrollments.iter().any(|row| row.name == new)
+            {
+                return Err(StoreError::NameTaken);
+            }
+            let connection = &mut document.connections[index];
+            connection.name = new.to_owned();
+            let renamed = connection.clone();
+            document
+                .confirmations
+                .retain(|row| row.connection.route != renamed.route);
+            Ok(renamed)
+        })
+    }
+
     pub fn reserve(&self, enrollment: PendingEnrollment) -> Result<(), StoreError> {
         self.change(|document| {
             if document
@@ -434,6 +460,68 @@ mod tests {
             paired: route.route.paired,
             credential: route.credential,
             unpair: UnpairState::Paired,
+        }
+    }
+
+    #[test]
+    fn rename_changes_only_the_name_and_invalidates_removal_previews() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let mut expected = saved(1);
+        store
+            .commit_guarded(|rows| {
+                rows.push(expected.clone());
+                Ok(())
+            })
+            .unwrap();
+        let preview = store.preview_remove(&expected.name, 1).unwrap();
+        expected.name = "penguin".into();
+        assert_eq!(store.rename("server-1", "penguin").unwrap(), expected);
+        assert_eq!(store.load().unwrap(), vec![expected]);
+        store.rename("penguin", "server-1").unwrap();
+        assert_eq!(
+            store.confirm_remove("server-1", &preview.token, 2),
+            Err(StoreError::Changed)
+        );
+    }
+
+    #[test]
+    fn failed_renames_preserve_the_document_including_reserved_enrollments() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .commit_guarded(|rows| {
+                rows.extend([saved(1), saved(2)]);
+                Ok(())
+            })
+            .unwrap();
+        let connection = saved(3);
+        store
+            .reserve(PendingEnrollment {
+                route: connection.route,
+                name: connection.name,
+                endpoint: connection.endpoint,
+                pin: connection.paired.pin,
+                claim: [8; 32],
+                credential: connection.credential,
+                public_key: [9; 32],
+                offered: false,
+                confirmed: false,
+            })
+            .unwrap();
+        let before = std::fs::read(store.root.join("connections.json")).unwrap();
+        for (old, new, error) in [
+            ("server-1", "server-2", StoreError::NameTaken),
+            ("server-1", "server-1", StoreError::NameTaken),
+            ("server-1", "server-3", StoreError::NameTaken),
+            ("missing", "available", StoreError::NotFound),
+            ("server-1", "local", StoreError::NameTaken),
+        ] {
+            assert_eq!(store.rename(old, new), Err(error));
+            assert_eq!(
+                std::fs::read(store.root.join("connections.json")).unwrap(),
+                before
+            );
         }
     }
 

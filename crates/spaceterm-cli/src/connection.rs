@@ -5,8 +5,8 @@ use crate::args::{ConnectionCommand, Global};
 use crate::contract::Mode;
 use crate::contract::{
     self, Code, ComparisonEvent, Confirmation, ConnectionAdd, ConnectionList, ConnectionRemove,
-    Details, Empty, Envelope, Failure, ListedConnection, OutputError, Revocation, UsageDetails,
-    UsageKind, Warning, WarningCode, WarningDetails,
+    ConnectionRename, Details, Empty, Envelope, Failure, ListedConnection, OutputError, Revocation,
+    UsageDetails, UsageKind, Warning, WarningCode, WarningDetails,
 };
 use crate::state::{CliState, RouteKey};
 use connections::enrollment::{self, PairingClient, PairingNetwork};
@@ -180,6 +180,7 @@ impl Connections<'_> {
         let deadline = Instant::now() + duration;
         let result = match command {
             ConnectionCommand::List => self.list(),
+            ConnectionCommand::Rename { old, new } => self.rename(old, new, deadline),
             ConnectionCommand::Add {
                 name,
                 join,
@@ -257,6 +258,30 @@ impl Connections<'_> {
         Ok(CommandOutput::envelope(
             Envelope::ok("connection.list", None, ConnectionList { connections }),
             lines,
+        ))
+    }
+    fn rename(&self, old: &str, new: &str, deadline: Instant) -> Result<CommandOutput, Failure> {
+        for (name, argument) in [(old, "<OLD>"), (new, "<NEW>")] {
+            if !connections::valid_name(name) {
+                return Err(reserved_name_for(argument));
+            }
+        }
+        self.checkpoint(deadline)?;
+        let renamed = self.store.rename(old, new).map_err(|error| match error {
+            StoreError::NameTaken => reserved_name_for("<NEW>"),
+            other => store_failure(other),
+        })?;
+        Ok(CommandOutput::envelope(
+            Envelope::ok(
+                "connection.rename",
+                None,
+                ConnectionRename {
+                    previous_name: old.to_owned(),
+                    name: renamed.name,
+                    route: format!("id:{}", hex(&renamed.route)),
+                },
+            ),
+            vec![format!("Renamed {old} to {new}.")],
         ))
     }
     fn add(
@@ -534,6 +559,7 @@ fn command_path(command: &ConnectionCommand) -> &'static str {
     match command {
         ConnectionCommand::Add { .. } => "connection.add",
         ConnectionCommand::List => "connection.list",
+        ConnectionCommand::Rename { .. } => "connection.rename",
         ConnectionCommand::Remove { .. } => "connection.remove",
     }
 }
@@ -547,10 +573,13 @@ pub(super) fn usage(argument: &str) -> Failure {
     )
 }
 fn reserved_name() -> Failure {
+    reserved_name_for("<NAME>")
+}
+fn reserved_name_for(argument: &str) -> Failure {
     Failure::with(
         Code::InvalidArguments,
         Details::Usage(UsageDetails {
-            argument: Some("<NAME>".into()),
+            argument: Some(argument.into()),
             kind: UsageKind::ReservedName,
         }),
     )

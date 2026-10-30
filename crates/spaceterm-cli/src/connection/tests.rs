@@ -801,3 +801,167 @@ fn interruption_after_confirmed_publication_reports_the_saved_connection_without
     assert!(fixture.store.pending_enrollments().unwrap().is_empty());
     assert!(fixture.network.cancels.lock().unwrap().is_empty());
 }
+
+#[test]
+fn rename_has_frozen_text_and_json_results_without_credential_access() {
+    for (old, new, golden, exit) in [
+        ("penguin", "lab", "connection_rename", 0),
+        ("penguin", "other", "connection_rename_name_taken", 2),
+        (
+            "missing-private-name",
+            "lab",
+            "connection_rename_not_found",
+            4,
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut expected = fixture.insert(1, "penguin");
+        fixture.insert(2, "other");
+        let before = std::fs::read(fixture.store_path()).unwrap();
+        let provider = Provider {
+            store: fixture.credentials.clone(),
+            calls: AtomicUsize::new(0),
+            unavailable: true,
+        };
+        let output = Connections {
+            identity: "spaceterm-development",
+            global: &global(),
+            store: &fixture.store,
+            credentials: &provider,
+            held: &NoHeld,
+            network: &fixture.network,
+            io: &mut fixture.io,
+        }
+        .run(&ConnectionCommand::Rename {
+            old: old.into(),
+            new: new.into(),
+        });
+        assert_eq!(output.exit, exit);
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+        assert!(fixture.credentials.reads.lock().unwrap().is_empty());
+        assert!(fixture.network.submits.lock().unwrap().is_empty());
+        assert!(fixture.network.revocations.lock().unwrap().is_empty());
+        contract::golden::assert_golden(golden, &output.envelope);
+        let mut json = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            output.render((&global()).into(), &mut json, &mut stderr),
+            exit
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&json).unwrap(),
+            output.envelope
+        );
+        assert!(stderr.is_empty());
+        let mut text = Vec::new();
+        let mut mode = global();
+        mode.json = false;
+        assert_eq!(output.render((&mode).into(), &mut text, &mut stderr), exit);
+        if exit == 0 {
+            assert_eq!(text, b"Renamed penguin to lab.\n");
+            assert!(stderr.is_empty());
+            expected.name = "lab".into();
+            assert_eq!(fixture.store.load().unwrap()[0], expected);
+            let listed = fixture.run(&ConnectionCommand::List);
+            assert_eq!(listed.envelope["data"]["connections"][0]["name"], "lab");
+        } else {
+            assert!(text.is_empty());
+            assert_eq!(
+                stderr,
+                if exit == 2 {
+                    b"error: Invalid arguments. See --help. (invalid_arguments)\nargument: <NEW>\n"
+                        .as_slice()
+                } else {
+                    b"error: No Saved Connection matches. (not_found)\n".as_slice()
+                }
+            );
+            assert_eq!(std::fs::read(fixture.store_path()).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn renamed_pairing_keeps_its_identity_pin_and_valid_credential() {
+    use ring::signature::{ED25519, Ed25519KeyPair, UnparsedPublicKey};
+    let mut fixture = Fixture::new();
+    let saved = fixture.insert(1, "penguin");
+    let credential = fixture
+        .credentials
+        .read(&saved.credential, Interaction::Quiet)
+        .unwrap()
+        .unwrap();
+    let public = DeviceCredential::from_bytes(&credential)
+        .unwrap()
+        .public_key()
+        .unwrap();
+    let output = fixture.run(&ConnectionCommand::Rename {
+        old: "penguin".into(),
+        new: "lab".into(),
+    });
+    assert_eq!(output.exit, 0);
+    assert!(route::resolve("penguin", &fixture.store).is_err());
+    let route::Route::Paired(renamed) = route::resolve("lab", &fixture.store).unwrap() else {
+        panic!("paired route")
+    };
+    assert_eq!(renamed.route, saved.route);
+    assert_eq!(renamed.paired, saved.paired);
+    assert_eq!(renamed.credential, saved.credential);
+    let secret = fixture
+        .credentials
+        .read(&renamed.credential, Interaction::Quiet)
+        .unwrap()
+        .unwrap();
+    // The existing pairing's public key still accepts proof from the retained credential.
+    let challenge = b"rename-pairing-authentication-challenge";
+    let proof = Ed25519KeyPair::from_pkcs8(&secret).unwrap().sign(challenge);
+    UnparsedPublicKey::new(&ED25519, public)
+        .verify(challenge, proof.as_ref())
+        .unwrap();
+    assert_eq!(fixture.credentials.values.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn rename_rejects_invalid_names_remote_routes_and_interruption_before_effects() {
+    for (old, new, global, interrupted, exit, argument) in [
+        ("local", "lab", global(), false, 2, Some("<OLD>")),
+        ("penguin", "local", global(), false, 2, Some("<NEW>")),
+        ("penguin", "", global(), false, 2, Some("<NEW>")),
+        (
+            "penguin",
+            "private\nname",
+            global(),
+            false,
+            2,
+            Some("<NEW>"),
+        ),
+        (
+            "penguin",
+            "lab",
+            Global {
+                server: Some("remote".into()),
+                ..global()
+            },
+            false,
+            2,
+            Some("--server"),
+        ),
+        ("penguin", "lab", global(), true, 130, None),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.io.interrupted.store(interrupted, Ordering::Relaxed);
+        let output = fixture.run_with(
+            &ConnectionCommand::Rename {
+                old: old.into(),
+                new: new.into(),
+            },
+            global,
+        );
+        assert_eq!(output.exit, exit);
+        if let Some(argument) = argument {
+            assert_eq!(output.envelope["error"]["details"]["argument"], argument);
+        }
+        assert!(!fixture.store_path().exists());
+        assert!(fixture.credentials.values.lock().unwrap().is_empty());
+        assert!(!output.envelope.to_string().contains("private"));
+    }
+}

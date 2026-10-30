@@ -210,6 +210,8 @@ pub enum ConnectionCommand {
     },
     /// Show Saved Connections.
     List,
+    /// Rename the CLI's saved connection only, preserving its pairing.
+    Rename { old: String, new: String },
     /// Unpair This Computer from a server.
     Remove {
         name: String,
@@ -505,6 +507,7 @@ impl Command {
             Self::Connection(command) => match command {
                 ConnectionCommand::Add { .. } => "connection.add",
                 ConnectionCommand::List => "connection.list",
+                ConnectionCommand::Rename { .. } => "connection.rename",
                 ConnectionCommand::Remove { .. } => "connection.remove",
             },
             Self::List(_) => "list",
@@ -693,6 +696,7 @@ mod tests {
             &["server", "unpair", "id:9c1d44e0"],
             &["connection", "add", "penguin", "--join"],
             &["connection", "list"],
+            &["connection", "rename", "penguin", "lab"],
             &["connection", "remove", "penguin"],
             &["list", "--workspace", "api"],
             &[
