@@ -20,6 +20,8 @@ pub(crate) struct DesktopWording {
     pub(crate) this_computer_phrase: &'static str,
     /// The command that opens System Directory Selection.
     pub(crate) system_directory_selection: &'static str,
+    /// The command that shows a file selected in the desktop's file manager.
+    pub(crate) reveal_file: &'static str,
     /// The remedy for an installation the updater cannot replace, as an alert title and message.
     pub(crate) read_only_update: (&'static str, &'static str),
     /// The same remedy when the update is overdue.
@@ -423,6 +425,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             this_computer: "This Computer",
             this_computer_phrase: "this computer",
             system_directory_selection: "Choose Directory…",
+            reveal_file: "Show in Folder",
             read_only_update: ("Move SpaceTerm", "Move SpaceTerm before updating it."),
             overdue_read_only_update: "Update overdue. Reinstall with the install script.",
         },

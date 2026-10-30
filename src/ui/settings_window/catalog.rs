@@ -153,6 +153,8 @@ pub(super) enum SettingsRowId {
     AllServers,
     /// Adds a server over SSH or with an invitation.
     AddServer,
+    /// This build's command in the account's own bin directory, and installing it.
+    CommandLineTool,
     /// The selected server's New Worktree Location, a Server Setting.
     ServerWorktreeLocation,
     /// The installed version, the latest check, and the next step the update service offers.
@@ -218,6 +220,7 @@ impl SettingsRowId {
             | Self::PairedDevices
             | Self::AllServers
             | Self::AddServer
+            | Self::CommandLineTool
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -788,6 +791,25 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         ],
         selector: "settings-row-add-server",
     },
+    SettingsRowDescriptor {
+        id: SettingsRowId::CommandLineTool,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::COMMAND_LINE_GROUP,
+        label: "Command Line Tool",
+        keywords: &[
+            "command line tool",
+            "command line",
+            "cli",
+            "spaceterm command",
+            "terminal command",
+            "install",
+            "path",
+            "launcher",
+            "shell",
+            "local bin",
+        ],
+        selector: "settings-row-command-line-tool",
+    },
     // Git on the selected server follows the Servers rows, so a query for "server" that both
     // match equally opens Servers. Within Git these rows stay last.
     SettingsRowDescriptor {
@@ -1080,7 +1102,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 40] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 41] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1113,6 +1135,7 @@ mod tests {
         SettingsRowId::PairedDevices,
         SettingsRowId::AllServers,
         SettingsRowId::AddServer,
+        SettingsRowId::CommandLineTool,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -1421,6 +1444,7 @@ mod tests {
                     | SettingsRowId::PairedDevices
                     | SettingsRowId::AllServers
                     | SettingsRowId::AddServer
+                    | SettingsRowId::CommandLineTool
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval

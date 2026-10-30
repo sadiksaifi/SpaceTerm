@@ -170,6 +170,7 @@ fn desktop_profile(
                 this_computer: "This Computer",
                 this_computer_phrase: "this computer",
                 system_directory_selection: "Choose Directory…",
+                reveal_file: "Show in Folder",
                 read_only_update: (
                     "Reinstall SpaceTerm to Update",
                     "Run the SpaceTerm install script to install the update.",
@@ -243,6 +244,7 @@ fn compose(
         direct_servers.clone(),
     );
     let server_context_paths = startup.server_context_paths();
+    let command_line_tool = command_line_tool(identity, bus.clone());
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
         super::repository_status_host::repository_status_adapters(
@@ -302,6 +304,7 @@ fn compose(
             ssh_setup: Some(ssh_setup),
             direct_servers: Some(direct_servers),
             server_context_paths: Some(server_context_paths),
+            command_line_tool,
         },
         services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),
@@ -313,6 +316,22 @@ fn compose(
             .with_appearance(settings_storage, appearance)
             .with_status_menu(super::linux_status_menu::install)
     })
+}
+
+/// This build's command, installed through the account's service and shown in the file manager.
+fn command_line_tool(
+    identity: ApplicationIdentity,
+    bus: Option<super::linux_session_bus::SessionBus>,
+) -> Option<Arc<crate::command_line_tool::CommandLineTool>> {
+    let files =
+        super::account_launcher_files::AccountLauncherFiles::new(identity.directory_name()).ok()?;
+    Some(Arc::new(crate::command_line_tool::CommandLineTool::new(
+        identity.directory_name(),
+        crate::command_line_tool::CommandLineToolAdapters {
+            files: Arc::new(files),
+            viewer: Arc::new(super::linux_file_viewer::FileManagerViewer::new(bus)),
+        },
+    )))
 }
 
 #[cfg(test)]

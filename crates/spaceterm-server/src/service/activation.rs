@@ -560,7 +560,8 @@ impl Service {
                     data.write_json(c"service.json", &state)?;
                 }
                 Step::Approved => {
-                    self.repoint_cli_locked(&self.runtime(&state))?;
+                    // A launcher failure never stops the candidate; clients read it as Outdated.
+                    self.repoint_cli_locked(&self.runtime(&state));
                     self.require_quiescent(&state)?;
                     self.verify_choice(&operation.candidate.installation(self))?;
                     if state.stopped {
@@ -602,7 +603,7 @@ impl Service {
                     data.write_json(c"service.json", &state)?;
                 }
                 Step::Completed | Step::Returned => {
-                    self.repoint_cli_locked(&self.runtime(&state))?;
+                    self.repoint_cli_locked(&self.runtime(&state));
                     return Ok(());
                 }
             }

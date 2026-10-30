@@ -75,6 +75,7 @@ fn offered(server: &Arc<ScriptedServer>) -> OfferedLocalServer {
         connection: Ok(Arc::clone(server) as Arc<dyn LocalServerControl>),
         service: None,
         update: None,
+        command_line_tool: None,
     })
 }
 
@@ -86,6 +87,7 @@ fn offered_with_service(
         connection: Ok(Arc::clone(server) as Arc<dyn LocalServerControl>),
         service: Some(Ok(Arc::clone(service) as Arc<dyn ServerServiceControl>)),
         update: None,
+        command_line_tool: None,
     })
 }
 
@@ -261,6 +263,7 @@ fn open_servers_with_update(
         connection: Ok(Arc::clone(&server) as Arc<dyn LocalServerControl>),
         service: Some(Ok(Arc::clone(&service) as Arc<dyn ServerServiceControl>)),
         update: Some(Arc::clone(&update) as Arc<dyn ServerUpdateControl>),
+        command_line_tool: None,
     });
     let (window, cx) = open_settings(offered, cx);
     click(NAVIGATION_SELECTOR, cx);
@@ -409,6 +412,7 @@ fn a_development_run_server_is_described_as_ending_with_the_run(cx: &mut TestApp
             )) as Arc<dyn LocalServerControl>),
             service: None,
             update: None,
+            command_line_tool: None,
         }),
         cx,
     );
@@ -603,6 +607,7 @@ fn an_unresolved_server_explains_itself_and_offers_nothing(cx: &mut TestAppConte
             connection: Err(ServerError::StorageUnavailable),
             service: None,
             update: None,
+            command_line_tool: None,
         }),
         cx,
     );
@@ -1303,6 +1308,7 @@ fn an_unresolved_service_explains_itself_and_offers_nothing(cx: &mut TestAppCont
             connection: Ok(Arc::clone(&server) as Arc<dyn LocalServerControl>),
             service: Some(Err(ServerError::StorageUnavailable)),
             update: None,
+            command_line_tool: None,
         }),
         cx,
     );

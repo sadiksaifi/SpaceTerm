@@ -179,6 +179,8 @@ pub(super) struct OfferedServer {
     pub(super) service: Option<Result<Arc<dyn ServerServiceControl>, ServerError>>,
     /// The server version and its update journey. `None` omits the version row.
     pub(super) update: Option<Arc<dyn ServerUpdateControl>>,
+    /// This computer's command for the server's identity. `None` omits its row.
+    pub(super) command_line_tool: Option<Arc<crate::command_line_tool::CommandLineTool>>,
 }
 
 /// The local server a Settings window presents. Every build offers one. `None` hides the Servers
@@ -187,7 +189,9 @@ pub(super) type OfferedLocalServer = Option<OfferedServer>;
 
 /// Resolves the running build's local server and its service. Resolution reads paths only: it
 /// sets up, installs, starts, and connects to nothing.
-pub(super) fn offered_local_server() -> OfferedLocalServer {
+pub(super) fn offered_local_server(
+    command_line_tool: Option<Arc<crate::command_line_tool::CommandLineTool>>,
+) -> OfferedLocalServer {
     let identity = ApplicationIdentity::current().directory_name();
     if crate::local_startup::owned_foreground() {
         return Some(OfferedServer {
@@ -196,6 +200,7 @@ pub(super) fn offered_local_server() -> OfferedLocalServer {
             }),
             service: None,
             update: None,
+            command_line_tool,
         });
     }
     let resolved = Service::for_identity(identity);
@@ -216,6 +221,7 @@ pub(super) fn offered_local_server() -> OfferedLocalServer {
             .map(|server| Arc::new(server) as Arc<dyn LocalServerControl>),
         service,
         update,
+        command_line_tool,
     })
 }
 

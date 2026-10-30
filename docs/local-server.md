@@ -73,7 +73,7 @@ curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/inst
 spaceterm server setup --network off
 ```
 
-For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `--identity spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
+For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `--identity spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. On a computer with the desktop, Settings > Servers > Command Line Tool creates the same launcher. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
 
 ```sh
 curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall
