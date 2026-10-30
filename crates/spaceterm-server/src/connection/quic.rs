@@ -2750,7 +2750,7 @@ mod tests {
                 break stream;
             }
             assert!(Instant::now() < deadline, "no connection arrived");
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::park_timeout(Duration::from_millis(5));
         };
         held.handshake(deadline).unwrap();
         let retired = Instant::now();
@@ -2761,7 +2761,7 @@ mod tests {
                 retired.elapsed() < RETIRE_LIMIT + Duration::from_secs(2),
                 "the retired listener outlived its limit"
             );
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::park_timeout(Duration::from_millis(20));
         }
         assert!(retired.elapsed() >= RETIRE_LIMIT);
         // The connection still lives, and its address binds again.
