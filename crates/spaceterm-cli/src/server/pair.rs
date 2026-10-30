@@ -21,6 +21,17 @@ const LIFETIME: Duration = Duration::from_secs(5 * 60);
 const POLL: Duration = Duration::from_secs(2);
 /// The longest Comparison Code line the command reads.
 const CODE_LIMIT: usize = 32;
+const WAITING: &str = "Open this Invitation Link on the device that joins. Waiting for it. Ctrl-C withdraws the invitation.\n";
+const COMPARISON_PROMPT: &str = " wants to pair. Type the Comparison Code it shows: ";
+
+/// Keep the QR visible through the waiting message, the longest device name and code entry.
+fn prompt_rows(columns: u16) -> usize {
+    let columns = usize::from(columns).max(1);
+    let name_columns = spaceterm_server::pane::control::MAX_CLIENT_NAME_CHARS * 2;
+    WAITING.trim_end().len().div_ceil(columns)
+        + (name_columns + COMPARISON_PROMPT.len() + CODE_LIMIT).div_ceil(columns)
+        + 1 // The cursor after the entered code's newline.
+}
 
 /// What pairing needs from the server. The running server's account IPC provides it.
 pub trait Invitations {
@@ -78,7 +89,7 @@ struct Terminal;
 impl Person for Terminal {
     fn show_link(&mut self, link: &str) -> Result<(), Failure> {
         let mut out = std::io::stdout().lock();
-        qr::write_invitation(&mut out, link, qr::terminal_columns())
+        qr::write_invitation(&mut out, link, qr::terminal_size())
             .map_err(|_| Failure::new(Code::OutputFailed))
     }
     fn say(&mut self, text: &str) {
@@ -128,9 +139,7 @@ pub fn pair(
     if let Err(failure) = person.show_link(&link) {
         return failed(failure);
     }
-    person.say(
-        "Open this Invitation Link on the device that joins. Waiting for it. Ctrl-C withdraws the invitation.\n",
-    );
+    person.say(WAITING);
     let deadline = Instant::now() + limit.min(lifetime).min(LIFETIME);
     let claim = loop {
         if person.interrupted() {
@@ -150,7 +159,7 @@ pub fn pair(
         person.sleep(POLL);
     };
     person.say(&format!(
-        "{} wants to pair. Type the Comparison Code it shows: ",
+        "{}{COMPARISON_PROMPT}",
         claim.device_name.as_str()
     ));
     // The code is entered within the invitation's own lifetime.
