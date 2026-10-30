@@ -1,0 +1,15 @@
+{
+  "command": "server.end-all-sessions",
+  "data": {},
+  "error": {
+    "class": "unavailable",
+    "code": "local_only",
+    "details": {},
+    "message": "This command runs only on the server's own machine.",
+    "retryable": false
+  },
+  "schema": "spaceterm.cli.v1",
+  "server": null,
+  "status": "error",
+  "warnings": []
+}

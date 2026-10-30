@@ -1581,6 +1581,19 @@ pub struct DeviceRef {
     pub name: String,
 }
 
+/// `effects` of `server.end-all-sessions`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct EndAllSessionsEffects {
+    pub ends_sessions: u32,
+    pub sessions: Vec<EndedSession>,
+}
+
+/// `server.end-all-sessions` after confirmation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServerEndAllSessions {
+    pub ended: Vec<EndedSession>,
+}
+
 /// `server.unpair`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServerUnpair {

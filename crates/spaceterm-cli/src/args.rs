@@ -122,6 +122,8 @@ pub enum ServerCommand {
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
     },
+    /// End every Terminal Session on this machine, retaining the server and organization.
+    EndAllSessions(Confirm),
     /// Revoke another Paired Device.
     Unpair {
         /// An exact device name, or `id:PAIRING`.
@@ -495,6 +497,7 @@ impl Command {
                 ServerCommand::Stop(_) => "server.stop",
                 ServerCommand::Restart(_) => "server.restart",
                 ServerCommand::Update { .. } => "server.update",
+                ServerCommand::EndAllSessions(_) => "server.end-all-sessions",
                 ServerCommand::Unpair { .. } => "server.unpair",
                 ServerCommand::Run { .. } => "server.run",
                 ServerCommand::Provision(_) => "server.provision",

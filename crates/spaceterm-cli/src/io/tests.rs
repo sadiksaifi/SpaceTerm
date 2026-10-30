@@ -1221,3 +1221,127 @@ fn stale_session_fences_leave_control_and_ended_sessions_unchanged() {
     );
     assert_eq!(observed.failure.unwrap().code, Code::SessionEnded);
 }
+
+#[test]
+#[ignore = "starts real PTYs; run on one thread with cli:io:test"]
+fn end_all_sessions_preview_and_confirmation_end_only_the_reviewed_sessions() {
+    use crate::contract::{Mode as OutputMode, ServerRef};
+    use crate::server::end_all_sessions;
+    use crate::work::dispatch::Dispatch;
+    use spaceterm_server::hierarchy::Inventory;
+
+    struct Journal {
+        link: ServerLink,
+        sequence: u64,
+    }
+    impl Dispatch for Journal {
+        fn server_id(&self) -> Id {
+            SERVER
+        }
+        fn client_id(&self) -> Id {
+            [1; 32]
+        }
+        fn resolve_leftovers(
+            &mut self,
+        ) -> Result<Vec<crate::contract::RecoveredOperation>, Failure> {
+            Ok(Vec::new())
+        }
+        fn submit(&mut self, mutation: Mutation) -> Result<Outcome, Failure> {
+            let reply = request(
+                &self.link,
+                Operation::Mutate {
+                    sequence: self.sequence,
+                    mutation,
+                },
+                Deadline::after(Some(Duration::from_secs(10))),
+            )?;
+            self.sequence += 1;
+            let ReplyBody::Outcome(result) = reply else {
+                panic!("mutation outcome");
+            };
+            Ok(result.outcome)
+        }
+    }
+    fn inventory(link: &ServerLink) -> Inventory {
+        link.inventory().unwrap().1.inventory.clone()
+    }
+    let mut host = Server::start();
+    let link = host.connect(1);
+    let (workspace, pane) = workspace(&link, 1);
+    let channel = super::channel::Channel::open(&link).unwrap();
+    let claimed = channel
+        .claim(
+            &target(workspace, pane, false),
+            spaceterm_server::pane::AttachmentClaim::Select { explicit: true },
+            None,
+            Deadline::after(Some(Duration::from_secs(10))),
+        )
+        .unwrap();
+    let super::channel::Claimed::Attached(_) = claimed else {
+        panic!("started Session");
+    };
+    let until = Instant::now() + Duration::from_secs(10);
+    let initial = loop {
+        let current = inventory(&link);
+        if current.close.as_ref().is_some_and(|c| {
+            c.sessions
+                .iter()
+                .any(|p| p.id == pane && p.session.is_some())
+        }) {
+            break current;
+        }
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let server = ServerRef {
+        name: "local".into(),
+        route: "local".into(),
+        id: hex(&SERVER),
+    };
+    let mut journal = Journal {
+        link: link.clone(),
+        sequence: 2,
+    };
+    let now = std::time::SystemTime::now();
+    let preview =
+        end_all_sessions::execute(&initial, &mut journal, server.clone(), None, now).unwrap();
+    let mut stdout = Vec::new();
+    assert_eq!(
+        preview.write(
+            OutputMode {
+                json: true,
+                ..OutputMode::default()
+            },
+            &mut stdout,
+            &mut Vec::new()
+        ),
+        3
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    let token = preview["data"]["confirmation"]["token"].as_str().unwrap();
+    let refused =
+        end_all_sessions::execute(&initial, &mut journal, server.clone(), Some("wrong"), now);
+    assert!(matches!(refused, Err(failure) if failure.code == Code::Changed));
+    assert_eq!(
+        inventory(&link).close.unwrap().sessions,
+        initial.close.as_ref().unwrap().sessions
+    );
+    let done = end_all_sessions::execute(&initial, &mut journal, server, Some(token), now).unwrap();
+    assert_eq!(done.exit(), 0);
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ended = inventory(&link);
+        let close = ended.close.unwrap();
+        assert_eq!(close.boot, initial.close.as_ref().unwrap().boot);
+        if close.sessions.iter().all(|p| p.session.is_none()) {
+            assert_eq!(
+                ended.workspaces.iter().map(|w| w.id).collect::<Vec<_>>(),
+                initial.workspaces.iter().map(|w| w.id).collect::<Vec<_>>()
+            );
+            break;
+        }
+        assert!(Instant::now() < until, "confirmed Sessions did not end");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    link.close();
+}
