@@ -133,6 +133,9 @@ pub enum SetupReadiness {
     /// System Settings lists the holder for the person to turn on. `cleared` says whether the
     /// setup first removed the holder's earlier entry, which an earlier build may have left.
     Ready { cleared: bool },
+    /// The person cancelled the setup before its next effect, so it made no request. `cleared`
+    /// says whether it had already removed the holder's earlier entry.
+    Cancelled { cleared: bool },
 }
 
 /// Content-free failures of a System Permission operation.
@@ -188,10 +191,12 @@ pub trait SystemPermissions: Send + Sync {
 
     /// Prepares System Settings for a Permission Setup: when programs do not receive the
     /// permission, removes the holder's earlier entry if it can, then requests it again so
-    /// System Settings lists the holder.
+    /// System Settings lists the holder. `cancelled` is read again immediately before the reset
+    /// and before the request, and a cancelled setup takes neither.
     fn prepare_setup(
         &self,
         permission: SystemPermission,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<SetupReadiness, PermissionError>;
 
     /// Forgets the system's decision for `permission` and this server alone.
@@ -208,7 +213,11 @@ impl SystemPermissions for Unsupported {
     fn request(&self, _: SystemPermission) -> Result<RequestOutcome, PermissionError> {
         Err(PermissionError::Unsupported)
     }
-    fn prepare_setup(&self, _: SystemPermission) -> Result<SetupReadiness, PermissionError> {
+    fn prepare_setup(
+        &self,
+        _: SystemPermission,
+        _: &dyn Fn() -> bool,
+    ) -> Result<SetupReadiness, PermissionError> {
         Err(PermissionError::Unsupported)
     }
     fn reset(&self, _: SystemPermission) -> Result<(), PermissionError> {
@@ -287,8 +296,12 @@ pub(crate) mod testing {
         fn prepare_setup(
             &self,
             permission: SystemPermission,
+            cancelled: &dyn Fn() -> bool,
         ) -> Result<SetupReadiness, PermissionError> {
             self.record("prepare_setup", permission);
+            if cancelled() {
+                return Ok(SetupReadiness::Cancelled { cleared: false });
+            }
             Ok(SetupReadiness::Ready { cleared: true })
         }
         fn reset(&self, permission: SystemPermission) -> Result<(), PermissionError> {

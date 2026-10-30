@@ -1,6 +1,7 @@
 """Headless installation refuses unsafe archives before executing an extracted program."""
 
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -57,6 +58,42 @@ class HeadlessInstallerTests(unittest.TestCase):
                     self.assertEqual(list(scratch.iterdir()), [])
                     self.assertFalse((root / "escaped").exists())
                     self.assertEqual(list(home.iterdir()), [])
+
+    def test_uninstall_of_an_incompatible_layout_fails_without_naming_a_path(self):
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            root = home / ".local/share/spaceterm-development/server"
+            # An installation from another layout: its executable is not where this one is.
+            old = root / "installations" / digest / "previous/spaceterm"
+            old.parent.mkdir(parents=True)
+            old.write_text("#!/bin/sh\nexit 0\n")
+            old.chmod(0o755)
+            (root / "service.json").write_text(json.dumps({"installation": digest}))
+            for confirm in ([], ["--confirm", "c1-" + "b" * 64]):
+                with self.subTest(confirm=bool(confirm)):
+                    result = subprocess.run(
+                        [
+                            "sh",
+                            ROOT / "packaging/install.sh",
+                            "--headless",
+                            "--identity",
+                            "spaceterm-development",
+                            "--uninstall",
+                            *confirm,
+                        ],
+                        env={**os.environ, "HOME": str(home)},
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 5, result.stderr)
+                    self.assertEqual(
+                        result.stderr,
+                        "error: incompatible_state: the installed server is from an incompatible"
+                        " SpaceTerm. Uninstall it with the installer of that version.\n",
+                    )
+                    self.assertNotIn(temporary, result.stdout + result.stderr)
 
     def test_uninstall_leaves_unmanaged_launchers_untouched(self):
         with tempfile.TemporaryDirectory() as temporary:

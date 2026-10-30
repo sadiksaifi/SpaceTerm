@@ -38,6 +38,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+/// How many cancelled Permission Setups the lane remembers. A cancellation can arrive before its
+/// preparation, so it is kept until that preparation ends or newer ones replace it.
+const MAX_CANCELLED_SETUPS: usize = 16;
+
+/// A Permission Setup name: 32 lowercase hexadecimal digits.
+fn setup_name_valid(setup: &str) -> bool {
+    setup.len() == 32
+        && setup
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// The contract code for an action only the server's own machine takes.
 pub const LOCAL_ONLY: &str = "local_only";
 /// The largest lane frame, in bytes.
@@ -90,9 +102,16 @@ pub enum LaneRequest {
     RequestPermission {
         permission: SystemPermission,
     },
-    /// Prepares a Permission Setup of one System Permission.
+    /// Prepares a Permission Setup of one System Permission. `setup` is the client's random
+    /// name for it, which [`LaneRequest::CancelPermissionSetup`] names.
     PreparePermissionSetup {
         permission: SystemPermission,
+        setup: String,
+    },
+    /// Cancels a Permission Setup, over another connection while its preparation runs. The
+    /// preparation then takes no further effect.
+    CancelPermissionSetup {
+        setup: String,
     },
     /// Forgets the system's decision for one System Permission and this server alone.
     ResetPermission {
@@ -146,6 +165,7 @@ pub enum LaneReply {
     Permissions(PermissionsReport),
     PermissionRequested(RequestOutcome),
     PermissionSetup(SetupReadiness),
+    PermissionSetupCancelled,
     PermissionReset,
     /// `code` is a code from the CLI output contract.
     Error {
@@ -325,6 +345,8 @@ pub struct LaneServer {
     feed: Arc<dyn Source>,
     launch: Box<Launcher>,
     permissions: Arc<dyn SystemPermissions>,
+    /// The Permission Setups cancelled while or before their preparation ran.
+    cancelled_setups: Mutex<std::collections::VecDeque<String>>,
     upload: Mutex<Option<Upload>>,
     /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
@@ -392,6 +414,7 @@ impl LaneServer {
             feed,
             launch,
             permissions,
+            cancelled_setups: Mutex::default(),
             upload: Mutex::new(None),
             executing: Mutex::new(()),
             watching: AtomicBool::new(false),
@@ -511,11 +534,18 @@ impl LaneServer {
             LaneRequest::Permissions
             | LaneRequest::RequestPermission { .. }
             | LaneRequest::PreparePermissionSetup { .. }
+            | LaneRequest::CancelPermissionSetup { .. }
             | LaneRequest::ResetPermission { .. } => {
                 return (self.permission(request, actor), None);
             }
         };
         (result.unwrap_or_else(|failure| error(&failure)), None)
+    }
+
+    fn cancelled_setups(&self) -> std::sync::MutexGuard<'_, std::collections::VecDeque<String>> {
+        self.cancelled_setups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Answers a System Permission request. Only the server's own machine sets up or changes
@@ -532,9 +562,26 @@ impl LaneServer {
             LaneRequest::RequestPermission { permission } => permissions
                 .request(permission)
                 .map(LaneReply::PermissionRequested),
-            LaneRequest::PreparePermissionSetup { permission } => permissions
-                .prepare_setup(permission)
-                .map(LaneReply::PermissionSetup),
+            LaneRequest::PreparePermissionSetup { permission, setup } => {
+                if !setup_name_valid(&setup) {
+                    return error(&ServerError::Protocol);
+                }
+                let cancelled = || self.cancelled_setups().contains(&setup);
+                let readiness = permissions.prepare_setup(permission, &cancelled);
+                self.cancelled_setups().retain(|name| *name != setup);
+                readiness.map(LaneReply::PermissionSetup)
+            }
+            LaneRequest::CancelPermissionSetup { setup } => {
+                if !setup_name_valid(&setup) {
+                    return error(&ServerError::Protocol);
+                }
+                let mut cancelled = self.cancelled_setups();
+                if cancelled.len() >= MAX_CANCELLED_SETUPS {
+                    cancelled.pop_front();
+                }
+                cancelled.push_back(setup);
+                Ok(LaneReply::PermissionSetupCancelled)
+            }
             LaneRequest::ResetPermission { permission } => permissions
                 .reset(permission)
                 .map(|()| LaneReply::PermissionReset),

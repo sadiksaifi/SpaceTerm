@@ -25,7 +25,7 @@ The desktop's Setup Guide no longer offers an application to drag into a list. A
 
 These grants are set up only on the server's machine, through that machine's desktop Settings or its `spaceterm` CLI.
 
-- **Service lane.** The lane carries `permissions`, `request_permission`, `prepare_permission_setup` and `reset_permission`. [The lane](../../crates/spaceterm-server/src/service/lane.rs) answers them only for an account-local caller. It refuses a paired caller with `local_only` before the system is asked anything.
+- **Service lane.** The lane carries `permissions`, `request_permission`, `prepare_permission_setup`, `cancel_permission_setup` and `reset_permission`. A Permission Setup carries a random setup name. Cancelling it sends `cancel_permission_setup` over another connection, and the server reads that cancellation again immediately before its reset and before its request, so no prompt appears after the person cancelled. [The lane](../../crates/spaceterm-server/src/service/lane.rs) answers them only for an account-local caller. It refuses a paired caller with `local_only` before the system is asked anything.
 - **CLI.** `spaceterm server permissions` shows each permission's state and who holds it. `request PERMISSION` asks the server for one permission, and `settings PERMISSION` opens its list from the CLI. [Route validation](../../crates/spaceterm-cli/src/connection/route.rs) refuses a remote `--server` with `local_only` before any credential or transport is opened.
 - **Desktop.** Settings > Privacy presents the account-local server's grants through [the desktop adapter](../../src/platform/server_permission_access.rs), and a paired server's card offers none.
 

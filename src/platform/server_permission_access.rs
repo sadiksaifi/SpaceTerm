@@ -30,6 +30,8 @@ use super::permission_access::{
 /// A probe answers within three seconds, and the server's own tools within ten each.
 const READ_LIMIT: Duration = Duration::from_secs(10);
 const CHANGE_LIMIT: Duration = Duration::from_secs(30);
+/// How often a waiting Permission Setup preparation checks whether its owner cancelled it.
+const CANCEL_POLL: Duration = Duration::from_millis(20);
 /// How long a microphone prompt may stay unanswered before the request reports the state then.
 const PROMPT_LIMIT: Duration = Duration::from_secs(600);
 
@@ -247,6 +249,13 @@ impl ServerPermissionAccess {
     }
 }
 
+/// A fresh random name for one Permission Setup: 32 lowercase hexadecimal digits.
+fn setup_name() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// The name System Settings lists `identity`'s server under, when launchd runs it from its
 /// bundle.
 fn expected_holder(identity: &str) -> PermissionHolder {
@@ -311,25 +320,64 @@ impl PermissionAccess for ServerPermissionAccess {
         completion: PermissionSetupCompletion,
     ) -> Result<PermissionSetupPreparation, PermissionAccessError> {
         let (preparation, cancellation) = PermissionSetupPreparation::new();
-        let request = LaneRequest::PreparePermissionSetup {
-            permission: server_permission(permission),
-        };
+        let permission = server_permission(permission);
         let spawned = self.spawn("spaceterm-permission-setup", move |shared| {
             if cancellation.is_cancelled() {
                 return;
             }
-            let readiness = shared
-                .call(&request, CHANGE_LIMIT)
-                .and_then(|reply| match reply {
-                    LaneReply::PermissionSetup(server::SetupReadiness::AlreadyGranted) => {
-                        Ok(PermissionSetupReadiness::AlreadyGranted)
-                    }
-                    LaneReply::PermissionSetup(server::SetupReadiness::Ready { cleared }) => {
-                        Ok(PermissionSetupReadiness::Ready { cleared })
-                    }
-                    _ => Err(Failure::Unavailable),
+            let Some(setup) = setup_name() else {
+                completion(Err(PermissionAccessError::PlatformUnavailable));
+                return;
+            };
+            let request = LaneRequest::PreparePermissionSetup {
+                permission,
+                setup: setup.clone(),
+            };
+            // The preparation waits on its own thread, so this one can carry a cancellation to
+            // the server while the server still waits for another setup or its probe.
+            let (sender, replied) = std::sync::mpsc::sync_channel(1);
+            let preparing = Arc::clone(shared);
+            let started = std::thread::Builder::new()
+                .name("spaceterm-permission-prepare".to_owned())
+                .spawn(move || {
+                    let _ = sender.send(preparing.call(&request, CHANGE_LIMIT));
                 });
+            if started.is_err() {
+                completion(Err(PermissionAccessError::PlatformUnavailable));
+                return;
+            }
+            let mut cancel_sent = false;
+            let reply = loop {
+                match replied.recv_timeout(CANCEL_POLL) {
+                    Ok(reply) => break reply,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if !cancel_sent && cancellation.is_cancelled() {
+                            cancel_sent = true;
+                            let cancel = LaneRequest::CancelPermissionSetup {
+                                setup: setup.clone(),
+                            };
+                            let _ = shared.call(&cancel, READ_LIMIT);
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break Err(Failure::Unavailable);
+                    }
+                }
+            };
             shared.record(shared.read());
+            // A cancelled preparation's completion never runs.
+            if cancellation.is_cancelled() {
+                return;
+            }
+            let readiness = reply.and_then(|reply| match reply {
+                LaneReply::PermissionSetup(server::SetupReadiness::AlreadyGranted) => {
+                    Ok(PermissionSetupReadiness::AlreadyGranted)
+                }
+                LaneReply::PermissionSetup(server::SetupReadiness::Ready { cleared }) => {
+                    Ok(PermissionSetupReadiness::Ready { cleared })
+                }
+                _ => Err(Failure::Unavailable),
+            });
             completion(readiness.map_err(Into::into));
         });
         spawned
@@ -456,6 +504,9 @@ mod tests {
         report: Mutex<Option<PermissionsReport>>,
         replies: Mutex<Vec<LaneReply>>,
         requests: Mutex<Vec<LaneRequest>>,
+        /// Holds the next preparation until the test releases it, as a server waiting for
+        /// another setup's probe does.
+        held_preparation: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     }
 
     impl PermissionLane for Arc<ScriptedLane> {
@@ -469,6 +520,15 @@ mod tests {
                     .clone()
                     .map(LaneReply::Permissions)
                     .ok_or(ServerError::NotRunning);
+            }
+            if matches!(request, LaneRequest::CancelPermissionSetup { .. }) {
+                return Ok(LaneReply::PermissionSetupCancelled);
+            }
+            if matches!(request, LaneRequest::PreparePermissionSetup { .. }) {
+                let held = self.held_preparation.lock().unwrap().take();
+                if let Some(release) = held {
+                    release.recv().unwrap();
+                }
             }
             let mut replies = self.replies.lock().unwrap();
             Ok(if replies.is_empty() {
@@ -609,6 +669,69 @@ mod tests {
         );
     }
 
+    /// Waits until the scripted server received a request `matching` accepts, and returns it.
+    fn received(lane: &ScriptedLane, matching: impl Fn(&LaneRequest) -> bool) -> LaneRequest {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(request) = lane.requests.lock().unwrap().iter().find(|r| matching(r)) {
+                return request.clone();
+            }
+            assert!(Instant::now() < deadline, "the request arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Cancelling a setup while the server still waits to prepare it tells the server, which then
+    /// takes no further effect, and the cancelled setup reports nothing.
+    #[test]
+    fn a_cancelled_setup_reaches_the_server_while_it_prepares() {
+        let lane = Arc::new(ScriptedLane::default());
+        *lane.report.lock().unwrap() = Some(report(
+            PermissionState::NotRequested,
+            PermissionState::NotGranted,
+        ));
+        lane.replies
+            .lock()
+            .unwrap()
+            .push(LaneReply::PermissionSetup(
+                server::SetupReadiness::Cancelled { cleared: false },
+            ));
+        let (release, held) = std::sync::mpsc::channel();
+        *lane.held_preparation.lock().unwrap() = Some(held);
+        let access = access(&lane);
+        settle(&access);
+        let (sender, ready) = std::sync::mpsc::channel();
+        let preparation = access
+            .prepare_setup(
+                SystemPermission::ScreenRecording,
+                Box::new(move |result| sender.send(result).unwrap()),
+            )
+            .unwrap();
+        let LaneRequest::PreparePermissionSetup { setup, .. } = received(&lane, |request| {
+            matches!(request, LaneRequest::PreparePermissionSetup { .. })
+        }) else {
+            unreachable!("a preparation");
+        };
+        assert_eq!(setup.len(), 32);
+
+        drop(preparation);
+        assert_eq!(
+            received(&lane, |request| matches!(
+                request,
+                LaneRequest::CancelPermissionSetup { .. }
+            )),
+            LaneRequest::CancelPermissionSetup {
+                setup: setup.clone()
+            },
+            "the cancellation names the waiting setup"
+        );
+        release.send(()).unwrap();
+        assert!(
+            ready.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a cancelled setup's completion never runs"
+        );
+    }
+
     #[test]
     fn a_setup_asks_the_server_and_reports_its_readiness() {
         let lane = Arc::new(ScriptedLane::default());
@@ -636,14 +759,13 @@ mod tests {
             Ok(PermissionSetupReadiness::Ready { cleared: true })
         );
         drop(preparation);
-        assert!(
-            lane.requests
-                .lock()
-                .unwrap()
-                .contains(&LaneRequest::PreparePermissionSetup {
-                    permission: server::SystemPermission::Accessibility
-                })
-        );
+        assert!(lane.requests.lock().unwrap().iter().any(|request| matches!(
+            request,
+            LaneRequest::PreparePermissionSetup {
+                permission: server::SystemPermission::Accessibility,
+                ..
+            }
+        )));
     }
 
     #[test]

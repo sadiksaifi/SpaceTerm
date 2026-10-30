@@ -149,6 +149,7 @@ impl SystemPermissions for MacosSystemPermissions {
     fn prepare_setup(
         &self,
         permission: SystemPermission,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<SetupReadiness, PermissionError> {
         let _probing = self.probing();
         // A failed read resets nothing, so a grant it could not see is never removed.
@@ -156,12 +157,20 @@ impl SystemPermissions for MacosSystemPermissions {
         if state == PermissionState::Granted {
             return Ok(SetupReadiness::AlreadyGranted);
         }
+        // A setup may wait here for another one's probe, so it reads the cancellation again
+        // right before each effect.
+        if cancelled() {
+            return Ok(SetupReadiness::Cancelled { cleared: false });
+        }
         // A failed reset leaves an entry the person turns on instead.
         let cleared = self.own.as_ref().is_some_and(|own| {
             self.native
                 .reset(tcc_service(permission), &own.identifier)
                 .is_ok()
         });
+        if cancelled() {
+            return Ok(SetupReadiness::Cancelled { cleared });
+        }
         self.ask(permission)?;
         Ok(SetupReadiness::Ready { cleared })
     }
@@ -592,7 +601,7 @@ mod tests {
             &[(SystemPermission::Accessibility, PermissionState::NotGranted)],
         );
         assert_eq!(
-            permissions.prepare_setup(SystemPermission::Accessibility),
+            permissions.prepare_setup(SystemPermission::Accessibility, &|| false),
             Ok(SetupReadiness::Ready { cleared: true })
         );
         assert_eq!(
@@ -609,7 +618,7 @@ mod tests {
             .reset_fails
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
-            permissions.prepare_setup(SystemPermission::Accessibility),
+            permissions.prepare_setup(SystemPermission::Accessibility, &|| false),
             Ok(SetupReadiness::Ready { cleared: false }),
             "a failed reset leaves an entry to turn on"
         );
@@ -622,7 +631,7 @@ mod tests {
             &[(SystemPermission::ScreenRecording, PermissionState::Granted)],
         );
         assert_eq!(
-            permissions.prepare_setup(SystemPermission::ScreenRecording),
+            permissions.prepare_setup(SystemPermission::ScreenRecording, &|| false),
             Ok(SetupReadiness::AlreadyGranted)
         );
         assert_eq!(effects(&scripted), ["probe"]);
@@ -631,10 +640,40 @@ mod tests {
             .probe_fails
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
-            permissions.prepare_setup(SystemPermission::ScreenRecording),
+            permissions.prepare_setup(SystemPermission::ScreenRecording, &|| false),
             Err(PermissionError::Unavailable)
         );
         assert_eq!(effects(&scripted), ["probe"]);
+    }
+
+    /// A setup cancelled while it waited resets nothing, and one cancelled after its reset makes
+    /// no request, so no prompt appears after the person cancelled.
+    #[test]
+    fn a_cancelled_setup_takes_no_further_effect() {
+        let (permissions, scripted) = permissions(
+            true,
+            &[(
+                SystemPermission::ScreenRecording,
+                PermissionState::NotGranted,
+            )],
+        );
+        assert_eq!(
+            permissions.prepare_setup(SystemPermission::ScreenRecording, &|| true),
+            Ok(SetupReadiness::Cancelled { cleared: false })
+        );
+        assert_eq!(effects(&scripted), ["probe"]);
+
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let cancelled_after_reset =
+            || checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0;
+        assert_eq!(
+            permissions.prepare_setup(SystemPermission::ScreenRecording, &cancelled_after_reset),
+            Ok(SetupReadiness::Cancelled { cleared: true })
+        );
+        assert_eq!(
+            effects(&scripted),
+            ["probe".to_owned(), format!("reset ScreenCapture {BUNDLE}")]
+        );
     }
 
     /// An inherited holder is the launching app, which Launch Services already knows.
@@ -648,7 +687,7 @@ mod tests {
             )],
         );
         assert_eq!(
-            permissions.prepare_setup(SystemPermission::ScreenRecording),
+            permissions.prepare_setup(SystemPermission::ScreenRecording, &|| false),
             Ok(SetupReadiness::Ready { cleared: false })
         );
         assert_eq!(effects(&scripted), ["probe", "request screen_recording"]);
