@@ -75,6 +75,14 @@ pub(crate) fn server_watch_sets() -> std::sync::Arc<dyn crate::repository_status
     #[cfg(target_os = "linux")]
     std::sync::Arc::new(repository_watch::NotifyRepositoryWatcher::new())
 }
+#[cfg(feature = "desktop")]
+mod account_launcher_files;
+#[cfg(target_os = "linux")]
+#[cfg(feature = "desktop")]
+mod linux_file_viewer;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
+mod macos_file_viewer;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(

@@ -1623,6 +1623,14 @@ pub struct ConnectionAdd {
     pub connection: Connection,
 }
 
+/// `connection.rename`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConnectionRename {
+    pub previous_name: String,
+    pub name: String,
+    pub route: String,
+}
+
 /// The first NDJSON line of `connection add --json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ComparisonEvent {

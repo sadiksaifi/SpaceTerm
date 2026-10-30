@@ -51,6 +51,8 @@ Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies
 
 Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Try Again and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). The CLI can Stop, Restart and Update a running paired server through [the service lane](adr/0057-administer-servers-over-the-service-lane.md). Network exposure, invitations, unpairing other devices, End All Sessions, Start and setup stay on the server's own machine. Saved addresses are read-only; add the server again to use a different address. [ADR 0056](adr/0056-install-and-pair-servers-from-their-own-command-line.md) describes CLI enrollment and its address override.
 
+To rename a CLI Saved Connection, run `spaceterm connection rename penguin lab`, then select it with `spaceterm --server lab`. Add `--json` for the result envelope. This changes only the CLI's saved name; [ADR 0056](adr/0056-install-and-pair-servers-from-their-own-command-line.md) owns rename behavior and separation from desktop connections.
+
 ### Reach one server over the LAN and a tailnet
 
 A server listens at one of its addresses, or on all interfaces. All Interfaces binds `0.0.0.0` and `[::]` at the same UDP port and answers each client from the address it dialed. It listens on every network the machine is on, including public networks and any network it joins later. Only paired devices are admitted. Choose it in Settings > Servers on the server's machine, or run the service command there:
@@ -73,7 +75,7 @@ curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/inst
 spaceterm server setup --network off
 ```
 
-For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `--identity spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
+For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `--identity spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. On a computer with the desktop, Settings > Servers > Command Line Tool creates the same launcher. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
 
 ```sh
 curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall

@@ -199,6 +199,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("main.rs"),
         root.join("application_modules.rs"),
         root.join("app.rs"),
+        root.join("command_line_tool.rs"),
         root.join("desktop_profile.rs"),
         root.join("keybindings.rs"),
         root.join("desktop_profile/default_keymap.rs"),
