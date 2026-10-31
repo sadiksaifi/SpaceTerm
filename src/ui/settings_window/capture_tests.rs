@@ -574,6 +574,25 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
 fn microphone_access_publishes_its_state(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
+    let assert_microphone = |expected: &str, cx: &mut VisualTestContext| {
+        let tree = A11yTree::read(cx);
+        let values = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| {
+                node["aria"]["role"] == "Label"
+                    && node["element_id"]
+                        .as_str()
+                        .is_some_and(|id| id.contains("settings-microphone-access-state-"))
+            })
+            .map(|node| {
+                node["aria"]["value"]
+                    .as_str()
+                    .expect("the microphone badge publishes text")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, [expected], "the microphone's own published state");
+    };
     let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Authorized));
     let (window, cx) = open_privacy(&access, cx);
     for (authorization, expected) in [
@@ -592,19 +611,13 @@ fn microphone_access_publishes_its_state(cx: &mut TestAppContext) {
         access.camera_authorization.set(Some(Ok(other)));
         cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_capture_access(cx)));
         cx.run_until_parked();
-        let tree = A11yTree::read(cx);
-        let values = tree
-            .with_role("Label")
-            .iter()
-            .filter_map(|node| node["aria"]["value"].as_str())
-            .collect::<Vec<_>>();
-        assert!(values.contains(&expected), "{authorization:?}: {values:?}");
+        assert_microphone(expected, cx);
         if authorization == Ok(CaptureAuthorization::NotDetermined) {
             click(REQUEST_SELECTOR, cx);
-            A11yTree::read(cx).text("Requesting");
+            assert_microphone("Requesting", cx);
             access.take_completion()(CaptureAuthorization::Authorized);
             cx.run_until_parked();
-            A11yTree::read(cx).text("Allowed");
+            assert_microphone("Allowed", cx);
         }
     }
 }
