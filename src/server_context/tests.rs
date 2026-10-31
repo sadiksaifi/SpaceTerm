@@ -180,29 +180,6 @@ fn successful_state_and_device_reads_keep_their_own_latest_timestamps() {
 }
 
 #[test]
-fn missing_network_display_fields_remain_unknown_rather_than_off_or_empty() {
-    let (paths, filesystem) = storage();
-    let key = ServerKey::Direct([1; 32]);
-    let mut context = ServerContext::load(paths.clone()).unwrap();
-    context
-        .remember(key.clone(), facts(20, ObservedServerStatus::Running))
-        .unwrap();
-    {
-        let mut files = filesystem.files.lock().unwrap();
-        let bytes = &mut files.values.values_mut().next().unwrap().0;
-        let mut document: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        let fields = document["facts"][0]["facts"].as_object_mut().unwrap();
-        fields.remove("network_access");
-        fields.remove("paired_devices");
-        *bytes = serde_json::to_vec(&document).unwrap();
-    }
-    let restored = ServerContext::load(paths).unwrap();
-    let actual = restored.facts(&key).unwrap();
-    assert_eq!(actual.network_access, None);
-    assert_eq!(actual.paired_devices, None);
-}
-
-#[test]
 fn malformed_network_observations_preserve_memory_and_exact_retained_bytes() {
     let (paths, filesystem) = storage();
     let key = ServerKey::Direct([1; 32]);
@@ -516,28 +493,6 @@ fn malformed_worktree_location_observations_preserve_the_prior_retained_record()
         ServerContext::load(paths).unwrap().facts(&key),
         Some(&expected)
     );
-}
-
-#[test]
-fn a_missing_retained_worktree_location_loads_as_unknown() {
-    let (paths, filesystem) = storage();
-    let key = ServerKey::Direct([1; 32]);
-    let mut context = ServerContext::load(paths.clone()).unwrap();
-    context
-        .remember(key.clone(), facts(20, ObservedServerStatus::Running))
-        .unwrap();
-    {
-        let mut files = filesystem.files.lock().unwrap();
-        let bytes = &mut files.values.values_mut().next().unwrap().0;
-        let mut document: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        document["facts"][0]["facts"]
-            .as_object_mut()
-            .unwrap()
-            .remove("worktree_location");
-        *bytes = serde_json::to_vec(&document).unwrap();
-    }
-    let restored = ServerContext::load(paths).unwrap();
-    assert_eq!(restored.facts(&key).unwrap().worktree_location, None);
 }
 
 #[test]

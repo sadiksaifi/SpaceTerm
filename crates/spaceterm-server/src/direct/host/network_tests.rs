@@ -308,31 +308,9 @@ fn exposure_refuses_an_address_this_machine_doesnt_have() {
 }
 
 #[test]
-fn a_retained_ipv6_wildcard_reads_as_every_interface() {
-    let network = network(&["127.0.0.1"], &[]);
-    let fixture = fixture(network.clone());
-    let bind = fixture.listen_at("0.0.0.0".parse().unwrap());
-    fixture.state.lock().unwrap().stop();
-    let path = fixture.paths.data.join("direct.json");
-    let text = std::fs::read_to_string(&path).unwrap();
-    let stored = format!("\"0.0.0.0:{}\"", bind.port());
-    assert!(text.contains(&stored));
-    std::fs::write(
-        &path,
-        text.replace(&stored, &format!("\"[::]:{}\"", bind.port())),
-    )
-    .unwrap();
-    let reopened = State::open_with_network(&fixture.paths, network).unwrap();
-    let ManagementReply::Status(status) = reopened
-        .lock()
-        .unwrap()
-        .manage(None, Management::Status)
-        .unwrap()
-        .0
-    else {
-        panic!()
-    };
-    assert_eq!(status.policy.unwrap().bind, bind);
-    assert_eq!(status.listener, ListenerState::Listening { addr: bind });
-    reopened.lock().unwrap().stop();
+fn an_ipv6_wildcard_parses_as_every_interface() {
+    assert_eq!(
+        NetworkPolicy::parse("[::]:9231"),
+        NetworkPolicy::every_interface(9231)
+    );
 }

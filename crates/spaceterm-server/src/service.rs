@@ -105,19 +105,12 @@ pub struct RetainedInstallation {
 struct State {
     installation: String,
     stopped: bool,
-    #[serde(default = "automatic_start_default")]
     automatic_start: bool,
     installed: bool,
-    #[serde(default)]
     removing: bool,
-    #[serde(default)]
     run: Option<Run>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation: Option<activation::Operation>,
-}
-
-fn automatic_start_default() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2710,7 +2703,7 @@ mod tests {
             let data = Directory::open(&fixture.paths.data, false).unwrap();
             data.write_json(
                 c"identity.json",
-                &serde_json::json!({"format":"old", "server":[1]}),
+                &serde_json::json!({"format":"account-local-2", "server":[1]}),
             )
             .unwrap();
             let identity = std::fs::read(fixture.paths.data.join("identity.json")).unwrap();

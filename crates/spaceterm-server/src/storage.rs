@@ -862,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn older_shared_organization_is_incompatible_and_left_unchanged() {
+    fn newer_shared_organization_is_incompatible_and_left_unchanged() {
         let fixture = Fixture::new();
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
@@ -875,9 +875,12 @@ mod tests {
         );
         let mut value = serde_json::to_value(&record).unwrap();
         let shared = value["organization"]["shared"].as_object_mut().unwrap();
-        // Retained organization from before automatic naming has neither field.
-        assert!(shared.remove("names").is_some());
-        assert!(shared.remove("home_directory").is_some());
+        // A newer build's retained organization has a field this build doesn't know.
+        assert!(
+            shared
+                .insert("layout_groups".into(), serde_json::json!([]))
+                .is_none()
+        );
         let original = serde_json::to_vec(&value).unwrap();
         let path = fixture.0.join("identity.json");
         fs::write(&path, &original).unwrap();

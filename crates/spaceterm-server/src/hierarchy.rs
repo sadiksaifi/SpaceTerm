@@ -15,12 +15,10 @@ const MAX_DEVICES: usize = 64;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
     /// Live owning-server Git facts. Excluded from retained Organization.
-    #[serde(default)]
     pub repositories: Option<crate::repository::Snapshot>,
     pub revision: u64,
     pub workspaces: Vec<Workspace>,
     /// Live facts accompany publication only; retained organization never supplies authority.
-    #[serde(default)]
     pub close: Option<CloseInventory>,
 }
 
@@ -221,15 +219,13 @@ pub enum WorktreeMembership {
     Repaired,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tab {
     /// An unpinned Root Tab whose Root Pane reads outside any repository returns to Following.
-    #[serde(default)]
     pub worktree_membership: WorktreeMembership,
     /// Saved membership, retained even when Git no longer lists the directory.
-    #[serde(default)]
     pub worktree: Option<PathBuf>,
     /// Main Worktree discovery locator for this membership, revalidated after each boot.
-    #[serde(default)]
     pub worktree_repository: Option<PathBuf>,
     pub id: Id,
     pub root_pane: Id,
@@ -255,7 +251,6 @@ pub struct Pane {
     /// Live terminal directory presentation. Never retained as restoration authority.
     pub current_directory: Option<PathBuf>,
     /// Protected Repository Source Directory from the owning Terminal Session, never retained.
-    #[serde(default)]
     pub repository_directory: Option<PathBuf>,
     /// Current presentation for every authorized client, independent of Pane control or visibility.
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
@@ -432,6 +427,7 @@ struct WorkspaceName {
     automatic_base: String,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     home_directory: Option<PathBuf>,
     names: Vec<WorkspaceName>,
@@ -443,9 +439,7 @@ pub struct State {
     /// The highest sequence of any device record the server replaced. A device without a record
     /// continues above it, so a replaced device's new edits never reuse a sequence. Its
     /// unresolved Original Operation keeps its own sequence, which [`State::apply`] accepts.
-    #[serde(default)]
     sequence_floor: u64,
-    #[serde(default)]
     creator_boot: Option<Id>,
     /// Durable cleanup intent names original Sessions, never future replacements.
     session_ends: Option<CloseInventory>,
@@ -1437,13 +1431,10 @@ struct JournalRecord {
     last: Option<RetainedOutcome>,
     /// Retired outcomes the client has not presented yet, oldest first. This is the client's
     /// own record; the server's acknowledgement retires an outcome independently.
-    #[serde(default)]
     unseen: Vec<RetainedOutcome>,
     /// How many unseen outcomes the bound ever forgot, and how many of those the client has
     /// said went unseen. Both only grow, so recording a presentation again changes nothing.
-    #[serde(default)]
     forgotten: u64,
-    #[serde(default)]
     forgotten_presented: u64,
 }
 /// Pending shared edits live outside Settings and are fenced to their original authority.
@@ -2977,27 +2968,6 @@ mod tests {
                 (3, 2),
                 "only the one forgotten after that notice still needs one"
             );
-        }
-
-        /// A journal written before the client recorded unseen outcomes still opens, with none.
-        #[test]
-        fn a_journal_without_unseen_outcomes_should_open_with_none() {
-            let root = Root::new();
-            drop(root.open());
-            let directory = crate::storage::Directory::open(&root.0, false).unwrap();
-            directory
-                .write_json(
-                    c"operations.json",
-                    &serde_json::json!({
-                        "server": SERVER,
-                        "client": CLIENT,
-                        "pending": null,
-                        "last": null,
-                    }),
-                )
-                .unwrap();
-
-            assert!(root.open().unseen().is_empty());
         }
     }
 

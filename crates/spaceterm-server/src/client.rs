@@ -1629,7 +1629,14 @@ mod tests {
             client_cache: std::sync::Arc::default(),
         };
         let data = Directory::open(&server.paths.data, true).unwrap();
-        let stopped = serde_json::json!({"installation": "a".repeat(64), "stopped": true, "installed": true, "run": null});
+        let stopped = serde_json::json!({
+            "installation": "a".repeat(64),
+            "stopped": true,
+            "automatic_start": true,
+            "installed": true,
+            "removing": false,
+            "run": null,
+        });
         data.write_json(c"service.json", &stopped).unwrap();
         assert_eq!(server.refresh(), Err(ServerError::Stopped));
         server.setup().unwrap();

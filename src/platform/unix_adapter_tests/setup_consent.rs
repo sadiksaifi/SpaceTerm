@@ -773,7 +773,6 @@ fn status() -> DirectStatus {
         server_name: "Remote".into(),
         listener: spaceterm_server::direct::ListenerState::Off,
         network_addresses: Err(DirectError::Transport),
-        abandoned_setups: Vec::new(),
         setup_generation: 0,
     }
 }

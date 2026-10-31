@@ -67,6 +67,7 @@ pub fn waiting_invitation(
             comparison_code,
             cleanup: Network::new(Answer::Exact),
         }),
+        None,
     );
     (owner, text, comparison_code)
 }
@@ -308,6 +309,7 @@ fn fixture(
         records.clone(),
         credentials.clone(),
         network.clone(),
+        None,
     );
     connections.resume_retained();
     (connections, records, credentials, network)
@@ -331,6 +333,7 @@ fn an_empty_saved_inventory_is_distinct_from_one_that_could_not_be_read() {
             Arc::new(Inventory(document)),
             Arc::new(Credentials::default()),
             Network::new(Answer::Lost),
+            None,
         );
         assert!(!connections.retained_inventory_loaded());
         connections.resume_retained();
@@ -447,6 +450,7 @@ fn connected_fixture(
         records.clone(),
         credentials.clone(),
         Arc::new(ConnectedNetwork),
+        None,
     );
     let mut state = connections.0.state.lock().unwrap();
     let mut ids = Vec::new();
@@ -603,6 +607,7 @@ fn retained_fixture_routes(
         records.clone(),
         credentials.clone(),
         network,
+        None,
     );
     connections.resume_retained();
     (connections, ids, CredentialLock(credentials), records)
@@ -651,6 +656,7 @@ fn offline_self_unpair_removes_only_its_route_and_keeps_exact_recovery_after_rel
         records,
         credentials.clone(),
         recovered_network.clone(),
+        None,
     );
     reopened.resume_retained();
     await_condition(|| reopened.pending_unpairs().is_empty());
@@ -714,6 +720,7 @@ fn locked_native_storage_pauses_quiet_recovery_until_explicit_resume() {
         records,
         credentials.clone(),
         network.clone(),
+        None,
     );
     reopened.resume_retained();
     await_condition(|| reopened.pending_unpairs()[0].state == UnpairProgress::NeedsInteraction);
@@ -756,6 +763,7 @@ fn interrupted_enrollment_resolves_only_its_retained_claim_without_reenrolling_o
         records,
         credentials.clone(),
         network.clone(),
+        None,
     );
     reopened.resume_retained();
     await_condition(|| reopened.pending_unpairs().is_empty());
@@ -911,7 +919,7 @@ fn disconnect_then_connect_ignores_the_previous_attempt_and_never_reopens_its_ga
         finish: Mutex::new(completions),
     });
     let connections =
-        DirectConnections::new("spaceterm-development", records, credentials, network);
+        DirectConnections::new("spaceterm-development", records, credentials, network, None);
     connections.resume_retained();
     connections.connect(&[1; 32]);
     let old_gate = attempts.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -954,6 +962,7 @@ fn two_confirmed_self_unpairs_sharing_a_key_finish_without_waiting_on_each_other
         records,
         credentials.clone(),
         network.clone(),
+        None,
     );
     connections.resume_retained();
     await_condition(|| connections.pending_unpairs().is_empty());
@@ -989,6 +998,7 @@ fn full_recovery_capacity_refuses_new_operations_but_still_removes_its_own_route
         records,
         credentials.clone(),
         network.clone(),
+        None,
     );
     connections.resume_retained();
     assert_eq!(

@@ -5,9 +5,6 @@
 //! Keychain password. An item that `security` creates trusts only `security`, which every build
 //! can run, so a new build reads it without a prompt. Any process of this account can read it the
 //! same way. Release and Development keep their items in-process with [`super::Keychain`].
-//!
-//! A quiet operation first checks in-process that `security` can use the item without asking.
-//! An item an older Preflight build created asks once; "Always Allow" lets `security` use it.
 
 use std::ffi::{CStr, c_char};
 use std::io::Write;
@@ -21,7 +18,6 @@ use security_framework_sys::base::{SecKeychainRef, errSecSuccess};
 use zeroize::Zeroizing;
 
 use super::super::{CredentialError, CredentialStore, Interaction, account, hex};
-use super::tool_access::{ToolAccess, tool_access};
 
 const SECURITY: &str = "/usr/bin/security";
 // SecKeychainStatus bit for an unlocked Keychain.
@@ -59,9 +55,9 @@ impl SecurityTool {
         }
     }
 
-    /// The Keychain and its path. A quiet operation refuses a locked Keychain, because `security`
+    /// The Keychain's path. A quiet operation refuses a locked Keychain, because `security`
     /// would ask the person to unlock it.
-    fn keychain(&self, interaction: Interaction) -> Result<(SecKeychain, String), CredentialError> {
+    fn keychain(&self, interaction: Interaction) -> Result<String, CredentialError> {
         let keychain = match &self.keychain {
             Some(path) => SecKeychain::open(path),
             None => SecKeychain::default(),
@@ -99,25 +95,7 @@ impl SecurityTool {
         if !quotable(path) {
             return Err(CredentialError::Unavailable);
         }
-        Ok((keychain, path.to_owned()))
-    }
-
-    /// Refuses a quiet operation on an item `security` would ask for, such as one an older
-    /// Preflight build created. Returns whether the item exists.
-    fn quiet(
-        &self,
-        keychain: &SecKeychain,
-        account: &str,
-        interaction: Interaction,
-    ) -> Result<bool, CredentialError> {
-        if interaction == Interaction::Requested {
-            return Ok(true);
-        }
-        match tool_access(keychain, &self.service, account)? {
-            ToolAccess::Absent => Ok(false),
-            ToolAccess::Quiet => Ok(true),
-            ToolAccess::Asks => Err(CredentialError::InteractionRequired),
-        }
+        Ok(path.to_owned())
     }
 }
 
@@ -141,11 +119,8 @@ impl CredentialStore for SecurityTool {
         key: &[u8; 32],
         interaction: Interaction,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
-        let (store, keychain) = self.keychain(interaction)?;
+        let keychain = self.keychain(interaction)?;
         let account = account(key);
-        if !self.quiet(&store, &account, interaction)? {
-            return Ok(None);
-        }
         let arguments = [
             "find-generic-password",
             "-s",
@@ -163,7 +138,7 @@ impl CredentialStore for SecurityTool {
     }
 
     fn insert(&self, key: &[u8; 32], secret: &[u8]) -> Result<(), CredentialError> {
-        let (_, keychain) = self.keychain(Interaction::Quiet)?;
+        let keychain = self.keychain(Interaction::Quiet)?;
         // Interactive mode reads the command from standard input, so the secret never appears
         // in this process's arguments. Without -U, an existing item is never replaced.
         let mut command = Zeroizing::new(String::new());
@@ -199,11 +174,8 @@ impl CredentialStore for SecurityTool {
     }
 
     fn remove(&self, key: &[u8; 32], interaction: Interaction) -> Result<(), CredentialError> {
-        let (store, keychain) = self.keychain(interaction)?;
+        let keychain = self.keychain(interaction)?;
         let account = account(key);
-        if !self.quiet(&store, &account, interaction)? {
-            return Ok(());
-        }
         let arguments = [
             "delete-generic-password",
             "-s",
@@ -345,12 +317,8 @@ mod native_tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use security_framework::os::macos::keychain::SecKeychain;
-
     use super::super::super::native_tests::refuses_replacement_and_preserves_other_pairings;
-    use super::super::super::{CredentialError, CredentialStore, Interaction, account, hex};
-    use super::super::service;
-    use super::super::tool_access::{ToolAccess, tool_access};
+    use super::super::super::{CredentialError, CredentialStore, Interaction, hex};
     use super::SecurityTool;
 
     const IDENTITY: &str = "spaceterm-preflight";
@@ -409,47 +377,6 @@ mod native_tests {
             // A locked Keychain would make `security` ask; a quiet read refuses first.
             match store.read(&key, Interaction::Quiet) {
                 Err(CredentialError::InteractionRequired) => Ok(()),
-                _ => Err(CredentialError::Unavailable),
-            }
-        })
-    }
-
-    #[test]
-    fn macos_preflight_store_refuses_quietly_an_item_security_would_ask_for()
-    -> Result<(), CredentialError> {
-        throwaway(|keychain, path| {
-            let key = [9; 32];
-            let account = account(&key);
-            // `-T ""` trusts no application, as an older build's item does not trust `security`.
-            if !security(&[
-                "add-generic-password",
-                "-s",
-                &service(IDENTITY),
-                "-a",
-                &account,
-                "-w",
-                "00",
-                "-T",
-                "",
-                path,
-            ]) {
-                return Err(CredentialError::Unavailable);
-            }
-            let opened = SecKeychain::open(keychain).map_err(|_| CredentialError::Unavailable)?;
-            // Checked before any store operation, so a wrong judgment fails here instead of
-            // letting `security` ask.
-            if tool_access(&opened, &service(IDENTITY), &account)? != ToolAccess::Asks {
-                return Err(CredentialError::Unavailable);
-            }
-            let store = SecurityTool::at(IDENTITY, keychain.to_owned());
-            match (
-                store.read(&key, Interaction::Quiet),
-                store.remove(&key, Interaction::Quiet),
-            ) {
-                (
-                    Err(CredentialError::InteractionRequired),
-                    Err(CredentialError::InteractionRequired),
-                ) => Ok(()),
                 _ => Err(CredentialError::Unavailable),
             }
         })

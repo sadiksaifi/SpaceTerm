@@ -348,6 +348,7 @@ mod tests {
             records.clone(),
             Arc::new(Credentials::default()),
             network.clone(),
+            None,
         );
         // Load through the public startup operation. No saved route opens a connection.
         owner.resume_retained();
@@ -393,6 +394,7 @@ mod tests {
             records.clone(),
             Arc::new(Credentials::default()),
             network.clone(),
+            None,
         );
         owner.resume_retained();
         (owner, records, network)
@@ -474,6 +476,7 @@ mod tests {
                 connections: AtomicUsize::new(0),
                 cancellations: Mutex::default(),
             }),
+            None,
         );
         owner.resume_retained();
         let setup = owner.clone();
