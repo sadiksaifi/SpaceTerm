@@ -1593,6 +1593,11 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
     document.appearance.window.density = ChromeDensity::Comfortable;
     document.terminal_themes =
         crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
+    document.keybindings = serde_json::from_value(serde_json::json!({
+        "new_workspace": "shift-cmd-y", "close_tab": null
+    }))
+    .unwrap();
+    let overrides = document.keybindings.clone();
     let imported = document.terminal_themes[0].id.clone();
     let slot = document.terminal_themes[0].appearance;
     document
@@ -1614,6 +1619,7 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
             .get(slot),
         &imported
     );
+    assert_eq!(document_of(&window, cx).keybindings, overrides);
     select_section(SettingsSectionId::Advanced, cx);
     click("settings-reset-all", cx);
     click("modal-action-settings-reset-all-confirm", cx);
@@ -1628,11 +1634,19 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
     );
     assert_eq!(after.appearance, SettingsDocument::default().appearance);
     after.validate().expect("reset selections remain valid");
+    assert_eq!(
+        serde_json::to_value(&after.keybindings).unwrap(),
+        serde_json::json!({})
+    );
     let retained = harness
         .storage
         .document()
         .expect("the retained document should parse");
     assert_eq!(retained.appearance, SettingsDocument::default().appearance);
+    assert_eq!(
+        serde_json::to_value(&retained.keybindings).unwrap(),
+        serde_json::json!({})
+    );
     assert!(
         retained.terminal_themes.is_empty(),
         "the emptied catalog should reach storage"
