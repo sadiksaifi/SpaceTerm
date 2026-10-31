@@ -38,6 +38,8 @@ pub(crate) use preferences::RepositoryStatusPreferences;
 /// The machine whose filesystem a repository lives on.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum RepositoryMachine {
+    // Local identities only occur in test and Developer Workbench fixtures.
+    #[cfg(any(test, feature = "developer-tools"))]
     Local,
     Remote(RemoteMachineKey),
 }
