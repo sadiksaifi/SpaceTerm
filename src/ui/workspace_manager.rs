@@ -319,8 +319,8 @@ pub(crate) struct WorkspaceManager {
     /// The view the last closed Workspace Window left, which this window presents as its
     /// Workspaces arrive.
     restoration: crate::ui::remembered_view::Restoration,
-    /// Follows the person's keyboard input in this window, which settles the restoration.
-    _person_input: Option<gpui::Subscription>,
+    /// This window's keystrokes, followed only while a remembered choice is held.
+    person_keys: Option<gpui::Subscription>,
 }
 
 impl WorkspaceManager {
@@ -449,9 +449,8 @@ impl WorkspaceManager {
             launch: launch::LocalLaunchState::new(local_server),
             display_order: display_order::DisplayOrder::default(),
             restoration: crate::ui::remembered_view::Restoration::none(),
-            _person_input: None,
+            person_keys: None,
         };
-        manager.follow_person_input(window, cx);
         manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
         manager.follow_direct_servers(window, cx);
@@ -5228,7 +5227,6 @@ impl WorkspaceManager {
         };
         let content = Self::workspace_action_scope(actions, cx)
             .id("workspace-manager")
-            .child(Self::person_pointer_input(cx))
             .bg(gpui_color(super::appearance::chrome(cx).surface(
                 crate::appearance::SurfaceRole::Sheet,
                 super::appearance::chrome(cx).colors.background,
@@ -5296,7 +5294,10 @@ impl WorkspaceManager {
             .children(self.pin_picker.iter().cloned())
             .children(self.active_directory_recovery(cx))
             .children(super::application_commands::overlay(window, cx));
-        ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
+        let presentation = ModalLayer::new(super::window_shell::render(content, window, cx))
+            .transient(transients)
+            .into_any_element();
+        self.person_input_scope(presentation, cx)
     }
 }
 

@@ -337,8 +337,18 @@ pub(crate) fn init(
     if let Err(error) = application_menu.install(cx) {
         eprintln!("failed to install the application menu: {error}");
     }
+    application_menu.follow_chosen_commands(Rc::new(menu_command_chosen), cx);
     crate::keybindings::runtime::attach_application_menu(application_menu, cx);
     Ok(())
+}
+
+/// The person chose a menu-bar command, which acts on the active window. A Workspace Window that
+/// still holds a remembered choice takes it as the person's input.
+pub(crate) fn menu_command_chosen(cx: &mut App) {
+    if let Some(window) = open_active_window(cx).and_then(|window| window.downcast::<WorkspaceManager>())
+    {
+        let _ = window.update(cx, |manager, _, cx| manager.person_input(cx));
+    }
 }
 
 fn switch_workspace_from_global_action(_: &SwitchWorkspace, cx: &mut App) {

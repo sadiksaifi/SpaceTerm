@@ -34,6 +34,10 @@ pub(crate) trait ApplicationMenuAdapter {
     fn perform(&self, _: ApplicationMenuCommand, _: &mut App) -> Result<(), ApplicationMenuError> {
         Err(ApplicationMenuError::Unavailable)
     }
+
+    /// Calls `chosen` after the person chooses a command from the application's menu bar, with
+    /// the pointer or the keyboard. A host without a native menu bar never calls it.
+    fn follow_chosen_commands(&self, _chosen: std::rc::Rc<dyn Fn(&mut App)>, _cx: &mut App) {}
 }
 
 #[cfg(test)]

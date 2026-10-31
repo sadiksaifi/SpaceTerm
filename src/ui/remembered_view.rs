@@ -308,6 +308,12 @@ impl Restoration {
         }
     }
 
+    /// Whether a remembered choice can still move the window's view, which the person's input
+    /// settles: the remembered Active Workspace or its fallback, or a held view.
+    pub(crate) fn awaits(&self) -> bool {
+        !matches!(self.selection, Selection::Settled) || !self.held.is_empty()
+    }
+
     /// Whether the window opened from a remembered view. Such a window never opens a Workspace
     /// for a person on its own, as a new client's first view does.
     pub(crate) const fn remembered(&self) -> bool {

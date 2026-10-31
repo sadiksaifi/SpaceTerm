@@ -868,3 +868,91 @@ fn another_clients_change_never_cancels_the_restore(cx: &mut TestAppContext) {
     sync(&manager, key, &mut window);
     assert_eq!(active_name(&manager, &mut window), "Far");
 }
+
+/// Whether the window listens for the person's input, which it does only while a remembered
+/// choice can still move its view.
+fn listens(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> bool {
+    cx.run_until_parked();
+    manager.read_with(cx, |manager, _| {
+        assert_eq!(
+            manager.person_keys.is_some(),
+            manager.restoration.awaits(),
+            "the keystroke interceptor lives exactly as long as the held choice"
+        );
+        manager.person_keys.is_some()
+    })
+}
+
+/// A command chosen from the menu bar reaches the window as an action with no key or press. The
+/// menu adapter reports it, so the remembered Workspace never replaces the person's choice.
+#[gpui::test]
+fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
+    cx: &mut TestAppContext,
+) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+
+    let (manager, mut window) = open_window(cx);
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    window.update(|window, _| window.activate_window());
+    window.run_until_parked();
+    // Window > Next Tab, chosen with the pointer.
+    cx.update(crate::app::menu_command_chosen);
+    window.run_until_parked();
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+}
+
+/// An input method can consume a key going down, as composing Japanese or Chinese does, but the
+/// key still comes up through the window. That is the person's input too.
+#[gpui::test]
+fn a_key_an_input_method_composes_keeps_the_view_when_the_server_returns(
+    cx: &mut TestAppContext,
+) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+
+    let (manager, mut window) = open_window(cx);
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    focus_content(&manager, &mut window);
+    // Only the key's release reaches the window; the input method took its press.
+    window.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("k").expect("the key parses"),
+    });
+    window.run_until_parked();
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+}
+
+/// The window listens for the person's input only while a remembered choice can still move its
+/// view: never on a first launch, and no longer once the person's input or the server settles it.
+#[gpui::test]
+fn the_window_listens_for_input_only_while_a_choice_is_held(cx: &mut TestAppContext) {
+    let (manager, mut window) = open_window(cx);
+    assert!(!listens(&manager, &mut window), "a first launch holds nothing");
+    close(&manager, &mut window);
+
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+    let (manager, mut window) = open_window(cx);
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present_penguin(&manager, &offline, &[5], &mut window);
+    assert!(listens(&manager, &mut window), "Far is awaited");
+    click_focused_pane(&manager, &mut window);
+    assert!(!listens(&manager, &mut window), "the person's click settles it");
+    close(&manager, &mut window);
+
+    // The person's choice became the view this window left, so the next one awaits nothing
+    // once this computer's server presents it.
+    let (manager, mut window) = open_window(cx);
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    assert!(
+        !listens(&manager, &mut window),
+        "the server presented the remembered Workspace"
+    );
+}

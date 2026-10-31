@@ -6,10 +6,14 @@
 //!
 //! The person's keyboard or pointer input in the window settles what is still awaited, so a
 //! remembered choice never replaces one the person made. The window learns of that input in one
-//! place, [`WorkspaceManager::person_input`], from two listeners that see it before any element
-//! handles it: a keystroke interceptor for this window, and a window-wide capture-phase listener
-//! for presses and scrolling. The window's own changes are not input, so they never settle
-//! anything.
+//! place, [`WorkspaceManager::person_input`], from [`PersonInputScope`], which wraps the window's
+//! whole presentation. While a remembered choice is held, it listens in the capture phase, before
+//! any element handles the input, for presses, scrolling and keys coming up. A key coming up still
+//! arrives after an input method consumed it going down. Keys going down reach a keystroke
+//! interceptor first, because a Shortcut's action runs before any element's own key listener.
+//! Both listen only while a remembered choice is held. A command chosen from the menu bar reaches the window as an action with
+//! no input event, so the menu adapter reports it through [`crate::app::menu_command_chosen`].
+//! The window's own changes are not input, so they never settle anything.
 
 use gpui::{App, Context, Window};
 use spaceterm_server::workspace_order::WorkspaceReference;
@@ -85,51 +89,58 @@ impl WorkspaceManager {
             }
         });
         self.restoration = Restoration::new(view);
+        self.follow_person_input(window, cx);
     }
 
-    /// Follows the person's keystrokes in this window, before anything in it handles them, so
-    /// every key counts, whatever it does.
+    /// Follows the person's input while a remembered choice is held, and stops once nothing is.
+    /// Keystrokes need an interceptor, because a Shortcut's action runs before any element's own
+    /// key listener; it costs every window, so it lives only as long as the held choice.
     pub(super) fn follow_person_input(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let this_window = window.window_handle().window_id();
-        let manager = cx.weak_entity();
-        self._person_input = Some(cx.intercept_keystrokes(move |_, window, cx| {
-            if window.window_handle().window_id() == this_window {
-                let _ = manager.update(cx, |manager, _| manager.person_input());
-            }
-        }));
+        let awaits = self.restoration.awaits();
+        if awaits == self.person_keys.is_some() {
+            return;
+        }
+        self.person_keys = awaits.then(|| {
+            let this_window = window.window_handle().window_id();
+            let manager = cx.weak_entity();
+            cx.intercept_keystrokes(move |_, window, cx| {
+                if window.window_handle().window_id() == this_window {
+                    let _ = manager.update(cx, |manager, cx| manager.person_input(cx));
+                }
+            })
+        });
+        // The next frame listens for presses, scrolling and key releases, or stops.
+        cx.notify();
     }
 
-    /// Listens for the person's presses and scrolling anywhere in this window, before any element
-    /// handles or blocks them. It draws nothing.
-    pub(super) fn person_pointer_input(cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        use gpui::{DispatchPhase, MouseDownEvent, ScrollWheelEvent, Styled as _};
-
-        let manager = cx.weak_entity();
-        gpui::canvas(
-            |_, _, _| {},
-            move |_, _, window, _| {
-                let pressed = manager.clone();
-                window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture {
-                        let _ = pressed.update(cx, |manager, _| manager.person_input());
-                    }
-                });
-                let scrolled = manager.clone();
-                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture {
-                        let _ = scrolled.update(cx, |manager, _| manager.person_input());
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_full()
+    /// Wraps the window's whole presentation in the element that tells it about the person's
+    /// input while a remembered choice can still move the view. Afterwards it listens for nothing.
+    pub(super) fn person_input_scope(
+        &self,
+        child: gpui::AnyElement,
+        cx: &mut Context<Self>,
+    ) -> PersonInputScope {
+        PersonInputScope {
+            child,
+            manager: self.restoration.awaits().then(|| cx.weak_entity()),
+        }
     }
 
-    /// The person gave this window keyboard or pointer input, which is their choice of what it
-    /// shows. Nothing remembered moves the view after it.
-    pub(super) fn person_input(&mut self) {
+    /// The person gave this window input, which is their choice of what it shows. Nothing
+    /// remembered moves the view after it.
+    pub(crate) fn person_input(&mut self, cx: &mut Context<Self>) {
+        if !self.restoration.awaits() {
+            return;
+        }
         self.restoration.person_input();
+        // The keystroke that got here may still be running the interceptor, so it stops after.
+        let manager = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = manager.update(cx, |manager, cx| {
+                manager.person_keys = None;
+                cx.notify();
+            });
+        });
     }
 
     /// Whether the window opened from a remembered view, which never opens a Workspace for a
@@ -189,6 +200,7 @@ impl WorkspaceManager {
         if keyboard && self.workspaces.active_workspace_id() == Some(workspace_id) {
             self.focus(window, cx);
         }
+        self.follow_person_input(window, cx);
     }
 
     /// Settles what the remembered view left open once a server published its own inventory,
@@ -238,6 +250,7 @@ impl WorkspaceManager {
             }
         }
         self.select_remembered_fallback(window, cx);
+        self.follow_person_input(window, cx);
     }
 
     /// Selects the first Workspace in display order when the remembered Active Workspace is gone
@@ -268,5 +281,88 @@ impl WorkspaceManager {
             || self
                 .active_tab_manager()
                 .is_some_and(|manager| manager.read(cx).holds_keyboard(window, cx))
+    }
+}
+
+/// The window's whole presentation, and the person's input to it while a remembered choice is held.
+pub(super) struct PersonInputScope {
+    child: gpui::AnyElement,
+    /// The window to tell, while it holds a remembered choice.
+    manager: Option<gpui::WeakEntity<WorkspaceManager>>,
+}
+
+impl gpui::IntoElement for PersonInputScope {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for PersonInputScope {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use gpui::{DispatchPhase, KeyUpEvent, MouseDownEvent, ScrollWheelEvent};
+
+        if let Some(manager) = &self.manager {
+            let tell = |manager: &gpui::WeakEntity<WorkspaceManager>| {
+                let manager = manager.clone();
+                move |phase: DispatchPhase, cx: &mut App| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = manager.update(cx, |manager, cx| manager.person_input(cx));
+                    }
+                }
+            };
+            // This element is an ancestor of everything the window presents, so input to any of it
+            // passes here first.
+            let key_up = tell(manager);
+            window.on_key_event(move |_: &KeyUpEvent, phase, _, cx| key_up(phase, cx));
+            let pressed = tell(manager);
+            window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| pressed(phase, cx));
+            let scrolled = tell(manager);
+            window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| scrolled(phase, cx));
+        }
+        self.child.paint(window, cx);
     }
 }
