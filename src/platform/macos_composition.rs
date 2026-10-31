@@ -193,8 +193,8 @@ fn compose(
             lifecycle,
             // Programs in Terminal Sessions inherit the grants of this machine's server, so the
             // rows read and set up that server's grants.
-            microphone_access: Some(Rc::clone(&server_permissions)
-                as Rc<dyn crate::platform::microphone_access::MicrophoneAccess>),
+            capture_access: Some(Rc::clone(&server_permissions)
+                as Rc<dyn crate::platform::capture_access::CaptureAccess>),
             permission_access: Some(server_permissions
                 as Rc<dyn crate::platform::permission_access::PermissionAccess>),
             setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)

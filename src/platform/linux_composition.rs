@@ -181,7 +181,7 @@ fn desktop_profile(
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
             &[
                 HostFeature::ApplicationMenuBar,
-                HostFeature::MicrophoneAccess,
+                HostFeature::CaptureAccess,
                 HostFeature::SystemPermissions,
             ],
             super::unix_local_time::local_time,
@@ -294,7 +294,7 @@ fn compose(
                 file_preview: Rc::new(super::linux_file_preview::LinuxFilePreviewFactory::new(bus.clone())),
             },
             lifecycle,
-            microphone_access: None,
+            capture_access: None,
             permission_access: None,
             setup_guide: None,
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
@@ -470,7 +470,7 @@ mod tests {
             assert!(presentation.has_feature(HostFeature::Updates));
             for feature in [
                 HostFeature::ApplicationMenuBar,
-                HostFeature::MicrophoneAccess,
+                HostFeature::CaptureAccess,
                 HostFeature::SystemPermissions,
             ] {
                 assert!(!presentation.has_feature(feature), "{feature:?}");

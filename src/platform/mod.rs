@@ -28,6 +28,8 @@ pub(crate) mod application_menu_model;
 #[cfg(feature = "desktop")]
 pub(crate) mod application_quit;
 #[cfg(feature = "desktop")]
+pub(crate) mod capture_access;
+#[cfg(feature = "desktop")]
 pub(crate) mod desktop_events;
 #[cfg(feature = "desktop")]
 pub(crate) mod display_refresh;
@@ -52,8 +54,6 @@ mod macos_text_input_focus;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
 pub(crate) mod macos_updates;
-#[cfg(feature = "desktop")]
-pub(crate) mod microphone_access;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(

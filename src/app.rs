@@ -1334,8 +1334,8 @@ pub(crate) struct ApplicationCapabilities {
         Rc<dyn crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory>,
     pub(crate) native_services: crate::terminal::native_services::NativeServiceAdapters,
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
-    pub(crate) microphone_access:
-        Option<Rc<dyn crate::platform::microphone_access::MicrophoneAccess>>,
+    /// Reads and requests the microphone and camera grants programs in a Terminal Session inherit.
+    pub(crate) capture_access: Option<Rc<dyn crate::platform::capture_access::CaptureAccess>>,
     /// Reads and recovers the System Permissions programs in a Terminal Session inherit.
     pub(crate) permission_access:
         Option<Rc<dyn crate::platform::permission_access::PermissionAccess>>,
@@ -1623,7 +1623,7 @@ pub(crate) fn initialize_application(
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
         crate::ui::settings_window::PermissionCapabilities {
-            microphone: host.adapters.microphone_access.clone(),
+            capture: host.adapters.capture_access.clone(),
             system_permissions: host.adapters.permission_access.clone(),
             permission_setup: host.permission_setup.get().cloned(),
         },
@@ -2464,7 +2464,7 @@ mod runtime_tests {
                 accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
-                microphone_access: None,
+                capture_access: None,
                 permission_access: None,
                 setup_guide: None,
                 theme_registry: None,

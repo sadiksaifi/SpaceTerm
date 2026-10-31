@@ -4,6 +4,7 @@
 mod add_server;
 mod advanced;
 mod background_image;
+mod capture;
 mod catalog;
 mod clipboard;
 mod command_line_tool;
@@ -16,7 +17,6 @@ mod git;
 mod import;
 mod keybindings;
 pub(crate) mod local_operations;
-mod microphone;
 mod notices;
 mod permission_access;
 pub(crate) mod remote_admin;
@@ -65,7 +65,7 @@ use crate::appearance::{
     UnavailableWindowEffect, WindowBackgroundChoices,
 };
 use crate::desktop_profile::HostFeature;
-use crate::platform::microphone_access::MicrophoneAccess;
+use crate::platform::capture_access::{CaptureAccess, CaptureDevice};
 use crate::platform::permission_access::{PermissionAccess, SystemPermission};
 #[cfg(test)]
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -86,12 +86,12 @@ use crate::ui::sidebar_window::form::{
     CaptionTone, CardEnds, FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button,
     row_horizontal_inset, section_heading,
 };
+use capture::CaptureAccessRow;
 use catalog::SettingsRowId;
 pub(crate) use catalog::SettingsSectionId;
 pub(crate) use command_line_tool::configure_command_line_tool;
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
-use microphone::MicrophoneAccessRow;
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
 pub(crate) use server_selection::configure_server_context;
 pub(crate) use server_update::update_offered;
@@ -126,7 +126,8 @@ impl Global for OpenSettingsWindow {}
 /// The system permissions the Privacy section reads and recovers.
 #[derive(Clone, Default)]
 pub(crate) struct PermissionCapabilities {
-    pub(crate) microphone: Option<Rc<dyn MicrophoneAccess>>,
+    /// The microphone and camera, which programs in a Terminal Session use.
+    pub(crate) capture: Option<Rc<dyn CaptureAccess>>,
     pub(crate) system_permissions: Option<Rc<dyn PermissionAccess>>,
     /// The application's Permission Setup, shared with every Pane.
     pub(crate) permission_setup: Option<Entity<super::permission_setup::PermissionSetup>>,
@@ -415,7 +416,8 @@ pub(crate) struct SettingsWindow {
     focus_handle: FocusHandle,
     navigation: SidebarNavigation,
     window_movement: WindowMovement,
-    microphone_access: MicrophoneAccessRow,
+    microphone_access: CaptureAccessRow,
+    camera_access: CaptureAccessRow,
     /// The sections and rows this desktop presents. A desktop omits only the surfaces of features
     /// it has no equivalent for; an unavailable feature keeps its rows to explain why.
     available_sections: Vec<SettingsSectionId>,
@@ -539,8 +541,11 @@ fn section_feature(section: SettingsSectionId) -> Option<HostFeature> {
 fn row_feature(row: SettingsRowId) -> Option<HostFeature> {
     if let Some(feature) = section_feature(row.descriptor().section) {
         Some(feature)
-    } else if row == SettingsRowId::MicrophoneAccess {
-        Some(HostFeature::MicrophoneAccess)
+    } else if matches!(
+        row,
+        SettingsRowId::MicrophoneAccess | SettingsRowId::CameraAccess
+    ) {
+        Some(HostFeature::CaptureAccess)
     } else {
         permission_access::row_permission(row).map(|_| HostFeature::SystemPermissions)
     }
@@ -699,7 +704,7 @@ impl SettingsWindow {
         // captured.
         cx.observe_window_activation(window, |settings, window, cx| {
             if window.is_window_active() {
-                settings.refresh_microphone_access(cx);
+                settings.refresh_capture_access(cx);
                 settings.refresh_permission_access(cx);
             } else {
                 settings.shortcuts.end_search_capture(cx);
@@ -809,7 +814,11 @@ impl SettingsWindow {
             omitted_rows,
             background_image_choices: 0,
             background_image_lease: None,
-            microphone_access: MicrophoneAccessRow::new(permissions.microphone),
+            microphone_access: CaptureAccessRow::new(
+                CaptureDevice::Microphone,
+                permissions.capture.clone(),
+            ),
+            camera_access: CaptureAccessRow::new(CaptureDevice::Camera, permissions.capture),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
                 permission_setup,
@@ -1626,7 +1635,12 @@ impl SettingsWindow {
             SettingsRowId::TerminalItalic => self.render_italic(cx),
             SettingsRowId::TerminalBoldAsBright => self.render_bold_as_bright(cx),
             SettingsRowId::InstalledThemes => self.render_installed_themes(appearance, cx),
-            SettingsRowId::MicrophoneAccess => self.render_microphone_access(appearance, cx),
+            SettingsRowId::MicrophoneAccess => {
+                self.render_capture_access(CaptureDevice::Microphone, appearance, cx)
+            }
+            SettingsRowId::CameraAccess => {
+                self.render_capture_access(CaptureDevice::Camera, appearance, cx)
+            }
             SettingsRowId::ScreenRecordingAccess => {
                 self.render_permission_access(SystemPermission::ScreenRecording, appearance, cx)
             }
@@ -2592,6 +2606,7 @@ impl SettingsWindow {
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }
+            SettingsRowId::CameraAccess => Some(self.camera_access.presentation().explanation),
             SettingsRowId::ClipboardWrites => {
                 Some("Programs in the Focused Pane can replace clipboard text, including over SSH.")
             }

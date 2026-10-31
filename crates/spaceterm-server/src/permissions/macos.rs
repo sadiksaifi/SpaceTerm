@@ -24,6 +24,7 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 const fn tcc_service(permission: SystemPermission) -> &'static str {
     match permission {
         SystemPermission::Microphone => "Microphone",
+        SystemPermission::Camera => "Camera",
         SystemPermission::ScreenRecording => "ScreenCapture",
         SystemPermission::Accessibility => "Accessibility",
     }
@@ -272,17 +273,34 @@ pub(super) fn in_process_state(permission: SystemPermission) -> PermissionState 
         }
     };
     match permission {
-        SystemPermission::Microphone => capture_state(),
+        SystemPermission::Microphone => capture_state(Capture::Audio),
+        SystemPermission::Camera => capture_state(Capture::Video),
         // SAFETY: Both functions read the calling process's own authorization and take no input.
         SystemPermission::ScreenRecording => granted(unsafe { CGPreflightScreenCaptureAccess() }),
         SystemPermission::Accessibility => granted(unsafe { AXIsProcessTrusted() } != 0),
     }
 }
 
-fn capture_state() -> PermissionState {
-    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
-    // SAFETY: AVFoundation exports this immutable media type when available.
-    let Some(media_type) = (unsafe { AVMediaTypeAudio }) else {
+/// The capture device a prompting permission authorizes.
+#[derive(Clone, Copy)]
+enum Capture {
+    Audio,
+    Video,
+}
+
+impl Capture {
+    fn media_type() -> impl Fn(Self) -> Option<&'static objc2_av_foundation::AVMediaType> {
+        // SAFETY: AVFoundation exports these immutable media types when available.
+        |capture| match capture {
+            Self::Audio => unsafe { objc2_av_foundation::AVMediaTypeAudio },
+            Self::Video => unsafe { objc2_av_foundation::AVMediaTypeVideo },
+        }
+    }
+}
+
+fn capture_state(capture: Capture) -> PermissionState {
+    use objc2_av_foundation::AVCaptureDevice;
+    let Some(media_type) = Capture::media_type()(capture) else {
         return PermissionState::NotGranted;
     };
     // SAFETY: The media type is a valid input for this class method.
@@ -307,7 +325,8 @@ impl Native for System {
     /// Terminal Session's programs do.
     fn request(&self, permission: SystemPermission) -> Result<(), PermissionError> {
         match permission {
-            SystemPermission::Microphone => request_capture(),
+            SystemPermission::Microphone => request_capture(Capture::Audio),
+            SystemPermission::Camera => request_capture(Capture::Video),
             SystemPermission::ScreenRecording | SystemPermission::Accessibility => {
                 let executable =
                     std::env::current_exe().map_err(|_| PermissionError::Unavailable)?;
@@ -359,6 +378,7 @@ impl Native for System {
 fn request_arguments(permission: SystemPermission) -> [&'static str; 4] {
     let name = match permission {
         SystemPermission::Microphone => "microphone",
+        SystemPermission::Camera => "camera",
         SystemPermission::ScreenRecording => "screen-recording",
         SystemPermission::Accessibility => "accessibility",
     };
@@ -369,7 +389,8 @@ fn request_arguments(permission: SystemPermission) -> [&'static str; 4] {
 /// process's responsible bundle in System Settings and may show the system's prompt.
 pub(super) fn request_in_process(permission: SystemPermission) -> Result<(), PermissionError> {
     match permission {
-        SystemPermission::Microphone => request_capture(),
+        SystemPermission::Microphone => request_capture(Capture::Audio),
+        SystemPermission::Camera => request_capture(Capture::Video),
         SystemPermission::ScreenRecording => {
             // SAFETY: The function takes no input. The return value only repeats the grant.
             let _ = unsafe { CGRequestScreenCaptureAccess() };
@@ -379,12 +400,11 @@ pub(super) fn request_in_process(permission: SystemPermission) -> Result<(), Per
     }
 }
 
-fn request_capture() -> Result<(), PermissionError> {
+fn request_capture(capture: Capture) -> Result<(), PermissionError> {
     use block2::RcBlock;
     use objc2::runtime::Bool;
-    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
-    // SAFETY: AVFoundation exports this immutable media type when available.
-    let media_type = unsafe { AVMediaTypeAudio }.ok_or(PermissionError::Unavailable)?;
+    use objc2_av_foundation::AVCaptureDevice;
+    let media_type = Capture::media_type()(capture).ok_or(PermissionError::Unavailable)?;
     // The decision reaches the probe's next read, so the completion keeps nothing.
     let completion = RcBlock::new(|_: Bool| {});
     // SAFETY: The media type is valid here. AVCaptureDevice copies the escaping block, which
@@ -824,6 +844,7 @@ mod tests {
             effects(&scripted),
             [
                 format!("reset Microphone {BUNDLE}"),
+                format!("reset Camera {BUNDLE}"),
                 format!("reset ScreenCapture {BUNDLE}"),
                 format!("reset Accessibility {BUNDLE}"),
             ]
@@ -832,6 +853,7 @@ mod tests {
             SystemPermission::ALL.map(super::super::settings_uri),
             [
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Camera",
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
             ]

@@ -169,8 +169,8 @@ pub enum ServerCommand {
 /// Setting up one System Permission on this machine.
 #[derive(Debug, Subcommand)]
 pub enum PermissionsCommand {
-    /// Ask the system for a permission: a prompt for the microphone, otherwise an entry in System
-    /// Settings to turn on.
+    /// Ask the system for a permission: a prompt for the microphone or camera, otherwise an entry
+    /// in System Settings to turn on.
     Request { permission: PermissionName },
     /// Open System Settings at the list that holds a permission.
     Settings { permission: PermissionName },
@@ -180,6 +180,7 @@ pub enum PermissionsCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum PermissionName {
     Microphone,
+    Camera,
     ScreenRecording,
     /// Device Control on macOS 27 and later.
     #[value(alias = "device-control")]
@@ -191,6 +192,7 @@ impl PermissionName {
         use spaceterm_server::permissions::SystemPermission;
         match self {
             Self::Microphone => SystemPermission::Microphone,
+            Self::Camera => SystemPermission::Camera,
             Self::ScreenRecording => SystemPermission::ScreenRecording,
             Self::Accessibility => SystemPermission::Accessibility,
         }
@@ -200,6 +202,7 @@ impl PermissionName {
         use spaceterm_server::permissions::SystemPermission;
         match permission {
             SystemPermission::Microphone => Self::Microphone,
+            SystemPermission::Camera => Self::Camera,
             SystemPermission::ScreenRecording => Self::ScreenRecording,
             SystemPermission::Accessibility => Self::Accessibility,
         }
@@ -209,6 +212,7 @@ impl PermissionName {
     pub const fn spelling(self) -> &'static str {
         match self {
             Self::Microphone => "microphone",
+            Self::Camera => "camera",
             Self::ScreenRecording => "screen-recording",
             Self::Accessibility => "accessibility",
         }
