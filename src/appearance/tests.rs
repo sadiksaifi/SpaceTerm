@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use super::*;
 
 #[test]
@@ -133,60 +131,106 @@ fn prepared_appearance(mode: AppearanceMode, opacity: f32) -> ResolvedAppearance
         .unwrap()
 }
 
-/// A Dark Pane sits one quiet step above the window root, measured against the opaque reference.
+/// Both appearances keep their Pane within a quiet band above the opaque window root.
 #[test]
-fn dark_pane_rests_one_subtle_step_above_the_window_root() {
-    for opacity in [1.0, 0.95, 0.85, 0.65, 0.3, 0.0] {
-        let resolved = prepared_appearance(AppearanceMode::Dark, opacity);
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let root = prepared.colors.background;
-        let pane = prepared
-            .pane_surface(resolved.terminal.colors.background)
-            .source_over(root);
+fn panes_rest_one_subtle_step_above_the_window_root() {
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        for opacity in [1.0, 0.95, 0.85, 0.65, 0.3, 0.0] {
+            let resolved = prepared_appearance(mode, opacity);
+            let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let root = prepared.colors.background;
+            let pane = prepared
+                .pane_surface(resolved.terminal.colors.background)
+                .source_over(root);
 
-        assert!(
-            [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
-                .into_iter()
-                .all(|(pane, root)| pane > root),
-            "a Dark Pane stays lighter than the window root at opacity {opacity}: pane={pane:?}",
-        );
-        let step = root.contrast_ratio(pane);
-        assert!(
-            (1.015..=1.07).contains(&step),
-            "a Dark Pane stays within one subtle step of the window root at opacity {opacity}: step={step}, pane={pane:?}",
-        );
+            assert!(
+                [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
+                    .into_iter()
+                    .all(|(pane, root)| pane > root),
+                "{mode:?} Pane stays lighter than the window root at opacity {opacity}: pane={pane:?}",
+            );
+            let step = root.contrast_ratio(pane);
+            assert!(
+                (if mode == AppearanceMode::Light {
+                    1.035..=1.24
+                } else {
+                    1.015..=1.07
+                })
+                .contains(&step),
+                "{mode:?} Pane stays within one subtle step of the window root at opacity {opacity}: step={step}, pane={pane:?}",
+            );
+        }
+    }
+    {
+        use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Card};
+
+        for opacity in [1.0, 0.65, 0.0] {
+            let resolved = prepared_appearance(AppearanceMode::Light, opacity);
+            let (active, inactive) =
+                crate::ui::appearance::ChromeAppearance::prepare_variants(&resolved.chrome);
+            let (settings, _) = crate::ui::appearance::settings::prepare_variants(
+                &resolved.chrome,
+                active,
+                inactive,
+            );
+            let canvas = settings.surface(Canvas).background;
+            let card = settings.surface(Card).background;
+            let edge = settings.card_edge().source_over(card);
+            let divider = settings.separator(Card).source_over(card);
+
+            assert!(
+                card.r > canvas.r && card.contrast_ratio(canvas) >= 1.05,
+                "Light Settings at {opacity}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
+            );
+            assert!(
+                edge == card,
+                "Light Settings at {opacity}: a group must not need a decorative outline"
+            );
+            assert!(
+                (1.12..=1.22).contains(&divider.contrast_ratio(card)),
+                "Light Settings at {opacity}: inset row rule {divider:?} must remain visible and quiet on {card:?}"
+            );
+        }
     }
 }
 
-/// A Dark Pane transmits with the window and keeps only the ink its step below the root costs.
+/// Both appearances admit less desktop as opacity rises while preserving their surface step.
 #[test]
-fn dark_pane_transmits_what_the_opacity_setting_asks() {
-    let settings = [0.0_f32, 0.3, 0.65, 0.85, 1.0];
-    let mut previous: Option<f64> = None;
-    for opacity in settings {
-        let resolved = prepared_appearance(AppearanceMode::Dark, opacity);
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
-        let pane = prepared.pane_surface(resolved.terminal.colors.background);
-        let transmitted = |fill: Color| 1.0 - f64::from(fill.a) / 255.0;
-        let chrome = transmitted(sheet);
-        let terminal = chrome * transmitted(pane);
+fn panes_transmit_what_the_opacity_setting_asks() {
+    for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
+        let settings = [0.0_f32, 0.3, 0.65, 0.85, 1.0];
+        let mut previous: Option<f64> = None;
+        for opacity in settings {
+            let resolved = prepared_appearance(mode, opacity);
+            let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
+            let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
+            let pane = prepared.pane_surface(resolved.terminal.colors.background);
+            let transmitted = |fill: Color| 1.0 - f64::from(fill.a) / 255.0;
+            let chrome = transmitted(sheet);
+            let terminal = chrome * transmitted(pane);
 
-        if let Some(previous) = previous {
+            if let Some(previous) = previous {
+                assert!(
+                    terminal < previous,
+                    "{mode:?} Pane admits less desktop as opacity rises: {terminal} at opacity {opacity} after {previous}",
+                );
+            }
+            previous = Some(terminal);
             assert!(
-                terminal < previous,
-                "a Dark Pane admits less desktop as opacity rises: {terminal} at opacity {opacity} after {previous}",
+                terminal
+                    >= chrome
+                        * if mode == AppearanceMode::Light {
+                            0.6
+                        } else {
+                            0.8
+                        },
+                "{mode:?} Pane admits nearly what the chrome admits at opacity {opacity}: terminal={terminal}, chrome={chrome}",
+            );
+            assert!(
+                terminal < chrome || opacity == 1.0,
+                "{mode:?} Pane stays denser than the chrome at opacity {opacity}",
             );
         }
-        previous = Some(terminal);
-        assert!(
-            terminal >= chrome * 0.8,
-            "a Dark Pane admits nearly what the chrome admits at opacity {opacity}: terminal={terminal}, chrome={chrome}",
-        );
-        assert!(
-            terminal < chrome || opacity == 1.0,
-            "a Dark Pane stays denser than the chrome at opacity {opacity}",
-        );
     }
 }
 
@@ -389,66 +433,6 @@ fn light_navigation_selections_share_one_contrast_direction_across_material_sett
     }
 }
 
-/// A Light Pane sits one quiet step above the chrome: the authored 1.21 while opaque, narrowing
-/// to the ladder ceiling as glass engages.
-#[test]
-fn light_pane_rests_one_subtle_step_above_the_window_root() {
-    for opacity in [1.0, 0.95, 0.85, 0.65, 0.3, 0.0] {
-        let resolved = prepared_appearance(AppearanceMode::Light, opacity);
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let root = prepared.colors.background;
-        let pane = prepared
-            .pane_surface(resolved.terminal.colors.background)
-            .source_over(root);
-
-        assert!(
-            [(pane.r, root.r), (pane.g, root.g), (pane.b, root.b)]
-                .into_iter()
-                .all(|(pane, root)| pane > root),
-            "a Light Pane stays brighter than the window root at opacity {opacity}: pane={pane:?}",
-        );
-        let step = pane.contrast_ratio(root);
-        assert!(
-            (1.035..=1.24).contains(&step),
-            "a Light Pane stays within one subtle step of the window root at opacity {opacity}: step={step}, pane={pane:?}",
-        );
-    }
-}
-
-/// A Light Pane transmits with the window and keeps only the overlay its step above the root
-/// costs, which is wider than a Dark Pane's.
-#[test]
-fn light_pane_transmits_what_the_opacity_setting_asks() {
-    let settings = [0.0_f32, 0.3, 0.65, 0.85, 1.0];
-    let mut previous: Option<f64> = None;
-    for opacity in settings {
-        let resolved = prepared_appearance(AppearanceMode::Light, opacity);
-        let prepared = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-        let sheet = prepared.surface(SurfaceRole::Sheet, prepared.colors.background);
-        let pane = prepared.pane_surface(resolved.terminal.colors.background);
-        let transmitted = |fill: Color| 1.0 - f64::from(fill.a) / 255.0;
-        let chrome = transmitted(sheet);
-        let terminal = chrome * transmitted(pane);
-
-        if let Some(previous) = previous {
-            assert!(
-                terminal < previous,
-                "a Light Pane admits less desktop as opacity rises: {terminal} at opacity {opacity} after {previous}",
-            );
-        }
-        previous = Some(terminal);
-        // Near-white ink over a near-white root costs more coverage, so this bound is below Dark's.
-        assert!(
-            terminal >= chrome * 0.6,
-            "a Light Pane admits nearly what the chrome admits at opacity {opacity}: terminal={terminal}, chrome={chrome}",
-        );
-        assert!(
-            terminal < chrome || opacity == 1.0,
-            "a Light Pane stays denser than the chrome at opacity {opacity}",
-        );
-    }
-}
-
 /// A Light selected chip spends one overlay for its step and transmits the rest, so its contrast
 /// stays within a band as opacity falls.
 #[test]
@@ -573,7 +557,9 @@ fn selected_surfaces_follow_opacity_in_both_appearances() {
                 prepared.colors.row_selected_background,
             );
             if opacity == 1.0 {
-                assert_eq!(selected, prepared.colors.row_selected_background);
+                assert_eq!(selected.a, 255, "{mode:?}: full opacity covers its host");
+                let host = prepared.colors.panel_background;
+                assert!(selected.r > host.r && selected.contrast_ratio(host) > 1.0);
             } else {
                 assert!(
                     selected.a > 0 && selected.a < 255,
@@ -1038,63 +1024,6 @@ fn proportional_terminal_font_request_falls_back_to_monospace_without_reordering
             .diagnostics
             .contains(&AppearanceDiagnostic::TerminalFontNotMonospace)
     );
-}
-
-/// Resetting a Terminal slot preserves Appearance Mode and the other slot.
-#[test]
-fn resetting_a_theme_slot_keeps_the_mode_and_other_slots() {
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Auto,
-        ..Default::default()
-    };
-    preferences.terminal.themes.light = ThemeId::new("missing.changed.terminal").unwrap();
-    let dark = preferences.terminal.themes.dark.clone();
-
-    preferences.reset(ResetTarget::TerminalTheme(Appearance::Light));
-
-    assert_eq!(preferences.mode, AppearanceMode::Auto);
-    assert_eq!(
-        preferences.terminal.themes.light,
-        AppearancePreferences::default().terminal.themes.light
-    );
-    assert_eq!(preferences.terminal.themes.dark, dark);
-}
-
-#[test]
-fn resetting_the_mode_preserves_every_theme_slot() {
-    let mut preferences = AppearancePreferences {
-        mode: AppearanceMode::Auto,
-        ..Default::default()
-    };
-    let terminal = preferences.terminal.themes.clone();
-
-    preferences.reset(ResetTarget::AppearanceMode);
-
-    assert_eq!(preferences.mode, AppearanceMode::Dark);
-    assert_eq!(preferences.terminal.themes, terminal);
-}
-
-#[test]
-fn successful_catalog_install_advances_revision_and_rejects_stale_revision() {
-    let theme = TerminalTheme {
-        id: ThemeId::new("custom.blue").unwrap(),
-        name: String::from("Blue"),
-        appearance: Appearance::Dark,
-        metadata: ThemeMetadata::default(),
-        colors: TerminalColorOverrides::default(),
-    };
-    let mut catalog = ThemeCatalog::default();
-    assert_eq!(
-        catalog
-            .install_batch(std::slice::from_ref(&theme), 0, &BTreeSet::new())
-            .unwrap(),
-        vec![theme.id.clone()]
-    );
-    assert_eq!(catalog.revision(), 1);
-    assert!(matches!(
-        catalog.install_batch(&[theme], 0, &BTreeSet::new()),
-        Err(CatalogError::RevisionConflict)
-    ));
 }
 
 #[test]

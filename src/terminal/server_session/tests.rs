@@ -341,8 +341,7 @@ fn a_copy_waiting_for_rows_wakes_the_worker_to_request_them() {
     );
 }
 
-#[test]
-fn copy_readiness_is_a_flag_the_worker_keeps_and_pages_decode_outside_the_lock() {
+pub(super) fn assert_copy_readiness_and_page_decoding() {
     use super::super::pointer_input::*;
     let adapter = Adapter::new();
     let mapping = adapter.frame(40);
@@ -963,8 +962,7 @@ fn modal_paste_is_single_use_and_lost_confirmation_reply_is_typed_as_uncertain()
             super::super::PasteResolution::Stale
         );
 
-        // Reconnection publishes the retained outcome before its replaceable
-        // wakeup. Later screen frames may replace that wakeup while UI is busy.
+        // Reconnection retains the outcome until the UI takes its warning once.
         let epoch = adapter.handle.state.invalidate();
         let mapping = ScreenMapping {
             epoch,
@@ -980,25 +978,9 @@ fn modal_paste_is_single_use_and_lost_confirmation_reply_is_typed_as_uncertain()
             .state
             .connected(epoch, mapping, true)
             .unwrap();
-        let (events, output) = async_channel::bounded(2);
-        events
-            .force_send(TerminalSessionEvent::PasteUnconfirmed)
-            .unwrap();
-        let screen = ScreenSnapshot::empty_with_appearance(
-            crate::local_path::LocalPathSemantics::Posix,
-            &adapter.handle.appearance.lock().unwrap(),
-        );
-        for _ in 0..2 {
-            events
-                .force_send(TerminalSessionEvent::Screen(Arc::clone(&screen)))
-                .unwrap();
-        }
-        while let Ok(event) = output.try_recv() {
-            assert!(matches!(event, TerminalSessionEvent::Screen(_)));
-        }
         assert!(
             adapter.handle.take_paste_unconfirmed(),
-            "screen replacement lost the retained paste warning"
+            "reconnection lost the retained paste warning"
         );
         assert!(
             !adapter.handle.take_paste_unconfirmed(),

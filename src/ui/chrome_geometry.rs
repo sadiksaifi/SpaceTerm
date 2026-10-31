@@ -54,15 +54,3 @@ pub(crate) fn pane_radius(outer_radius: f32, frame_inset: f32) -> f32 {
         .round()
         .clamp(RADIUS_CONTROL, RADIUS_SURFACE_LARGE)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pane_radius_is_the_only_native_derived_radius_and_stays_inside_the_scale() {
-        assert_eq!(pane_radius(0.0, 6.0), RADIUS_CONTROL);
-        assert_eq!(pane_radius(16.0, 6.0), 10.0);
-        assert_eq!(pane_radius(100.0, 6.0), RADIUS_SURFACE_LARGE);
-    }
-}

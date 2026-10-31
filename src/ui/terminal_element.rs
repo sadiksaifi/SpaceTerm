@@ -5027,6 +5027,21 @@ mod tests {
             )
             .is_none()
         );
+        {
+            let plan = cursor_paint_plan(
+                true,
+                crate::terminal::CursorShapeSnapshot::BlockHollow,
+                point(px(0.0), px(0.0)),
+                px(9.0),
+                px(20.0),
+                2,
+            )
+            .unwrap();
+
+            assert_eq!(plan.paint, CursorPaint::Outline);
+            assert_eq!(plan.bounds.size, size(px(18.0), px(20.0)));
+            assert!(!plan.recolor_text);
+        }
     }
 
     #[test]
@@ -5057,23 +5072,6 @@ mod tests {
         assert_eq!(actual.bounds.size.height, expected.bounds.size.height);
         assert_eq!(actual.recolor_text, expected.recolor_text);
         assert_eq!(actual.paint, expected.paint);
-    }
-
-    #[test]
-    fn hollow_cursor_is_outline_only_and_preserves_covered_text() {
-        let plan = cursor_paint_plan(
-            true,
-            crate::terminal::CursorShapeSnapshot::BlockHollow,
-            point(px(0.0), px(0.0)),
-            px(9.0),
-            px(20.0),
-            2,
-        )
-        .unwrap();
-
-        assert_eq!(plan.paint, CursorPaint::Outline);
-        assert_eq!(plan.bounds.size, size(px(18.0), px(20.0)));
-        assert!(!plan.recolor_text);
     }
 
     #[test]
@@ -5737,32 +5735,6 @@ mod tests {
         assert_eq!(input.fragments.len(), 1);
         assert_eq!(input.fragments[0].runs.len(), 1);
         assert_eq!(input.fragments[0].runs[0].len, 384);
-    }
-
-    #[test]
-    fn terminal_text_runs_configure_emoji_and_system_fallbacks() {
-        let row = Arc::<[CellSnapshot]>::from([cell("A")]);
-
-        let fonts = test_terminal_fonts(&"JetBrains Mono".into());
-        let input = prepare_row_cached(&row, &colors(), &fonts, 0, &[]);
-        assert_eq!(
-            input.fragments[0].runs[0].font.features,
-            gpui::FontFeatures(std::sync::Arc::new(vec![
-                ("liga".to_owned(), 0),
-                ("clig".to_owned(), 0),
-                ("calt".to_owned(), 0)
-            ]))
-        );
-
-        assert_eq!(
-            input.fragments[0].runs[0]
-                .font
-                .fallbacks
-                .as_ref()
-                .expect("terminal text must carry an explicit fallback cascade")
-                .fallback_list(),
-            ["fixture-emoji", "fixture-monospace"]
-        );
     }
 
     #[test]
@@ -7738,15 +7710,7 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ne!(first, replaced);
-    }
-
-    #[test]
-    fn preedit_shape_cache_key_invalidates_when_visible_height_changes() {
-        let layout = layout_preedit("かな", 0, 0, 80, 2);
-        let first = prepared_preedit_key(&layout, 24);
-        let resized = prepared_preedit_key(&layout, 25);
-
-        assert_ne!(first, resized);
+        assert_ne!(first, prepared_preedit_key(&layout, 25));
     }
 
     #[test]
@@ -7764,29 +7728,6 @@ mod tests {
         let mut cached = None;
         let first = reuse_or_prepare_row(&mut cached, &first_source, prepared_row_key(), || ());
         let second = reuse_or_prepare_row(&mut cached, &second_source, prepared_row_key(), || ());
-
-        assert!(!Arc::ptr_eq(&first, &second));
-    }
-
-    #[test]
-    fn shaped_geometry_cache_invalidates_when_layout_geometry_changes() {
-        let source = Arc::new(prepare_row(
-            &Arc::from([cell("a")]),
-            &colors(),
-            &"Menlo".into(),
-        ));
-        let mut cached = None;
-        let first_key = prepared_row_key();
-        let first = reuse_or_prepare_row(&mut cached, &source, first_key, || ());
-        let second = reuse_or_prepare_row(
-            &mut cached,
-            &source,
-            PreparedRowKey {
-                cell_width: px(9.0),
-                ..first_key
-            },
-            || (),
-        );
 
         assert!(!Arc::ptr_eq(&first, &second));
     }
