@@ -104,7 +104,7 @@ mod exercise {
                 {
                     return Err("cleanup preserved changed test Workspace membership".into());
                 }
-                let target = CloseTarget::Workspace { workspace };
+                let target = CloseTarget::KillWorkspace { workspace };
                 let confirmation = inventory
                     .close_confirmation(target)
                     .ok_or("cleanup confirmation missing")?;

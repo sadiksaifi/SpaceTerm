@@ -574,7 +574,7 @@ impl EchoPane {
         if inventory.close.as_ref().map(|close| close.boot) != Some(self.boot) {
             return fail("the server restarted; nothing to close");
         }
-        let target = CloseTarget::Workspace {
+        let target = CloseTarget::KillWorkspace {
             workspace: self.workspace,
         };
         let Some(confirmation) = inventory.close_confirmation(target) else {

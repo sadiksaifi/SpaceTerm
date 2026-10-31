@@ -1060,13 +1060,13 @@ fn optimistic_pending_tab_split_and_later_navigation_keep_the_frame_and_keyboard
 #[gpui::test]
 fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mut TestAppContext) {
     let (harness, cx) = window_harness(cx);
-    cx.dispatch_action(crate::ui::CreateTab);
+    cx.dispatch_action(crate::ui::NewTab);
     let committed = harness.server.finish(false, true);
     assert!(matches!(committed.outcome, Outcome::Accepted { .. }));
     let bound_source = harness.server.inventory().workspaces[0].tabs[1].root_pane;
     // The worker published accepted membership, but its original is still awaiting ack. The
     // next key event observes that outcome before the regular window membership poll binds it.
-    cx.dispatch_action(crate::ui::CreateTab);
+    cx.dispatch_action(crate::ui::NewTab);
     assert_eq!(
         harness.server.dispatched().len(),
         1,
@@ -1094,7 +1094,7 @@ fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mu
         "binding may retire the view alias only after queued intent owns its canonical source"
     );
     project_window(&harness, cx);
-    cx.dispatch_action(crate::ui::CreateTab);
+    cx.dispatch_action(crate::ui::NewTab);
     assert!(matches!(
         harness.server.finish(true, true).outcome,
         Outcome::Accepted { .. }
@@ -1108,7 +1108,7 @@ fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mu
 fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut TestAppContext) {
     let (harness, cx) = window_harness(cx);
     for _ in 0..15 {
-        cx.dispatch_action(crate::ui::CreateTab);
+        cx.dispatch_action(crate::ui::NewTab);
     }
     cx.dispatch_action(crate::ui::PreviousTab);
     let selected = local_view(&harness, cx);
@@ -1156,7 +1156,7 @@ fn readiness_reserves_foreground_start_capacity_during_a_hidden_creation_burst(
         pane.admitted();
     }
     for _ in 0..15 {
-        cx.dispatch_action(crate::ui::CreateTab);
+        cx.dispatch_action(crate::ui::NewTab);
     }
     cx.dispatch_action(crate::ui::ActivateTab1);
     for _ in 0..15 {
@@ -1455,12 +1455,12 @@ fn optimistic_workspace_close_keeps_its_host_through_a_lost_ack() {
     let server = DelayedServer::new();
     let (_, mut model) = model(&server);
     let workspace = server.inventory().workspaces[0].id;
-    let target = spaceterm_server::hierarchy::CloseTarget::Workspace { workspace };
+    let target = spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace };
     let approval = model.close_approval(target).unwrap();
     assert_eq!(
         model.close(
             approval,
-            crate::close_confirmation::CloseTarget::Workspace(first_workspace_id())
+            crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id())
         ),
         SharedSubmission::Submitted
     );
@@ -1488,11 +1488,11 @@ fn a_committed_original_keeps_resolving_without_a_workspace_window(cx: &mut Test
     let (source, mut model) = model(&server);
     let workspace = server.inventory().workspaces[0].id;
     let approval = model
-        .close_approval(spaceterm_server::hierarchy::CloseTarget::Workspace { workspace })
+        .close_approval(spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace })
         .unwrap();
     model.close(
         approval,
-        crate::close_confirmation::CloseTarget::Workspace(first_workspace_id()),
+        crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id()),
     );
     server.finish(false, true);
     model.poll();

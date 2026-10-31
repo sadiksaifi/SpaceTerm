@@ -21,7 +21,7 @@ use super::super::sidebar_motion::SidebarMotion;
 use super::super::workspace_creation::WorkspaceCreation;
 use super::super::workspace_frame::WorkspaceFrame;
 use super::launch::LaunchAction;
-use super::{SwitchWorkspace, WindowDragRegion, WorkspaceManager};
+use super::{ChooseWorkspace, WindowDragRegion, WorkspaceManager};
 use crate::ui::appearance::gpui_color;
 
 pub(super) const EMPTY_TITLE: &str = "No Workspaces Attached";
@@ -305,7 +305,7 @@ impl WorkspaceManager {
                 .debug_selector("empty-workspace-choose")
                 .tooltip(
                     Tooltip::new("empty-workspace-choose-tooltip", "Choose Workspace")
-                        .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                        .shortcut(presentation.shortcut(&ChooseWorkspace).unwrap_or_default()),
                 )
                 .on_activate(move |_, window, cx| {
                     let _ = choose_manager.update(cx, |manager, cx| {

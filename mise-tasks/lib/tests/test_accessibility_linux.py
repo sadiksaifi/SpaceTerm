@@ -438,7 +438,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         self.probe.wait = lambda predicate, classification: (
             predicate() or self.smoke.require(False, classification)
         )
-        switch = Accessible("button", name="Switch Workspace")
+        switch = Accessible("button", name="Choose Workspace")
         local = Accessible("menu item", name="Local Workspace")
         field = Accessible("entry", name="Workspace name")
         query = ""

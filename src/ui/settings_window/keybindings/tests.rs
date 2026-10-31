@@ -325,15 +325,15 @@ fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mu
         "shift-f3",
         "ctrl-shift-y",
     ] {
-        record(&window, Command::CloseWorkspace, chord, cx);
+        record(&window, Command::KillWorkspace, chord, cx);
         assert_eq!(
-            retained(&window, Command::CloseWorkspace, cx),
+            retained(&window, Command::KillWorkspace, cx),
             Some(Some(shortcut(chord))),
             "{chord}"
         );
     }
 
-    let accepted = retained(&window, Command::CloseWorkspace, cx);
+    let accepted = retained(&window, Command::KillWorkspace, cx);
     for (chord, refusal) in [
         ("ctrl-c", "Ctrl+C is reserved for terminal programs."),
         ("ctrl-2", "Ctrl+2 is reserved for terminal programs."),
@@ -360,9 +360,9 @@ fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mu
         ("ctrl-,", "Ctrl+, is reserved for Settings."),
         ("cmd-t", "Primary+T is reserved for desktop shortcuts."),
     ] {
-        record(&window, Command::CloseWorkspace, chord, cx);
+        record(&window, Command::KillWorkspace, chord, cx);
         assert_eq!(
-            description(&window, Command::CloseWorkspace, cx),
+            description(&window, Command::KillWorkspace, cx),
             Some(ShortcutDescription {
                 text: refusal.into(),
                 tone: CaptionTone::Error,
@@ -372,7 +372,7 @@ fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mu
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert_eq!(
-            retained(&window, Command::CloseWorkspace, cx),
+            retained(&window, Command::KillWorkspace, cx),
             accepted,
             "{chord}"
         );
@@ -470,12 +470,12 @@ fn delete_unassigns_and_the_row_reset_restores_the_default(cx: &mut TestAppConte
 #[gpui::test]
 fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(
-        with_keybindings(r#"{"create_tab":"ctrl-c","new_worktree":"cmd-q"}"#),
+        with_keybindings(r#"{"new_tab":"ctrl-c","new_worktree":"cmd-q"}"#),
         cx,
     );
 
     assert_eq!(
-        description(&window, Command::CreateTab, cx),
+        description(&window, Command::NewTab, cx),
         Some(ShortcutDescription {
             text: "Ctrl+C is reserved for terminal input. Default shortcut active.".into(),
             tone: CaptionTone::Warning,
@@ -484,7 +484,7 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
     assert_eq!(
         window.read_with(cx, |settings, cx| settings
             .resolved_keymap(cx)
-            .shortcut(Command::CreateTab)
+            .shortcut(Command::NewTab)
             .cloned()),
         Some(shortcut("cmd-t"))
     );
@@ -498,7 +498,7 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
     );
     // Both overrides stay retained until the person changes them.
     assert_eq!(
-        retained(&window, Command::CreateTab, cx),
+        retained(&window, Command::NewTab, cx),
         Some(Some(shortcut("ctrl-c")))
     );
     assert_eq!(
@@ -506,10 +506,10 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
         Some(Some(shortcut("cmd-q")))
     );
     // Focus scrolls the row, which sits below the first screen of Commands, into view.
-    focus_recorder(&window, Command::CreateTab, cx);
-    click("settings-row-shortcut-create-tab-reset", cx);
-    assert_eq!(retained(&window, Command::CreateTab, cx), None);
-    assert_eq!(description(&window, Command::CreateTab, cx), None);
+    focus_recorder(&window, Command::NewTab, cx);
+    click("settings-row-shortcut-new-tab-reset", cx);
+    assert_eq!(retained(&window, Command::NewTab, cx), None);
+    assert_eq!(description(&window, Command::NewTab, cx), None);
 }
 
 #[gpui::test]
@@ -532,7 +532,7 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
 
 #[gpui::test]
 fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut TestAppContext) {
-    let document = with_keybindings(r#"{"create_tab":"cmd-t","split_right":"ctrl-shift-t"}"#);
+    let document = with_keybindings(r#"{"new_tab":"cmd-t","split_right":"ctrl-shift-t"}"#);
     let (window, cx) = open_keybindings_on(
         MemoryStorage::with_document(&document),
         |cx| {
@@ -542,7 +542,7 @@ fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut Tes
                 TerminalConventions::ControlShiftShortcuts,
                 [
                     (
-                        Command::CreateTab,
+                        Command::NewTab,
                         Some(DefaultBinding::new("ctrl-shift-t", &[])),
                     ),
                     (
@@ -562,34 +562,34 @@ fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut Tes
     );
 
     assert_eq!(
-        description(&window, Command::CreateTab, cx),
+        description(&window, Command::NewTab, cx),
         Some(ShortcutDescription {
             text: "Primary+T is reserved for desktop shortcuts. Default shortcut assigned to Split Right.".into(),
             tone: CaptionTone::Warning,
         })
     );
     assert_eq!(
-        retained(&window, Command::CreateTab, cx),
+        retained(&window, Command::NewTab, cx),
         Some(Some(shortcut("cmd-t")))
     );
     assert_eq!(
         window.read_with(cx, |settings, cx| settings
             .resolved_keymap(cx)
-            .shortcut(Command::CreateTab)
+            .shortcut(Command::NewTab)
             .cloned()),
         None
     );
     // Focus scrolls the row, which sits below the first screen of Commands, into view.
-    focus_recorder(&window, Command::CreateTab, cx);
-    click("settings-row-shortcut-create-tab-reset", cx);
+    focus_recorder(&window, Command::NewTab, cx);
+    click("settings-row-shortcut-new-tab-reset", cx);
 
-    assert_eq!(retained(&window, Command::CreateTab, cx), None);
+    assert_eq!(retained(&window, Command::NewTab, cx), None);
     assert_eq!(retained(&window, Command::SplitRight, cx), Some(None));
-    assert_eq!(description(&window, Command::CreateTab, cx), None);
+    assert_eq!(description(&window, Command::NewTab, cx), None);
     assert_eq!(
         window.read_with(cx, |settings, cx| settings
             .resolved_keymap(cx)
-            .shortcut(Command::CreateTab)
+            .shortcut(Command::NewTab)
             .cloned()),
         Some(shortcut("ctrl-shift-t"))
     );
@@ -660,7 +660,7 @@ fn searching_by_shortcut_finds_the_command_the_chord_runs(cx: &mut TestAppContex
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
 
-    assert_eq!(found(&window, cx), vec![Command::CreateTab]);
+    assert_eq!(found(&window, cx), vec![Command::NewTab]);
     assert_eq!(search_value(&window, cx), "Primary+T");
     // Recording continues, so the next chord replaces the first.
     assert!(is_searching_by_shortcut(&window, cx));

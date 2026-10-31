@@ -28,14 +28,14 @@ use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
-    ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
-    CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
-    FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    MoveTabLeft, MoveTabRight, NewWorkspace, NewWorktree, NextTab, NextWorktree,
+    ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ChooseWorkspace, ClosePane,
+    CloseTab, CloseTerminalFind, CopySelection, FindNext, FindPrevious, FocusNextPane,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane, KillWorkspace,
+    MoveTabLeft, MoveTabRight, NewTab, NewWorkspace, NewWorktree, NextTab, NextWorktree,
     OpenLocalDirectory, OpenTerminalFind, PreviousTab, PreviousWorktree, ScrollPageDown,
     ScrollPageUp, ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight,
-    SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
-    ToggleSidebar, ToggleSidebarFocus,
+    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{CloseConfirmation, CloseTarget};
@@ -1895,14 +1895,14 @@ impl WorkspaceManager {
             }
             WorkspaceMenuCommand::Detach => self.detach_shared_workspace(workspace_id, window, cx),
             WorkspaceMenuCommand::Close => {
-                self.request_close(CloseTarget::Workspace(workspace_id), window, cx)
+                self.request_close(CloseTarget::KillWorkspace(workspace_id), window, cx)
             }
         }
     }
 
-    fn on_switch_workspace(
+    fn on_choose_workspace(
         &mut self,
-        _: &SwitchWorkspace,
+        _: &ChooseWorkspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1983,15 +1983,15 @@ impl WorkspaceManager {
         }
     }
 
-    fn on_close_workspace(
+    fn on_kill_workspace(
         &mut self,
-        _: &CloseWorkspace,
+        _: &KillWorkspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // The empty view has no Workspace to close.
         if let Some(workspace_id) = self.workspaces.active_workspace_id() {
-            self.request_close(CloseTarget::Workspace(workspace_id), window, cx);
+            self.request_close(CloseTarget::KillWorkspace(workspace_id), window, cx);
         }
     }
 
@@ -2362,7 +2362,7 @@ impl WorkspaceManager {
         .tooltip(
             Tooltip::new("workspace-switcher-tooltip", "Choose Workspace")
                 .debug_selector("workspace-switcher-tooltip")
-                .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                .shortcut(presentation.shortcut(&ChooseWorkspace).unwrap_or_default()),
         )
         .when_some(
             collapsed_identity,
@@ -2378,7 +2378,7 @@ impl WorkspaceManager {
                     .full_width(motion.is_none())
                     .tooltip(
                         tooltip
-                            .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                            .shortcut(presentation.shortcut(&ChooseWorkspace).unwrap_or_default()),
                     )
             },
         )
@@ -3630,7 +3630,7 @@ impl WorkspaceManager {
                 .map(|entry| entry.payload().read(cx))
         };
         match target {
-            CloseTarget::Workspace(workspace_id) => Some(ServerCloseTarget::Workspace {
+            CloseTarget::KillWorkspace(workspace_id) => Some(ServerCloseTarget::KillWorkspace {
                 workspace: shared.facts(workspace_id)?.server,
             }),
             CloseTarget::Tab {
@@ -5019,10 +5019,10 @@ impl WorkspaceManager {
             })
             .when(actions.workspaces, |scope| {
                 scope
-                    .on_action(cx.listener(Self::on_switch_workspace))
+                    .on_action(cx.listener(Self::on_choose_workspace))
                     .on_action(cx.listener(Self::on_new_workspace))
                     .on_action(cx.listener(Self::on_open_local_directory))
-                    .on_action(cx.listener(Self::on_close_workspace))
+                    .on_action(cx.listener(Self::on_kill_workspace))
                     .on_action(cx.listener(Self::on_activate_workspace_1))
                     .on_action(cx.listener(Self::on_activate_workspace_2))
                     .on_action(cx.listener(Self::on_activate_workspace_3))
@@ -5036,7 +5036,7 @@ impl WorkspaceManager {
                     .on_action(cx.listener(Self::on_toggle_sidebar_focus))
             })
             .on_action(cx.listener(Self::forward_active_terminal_action::<CopySelection>))
-            .on_action(cx.listener(Self::forward_active_terminal_action::<CreateTab>))
+            .on_action(cx.listener(Self::forward_active_terminal_action::<NewTab>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab1>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab2>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab3>))
@@ -5177,7 +5177,7 @@ impl SharedCloseKeyboard {
 /// The Workspace a close target belongs to.
 const fn close_target_workspace(target: CloseTarget) -> WorkspaceId {
     match target {
-        CloseTarget::Workspace(workspace_id)
+        CloseTarget::KillWorkspace(workspace_id)
         | CloseTarget::Tab { workspace_id, .. }
         | CloseTarget::Pane { workspace_id, .. }
         | CloseTarget::Worktree { workspace_id, .. } => workspace_id,

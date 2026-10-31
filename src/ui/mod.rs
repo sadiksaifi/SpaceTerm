@@ -124,7 +124,7 @@ actions!(
         FocusNextPane,
         TogglePaneZoom,
         ShowRepositoryStatus,
-        CreateTab,
+        NewTab,
         ActivateTab1,
         ActivateTab2,
         ActivateTab3,
@@ -149,8 +149,8 @@ actions!(
         ActivateWorkspace9,
         ClosePane,
         CloseTab,
-        CloseWorkspace,
-        SwitchWorkspace,
+        KillWorkspace,
+        ChooseWorkspace,
         NewWorkspace,
         OpenLocalDirectory,
         NewWorktree,
@@ -340,13 +340,13 @@ mod tests {
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
-            ("cmd-shift-k", SwitchWorkspace.name()),
+            ("cmd-shift-k", ChooseWorkspace.name()),
             ("cmd-n", NewWorkspace.name()),
             ("cmd-o", OpenLocalDirectory.name()),
-            ("cmd-t", CreateTab.name()),
+            ("cmd-t", NewTab.name()),
             ("cmd-w", ClosePane.name()),
             ("cmd-shift-w", CloseTab.name()),
-            ("ctrl-cmd-w", CloseWorkspace.name()),
+            ("ctrl-cmd-w", KillWorkspace.name()),
         ];
         let actual = cx.update(|cx| {
             expected

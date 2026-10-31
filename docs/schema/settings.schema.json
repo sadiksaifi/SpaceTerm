@@ -464,7 +464,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "switch_workspace": {
+        "choose_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
         "new_workspace": {
@@ -482,7 +482,7 @@
         "previous_worktree": {
           "$ref": "#/$defs/shortcutOverride"
         },
-        "close_workspace": {
+        "kill_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
         "activate_workspace1": {
@@ -512,7 +512,7 @@
         "activate_workspace9": {
           "$ref": "#/$defs/shortcutOverride"
         },
-        "create_tab": {
+        "new_tab": {
           "$ref": "#/$defs/shortcutOverride"
         },
         "close_tab": {

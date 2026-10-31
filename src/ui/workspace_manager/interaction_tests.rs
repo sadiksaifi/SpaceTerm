@@ -201,7 +201,7 @@ fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
         harness.manager.update(cx, |manager, cx| {
             manager.sync_shared_workspaces(remote, window, cx);
             manager.request_shared_close(
-                crate::close_confirmation::CloseTarget::Workspace(far),
+                crate::close_confirmation::CloseTarget::KillWorkspace(far),
                 window,
                 cx,
             );
@@ -236,7 +236,7 @@ fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
             .payload()
             .entity_id()
     });
-    cx.dispatch_action(crate::ui::CloseWorkspace);
+    cx.dispatch_action(crate::ui::KillWorkspace);
     cx.run_until_parked();
     click("modal-action-shared-close-confirm", cx);
     assert_eq!(
@@ -274,7 +274,7 @@ fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &m
 
     let (harness, cx) = shared_close_harness(cx);
     assert!(shared_close_terminal_is_focused(&harness, cx));
-    cx.dispatch_action(crate::ui::CloseWorkspace);
+    cx.dispatch_action(crate::ui::KillWorkspace);
     redraw(cx);
     harness.publish(
         shared_close_inventory(
@@ -324,7 +324,7 @@ fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
     use spaceterm_server::hierarchy::{Mutation, Outcome};
 
     let (harness, cx) = shared_close_harness(cx);
-    cx.dispatch_action(crate::ui::CloseWorkspace);
+    cx.dispatch_action(crate::ui::KillWorkspace);
     cx.run_until_parked();
     click("modal-action-shared-close-confirm", cx);
     right_click("workspace-row-2-active", cx);
@@ -503,7 +503,7 @@ fn final_workspace_close_dismisses_on_publication_without_acknowledgement(cx: &m
     use spaceterm_server::hierarchy::Inventory;
     let (harness, cx) = shared_close_harness(cx);
     harness.detach_other(cx);
-    cx.dispatch_action(crate::ui::CloseWorkspace);
+    cx.dispatch_action(crate::ui::KillWorkspace);
     cx.run_until_parked();
     click("modal-action-shared-close-confirm", cx);
     assert_eq!(harness.shared_rows(cx), 0);

@@ -2564,7 +2564,7 @@ mod close {
         );
 
         let kill = shared
-            .close_approval(CloseTarget::Workspace {
+            .close_approval(CloseTarget::KillWorkspace {
                 workspace: WORKSPACE,
             })
             .expect("the published Workspace can be reviewed");

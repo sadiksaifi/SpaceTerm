@@ -17,9 +17,9 @@ use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusC
 use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
-    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
-    NextTab, PreviousTab, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TabIdentity, TabView,
-    TabViewEvent, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, MoveTabLeft, MoveTabRight, NewTab, NextTab,
+    PreviousTab, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TabIdentity, TabView, TabViewEvent,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -1434,7 +1434,7 @@ impl TabManager {
         self.request_close_tab(self.tabs.active_tab_id(), cx);
     }
 
-    fn on_create_tab(&mut self, _: &CreateTab, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.create_tab(window, cx);
     }
 
@@ -2188,7 +2188,7 @@ impl Render for TabManager {
                     .font
                     .clone(),
             )
-            .on_action(cx.listener(Self::on_create_tab))
+            .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_activate_tab_1))
             .on_action(cx.listener(Self::on_activate_tab_2))
             .on_action(cx.listener(Self::on_activate_tab_3))
@@ -3321,7 +3321,7 @@ fn tab_menu_entries(
     vec![
         with_shortcut(
             MenuEntry::action("New Tab", TabMenuCommand::NewTab),
-            &CreateTab,
+            &NewTab,
         )
         .icon(|foreground, size| {
             Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
@@ -3381,7 +3381,7 @@ fn title_bar_control_focus_ring(appearance: &super::appearance::ChromeAppearance
 fn create_tab_shortcut(
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Option<gpui::SharedString> {
-    presentation.shortcut(&crate::ui::CreateTab)
+    presentation.shortcut(&crate::ui::NewTab)
 }
 
 #[cfg(test)]
@@ -6571,7 +6571,7 @@ mod tests {
             // A Tab opens from the keyboard part way between two frames.
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(10));
-            cx.dispatch_action(crate::ui::CreateTab);
+            cx.dispatch_action(crate::ui::NewTab);
             frames.push(cx.debug_bounds(chip).unwrap().origin.x);
             for _ in 0..2 {
                 next_frame(cx);

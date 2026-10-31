@@ -224,7 +224,7 @@ fn shared_kill_ends_another_controllers_work_and_replays_without_touching_surviv
     else {
         panic!()
     };
-    let target = CloseTarget::Workspace { workspace };
+    let target = CloseTarget::KillWorkspace { workspace };
     let confirmation = shared_inventory(&mut host)
         .close_confirmation(target)
         .expect("server supplies close authority");
@@ -319,7 +319,7 @@ fn shared_close_rejects_membership_changes_and_confirmations_from_another_boot()
     use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
     let mut host = SharedWorkspaceHost::new(host());
     let workspace = create_shared(&mut host, 1);
-    let target = CloseTarget::Workspace { workspace };
+    let target = CloseTarget::KillWorkspace { workspace };
     let confirmation = shared_inventory(&mut host)
         .close_confirmation(target)
         .unwrap();
@@ -494,11 +494,11 @@ fn preparation_does_not_refill_deliberately_empty_shared_organization() {
     let mut host = SharedWorkspaceHost::new(host());
     let workspace = create_shared(&mut host, 1);
     let confirmation = shared_inventory(&mut host)
-        .close_confirmation(CloseTarget::Workspace { workspace })
+        .close_confirmation(CloseTarget::KillWorkspace { workspace })
         .unwrap();
     assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
         sequence: 2,
-        mutation: Mutation::Close { target: CloseTarget::Workspace { workspace }, confirmation },
+        mutation: Mutation::Close { target: CloseTarget::KillWorkspace { workspace }, confirmation },
     }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
     host.prepare_initial_organization().unwrap();
     assert!(shared_inventory(&mut host).workspaces.is_empty());

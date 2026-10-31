@@ -85,7 +85,7 @@ fn cleanup_exercise(connection: &ServerLink) -> Result<(), Box<dyn Error>> {
     {
         return Err("unrelated Workspace was preserved".into());
     }
-    let target = spaceterm_server::hierarchy::CloseTarget::Workspace {
+    let target = spaceterm_server::hierarchy::CloseTarget::KillWorkspace {
         workspace: workspace.id,
     };
     let confirmation = inventory
@@ -293,13 +293,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Cleanup removes only the Workspace created by this exercise.
     let (inventory, sequence) = inventory(&connection)?;
     let confirmation = inventory
-        .close_confirmation(spaceterm_server::hierarchy::CloseTarget::Workspace { workspace })
+        .close_confirmation(spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace })
         .ok_or("close confirmation")?;
     mutate(
         &connection,
         sequence,
         Mutation::Close {
-            target: spaceterm_server::hierarchy::CloseTarget::Workspace { workspace },
+            target: spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace },
             confirmation,
         },
     )?;

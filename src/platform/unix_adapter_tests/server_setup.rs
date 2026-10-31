@@ -392,7 +392,7 @@ fn native_server_owned_work(
     } else {
         Ok(())
     };
-    let target = CloseTarget::Workspace { workspace };
+    let target = CloseTarget::KillWorkspace { workspace };
     let current = api("quic-cleanup-inventory", repository::inventory(&connection))?.0;
     let confirmation = current
         .close_confirmation(target)

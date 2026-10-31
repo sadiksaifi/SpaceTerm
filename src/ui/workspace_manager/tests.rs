@@ -1761,7 +1761,7 @@ fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
 
     cx.simulate_keystrokes("ctrl-cmd-w");
     cx.run_until_parked();
-    let workspace = Some(CloseTarget::Workspace(WorkspaceId::new(1)));
+    let workspace = Some(CloseTarget::KillWorkspace(WorkspaceId::new(1)));
     assert_eq!(pending(cx), workspace);
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
@@ -5358,7 +5358,7 @@ pub(crate) fn assert_scroll_shortcuts_from_sidebar_focus(
         crate::keybindings::runtime::install(profile, cx);
     });
     let shortcut = |command| keymap.shortcut(command).unwrap().to_string();
-    cx.simulate_keystrokes(&shortcut(Command::CreateTab));
+    cx.simulate_keystrokes(&shortcut(Command::NewTab));
     cx.run_until_parked();
     cx.simulate_keystrokes(&shortcut(Command::SplitRight));
     cx.run_until_parked();
@@ -9188,7 +9188,7 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     assert_eq!(
         harness.closes(),
         vec![shared_close_mutation(
-            ServerCloseTarget::Workspace {
+            ServerCloseTarget::KillWorkspace {
                 workspace: SHARED_CLOSE_WORKSPACE,
             },
             &[
@@ -9232,7 +9232,7 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     );
 }
 
-/// Control-Command-W runs the retained close_workspace Command, which opens Kill Workspace on a
+/// Control-Command-W runs the kill_workspace Command, which opens Kill Workspace on a
 /// shared Workspace rather than Close Pane.
 #[gpui::test]
 fn shared_control_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
@@ -9250,7 +9250,7 @@ fn shared_control_command_w_should_open_kill_workspace(cx: &mut TestAppContext) 
             .close_confirmation
             .pending()
             .map(|pending| pending.target)),
-        Some(CloseTarget::Workspace(_))
+        Some(CloseTarget::KillWorkspace(_))
     ));
     click("modal-action-shared-close-cancel", cx);
     redraw(cx);

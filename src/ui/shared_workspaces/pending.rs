@@ -328,7 +328,7 @@ impl PendingEdits {
                     workspace: id(workspace),
                     tab: id(tab),
                 },
-                CloseTarget::Workspace { workspace } => CloseTarget::Workspace {
+                CloseTarget::KillWorkspace { workspace } => CloseTarget::KillWorkspace {
                     workspace: id(workspace),
                 },
                 CloseTarget::Worktree { workspace, tab } => CloseTarget::Worktree {
@@ -444,7 +444,7 @@ fn close_references(target: CloseTarget) -> Vec<Id> {
         CloseTarget::Tab { workspace, tab } | CloseTarget::Worktree { workspace, tab } => {
             vec![workspace, tab]
         }
-        CloseTarget::Workspace { workspace } => vec![workspace],
+        CloseTarget::KillWorkspace { workspace } => vec![workspace],
     }
 }
 
@@ -658,7 +658,7 @@ pub(super) fn closes_workspace(mutation: &Mutation, workspace: Id) -> bool {
     let server = match target {
         spaceterm_server::hierarchy::CloseTarget::Pane { workspace, .. }
         | spaceterm_server::hierarchy::CloseTarget::Tab { workspace, .. }
-        | spaceterm_server::hierarchy::CloseTarget::Workspace { workspace }
+        | spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace }
         | spaceterm_server::hierarchy::CloseTarget::Worktree { workspace, .. } => *workspace,
     };
     server == workspace && confirmation.removes_workspace

@@ -32,7 +32,7 @@ pub(crate) fn profile(
         .collect();
     let defaults = [
         (
-            Command::SwitchWorkspace,
+            Command::ChooseWorkspace,
             Some(DefaultBinding::new("cmd-shift-k", &[])),
         ),
         (
@@ -55,7 +55,7 @@ pub(crate) fn profile(
         // Cmd+W closes the Focused Pane and Shift+Cmd+W the Active Tab, so Kill Workspace, which
         // always asks first, takes the Control chord.
         (
-            Command::CloseWorkspace,
+            Command::KillWorkspace,
             Some(DefaultBinding::new("ctrl-cmd-w", &[])),
         ),
         (
@@ -94,7 +94,7 @@ pub(crate) fn profile(
             Command::ActivateWorkspace9,
             Some(DefaultBinding::new("ctrl-9", &[])),
         ),
-        (Command::CreateTab, Some(DefaultBinding::new("cmd-t", &[]))),
+        (Command::NewTab, Some(DefaultBinding::new("cmd-t", &[]))),
         (
             Command::CloseTab,
             Some(DefaultBinding::new("cmd-shift-w", &[])),

@@ -69,13 +69,13 @@ macro_rules! commands {
 }
 
 commands! {
-    SwitchWorkspace => ("switch_workspace", "Choose Workspace", Workspace, Application, crate::ui::SwitchWorkspace),
+    ChooseWorkspace => ("choose_workspace", "Choose Workspace", Workspace, Application, crate::ui::ChooseWorkspace),
     NewWorkspace => ("new_workspace", "New Workspace", Workspace, Application, crate::ui::NewWorkspace),
     OpenLocalDirectory => ("open_local_directory", "Open Local Directory", Workspace, Application, crate::ui::OpenLocalDirectory),
     NewWorktree => ("new_worktree", "New Worktree", Workspace, Application, crate::ui::NewWorktree),
     NextWorktree => ("next_worktree", "Next Worktree", Workspace, Workspace, crate::ui::NextWorktree),
     PreviousWorktree => ("previous_worktree", "Previous Worktree", Workspace, Workspace, crate::ui::PreviousWorktree),
-    CloseWorkspace => ("close_workspace", "Kill Workspace", Workspace, Application, crate::ui::CloseWorkspace),
+    KillWorkspace => ("kill_workspace", "Kill Workspace", Workspace, Application, crate::ui::KillWorkspace),
     ActivateWorkspace1 => ("activate_workspace1", "Workspace 1", Workspace, Workspace, crate::ui::ActivateWorkspace1),
     ActivateWorkspace2 => ("activate_workspace2", "Workspace 2", Workspace, Workspace, crate::ui::ActivateWorkspace2),
     ActivateWorkspace3 => ("activate_workspace3", "Workspace 3", Workspace, Workspace, crate::ui::ActivateWorkspace3),
@@ -85,7 +85,7 @@ commands! {
     ActivateWorkspace7 => ("activate_workspace7", "Workspace 7", Workspace, Workspace, crate::ui::ActivateWorkspace7),
     ActivateWorkspace8 => ("activate_workspace8", "Workspace 8", Workspace, Workspace, crate::ui::ActivateWorkspace8),
     ActivateWorkspace9 => ("activate_workspace9", "Workspace 9", Workspace, Workspace, crate::ui::ActivateWorkspace9),
-    CreateTab => ("create_tab", "New Tab", Tab, Application, crate::ui::CreateTab),
+    NewTab => ("new_tab", "New Tab", Tab, Application, crate::ui::NewTab),
     CloseTab => ("close_tab", "Close Tab", Tab, Application, crate::ui::CloseTab),
     ActivateTab1 => ("activate_tab1", "Tab 1", Tab, Workspace, crate::ui::ActivateTab1),
     ActivateTab2 => ("activate_tab2", "Tab 2", Tab, Workspace, crate::ui::ActivateTab2),

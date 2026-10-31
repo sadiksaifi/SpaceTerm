@@ -476,7 +476,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{NewWorkspace, SwitchWorkspace};
+    use crate::ui::{ChooseWorkspace, NewWorkspace};
     use gpui::KeyBinding;
 
     #[gpui::test]
@@ -696,7 +696,7 @@ mod tests {
                 presentation.shortcut(&NewWorkspace).as_deref(),
                 Some("Primary+Y")
             );
-            assert_eq!(presentation.shortcut(&SwitchWorkspace), None);
+            assert_eq!(presentation.shortcut(&ChooseWorkspace), None);
             cx.clear_key_bindings();
             presentation.refresh(cx);
             assert_eq!(presentation.shortcut(&NewWorkspace), None);

@@ -408,7 +408,7 @@ mod tests {
 
     #[gpui::test]
     fn desktop_profile_should_present_linux_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {
-        use crate::ui::{ClosePane, CloseTab, CreateTab, NewWorkspace, SwitchWorkspace};
+        use crate::ui::{ChooseWorkspace, ClosePane, CloseTab, NewTab, NewWorkspace};
 
         cx.update(|cx| {
             crate::ui::initialize_controls(cx).unwrap();
@@ -426,9 +426,9 @@ mod tests {
             );
             let presentation = DesktopPresentation::get(cx);
             for (shortcut, label) in [
-                (presentation.shortcut(&SwitchWorkspace), "Ctrl+Shift+K"),
+                (presentation.shortcut(&ChooseWorkspace), "Ctrl+Shift+K"),
                 (presentation.shortcut(&NewWorkspace), "Ctrl+Shift+N"),
-                (presentation.shortcut(&CreateTab), "Ctrl+Shift+T"),
+                (presentation.shortcut(&NewTab), "Ctrl+Shift+T"),
                 (presentation.shortcut(&ClosePane), "Ctrl+Shift+W"),
                 (presentation.shortcut(&CloseTab), "Ctrl+Shift+Alt+W"),
                 (presentation.shortcut(&crate::ui::ActivateTab1), "Alt+1"),

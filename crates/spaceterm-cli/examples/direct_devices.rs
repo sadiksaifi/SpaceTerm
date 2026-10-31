@@ -438,7 +438,7 @@ mod exercise {
                 && owned.pane.is_none_or(|pane| work.tabs[0].root_pane == pane),
             "cleanup refused: test Workspace changed",
         )?;
-        let target = CloseTarget::Workspace {
+        let target = CloseTarget::KillWorkspace {
             workspace: owned.workspace,
         };
         let confirmation = current

@@ -162,7 +162,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     close(
         &first,
-        CloseTarget::Workspace {
+        CloseTarget::KillWorkspace {
             workspace: inactive,
         },
     )?;
@@ -201,7 +201,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(&linked)
     );
     assert!(!linked.exists());
-    close(&first, CloseTarget::Workspace { workspace })?;
+    close(&first, CloseTarget::KillWorkspace { workspace })?;
     support::done(&first, Operation::Shutdown)?;
     restarted.0.wait()?;
     println!(

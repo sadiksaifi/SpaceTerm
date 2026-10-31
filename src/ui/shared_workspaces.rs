@@ -2234,7 +2234,7 @@ mod development {
                 _ if confirmation.removes_workspace => SharedCloseScope::Workspace,
                 ServerCloseTarget::Pane { .. } => SharedCloseScope::Pane,
                 ServerCloseTarget::Tab { .. } => SharedCloseScope::Tab,
-                ServerCloseTarget::Workspace { .. } => SharedCloseScope::Workspace,
+                ServerCloseTarget::KillWorkspace { .. } => SharedCloseScope::Workspace,
                 ServerCloseTarget::Worktree { .. } => SharedCloseScope::Worktree,
             };
             Ok(SharedCloseApproval {
@@ -2939,7 +2939,7 @@ mod development {
         let workspace = match target {
             ServerCloseTarget::Pane { workspace, .. }
             | ServerCloseTarget::Tab { workspace, .. }
-            | ServerCloseTarget::Workspace { workspace }
+            | ServerCloseTarget::KillWorkspace { workspace }
             | ServerCloseTarget::Worktree { workspace, .. } => workspace,
         };
         inventory
@@ -2953,7 +2953,7 @@ mod development {
         target_workspace(inventory, target).is_some_and(|workspace| {
             let tab = |id: Id| workspace.tabs.iter().find(|tab| tab.id == id);
             match target {
-                ServerCloseTarget::Workspace { .. } => true,
+                ServerCloseTarget::KillWorkspace { .. } => true,
                 ServerCloseTarget::Tab { tab: id, .. } => tab(id).is_some(),
                 ServerCloseTarget::Worktree { tab: id, .. } => tab(id).is_some_and(|anchor| {
                     anchor.worktree.is_some()
@@ -3065,7 +3065,7 @@ mod development {
             };
             let stops = if sessions == 1 { "its" } else { "their" };
             match self.target {
-                ServerCloseTarget::Workspace { .. } => {
+                ServerCloseTarget::KillWorkspace { .. } => {
                     let tabs = match self.tabs {
                         1 => "1 Tab".to_owned(),
                         count => format!("{count} Tabs"),
@@ -3143,7 +3143,7 @@ mod development {
                 ServerCloseTarget::Worktree { .. } if !self.confirmation.removes_workspace => {
                     Some("The Worktree, its files, and its branch are kept.")
                 }
-                ServerCloseTarget::Workspace { .. } => {
+                ServerCloseTarget::KillWorkspace { .. } => {
                     Some("Repository files and Worktrees stay on disk.")
                 }
                 _ if self.confirmation.removes_workspace => Some(
@@ -3177,7 +3177,7 @@ mod development {
             ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
             ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
             ServerCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
-            ServerCloseTarget::Workspace { .. } => "Workspace Changed on Another Client",
+            ServerCloseTarget::KillWorkspace { .. } => "Workspace Changed on Another Client",
         }
     }
 

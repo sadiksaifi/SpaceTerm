@@ -32,7 +32,7 @@ pub(super) fn profile(
         .collect();
     let defaults = [
         (
-            Command::SwitchWorkspace,
+            Command::ChooseWorkspace,
             Some(DefaultBinding::new("ctrl-shift-k", &[])),
         ),
         (
@@ -52,7 +52,7 @@ pub(super) fn profile(
             Command::PreviousWorktree,
             Some(DefaultBinding::new("ctrl-alt-shift-[", &[])),
         ),
-        (Command::CloseWorkspace, None),
+        (Command::KillWorkspace, None),
         (
             Command::ActivateWorkspace1,
             Some(DefaultBinding::new("ctrl-alt-1", &[])),
@@ -90,7 +90,7 @@ pub(super) fn profile(
             Some(DefaultBinding::new("ctrl-alt-9", &[])),
         ),
         (
-            Command::CreateTab,
+            Command::NewTab,
             Some(DefaultBinding::new("ctrl-shift-t", &[])),
         ),
         (
@@ -465,7 +465,7 @@ mod tests {
             for command in Command::ALL {
                 let expected = if matches!(
                     command,
-                    Command::CloseWorkspace
+                    Command::KillWorkspace
                         | Command::ShowRepositoryStatus
                         | Command::NewWorktree
                         | Command::About
@@ -530,8 +530,8 @@ mod tests {
     fn linux_defaults_resolve_to_the_chords_gpui_dispatches() {
         let resolved = profile().resolve(&KeybindingPreferences::default());
         for (command, dispatch) in [
-            (Command::SwitchWorkspace, &["ctrl-shift-k"][..]),
-            (Command::CreateTab, &["ctrl-shift-t"]),
+            (Command::ChooseWorkspace, &["ctrl-shift-k"][..]),
+            (Command::NewTab, &["ctrl-shift-t"]),
             (Command::CloseTab, &["ctrl-alt-shift-w"]),
             (Command::NextWorktree, &["ctrl-alt-}"]),
             (Command::PreviousWorktree, &["ctrl-alt-{"]),
@@ -568,7 +568,7 @@ mod tests {
                 "{command:?}"
             );
         }
-        assert_eq!(resolved.shortcut(Command::CloseWorkspace), None);
+        assert_eq!(resolved.shortcut(Command::KillWorkspace), None);
     }
 
     #[test]
@@ -577,9 +577,9 @@ mod tests {
         let cases = [
             (
                 profile(),
-                r#"{"create_tab":"cmd-t","split_right":"cmd-d"}"#,
+                r#"{"new_tab":"cmd-t","split_right":"cmd-d"}"#,
                 [
-                    (Command::CreateTab, "ctrl-shift-t"),
+                    (Command::NewTab, "ctrl-shift-t"),
                     (Command::SplitRight, "ctrl-shift-d"),
                 ],
                 Reservation::System(SystemReservation::DesktopShortcut),
@@ -590,11 +590,8 @@ mod tests {
                     vec![],
                 )
                 .unwrap(),
-                r#"{"create_tab":"ctrl-shift-t","split_right":"ctrl-shift-d"}"#,
-                [
-                    (Command::CreateTab, "cmd-t"),
-                    (Command::SplitRight, "cmd-d"),
-                ],
+                r#"{"new_tab":"ctrl-shift-t","split_right":"ctrl-shift-d"}"#,
+                [(Command::NewTab, "cmd-t"), (Command::SplitRight, "cmd-d")],
                 Reservation::Terminal(crate::keybindings::TerminalConvention::ControlCharacter),
             ),
         ];
@@ -690,15 +687,15 @@ mod tests {
                 .is_some()
         }));
         let preferences: KeybindingPreferences =
-            serde_json::from_str(r#"{"create_tab":"ctrl-shift-p"}"#).unwrap();
+            serde_json::from_str(r#"{"new_tab":"ctrl-shift-p"}"#).unwrap();
         assert_eq!(
             profile
                 .resolve(&preferences)
-                .inactive_override(Command::CreateTab),
+                .inactive_override(Command::NewTab),
             Some(crate::keybindings::Reservation::System(
                 crate::keybindings::SystemReservation::CommandPalette,
             ))
         );
-        assert_eq!(preferences.get(Command::CreateTab), Some(&Some(shortcut)));
+        assert_eq!(preferences.get(Command::NewTab), Some(&Some(shortcut)));
     }
 }

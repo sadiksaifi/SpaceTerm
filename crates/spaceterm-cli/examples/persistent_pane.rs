@@ -143,7 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let cleanup = repository::connect(&server)?;
     let current = repository::inventory(&cleanup)?.0;
-    let target = CloseTarget::Workspace { workspace };
+    let target = CloseTarget::KillWorkspace { workspace };
     let confirmation = current
         .close_confirmation(target)
         .ok_or("fixture close target missing")?;

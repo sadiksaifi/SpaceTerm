@@ -1902,7 +1902,7 @@ fn new_tab_entry<A: Clone>(
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> MenuEntry<A> {
     let entry = MenuEntry::action("New Tab", command);
-    match presentation.shortcut(&crate::ui::CreateTab) {
+    match presentation.shortcut(&crate::ui::NewTab) {
         Some(shortcut) => entry.shortcut(shortcut),
         None => entry,
     }

@@ -1012,13 +1012,13 @@ macro_rules! shortcut_rows {
 }
 
 shortcut_rows! {
-    SwitchWorkspace => "switch-workspace",
+    ChooseWorkspace => "choose-workspace",
     NewWorkspace => "new-workspace",
     OpenLocalDirectory => "open-local-directory",
     NewWorktree => "new-worktree",
     NextWorktree => "next-worktree",
     PreviousWorktree => "previous-worktree",
-    CloseWorkspace => "close-workspace",
+    KillWorkspace => "kill-workspace",
     ActivateWorkspace1 => "activate-workspace-1",
     ActivateWorkspace2 => "activate-workspace-2",
     ActivateWorkspace3 => "activate-workspace-3",
@@ -1028,7 +1028,7 @@ shortcut_rows! {
     ActivateWorkspace7 => "activate-workspace-7",
     ActivateWorkspace8 => "activate-workspace-8",
     ActivateWorkspace9 => "activate-workspace-9",
-    CreateTab => "create-tab",
+    NewTab => "new-tab",
     CloseTab => "close-tab",
     ActivateTab1 => "activate-tab-1",
     ActivateTab2 => "activate-tab-2",

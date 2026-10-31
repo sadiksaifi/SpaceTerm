@@ -118,7 +118,7 @@ tab	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_area::Indent
 shift-tab	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_area::Outdent
 ctrl-tab	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_input::FocusNext
 ctrl-shift-tab	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_input::FocusPrevious
-ctrl-shift-k	None	terminal::SwitchWorkspace
+ctrl-shift-k	None	terminal::ChooseWorkspace
 ctrl-shift-n	None	terminal::NewWorkspace
 ctrl-shift-o	None	terminal::OpenLocalDirectory
 ctrl-alt-}	Some(Identifier("TerminalPane"))	terminal::NextWorktree
@@ -132,7 +132,7 @@ ctrl-alt-6	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace6
 ctrl-alt-7	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace7
 ctrl-alt-8	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace8
 ctrl-alt-9	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace9
-ctrl-shift-t	None	terminal::CreateTab
+ctrl-shift-t	None	terminal::NewTab
 ctrl-alt-shift-w	None	terminal::CloseTab
 alt-1	Some(Identifier("TerminalPane"))	terminal::ActivateTab1
 alt-2	Some(Identifier("TerminalPane"))	terminal::ActivateTab2

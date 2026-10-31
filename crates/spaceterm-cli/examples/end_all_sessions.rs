@@ -369,7 +369,7 @@ mod exercise {
             return Err("End All Sessions changed a repository-file witness".into());
         }
         let current = inventory(&a)?.0;
-        let target = CloseTarget::Workspace { workspace };
+        let target = CloseTarget::KillWorkspace { workspace };
         let confirmation = current
             .close_confirmation(target)
             .ok_or("fixture cleanup confirmation unavailable")?;
