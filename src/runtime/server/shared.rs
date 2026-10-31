@@ -63,6 +63,7 @@ impl Selection {
 pub struct SharedWorkspaceHost {
     writes: worktrees::Writes,
     prototype: DevelopmentPaneHost,
+    directories: super::directories::DirectoryOperations,
     repositories: super::repositories::ServerRepositories,
     state: State,
     panes: BTreeMap<Id, DevelopmentPaneHost>,
@@ -147,6 +148,7 @@ impl SharedWorkspaceHost {
         let repositories = super::repositories::ServerRepositories::new(prototype.boot);
         Self {
             prototype,
+            directories: super::directories::DirectoryOperations::default(),
             writes: worktrees::Writes::new(),
             repositories,
             state,
@@ -469,7 +471,6 @@ impl SharedWorkspaceHost {
                 directory_unavailable: false,
                 failed_directory_session: None,
                 dormant: None,
-                directories: super::directories::DirectoryOperations::default(),
                 names: Arc::clone(&self.prototype.names),
                 notifier: self.prototype.notifier.clone(),
                 session_context: self.prototype.session_context.clone(),
@@ -1072,7 +1073,7 @@ impl SharedWorkspaceHost {
         }
         self.paced = (Some(now + PRESENTATION_INTERVAL), false);
         let _ = self.finish_worktrees(false);
-        self.prototype.directories.tick();
+        self.directories.tick();
         let _ = self.synchronized();
         self.answer_waiting();
         self.publish();
@@ -1094,7 +1095,7 @@ impl SharedWorkspaceHost {
         };
         let paced = self.paced.0.filter(|_| self.paced.1);
         // A read that settles wakes the host. A read that outlasts its deadline settles then.
-        let reads = [self.prototype.directories.due(), self.worktree_reads_due()];
+        let reads = [self.directories.due(), self.worktree_reads_due()];
         // A failed synchronization never reaches the Git read it would start, so its due time
         // stays past. Retrying waits for the tick instead.
         let repositories = (self.blocked.is_none() && self.settled())
@@ -1134,7 +1135,7 @@ impl HostCommands for SharedWorkspaceHost {
     }
     fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
         self.repositories.set_wake(Arc::clone(&wake));
-        self.prototype.directories.set_wake(Arc::clone(&wake));
+        self.directories.set_wake(Arc::clone(&wake));
         self.wake_worktree_reads(Arc::clone(&wake));
         self.ticker = Some(wake);
     }
@@ -1214,17 +1215,17 @@ impl HostCommands for SharedWorkspaceHost {
                 .worktree_read(device, connection, id, read)
                 .transpose()
                 .map(|result| Ok(ReplyBody::Worktree(result))),
-            read => self.prototype.directories.read(connection, id, read),
+            read => self.directories.read(connection, id, read),
         };
         self.rearm();
         started
     }
     fn cancel_read(&mut self, connection: Id, id: RequestId) {
-        self.prototype.directories.cancel((connection, id));
+        self.directories.cancel((connection, id));
         self.cancel_worktree_read(connection, id);
     }
     fn settled_reads(&mut self) -> Vec<super::SettledRead> {
-        let mut settled = self.prototype.directories.settled_reads();
+        let mut settled = self.directories.settled_reads();
         settled.extend(self.settled_worktree_reads());
         settled
     }
@@ -1323,7 +1324,7 @@ impl HostCommands for SharedWorkspaceHost {
     fn disconnected(&mut self, connection: Id) {
         self.unsubscribe(connection);
         self.cancel_worktree_reads(connection);
-        self.prototype.directories.cancel_connection(connection);
+        self.directories.cancel_connection(connection);
         self.repositories.disconnected(connection);
         for host in self.panes.values_mut() {
             host.disconnected(connection);
@@ -1453,7 +1454,7 @@ impl HostCommands for SharedWorkspaceHost {
         self.stop_worktree_reads();
         self.finish_worktrees(true)
             .map_err(|_| ServerError::StorageUnavailable)?;
-        self.prototype.directories.stop();
+        self.directories.stop();
         self.repositories.shutdown();
         self.synchronize()
             .map_err(|_| ServerError::StorageUnavailable)?;

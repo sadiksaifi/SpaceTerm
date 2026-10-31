@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub(crate) const MAX_QUERY_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "desktop")]
 pub enum FindDirection {
     Next,
     Previous,

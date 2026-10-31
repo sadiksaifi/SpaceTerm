@@ -301,9 +301,9 @@ fn compose(
             repository_status,
             background_images: None,
             local_server: crate::ui::LocalServerAdapters::account(),
-            ssh_setup: Some(ssh_setup),
-            direct_servers: Some(direct_servers),
-            server_context_paths: Some(server_context_paths),
+            ssh_setup,
+            direct_servers,
+            server_context_paths,
             command_line_tool,
             desktop_channel: super::unix_desktop_channel::DesktopChannelListener::bind(
                 identity.directory_name(),

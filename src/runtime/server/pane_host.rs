@@ -426,14 +426,26 @@ impl OwnedPane {
                     PointerInput {
                         generation,
                         phase: match input.phase {
-                            pane::PointerPhase::Press => super::super::PointerPhase::Press,
-                            pane::PointerPhase::Motion => super::super::PointerPhase::Motion,
-                            pane::PointerPhase::Release => super::super::PointerPhase::Release,
+                            pane::PointerPhase::Press => {
+                                crate::terminal::pointer_input::PointerPhase::Press
+                            }
+                            pane::PointerPhase::Motion => {
+                                crate::terminal::pointer_input::PointerPhase::Motion
+                            }
+                            pane::PointerPhase::Release => {
+                                crate::terminal::pointer_input::PointerPhase::Release
+                            }
                         },
                         button: input.button.map(|button| match button {
-                            pane::PointerButton::Left => super::super::PointerButton::Left,
-                            pane::PointerButton::Middle => super::super::PointerButton::Middle,
-                            pane::PointerButton::Right => super::super::PointerButton::Right,
+                            pane::PointerButton::Left => {
+                                crate::terminal::pointer_input::PointerButton::Left
+                            }
+                            pane::PointerButton::Middle => {
+                                crate::terminal::pointer_input::PointerButton::Middle
+                            }
+                            pane::PointerButton::Right => {
+                                crate::terminal::pointer_input::PointerButton::Right
+                            }
                         }),
                         position: SurfacePosition {
                             x: input.x,
@@ -471,24 +483,28 @@ impl OwnedPane {
                     vertical_steps: input.vertical_steps,
                     phase: match input.phase {
                         pane::WheelPhase::GestureStarted => {
-                            super::super::WheelPhase::GestureStarted
+                            crate::terminal::pointer_input::WheelPhase::GestureStarted
                         }
                         pane::WheelPhase::GestureChanged => {
-                            super::super::WheelPhase::GestureChanged
+                            crate::terminal::pointer_input::WheelPhase::GestureChanged
                         }
-                        pane::WheelPhase::GestureEnded => super::super::WheelPhase::GestureEnded,
+                        pane::WheelPhase::GestureEnded => {
+                            crate::terminal::pointer_input::WheelPhase::GestureEnded
+                        }
                         pane::WheelPhase::GestureCancelled => {
-                            super::super::WheelPhase::GestureCancelled
+                            crate::terminal::pointer_input::WheelPhase::GestureCancelled
                         }
                         pane::WheelPhase::MomentumStarted => {
-                            super::super::WheelPhase::MomentumStarted
+                            crate::terminal::pointer_input::WheelPhase::MomentumStarted
                         }
                         pane::WheelPhase::MomentumChanged => {
-                            super::super::WheelPhase::MomentumChanged
+                            crate::terminal::pointer_input::WheelPhase::MomentumChanged
                         }
-                        pane::WheelPhase::MomentumEnded => super::super::WheelPhase::MomentumEnded,
+                        pane::WheelPhase::MomentumEnded => {
+                            crate::terminal::pointer_input::WheelPhase::MomentumEnded
+                        }
                         pane::WheelPhase::MomentumCancelled => {
-                            super::super::WheelPhase::MomentumCancelled
+                            crate::terminal::pointer_input::WheelPhase::MomentumCancelled
                         }
                     },
                     position: SurfacePosition {
@@ -522,16 +538,16 @@ impl OwnedPane {
                         })
                     }
                     PasteRequestOutcome::Rejected(reason) => PasteOutcome::Rejected(match reason {
-                        super::super::PasteRejection::Empty => pane::PasteRejection::Empty,
-                        super::super::PasteRejection::TooLarge { limit } => {
+                        crate::terminal::native_services::paste::PasteRejection::Empty => pane::PasteRejection::Empty,
+                        crate::terminal::native_services::paste::PasteRejection::TooLarge { limit } => {
                             pane::PasteRejection::TooLarge {
                                 limit: limit as u32,
                             }
                         }
-                        super::super::PasteRejection::ConfirmationPending => {
+                        crate::terminal::native_services::paste::PasteRejection::ConfirmationPending => {
                             pane::PasteRejection::ConfirmationPending
                         }
-                        super::super::PasteRejection::TerminalUnfocused => {
+                        crate::terminal::native_services::paste::PasteRejection::TerminalUnfocused => {
                             pane::PasteRejection::TerminalUnfocused
                         }
                     }),

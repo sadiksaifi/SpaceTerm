@@ -467,12 +467,12 @@ fn spawn_reader(
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 pub fn conformance_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
     tests::observe_initialization()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 pub struct ShutdownObservation {
     pub after_factory_drop: usize,
     pub after_owner_drop: usize,
@@ -481,7 +481,7 @@ pub struct ShutdownObservation {
     pub dropped_before_termination: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 pub fn conformance_shutdown() -> Result<ShutdownObservation, String> {
     let (after_factory_drop, after_owner_drop) = tests::observe_retention(false)?;
     let (_, after_repeated_close) = tests::observe_retention(true)?;

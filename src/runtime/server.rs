@@ -1,5 +1,31 @@
 //! The server runtime: the shared Workspace host and the per-Pane hosts that own each live
 //! Terminal Session.
+use crate::appearance::resolution::AppearanceGeneration;
+use crate::appearance::terminal_theme::Appearance;
+use crate::domain::workspace_collection::ValidatedLocalDirectory;
+use crate::platform::local_filesystem::LocalFilesystemError;
+use crate::terminal::accessibility::{
+    AccessibilityCellRef, AccessibilityRowId, AccessibilityScreen, TerminalAccessibilityModel,
+};
+use crate::terminal::emulator::{
+    ActiveScreenSnapshot, CellSnapshot, CursorShapeSnapshot, PresentationGeneration, RowSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
+};
+use crate::terminal::failure::TerminalFailure;
+use crate::terminal::graphics::GraphicsSnapshot;
+use crate::terminal::key::*;
+use crate::terminal::native_services::hyperlink::{HyperlinkKind, HyperlinkTarget};
+use crate::terminal::native_services::osc52::{Osc52Operation, Osc52Target};
+use crate::terminal::native_services::paste::{
+    PasteConfirmationId, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
+};
+use crate::terminal::pointer_input::*;
+use crate::terminal::session::{
+    ClipboardCompletion, ClipboardRequest, LocalTerminalLaunchPlan, NativeTerminalSessionFactory,
+    TerminalAppearanceUpdate, TerminalRuntime, TerminalSessionEvent, TerminalSessionFailure,
+    TerminalSubscription,
+};
+
 use super::*;
 use crate::terminal::session::TerminalSessionStartupStage;
 use spaceterm_server::organization::OrganizationStore;
@@ -165,8 +191,7 @@ pub(crate) mod testing {
 mod directory_tests;
 mod dispatch;
 pub use dispatch::{HostCommands, HostRead, Observers, RunAnswer, RunRequest, Served, SettledRead};
-pub use publish::{Observation, Observed};
-pub use screen_encoder::ScreenCapture;
+
 #[cfg(test)]
 #[path = "server/effect_tests.rs"]
 mod effect_tests;
@@ -220,7 +245,6 @@ pub struct DevelopmentPaneHost {
     directory_unavailable: bool,
     failed_directory_session: Option<PaneTarget>,
     dormant: Option<DormantPane>,
-    directories: directories::DirectoryOperations,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
@@ -322,6 +346,7 @@ impl DevelopmentPaneHost {
             .filter(|pane| !pane.ended)
             .map(|pane| pane.lease.session)
     }
+    #[cfg(test)]
     pub fn new(
         factory: NativeTerminalSessionFactory,
         directory: ValidatedLocalDirectory,
@@ -335,7 +360,6 @@ impl DevelopmentPaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
             session_context: None,
@@ -369,10 +393,17 @@ impl DevelopmentPaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
             session_context: None,
         })
     }
 }
+
+#[cfg(test)]
+pub(crate) use publish::Observed;
+#[cfg(test)]
+use screen_encoder::ScreenCapture;
+
+#[cfg(test)]
+use crate::local_path::LocalPathSemantics;

@@ -1032,18 +1032,14 @@ pub(crate) fn open(
         }
         crate::ui::updates::install_local_updates(Arc::new(NativeLocalUpdates), cx);
         // Both enrollment methods publish into this paired connection registry.
-        if let Some(direct) = direct_servers.clone() {
-            crate::ui::direct_servers::install(direct, cx);
-            // Paired server cards stop, restart and update each server over its service lane.
-            crate::ui::settings_window::remote_admin::install(
-                crate::ui::settings_window::remote_admin::lane_source(),
-                cx,
-            );
-        }
+        crate::ui::direct_servers::install(direct_servers.clone(), cx);
+        // Paired server cards stop, restart and update each server over its service lane.
+        crate::ui::settings_window::remote_admin::install(
+            crate::ui::settings_window::remote_admin::lane_source(),
+            cx,
+        );
         // The Settings window supplies prompts for each explicit setup attempt.
-        if let Some(factory) = ssh_setup.clone() {
-            crate::ui::ssh_setup::install(factory, cx);
-        }
+        crate::ui::ssh_setup::install(ssh_setup.clone(), cx);
         // Resuming is quiet: a route or unpair that needs a credential prompt waits for Resume.
         if let Some(direct) = crate::ui::direct_servers::installed(cx) {
             direct.resume_retained();
@@ -1353,12 +1349,11 @@ pub(crate) struct ApplicationCapabilities {
     /// Launches and presents the account-local SpaceTerm Server in the Workspace Window.
     pub(crate) local_server: crate::ui::LocalServerAdapters,
     /// Supplies temporary SSH provisioning to Add Server.
-    pub(crate) ssh_setup: Option<Rc<dyn crate::ui::ssh_setup::SshSetupFactory>>,
+    pub(crate) ssh_setup: Rc<dyn crate::ui::ssh_setup::SshSetupFactory>,
     /// The desktop's direct network connections, installed by its first Workspace Window.
-    /// `None` offers no direct network connections.
-    pub(crate) direct_servers: Option<crate::direct_connections::DirectConnections>,
+    pub(crate) direct_servers: crate::direct_connections::DirectConnections,
     /// Private presentation context, independent of saved connection authority and Settings.
-    pub(crate) server_context_paths: Option<Arc<AppPaths>>,
+    pub(crate) server_context_paths: Arc<AppPaths>,
     /// Reads and installs this build's command for Settings. `None` omits its row.
     pub(crate) command_line_tool: Option<Arc<crate::command_line_tool::CommandLineTool>>,
     /// Answers `spaceterm open` and `spaceterm show` from this account. `None` listens nowhere,
@@ -1606,9 +1601,10 @@ pub(crate) fn initialize_application(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
-    if let Some(paths) = &host.adapters.server_context_paths {
-        crate::ui::settings_window::configure_server_context(Arc::clone(paths), cx);
-    }
+    crate::ui::settings_window::configure_server_context(
+        Arc::clone(&host.adapters.server_context_paths),
+        cx,
+    );
     if let Some(tool) = &host.adapters.command_line_tool {
         crate::ui::settings_window::configure_command_line_tool(Arc::clone(tool), cx);
     }
@@ -2447,6 +2443,28 @@ mod runtime_tests {
     impl crate::platform::desktop_events::DesktopEventAdapter for NoDesktopEvents {
         fn install(&self, _: &mut App) {}
     }
+    struct NoSshSetup;
+    impl crate::ui::ssh_setup::SshSetupFactory for NoSshSetup {
+        fn backend(&self) -> Option<Arc<dyn crate::ssh::provisioning::SshSetupBackend>> {
+            None
+        }
+        fn prompts(
+            &self,
+            _: &gpui::Window,
+            _: &mut gpui::App,
+        ) -> Option<Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>> {
+            None
+        }
+        fn hosts(&self) -> Arc<dyn crate::ui::ssh_setup::SshHostSource> {
+            Arc::new(Self)
+        }
+    }
+    impl crate::ui::ssh_setup::SshHostSource for NoSshSetup {
+        fn hosts(&self) -> Vec<crate::domain::SshDestination> {
+            Vec::new()
+        }
+    }
+
     fn parts(
         services: Rc<RecordingServices>,
         movement: Rc<RecordingMovement>,
@@ -2482,9 +2500,12 @@ mod runtime_tests {
                 repository_status: None,
                 background_images: None,
                 local_server: crate::ui::launch_testing::presenting(session_factory),
-                ssh_setup: None,
-                direct_servers: None,
-                server_context_paths: None,
+                ssh_setup: Rc::new(NoSshSetup),
+                direct_servers: crate::direct_connections::tests::connected_routes(&[]).0,
+                server_context_paths: Arc::new(crate::platform::testing::resolve_app_paths(
+                    &crate::platform::app_directories::AppDirectoryEnvironment { home: Some("/test/home".into()), ..Default::default() }, Some("/test/runtime".into()), 104,
+                    Arc::new(crate::platform::testing::RecordingFilesystem::default()),
+                ).unwrap()),
                 command_line_tool: None,
                 desktop_channel: None,
             },

@@ -3470,15 +3470,6 @@ impl TerminalPane {
                 cx.notify();
                 None
             }
-            Err(SelectionCopyError::WorkerStopped) => {
-                self.present_failure(
-                    TerminalFailure::resource("receive-selection-reply"),
-                    true,
-                    Some(RecoveryAction::CopySelection),
-                );
-                cx.notify();
-                None
-            }
             Ok(None | Some(_)) => None,
         }
     }

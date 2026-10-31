@@ -848,6 +848,7 @@ struct MouseModeState {
 
 /// A keyboard movement through the Scrollback viewport, as the Scroll Commands request it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "desktop")]
 pub enum ScrollbackMovement {
     PageUp,
     PageDown,

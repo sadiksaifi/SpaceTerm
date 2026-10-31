@@ -1,6 +1,6 @@
 //! Watches repository directories through the Operating System's file events.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};

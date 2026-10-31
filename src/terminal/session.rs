@@ -46,13 +46,16 @@ use crate::platform::native_pty::{
 };
 use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchPlanner};
 use crate::terminal::accessibility::AccessibilitySelectionRefs;
+#[cfg(feature = "desktop")]
 use crate::terminal::accessibility::AccessibilitySelectionRequest;
 use crate::terminal::accessibility::TerminalAccessibilityModel;
 use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
+#[cfg(feature = "desktop")]
+use crate::terminal::emulator::ScrollbackMovement;
 use crate::terminal::emulator::{
-    EmulatorAction, PresentationGeneration, ScreenSnapshot, ScrollbackMovement, TerminalEmulator,
+    EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
@@ -68,6 +71,7 @@ use crate::terminal::paste::{
 };
 use crate::terminal::permission_request::{PermissionRequest, PermissionRequestFilter};
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
+#[cfg(feature = "desktop")]
 use crate::terminal::{FindDirection, FindQueryGeneration};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -276,6 +280,7 @@ impl From<std::io::Error> for TerminalSessionError {
     }
 }
 
+#[cfg(feature = "desktop")]
 pub struct StartedTerminalSession {
     pub handle: Box<dyn TerminalSessionHandle>,
     pub events: async_channel::Receiver<TerminalSessionEvent>,
@@ -286,11 +291,11 @@ pub struct StartedTerminalSession {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionCopyError {
     Formatting,
-    WorkerStopped,
 }
 
 /// Server-backed delivery for native accessibility requests, which the server Pane's
 /// connection fences by its own epoch and focus generation.
+#[cfg(feature = "desktop")]
 pub(crate) type ServerAccessibilitySelection =
     Arc<dyn Fn(AccessibilitySelectionRequest) + Send + Sync>;
 #[cfg(feature = "desktop")]
@@ -304,10 +309,12 @@ pub(crate) type ServerAccessibilityDemand = Arc<dyn Fn() + Send + Sync>;
     )
 )]
 #[derive(Clone)]
+#[cfg(feature = "desktop")]
 pub struct AccessibilitySelectionSender {
     deliver: ServerAccessibilitySelection,
 }
 
+#[cfg(feature = "desktop")]
 impl fmt::Debug for AccessibilitySelectionSender {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("AccessibilitySelectionSender")
@@ -321,6 +328,7 @@ impl fmt::Debug for AccessibilitySelectionSender {
         reason = "only a native accessibility Adapter requests accessibility work"
     )
 )]
+#[cfg(feature = "desktop")]
 impl AccessibilitySelectionSender {
     #[cfg(all(test, feature = "desktop"))]
     pub fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
@@ -446,6 +454,7 @@ impl TerminalSessionMetadataState {
 
 /// Whether a Terminal Session's current connection takes interactive terminal input yet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "desktop")]
 pub enum InteractiveInput {
     /// The connection is still attaching or was interrupted.
     Pending,
@@ -453,9 +462,11 @@ pub enum InteractiveInput {
 }
 
 /// Bounds one host commit and the text retained while its transport completes.
+#[cfg(feature = "desktop")]
 pub const MAX_INPUT_METHOD_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+#[cfg(feature = "desktop")]
 pub enum InputMethodRefusal {
     #[error("Input method text is over 65,536 bytes.")]
     TooLarge,
@@ -464,12 +475,14 @@ pub enum InputMethodRefusal {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "desktop")]
 pub enum InputMethodOutcome {
     Written,
     /// Some text may have reached the terminal. Never replay this commit automatically.
     Interrupted,
 }
 
+#[cfg(feature = "desktop")]
 pub trait TerminalSessionHandle {
     /// Drains bounded native requests independently of replaceable presentation wakeups.
     fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
@@ -587,6 +600,7 @@ pub trait TerminalSessionHandle {
 }
 
 /// Starts a server-owned Terminal Session or its client presentation.
+#[cfg(feature = "desktop")]
 pub trait TerminalSessionFactory {
     fn start(
         &self,

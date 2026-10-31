@@ -42,13 +42,6 @@ impl PermissionRequest {
         .collect();
         Self { permissions }
     }
-
-    #[cfg(test)]
-    pub fn for_test(permissions: &[SystemPermission]) -> Self {
-        Self {
-            permissions: permissions.to_vec(),
-        }
-    }
 }
 
 #[derive(Debug)]

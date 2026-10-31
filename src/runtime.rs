@@ -1,74 +1,21 @@
-//! PTY and VT ownership and presentation contracts for desktop and headless hosts.
+//! PTY and VT contracts used by headless hosts.
 
-pub use crate::appearance::color::Color;
-pub use crate::appearance::resolution::{
-    AppearanceGeneration, FontClass, FontStyle, ResolvedFontDescriptor, ResolvedTerminalAppearance,
-    ResolvedTerminalTypography,
+pub use crate::platform::local_filesystem::LocalFilesystemAuthority;
+pub use crate::platform::native_pty::NativePtyAdapterFactory;
+pub use crate::platform::shell_integration::{
+    ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy,
 };
-pub use crate::appearance::terminal_theme::{Appearance, CatalogError, TerminalColors, ThemeId};
-pub use crate::domain::workspace_collection::{
-    CurrentDirectory, RemoteDirectory, RemoteWorkspaceValueError, ValidatedLocalDirectory,
+pub use crate::platform::shell_launch::ShellLaunchPlanner;
+pub use crate::terminal::emulator::ScreenSnapshot;
+pub use crate::terminal::geometry::{
+    BackingScale, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
 };
-pub use crate::local_path::LocalPathSemantics;
-pub use crate::platform::local_filesystem::{
-    LocalChildDirectories, LocalDirectoryIdentity, LocalFilesystemAuthority, LocalFilesystemError,
-    LocalIdentityObservation, LocalIdentitySource, LocalObjectIdentity, LocalObjectKind,
-    NewDirectoryTarget, ValidatedLocalFile,
-};
-pub use crate::platform::native_pty::*;
-pub use crate::platform::permission_access::SystemPermission;
-pub use crate::platform::shell_integration::*;
-pub use crate::platform::shell_launch::{
-    PreparedShellLaunch, ShellLaunchFailure, ShellLaunchPlanner,
-};
-pub use crate::terminal::accessibility::{
-    AccessibilityCellRef, AccessibilityCellView, AccessibilityGeometry, AccessibilityRowId,
-    AccessibilityRowView, AccessibilityScreen, AccessibilitySelectionRequest,
-    TerminalAccessibilityModel,
-};
-pub use crate::terminal::attention::AttentionEvent;
-pub use crate::terminal::emulator::{
-    ActiveScreenSnapshot, CellSemanticSnapshot, CellSnapshot, ContentDamageSnapshot,
-    CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, PresentationGeneration,
-    RowSnapshot, ScreenSizeSnapshot, ScreenSnapshot, ScrollbackMovement, ScrollbarSnapshot,
-    SnapshotDamage, TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource,
-    TerminalUnderlineSnapshot, ViewportSnapshot,
-};
-pub use crate::terminal::failure::{FailureClass, FailureReason, Recoverability, TerminalFailure};
-pub use crate::terminal::find::{
-    FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
-};
-pub use crate::terminal::geometry::*;
-pub use crate::terminal::graphics::{
-    GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot,
-};
-pub use crate::terminal::key::*;
-pub use crate::terminal::metadata::{
-    CommandMetadata, CommandState, DirectoryMetadata, DirectoryProvenance, LocalMachine,
-    MetadataFreshness, ProgressMetadata, PromptOwner, PromptZone, RemoteMachine,
-    RemoteTerminalMetadataContext, TerminalLocalFileCapabilities, TerminalMetadataContext,
-    TerminalMetadataSnapshot, TerminalOrigin, TitleMetadata, TitleProvenance,
-};
-pub use crate::terminal::native_services::hyperlink::{HyperlinkKind, HyperlinkTarget};
-pub use crate::terminal::native_services::osc52::{Osc52Operation, Osc52Target, Osc52Terminator};
-pub use crate::terminal::native_services::paste::{
-    PasteConfirmation, PasteConfirmationId, PasteDecision, PasteIntakeError, PastePayload,
-    PasteRejection, PasteRequestOutcome, PasteResolution, PasteRisk,
-};
-pub use crate::terminal::native_services::selection::{
-    SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy,
-};
-pub use crate::terminal::permission_request::PermissionRequest;
-pub use crate::terminal::pointer_input::*;
+pub use crate::terminal::key::{KeyAction, KeyInput, PhysicalKey};
+pub use crate::terminal::metadata::LocalMachine;
 pub use crate::terminal::session::{
-    AccessibilityDemandSender, AccessibilitySelectionSender, ClipboardCompletion, ClipboardRequest,
-    InputMethodOutcome, InputMethodRefusal, LocalTerminalLaunchPlan, MAX_INPUT_METHOD_BYTES,
-    NativeTerminalSessionFactory, SelectionCopyError, StartedTerminalSession,
-    TerminalAppearanceUpdate, TerminalRuntime, TerminalSessionError, TerminalSessionEvent,
-    TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure, TerminalSessionHandle,
-    TerminalSubscription,
+    LocalTerminalLaunchPlan, NativeTerminalSessionFactory, TerminalAppearanceUpdate,
+    TerminalRuntime, TerminalSessionEvent,
 };
-pub use crate::terminal::title::TitleGlyph;
 
 /// Returns the native PTY adapter used by the desktop and headless hosts.
 pub fn native_pty_factory() -> std::sync::Arc<dyn NativePtyAdapterFactory> {
@@ -87,7 +34,15 @@ pub(crate) use server::metadata::encode as encode_server_metadata;
 pub(crate) use server::screen_encoder;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) use server::testing as directory_testing;
-pub use server::{
-    DevelopmentPaneHost, HostCommands, Observation, Observed, ScreenCapture, Served,
-    ServerSessionContext, SharedWorkspaceHost,
-};
+pub use server::{Served, ServerSessionContext, SharedWorkspaceHost};
+
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) use server::HostCommands;
+
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) use server::Observed;
+
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) use crate::terminal::native_services::hyperlink::HyperlinkKind;
+#[cfg(feature = "desktop")]
+pub(crate) use crate::terminal::native_services::hyperlink::HyperlinkTarget;
