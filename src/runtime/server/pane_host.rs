@@ -1,4 +1,4 @@
-//! Pane selection, claim, input and lifecycle for the Development host.
+//! Pane selection, claim, input and lifecycle for the server's Pane host.
 use super::*;
 
 impl DevelopmentPaneHost {

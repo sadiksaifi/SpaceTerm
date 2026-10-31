@@ -365,7 +365,7 @@ impl DevelopmentPaneHost {
             session_context: None,
         })
     }
-    /// Native composition for the explicitly launched local Development host.
+    /// Native composition for the explicitly launched local server.
     pub fn local() -> Result<Self, ServerError> {
         Self::local_with_pty_factory(native_pty_factory())
     }

@@ -1,4 +1,4 @@
-//! Authenticated real-host directory recovery. Uses account-local authority and an idle Development host.
+//! Authenticated real-host directory recovery. Uses account-local authority and an idle Development server.
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
 #[expect(

@@ -179,7 +179,7 @@ impl Fixture {
     pub(crate) fn enable(&self) {
         self.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
     }
-    /// Enables exposure on a free UDP port of `ip`, and returns the address the server listens
+    /// Enables Network Access on a free UDP port of `ip`, and returns the address the server listens
     /// at. Another test can take the port between finding it and binding it, so a failed bind
     /// tries another.
     pub(crate) fn listen_at(&self, ip: std::net::IpAddr) -> std::net::SocketAddr {
@@ -3052,7 +3052,7 @@ mod quic_connections {
         drop(server.join().unwrap());
     }
 
-    /// Turning exposure off and on at the same address while a client is connected takes the
+    /// Turning Network Access off and on at the same address while a client is connected takes the
     /// listener back instead of binding a socket the old connection still holds, and that
     /// connection still receives its goodbye.
     #[test]
@@ -3621,7 +3621,7 @@ mod quic_connections {
         status.listener
     }
 
-    /// Moving exposure from the wildcard to one address of the same port binds at once when
+    /// Moving Network Access from the wildcard to one address of the same port binds at once when
     /// no connection holds the old socket.
     #[test]
     fn changing_the_address_without_connections_binds_at_once() {
@@ -3702,7 +3702,7 @@ mod quic_connections {
         Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback())
     }
 
-    /// Widening exposure from one address to every interface at the same port keeps the paired
+    /// Widening Network Access from one address to every interface at the same port keeps the paired
     /// connection of that address and its invitations. Clients of the
     /// server's other addresses then connect too, each answered from the address it dialed.
     #[test]

@@ -302,7 +302,13 @@ impl PreparedFilePreview {
 
     /// The authorized target, for a deferred adapter that revalidates and owns it on its own
     /// thread.
-    #[allow(dead_code, reason = "only a deferred preview adapter takes the target")]
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "only the Linux preview adapter defers and takes the target"
+        )
+    )]
     pub(crate) fn into_target(mut self) -> Option<FilePreviewTarget> {
         self.target.take()
     }

@@ -10,10 +10,10 @@
 //! `--fetches` then times reads of 200-row Scrollback pages from that history. A paired run
 //! enrolls a fresh pairing through an owner on the server's machine and revokes it afterwards.
 //! Without `--owner-command` the owner is this process, so the server must be on this machine;
-//! `--expose` enables the server's network exposure for the run, through the owner command when
+//! `--expose` enables the server's Network Access for the run, through the owner command when
 //! there is one. `owner` serves the owner side as JSON lines on standard input and output; when
 //! its input ends, it withdraws unused invitations, revokes the devices it approved and restores
-//! exposure. SIGINT, SIGTERM and SIGHUP stop a measurement through the same cleanup. Protocol
+//! Network Access. SIGINT, SIGTERM and SIGHUP stop a measurement through the same cleanup. Protocol
 //! calls live in `protocol.rs`.
 mod protocol;
 
@@ -267,8 +267,8 @@ impl OwnerLink {
         self.ask(json!({ "abandon": true })).map(drop)
     }
 
-    /// Enables exposure at `bind`. Here it returns what to restore; an owner command restores
-    /// exposure itself when its input ends.
+    /// Enables Network Access at `bind`. Here it returns what to restore; an owner command restores
+    /// Network Access itself when its input ends.
     fn expose(&mut self, bind: std::net::SocketAddr) -> Result<Option<protocol::Exposure>> {
         if let Self::Here(owner) = self {
             return owner.expose(bind).map(Some);
@@ -424,7 +424,7 @@ extern "C" fn interrupt(_: libc::c_int) {
 }
 
 /// Turns SIGINT, SIGTERM and SIGHUP into a flag the measurement loops check, so an interrupted
-/// run still closes its Workspace, revokes its pairing and restores exposure.
+/// run still closes its Workspace, revokes its pairing and restores Network Access.
 fn trap_interrupts() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: the handler only stores to an atomic, which is async-signal-safe, and the

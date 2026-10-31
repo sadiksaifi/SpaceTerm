@@ -28,9 +28,12 @@ pub(crate) mod remembered_view;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
-#[allow(
-    dead_code,
-    reason = "only a status item without native alerts opens this window"
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "only a status item without native alerts opens this window"
+    )
 )]
 pub(crate) mod server_control_window;
 pub(crate) mod server_pane;

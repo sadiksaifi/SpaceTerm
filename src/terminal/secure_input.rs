@@ -27,9 +27,9 @@ struct PaneState {
 pub(crate) struct SecureInputHandle(Rc<RefCell<SecureInputCoordinator>>);
 
 impl SecureInputHandle {
-    #[allow(
-        dead_code,
-        reason = "native input isolation is selected by composition"
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only macOS composes native input isolation")
     )]
     pub(crate) fn new(adapter: Box<dyn SecureInputAdapter>) -> Self {
         Self(Rc::new(RefCell::new(SecureInputCoordinator {
@@ -43,9 +43,12 @@ impl SecureInputHandle {
         })))
     }
 
-    #[allow(
-        dead_code,
-        reason = "absence of input isolation is selected by composition"
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "only Linux composes the absence of input isolation"
+        )
     )]
     pub(crate) fn unavailable() -> Self {
         Self(Rc::new(RefCell::new(SecureInputCoordinator {

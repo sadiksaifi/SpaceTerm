@@ -857,7 +857,7 @@ impl QuicListener {
     }
 
     /// Widens the listener from one address to every interface at the same port and keeps its
-    /// connections, as when exposure widens. When the wildcard can't be bound the listener keeps
+    /// connections, as when Network Access widens. When the wildcard can't be bound the listener keeps
     /// its old address.
     pub fn widen(&self) -> Result<(), QuicError> {
         let (done, result) = std::sync::mpsc::sync_channel(1);

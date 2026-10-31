@@ -31,7 +31,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - Coordinate shared caches and native resources per host; separate baseline artifacts and overlap independent checks and reviews.
 - Run scoped tests, then required acceptance checks; reuse evidence only while relevant code, artifacts, configuration and environment still match.
 - Before any user-requested commit, push, or PR merge into main, disclose any known pre-existing test or check failures unrelated to your changes.
-- For local server setup or incompatible development state, follow [the local workflow](docs/local-server.md).
+- For local server setup, follow [the local workflow](docs/local-server.md).
 - For Linux work and native verification, use Penguin directly: `ssh penguin` for commands and Remora for its desktop.
 - Repositories live at `~/Projects/{SpaceTerm,zed,accesskit}` on both hosts. Clone missing forks from `github.com/sadiksaifi/{zed,accesskit}`.
 

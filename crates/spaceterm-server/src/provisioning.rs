@@ -80,7 +80,7 @@ pub fn prepare_direct(
     }
 }
 
-/// Authorize an exact network exposure and client public key through owning-account IPC.
+/// Authorize an exact Network Access policy and client public key through owning-account IPC.
 /// The server atomically binds the operation to the policy, key, name and assigned identities.
 pub fn setup_direct(
     identity: &str,

@@ -175,7 +175,7 @@ struct DirectRecord {
 
 impl ServerConnection {
     /// Reads previously bound identity fences without storage, network or credential access.
-    /// Local handles bind after successful protocol/capability admission. Direct
+    /// Local handles bind after successful protocol admission. Direct
     /// handles bind their explicit retained pairing at construction. Clones share the binding;
     /// a fresh handle must establish its own. Live admission still checks every transport.
     pub fn client_scope(&self) -> Result<ClientScope, ServerError> {
@@ -809,7 +809,7 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
-    /// Select a bind policy and its exposure atomically. None retains the configured address.
+    /// Select a bind policy and whether Network Access is on atomically. None retains the configured address.
     pub fn set_direct_policy(
         &self,
         policy: Option<crate::direct::NetworkPolicy>,

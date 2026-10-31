@@ -57,16 +57,16 @@ pub fn name_client(name: &str) {
     unsafe { std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", name) };
 }
 
-/// The owning machine's account-local authority over network exposure and pairing.
+/// The owning machine's account-local authority over Network Access and pairing.
 pub struct Owner {
     server: ServerConnection,
     /// Invitations this owner issued and has not seen consumed by an approved claim.
     issued: RefCell<Vec<ClaimId>>,
 }
 
-/// Network exposure to restore after a temporary change.
+/// Network Access to restore after a temporary change.
 pub struct Exposure {
-    /// The state before the change, or None when exposure already matched.
+    /// The state before the change, or None when Network Access already matched.
     previous: Option<(Option<NetworkPolicy>, bool)>,
 }
 
@@ -78,8 +78,8 @@ impl Owner {
         })
     }
 
-    /// Enables exposure at `bind`. A policy change other than widening to every interface at the
-    /// same port disconnects every paired client, so an exposure already enabled at `bind` stays
+    /// Enables Network Access at `bind`. A policy change other than widening to every interface at the
+    /// same port disconnects every paired client, so Network Access already enabled at `bind` stays
     /// untouched.
     pub fn expose(&self, bind: SocketAddr) -> Result<Exposure> {
         let status = at("exposure status", self.server.direct_status())?;

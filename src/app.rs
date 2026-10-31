@@ -1190,10 +1190,6 @@ struct DefaultWorkspaceWindowHost(Rc<HostComposition>);
 impl gpui::Global for DefaultWorkspaceWindowHost {}
 
 /// Reopening belongs to application lifecycle, including when only Settings remains open.
-#[allow(
-    dead_code,
-    reason = "external activation sources are selected by host composition"
-)]
 pub(crate) fn activate_default_window(cx: &mut App, token: Option<&str>) {
     leave_menu_only(cx);
     if let Some(host) = cx

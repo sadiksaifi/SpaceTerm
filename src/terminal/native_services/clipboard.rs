@@ -27,9 +27,9 @@ impl Default for ClipboardPreferences {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TextClipboardTarget {
     Clipboard,
-    #[allow(
-        dead_code,
-        reason = "not every host exposes an independent PRIMARY selection"
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "macOS has no PRIMARY selection")
     )]
     Primary,
 }

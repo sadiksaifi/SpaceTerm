@@ -1,4 +1,4 @@
-//! Request dispatch, and the connection-facing service boundary of the Development host.
+//! Request dispatch, and the connection-facing service boundary of the server's Pane host.
 use super::publish::{Observed, Publication};
 use super::*;
 use crate::terminal::session::SubscriptionNotifier;

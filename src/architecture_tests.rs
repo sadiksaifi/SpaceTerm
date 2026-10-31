@@ -450,9 +450,14 @@ fn is_host_lint_allowance(compact: &str) -> bool {
     else {
         return false;
     };
-    rest.strip_prefix("cfg_attr(not(target_os=\"macos\"),allow(dead_code,reason=\"")
-        .and_then(|reason| reason.strip_suffix("\"))]"))
-        .is_some_and(|reason| !reason.is_empty() && !reason.contains(['"', '\\']))
+    [
+        "cfg_attr(not(target_os=\"macos\"),allow(dead_code,reason=\"",
+        "cfg_attr(target_os=\"macos\",allow(dead_code,reason=\"",
+    ]
+    .into_iter()
+    .find_map(|prefix| rest.strip_prefix(prefix))
+    .and_then(|reason| reason.strip_suffix("\"))]"))
+    .is_some_and(|reason| !reason.is_empty() && !reason.contains(['"', '\\']))
 }
 
 fn native_suite_gate(line: &str) -> Option<NativeSuitePlatform> {
@@ -613,6 +618,7 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "#[cfg(all(test, any(target_os = \"macos\", target_os = \"linux\"), feature = \"native-tests\"))]\n#[path = \"../platform/unix_adapter_tests/session.rs\"]\nmod unix_adapter_tests;",
         "#[cfg(all(test, any(target_os = \"macos\", target_os = \"linux\"), feature = \"native-tests\"))]\nmod unix_adapter_tests {\ninclude!(\"../platform/unix_adapter_tests/session.rs\");\n}",
         "#[cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]\nstruct Endpoint;",
+        "#[cfg_attr(target_os = \"macos\", allow(dead_code, reason = \"only a native Adapter consumes it\"))]\nstruct Endpoint;",
         "#[cfg_attr(\n    not(target_os = \"macos\"),\n    allow(dead_code, reason = \"only a native Adapter consumes it\")\n)]\nstruct Endpoint;",
         "#![cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]",
         "let profile = TextInputKeybindingProfile::Linux;",
