@@ -23,10 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-/// Credential access is constructed only for enrollment, recovery or a paired route.
-pub trait CredentialProvider {
-    fn open(&self) -> Result<Arc<dyn CredentialStore>, CredentialError>;
-}
+pub use connections::credentials::CredentialProvider;
 pub struct CliCredentials<'a> {
     identity: &'a str,
     private_file: std::cell::Cell<bool>,
@@ -48,8 +45,24 @@ impl<'a> CliCredentials<'a> {
     }
 }
 impl CredentialProvider for CliCredentials<'_> {
-    fn open(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        let store = connections::credentials::for_cli(self.identity)?;
+    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+        self.notice(connections::credentials::for_cli_enrollment(self.identity)?)
+    }
+    fn open(
+        &self,
+        kind: connections::StoreKind,
+    ) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+        self.notice(connections::credentials::for_cli_record(
+            self.identity,
+            kind,
+        )?)
+    }
+}
+impl CliCredentials<'_> {
+    fn notice(
+        &self,
+        store: Arc<dyn CredentialStore>,
+    ) -> Result<Arc<dyn CredentialStore>, CredentialError> {
         self.private_file
             .set(self.private_file.get() || store.kind() == connections::StoreKind::PrivateFile);
         Ok(store)
@@ -252,7 +265,7 @@ impl Connections<'_> {
                 route: format!("id:{}", hex(&row.route)),
                 endpoint: row.endpoint.clone(),
                 fingerprint: row.paired.pin.fingerprint(),
-                store: platform_kind(),
+                store: store_kind(row.credential_store),
                 unpair_pending: row.unpair == connections::UnpairState::Pending,
                 held_outcomes: self.held.count(&row.route)?,
             });
@@ -363,11 +376,9 @@ impl Connections<'_> {
             return Err(Code::InteractionRequired.into());
         }
         self.checkpoint(deadline)?;
-        let credentials = self.credentials.open().map_err(credential_failure)?;
-        self.checkpoint(deadline)?;
         let client = PairingClient {
             store: self.store,
-            credentials: credentials.as_ref(),
+            credentials: self.credentials,
             network: self.network,
         };
         let pending = client
@@ -422,10 +433,7 @@ impl Connections<'_> {
                 match joining.finish(&|| self.io.interrupted()) {
                     Ok(Some(connection)) => {
                         let data = ConnectionAdd {
-                            connection: connection_data(
-                                &connection,
-                                store_kind(credentials.kind()),
-                            ),
+                            connection: connection_data(&connection),
                         };
                         let lines = vec![format!(
                             "Saved {} ({}) at {}.",
@@ -520,7 +528,7 @@ impl Connections<'_> {
                         token,
                         expires_at: timestamp(preview.expires)?,
                         effects: Effects {
-                            connection: connection_data(&preview.connection, platform_kind()),
+                            connection: connection_data(&preview.connection),
                             unpairs_this_computer: true,
                         },
                     },
@@ -540,14 +548,12 @@ impl Connections<'_> {
                     store_failure(error)
                 }
             })?;
-        if let Ok(credentials) = self.credentials.open() {
-            let client = PairingClient {
-                store: self.store,
-                credentials: credentials.as_ref(),
-                network: self.network,
-            };
-            let _ = client.recover_while(deadline, &|| self.io.interrupted());
-        }
+        let client = PairingClient {
+            store: self.store,
+            credentials: self.credentials,
+            network: self.network,
+        };
+        let _ = client.recover_while(deadline, &|| self.io.interrupted());
         let pending = self
             .store
             .pending()
@@ -698,16 +704,6 @@ fn store_kind(kind: connections::StoreKind) -> contract::StoreKind {
         connections::StoreKind::PrivateFile => contract::StoreKind::PrivateFile,
     }
 }
-fn platform_kind() -> contract::StoreKind {
-    #[cfg(target_os = "macos")]
-    {
-        contract::StoreKind::Keychain
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        contract::StoreKind::SecretService
-    }
-}
 fn kind_name(kind: contract::StoreKind) -> &'static str {
     match kind {
         contract::StoreKind::Keychain => "Keychain",
@@ -715,16 +711,13 @@ fn kind_name(kind: contract::StoreKind) -> &'static str {
         contract::StoreKind::PrivateFile => "private file",
     }
 }
-fn connection_data(
-    connection: &SavedConnection,
-    store: contract::StoreKind,
-) -> contract::Connection {
+fn connection_data(connection: &SavedConnection) -> contract::Connection {
     contract::Connection {
         name: connection.name.clone(),
         route: format!("id:{}", hex(&connection.route)),
         endpoint: connection.endpoint.clone(),
         fingerprint: connection.paired.pin.fingerprint(),
-        store,
+        store: store_kind(connection.credential_store),
     }
 }
 fn pending_warning() -> Warning {

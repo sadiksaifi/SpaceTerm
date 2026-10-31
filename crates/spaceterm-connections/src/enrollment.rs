@@ -1,7 +1,8 @@
 //! Foreground enrollment and restricted recovery for the CLI's own connections.
+use crate::credentials::{CredentialProvider, StoreKind};
 use crate::{
-    ConnectionStore, CredentialError, CredentialStore, Interaction, PendingEnrollment,
-    PendingRevocation, SavedConnection, StoreError, UnpairState,
+    ConnectionStore, CredentialError, Interaction, PendingEnrollment, PendingRevocation,
+    SavedConnection, StoreError, UnpairState,
 };
 use spaceterm_server::Lock;
 use spaceterm_server::direct::{
@@ -81,7 +82,7 @@ impl PairingNetwork for NativeNetwork {
 
 pub struct PairingClient<'a> {
     pub store: &'a ConnectionStore,
-    pub credentials: &'a dyn CredentialStore,
+    pub credentials: &'a dyn CredentialProvider,
     pub network: &'a dyn PairingNetwork,
 }
 
@@ -106,6 +107,7 @@ impl<'a> PairingClient<'a> {
         if !crate::valid_name(&name) {
             return Err(StoreError::NameTaken.into());
         }
+        let credentials = self.credentials.select()?;
         let route = crate::random_id()?;
         let credential_key = crate::random_id()?;
         let credential = DeviceCredential::generate()?;
@@ -118,6 +120,7 @@ impl<'a> PairingClient<'a> {
             pin: invitation.server_pin().clone(),
             claim: enrollment.claim_id(),
             credential: credential_key,
+            credential_store: credentials.kind(),
             public_key: credential.public_key()?,
             offered: false,
             confirmed: false,
@@ -126,9 +129,7 @@ impl<'a> PairingClient<'a> {
         self.store
             .transaction(deadline, cancelled)
             .reserve(record.clone())?;
-        let result = self
-            .credentials
-            .insert(&credential_key, credential.expose_bytes());
+        let result = credentials.insert(&credential_key, credential.expose_bytes());
         if let Err(error) = result {
             // A failed insert grants no authority over an existing native item. Recovery
             // checks the generated public key before retiring any item.
@@ -205,9 +206,10 @@ impl<'a> PairingClient<'a> {
         Ok(pending)
     }
 
-    fn read_credential(&self, key: &[u8; 32]) -> Result<DeviceCredential, Error> {
+    fn read_credential(&self, key: &[u8; 32], kind: StoreKind) -> Result<DeviceCredential, Error> {
         let bytes = self
             .credentials
+            .open(kind)?
             .read(key, Interaction::Quiet)?
             .ok_or(CredentialError::Unavailable)?;
         Ok(DeviceCredential::from_bytes(&bytes)?)
@@ -219,9 +221,8 @@ impl<'a> PairingClient<'a> {
         deadline: Instant,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), Error> {
-        let bytes = self
-            .credentials
-            .read(&record.credential, Interaction::Quiet)?;
+        let credentials = self.credentials.open(record.credential_store)?;
+        let bytes = credentials.read(&record.credential, Interaction::Quiet)?;
         let credential = bytes
             .as_ref()
             .map(|bytes| DeviceCredential::from_bytes(bytes))
@@ -252,8 +253,7 @@ impl<'a> PairingClient<'a> {
                 .confirm_enrollment_cleanup(record.route)?;
         }
         if owns_item {
-            self.credentials
-                .remove(&record.credential, Interaction::Quiet)?;
+            credentials.remove(&record.credential, Interaction::Quiet)?;
         }
         self.store
             .transaction(deadline, cancelled)
@@ -269,7 +269,7 @@ impl<'a> PairingClient<'a> {
     ) -> Result<(), Error> {
         let saved = &record.connection;
         if !record.confirmed {
-            let credential = self.read_credential(&saved.credential)?;
+            let credential = self.read_credential(&saved.credential, saved.credential_store)?;
             let receipt = self.network.revoke(saved, &credential, deadline)?;
             if receipt.server != saved.paired.pin.server
                 || receipt.operation != saved.route
@@ -282,6 +282,7 @@ impl<'a> PairingClient<'a> {
                 .confirm_revocation(saved.route)?;
         }
         self.credentials
+            .open(saved.credential_store)?
             .remove(&saved.credential, Interaction::Quiet)?;
         self.store
             .transaction(deadline, cancelled)
@@ -315,6 +316,7 @@ impl Joining<'_> {
             endpoint: self.record.endpoint.clone(),
             paired,
             credential: self.record.credential,
+            credential_store: self.record.credential_store,
             unpair: UnpairState::Paired,
         };
         if let Err(error) = self

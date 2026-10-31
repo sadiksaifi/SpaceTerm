@@ -1090,7 +1090,7 @@ impl WarningCode {
             }
             Self::LauncherNotOnPath => "The spaceterm launcher is not on PATH.",
             Self::PrivateCredentialFile => {
-                "CLI pairing secrets use a private file because this machine has no usable Secret Service."
+                "This pairing uses a private credential file selected when Secret Service was unavailable."
             }
             Self::UnpairPending => {
                 "The server has not confirmed the unpairing yet. Later connection commands retry it."

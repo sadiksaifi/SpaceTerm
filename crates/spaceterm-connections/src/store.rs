@@ -21,6 +21,7 @@ pub struct SavedConnection {
     pub endpoint: String,
     pub paired: PairedDevice,
     pub credential: [u8; 32],
+    pub credential_store: crate::StoreKind,
     pub unpair: UnpairState,
 }
 
@@ -44,6 +45,7 @@ pub struct PendingEnrollment {
     pub pin: ServerPin,
     pub claim: [u8; 32],
     pub credential: [u8; 32],
+    pub credential_store: crate::StoreKind,
     pub public_key: [u8; 32],
     pub offered: bool,
     pub confirmed: bool,
@@ -216,6 +218,7 @@ impl ConnectionTransaction<'_> {
                         && row.endpoint == connection.endpoint
                         && row.pin == connection.paired.pin
                         && row.credential == connection.credential
+                        && row.credential_store == connection.credential_store
                         && !row.confirmed
                 })
                 .ok_or(StoreError::Changed)?;
@@ -509,6 +512,7 @@ mod tests {
             endpoint: route.route.endpoint,
             paired: route.route.paired,
             credential: route.credential,
+            credential_store: crate::StoreKind::Keychain,
             unpair: UnpairState::Paired,
         }
     }
@@ -599,6 +603,7 @@ mod tests {
                 pin: connection.paired.pin,
                 claim: [8; 32],
                 credential: connection.credential,
+                credential_store: connection.credential_store,
                 public_key: [9; 32],
                 offered: false,
                 confirmed: false,

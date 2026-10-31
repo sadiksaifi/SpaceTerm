@@ -244,7 +244,7 @@ impl Route {
         let route = match self {
             Self::Local => CliRoute::Local,
             Self::Paired(saved) => {
-                let credentials = credentials.open().map_err(|error| {
+                let credentials = credentials.open(saved.credential_store).map_err(|error| {
                     ServerError::Direct(match error {
                         CredentialError::InteractionRequired => DirectError::InteractionRequired,
                         CredentialError::Unavailable => DirectError::CredentialUnavailable,
