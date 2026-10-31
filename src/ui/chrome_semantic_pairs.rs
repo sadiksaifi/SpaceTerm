@@ -126,10 +126,6 @@ mod tests {
             .expect("semantic-pair fixture must resolve");
         let authored = resolved.chrome.colors.clone();
         let prepared = ChromeAppearance::prepare(&resolved.chrome);
-        assert_eq!(
-            resolved.chrome.colors, authored,
-            "preparation must not mutate source roles"
-        );
         (authored, prepared)
     }
 

@@ -213,6 +213,20 @@ mod tests {
         );
         lifecycle.mark_presented(PresentationGeneration::test(2));
         assert!(!lifecycle.update_visibility(visible()).request_redraw);
+        {
+            let mut lifecycle = RenderLifecycle::new(SurfaceVisibility {
+                minimized: true,
+                ..visible()
+            });
+            lifecycle.observe_snapshot(PresentationGeneration::test(1));
+            lifecycle.observe_snapshot(PresentationGeneration::test(5));
+            assert!(lifecycle.update_visibility(visible()).request_redraw);
+            assert!(!lifecycle.update_visibility(visible()).request_redraw);
+            assert_eq!(
+                lifecycle.take_frame(),
+                Some(PresentationGeneration::test(5))
+            );
+        }
     }
 
     #[test]
@@ -255,44 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn recurring_effects_require_every_animation_visibility_fact() {
-        let mut lifecycle = RenderLifecycle::new(visible());
-        assert!(lifecycle.effects().animations_active);
-        for hidden in [
-            SurfaceVisibility {
-                application_active: false,
-                ..visible()
-            },
-            SurfaceVisibility {
-                key_window: false,
-                ..visible()
-            },
-            SurfaceVisibility {
-                minimized: true,
-                ..visible()
-            },
-            SurfaceVisibility {
-                occluded: true,
-                ..visible()
-            },
-            SurfaceVisibility {
-                live_resize: true,
-                ..visible()
-            },
-            SurfaceVisibility {
-                workspace_visible: false,
-                ..visible()
-            },
-            SurfaceVisibility {
-                pane_visible: false,
-                ..visible()
-            },
-        ] {
-            assert!(!lifecycle.update_visibility(hidden).animations_active);
-        }
-    }
-
-    #[test]
     fn every_visibility_combination_has_independent_presentation_and_animation_policy() {
         for mask in 0_u8..128 {
             let visibility = SurfaceVisibility {
@@ -316,6 +292,42 @@ mod tests {
             assert!(!lifecycle.update_visibility(visible()).request_redraw);
             assert!(!lifecycle.effects().animations_active);
         }
+        {
+            let mut lifecycle = RenderLifecycle::new(visible());
+            assert!(lifecycle.effects().animations_active);
+            for hidden in [
+                SurfaceVisibility {
+                    application_active: false,
+                    ..visible()
+                },
+                SurfaceVisibility {
+                    key_window: false,
+                    ..visible()
+                },
+                SurfaceVisibility {
+                    minimized: true,
+                    ..visible()
+                },
+                SurfaceVisibility {
+                    occluded: true,
+                    ..visible()
+                },
+                SurfaceVisibility {
+                    live_resize: true,
+                    ..visible()
+                },
+                SurfaceVisibility {
+                    workspace_visible: false,
+                    ..visible()
+                },
+                SurfaceVisibility {
+                    pane_visible: false,
+                    ..visible()
+                },
+            ] {
+                assert!(!lifecycle.update_visibility(hidden).animations_active);
+            }
+        }
     }
 
     #[test]
@@ -327,22 +339,6 @@ mod tests {
         lifecycle.observe_snapshot(PresentationGeneration::test(1));
         assert!(lifecycle.is_presented(PresentationGeneration::test(3)));
         assert_eq!(lifecycle.take_frame(), None);
-    }
-
-    #[test]
-    fn repeated_visibility_notifications_request_only_one_restoration_frame() {
-        let mut lifecycle = RenderLifecycle::new(SurfaceVisibility {
-            minimized: true,
-            ..visible()
-        });
-        lifecycle.observe_snapshot(PresentationGeneration::test(1));
-        lifecycle.observe_snapshot(PresentationGeneration::test(5));
-        assert!(lifecycle.update_visibility(visible()).request_redraw);
-        assert!(!lifecycle.update_visibility(visible()).request_redraw);
-        assert_eq!(
-            lifecycle.take_frame(),
-            Some(PresentationGeneration::test(5))
-        );
     }
 
     #[test]

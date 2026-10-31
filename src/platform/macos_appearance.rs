@@ -292,14 +292,6 @@ impl Drop for MacosAppearanceSubscription {
 pub(in crate::platform) mod tests {
     use super::*;
 
-    #[test]
-    fn show_borders_prefers_the_independent_fact_and_falls_back_to_legacy_contrast() {
-        assert!(!resolve_show_borders(Some(false), true));
-        assert!(resolve_show_borders(Some(true), false));
-        assert!(resolve_show_borders(None, true));
-        assert!(!resolve_show_borders(None, false));
-    }
-
     pub(in crate::platform) fn forcing_native_chrome_does_not_change_the_system_preference(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -395,5 +387,17 @@ pub(in crate::platform) mod tests {
             drop(subscription);
             assert!(changed.is_closed());
         });
+    }
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::resolve_show_borders;
+    #[test]
+    fn show_borders_prefers_the_independent_fact_and_falls_back_to_legacy_contrast() {
+        assert!(!resolve_show_borders(Some(false), true));
+        assert!(resolve_show_borders(Some(true), false));
+        assert!(resolve_show_borders(None, true));
+        assert!(!resolve_show_borders(None, false));
     }
 }

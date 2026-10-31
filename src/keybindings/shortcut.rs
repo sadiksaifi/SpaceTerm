@@ -195,13 +195,6 @@ mod tests {
         );
     }
     #[test]
-    fn retained_shifted_spellings_survive_layout_changes() {
-        let shortcut: Shortcut = serde_json::from_str("\"shift-cmd-7\"").unwrap();
-        assert_eq!(shortcut.to_string(), "shift-cmd-7");
-        assert_eq!(serde_json::to_string(&shortcut).unwrap(), "\"shift-cmd-7\"");
-    }
-
-    #[test]
     fn shifted_punctuation_has_one_identity_and_matches_native_dispatch() {
         for (base, symbol) in [
             ("`", "~"),

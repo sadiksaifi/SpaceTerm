@@ -3685,73 +3685,18 @@ fn resolve_row_paint(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn combo_box_shortcuts_use_the_shortcut_font_slot() {
-        let regular = gpui::font("Regular");
-        let shortcut = gpui::font("Shortcut");
-        let typography =
-            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
-                .semantic_fonts(shortcut.clone(), regular.clone(), regular);
-
-        assert_eq!(super::combo_box_shortcut_font(&typography), &shortcut);
+pub(crate) mod tests {
+    pub(crate) fn consumer_fonts(typography: &crate::ControlTypography) -> Vec<gpui::Font> {
+        vec![super::combo_box_shortcut_font(typography).clone()]
     }
 
     use super::*;
 
-    fn row_paint(seed: u32) -> crate::ListRowPaint {
-        let colors = [seed, seed + 1, seed + 2, seed + 3, seed + 4, seed + 5].map(gpui::rgba);
-        crate::ListRowPaint::new(
-            colors[0], colors[1], colors[2], colors[3], colors[4], colors[5],
+    pub(crate) fn density_extents(theme: ComboBoxTheme) -> (gpui::Pixels, gpui::Pixels) {
+        (
+            theme.metrics.trigger_height,
+            theme.metrics.trigger_corner_radius,
         )
-    }
-
-    #[test]
-    fn density_scales_combo_bounds_but_not_trigger_radius() {
-        let paint = ComboBoxPaint::new(
-            gpui::rgba(0),
-            gpui::rgba(0),
-            gpui::rgba(0),
-            gpui::rgba(0),
-            gpui::rgba(0),
-            gpui::rgba(0),
-            gpui::rgba(0),
-            gpui::rgba(0),
-            gpui::rgba(0),
-        );
-        let theme = ComboBoxTheme::new(
-            paint,
-            ComboBoxMetrics::new(px(240.0), px(28.0)).trigger_shape(px(6.0)),
-        );
-        let comfortable = theme.scaled_spacing(1.25);
-
-        assert!(comfortable.metrics.trigger_height > theme.metrics.trigger_height);
-        assert_eq!(
-            comfortable.metrics.trigger_corner_radius,
-            theme.metrics.trigger_corner_radius
-        );
-    }
-
-    #[test]
-    fn renderer_should_reach_selected_hovered_row_paint() {
-        let normal = row_paint(10);
-        let hovered = row_paint(20);
-        let selected = row_paint(30);
-        let selected_hovered = row_paint(40);
-        let disabled = row_paint(50);
-        let rows = crate::ListRowPaints::new(
-            normal,
-            hovered,
-            selected,
-            selected_hovered,
-            disabled,
-            disabled,
-        );
-
-        assert_eq!(
-            resolve_row_paint(Some(rows), true, true, true, true),
-            Some(selected_hovered)
-        );
     }
 
     #[test]
@@ -3770,6 +3715,91 @@ mod tests {
         assert_eq!(paint.trigger_leading_foreground(false, false), text);
         assert_eq!(paint.trigger_leading_foreground(true, true), icon);
         assert_eq!(paint.trigger_leading_foreground(true, false), disabled);
+
+        let row = ComboBoxPaint::new(
+            gpui::rgba(0x111111ff),
+            gpui::rgba(0x222222ff),
+            gpui::rgba(0x333333ff),
+            gpui::rgba(0x444444ff),
+            gpui::rgba(0x555555ff),
+            gpui::rgba(0x666666ff),
+            gpui::rgba(0x777777ff),
+            gpui::rgba(0x888888ff),
+            gpui::rgba(0x999999ff),
+        );
+        let hovered = row
+            .hover_background(gpui::rgba(0xaabbccff))
+            .hover_foreground(gpui::rgba(0xddeeffff));
+        assert_eq!(hovered.hover_background, gpui::rgba(0xaabbccff));
+        assert_eq!(hovered.hover_foreground, gpui::rgba(0xddeeffff));
+        assert_eq!(hovered.selected_background, gpui::rgba(0x444444ff));
+        assert_eq!(hovered.selected_foreground, gpui::rgba(0x555555ff));
+        assert_eq!(hovered.trigger_background, gpui::rgba(0x666666ff));
+        assert_eq!(hovered.trigger_hover_background, gpui::rgba(0x777777ff));
+        assert_eq!(hovered.trigger_border, gpui::rgba(0x888888ff));
+
+        let background = gpui::rgba(0xaabbccff);
+        let foreground = gpui::rgba(0xddeeffff);
+        let pressed = gpui::rgba(0x123456ff);
+        let disabled = gpui::rgba(0xabcdef80);
+        let state = |seed| {
+            crate::ListRowPaint::new(
+                gpui::rgba(seed),
+                gpui::rgba(seed + 1),
+                gpui::rgba(seed + 2),
+                gpui::rgba(seed + 3),
+                gpui::rgba(seed + 4),
+                gpui::rgba(seed + 5),
+            )
+        };
+        let rows = crate::ListRowPaints::new(
+            state(10),
+            state(20),
+            state(30),
+            state(40),
+            state(50),
+            state(60),
+        );
+        for (operation, actual, expected) in [
+            (
+                "hover background",
+                row.hover_background(background),
+                ComboBoxPaint {
+                    hover_background: background,
+                    ..row
+                },
+            ),
+            (
+                "hover foreground",
+                row.hover_foreground(foreground),
+                ComboBoxPaint {
+                    hover_foreground: foreground,
+                    ..row
+                },
+            ),
+            (
+                "trigger press and disabled backgrounds",
+                row.trigger_state_backgrounds(pressed, disabled),
+                ComboBoxPaint {
+                    trigger_pressed_background: pressed,
+                    trigger_disabled_background: disabled,
+                    ..row
+                },
+            ),
+            (
+                "row states",
+                row.rows(rows),
+                ComboBoxPaint {
+                    rows: Some(rows),
+                    ..row
+                },
+            ),
+        ] {
+            assert_eq!(
+                actual, expected,
+                "{operation} must preserve every sibling paint field"
+            );
+        }
     }
 
     #[test]
@@ -3779,16 +3809,23 @@ mod tests {
         let normal = gpui::rgba(0x0000002b);
         let interaction = gpui::rgba(0x00000040);
         let disabled = gpui::rgba(0x0000000a);
-        let theme = ComboBoxTheme::new(
+        let original = ComboBoxTheme::new(
             ComboBoxPaint::new(fill, fill, fill, fill, fill, fill, fill, normal, focus),
             ComboBoxMetrics::new(px(240.0), px(28.0)),
-        )
-        .ordinary_borders(crate::ControlBorderStates::new(
-            normal,
-            interaction,
-            interaction,
-            disabled,
-        ));
+        );
+        let borders = crate::ControlBorderStates::new(normal, interaction, interaction, disabled);
+        let theme = original.ordinary_borders(borders);
+        assert_eq!(
+            theme,
+            ComboBoxTheme {
+                paint: ComboBoxPaint {
+                    trigger_state_borders: Some(borders),
+                    ..original.paint
+                },
+                ..original
+            },
+            "ordinary hover and press borders must preserve sibling paints"
+        );
 
         assert_eq!(
             trigger_edges(theme.paint, true, true),
@@ -3869,41 +3906,19 @@ mod tests {
     }
 
     #[test]
-    fn row_hover_paint_should_not_replace_selection_paint() {
-        let base = gpui::rgba(0x111111ff);
-        let selected = gpui::rgba(0x222222ff);
-        let hovered = gpui::rgba(0xabcdef80);
-        let hover_foreground = gpui::rgba(0x123456ff);
-        let paint = ComboBoxPaint::new(base, base, base, selected, base, base, base, base, base)
-            .hover_background(hovered)
-            .hover_foreground(hover_foreground);
-        assert_eq!(paint.hover_background, hovered);
-        assert_eq!(paint.hover_foreground, hover_foreground);
-        assert_eq!(paint.selected_foreground, base);
-        assert_eq!(paint.selected_background, selected);
-        assert_eq!(paint.trigger_hover_background, base);
-    }
-
-    #[test]
-    fn filtering_should_match_unicode_case_without_slicing_text() {
-        let items = vec![
-            ComboBoxItem::new(1, "Ångström").keywords(["measurement"]),
-            ComboBoxItem::new(2, "Remote over SSH"),
-        ];
-
-        let matches = match_items(&items, "ång");
-
-        assert_eq!(matches[0].0, 0);
-        assert_eq!(matches[0].1.label, vec![0..4]);
-    }
-
-    #[test]
     fn filtering_should_report_unicode_description_highlights() {
         let items = vec![ComboBoxItem::new(1, "Workspace").description("/project/Ångström")];
 
         let matches = match_items(&items, "ång");
 
+        assert_eq!(matches[0].0, 0);
+        assert_eq!(matches[0].1.label, Vec::<std::ops::Range<usize>>::new());
         assert_eq!(matches[0].1.description, vec![9..13]);
+
+        let label_items = vec![ComboBoxItem::new(1, "Ångström").keywords(["measurement"])];
+        let label_matches = match_items(&label_items, "ång");
+        assert_eq!(label_matches[0].0, 0);
+        assert_eq!(label_matches[0].1.label, vec![0..4]);
     }
 
     #[test]
@@ -3915,30 +3930,8 @@ mod tests {
         ];
 
         assert_eq!(match_items(&items, "mac home workspace")[0].0, 0);
+        assert_eq!(match_items(&items, "mac workspace")[0].0, 0);
         assert!(match_items(&items, "mac home server").is_empty());
-    }
-
-    #[test]
-    fn filtering_should_rank_contiguous_matches() {
-        let items = vec![
-            ComboBoxItem::new(1, "random"),
-            ComboBoxItem::new(2, "projects"),
-        ];
-
-        assert_eq!(match_items(&items, "ro")[0].0, 1);
-    }
-
-    #[test]
-    fn filtering_should_preserve_item_order_for_an_empty_query() {
-        let items = vec![ComboBoxItem::new(1, "Third"), ComboBoxItem::new(2, "First")];
-
-        assert_eq!(
-            match_items(&items, "")
-                .into_iter()
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>(),
-            vec![0, 1]
-        );
     }
 
     #[test]

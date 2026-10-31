@@ -766,29 +766,27 @@ mod tests {
     }
 
     #[test]
-    fn reimporting_a_zed_family_replaces_its_themes() {
-        let storage = std::sync::Arc::new(MemoryStorage::default());
-        let settings = Settings::load(storage.clone());
-        let token = settings.begin_preview(0).unwrap();
-        let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
-        let install = || {
-            import_family(bytes, |source| {
-                settings.import_preview(&token, settings.snapshot().catalog_revision, source)
-            })
-        };
-
-        assert_eq!(install(), installed_message(1));
-        assert_eq!(install(), installed_message(1));
-        assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
-        assert_eq!(
-            storage.writes(),
-            0,
-            "importing a preview must not write settings"
-        );
-    }
-
-    #[test]
     fn a_malformed_zed_family_installs_nothing_and_a_corrected_retry_is_clean() {
+        // Preserve the singular-family idempotence case alongside the two-theme corrected retry.
+        {
+            let storage = std::sync::Arc::new(MemoryStorage::default());
+            let settings = Settings::load(storage.clone());
+            let token = settings.begin_preview(0).unwrap();
+            let bytes = br##"{"themes":[{"name":"Sample","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##;
+            for _ in 0..2 {
+                assert_eq!(
+                    import_family(bytes, |source| settings.import_preview(
+                        &token,
+                        settings.snapshot().catalog_revision,
+                        source
+                    ))
+                    .as_ref(),
+                    "Installed 1 theme."
+                );
+                assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 1);
+            }
+            assert_eq!(storage.writes(), 0);
+        }
         let storage = std::sync::Arc::new(MemoryStorage::default());
         let settings = Settings::load(storage.clone());
         let token = settings.begin_preview(0).unwrap();
@@ -803,8 +801,20 @@ mod tests {
         assert_eq!(install(invalid).as_ref(), "Unreadable Zed theme file.");
         assert!(settings.snapshot().candidate.terminal_themes.is_empty());
 
-        assert_eq!(install(corrected), installed_message(2));
+        assert_eq!(install(corrected).as_ref(), "Installed 2 themes.");
+        let first = settings.snapshot().candidate.terminal_themes.clone();
+        assert_eq!(install(corrected).as_ref(), "Installed 2 themes.");
+        assert_eq!(settings.snapshot().candidate.terminal_themes, first);
         assert_eq!(settings.snapshot().candidate.terminal_themes.len(), 2);
+        let replacement = br##"{"themes":[{"name":"First","appearance":"dark","style":{"terminal.foreground":"#abcdef"}},{"name":"Second","appearance":"light","style":{}}]}"##;
+        assert_eq!(install(replacement).as_ref(), "Installed 2 themes.");
+        let replaced = settings.snapshot().candidate.terminal_themes.clone();
+        assert_eq!(replaced.len(), 2);
+        let first_theme = replaced.iter().find(|theme| theme.name == "First").unwrap();
+        assert_eq!(
+            first_theme.colors.foreground,
+            Some(crate::appearance::Color::rgb(0xabcdef))
+        );
         assert_eq!(
             storage.writes(),
             0,

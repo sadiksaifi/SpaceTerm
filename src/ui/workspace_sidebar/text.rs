@@ -451,7 +451,6 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, _| MachineLabelFixture { machine: "A aaa" });
         let mut failures = Vec::new();
         for (scale, machine) in [(1.25, "A aaa"), (1.5, "A aaa"), (1.75, "A aa")] {
-            cx.simulate_scale_factor_change(scale);
             view.update(cx, |view, cx| {
                 view.machine = machine;
                 cx.notify();
@@ -462,10 +461,12 @@ mod tests {
                     .typography
                     .measure(TextRole::Secondary, machine, window)
             });
-            // 33 and 27 logical pixels are odd. The unrounded text widths snap down at these scales.
-            assert_eq!(f32::from(measured.ceil()) as u32 % 2, 1);
-            let device_width = f32::from(measured) * scale;
-            assert!((device_width - 0.5).ceil() < device_width);
+            // Put the intrinsic width a quarter device pixel past an integer. Rounding
+            // to the nearest device pixel would clip it with any host font.
+            let width = f32::from(measured);
+            let scale = ((width * scale).floor() + 0.25) / width;
+            cx.simulate_scale_factor_change(scale);
+            cx.run_until_parked();
             let label = cx
                 .debug_bounds("workspace-machine-1")
                 .expect("machine label");

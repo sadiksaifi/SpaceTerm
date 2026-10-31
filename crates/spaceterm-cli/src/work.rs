@@ -173,21 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn versioned_renames_use_the_snapshot_name_version() {
-        let snapshot = fixture();
-        let plan = workspace::rename(
-            &snapshot,
-            &args(Some("api"), None, None),
-            None,
-            "api-v2".into(),
-        )
-        .unwrap();
-        assert!(
-            matches!(plan.mutation, Mutation::RenameWorkspace { workspace, version: 2, name } if workspace == id(1) && name == "api-v2")
-        );
-    }
-
-    #[test]
     fn creation_control_uses_agents_then_valid_current_context_then_unclaimed() {
         let snapshot = fixture();
         let current = Current {

@@ -1,23 +1,3 @@
-const TERMINAL_ROLES: &[&str] = &[
-    "foreground",
-    "background",
-    "normal",
-    "bright",
-    "dim",
-    "bright_foreground",
-    "dim_foreground",
-    "cursor",
-    "cursor_text",
-    "selection_background",
-    "selection_foreground",
-    "find_match_background",
-    "find_match_foreground",
-    "find_active_match_background",
-    "find_active_match_foreground",
-    "hyperlink",
-    "visual_bell",
-];
-
 fn published_schema() -> serde_json::Value {
     serde_json::from_str(include_str!("../../docs/schema/settings.schema.json"))
         .expect("published settings schema must be JSON")
@@ -28,16 +8,48 @@ fn validator() -> jsonschema::Validator {
 }
 
 #[test]
-fn published_schema_lists_exactly_the_accepted_color_roles() {
-    let schema = published_schema();
-    let listed_terminal: std::collections::BTreeSet<_> =
-        schema["$defs"]["terminalColors"]["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-    assert_eq!(listed_terminal, TERMINAL_ROLES.iter().copied().collect());
+fn published_schema_and_parser_accept_color_values_and_reject_unknown_or_mistyped_roles() {
+    let validator = validator();
+    let mut settings = serde_json::to_value(super::SettingsDocument::default()).unwrap();
+    // A complete authored palette exercises the schema and parser, including array roles.
+    let colors = serde_json::json!({
+        "foreground": "#abcdefff", "background": "#123456ff",
+        "normal": ["#111111ff", "#222222ff", "#333333ff", "#444444ff", "#555555ff", "#666666ff", "#777777ff", "#888888ff"],
+        "bright": ["#111111ff", "#222222ff", "#333333ff", "#444444ff", "#555555ff", "#666666ff", "#777777ff", "#888888ff"],
+        "dim": ["#111111ff", "#222222ff", "#333333ff", "#444444ff", "#555555ff", "#666666ff", "#777777ff", "#888888ff"],
+        "bright_foreground": "#fedcbaff", "dim_foreground": "#654321ff",
+        "cursor": "#aabbccff", "cursor_text": "#001122ff",
+        "selection_background": "#12345680", "selection_foreground": "#abcdefff",
+        "find_match_background": "#23456780", "find_match_foreground": "#bcdef0ff",
+        "find_active_match_background": "#34567880", "find_active_match_foreground": "#cdef01ff",
+        "hyperlink": "#456789ff", "visual_bell": "#56789a80"
+    });
+    settings["appearance"]["terminal"]["overrides"] = serde_json::json!({
+        "builtin.spaceterm.dark": colors
+    });
+    let parse =
+        |value: &serde_json::Value| super::parse_settings(&serde_json::to_vec(value).unwrap());
+    assert!(validator.is_valid(&settings));
+    let parsed = parse(&settings).unwrap();
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap()["appearance"]["terminal"]["overrides"]["builtin.spaceterm.dark"],
+        colors
+    );
+    for (role, invalid) in [
+        ("foreground", serde_json::json!("#xyzxyz")),
+        ("foreground", serde_json::json!(["#abcdefff"])),
+        ("normal", serde_json::json!("#abcdefff")),
+        ("bright", serde_json::json!(["#abcdefff"])),
+        ("unknown_role", serde_json::json!("#abcdefff")),
+        ("terminal.foreground", serde_json::json!("#abcdefff")),
+        ("Foreground", serde_json::json!("#abcdefff")),
+    ] {
+        let mut invalid_settings = settings.clone();
+        invalid_settings["appearance"]["terminal"]["overrides"]["builtin.spaceterm.dark"][role] =
+            invalid;
+        assert!(!validator.is_valid(&invalid_settings), "{role}");
+        assert!(parse(&invalid_settings).is_err(), "{role}");
+    }
 }
 
 #[test]

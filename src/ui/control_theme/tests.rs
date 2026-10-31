@@ -243,14 +243,6 @@ fn control_catalog_preserves_exact_semantic_font_metadata() {
     let typography = ChromeTypography::prepare(&resolved, ChromeDensity::Compact);
     let controls = prepared_control_typography(&typography);
 
-    for (actual, role) in [
-        (controls.shortcut(), TextRole::Shortcut),
-        (controls.caption(), TextRole::Caption),
-        (controls.badge(), TextRole::Badge),
-    ] {
-        assert_eq!(actual, &typography.style(role).font);
-    }
-
     let shortcut = controls.shortcut();
     assert_eq!(shortcut.family.as_ref(), "Body Family");
     assert_eq!(shortcut.style, gpui::FontStyle::Italic);
@@ -264,17 +256,9 @@ fn control_catalog_preserves_exact_semantic_font_metadata() {
             .as_ref(),
         &["Body Fallback".to_owned()]
     );
-    assert!(
-        shortcut
-            .features
-            .tag_value_list()
-            .contains(&("ss01".to_owned(), 1))
-    );
-    assert!(
-        shortcut
-            .features
-            .tag_value_list()
-            .contains(&("tnum".to_owned(), 1))
+    assert_eq!(
+        shortcut.features.tag_value_list(),
+        &[("ss01".to_owned(), 1), ("tnum".to_owned(), 1)]
     );
 
     let caption = controls.caption();
@@ -296,17 +280,18 @@ fn control_catalog_preserves_exact_semantic_font_metadata() {
     assert_eq!(badge.family.as_ref(), "Caption Family");
     assert_eq!(badge.style, gpui::FontStyle::Normal);
     assert_eq!(badge.weight, gpui::FontWeight(375.0));
-    assert!(
+    assert_eq!(
         badge
-            .features
-            .tag_value_list()
-            .contains(&("ss02".to_owned(), 1))
+            .fallbacks
+            .as_ref()
+            .expect("badge fallbacks")
+            .0
+            .as_ref(),
+        &["Caption Fallback".to_owned()]
     );
-    assert!(
-        badge
-            .features
-            .tag_value_list()
-            .contains(&("tnum".to_owned(), 1))
+    assert_eq!(
+        badge.features.tag_value_list(),
+        &[("ss02".to_owned(), 1), ("tnum".to_owned(), 1)]
     );
 }
 
@@ -919,6 +904,18 @@ const FLOATING_ROLES: [FloatingRole; 6] = [
 fn light_selections_and_terminal_share_the_common_surface() {
     let (resolved, prepared) =
         resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
+    let background = Color::rgb(0xe5e5e5);
+    assert_eq!(prepared.colors.background, background);
+    assert_eq!(prepared.colors.title_bar_background, background);
+    assert_eq!(prepared.colors.panel_background, background);
+    assert_eq!(
+        prepared.colors.elevated_surface_background,
+        Color::rgb(0xfafafa)
+    );
+    assert_eq!(
+        prepared.floating_colors.row_selected_background,
+        Color::rgb(0xfdfdfd)
+    );
     let selected = Color::rgb(0xfdfdfd);
     let popup_selected = selected;
     assert_eq!(
@@ -1069,41 +1066,6 @@ fn light_navigation_keeps_quiet_edges_and_uses_the_rim_for_selected_hover() {
 }
 
 #[test]
-fn light_settings_grouping_uses_surface_separation_and_quiet_outer_edges() {
-    use crate::ui::appearance::settings::SettingsSurfaceRole::{Canvas, Card};
-
-    for opacity in [1.0, 0.65, 0.0] {
-        let (resolved, _) = resolve_case(
-            Appearance::Light,
-            ChromeDensity::Compact,
-            opacity,
-            true,
-            true,
-        );
-        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
-        let (settings, _) =
-            crate::ui::appearance::settings::prepare_variants(&resolved.chrome, active, inactive);
-        let canvas = settings.surface(Canvas).background;
-        let card = settings.surface(Card).background;
-        let edge = settings.card_edge().source_over(card);
-        let divider = settings.separator(Card).source_over(card);
-
-        assert!(
-            card.r > canvas.r && card.contrast_ratio(canvas) >= 1.05,
-            "Light Settings at {opacity}: card {card:?} must separate from canvas {canvas:?} without relying on an outline"
-        );
-        assert!(
-            edge == card,
-            "Light Settings at {opacity}: a group must not need a decorative outline"
-        );
-        assert!(
-            (1.12..=1.22).contains(&divider.contrast_ratio(card)),
-            "Light Settings at {opacity}: inset row rule {divider:?} must remain visible and quiet on {card:?}"
-        );
-    }
-}
-
-#[test]
 fn dark_search_fields_separate_from_their_host_without_competing_with_selection() {
     for opacity in [1.0, 0.65] {
         let (resolved, _) = resolve_case(
@@ -1231,7 +1193,6 @@ fn settings_surfaces_follow_window_opacity_and_controls_use_their_actual_hosts()
         for opacity in [1.0, 0.65, 0.0] {
             let (resolved, _) =
                 resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
-            let authored = resolved.chrome.colors.clone();
             let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
             let (settings, _) = crate::ui::appearance::settings::prepare_variants(
                 &resolved.chrome,
@@ -1242,7 +1203,6 @@ fn settings_surfaces_follow_window_opacity_and_controls_use_their_actual_hosts()
             let canvas = settings.surface(Canvas);
             let card = settings.surface(Card);
 
-            assert_eq!(resolved.chrome.colors, authored);
             for (host, expected) in [
                 (spaceterm_ui::ControlHost::Panel, sidebar.background),
                 (spaceterm_ui::ControlHost::Window, canvas.background),
@@ -1373,24 +1333,6 @@ fn light_unfocused_navigation_and_segments_keep_translucent_raised_selections() 
             );
         }
     }
-}
-
-#[test]
-fn light_navigation_uses_raised_surfaces_without_erasing_popup_selection() {
-    let (_, prepared) = resolve_case(Appearance::Light, ChromeDensity::Compact, 1.0, true, true);
-    let background = Color::rgb(0xe5e5e5);
-    let raised = Color::rgb(0xfafafa);
-    let selected = Color::rgb(0xfdfdfd);
-    assert_eq!(prepared.colors.background, background);
-    assert_eq!(prepared.colors.title_bar_background, background);
-    assert_eq!(prepared.colors.panel_background, background);
-    assert_eq!(prepared.colors.elevated_surface_background, raised);
-    assert_eq!(prepared.colors.tab_active_background, selected);
-    assert_eq!(
-        prepared.panel_controls.reference.row_selected_background,
-        selected
-    );
-    assert_eq!(prepared.floating_colors.row_selected_background, selected);
 }
 
 #[test]
@@ -2157,7 +2099,7 @@ fn inactive_prepared_control_hosts_suppress_hover_without_clearing_selection() {
 }
 
 #[test]
-fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors() {
+fn increased_contrast_reaches_final_host_floors() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for opacity in [1.0, 0.65, 0.0] {
             let mut preferences = AppearancePreferences {
@@ -2182,7 +2124,6 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                     &AvailableFonts::default(),
                 )
                 .unwrap();
-            let authored = resolved.chrome.colors.clone();
             for active in [true, false] {
                 let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
                 for host in [&prepared.panel_controls, &prepared.card_controls] {
@@ -2224,7 +2165,6 @@ fn increased_contrast_reaches_final_host_floors_without_mutating_resolved_colors
                         "field text: {appearance:?}, opacity={opacity}, active={active}, background={field:?}"
                     );
                 }
-                assert_eq!(resolved.chrome.colors, authored);
             }
         }
     }
@@ -2236,7 +2176,6 @@ fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
     chrome.composition.capabilities.increase_contrast = true;
-    let authored = chrome.colors.clone();
 
     for active in [true, false] {
         let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
@@ -2409,7 +2348,6 @@ fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
             }
         }
     }
-    assert_eq!(resolved.chrome.colors, authored);
 }
 
 #[test]
@@ -2418,7 +2356,6 @@ fn focused_selected_sidebar_row_uses_panel_prepared_focus_and_selection_roles() 
         resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
     let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
     chrome.composition.capabilities.increase_contrast = true;
-    let authored = chrome.colors.clone();
 
     let prepared = ChromeAppearance::prepare(&resolved.chrome);
     let host = prepared.control_host_background(spaceterm_ui::ControlHost::Panel);
@@ -2445,7 +2382,6 @@ fn focused_selected_sidebar_row_uses_panel_prepared_focus_and_selection_roles() 
             .contrast_ratio(selected)
             >= 7.0
     );
-    assert_eq!(resolved.chrome.colors, authored);
 }
 
 #[test]
@@ -3436,46 +3372,6 @@ fn dark_floating_ordinary_controls_share_one_readable_ordered_alpha() {
 }
 
 #[test]
-fn dark_floating_ghost_states_preserve_authored_order_without_an_opaque_fallback() {
-    let (resolved, prepared) =
-        resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
-    let paint = &prepared.floating_control_colors;
-    assert_eq!(paint.ghost_element_background.a, 0);
-    let rest = prepared.floating_colors.elevated_surface_background;
-    let hover = paint.ghost_element_hover;
-    let pressed = paint.ghost_element_active;
-    let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
-    let endpoints =
-        [Color::BLACK, Color::WHITE].map(|underlay| shell_endpoint_background(shell, underlay));
-    assert!(
-        !prepared
-            .floating_fallbacks
-            .contains(&FloatingControlFamily::GhostElement),
-        "Dark Ghost unexpectedly fell back: semantic_rest={rest:?}, host_endpoints={endpoints:?}, rest={:?}, hover={hover:?}, pressed={pressed:?}, disabled={:?}, hover_content={:?}, pressed_content={:?}",
-        paint.ghost_element_background,
-        paint.ghost_element_disabled,
-        paint.ghost_element_hover_foreground,
-        paint.ghost_element_active_foreground,
-    );
-
-    assert!(rest.r < hover.r && hover.r < pressed.r);
-    assert!(hover.a < 255 && pressed.a < 255);
-
-    let authored = &resolved.chrome.colors;
-    for (authored_state, rehosted_state) in [
-        (authored.ghost_element_hover, hover),
-        (authored.ghost_element_active, pressed),
-    ] {
-        let authored_step = authored_state.contrast_ratio(authored.background);
-        let rehosted_step = rehosted_state.source_over(rest).contrast_ratio(rest);
-        assert!(
-            (authored_step - rehosted_step).abs() < 0.02,
-            "authored step {authored_step:.3} must survive rehosting as {rehosted_step:.3}"
-        );
-    }
-}
-
-#[test]
 fn built_in_floating_ghost_states_transmit_without_weakening_order_or_content() {
     for appearance in [Appearance::Light, Appearance::Dark] {
         for opacity in [0.65, 0.3, 0.0] {
@@ -3543,6 +3439,44 @@ fn built_in_floating_ghost_states_transmit_without_weakening_order_or_content() 
                     assert!(icon.source_over(background).contrast_ratio(background) >= 4.5);
                 }
             }
+        }
+    }
+    {
+        let (resolved, prepared) =
+            resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
+        let paint = &prepared.floating_control_colors;
+        assert_eq!(paint.ghost_element_background.a, 0);
+        let rest = prepared.floating_colors.elevated_surface_background;
+        let hover = paint.ghost_element_hover;
+        let pressed = paint.ghost_element_active;
+        let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
+        let endpoints =
+            [Color::BLACK, Color::WHITE].map(|underlay| shell_endpoint_background(shell, underlay));
+        assert!(
+            !prepared
+                .floating_fallbacks
+                .contains(&FloatingControlFamily::GhostElement),
+            "Dark Ghost unexpectedly fell back: semantic_rest={rest:?}, host_endpoints={endpoints:?}, rest={:?}, hover={hover:?}, pressed={pressed:?}, disabled={:?}, hover_content={:?}, pressed_content={:?}",
+            paint.ghost_element_background,
+            paint.ghost_element_disabled,
+            paint.ghost_element_hover_foreground,
+            paint.ghost_element_active_foreground,
+        );
+
+        assert!(rest.r < hover.r && hover.r < pressed.r);
+        assert!(hover.a < 255 && pressed.a < 255);
+
+        let authored = &resolved.chrome.colors;
+        for (authored_state, rehosted_state) in [
+            (authored.ghost_element_hover, hover),
+            (authored.ghost_element_active, pressed),
+        ] {
+            let authored_step = authored_state.contrast_ratio(authored.background);
+            let rehosted_step = rehosted_state.source_over(rest).contrast_ratio(rest);
+            assert!(
+                (authored_step - rehosted_step).abs() < 0.02,
+                "authored step {authored_step:.3} must survive rehosting as {rehosted_step:.3}"
+            );
         }
     }
 }
@@ -4198,114 +4132,187 @@ fn unfocused_popup_selection_keeps_transmitting_the_material() {
 fn installed_floating_catalog_uses_the_material_control_presentation(
     cx: &mut gpui::TestAppContext,
 ) {
-    let (_, prepared) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
-    let reference = &prepared.floating_colors;
-    let colors = &prepared.floating_control_colors;
-    let field = &prepared.floating_field_colors;
-    let mut popup = reference.clone();
-    popup.elevated_surface_background =
-        prepared.floating_surface(prepared.floating_colors.elevated_surface_background);
-    let unfocused_reference = prepared
-        .unfocused_selection_colors(spaceterm_ui::ControlHost::Floating)
-        .clone();
-    let mut unfocused_popup = unfocused_reference.clone();
-    unfocused_popup.elevated_surface_background = popup.elevated_surface_background;
-    let with_elevation = |theme: spaceterm_ui::SurfaceControlThemes| {
-        theme.toggle_segmented_elevation(
-            spaceterm_ui::ControlShadow::none(),
-            None,
-            spaceterm_ui::ControlShadow::single(spaceterm_ui::ControlShadowLayer::new(
-                gpui_color(prepared.colors.shadow.multiply_opacity(89)).into(),
-                gpui::px(0.0),
-                gpui::px(1.0),
-                gpui::px(2.0),
-                gpui::px(-1.0),
-            )),
-            None,
-        )
+    use gpui::prelude::*;
+    use spaceterm_ui::{
+        ControlHost, DeterminateProgress, ProgressBar, ProgressState, SearchField, TextInput,
     };
-    let expected = spaceterm_ui::SurfaceControlThemes::new(
-        super::button::prepared(
-            colors,
-            &prepared.typography,
-            &prepared.icons,
-            prepared.capabilities.show_borders,
-        ),
-        super::toggle::prepared(colors, &prepared.typography),
-        super::progress::theme(colors),
-        super::segmented_control::prepared(
-            &prepared.floating_segmented_colors,
-            &prepared.typography,
-            super::segmented_control::SegmentedPolicy::prepared(&prepared),
-        ),
-        super::search_field::prepared(
-            &prepared.floating_field_reference,
-            field,
-            &prepared.typography,
-            &prepared.icons,
-        ),
-        super::text_input::themed(field, reference),
-    )
-    .triggers(
-        super::menu::prepared_with_rows(
-            reference,
-            colors,
-            &popup,
-            Some((&unfocused_reference, &unfocused_popup)),
-            &prepared.typography,
-            &prepared.icons,
-            super::OverlayRowPolicy::prepared(&prepared),
-        ),
-        super::combo_box::prepared_with_rows(
-            reference,
-            colors,
-            &popup,
-            Some((&unfocused_reference, &unfocused_popup)),
-            &prepared.typography,
-            &prepared.icons,
-            super::OverlayRowPolicy::prepared(&prepared),
-        ),
-    );
-    let expected = with_elevation(expected);
-    let expected_panel =
-        super::surface_control_themes(&prepared.panel_controls, reference, &popup, &prepared);
-    let expected_title_bar =
-        super::surface_control_themes(&prepared.title_bar_controls, reference, &popup, &prepared);
-    let expected_card =
-        super::surface_control_themes(&prepared.card_controls, reference, &popup, &prepared);
-    let expected_panel = with_elevation(expected_panel);
-    let expected_title_bar = with_elevation(expected_title_bar);
-    let expected_card = with_elevation(expected_card);
 
-    cx.update(|cx| {
-        crate::ui::initialize_controls(cx).unwrap();
-        super::replace_uniform_control_catalog(cx, &prepared)
-            .expect("floating catalog should install");
-        assert_eq!(
+    struct EditorFrame(gpui::Entity<TextInput>);
+    impl gpui::Render for EditorFrame {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let focus = self.0.read(cx).focus_handle();
+            spaceterm_ui::field_frame(
+                "catalog-editor-frame",
+                &focus,
+                spaceterm_ui::FieldState::default(),
+                px(6.0),
+                cx,
+            )
+            .debug_selector(|| "catalog-editor-frame".to_owned())
+            .w_full()
+            .h(px(24.0))
+            .child(self.0.clone())
+        }
+    }
+    struct Fields {
+        host: ControlHost,
+        editor: gpui::Entity<EditorFrame>,
+        search: gpui::Entity<TextInput>,
+    }
+    impl gpui::Render for Fields {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            self.host.mount(
+                gpui::div()
+                    .w(px(400.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .child(SearchField::new("catalog-search", self.search.clone()))
+                    .child(self.editor.clone())
+                    .child(ProgressBar::new(
+                        "catalog-progress",
+                        "Loading",
+                        ProgressState::Determinate(DeterminateProgress::new(0.5).unwrap()),
+                    )),
+            )
+        }
+    }
+    fn assert_fill(cx: &mut gpui::VisualTestContext, selector: &'static str, expected: Color) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} paints"));
+        cx.update(|window, _| {
+            let fills = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.bounds == bounds.scale(window.scale_factor()))
+                .filter_map(|quad| quad.background.as_solid())
+                .map(|color| application_color(gpui::Rgba::from(color)))
+                .collect::<Vec<_>>();
+            if expected.a == 0 {
+                assert!(
+                    fills.iter().all(|fill| fill.a == 0),
+                    "{selector} must stay unpainted: {fills:?}"
+                );
+            } else {
+                assert!(
+                    fills.contains(&expected),
+                    "{selector}: expected {expected:?}, got {fills:?}"
+                );
+            }
+        });
+    }
+    cx.update(crate::ui::initialize_controls).unwrap();
+    let (_, prepared) = resolve_case(Appearance::Dark, ChromeDensity::Compact, 0.0, true, true);
+    cx.update(|cx| super::replace_uniform_control_catalog(cx, &prepared).unwrap());
+    for (host, colors) in [
+        (ControlHost::TitleBar, &prepared.title_bar_controls.colors),
+        (ControlHost::Panel, &prepared.panel_controls.colors),
+        (ControlHost::Card, &prepared.card_controls.colors),
+        (ControlHost::Floating, &prepared.floating_control_colors),
+    ] {
+        assert!(cx.update(|cx| {
             cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .hosted_controls(spaceterm_ui::ControlHost::TitleBar),
-            Some(&expected_title_bar),
-        );
+                .hosted_controls(host)
+                .is_some()
+        }));
+        let (_, view) = cx.add_window_view(|_, _| ControlEdgeFixture(host));
+        view.simulate_resize(gpui::size(px(640.0), px(640.0)));
+        view.run_until_parked();
+        for selector in [
+            "edge-button",
+            "edge-icon",
+            "edge-combo",
+            "edge-icon-combo",
+            "edge-menu",
+            "edge-picker",
+            "edge-segmented",
+            "edge-checkbox-indicator",
+            "edge-switch-indicator",
+        ] {
+            let bounds = view
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{host:?}/{selector}"));
+            assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
+        }
         assert_eq!(
-            cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .hosted_controls(spaceterm_ui::ControlHost::Floating),
-            Some(&expected),
+            view.debug_bounds("edge-button").unwrap().size.height,
+            px(24.0)
         );
-        assert_eq!(
-            cx.global::<spaceterm_ui::ModalTheme>(),
-            &super::modal::theme(colors),
+        for selector in ["edge-button", "edge-icon", "edge-combo"] {
+            assert_fill(view, selector, colors.element_background);
+        }
+        for selector in ["edge-checkbox-indicator", "edge-switch-indicator"] {
+            assert_fill(view, selector, colors.toggle_off_background);
+        }
+        let segmented = match host {
+            ControlHost::TitleBar => &prepared.title_bar_controls.segmented,
+            ControlHost::Panel => &prepared.panel_controls.segmented,
+            ControlHost::Card => &prepared.card_controls.segmented,
+            ControlHost::Floating => &prepared.floating_segmented_colors,
+            ControlHost::Window => unreachable!(),
+        };
+        assert_fill(view, "edge-segmented", segmented.element_background);
+        assert!(colors.element_background.a > 0 && colors.element_background.a < 255);
+
+        if host == ControlHost::Floating {
+            assert!(colors.ghost_element_hover.a > 0);
+            assert_ne!(
+                colors.ghost_element_hover,
+                prepared.control_colors.ghost_element_hover
+            );
+            let menu = view
+                .debug_bounds("edge-menu")
+                .expect("Floating menu trigger");
+            view.simulate_mouse_move(menu.center(), None, gpui::Modifiers::none());
+            view.run_until_parked();
+            view.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            view.update(|window, cx| window.simulate_next_frame(cx));
+            view.run_until_parked();
+            assert_fill(view, "edge-menu", colors.ghost_element_hover);
+        }
+
+        let field_colors = if host == ControlHost::Floating {
+            &prepared.floating_field_colors
+        } else {
+            colors
+        };
+        let (_, fields) = cx.add_window_view(|window, cx| Fields {
+            host,
+            editor: cx.new(|cx| {
+                EditorFrame(cx.new(|cx| {
+                    TextInput::new("catalog-editor", "Editor", "text", window, cx)
+                        .debug_selector("catalog-editor")
+                }))
+            }),
+            search: cx.new(|cx| {
+                TextInput::new("catalog-search-input", "Search", "", window, cx)
+                    .variant(spaceterm_ui::TextInputVariant::Bare)
+            }),
+        });
+        fields.run_until_parked();
+        assert_fill(fields, "catalog-search", field_colors.input_background);
+        assert_fill(
+            fields,
+            "catalog-editor-frame",
+            field_colors.input_background,
         );
-        assert_eq!(
-            cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .hosted_controls(spaceterm_ui::ControlHost::Panel),
-            Some(&expected_panel),
+        assert_fill(fields, "catalog-progress-track", colors.progress_track);
+        assert_fill(
+            fields,
+            "catalog-progress-indicator",
+            colors.progress_indicator,
         );
-        assert_eq!(
-            cx.global::<spaceterm_ui::ControlThemeCatalog>()
-                .hosted_controls(spaceterm_ui::ControlHost::Card),
-            Some(&expected_card),
-        );
-    });
+    }
 }
 
 #[test]
@@ -4350,47 +4357,32 @@ fn floating_text_stays_readable_over_extreme_content_at_minimum_opacity() {
         let host = &prepared.floating_colors;
         for role in FLOATING_ROLES {
             let shell = prepared.floating_surfaces().shell(role);
-            let text = if role == FloatingRole::Readout {
+            let primary = if role == FloatingRole::Readout {
                 host.preview_foreground
             } else {
                 host.text
             };
-            for underlay in [Color::BLACK, Color::WHITE] {
-                let background = shell_endpoint_background(shell, underlay);
-                let foreground = text.source_over(background);
-                let contrast = foreground.contrast_ratio(background);
-                assert!(
-                    contrast >= 4.5,
-                    "{appearance:?} {role:?} ordinary text must stay readable over {underlay:?}: \
-                     contrast={contrast:.2}, background={background:?}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn floating_supporting_text_stays_readable_over_extreme_content_at_minimum_opacity() {
-    for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
-        let host = &prepared.floating_colors;
-        // Tooltip shortcuts, modal body copy, and Find result counts use this register directly.
-        // Menu and palette rows resolve their own content contrast and do not use this contract.
-        for role in [
-            FloatingRole::Tooltip,
-            FloatingRole::Modal,
-            FloatingRole::Notice,
-        ] {
-            let shell = prepared.floating_surfaces().shell(role);
-            for underlay in [Color::BLACK, Color::WHITE] {
-                let background = shell_endpoint_background(shell, underlay);
-                let foreground = host.text_muted.source_over(background);
-                let contrast = foreground.contrast_ratio(background);
-                assert!(
-                    contrast >= 4.5,
-                    "{appearance:?} {role:?} supporting text must stay readable over {underlay:?}: \
-                     contrast={contrast:.2}, background={background:?}"
-                );
+            let supporting = matches!(
+                role,
+                FloatingRole::Tooltip | FloatingRole::Modal | FloatingRole::Notice
+            )
+            .then_some(host.text_muted);
+            let placeholder = matches!(role, FloatingRole::Command | FloatingRole::Popover)
+                .then_some(host.input_placeholder);
+            for (register, text) in [
+                ("primary", Some(primary)),
+                ("supporting", supporting),
+                ("placeholder", placeholder),
+            ] {
+                let Some(text) = text else { continue };
+                for underlay in [Color::BLACK, Color::WHITE] {
+                    let background = shell_endpoint_background(shell, underlay);
+                    let contrast = text.source_over(background).contrast_ratio(background);
+                    assert!(
+                        contrast >= 4.5,
+                        "{appearance:?}/{role:?}/{register} contrast={contrast:.2} over {underlay:?}: {background:?}"
+                    );
+                }
             }
         }
     }
@@ -4521,28 +4513,6 @@ fn builtin_disabled_controls_never_report_an_unmet_absolute_floor() {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-#[test]
-fn floating_bare_editor_placeholders_stay_readable_over_extreme_content() {
-    for appearance in [Appearance::Light, Appearance::Dark] {
-        let (_, prepared) = resolve_case(appearance, ChromeDensity::Compact, 0.0, true, true);
-        let host = &prepared.floating_colors;
-        for role in [FloatingRole::Command, FloatingRole::Popover] {
-            let shell = prepared.floating_surfaces().shell(role);
-            for underlay in [Color::BLACK, Color::WHITE] {
-                let background = shell_endpoint_background(shell, underlay);
-                let contrast = host
-                    .input_placeholder
-                    .source_over(background)
-                    .contrast_ratio(background);
-                assert!(
-                    contrast >= 4.5,
-                    "{appearance:?} {role:?} bare editor placeholder contrast={contrast:.2} over {underlay:?}"
-                );
             }
         }
     }

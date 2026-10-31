@@ -2784,7 +2784,10 @@ impl TerminalPane {
             && self.ime.marked_text().is_none()
             && window.is_fullscreen();
         if eligible_escape {
-            if self.fullscreen_escape.escape_pressed(Instant::now()) {
+            if self
+                .fullscreen_escape
+                .escape_pressed(cx.background_executor().now())
+            {
                 window.toggle_fullscreen();
             }
         } else {

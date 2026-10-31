@@ -1188,42 +1188,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual measurement of full and incremental large-history publication"]
-    fn accesskit_large_history_publication_measurement() {
-        use std::{hint::black_box, time::Instant};
-        let mut fixture = RetainedFixture::new(10_000);
-        let initial = fixture.snapshot(true, (0..10_000).collect());
-        let frames = 100;
-        let measure = |name, models: [TerminalAccessibilityModel; 2]| {
-            let mut full = pane_tree(models[0].clone());
-            let mut incremental = pane_tree(models[0].clone());
-            update_with(&mut full, true);
-            update(&mut incremental);
-            let run = |tree: &mut PaneTree, full: bool| {
-                let start = Instant::now();
-                for frame in 0..frames {
-                    tree.model = models[frame % 2].clone();
-                    black_box(update_with(tree, full));
-                }
-                start.elapsed().as_secs_f64() * 1_000_000.0 / frames as f64
-            };
-            let before = run(&mut full, true);
-            let after = run(&mut incremental, false);
-            eprintln!(
-                "accesskit publication {name}, 10,000 rows x 80 cells, {frames} frames: full {before:.2} us/frame, incremental {after:.2} us/frame"
-            );
-        };
-        measure("unchanged", [initial.clone(), initial.clone()]);
-        fixture.cursor = Some((9_998, 79));
-        let cursor = fixture.snapshot(false, vec![]);
-        measure("cursor", [initial.clone(), cursor.clone()]);
-        fixture.rows[5_000].revision += 1;
-        fixture.rows[5_000].cells[0] = AccessibilityCell::new("y", 1, false);
-        let changed = fixture.snapshot(false, vec![5_000]);
-        measure("single row", [cursor, changed]);
-    }
-
-    #[test]
     fn accesskit_unchanged_large_history_publishes_no_rows() {
         let model = TerminalAccessibilityModel::new(
             (0..10_000)

@@ -30,18 +30,6 @@ fn test_theme() -> CommandPaletteTheme {
 }
 
 #[test]
-fn density_scales_palette_bounds_but_not_accessory_radius() {
-    let theme = test_theme();
-    let comfortable = theme.scaled_spacing(1.25);
-
-    assert!(comfortable.metrics.row_height > theme.metrics.row_height);
-    assert_eq!(
-        comfortable.metrics.accessory_radius,
-        theme.metrics.accessory_radius
-    );
-}
-
-#[test]
 fn row_text_paints_should_resolve_normal_selected_and_disabled_foregrounds() {
     let paint = test_theme().paint;
 
@@ -59,23 +47,8 @@ fn row_text_paints_should_resolve_normal_selected_and_disabled_foregrounds() {
     );
 }
 
-#[test]
-fn selected_hovered_row_should_preserve_the_complete_combined_paint() {
-    let row = |color| {
-        let color = rgba(color);
-        crate::ListRowPaint::new(color, color, color, color, color, color)
-    };
-    let selected_hovered = row(0x7351baff);
-    let paint = test_theme().paint.rows(crate::ListRowPaints::new(
-        row(0x202024ff),
-        row(0x305070ff),
-        row(0x456789ff),
-        selected_hovered,
-        row(0x808080ff),
-        row(0x808080ff),
-    ));
-
-    assert_eq!(paint.row_paint(false, true, true, true), selected_hovered);
+pub(crate) fn density_extents(theme: CommandPaletteTheme) -> (gpui::Pixels, gpui::Pixels) {
+    (theme.metrics.row_height, theme.metrics.accessory_radius)
 }
 
 fn items() -> Vec<CommandPaletteItem<u8>> {
@@ -183,8 +156,10 @@ fn unsectioned_hosts_should_be_separated_from_a_warning_section() {
     );
 }
 
-#[test]
-fn presented_results_should_measure_every_row_kind_and_resolve_scroll_offsets() {
+#[gpui::test]
+fn presented_results_should_measure_every_row_kind_and_resolve_scroll_offsets(
+    cx: &mut TestAppContext,
+) {
     let (results, metrics) = sectioned_results();
 
     let offset = |y| {
@@ -209,6 +184,66 @@ fn presented_results_should_measure_every_row_kind_and_resolve_scroll_offsets() 
             (8, px(0.0)),
         )
     );
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            vec![
+                CommandPaletteItem::new(1, "First")
+                    .section("Recent")
+                    .debug_selector("extent-first"),
+                CommandPaletteItem::new(2, "Second")
+                    .description("Details")
+                    .section("Recent")
+                    .debug_selector("extent-second"),
+                CommandPaletteItem::new(3, "Third")
+                    .section("All")
+                    .debug_selector("extent-third"),
+            ],
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let first = cx.debug_bounds("extent-first").expect("first row");
+    let second = cx.debug_bounds("extent-second").expect("described row");
+    let third = cx
+        .debug_bounds("extent-third")
+        .expect("row after separator and section");
+    assert_eq!(first.size.height, px(28.0));
+    assert_eq!(second.size.height, px(40.0));
+    assert_eq!(second.top(), first.bottom());
+    assert_eq!(third.top() - second.bottom(), px(31.0));
+    let panel = cx.debug_bounds("command-palette-panel").expect("panel");
+    assert!(first.top() >= panel.top() && third.bottom() <= panel.bottom());
+    palette.update(cx, |palette, cx| {
+        palette.set_items(
+            (10..50u8)
+                .map(|i| {
+                    CommandPaletteItem::new(i, format!("Command {i}"))
+                        .debug_selector(format!("extent-row-{i}"))
+                })
+                .collect(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let panel = cx.debug_bounds("command-palette-panel").unwrap();
+    let first = cx.debug_bounds("extent-row-10").unwrap();
+    for _ in 0..39 {
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+    }
+    let last = cx
+        .debug_bounds("extent-row-49")
+        .expect("navigation should reveal final row");
+    assert_eq!(last.size.height, px(28.0));
+    assert!(last.top() >= panel.top() && last.bottom() <= panel.bottom());
+    assert_eq!(selected(&palette, cx), Some(49));
+    for _ in 0..39 {
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+    }
+    assert_eq!(cx.debug_bounds("extent-row-10"), Some(first));
 }
 
 #[test]
@@ -228,19 +263,6 @@ fn page_target_should_skip_disabled_matches_without_ignoring_their_height() {
     assert_eq!(
         results.page_target(Some(4), &[0, 2, 4], px(120.0), -1, metrics),
         Some(2)
-    );
-}
-
-#[test]
-fn empty_query_should_preserve_provider_order() {
-    let matches = match_command_palette_items(&items(), "", CommandPaletteMatching::Semantic);
-
-    assert_eq!(
-        matches
-            .iter()
-            .map(|matched| matched.item_index)
-            .collect::<Vec<_>>(),
-        vec![0, 1, 2]
     );
 }
 
@@ -269,19 +291,37 @@ fn matcher_should_search_labels_and_keywords() {
             .item_index,
         2
     );
-}
 
-#[test]
-fn direct_label_match_should_rank_above_metadata_match() {
-    let items = vec![
+    for query in ["", "  "] {
+        assert_eq!(
+            match_command_palette_items(&items, query, CommandPaletteMatching::Semantic)
+                .iter()
+                .map(|matched| matched.item_index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2],
+            "an empty query preserves provider order"
+        );
+    }
+    assert_eq!(
+        match_command_palette_items(&items, "open project", CommandPaletteMatching::Semantic)
+            .iter()
+            .map(|matched| matched.item_index)
+            .collect::<Vec<_>>(),
+        [0],
+        "query tokens may match both the label and keywords"
+    );
+    let competing = vec![
         CommandPaletteItem::new(1, "Open").keywords(["window"]),
         CommandPaletteItem::new(2, "Window Settings"),
+        CommandPaletteItem::new(3, "Window Settings"),
     ];
-
     assert_eq!(
-        match_command_palette_items(&items, "window", CommandPaletteMatching::Semantic)[0]
-            .item_index,
-        1
+        match_command_palette_items(&competing, "window", CommandPaletteMatching::Semantic)
+            .iter()
+            .map(|matched| matched.item_index)
+            .collect::<Vec<_>>(),
+        [1, 2, 0],
+        "label matches rank above keywords and equal scores preserve provider order"
     );
 }
 
@@ -296,16 +336,6 @@ fn unicode_highlights_should_remain_valid_label_boundaries() {
         items[0].label().is_char_boundary(range.start)
             && items[0].label().is_char_boundary(range.end)
     }));
-}
-
-#[test]
-fn multiple_query_tokens_may_match_different_semantic_fields() {
-    let items = vec![CommandPaletteItem::new(1, "Open Workspace").keywords(["project"])];
-
-    assert_eq!(
-        match_command_palette_items(&items, "open project", CommandPaletteMatching::Semantic).len(),
-        1
-    );
 }
 
 struct CloneCountingId {

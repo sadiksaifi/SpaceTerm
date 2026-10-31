@@ -533,6 +533,7 @@ fn a_selection_across_uncached_rows_copies_once_their_pages_arrive() {
     assert!(text.starts_with("line1\nline2\n"));
     assert!(text.ends_with("line1999\n$"), "{text:?}");
     assert_eq!(text.lines().count(), 2000);
+    super::super::tests::assert_copy_readiness_and_page_decoding();
 }
 
 #[test]

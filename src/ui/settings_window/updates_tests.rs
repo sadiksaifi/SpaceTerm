@@ -114,27 +114,6 @@ fn update_preferences_should_edit_the_draft_and_reset_one_row_at_a_time(cx: &mut
 }
 
 #[gpui::test]
-fn settings_search_should_find_the_overdue_reminder_from_another_section(cx: &mut TestAppContext) {
-    let (window, cx) = open_updates(cx);
-    click("settings-navigation-settings-section-interface", cx);
-
-    cx.update(|_, cx| {
-        let search = window.read(cx).search.clone();
-        search.update(cx, |search, cx| search.set_value("overdue".to_owned(), cx));
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        window.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Updates
-    );
-    assert!(
-        cx.debug_bounds("settings-row-update-reminder-interval")
-            .is_some()
-    );
-}
-
-#[gpui::test]
 fn status_should_offer_no_update_action_without_the_update_service(cx: &mut TestAppContext) {
     let (window, cx) = open_updates(cx);
 

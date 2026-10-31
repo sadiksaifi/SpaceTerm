@@ -3,6 +3,7 @@
 //! Everything here is pure. Every repository-supplied string is sanitized before display, and no
 //! state is carried by color alone: a dimmed value also says why in its accessible label.
 
+use super::display_text::is_bidirectional_format;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -373,13 +374,6 @@ fn presented(view: &RepositoryView) -> Option<&RepositoryStatus> {
         RepositoryView::Hidden => None,
         RepositoryView::Repository(status) => Some(status),
     }
-}
-
-fn is_bidirectional_format(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-    )
 }
 
 fn plural(count: impl Into<u64>, unit: &str) -> String {

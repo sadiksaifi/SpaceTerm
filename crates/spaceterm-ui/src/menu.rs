@@ -4044,7 +4044,7 @@ fn entry_offset(entries: &[InternalEntry], index: usize, metrics: MenuMetrics) -
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gpui::{Context, Entity, Modifiers, Render, TestAppContext, VisualTestContext, rgba};
     use std::{
@@ -4484,24 +4484,6 @@ mod tests {
         assert_row_paint(selected_hovered, row, cx);
     }
 
-    #[test]
-    fn row_hover_paint_should_not_replace_selection_paint() {
-        let original = test_theme().paint;
-        let hovered = rgba(0xabcdef80);
-        let hover_foreground = rgba(0x123456ff);
-        let paint = original
-            .hover_background(hovered)
-            .hover_foreground(hover_foreground);
-        assert_eq!(paint.hover_background, hovered);
-        assert_eq!(paint.hover_foreground, hover_foreground);
-        assert_eq!(paint.selected_foreground, original.selected_foreground);
-        assert_eq!(paint.selected_background, original.selected_background);
-        assert_eq!(
-            paint.trigger_hover_background,
-            original.trigger_hover_background
-        );
-    }
-
     fn inert(label: &str, disabled: bool) -> InternalEntry {
         InternalEntry {
             kind: InternalEntryKind::Item {
@@ -4675,48 +4657,57 @@ mod tests {
         );
     }
 
-    #[test]
-    fn panel_metrics_inherit_shell_geometry_and_entry_extents() {
-        let base = MenuMetrics::new(px(196.0), px(26.0))
-            .horizontal_padding(px(6.0))
-            .leading_columns(px(16.0), px(18.0), px(4.0))
-            .gap(px(6.0))
-            .submenu_gap(px(2.0));
-        let shell = test_shell();
-        let metrics = MenuTheme::new(test_theme().paint, MenuSizes::new(base, base, base))
-            .resolve(MenuSize::Regular, shell)
-            .metrics;
-
-        let entries = vec![
-            inert("New Window", false),
-            inert("Rename Workspace", false),
-            InternalEntry {
-                kind: InternalEntryKind::Separator,
-            },
-            inert("Close Workspace", false),
-        ];
-
-        assert_eq!(row_corner_radius(metrics), shell.nested_radius());
-        assert_eq!(
-            content_leading_inset(metrics, panel_leading_columns(&entries)),
-            shell.content_inset() + px(6.0)
+    #[gpui::test]
+    fn panel_contains_independently_sized_rows_and_separator(cx: &mut TestAppContext) {
+        let (_, cx) = open_columns_menu(
+            cx,
+            vec![
+                MenuEntry::action("First", "first").debug_selector("extent-menu-first"),
+                MenuEntry::action("Second", "second").debug_selector("extent-menu-second"),
+                MenuEntry::separator(),
+                MenuEntry::action("Third", "third").debug_selector("extent-menu-third"),
+            ],
         );
-        assert_eq!(metrics.panel_padding, shell.content_inset());
-        assert_eq!(
-            panel_size(&entries, metrics),
-            size(px(196.0), px(89.0) + shell.content_inset() * 2.0)
-        );
+        let panel = cx.debug_bounds("menu-panel-0").expect("panel");
+        let first = cx.debug_bounds("extent-menu-first").expect("first row");
+        let second = cx.debug_bounds("extent-menu-second").expect("second row");
+        let third = cx.debug_bounds("extent-menu-third").expect("third row");
+        assert_eq!(first.size.height, px(28.0));
+        assert_eq!(second.size.height, px(28.0));
+        assert_eq!(third.size.height, px(28.0));
+        assert_eq!(second.top(), first.bottom());
+        assert_eq!(third.top() - second.bottom(), px(9.0));
+        assert_eq!(first.top() - panel.top(), px(5.0));
+        assert_eq!(panel.bottom() - third.bottom(), px(5.0));
+        assert_eq!(first.left() - panel.left(), px(5.0));
+        assert_eq!(panel.right() - first.right(), px(5.0));
+        assert_eq!(panel.size.height, px(103.0));
+        cx.update(|window, _| {
+            let first = first.scale(window.scale_factor());
+            let rows = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.bounds == first)
+                .collect::<Vec<_>>();
+            assert!(!rows.is_empty(), "the highlighted row must reach the scene");
+            let radius = px(6.0).scale(window.scale_factor());
+            for quad in rows {
+                assert_eq!(
+                    [
+                        quad.corner_radii.top_left,
+                        quad.corner_radii.top_right,
+                        quad.corner_radii.bottom_right,
+                        quad.corner_radii.bottom_left
+                    ],
+                    [radius; 4],
+                    "row corners must use the independent 6 px inset radius"
+                );
+            }
+        });
     }
 
-    #[test]
-    fn menu_shortcut_font_selects_the_shortcut_slot() {
-        let regular = gpui::font("Regular");
-        let shortcut = gpui::font("Shortcut");
-        let typography =
-            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
-                .semantic_fonts(shortcut.clone(), regular.clone(), regular);
-
-        assert_eq!(menu_shortcut_font(&typography), &shortcut);
+    pub(crate) fn consumer_fonts(typography: &crate::ControlTypography) -> Vec<gpui::Font> {
+        vec![super::menu_shortcut_font(typography).clone()]
     }
 
     #[test]
@@ -5125,6 +5116,80 @@ mod tests {
 
     #[gpui::test]
     fn menu_hover_should_use_its_paired_foreground(cx: &mut TestAppContext) {
+        let original = test_theme().paint;
+        let hovered = original
+            .hover_background(rgba(0xabcdef80))
+            .hover_foreground(rgba(0x123456ff));
+        assert_eq!(hovered.hover_background, rgba(0xabcdef80));
+        assert_eq!(hovered.hover_foreground, rgba(0x123456ff));
+        assert_eq!(hovered.selected_foreground, original.selected_foreground);
+        assert_eq!(hovered.selected_background, original.selected_background);
+        assert_eq!(
+            hovered.trigger_hover_background,
+            original.trigger_hover_background
+        );
+
+        let background = rgba(0xabcdef80);
+        let foreground = rgba(0x123456ff);
+        let border = rgba(0x89abcdef);
+        let rows = crate::ListRowPaints::new(
+            row_paint(10),
+            row_paint(20),
+            row_paint(30),
+            row_paint(40),
+            row_paint(50),
+            row_paint(60),
+        );
+        for (operation, actual, expected) in [
+            (
+                "hover background",
+                original.hover_background(background),
+                MenuPaint {
+                    hover_background: background,
+                    ..original
+                },
+            ),
+            (
+                "hover foreground",
+                original.hover_foreground(foreground),
+                MenuPaint {
+                    hover_foreground: foreground,
+                    ..original
+                },
+            ),
+            (
+                "trigger states",
+                original.trigger(foreground, background, border),
+                MenuPaint {
+                    trigger_background: foreground,
+                    trigger_hover_background: background,
+                    trigger_border: border,
+                    ..original
+                },
+            ),
+            (
+                "row states",
+                original.rows(rows),
+                MenuPaint {
+                    rows: Some(rows),
+                    ..original
+                },
+            ),
+            (
+                "destructive row states",
+                original.destructive_rows(rows),
+                MenuPaint {
+                    destructive_rows: Some(rows),
+                    ..original
+                },
+            ),
+        ] {
+            assert_eq!(
+                actual, expected,
+                "{operation} must preserve every sibling paint field"
+            );
+        }
+
         let (root, events, cx) = menu_window(cx);
         let mut theme = test_theme();
         theme.paint = theme
@@ -5333,21 +5398,17 @@ mod tests {
         assert_eq!(label_inset(cx, "reset"), expected);
     }
 
-    #[test]
-    fn density_scales_menu_bounds_but_not_trigger_radius() {
-        let original = test_theme()
-            .resolve(MenuSize::Regular, test_shell())
-            .metrics;
-        let comfortable = test_theme()
-            .scaled_spacing(1.25)
-            .resolve(MenuSize::Regular, test_shell())
-            .metrics;
-
-        assert!(comfortable.trigger_height > original.trigger_height);
-        assert_eq!(
-            comfortable.trigger_corner_radius,
-            original.trigger_corner_radius
-        );
+    pub(crate) fn density_extents(theme: MenuTheme) -> (gpui::Pixels, gpui::Pixels) {
+        (
+            theme
+                .resolve(MenuSize::Regular, test_shell())
+                .metrics
+                .trigger_height,
+            theme
+                .resolve(MenuSize::Regular, test_shell())
+                .metrics
+                .trigger_corner_radius,
+        )
     }
 
     struct ScrollTestRoot {
@@ -5399,6 +5460,7 @@ mod tests {
 
         let panel = cx.debug_bounds("menu-panel-0").expect("constrained menu");
         let row = cx.debug_bounds("scroll-menu-row-39").expect("last command");
+        assert_eq!(row.size.height, px(28.0));
         assert!(row.top() >= panel.top() && row.bottom() <= panel.bottom());
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();

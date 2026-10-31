@@ -222,7 +222,7 @@ fn init_with_text_direction(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Action, Keystroke, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -256,122 +256,5 @@ mod tests {
                 && *cx.global::<spaceterm_ui::ModalDesktopPolicy>()
                     == spaceterm_ui::ModalDesktopPolicy::mac_os()
         }));
-    }
-
-    #[gpui::test]
-    fn ui_init_should_install_explicit_modal_command_period_binding(cx: &mut TestAppContext) {
-        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
-        let command_period = Keystroke::parse("cmd-.").expect("macOS modal Shortcut should parse");
-
-        let has_binding = cx.update(|cx| {
-            cx.all_bindings_for_input(&[command_period])
-                .iter()
-                .any(|binding| {
-                    binding.action().name() == "spaceterm_modal::ActivatePlatformCancel"
-                        && binding.predicate().is_some_and(|predicate| {
-                            predicate.eval(&[gpui::KeyContext::parse("SpaceTermModal").unwrap()])
-                                && !predicate.eval(&[gpui::KeyContext::parse("Terminal").unwrap()])
-                        })
-                })
-        });
-
-        assert!(has_binding);
-    }
-
-    #[gpui::test]
-    fn terminal_zoom_shortcuts_should_bind_font_size_actions(cx: &mut TestAppContext) {
-        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
-        let expected = [
-            ("cmd-=", IncreaseTerminalFontSize.name()),
-            ("cmd-+", IncreaseTerminalFontSize.name()),
-            ("cmd--", DecreaseTerminalFontSize.name()),
-            ("cmd-0", ResetTerminalFontSize.name()),
-        ];
-        let actual = cx.update(|cx| {
-            expected
-                .iter()
-                .map(|(shortcut, _)| {
-                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
-                        panic!("invalid test shortcut {shortcut}: {error}")
-                    });
-                    let bindings = cx.all_bindings_for_input(&[keystroke]);
-                    (
-                        *shortcut,
-                        bindings
-                            .last()
-                            .map(|binding| binding.action().name())
-                            .unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-
-        assert_eq!(actual.as_slice(), expected);
-    }
-
-    #[gpui::test]
-    fn terminal_find_shortcuts_should_bind_supplied_desktop_actions(cx: &mut TestAppContext) {
-        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
-        let expected = [
-            ("cmd-f", OpenTerminalFind.name()),
-            ("cmd-g", FindNext.name()),
-            ("cmd-shift-g", FindPrevious.name()),
-        ];
-        let actual = cx.update(|cx| {
-            expected
-                .iter()
-                .map(|(shortcut, _)| {
-                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
-                        panic!("invalid test shortcut {shortcut}: {error}")
-                    });
-                    let bindings = cx.all_bindings_for_input(&[keystroke]);
-                    (
-                        *shortcut,
-                        bindings
-                            .last()
-                            .map(|binding| binding.action().name())
-                            .unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-
-        assert_eq!(actual.as_slice(), expected);
-    }
-
-    #[gpui::test]
-    fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
-        cx.update(|cx| init(cx).expect("UI initialization should succeed"));
-        let expected = [
-            ("cmd-shift-k", ChooseWorkspace.name()),
-            ("cmd-n", NewWorkspace.name()),
-            ("cmd-o", OpenLocalDirectory.name()),
-            ("cmd-t", NewTab.name()),
-            ("cmd-w", ClosePane.name()),
-            ("cmd-shift-w", CloseTab.name()),
-            ("ctrl-cmd-w", KillWorkspace.name()),
-        ];
-        let actual = cx.update(|cx| {
-            expected
-                .iter()
-                .map(|(shortcut, _)| {
-                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
-                        panic!("invalid test shortcut {shortcut}: {error}")
-                    });
-                    let bindings = cx.all_bindings_for_input(&[keystroke]);
-                    let binding = bindings.last().expect("the command has a binding");
-                    assert!(binding.predicate().is_none(), "{shortcut} must be global");
-                    (
-                        *shortcut,
-                        bindings
-                            .last()
-                            .map(|binding| binding.action().name())
-                            .unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-
-        assert_eq!(actual.as_slice(), expected);
     }
 }

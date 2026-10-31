@@ -4892,7 +4892,6 @@ mod tests {
         let appearance = super::super::appearance::ChromeAppearance::default();
         let mut failures = Vec::new();
         for (scale, text) in [(1.25, "A aa"), (1.5, "A aa"), (1.75, "A aaaaa")] {
-            cx.simulate_scale_factor_change(scale);
             view.update(cx, |view, cx| {
                 view.text = text;
                 cx.notify();
@@ -4904,10 +4903,12 @@ mod tests {
                     .measure(TextRole::Body, text, window)
                     .ceil()
             });
-            // The caption ladder must reserve all 29 or 51 intrinsic logical pixels after snapping.
-            let intrinsic_device = f32::from(intrinsic) * scale;
-            assert_eq!(f32::from(intrinsic) as u32 % 2, 1);
-            assert!((intrinsic_device - 0.5).ceil() < intrinsic_device);
+            // Put the intrinsic width a quarter device pixel past an integer. Rounding
+            // to the nearest device pixel would clip it with any host font.
+            let width = f32::from(intrinsic);
+            let scale = ((width * scale).floor() + 0.25) / width;
+            cx.simulate_scale_factor_change(scale);
+            cx.run_until_parked();
             let segment = cx
                 .debug_bounds("fractional-caption-segment")
                 .expect("caption segment");

@@ -989,7 +989,8 @@ fn replacing_catalog_without_floating_overrides_should_remove_stale_host_present
 fn scaling_catalog_preserves_role_materials_radii_and_hairlines_while_growing_insets(
     cx: &mut TestAppContext,
 ) {
-    let initial = test_catalog(true, 1, HOST_FIELD);
+    let mut initial = test_catalog(true, 1, HOST_FIELD);
+    initial.floating = initial.floating.map(|theme| theme.backdrop_blur(px(20.0)));
     cx.update(|cx| init_uniform_control_catalog(cx, initial.clone()))
         .expect("catalog should initialize");
     let before = cx.update(|cx| *cx.global::<FloatingSurfaceTheme>());
@@ -1014,11 +1015,28 @@ fn scaling_catalog_preserves_role_materials_radii_and_hairlines_while_growing_in
     ] {
         let original = before.shell(role);
         let scaled = after.shell(role);
+        assert_eq!(
+            original.frame(div()).style().backdrop_blur,
+            Some(px(20.0)),
+            "{role:?} original shell blur"
+        );
+        assert_eq!(
+            scaled.frame(div()).style().backdrop_blur,
+            Some(px(20.0)),
+            "{role:?} scaled shell blur"
+        );
+
         assert_eq!(scaled.material(), original.material(), "{role:?}");
         assert_eq!(scaled.edge(), original.edge(), "{role:?}");
         assert_eq!(scaled.divider(), original.divider(), "{role:?}");
         assert_eq!(scaled.hairline(), original.hairline(), "{role:?}");
-        assert_eq!(scaled.corner_radius(), original.corner_radius(), "{role:?}");
+        let radius = match role {
+            FloatingRole::Popover | FloatingRole::Notice => 10.0,
+            FloatingRole::Command | FloatingRole::Modal => 12.0,
+            FloatingRole::Tooltip | FloatingRole::Readout => 8.0,
+        };
+        assert_eq!(original.corner_radius(), px(radius), "{role:?}");
+        assert_eq!(scaled.corner_radius(), px(radius), "{role:?}");
         assert_eq!(
             scaled.content_inset(),
             original.content_inset() * 1.25,
@@ -1272,8 +1290,8 @@ fn control_host_wrappers_do_not_paint_another_surface(cx: &mut TestAppContext) {
     }
 }
 
-#[test]
-fn resting_host_metrics_scale_once_with_the_complete_catalog() {
+#[gpui::test]
+fn resting_host_metrics_scale_once_with_the_complete_catalog(cx: &mut TestAppContext) {
     let initial = surface_host_catalog(1, PANEL_FIELD, CARD_FIELD);
     let scaled = initial.clone().scale_spacing(1.25);
     for host in [
@@ -1291,4 +1309,19 @@ fn resting_host_metrics_scale_once_with_the_complete_catalog() {
     }
     assert!(scaled.hosted_controls(ControlHost::Window).is_none());
     assert_eq!(scaled.generation, initial.generation);
+    let button = |catalog: &ControlThemeCatalog| {
+        cx.update(|cx| {
+            init_uniform_control_catalog(cx, catalog.clone()).expect("install scaled host catalog");
+            ControlHost::Floating
+                .button_theme(cx)
+                .icon_button_size(crate::ButtonSize::Regular)
+        })
+    };
+    let base = button(&initial);
+    assert_eq!(base, px(28.0));
+    assert_eq!(button(&scaled), px(32.0));
+    assert!(
+        (button(&scaled.clone().scale_spacing(1.2)) - button(&initial.scale_spacing(1.5))).abs()
+            < px(0.001)
+    );
 }

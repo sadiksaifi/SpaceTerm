@@ -156,25 +156,6 @@ fn presented(facts: UpdateFacts) -> UpdatePresentation {
 }
 
 #[gpui::test]
-fn dropdown_local_update_opens_the_existing_confirmation_without_activation(
-    cx: &mut TestAppContext,
-) {
-    let harness = open(available(), cx);
-    harness.cx.update(|window, cx| {
-        cx.set_global(super::super::OpenSettingsWindow(
-            window.window_handle().downcast::<SettingsWindow>().unwrap(),
-        ));
-        crate::ui::updates::server_rows::ServerUpdateAction::Local.activate(cx);
-    });
-    harness.cx.run_until_parked();
-    assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
-    assert!(alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
-    click_modal(UPDATE_CANCEL_SELECTOR, harness.cx);
-    assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
-    assert!(harness.service.changes().is_empty());
-}
-
-#[gpui::test]
 fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) {
     let mut harness = open(available(), cx);
     let inventory_refreshes = Rc::new(std::cell::Cell::new(0));
@@ -237,13 +218,22 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
 #[gpui::test]
 fn cancelling_the_confirmation_changes_nothing(cx: &mut TestAppContext) {
     let mut harness = open(available(), cx);
-    click(UPDATE_SELECTOR, harness.cx);
+    harness.cx.update(|window, cx| {
+        cx.set_global(super::super::OpenSettingsWindow(
+            window.window_handle().downcast::<SettingsWindow>().unwrap(),
+        ));
+        crate::ui::updates::server_rows::ServerUpdateAction::Local.activate(cx);
+    });
+    harness.cx.run_until_parked();
+    assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
+    assert!(alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
     click_modal(UPDATE_CANCEL_SELECTOR, harness.cx);
 
     assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
     let presentation = harness.presentation();
     assert_eq!(presentation.state, "Update available");
     assert_eq!(presentation.actions, [UpdateAction::Update]);
+    assert!(harness.service.changes().is_empty());
 }
 
 #[test]
@@ -682,11 +672,20 @@ fn confirmed_update_after_reopening(
 
 #[gpui::test]
 fn a_confirmed_update_finishes_after_settings_reopens(cx: &mut TestAppContext) {
-    let (presentation, failure, calls) =
-        confirmed_update_after_reopening(available(), Outcome::Ready, cx);
-    assert_eq!(presentation.state, "Up to date");
-    assert_eq!(failure, None);
-    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+    for stopped_server in [false, true] {
+        let mut facts = available();
+        if stopped_server {
+            facts.status = Ok(stopped());
+        }
+        let (presentation, failure, calls) =
+            confirmed_update_after_reopening(facts, Outcome::Ready, cx);
+        assert_eq!(presentation.state, "Up to date");
+        if stopped_server {
+            assert!(presentation.explanation.contains("stopped"));
+        }
+        assert_eq!(failure, None);
+        assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+    }
 }
 
 #[gpui::test]
@@ -721,18 +720,6 @@ fn a_successful_update_does_not_keep_a_transient_followup_read_failure(cx: &mut 
         harness.update.changes(),
         [UpdateCall::PrepareUpdate, UpdateCall::Activate]
     );
-}
-
-#[gpui::test]
-fn updating_a_stopped_server_after_settings_reopens_keeps_it_stopped(cx: &mut TestAppContext) {
-    let mut facts = available();
-    facts.status = Ok(stopped());
-    let (presentation, failure, calls) =
-        confirmed_update_after_reopening(facts, Outcome::Ready, cx);
-    assert_eq!(presentation.state, "Up to date");
-    assert!(presentation.explanation.contains("stopped"));
-    assert_eq!(failure, None);
-    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
 }
 
 /// Check Now checks for a newer SpaceTerm first, because server builds ship inside it, and reads

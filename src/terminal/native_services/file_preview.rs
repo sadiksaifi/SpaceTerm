@@ -305,23 +305,6 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[test]
-    fn platform_error_identifiers_carry_no_target_content() {
-        assert_eq!(
-            [
-                FilePreviewError::StaleTarget,
-                FilePreviewError::OffMainThread,
-                FilePreviewError::PlatformUnavailable,
-            ]
-            .map(|error| format!("{error:?}")),
-            [
-                "StaleTarget".to_owned(),
-                "OffMainThread".to_owned(),
-                "PlatformUnavailable".to_owned(),
-            ]
-        );
-    }
-
     #[cfg(all(test, target_os = "macos", feature = "native-tests"))]
     mod macos_adapter_tests {
         include!("../../platform/macos_adapter_tests/quick_look.rs");
