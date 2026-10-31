@@ -12,11 +12,11 @@ use crate::domain::WorkspaceId;
 use crate::ui::remembered_view::{Restoration, SidebarView, WindowPlacement, WindowView};
 
 /// Where navigation stands for restoration: the person's navigation, and the explicit Pane
-/// selections in the Active Tab, which can choose the Pane already focused.
+/// choices in the Active Tab, which can choose the Pane already focused or change its zoom.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RestorationMark {
     navigation: super::NavigationMark,
-    selections: u64,
+    choices: u64,
 }
 
 impl WorkspaceManager {
@@ -32,7 +32,7 @@ impl WorkspaceManager {
         crate::ui::remembered_view::remember_workspace_window(view, cx);
     }
 
-    fn remembered_view(&self, window: &Window, cx: &Context<Self>) -> WindowView {
+    fn remembered_view(&self, window: &Window, cx: &App) -> WindowView {
         let sidebar = self.sidebar.read(cx);
         let layout = sidebar.layout();
         let workspaces = self
@@ -45,19 +45,22 @@ impl WorkspaceManager {
                 Some((reference, remembered))
             })
             .collect();
-        WindowView {
+        let mut view = WindowView {
             placement: Some(WindowPlacement::of(window, cx)),
             sidebar: SidebarView {
                 visible: layout.visible,
                 width: layout.width,
                 focused: sidebar.is_focused(window),
+                focus_visible: sidebar.has_visible_focus(window),
             },
             active_workspace: self
                 .workspaces
                 .active_workspace_id()
                 .and_then(|workspace_id| self.workspace_reference(workspace_id)),
             workspaces,
-        }
+        };
+        self.restoration.carry_into(&mut view);
+        view
     }
 
     /// Names a server Workspace across windows.
@@ -79,7 +82,7 @@ impl WorkspaceManager {
         self.sidebar.update(cx, |workspace_sidebar, cx| {
             workspace_sidebar.set_layout(sidebar.visible, sidebar.width, window, cx);
             if sidebar.focused {
-                workspace_sidebar.take_keyboard(window, cx);
+                workspace_sidebar.take_keyboard(sidebar.focus_visible, window, cx);
             }
         });
         self.restoration = Restoration::new(view, self.restoration_mark(cx));
@@ -91,14 +94,14 @@ impl WorkspaceManager {
         self.restoration.remembered()
     }
 
-    /// Where the person's navigation stands, counting every explicit Pane selection, even of
-    /// the Pane already focused.
+    /// Where the person's navigation stands, counting every explicit Pane choice, even of the
+    /// Pane already focused, and every zoom change.
     pub(super) fn restoration_mark(&self, cx: &App) -> RestorationMark {
         RestorationMark {
             navigation: self.navigation(cx),
-            selections: self
+            choices: self
                 .active_tab_manager()
-                .map_or(0, |manager| manager.read(cx).selections(cx)),
+                .map_or(0, |manager| manager.read(cx).choices(cx)),
         }
     }
 

@@ -753,8 +753,10 @@ impl WorkspaceManager {
         {
             Self::present_launch_alert(presentation, window, cx);
         }
-        // The screen's own focus moves to its default action when one appears.
-        if self.workspaces.active_workspace_id().is_none() {
+        // The screen's own focus moves to its default action when one appears. The keyboard the
+        // person or a reopened window left in the sidebar stays there.
+        if self.workspaces.active_workspace_id().is_none() && !self.sidebar_holds_keyboard(window, cx)
+        {
             self.focus(window, cx);
         }
         cx.notify();

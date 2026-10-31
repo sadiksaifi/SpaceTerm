@@ -519,8 +519,9 @@ pub(crate) struct TabView {
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     /// Advances when a split, close, move, or zoom changes the Pane layout.
     pane_layout_revision: u64,
-    /// Counts explicit Pane selections, which the Focused Pane alone can't show.
-    selections: std::cell::Cell<u64>,
+    /// Counts the person's explicit Pane choices, which the Focused Pane alone can't show:
+    /// selections, including of the Pane already focused, and zoom changes.
+    choices: std::cell::Cell<u64>,
     /// The layout revision the caption controls last rendered for.
     revealed_layout_revision: u64,
     close_tab_requested: bool,
@@ -616,7 +617,7 @@ impl TabView {
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
             pane_layout_revision: 0,
-            selections: std::cell::Cell::new(0),
+            choices: std::cell::Cell::new(0),
             revealed_layout_revision: 0,
             close_tab_requested: false,
             tab_focus: cx.focus_handle(),
@@ -1013,9 +1014,14 @@ impl TabView {
         cx.notify();
     }
 
-    /// How many explicit Pane selections this Tab has had, including of the Focused Pane.
-    pub(crate) fn selections(&self) -> u64 {
-        self.selections.get()
+    /// How many explicit Pane choices this Tab has had: selections, including of the Focused
+    /// Pane, and zoom changes.
+    pub(crate) fn choices(&self) -> u64 {
+        self.choices.get()
+    }
+
+    fn count_choice(&self) {
+        self.choices.set(self.choices.get().wrapping_add(1));
     }
 
     /// How many explicit Focused Pane changes this Tab has had.
@@ -1516,6 +1522,8 @@ impl TabView {
         if self.tab.toggle_zoom().is_none() {
             return;
         }
+        // Only the person zooms; a restored zoom changes the Tab directly.
+        self.count_choice();
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
         self.pane_motion.expect_raise(zoomed);
@@ -3098,7 +3106,7 @@ impl TabView {
     /// retained shell. An unreachable server is asked for nothing at all.
     fn select_shared_pane(&self, pane_id: PaneId) {
         // Every explicit selection is the person's choice, even of the Pane already focused.
-        self.selections.set(self.selections.get().wrapping_add(1));
+        self.count_choice();
         let Some(shared) = self.shared.as_ref().filter(|shared| shared.reachable()) else {
             return;
         };

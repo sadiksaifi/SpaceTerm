@@ -228,6 +228,8 @@ pub(crate) struct SidebarView {
     pub(crate) width: Pixels,
     /// Whether the sidebar held the keyboard.
     pub(crate) focused: bool,
+    /// Whether the keyboard brought it there, which emphasizes the selected row.
+    pub(crate) focus_visible: bool,
 }
 
 /// One closed Workspace Window's Client View State, by server identity, because the next window
@@ -319,6 +321,21 @@ impl<M: Copy + Eq> Restoration<M> {
         workspace: &WorkspaceReference,
     ) -> Option<RememberedWorkspace> {
         self.workspaces.remove(workspace)
+    }
+
+    /// Carries what this window never presented into `view`, the view it leaves as it closes:
+    /// remembered Workspaces that never arrived, and the remembered Active Workspace while it is
+    /// still awaited. A window closed before its server returned leaves the next one the same
+    /// view.
+    pub(crate) fn carry_into(&self, view: &mut WindowView) {
+        for (workspace, remembered) in &self.workspaces {
+            view.workspaces
+                .entry(*workspace)
+                .or_insert_with(|| remembered.clone());
+        }
+        if let Selection::Waiting(target) = &self.selection {
+            view.active_workspace = Some(*target);
+        }
     }
 
     /// Keeps the view of a Workspace a retained copy presented, until its server publishes.
@@ -430,6 +447,7 @@ mod tests {
                 visible: true,
                 width: px(240.0),
                 focused: false,
+                focus_visible: false,
             },
             active_workspace: active,
             workspaces: BTreeMap::from([(
@@ -712,6 +730,25 @@ mod tests {
             vec![(reference(1, 1), remembered)]
         );
         assert_eq!(restoration.take_held(owner(1)), Vec::new());
+    }
+
+    #[test]
+    fn a_window_closed_before_its_view_arrived_carries_it_into_the_next() {
+        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
+        let mut next = view(None);
+        next.workspaces.clear();
+        restoration.carry_into(&mut next);
+        assert_eq!(next.active_workspace, Some(reference(1, 1)));
+        assert!(next.workspaces.contains_key(&reference(1, 1)));
+
+        // Once presented or chosen against, nothing is carried.
+        let _ = restoration.take_workspace(&reference(1, 1));
+        restoration.observe(1);
+        let mut later = view(None);
+        later.workspaces.clear();
+        restoration.carry_into(&mut later);
+        assert_eq!(later.active_workspace, None);
+        assert!(later.workspaces.is_empty());
     }
 
     #[test]

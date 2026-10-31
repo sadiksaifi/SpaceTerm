@@ -1614,10 +1614,14 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let open_pane = !self.sidebar.read(cx).is_focused(window)
-            && !self.sidebar.read(cx).rename_is_focused(window)
-            && !self.sidebar.read(cx).menu_open();
+        let open_pane = !self.sidebar_holds_keyboard(window, cx);
         self.activate_workspace_focusing(workspace_id, open_pane, window, cx)
+    }
+
+    /// Whether the sidebar, its rename field or its menu holds the keyboard.
+    fn sidebar_holds_keyboard(&self, window: &Window, cx: &App) -> bool {
+        let sidebar = self.sidebar.read(cx);
+        sidebar.is_focused(window) || sidebar.rename_is_focused(window) || sidebar.menu_open()
     }
 
     fn activate_workspace_focusing(

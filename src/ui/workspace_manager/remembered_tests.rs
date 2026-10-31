@@ -557,3 +557,126 @@ fn selecting_the_focused_pane_after_reopening_keeps_it_when_the_server_returns(
     sync(&manager, key, &mut window);
     assert_eq!(active_name(&manager, &mut window), "Here");
 }
+
+/// Whether the sidebar holds the keyboard, as the keyboard brought it there.
+fn sidebar_has_keyboard(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| manager.read(cx).sidebar.read(cx).has_visible_focus(window))
+}
+
+/// Keyboard focus in the sidebar returns with the reopened window, on the same row, once the
+/// window's Workspaces arrive and whatever its server presents in their Panes.
+#[gpui::test]
+fn a_reopened_window_returns_the_keyboard_to_the_sidebar(cx: &mut TestAppContext) {
+    let edits = Rc::new(ScriptedEdits::new(Some(server_inventory(
+        1,
+        &[("Logs", 1), ("Build", 2)],
+    ))));
+    let (manager, mut window) = open_window(cx);
+    present_penguin(&manager, &edits, &[1, 2], &mut window);
+    select(&manager, "Build", &mut window);
+    // Cmd+Shift+E, as the person moves the keyboard to the sidebar.
+    window.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.toggle_sidebar_focus(window, cx));
+    });
+    window.run_until_parked();
+    assert!(sidebar_has_keyboard(&manager, &mut window));
+    close(&manager, &mut window);
+
+    let (manager, mut window) = open_window(cx);
+    assert!(sidebar_has_keyboard(&manager, &mut window));
+    present_penguin(&manager, &edits, &[1, 2], &mut window);
+    window.run_until_parked();
+
+    assert_eq!(active_name(&manager, &mut window), "Build");
+    assert!(sidebar_has_keyboard(&manager, &mut window));
+    window.simulate_keystrokes("up");
+    window.run_until_parked();
+    assert!(
+        sidebar_has_keyboard(&manager, &mut window),
+        "keys reach the sidebar"
+    );
+}
+
+/// A window closed before its server returned leaves the next window the view it never got to
+/// present.
+#[gpui::test]
+fn closing_before_the_server_returns_keeps_the_unfinished_view(cx: &mut TestAppContext) {
+    let edits = closed_on_builds_second_tab(cx);
+    let offline = Rc::new(ScriptedEdits::new(None));
+    offline.set_connected(false);
+
+    let (manager, mut window) = open_window(cx);
+    present_penguin(&manager, &offline, &[1, 2], &mut window);
+    assert_eq!(
+        manager.read_with(&window, |manager, _| manager.workspaces.len()),
+        0,
+        "nothing is presented while the server is away"
+    );
+    close(&manager, &mut window);
+
+    let (manager, mut window) = open_window(cx);
+    present_penguin(&manager, &edits, &[1, 2], &mut window);
+
+    assert_eq!(active_name(&manager, &mut window), "Build");
+    assert_eq!(focused_pane(&manager, &mut window), Some(second_pane(2)));
+}
+
+/// Penguin's Build, whose Root Tab is split into a second Pane.
+fn split_root_tab(revision: u64) -> Inventory {
+    let mut inventory = server_inventory(revision, &[("Build", 2)]);
+    let tab = &mut inventory.workspaces[0].tabs[0];
+    let mut split = tab.panes[0].clone();
+    split.id = [2 + 130; 32];
+    split.source = Some(root_pane(2));
+    tab.panes.push(split);
+    inventory
+}
+
+/// Whether the Active Tab presents its Focused Pane zoomed.
+fn zoomed(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> bool {
+    manager.read_with(cx, |manager, cx| {
+        manager.active_tab_manager().is_some_and(|tabs| {
+            matches!(
+                tabs.read(cx).active_tab_view().read(cx).zoom_state(),
+                crate::domain::ZoomState::Zoomed(_)
+            )
+        })
+    })
+}
+
+/// A zoom the person changes before the server publishes is newer than the remembered one, so
+/// publication leaves it.
+#[gpui::test]
+fn a_zoom_changed_before_the_server_publishes_stays(cx: &mut TestAppContext) {
+    let edits = Rc::new(ScriptedEdits::new(Some(split_root_tab(1))));
+    let (manager, mut window) = open_window(cx);
+    present_penguin(&manager, &edits, &[2], &mut window);
+    assert!(!zoomed(&manager, &mut window));
+    close(&manager, &mut window);
+
+    let (manager, mut window) = open_window(cx);
+    present_retained_penguin(
+        &manager,
+        spaceterm_server::client_view::RetainedInventory::retain(&split_root_tab(1)),
+        &mut window,
+    );
+    // Cmd+Shift+Enter in the Root Tab.
+    window.update(|window, cx| {
+        let tab = manager
+            .read(cx)
+            .active_tab_manager()
+            .expect("Build is active")
+            .read(cx)
+            .active_tab_view();
+        tab.update(cx, |tab, cx| tab.toggle_zoom(window, cx));
+    });
+    window.run_until_parked();
+    assert!(zoomed(&manager, &mut window));
+
+    connect_penguin(
+        &manager,
+        &Rc::new(ScriptedEdits::new(Some(split_root_tab(2)))),
+        &mut window,
+    );
+    assert!(zoomed(&manager, &mut window));
+}

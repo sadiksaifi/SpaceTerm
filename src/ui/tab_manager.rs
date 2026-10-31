@@ -2944,9 +2944,10 @@ impl TabManager {
         cx.notify();
     }
 
-    /// How many explicit Pane selections the Active Tab has had.
-    pub(crate) fn selections(&self, cx: &App) -> u64 {
-        self.tabs.active_tab().read(cx).selections()
+    /// How many explicit Pane choices the Active Tab has had, such as selections and zoom
+    /// changes.
+    pub(crate) fn choices(&self, cx: &App) -> u64 {
+        self.tabs.active_tab().read(cx).choices()
     }
 
     /// Adds the Tabs the server published that this strip does not present yet, then reconciles
