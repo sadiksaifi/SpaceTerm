@@ -2884,10 +2884,48 @@ impl TabManager {
         })
     }
 
-    /// Presents the view another window left of this Workspace's Tabs. The remembered Active
-    /// Tab returns without selecting its Focused Pane, and a Tab that is gone leaves the Active
-    /// Tab as it is.
+    /// Presents the view another window left of this Workspace's Tabs, without selecting a Pane.
     pub(crate) fn restore_remembered(
+        &mut self,
+        remembered: &crate::ui::remembered_view::RememberedWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (view, tab) in self.remembered_tabs(remembered) {
+            view.update(cx, |view, cx| view.restore_remembered(tab, window, cx));
+        }
+        self.restore_active_tab(remembered, window, cx);
+    }
+
+    /// Restores which Tab is active and each Tab's focus another window left. A Tab or Pane
+    /// that is gone leaves the Root Tab or Root Pane, which nothing selects.
+    pub(crate) fn restore_selection(
+        &mut self,
+        remembered: &crate::ui::remembered_view::RememberedWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (view, tab) in self.remembered_tabs(remembered) {
+            view.update(cx, |view, cx| view.restore_focus(tab, cx));
+        }
+        self.restore_active_tab(remembered, window, cx);
+    }
+
+    fn remembered_tabs<'a>(
+        &self,
+        remembered: &'a crate::ui::remembered_view::RememberedWorkspace,
+    ) -> Vec<(Entity<TabView>, &'a crate::ui::remembered_view::RememberedTab)> {
+        let Some(shared) = self.shared.as_ref() else {
+            return Vec::new();
+        };
+        remembered
+            .tabs
+            .iter()
+            .filter_map(|(server, tab)| Some((self.tabs.tab(shared.local_tab(*server)?)?.clone(), tab)))
+            .collect()
+    }
+
+    fn restore_active_tab(
         &mut self,
         remembered: &crate::ui::remembered_view::RememberedWorkspace,
         window: &mut Window,
@@ -2896,22 +2934,19 @@ impl TabManager {
         let Some(shared) = self.shared.as_ref() else {
             return;
         };
-        let tabs: Vec<_> = remembered
-            .tabs
-            .iter()
-            .filter_map(|(server, tab)| Some((self.tabs.tab(shared.local_tab(*server)?)?.clone(), tab)))
-            .collect();
-        let active = remembered
+        let tab_id = remembered
             .active_tab
             .and_then(|server| shared.local_tab(server))
-            .filter(|tab_id| *tab_id != self.tabs.active_tab_id());
-        for (view, tab) in tabs {
-            view.update(cx, |view, cx| view.restore_remembered(tab, window, cx));
-        }
-        if let Some(tab_id) = active {
+            .unwrap_or_else(|| self.tabs.root_tab_id());
+        if tab_id != self.tabs.active_tab_id() {
             self.activate_tab_focusing(tab_id, false, window, cx);
         }
         cx.notify();
+    }
+
+    /// How many explicit Pane selections the Active Tab has had.
+    pub(crate) fn selections(&self, cx: &App) -> u64 {
+        self.tabs.active_tab().read(cx).selections()
     }
 
     /// Adds the Tabs the server published that this strip does not present yet, then reconciles

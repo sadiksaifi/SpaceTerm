@@ -1039,10 +1039,14 @@ pub(crate) fn open(
     // A window reopened while the client kept running presents the view the last one left.
     let remembered = crate::ui::remembered_view::take_workspace_window(cx);
     let mut options = workspace_window_options(host, cx);
-    if let Some(placement) = remembered.as_ref().and_then(|view| view.placement) {
-        placement.apply(&mut options, cx);
-    }
+    let placement = remembered
+        .as_ref()
+        .and_then(|view| view.placement.as_ref())
+        .map(|placement| placement.apply(&mut options, cx));
     let result = cx.open_window(options, |window, cx| {
+        if let Some(placement) = placement {
+            placement.finish(window);
+        }
         crate::ui::updates::install_local_updates(Arc::new(NativeLocalUpdates), cx);
         // Both enrollment methods publish into this paired connection registry.
         if let Some(direct) = direct_servers.clone() {

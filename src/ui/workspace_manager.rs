@@ -318,7 +318,7 @@ pub(crate) struct WorkspaceManager {
     display_order: display_order::DisplayOrder,
     /// The view the last closed Workspace Window left, which this window presents as its
     /// Workspaces arrive.
-    restoration: crate::ui::remembered_view::Restoration<NavigationMark>,
+    restoration: crate::ui::remembered_view::Restoration<remembered::RestorationMark>,
 }
 
 impl WorkspaceManager {
@@ -3078,12 +3078,14 @@ impl WorkspaceManager {
         };
         if let Some(inventory) = poll.inventory {
             self.apply_shared_inventory(key, &inventory, removal, window, cx);
-            self.settle_remembered_selection(key, window, cx);
+            self.settle_remembered_view(key, window, cx);
         }
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
-        // Active Tab and its Focused Pane's shell. Later launches restore views passively.
+        // Active Tab and its Focused Pane's shell. Later launches restore views passively, and
+        // so does a window reopened with the view the last one left, which nobody chose here.
         if let Some(workspace_id) = poll
             .initial
+            .filter(|_| !self.restores_remembered_view())
             .and_then(|server| self.shared.get(key)?.local(server))
             && self.activate_workspace(workspace_id, window, cx)
         {

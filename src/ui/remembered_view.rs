@@ -9,6 +9,7 @@
 //! client-lifetime record in the terminal layer, which reattaches them as it does after a
 //! reconnect. This module keeps the rest.
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use gpui::{App, Bounds, DisplayId, Pixels, Size, Window, WindowBounds, WindowOptions, px};
 use spaceterm_server::hierarchy::Id;
@@ -44,7 +45,7 @@ pub(crate) fn remember_settings_window(section: SettingsSectionId, window: &Wind
 
 /// Where the last closed Settings Window was, and its Settings Section.
 pub(crate) fn settings_window(cx: &App) -> Option<SettingsWindowView> {
-    cx.try_global::<Remembered>()?.settings_window
+    cx.try_global::<Remembered>()?.settings_window.clone()
 }
 
 /// Drops everything remembered, as a real quit does.
@@ -52,7 +53,7 @@ pub(crate) fn forget(cx: &mut App) {
     cx.set_global(Remembered::default());
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SettingsWindowView {
     pub(crate) placement: WindowPlacement,
     pub(crate) section: SettingsSectionId,
@@ -60,12 +61,31 @@ pub(crate) struct SettingsWindowView {
 
 /// An Operating-System Window's size, position, display, and windowed, filled or fullscreen
 /// state.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WindowPlacement {
     /// The window's state, with the bounds it returns to when it leaves it.
     bounds: WindowBounds,
     /// The display's persistent identity, when it reports one.
     display: Option<[u8; 16]>,
+    /// The window system's own record of the window, where it keeps one. On macOS it holds a
+    /// filled or tiled state and the frame the window returns to from it, which the bounds alone
+    /// report as an ordinary window. It stays in memory like the rest of this view.
+    native: Option<Arc<[u8]>>,
+}
+
+/// What a window opened with a [`WindowPlacement`] still restores once it exists.
+#[must_use]
+pub(crate) struct OpenedPlacement {
+    native: Option<Arc<[u8]>>,
+}
+
+impl OpenedPlacement {
+    /// Restores the window system's own record of the window, such as a filled state.
+    pub(crate) fn finish(self, window: &Window) {
+        if let Some(native) = self.native {
+            window.restore_native_window_state(&native);
+        }
+    }
 }
 
 impl WindowPlacement {
@@ -77,12 +97,14 @@ impl WindowPlacement {
                 .display(cx)
                 .and_then(|display| display.uuid().ok())
                 .map(|uuid| *uuid.as_bytes()),
+            native: window.native_window_state().map(Arc::from),
         }
     }
 
     /// Opens a window with this placement on a connected display, inside that display's visible
-    /// area and at least `options.window_min_size`.
-    pub(crate) fn apply(&self, options: &mut WindowOptions, cx: &App) {
+    /// area and at least `options.window_min_size`. Finish the returned placement on the new
+    /// window.
+    pub(crate) fn apply(&self, options: &mut WindowOptions, cx: &App) -> OpenedPlacement {
         let primary = cx.primary_display().map(|display| display.id());
         let mut displays: Vec<_> = cx
             .displays()
@@ -105,11 +127,33 @@ impl WindowPlacement {
         let minimum = options
             .window_min_size
             .unwrap_or_else(|| gpui::size(px(0.0), px(0.0)));
-        if let Some((bounds, display)) = place(*self, &displays, positions, minimum) {
-            options.window_bounds = Some(bounds);
-            options.display_id = display;
+        let Some(placed) = place(self, &displays, positions, minimum) else {
+            return OpenedPlacement { native: None };
+        };
+        options.window_bounds = Some(placed.bounds);
+        options.display_id = placed.display;
+        self.opened(&placed)
+    }
+
+    /// What a window `placed` restores once it exists. The window system's record names a
+    /// display, which must still be connected.
+    fn opened(&self, placed: &Placed) -> OpenedPlacement {
+        OpenedPlacement {
+            native: placed
+                .on_remembered_display
+                .then(|| self.native.clone())
+                .flatten(),
         }
     }
+}
+
+/// Where [`place`] opens a window.
+#[derive(Debug, PartialEq)]
+struct Placed {
+    bounds: WindowBounds,
+    display: Option<DisplayId>,
+    /// Whether the window returns to the display it left.
+    on_remembered_display: bool,
 }
 
 /// One connected display, as placement reads it.
@@ -124,11 +168,11 @@ struct DisplayArea {
 /// whose display is gone is centered on the primary display. Without `positions`, only its size
 /// and state return, on the display the window system chooses.
 fn place(
-    placement: WindowPlacement,
+    placement: &WindowPlacement,
     displays: &[DisplayArea],
     positions: bool,
     minimum: Size<Pixels>,
-) -> Option<(WindowBounds, Option<DisplayId>)> {
+) -> Option<Placed> {
     let remembered = displays.iter().find(|display| {
         placement.display.is_some() && display.identity == placement.display
     });
@@ -164,7 +208,11 @@ fn place(
         WindowBounds::Maximized(_) => WindowBounds::Maximized(bounds),
         WindowBounds::Fullscreen(_) => WindowBounds::Fullscreen(bounds),
     };
-    Some((bounds, positions.then_some(display.id)))
+    Some(Placed {
+        bounds,
+        display: positions.then_some(display.id),
+        on_remembered_display: positions && remembered.is_some(),
+    })
 }
 
 /// `value` within `low..=high`, preferring `low` when the range is empty, so a minimum size wins
@@ -218,31 +266,51 @@ pub(crate) struct RememberedPane {
 }
 
 /// What a window takes from a remembered view as its Workspaces arrive.
+///
+/// Every remembered choice yields to the person: once navigation moves from where the window
+/// last left it, nothing remembered changes the view again.
 pub(crate) struct Restoration<M> {
+    /// Whether the window opened from a remembered view, which it presents passively.
+    remembered: bool,
     workspaces: BTreeMap<WorkspaceReference, RememberedWorkspace>,
-    selection: Selection<M>,
+    /// Views presented from a retained copy, which apply again once their server publishes its
+    /// own membership, so a Tab or Pane removed meanwhile falls back to the Root Tab or Pane.
+    held: BTreeMap<WorkspaceReference, RememberedWorkspace>,
+    selection: Selection,
+    /// Where navigation stood when the window last changed its own presentation, until the
+    /// person navigates.
+    navigation: Option<M>,
 }
 
 impl<M: Copy + Eq> Restoration<M> {
     /// Restores `view` from `navigation`, where the person's navigation stands in the new window.
     pub(crate) fn new(view: WindowView, navigation: M) -> Self {
         Self {
+            remembered: true,
             workspaces: view.workspaces,
+            held: BTreeMap::new(),
             selection: view
                 .active_workspace
-                .map_or(Selection::Settled, |target| Selection::Waiting {
-                    target,
-                    navigation,
-                }),
+                .map_or(Selection::Settled, Selection::Waiting),
+            navigation: Some(navigation),
         }
     }
 
     /// A window with nothing to restore.
     pub(crate) fn none() -> Self {
         Self {
+            remembered: false,
             workspaces: BTreeMap::new(),
+            held: BTreeMap::new(),
             selection: Selection::Settled,
+            navigation: None,
         }
+    }
+
+    /// Whether the window opened from a remembered view. Such a window never opens a Workspace
+    /// for a person on its own, as a new client's first view does.
+    pub(crate) const fn remembered(&self) -> bool {
+        self.remembered
     }
 
     /// The remembered view of a Workspace the window presents for the first time, once.
@@ -253,64 +321,89 @@ impl<M: Copy + Eq> Restoration<M> {
         self.workspaces.remove(workspace)
     }
 
-    /// Settles the Active Workspace when the person navigated since `navigation` was recorded.
-    /// Call before the window changes its own presentation.
+    /// Keeps the view of a Workspace a retained copy presented, until its server publishes.
+    pub(crate) fn hold(&mut self, workspace: WorkspaceReference, view: RememberedWorkspace) {
+        if self.navigation.is_some() {
+            self.held.insert(workspace, view);
+        }
+    }
+
+    /// The held views of `owner`'s Workspaces, once its server published its own membership.
+    pub(crate) fn take_held(&mut self, owner: OwnerId) -> Vec<(WorkspaceReference, RememberedWorkspace)> {
+        let owned: Vec<_> = self
+            .held
+            .keys()
+            .filter(|workspace| workspace.owner == owner)
+            .copied()
+            .collect();
+        owned
+            .into_iter()
+            .filter_map(|workspace| Some((workspace, self.held.remove(&workspace)?)))
+            .collect()
+    }
+
+    /// Settles everything when the person navigated since navigation was last recorded. Call
+    /// before the window changes its own presentation.
     pub(crate) fn observe(&mut self, navigation: M) {
-        if let Selection::Waiting {
-            navigation: recorded,
-            ..
-        } = &self.selection
-            && *recorded != navigation
-        {
+        if self.navigation.is_some_and(|recorded| recorded != navigation) {
+            self.navigation = None;
             self.selection = Selection::Settled;
+            self.held.clear();
         }
     }
 
     /// Records where navigation stands after the window changed its own presentation.
     pub(crate) fn record(&mut self, navigation: M) {
-        if let Selection::Waiting {
-            navigation: recorded,
-            ..
-        } = &mut self.selection
-        {
-            *recorded = navigation;
+        if self.navigation.is_some() {
+            self.navigation = Some(navigation);
         }
     }
 
     /// Whether the window should select `workspace`, which it just presented. The remembered
     /// Active Workspace returns while the person has selected nothing since the window opened.
     pub(crate) fn selects(&self, workspace: &WorkspaceReference) -> bool {
-        matches!(&self.selection, Selection::Waiting { target, .. } if target == workspace)
+        matches!(&self.selection, Selection::Waiting(target) if target == workspace)
     }
 
     /// Settles the Active Workspace once `owner`'s server published its own inventory, which
-    /// `presents` reads. Returns whether the window lacks the remembered Workspace after it, so
-    /// the window selects its default. A retained copy standing in for an offline server is not
-    /// its server's inventory.
+    /// `presents` reads. When the window lacks the remembered Workspace after it, the window's
+    /// default comes next: see [`Self::take_fallback`]. A retained copy standing in for an
+    /// offline server is not its server's inventory.
     pub(crate) fn published(
         &mut self,
         owner: OwnerId,
         presents: impl FnOnce(&WorkspaceReference) -> bool,
-    ) -> bool {
-        let Selection::Waiting { target, .. } = &self.selection else {
-            return false;
+    ) {
+        let Selection::Waiting(target) = &self.selection else {
+            return;
         };
         if target.owner != owner {
-            return false;
+            return;
         }
-        let missing = !presents(target);
-        self.selection = Selection::Settled;
-        missing
+        self.selection = if presents(target) {
+            Selection::Settled
+        } else {
+            Selection::Fallback
+        };
+    }
+
+    /// Whether the window selects its default Workspace now, because the remembered one is gone
+    /// and the person has selected nothing since. The window asks once its Workspace order is
+    /// ready, so the default is the first Workspace in the order the person keeps.
+    pub(crate) fn take_fallback(&mut self) -> bool {
+        if matches!(self.selection, Selection::Fallback) {
+            self.selection = Selection::Settled;
+            return true;
+        }
+        false
     }
 }
 
-enum Selection<M> {
-    /// The remembered Active Workspace returns when its server presents it, unless the person
-    /// navigates first.
-    Waiting {
-        target: WorkspaceReference,
-        navigation: M,
-    },
+enum Selection {
+    /// The remembered Active Workspace returns when its server presents it.
+    Waiting(WorkspaceReference),
+    /// The remembered Active Workspace is gone, so the window selects its default.
+    Fallback,
     Settled,
 }
 
@@ -324,6 +417,10 @@ mod tests {
             owner: OwnerId::from_bytes([owner; 32]),
             workspace: [workspace; 32],
         }
+    }
+
+    fn owner(owner: u8) -> OwnerId {
+        OwnerId::from_bytes([owner; 32])
     }
 
     fn view(active: Option<WorkspaceReference>) -> WindowView {
@@ -364,6 +461,22 @@ mod tests {
         })
     }
 
+    fn placement(bounds: WindowBounds, display: u8) -> WindowPlacement {
+        WindowPlacement {
+            bounds,
+            display: Some([display; 16]),
+            native: None,
+        }
+    }
+
+    fn placed(bounds: WindowBounds, display: u64, remembered: bool) -> Option<Placed> {
+        Some(Placed {
+            bounds,
+            display: Some(DisplayId::new(display)),
+            on_remembered_display: remembered,
+        })
+    }
+
     const MINIMUM: Size<Pixels> = Size {
         width: px(480.0),
         height: px(260.0),
@@ -386,20 +499,14 @@ mod tests {
 
     #[test]
     fn a_window_returns_where_it_was_on_its_display() {
-        let placement = WindowPlacement {
-            bounds: windowed((1700.0, 120.0), (1000.0, 700.0)),
-            display: Some([2; 16]),
-        };
         let displays = [
             display(1, 1, (0.0, 25.0), (1440.0, 875.0)),
             display(2, 2, (1440.0, 0.0), (2560.0, 1440.0)),
         ];
+        let bounds = windowed((1700.0, 120.0), (1000.0, 700.0));
         assert_eq!(
-            place(placement, &displays, true, MINIMUM),
-            Some((
-                windowed((1700.0, 120.0), (1000.0, 700.0)),
-                Some(DisplayId::new(2))
-            ))
+            place(&placement(bounds, 2), &displays, true, MINIMUM),
+            placed(bounds, 2, true)
         );
     }
 
@@ -414,57 +521,75 @@ mod tests {
             WindowBounds::Maximized(restore),
             WindowBounds::Fullscreen(restore),
         ] {
-            let placement = WindowPlacement {
-                bounds,
-                display: Some([1; 16]),
-            };
             assert_eq!(
-                place(placement, &displays, true, MINIMUM),
-                Some((bounds, Some(DisplayId::new(1))))
+                place(&placement(bounds, 1), &displays, true, MINIMUM),
+                placed(bounds, 1, true)
             );
         }
     }
 
     #[test]
-    fn a_window_whose_display_is_gone_opens_centered_on_the_primary_display() {
-        let placement = WindowPlacement {
-            bounds: windowed((3000.0, 400.0), (1000.0, 700.0)),
-            display: Some([9; 16]),
+    fn the_window_systems_record_returns_only_on_its_own_display() {
+        let native: Arc<[u8]> = Arc::from(&b"filled, from 900x580"[..]);
+        let remembered = WindowPlacement {
+            native: Some(Arc::clone(&native)),
+            ..placement(windowed((0.0, 25.0), (1440.0, 875.0)), 1)
         };
+        let finish = |displays: &[DisplayArea], positions: bool| {
+            let placed = place(&remembered, displays, positions, MINIMUM).unwrap();
+            remembered.opened(&placed).native
+        };
+        // macOS reports a filled window as ordinary bounds; its record restores the fill and
+        // the frame the window returns to from it.
+        assert_eq!(
+            finish(&[display(1, 1, (0.0, 25.0), (1440.0, 875.0))], true),
+            Some(native)
+        );
+        // The record would place the window on a display that is gone.
+        assert_eq!(
+            finish(&[display(2, 2, (0.0, 25.0), (1440.0, 875.0))], true),
+            None
+        );
+        assert_eq!(
+            finish(&[display(1, 1, (0.0, 25.0), (1440.0, 875.0))], false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_window_whose_display_is_gone_opens_centered_on_the_primary_display() {
         let displays = [display(1, 1, (0.0, 25.0), (1440.0, 875.0))];
         assert_eq!(
-            place(placement, &displays, true, MINIMUM),
-            Some((
-                windowed((220.0, 112.5), (1000.0, 700.0)),
-                Some(DisplayId::new(1))
-            ))
+            place(
+                &placement(windowed((3000.0, 400.0), (1000.0, 700.0)), 9),
+                &displays,
+                true,
+                MINIMUM
+            ),
+            placed(windowed((220.0, 112.5), (1000.0, 700.0)), 1, false)
         );
     }
 
     #[test]
     fn a_window_stays_inside_its_displays_visible_area_at_its_minimum_size() {
         let displays = [display(1, 1, (0.0, 25.0), (1280.0, 775.0))];
-        let oversized = WindowPlacement {
-            bounds: windowed((-200.0, 0.0), (2000.0, 1200.0)),
-            display: Some([1; 16]),
-        };
         assert_eq!(
-            place(oversized, &displays, true, MINIMUM),
-            Some((
-                windowed((0.0, 25.0), (1280.0, 775.0)),
-                Some(DisplayId::new(1))
-            ))
+            place(
+                &placement(windowed((-200.0, 0.0), (2000.0, 1200.0)), 1),
+                &displays,
+                true,
+                MINIMUM
+            ),
+            placed(windowed((0.0, 25.0), (1280.0, 775.0)), 1, true)
         );
-        let offscreen = WindowPlacement {
-            bounds: windowed((1200.0, 760.0), (300.0, 100.0)),
-            display: Some([1; 16]),
-        };
         assert_eq!(
-            place(offscreen, &displays, true, MINIMUM),
-            Some((
-                windowed((800.0, 540.0), (480.0, 260.0)),
-                Some(DisplayId::new(1))
-            ))
+            place(
+                &placement(windowed((1200.0, 760.0), (300.0, 100.0)), 1),
+                &displays,
+                true,
+                MINIMUM
+            ),
+            placed(windowed((800.0, 540.0), (480.0, 260.0)), 1, true)
         );
     }
 
@@ -475,14 +600,17 @@ mod tests {
             origin: point(px(500.0), px(300.0)),
             size: size(px(1000.0), px(700.0)),
         };
-        let placement = WindowPlacement {
-            bounds: WindowBounds::Maximized(restore),
-            display: Some([1; 16]),
-        };
-        let (bounds, display) = place(placement, &displays, false, MINIMUM).unwrap();
-        assert_eq!(display, None);
-        assert!(matches!(bounds, WindowBounds::Maximized(_)));
-        assert_eq!(bounds.get_bounds().size, restore.size);
+        let placed = place(
+            &placement(WindowBounds::Maximized(restore), 1),
+            &displays,
+            false,
+            MINIMUM,
+        )
+        .unwrap();
+        assert_eq!(placed.display, None);
+        assert!(!placed.on_remembered_display);
+        assert!(matches!(placed.bounds, WindowBounds::Maximized(_)));
+        assert_eq!(placed.bounds.get_bounds().size, restore.size);
     }
 
     #[test]
@@ -490,8 +618,9 @@ mod tests {
         let placement = WindowPlacement {
             bounds: windowed((0.0, 0.0), (900.0, 580.0)),
             display: None,
+            native: None,
         };
-        assert_eq!(place(placement, &[], true, MINIMUM), None);
+        assert_eq!(place(&placement, &[], true, MINIMUM), None);
     }
 
     #[test]
@@ -510,21 +639,40 @@ mod tests {
     #[test]
     fn the_remembered_active_workspace_returns_when_its_server_presents_it() {
         let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
+        assert!(restoration.remembered());
         assert!(!restoration.selects(&reference(1, 2)));
         assert!(restoration.selects(&reference(1, 1)));
-        assert!(!restoration.published(OwnerId::from_bytes([1; 32]), |_| true));
+        restoration.published(owner(1), |_| true);
+        assert!(!restoration.take_fallback());
         // Once settled, a later presentation never moves the selection.
         assert!(!restoration.selects(&reference(1, 1)));
     }
 
     #[test]
-    fn a_killed_or_detached_active_workspace_falls_back_to_the_default() {
+    fn a_killed_or_detached_active_workspace_falls_back_to_the_default_once() {
         let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
         // Another server's inventory says nothing about it.
-        assert!(!restoration.published(OwnerId::from_bytes([2; 32]), |_| false));
-        assert!(restoration.published(OwnerId::from_bytes([1; 32]), |_| false));
+        restoration.published(owner(2), |_| false);
+        assert!(!restoration.take_fallback());
+        restoration.published(owner(1), |_| false);
         assert!(!restoration.selects(&reference(1, 1)));
-        assert!(!restoration.published(OwnerId::from_bytes([1; 32]), |_| false));
+        assert!(restoration.take_fallback());
+        assert!(!restoration.take_fallback());
+    }
+
+    #[test]
+    fn a_fallback_waiting_for_the_workspace_order_yields_to_navigation() {
+        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
+        restoration.published(owner(1), |_| false);
+        // The window's own presentation changes nothing while the order is read.
+        restoration.record(1);
+        restoration.observe(1);
+        assert!(restoration.take_fallback());
+
+        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
+        restoration.published(owner(1), |_| false);
+        restoration.observe(2);
+        assert!(!restoration.take_fallback());
     }
 
     #[test]
@@ -532,26 +680,49 @@ mod tests {
         let mut restoration = Restoration::new(view(Some(reference(2, 1))), 0);
         // The local server and the window's own presentation change nothing.
         restoration.observe(0);
-        assert!(!restoration.published(OwnerId::from_bytes([1; 32]), |_| false));
+        restoration.published(owner(1), |_| false);
         restoration.record(1);
         restoration.observe(1);
+        assert!(!restoration.take_fallback());
         assert!(restoration.selects(&reference(2, 1)));
     }
 
     #[test]
     fn selecting_anything_after_reopening_keeps_the_persons_choice() {
         let mut restoration = Restoration::new(view(Some(reference(2, 1))), 0);
+        restoration.hold(reference(2, 1), RememberedWorkspace::default());
         restoration.record(1);
         restoration.observe(2);
         assert!(!restoration.selects(&reference(2, 1)));
-        assert!(!restoration.published(OwnerId::from_bytes([2; 32]), |_| false));
+        restoration.published(owner(2), |_| false);
+        assert!(!restoration.take_fallback());
+        assert_eq!(restoration.take_held(owner(2)), Vec::new());
     }
 
     #[test]
-    fn a_window_without_a_remembered_view_selects_nothing() {
+    fn a_view_a_retained_copy_presented_applies_again_when_its_server_publishes() {
+        let mut restoration = Restoration::new(view(None), 0);
+        let remembered = restoration
+            .take_workspace(&reference(1, 1))
+            .expect("the view is remembered");
+        restoration.hold(reference(1, 1), remembered.clone());
+        assert_eq!(restoration.take_held(owner(2)), Vec::new());
+        assert_eq!(
+            restoration.take_held(owner(1)),
+            vec![(reference(1, 1), remembered)]
+        );
+        assert_eq!(restoration.take_held(owner(1)), Vec::new());
+    }
+
+    #[test]
+    fn a_window_without_a_remembered_view_restores_nothing() {
         let mut restoration = Restoration::<u8>::none();
+        assert!(!restoration.remembered());
         assert!(!restoration.selects(&reference(1, 1)));
-        assert!(!restoration.published(OwnerId::from_bytes([1; 32]), |_| false));
+        restoration.published(owner(1), |_| false);
+        assert!(!restoration.take_fallback());
+        restoration.hold(reference(1, 1), RememberedWorkspace::default());
+        assert_eq!(restoration.take_held(owner(1)), Vec::new());
         assert_eq!(restoration.take_workspace(&reference(1, 1)), None);
     }
 }

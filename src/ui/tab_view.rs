@@ -519,6 +519,8 @@ pub(crate) struct TabView {
     native_service_focus_signature: Option<(bool, PaneId, Option<TerminalFocusBlocker>)>,
     /// Advances when a split, close, move, or zoom changes the Pane layout.
     pane_layout_revision: u64,
+    /// Counts explicit Pane selections, which the Focused Pane alone can't show.
+    selections: std::cell::Cell<u64>,
     /// The layout revision the caption controls last rendered for.
     revealed_layout_revision: u64,
     close_tab_requested: bool,
@@ -614,6 +616,7 @@ impl TabView {
             native_service_hierarchy_generation: 0,
             native_service_focus_signature: None,
             pane_layout_revision: 0,
+            selections: std::cell::Cell::new(0),
             revealed_layout_revision: 0,
             close_tab_requested: false,
             tab_focus: cx.focus_handle(),
@@ -966,6 +969,31 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.restore_focus(remembered, cx);
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let panes: Vec<_> = remembered
+            .panes
+            .iter()
+            .filter_map(|(server, pane)| Some((shared.local_pane(*server)?, pane)))
+            .collect();
+        for (pane_id, pane) in panes {
+            if let Some(terminal) = self.tab.pane(pane_id).cloned() {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.restore_remembered(pane, window, cx);
+                });
+            }
+        }
+    }
+
+    /// Restores the focus history, Focused Pane and zoom another window left of this Tab. A
+    /// Focused Pane that is gone leaves the Root Pane focused, never selected.
+    pub(crate) fn restore_focus(
+        &mut self,
+        remembered: &crate::ui::remembered_view::RememberedTab,
+        cx: &mut Context<Self>,
+    ) {
         let Some(shared) = self.shared.as_ref() else {
             return;
         };
@@ -975,27 +1003,19 @@ impl TabView {
             .filter_map(|server| shared.local_pane(*server))
             .collect();
         let focused = shared.local_pane(remembered.focused);
-        let panes: Vec<_> = remembered
-            .panes
-            .iter()
-            .filter_map(|(server, pane)| Some((shared.local_pane(*server)?, pane)))
-            .collect();
-        self.tab
-            .restore_focus(&history, focused, remembered.zoomed);
+        self.tab.restore_focus(&history, focused, remembered.zoomed);
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
         self.sync_terminal_focus(cx);
-        for (pane_id, pane) in panes {
-            if let Some(terminal) = self.tab.pane(pane_id).cloned() {
-                terminal.update(cx, |terminal, cx| {
-                    terminal.restore_remembered(pane, window, cx);
-                });
-            }
-        }
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
         });
         cx.notify();
+    }
+
+    /// How many explicit Pane selections this Tab has had, including of the Focused Pane.
+    pub(crate) fn selections(&self) -> u64 {
+        self.selections.get()
     }
 
     /// How many explicit Focused Pane changes this Tab has had.
@@ -3077,6 +3097,8 @@ impl TabView {
     /// own, window restoration, and membership publication never do, so none of them starts a
     /// retained shell. An unreachable server is asked for nothing at all.
     fn select_shared_pane(&self, pane_id: PaneId) {
+        // Every explicit selection is the person's choice, even of the Pane already focused.
+        self.selections.set(self.selections.get().wrapping_add(1));
         let Some(shared) = self.shared.as_ref().filter(|shared| shared.reachable()) else {
             return;
         };

@@ -219,18 +219,19 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     // Settings returns where it last closed, on the Settings Section it showed, unless the
     // request names one.
     let remembered = super::remembered_view::settings_window(cx);
-    let section = section.or(remembered.map(|remembered| remembered.section));
+    let section = section.or(remembered.as_ref().map(|remembered| remembered.section));
     let mut options = super::sidebar_window::window_options(
         "Settings",
         size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
         cx,
     );
-    if let Some(remembered) = remembered {
-        remembered.placement.apply(&mut options, cx);
-    }
+    let placement = remembered.map(|remembered| remembered.placement.apply(&mut options, cx));
     let opened = cx.open_window(
         options,
         |window, cx| {
+            if let Some(placement) = placement {
+                placement.finish(window);
+            }
             let settings = cx.new(|cx| {
                 let mut settings = SettingsWindow::new_with_capabilities(
                     Rc::clone(&window_drag),

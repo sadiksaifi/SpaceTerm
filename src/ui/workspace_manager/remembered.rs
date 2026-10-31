@@ -4,12 +4,20 @@
 //! when the window closes, and presents it as the next window's Workspaces arrive. Every step is
 //! passive: nothing selects a Pane, so no Pane control moves and no restored shell starts.
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use spaceterm_server::workspace_order::WorkspaceReference;
 
 use super::{ServerKey, WorkspaceManager};
 use crate::domain::WorkspaceId;
 use crate::ui::remembered_view::{Restoration, SidebarView, WindowPlacement, WindowView};
+
+/// Where navigation stands for restoration: the person's navigation, and the explicit Pane
+/// selections in the Active Tab, which can choose the Pane already focused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RestorationMark {
+    navigation: super::NavigationMark,
+    selections: u64,
+}
 
 impl WorkspaceManager {
     /// Closes the window, leaving its view for the next Workspace Window.
@@ -74,20 +82,37 @@ impl WorkspaceManager {
                 workspace_sidebar.take_keyboard(window, cx);
             }
         });
-        self.restoration = Restoration::new(view, self.navigation(cx));
+        self.restoration = Restoration::new(view, self.restoration_mark(cx));
     }
 
-    /// Settles the remembered Active Workspace when the person navigated since the window last
-    /// changed its own presentation. Call before applying a server's inventory.
+    /// Whether the window opened from a remembered view, which never opens a Workspace for a
+    /// person on its own.
+    pub(super) const fn restores_remembered_view(&self) -> bool {
+        self.restoration.remembered()
+    }
+
+    /// Where the person's navigation stands, counting every explicit Pane selection, even of
+    /// the Pane already focused.
+    pub(super) fn restoration_mark(&self, cx: &App) -> RestorationMark {
+        RestorationMark {
+            navigation: self.navigation(cx),
+            selections: self
+                .active_tab_manager()
+                .map_or(0, |manager| manager.read(cx).selections(cx)),
+        }
+    }
+
+    /// Settles every remembered choice when the person navigated since the window last changed
+    /// its own presentation. Call before the window changes it.
     pub(super) fn observe_navigation(&mut self, cx: &Context<Self>) {
-        let navigation = self.navigation(cx);
-        self.restoration.observe(navigation);
+        let mark = self.restoration_mark(cx);
+        self.restoration.observe(mark);
     }
 
     /// Records where navigation stands after the window changed its own presentation.
     pub(super) fn record_navigation(&mut self, cx: &Context<Self>) {
-        let navigation = self.navigation(cx);
-        self.restoration.record(navigation);
+        let mark = self.restoration_mark(cx);
+        self.restoration.record(mark);
     }
 
     /// Presents the remembered view of a Workspace its server just presented, and selects it
@@ -100,9 +125,13 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(owner) = self.shared.get(key).and_then(|shared| shared.owner()) else {
+        let Some(shared) = self.shared.get(key) else {
             return;
         };
+        let Some(owner) = shared.owner() else {
+            return;
+        };
+        let retained_copy = shared.presents_retained_copy();
         let reference = WorkspaceReference {
             owner,
             workspace: server,
@@ -122,6 +151,11 @@ impl WorkspaceManager {
             manager.update(cx, |manager, cx| {
                 manager.restore_remembered(&remembered, window, cx);
             });
+            // A retained copy may still list a Tab or Pane another client closed. The server's
+            // own membership decides the selection again.
+            if retained_copy {
+                self.restoration.hold(reference, remembered);
+            }
         }
         let active = self.workspaces.active_workspace_id() == Some(workspace_id);
         if self.restoration.selects(&reference) && !active {
@@ -134,10 +168,14 @@ impl WorkspaceManager {
         }
     }
 
-    /// Settles the remembered Active Workspace once its own server published an inventory. One
-    /// that inventory lacks was killed or detached, so the first Workspace in display order is
+    /// Settles what the remembered view left open once a server published its own inventory,
+    /// which follows that inventory's application and the window's own presentation changes.
+    ///
+    /// Each Workspace a retained copy presented takes its remembered selection again, so a Tab
+    /// or Pane that is gone leaves the Root Tab or Root Pane. A remembered Active Workspace the
+    /// inventory lacks was killed or detached, so the first Workspace in display order is
     /// selected instead.
-    pub(super) fn settle_remembered_selection(
+    pub(super) fn settle_remembered_view(
         &mut self,
         key: ServerKey,
         window: &mut Window,
@@ -153,18 +191,50 @@ impl WorkspaceManager {
         let Some(owner) = shared.owner() else {
             return;
         };
-        let missing = self.restoration.published(owner, |target| {
+        self.restoration.published(owner, |target| {
             shared.local(target.workspace).is_some()
         });
+        let held: Vec<_> = self
+            .restoration
+            .take_held(owner)
+            .into_iter()
+            .filter_map(|(reference, remembered)| {
+                let local = shared.local(reference.workspace)?;
+                let manager = self.workspaces.workspace(local)?.payload().clone();
+                Some((local, manager, remembered))
+            })
+            .collect();
+        for (local, manager, remembered) in held {
+            let keyboard = self.workspaces.active_workspace_id() == Some(local)
+                && self.content_holds_keyboard(window, cx);
+            manager.update(cx, |manager, cx| {
+                manager.restore_selection(&remembered, window, cx);
+            });
+            if keyboard {
+                self.focus(window, cx);
+            }
+        }
+        self.select_remembered_fallback(window, cx);
+        self.record_navigation(cx);
+    }
+
+    /// Selects the first Workspace in display order when the remembered Active Workspace is gone
+    /// and the person has selected nothing since. A saved order still being read decides which
+    /// Workspace is first, so the selection waits for it.
+    pub(super) fn select_remembered_fallback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.display_order_ready() || !self.restoration.take_fallback() {
+            return;
+        }
         let Some(first) = self.workspaces.iter().next().map(|entry| entry.id()) else {
             return;
         };
-        if missing && self.workspaces.active_workspace_id() != Some(first) {
+        if self.workspaces.active_workspace_id() != Some(first) {
             let keyboard = self.content_holds_keyboard(window, cx);
             self.activate_workspace_focusing(first, false, window, cx);
             if keyboard {
                 self.focus(window, cx);
             }
+            self.record_navigation(cx);
         }
     }
 

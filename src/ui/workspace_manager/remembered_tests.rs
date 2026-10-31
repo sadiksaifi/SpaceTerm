@@ -80,14 +80,30 @@ fn present(
     attached: &[u8],
     cx: &mut VisualTestContext,
 ) -> ServerKey {
-    let attached: Vec<Id> = attached.iter().map(|number| [*number; 32]).collect();
+    let panes = ScriptedPanes::new(MultiServerHarness::session_factory());
+    present_with(manager, origin, owner, edits, Some(attached), &panes, cx)
+}
+
+/// Presents `origin`'s Workspaces over `edits`, opening Panes through `panes`. Without
+/// `attached`, this client has never chosen any, as a new client's first view.
+fn present_with(
+    manager: &Entity<WorkspaceManager>,
+    origin: ServerOrigin,
+    owner: Id,
+    edits: &Rc<ScriptedEdits>,
+    attached: Option<&[u8]>,
+    panes: &Rc<ScriptedPanes>,
+    cx: &mut VisualTestContext,
+) -> ServerKey {
+    let attached: Option<Vec<Id>> =
+        attached.map(|attached| attached.iter().map(|number| [*number; 32]).collect());
     let key = cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let key = manager.present_server_workspaces(
                 origin,
                 SharedEditSource::new(Rc::clone(edits) as Rc<_>),
                 SharedPaneSessions::with_opener(
-                    ScriptedPanes::new(MultiServerHarness::session_factory()) as Rc<_>,
+                    Rc::clone(panes) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
@@ -95,7 +111,9 @@ fn present(
             );
             if let Some(shared) = manager.shared.get_mut(key) {
                 shared.identify(Rc::new(FixedOwner(owner)));
-                shared.attach_for_test(&attached);
+                if let Some(attached) = &attached {
+                    shared.attach_for_test(attached);
+                }
             }
             manager.sync_shared_workspaces(key, window, cx);
             key
@@ -357,4 +375,185 @@ fn a_reopened_window_presents_each_panes_font_size_and_find(cx: &mut TestAppCont
 
     assert_eq!(focused_view(&manager, &mut window), Some(left));
     assert!(window.debug_bounds("terminal-find-bar").is_some());
+}
+
+/// A new client's first view opens a Workspace for the person, but a window reopened with the
+/// view the last one left opens none on its own: it takes no Pane control and starts no shell.
+#[gpui::test]
+fn a_reopened_window_never_opens_a_new_clients_first_view(cx: &mut TestAppContext) {
+    let (_, offline) = closed_on_an_offline_servers_workspace(cx);
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    let first_view = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[("Here", 1)]))));
+    let local_panes = ScriptedPanes::new(MultiServerHarness::session_factory());
+
+    let (manager, mut window) = open_window(cx);
+    present_with(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &first_view,
+        None,
+        &local_panes,
+        &mut window,
+    );
+    assert_eq!(local_panes.pane(root_pane(1)).selections(), 0);
+    present_penguin(&manager, &offline, &[5], &mut window);
+
+    assert_eq!(active_name(&manager, &mut window), "Far");
+    assert_eq!(local_panes.pane(root_pane(1)).selections(), 0);
+}
+
+const fn third_tab(number: u8) -> Id {
+    [number + 70; 32]
+}
+
+/// Penguin's Build with a Root Tab, its second Tab and a third Tab.
+fn three_tabs(revision: u64) -> Inventory {
+    let mut inventory = with_second_tab(server_inventory(revision, &[("Build", 2)]), 2);
+    let mut third = inventory.workspaces[0].tabs[1].clone();
+    third.id = third_tab(2);
+    third.root_pane = [2 + 120; 32];
+    third.panes[0].id = [2 + 120; 32];
+    inventory.workspaces[0].tabs.push(third);
+    inventory
+}
+
+/// Presents penguin offline from what this client retained, `copy`, as a reopened window does
+/// before the route connects.
+fn present_retained_penguin(
+    manager: &Entity<WorkspaceManager>,
+    copy: spaceterm_server::client_view::RetainedInventory,
+    cx: &mut VisualTestContext,
+) -> ServerKey {
+    let route = named_route("penguin");
+    let key = cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            let key = manager
+                .present_direct_route(
+                    DirectServer {
+                        route,
+                        name: "penguin".into(),
+                    },
+                    window,
+                    cx,
+                )
+                .expect("the route is presented");
+            if let Some(shared) = manager.shared.get_mut(key) {
+                shared.identify(Rc::new(FixedOwner(route)));
+                shared.retain_copy_for_test(copy);
+            }
+            manager.present_retained_copy(&route);
+            manager.sync_shared_workspaces(key, window, cx);
+            key
+        })
+    });
+    cx.run_until_parked();
+    key
+}
+
+/// Connects penguin's route over `edits`.
+fn connect_penguin(manager: &Entity<WorkspaceManager>, edits: &Rc<ScriptedEdits>, cx: &mut VisualTestContext) {
+    let route = named_route("penguin");
+    let panes = ScriptedPanes::new(MultiServerHarness::session_factory());
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.follow_direct_route(&route, Some((Rc::clone(edits) as Rc<_>, panes as Rc<_>)));
+            let key = manager
+                .server_key(&crate::ui::ServerTarget::Direct(route))
+                .expect("the route stays presented");
+            manager.sync_shared_workspaces(key, window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// A retained copy still lists the Tab another client closed while the window was closed. Once
+/// the server publishes, the Root Tab is selected rather than the closed Tab's neighbor.
+#[gpui::test]
+fn a_tab_closed_while_offline_leaves_the_root_tab_once_the_server_publishes(
+    cx: &mut TestAppContext,
+) {
+    let edits = Rc::new(ScriptedEdits::new(Some(three_tabs(1))));
+    let (manager, mut window) = open_window(cx);
+    present_penguin(&manager, &edits, &[2], &mut window);
+    open_tab(&manager, second_tab(2), &mut window);
+    assert_eq!(focused_pane(&manager, &mut window), Some(second_pane(2)));
+    close(&manager, &mut window);
+
+    let (manager, mut window) = open_window(cx);
+    present_retained_penguin(
+        &manager,
+        spaceterm_server::client_view::RetainedInventory::retain(&three_tabs(1)),
+        &mut window,
+    );
+    assert_eq!(focused_pane(&manager, &mut window), Some(second_pane(2)));
+
+    let mut closed = three_tabs(2);
+    closed.workspaces[0].tabs.remove(1);
+    let live = Rc::new(ScriptedEdits::new(Some(closed)));
+    connect_penguin(&manager, &live, &mut window);
+
+    assert_eq!(active_name(&manager, &mut window), "Build");
+    assert_eq!(focused_pane(&manager, &mut window), Some(root_pane(2)));
+}
+
+/// The first Workspace in display order is the first in the order the person keeps, which the
+/// window may still be reading when the server publishes.
+#[gpui::test]
+fn a_killed_workspaces_fallback_waits_for_the_saved_workspace_order(cx: &mut TestAppContext) {
+    let edits = closed_on_builds_second_tab(cx);
+    edits.set_inventory(server_inventory(2, &[("Logs", 1), ("Tests", 3)]));
+
+    let (manager, mut window) = open_window(cx);
+    manager.update(&mut window, |manager, _| manager.read_display_order_later());
+    present_penguin(&manager, &edits, &[1, 3], &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Logs");
+
+    let reference = |number: u8| spaceterm_server::workspace_order::WorkspaceReference {
+        owner: spaceterm_server::workspace_order::OwnerId::from_bytes(named_route("penguin")),
+        workspace: [number; 32],
+    };
+    let mut saved = spaceterm_server::workspace_order::WorkspaceOrder::default();
+    saved
+        .record(&[reference(3), reference(1)])
+        .expect("the order records");
+    window.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.display_order_read(Some(saved), window, cx);
+        });
+    });
+    window.run_until_parked();
+
+    assert_eq!(active_name(&manager, &mut window), "Tests");
+}
+
+/// Clicking the Pane already focused is the person's choice too, so the remembered Workspace
+/// never replaces it when its server returns.
+#[gpui::test]
+fn selecting_the_focused_pane_after_reopening_keeps_it_when_the_server_returns(
+    cx: &mut TestAppContext,
+) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+
+    let (manager, mut window) = open_window(cx);
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    assert_eq!(focused_pane(&manager, &mut window), Some(root_pane(1)));
+    window.update(|window, cx| {
+        let tabs = manager
+            .read(cx)
+            .active_tab_manager()
+            .expect("Here is active");
+        let tab = tabs.read(cx).active_tab_view();
+        tab.update(cx, |tab, cx| {
+            tab.focus_shared_pane_explicitly(root_pane(1), window, cx);
+        });
+    });
+    window.run_until_parked();
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
 }
