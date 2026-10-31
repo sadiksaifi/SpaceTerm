@@ -7,6 +7,7 @@
 mod admission;
 pub mod frame;
 pub mod limits;
+mod major;
 pub mod message;
 pub mod operation;
 pub mod screen;
@@ -14,8 +15,9 @@ pub mod screen;
 mod tests;
 
 pub(crate) use admission::*;
-pub use admission::{AgentName, InvalidAgentName, Lane, MAJOR};
+pub use admission::{AgentName, InvalidAgentName, Lane};
 pub use frame::{DecodeError, Kind, RawFrame, WireMessage};
+pub use major::MAJOR;
 pub use message::{
     Acknowledge, Cancel, Channel, ClientMessage, EffectDone, Fatal, Frame, FrameAck, Input,
     InputEvent, InputOutcome, InventoryRevision, PaneEvent, PaneMessage, Ping, Pong, Refusal,

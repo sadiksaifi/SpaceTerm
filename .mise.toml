@@ -645,7 +645,7 @@ run = [
 ]
 
 [tasks."server:graphics:transport:test"]
-description = "Test authenticated graphics transfers and slow readers with protocol major 4 and fixture identities"
+description = "Test authenticated graphics transfers and slow readers with fixture identities"
 run = "cargo test --package spaceterm-server --lib --features client --locked"
 
 [tasks."server:directory:build"]

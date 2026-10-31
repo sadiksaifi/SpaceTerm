@@ -1,7 +1,7 @@
 #[path = "../../build/identity.rs"]
 mod identity;
-
-const PROTOCOL_MAJOR: u16 = 4;
+#[path = "../spaceterm-server/src/protocol/major.rs"]
+mod major;
 
 fn main() {
     let root = std::path::PathBuf::from(
@@ -19,6 +19,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-changed=../../build/identity.rs");
+    println!("cargo:rerun-if-changed=../spaceterm-server/src/protocol/major.rs");
     println!("cargo:rerun-if-changed=src");
     let release = std::env::var("SPACETERM_RELEASE_TAG").ok();
     let packaged = std::env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
@@ -48,13 +49,10 @@ fn main() {
     let source = source.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
     // All strings come from the validated build identity or Cargo's target triple.
     let document = format!(
-        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{PROTOCOL_MAJOR}}}\n",
-        build.version, build.commit,
+        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{}}}\n",
+        build.version,
+        build.commit,
+        major::MAJOR,
     );
     std::fs::write(output.join("build-info.json"), document).expect("write server build metadata");
-    std::fs::write(
-        output.join("build-info.rs"),
-        format!("const PROTOCOL_MAJOR: u16 = {PROTOCOL_MAJOR};\n"),
-    )
-    .expect("write server admission metadata");
 }

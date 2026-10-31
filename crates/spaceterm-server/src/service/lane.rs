@@ -1,4 +1,4 @@
-//! The service lane: bounded JSON administration that every protocol major from 4 on reads the
+//! The service lane: bounded JSON administration that every protocol major reads the
 //! same way, so Status, Stop, Restart and Update work across majors.
 //!
 //! A client selects it with [`crate::protocol::Lane::Service`] in the admission preamble. Each

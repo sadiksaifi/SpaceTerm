@@ -52,8 +52,21 @@ SHARED_RESOURCES = "share/spaceterm"
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
-# The SpaceTerm Protocol major that `crates/spaceterm-cli/build.rs` stamps into server builds.
-PROTOCOL_MAJOR = 4
+# The file that owns the SpaceTerm Protocol major. `crates/spaceterm-cli/build.rs` stamps the
+# same major into server builds.
+PROTOCOL_MAJOR_SOURCE = "crates/spaceterm-server/src/protocol/major.rs"
+PROTOCOL_MAJOR_LINE = re.compile(r"^pub const MAJOR: u16 = ([1-9][0-9]*);$", re.MULTILINE)
+
+
+def protocol_major(root=ROOT):
+    """Returns the SpaceTerm Protocol major of the source tree at `root`."""
+    found = PROTOCOL_MAJOR_LINE.findall((root / PROTOCOL_MAJOR_SOURCE).read_text())
+    if len(found) != 1:
+        raise TaskError("the protocol major source must declare one major")
+    return int(found[0])
+
+
+PROTOCOL_MAJOR = protocol_major()
 BUILD_KEYS = {
     "schema",
     "identity",

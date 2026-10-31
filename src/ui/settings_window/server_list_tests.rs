@@ -955,8 +955,9 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
         crate::appearance::ChromeDensity::Comfortable
     );
     assert_eq!(
-        retained.schema_version, 7,
-        "the Settings Document stays schema 7"
+        retained.schema_version,
+        crate::settings::SettingsDocument::default().schema_version,
+        "the Settings Document stays at the current schema"
     );
     assert_eq!(
         servers.direct.routes(),

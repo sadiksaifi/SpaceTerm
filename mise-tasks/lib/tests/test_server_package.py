@@ -50,7 +50,7 @@ class ServerArchiveTests(unittest.TestCase):
         self.info = {
             "schema": 1,
             "source_sha256": None,
-            "protocol_major": 4,
+            "protocol_major": server_package.PROTOCOL_MAJOR,
             "identity": "spaceterm-preflight",
             "target": "x86_64-unknown-linux-gnu",
             "commit": self.commit,
@@ -321,7 +321,8 @@ class ServerArchiveTests(unittest.TestCase):
             self.assertRaisesRegex(TaskError, "protocol major"),
         ):
             server_package.compatible_candidate(
-                {**self.info, "protocol_major": 1}, self.info["identity"]
+                {**self.info, "protocol_major": server_package.PROTOCOL_MAJOR + 1},
+                self.info["identity"],
             )
 
     def test_desktop_candidate_requires_both_explicit_artifact_inputs(self):

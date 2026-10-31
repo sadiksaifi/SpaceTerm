@@ -4,8 +4,9 @@ use super::super::servers::{ConnectedServer, LocalServerStatus, ServiceAction, S
 use super::*;
 use crate::direct_connections::UnavailableReason;
 
-const CONNECTED: LocalServerStatus =
-    LocalServerStatus::Connected(ConnectedServer { protocol_major: 1 });
+const CONNECTED: LocalServerStatus = LocalServerStatus::Connected(ConnectedServer {
+    protocol_major: spaceterm_server::protocol::MAJOR,
+});
 
 #[test]
 fn a_running_local_server_reads_as_running_for_this_account_and_live() {

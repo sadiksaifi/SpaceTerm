@@ -13,8 +13,8 @@
 //! server_admin_native [--identity ID] [--server NAME] [--cli PATH]
 //!     [--machine PREFIX] [--machine-cli PATH] [--machine-fixture PATH]
 //!     [--network all|IP|IP:PORT|off] [--candidate ARCHIVE SIGNATURE]
-//!     [--major5 ARCHIVE SIGNATURE] [--broken ARCHIVE SIGNATURE] [--restore ARCHIVE SIGNATURE]
-//!     [--expiry] [--case NAME]...
+//!     [--next-major ARCHIVE SIGNATURE] [--broken ARCHIVE SIGNATURE]
+//!     [--restore ARCHIVE SIGNATURE] [--expiry] [--case NAME]...
 //! server_admin_native fixture ID ACTION [ARGUMENT]...
 //! ```
 //!
@@ -74,7 +74,7 @@ struct Options {
     machine_fixture: String,
     network: Option<String>,
     candidate: Option<(String, String)>,
-    major5: Option<(String, String)>,
+    next_major: Option<(String, String)>,
     broken: Option<(String, String)>,
     restore: Option<(String, String)>,
     expiry: bool,
@@ -109,7 +109,7 @@ impl Options {
             machine_fixture: env("MACHINE_FIXTURE").unwrap_or_default(),
             network: env("NETWORK"),
             candidate: pair("CANDIDATE"),
-            major5: pair("MAJOR5"),
+            next_major: pair("NEXT_MAJOR"),
             broken: pair("BROKEN"),
             restore: pair("RESTORE"),
             expiry: env("EXPIRY").is_some(),
@@ -137,7 +137,7 @@ impl Options {
                 "--machine-fixture" => options.machine_fixture = value()?,
                 "--network" => options.network = Some(value()?),
                 "--candidate" => options.candidate = Some((value()?, value()?)),
-                "--major5" => options.major5 = Some((value()?, value()?)),
+                "--next-major" => options.next_major = Some((value()?, value()?)),
                 "--broken" => options.broken = Some((value()?, value()?)),
                 "--restore" => options.restore = Some((value()?, value()?)),
                 "--expiry" => options.expiry = true,
@@ -326,8 +326,8 @@ fn run(options: &Options) -> Result<()> {
     if options.candidate.is_some() {
         cases.push(("update-upload", update_upload));
     }
-    if options.major5.is_some() {
-        cases.push(("update-major5", update_major5));
+    if options.next_major.is_some() {
+        cases.push(("update-next-major", update_next_major));
     }
     if options.broken.is_some() {
         cases.push(("return", return_through_update));
@@ -661,10 +661,13 @@ fn update_upload(options: &Options) -> Result<String> {
     ))
 }
 
-fn update_major5(options: &Options) -> Result<String> {
-    let (archive, signature) = options.major5.as_ref().ok_or("no major-5 candidate")?;
+fn update_next_major(options: &Options) -> Result<String> {
+    let (archive, signature) = options
+        .next_major
+        .as_ref()
+        .ok_or("no next-major candidate")?;
     options.fixture("start-session", &[])?;
-    let ran = update_with(options, archive, signature, "major-5 preview")?;
+    let ran = update_with(options, archive, signature, "next-major preview")?;
     let preview = &ran.envelope["preview"];
     let warned = preview["warnings"]
         .as_array()
@@ -683,7 +686,7 @@ fn update_major5(options: &Options) -> Result<String> {
         )
         .into());
     }
-    // The lane answers the major-5 server, though work commands need a matching CLI.
+    // The lane answers the next-major server, though work commands need a matching CLI.
     let status = options
         .cli(&["server", "status"])?
         .expect(0, "status after the update")?;

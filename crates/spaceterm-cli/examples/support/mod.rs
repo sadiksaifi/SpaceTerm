@@ -120,9 +120,9 @@ pub fn workspace_of(inventory: &Inventory, pane: Id) -> Option<Id> {
         .map(|workspace| workspace.id)
 }
 
-/// The first Pane of the inventory, as the single-Pane `Attach` and `Select` requests of protocol
-/// major 1 chose it. With `create`, an empty inventory first gains a Workspace, as the server's
-/// own initial organization does. Without it, an empty inventory has no Pane to claim.
+/// Selects the first Pane in the first Tab of the first Workspace in the current inventory.
+/// With `create`, an empty inventory first gains a Workspace. Without it, an empty inventory
+/// has no Pane to claim.
 pub fn first_pane(link: &ServerLink, create: bool) -> Result<Id> {
     let (inventory, sequence) = inventory(link)?;
     let first = |inventory: &Inventory| {

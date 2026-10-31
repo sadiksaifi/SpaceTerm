@@ -10,7 +10,6 @@ use spaceterm_server::{
 use std::io::{Read, Write};
 
 const IDENTITY: &str = env!("SPACETERM_SERVER_IDENTITY");
-include!(concat!(env!("OUT_DIR"), "/build-info.rs"));
 
 pub enum Error {
     Failure(Failure),
@@ -127,8 +126,12 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
             sha256,
         } => {
             let service = Service::for_identity(IDENTITY)?;
-            let candidate =
-                service.provision_candidate(archive, signature, sha256, PROTOCOL_MAJOR)?;
+            let candidate = service.provision_candidate(
+                archive,
+                signature,
+                sha256,
+                spaceterm_server::protocol::MAJOR,
+            )?;
             service.install(&candidate.directory)?;
         }
         ProvisionCommand::SshEnableLinger { password_stdin } => {

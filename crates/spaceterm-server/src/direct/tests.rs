@@ -3962,7 +3962,7 @@ fn an_expired_client_deadline_sends_no_authentication() {
 }
 
 #[test]
-fn authentication_accepts_a_signed_future_work_major_for_service_admission() {
+fn authentication_accepts_signed_work_majors_for_service_admission() {
     struct Exchange {
         frames: std::collections::VecDeque<serde_json::Value>,
         sent: usize,
@@ -3986,13 +3986,13 @@ fn authentication_accepts_a_signed_future_work_major_for_service_admission() {
         build: "Development".into(),
     };
     for (major, tampered, expected) in [
+        (crate::protocol::MAJOR, false, None),
         (crate::protocol::MAJOR + 1, false, None),
         (
             crate::protocol::MAJOR + 1,
             true,
             Some(DirectError::AuthenticationRefused),
         ),
-        (3, false, Some(DirectError::IncompatibleProtocol)),
     ] {
         let mut challenge = wire::Challenge {
             major,

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, TaskError, cargo
+from spaceterm_tasks import ROOT, TaskError, cargo, server_package
 from spaceterm_tasks.server_builds import _source, prepare
 
 
@@ -61,6 +61,9 @@ class ServerSourceTests(unittest.TestCase):
             (root / "assets").mkdir()
             shutil.copyfile(ROOT / "build/identity.rs", root / "build/identity.rs")
             shutil.copyfile(ROOT / "crates/spaceterm-cli/build.rs", crate / "build.rs")
+            major = root / server_package.PROTOCOL_MAJOR_SOURCE
+            major.parent.mkdir(parents=True)
+            shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
             (root / "Cargo.toml").write_text(
                 '[workspace]\nmembers = ["crates/spaceterm-cli"]\nresolver = "3"\n'
             )

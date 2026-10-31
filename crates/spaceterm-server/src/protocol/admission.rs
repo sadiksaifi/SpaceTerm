@@ -2,8 +2,9 @@
 //! length-prefixed JSON. An incompatible peer therefore always receives a typed incompatibility.
 //! After admission both peers switch to the postcard framing in [`super::frame`].
 //! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
-//! From major 4 on, the preamble is frozen: later majors read and write these exact messages, so
-//! the service lane ([`Lane::Service`]) works across majors.
+//! The preamble is frozen: later majors read and write these exact messages, so the service lane
+//! ([`Lane::Service`]) works across majors.
+use super::MAJOR;
 use crate::pane::control::ClientName;
 use crate::{AuthenticatedStatus, ServerError};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -13,8 +14,6 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-/// The protocol major of the pushed, multiplexed exchange.
-pub const MAJOR: u16 = 4;
 const MAX_FRAME: usize = 8192;
 const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
 
