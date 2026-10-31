@@ -81,6 +81,6 @@ pub fn kill(
     })?;
     Ok((
         target,
-        spaceterm_server::hierarchy::CloseTarget::Workspace { workspace },
+        spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace },
     ))
 }

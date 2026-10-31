@@ -3,7 +3,7 @@ use super::*;
 use pane::accessibility::{self as wire, Error};
 use std::time::Instant;
 
-fn snapshot(host: &mut DevelopmentPaneHost, lease: Lease, base: Option<u64>) -> wire::Snapshot {
+fn snapshot(host: &mut ServerPaneHost, lease: Lease, base: Option<u64>) -> wire::Snapshot {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut revision = None;
     let mut bytes = Vec::new();

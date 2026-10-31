@@ -96,7 +96,7 @@ impl WorkspaceManager {
             } => Task::ready(Some(reply(
                 self.presented_workspace(server, workspace, context, cx)
                     .ok_or(Refusal::NotShown)
-                    .and_then(|workspace_id| self.show_shared(workspace_id, tab, pane, window, cx)),
+                    .and_then(|workspace_id| self.show(workspace_id, tab, pane, window, cx)),
             ))),
             Request::Open {
                 session,
@@ -114,8 +114,8 @@ impl WorkspaceManager {
         context: &DesktopRequests,
         cx: &App,
     ) -> Option<WorkspaceId> {
-        self.shared.iter().find_map(|(key, shared)| {
-            let workspace_id = shared.local(workspace)?;
+        self.binding.iter().find_map(|(key, binding)| {
+            let workspace_id = binding.local(workspace)?;
             self.presents_server(key, server, context, cx)
                 .then_some(workspace_id)
         })
@@ -128,7 +128,7 @@ impl WorkspaceManager {
         context: &DesktopRequests,
         cx: &App,
     ) -> bool {
-        self.shared
+        self.binding
             .origin(key)
             .and_then(|origin| (context.server_of)(origin, cx))
             == Some(server)
@@ -146,25 +146,25 @@ impl WorkspaceManager {
             .workspaces
             .iter()
             .find_map(|entry| {
-                let key = self.shared.owner(entry.id())?;
+                let key = self.binding.owner(entry.id())?;
                 entry
                     .payload()
                     .read(cx)
-                    .presents_shared_pane(session.pane, cx)
+                    .presents_pane(session.pane, cx)
                     .then_some((key, entry.id()))
             })
             .ok_or(Refusal::NotShown)?;
         if !self.presents_server(key, session.server, context, cx) {
             return Err(Refusal::NotShown);
         }
-        let shared = self.shared.get(key).ok_or(Refusal::NotShown)?;
+        let binding = self.binding.get(key).ok_or(Refusal::NotShown)?;
         // Only the account-local server's Panes carry this machine's filesystem authority.
-        let filesystem = shared
+        let filesystem = binding
             .sessions()
             .local_filesystem()
             .ok_or(Refusal::RemoteSession)?
             .clone();
-        let live = shared
+        let live = binding
             .latest_inventory()
             .and_then(|inventory| inventory.close.as_ref())
             .and_then(|close| close.sessions.iter().find(|pane| pane.id == session.pane))
@@ -177,7 +177,7 @@ impl WorkspaceManager {
 
     /// Brings this window's own view to a presented Workspace, and to its Tab and Pane when
     /// given, then brings the window forward. Nothing moves unless every level is presented.
-    fn show_shared(
+    fn show(
         &mut self,
         workspace_id: WorkspaceId,
         tab: Option<Id>,
@@ -190,7 +190,7 @@ impl WorkspaceManager {
             .workspace(workspace_id)
             .map(|entry| entry.payload().clone())
             .ok_or(Refusal::NotShown)?;
-        if !manager.read(cx).presents_shared_target(tab, pane, cx) {
+        if !manager.read(cx).presents_target(tab, pane, cx) {
             return Err(Refusal::NotShown);
         }
         if self.workspaces.active_workspace_id() != Some(workspace_id)
@@ -202,7 +202,7 @@ impl WorkspaceManager {
         self.scroll_active_workspace_into_view(cx);
         if let Some(target) = pane.or(tab) {
             manager.update(cx, |manager, cx| {
-                manager.open_accepted_shared(target, window, cx);
+                manager.open_accepted(target, window, cx);
             });
         }
         window.activate_window();
@@ -296,8 +296,7 @@ impl WorkspaceManager {
             }
             Ok(Validated::Preview(prepared)) => {
                 // File Preview presents for its Pane, so the person sees which Pane asked.
-                if let Err(refusal) =
-                    self.show_shared(workspace_id, None, Some(session.pane), window, cx)
+                if let Err(refusal) = self.show(workspace_id, None, Some(session.pane), window, cx)
                 {
                     return Some(Reply::Refused(refusal));
                 }
@@ -311,7 +310,7 @@ impl WorkspaceManager {
                 // The worker prepared the target, so presenting it touches no file here.
                 manager
                     .update(cx, |manager, cx| {
-                        manager.preview_shared_local_file(session.pane, prepared, window, cx)
+                        manager.preview_local_file(session.pane, prepared, window, cx)
                     })
                     .then_some(())
                     .ok_or(Refusal::PreviewUnavailable)
@@ -360,7 +359,7 @@ fn validate(
 }
 
 /// Answers each request the endpoint accepts on the GPUI main thread, in the window presenting
-/// this desktop's shared Workspaces. The endpoint's thread serves one connection at a time, and
+/// this desktop's Workspaces. The endpoint's thread serves one connection at a time, and
 /// every connection ends by its own deadlines.
 pub(crate) fn serve(
     endpoint: Arc<dyn crate::desktop_channel::DesktopChannelEndpoint>,
@@ -418,7 +417,7 @@ pub(crate) fn serve(
     cx.spawn(async move |cx| {
         while let Ok(exchange) = received.recv().await {
             let answer = cx.update(|cx| {
-                let Some(window) = crate::ui::shared_workspaces::presenting_window(cx) else {
+                let Some(window) = crate::ui::workspaces::presenting_window(cx) else {
                     return Task::ready(Some(Reply::Refused(Refusal::NotShown)));
                 };
                 window

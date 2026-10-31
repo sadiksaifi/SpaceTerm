@@ -40,7 +40,7 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DevelopmentPaneStatus {
+pub(crate) enum ServerPaneStatus {
     Connecting,
     Restored,
     Connected,
@@ -62,8 +62,8 @@ enum Admission {
     Waiting,
     Granted,
 }
-pub(crate) struct DevelopmentPaneState {
-    status: Mutex<DevelopmentPaneStatus>,
+pub(crate) struct ServerPaneState {
+    status: Mutex<ServerPaneStatus>,
     /// Admission settles before a hidden Pane receives its input-enabling screen.
     admission: Mutex<Admission>,
     /// Who controlled the Pane when the server last offered Take Over.
@@ -99,10 +99,10 @@ pub(crate) struct DevelopmentPaneState {
     /// Hints the views that read what this Pane presents.
     changes: crate::terminal::changes::Changes,
 }
-impl DevelopmentPaneState {
+impl ServerPaneState {
     fn new() -> Self {
         Self {
-            status: Mutex::new(DevelopmentPaneStatus::Connecting),
+            status: Mutex::new(ServerPaneStatus::Connecting),
             admission: Mutex::new(Admission::Pending),
             controller: Mutex::default(),
             session_end: Mutex::default(),
@@ -135,7 +135,7 @@ impl DevelopmentPaneState {
         }
     }
 
-    pub(crate) fn status(&self) -> DevelopmentPaneStatus {
+    pub(crate) fn status(&self) -> ServerPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
     /// Leaves this client's view of the Pane, its Scrollback position and Selection, for the
@@ -186,7 +186,7 @@ impl DevelopmentPaneState {
     /// connection reads as Pending.
     pub(crate) fn interactive_input(&self) -> super::InteractiveInput {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        let interactive = *status == DevelopmentPaneStatus::Connected
+        let interactive = *status == ServerPaneStatus::Connected
             && self
                 .interaction
                 .lock()
@@ -217,13 +217,13 @@ impl DevelopmentPaneState {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()
             && self.session_end().is_none()
-            && (*status != DevelopmentPaneStatus::Connecting
+            && (*status != ServerPaneStatus::Connecting
                 || *self.admission.lock().unwrap_or_else(|e| e.into_inner()) != Admission::Granted)
             && matches!(
                 *status,
-                DevelopmentPaneStatus::Connecting
-                    | DevelopmentPaneStatus::Restored
-                    | DevelopmentPaneStatus::Takeover
+                ServerPaneStatus::Connecting
+                    | ServerPaneStatus::Restored
+                    | ServerPaneStatus::Takeover
             )
         {
             self.selected.store(true, Ordering::Release);
@@ -253,9 +253,9 @@ impl DevelopmentPaneState {
         if !self.start_unconfirmed()
             && matches!(
                 *status,
-                DevelopmentPaneStatus::Restored
-                    | DevelopmentPaneStatus::SessionEnded(_)
-                    | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                ServerPaneStatus::Restored
+                    | ServerPaneStatus::SessionEnded(_)
+                    | ServerPaneStatus::Failed(ServerError::DirectoryUnavailable)
             )
             && !self.directory_busy.swap(true, Ordering::AcqRel)
         {
@@ -294,7 +294,7 @@ impl DevelopmentPaneState {
         target: pane::directories::Target,
         replacement: std::path::PathBuf,
     ) {
-        if self.status() == DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+        if self.status() == ServerPaneStatus::Failed(ServerError::DirectoryUnavailable)
             && !self.start_unconfirmed()
             && self.recovery_target().as_ref() == Some(&target)
         {
@@ -310,10 +310,10 @@ impl DevelopmentPaneState {
     }
     pub(crate) fn take_over(&self) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        if *status == DevelopmentPaneStatus::Takeover && !self.start_unconfirmed() {
+        if *status == ServerPaneStatus::Takeover && !self.start_unconfirmed() {
             // This action supersedes earlier selection; a later eligible selection stays queued.
             self.selected.store(false, Ordering::Release);
-            *status = DevelopmentPaneStatus::TakingOver;
+            *status = ServerPaneStatus::TakingOver;
             self.take_over.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
             self.wake.notify();
@@ -331,8 +331,8 @@ impl DevelopmentPaneState {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         self.set_session_end(session_ended);
         *self.controller.lock().unwrap_or_else(|e| e.into_inner()) = Some(controller);
-        if *status != DevelopmentPaneStatus::TakingOver {
-            *status = DevelopmentPaneStatus::Takeover;
+        if *status != ServerPaneStatus::TakingOver {
+            *status = ServerPaneStatus::Takeover;
         }
         drop(status);
         self.changed();
@@ -352,8 +352,8 @@ impl DevelopmentPaneState {
             .clear();
         self.hidden_input.store(false, Ordering::Release);
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        if *status == DevelopmentPaneStatus::Connected {
-            *status = DevelopmentPaneStatus::Reconnecting;
+        if *status == ServerPaneStatus::Connected {
+            *status = ServerPaneStatus::Reconnecting;
         }
         self.paste_unconfirmed.store(false, Ordering::Release);
         self.interaction
@@ -418,15 +418,15 @@ impl DevelopmentPaneState {
 
             self.selected.store(false, Ordering::Release);
             *status = if error == ServerError::DirectoryUnavailable {
-                DevelopmentPaneStatus::Failed(error)
+                ServerPaneStatus::Failed(error)
             } else if has_takeover && retryable {
-                DevelopmentPaneStatus::TakeoverReconnecting
+                ServerPaneStatus::TakeoverReconnecting
             } else if has_takeover {
-                DevelopmentPaneStatus::TakeoverFailed(error)
+                ServerPaneStatus::TakeoverFailed(error)
             } else if retryable {
-                DevelopmentPaneStatus::Reconnecting
+                ServerPaneStatus::Reconnecting
             } else {
-                DevelopmentPaneStatus::Failed(error)
+                ServerPaneStatus::Failed(error)
             };
         }
         if !retryable
@@ -443,9 +443,9 @@ impl DevelopmentPaneState {
         self.changed();
         retryable
     }
-    fn set(&self, status: DevelopmentPaneStatus) {
+    fn set(&self, status: ServerPaneStatus) {
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        if status != DevelopmentPaneStatus::Connected {
+        if status != ServerPaneStatus::Connected {
             self.reading
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -488,13 +488,13 @@ impl DevelopmentPaneState {
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
         }
-        let changed = previous != epoch || *status != DevelopmentPaneStatus::Connected;
-        if *status != DevelopmentPaneStatus::Connected {
+        let changed = previous != epoch || *status != ServerPaneStatus::Connected;
+        if *status != ServerPaneStatus::Connected {
             let interaction = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
             self.effect_authority
                 .client_focus(Some(interaction.target == pane::FocusTarget::Terminal));
         }
-        *status = DevelopmentPaneStatus::Connected;
+        *status = ServerPaneStatus::Connected;
         drop(status);
         // Each frame reaches here. Only a new status or generation concerns a view.
         if changed {
@@ -504,23 +504,23 @@ impl DevelopmentPaneState {
     }
 }
 #[derive(Clone)]
-pub(crate) struct DevelopmentServerSessionFactory {
+pub(crate) struct ServerSessionFactory {
     server: ServerConnection,
     local_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
     remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
     pane_id: spaceterm_server::hierarchy::Id,
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     control: Arc<control::PaneControl>,
-    state: Arc<DevelopmentPaneState>,
+    state: Arc<ServerPaneState>,
 }
-impl DevelopmentServerSessionFactory {
+impl ServerSessionFactory {
     /// Presents one server Pane. Construction connects to nothing.
     pub(crate) fn for_pane(
         server: ServerConnection,
         controls: &PaneControls,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
         pane_id: spaceterm_server::hierarchy::Id,
-    ) -> (Self, Arc<DevelopmentPaneState>) {
+    ) -> (Self, Arc<ServerPaneState>) {
         let local_files = server.is_account_local().then_some(local_files);
         Self::for_origin(server, controls, local_files, None, pane_id)
     }
@@ -530,7 +530,7 @@ impl DevelopmentServerSessionFactory {
         controls: &PaneControls,
         server_display: String,
         pane_id: spaceterm_server::hierarchy::Id,
-    ) -> (Self, Arc<DevelopmentPaneState>) {
+    ) -> (Self, Arc<ServerPaneState>) {
         let metadata = super::metadata::RemoteTerminalMetadataContext::new(
             server_display,
             crate::domain::RemoteDirectory::home(),
@@ -544,7 +544,7 @@ impl DevelopmentServerSessionFactory {
         local_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
         remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
         pane_id: spaceterm_server::hierarchy::Id,
-    ) -> (Self, Arc<DevelopmentPaneState>) {
+    ) -> (Self, Arc<ServerPaneState>) {
         let control = controls.pane(pane_id);
         // A view a closed window left of this Pane returns with the next window.
         let retained = control
@@ -552,11 +552,11 @@ impl DevelopmentServerSessionFactory {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        let state = Arc::new(DevelopmentPaneState {
+        let state = Arc::new(ServerPaneState {
             connection_recovery: Arc::clone(&control.recovery),
             retained_view: Arc::clone(&control.view),
             reading: Mutex::new(retained.unwrap_or_default()),
-            ..DevelopmentPaneState::new()
+            ..ServerPaneState::new()
         });
         *state
             .directory_server
@@ -750,7 +750,7 @@ impl Interaction {
 }
 struct PresentationHandle {
     input: mpsc::SyncSender<SubmittedInput>,
-    state: Arc<DevelopmentPaneState>,
+    state: Arc<ServerPaneState>,
     alive: Arc<AtomicBool>,
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
@@ -856,7 +856,7 @@ impl TerminalSessionHandle for PresentationHandle {
         }
     }
     fn reading_available(&self) -> bool {
-        self.state.status() == DevelopmentPaneStatus::Connected
+        self.state.status() == ServerPaneStatus::Connected
             && self
                 .state
                 .interaction

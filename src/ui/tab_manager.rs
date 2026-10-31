@@ -17,9 +17,9 @@ use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusC
 use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
-    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, CreateTab, MoveTabLeft, MoveTabRight,
-    NextTab, PreviousTab, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TabIdentity, TabView,
-    TabViewEvent, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, MoveTabLeft, MoveTabRight, NewTab, NextTab,
+    PreviousTab, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT, TabIdentity, TabView, TabViewEvent,
+    WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -374,21 +374,21 @@ struct DraggedTab {
     owner: gpui::EntityId,
 }
 
-/// One shared server Workspace's Tabs, when a SpaceTerm Server owns the Workspace.
-type SharedTabBinding = super::shared_workspaces::SharedTabs;
+/// One server Workspace's Tabs, when a SpaceTerm Server owns the Workspace.
+type WorkspaceTabBinding = super::workspaces::WorkspaceTabs;
 
 /// A server Workspace's Root Tab and Root Pane, and the connection the Root Pane reads.
-pub(crate) struct SharedRoot {
+pub(crate) struct WorkspaceRoot {
     pub(crate) tab: spaceterm_server::hierarchy::Id,
     pub(crate) pane: spaceterm_server::hierarchy::Id,
     pub(crate) state: std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
 }
 
-/// What a shared server Workspace's Tab strip offers. Creating a Tab, splitting a Pane, and
+/// What a server Workspace's Tab strip offers. Creating a Tab, splitting a Pane, and
 /// closing a Tab ask the server. They are unavailable offline or when the bounded connected
 /// queue is full.
 #[derive(Clone, Copy)]
-struct SharedStripControls {
+struct WorkspaceStripControls {
     edits: bool,
     edits_reason: &'static str,
 }
@@ -419,14 +419,14 @@ pub(crate) struct TabManager {
     tab_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
     /// The server Workspace this Tab strip presents.
-    shared: SharedTabBinding,
-    parked_shared_tabs: std::collections::BTreeMap<
+    binding: WorkspaceTabBinding,
+    parked_tabs: std::collections::BTreeMap<
         TabId,
         crate::domain::tab_collection::ParkedTab<Entity<TabView>>,
     >,
     /// The Active Tab this client's just-submitted shared close ends, when the keyboard rested
     /// in this strip as the person asked for it. The next reconciliation takes it.
-    shared_close_keyboard: Option<TabId>,
+    close_keyboard: Option<TabId>,
     #[cfg(test)]
     rendered_window_active: bool,
     #[cfg(test)]
@@ -445,19 +445,19 @@ impl TabManager {
     /// A Tab strip presenting one server Workspace. Its Root Tab presents the server's Root Tab,
     /// whose Root Pane reads `root_state` and runs in `session_factory`, and every later Tab
     /// arrives with the published membership.
-    pub(crate) fn shared(
-        mut shared: SharedTabBinding,
-        root: SharedRoot,
+    pub(crate) fn new(
+        mut binding: WorkspaceTabBinding,
+        root: WorkspaceRoot,
         session_factory: WorkspaceTerminalSessionFactory,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pane_construction = shared.sessions().panes().clone();
-        let panes = super::shared_workspaces::SharedPanes::new(
-            shared.edits(),
-            shared.sessions().clone(),
-            shared.workspace(),
+        let pane_construction = binding.sessions().panes().clone();
+        let panes = super::workspaces::WorkspacePanes::new(
+            binding.edits(),
+            binding.sessions().clone(),
+            binding.workspace(),
             root.tab,
         );
         let tabs = TabCollection::new(|tab_id| {
@@ -471,7 +471,7 @@ impl TabManager {
                 cx,
             )
         });
-        shared.register(tabs.root_tab_id(), root.tab);
+        binding.register(tabs.root_tab_id(), root.tab);
         Self {
             tabs,
             tab_epoch: 0,
@@ -492,9 +492,9 @@ impl TabManager {
             window_drag_status: WindowDragRegionStatus::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
-            shared,
-            parked_shared_tabs: std::collections::BTreeMap::new(),
-            shared_close_keyboard: None,
+            binding,
+            parked_tabs: std::collections::BTreeMap::new(),
+            close_keyboard: None,
             #[cfg(test)]
             rendered_window_active: window.is_window_active(),
             #[cfg(test)]
@@ -510,7 +510,7 @@ impl TabManager {
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         pane_construction: PaneConstruction,
-        shared: super::shared_workspaces::SharedPanes,
+        binding: super::workspaces::WorkspacePanes,
         root: (
             spaceterm_server::hierarchy::Id,
             std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
@@ -523,7 +523,7 @@ impl TabManager {
                 tab_id,
                 session_factory,
                 pane_construction,
-                shared,
+                binding,
                 root,
                 window,
                 cx,
@@ -679,7 +679,7 @@ impl TabManager {
         for (_, view) in self.tabs.iter() {
             view.update(cx, |view, cx| view.close_all(cx));
         }
-        for parked in self.parked_shared_tabs.values() {
+        for parked in self.parked_tabs.values() {
             parked.payload().update(cx, |view, cx| view.close_all(cx));
         }
     }
@@ -720,30 +720,26 @@ impl TabManager {
     #[cfg(test)]
     pub(crate) fn focused_server_pane(&self, cx: &App) -> Option<spaceterm_server::hierarchy::Id> {
         let view = self.tabs.active_tab().read(cx);
-        view.shared_server_pane(view.focused_pane_id())
+        view.server_pane(view.focused_pane_id())
     }
 
     /// Whether a Tab of this strip holds the server Pane `pane`.
-    pub(crate) fn presents_shared_pane(
-        &self,
-        pane: spaceterm_server::hierarchy::Id,
-        cx: &App,
-    ) -> bool {
+    pub(crate) fn presents_pane(&self, pane: spaceterm_server::hierarchy::Id, cx: &App) -> bool {
         self.tabs
             .iter()
-            .any(|(_, view)| view.read(cx).holds_shared_pane(pane))
+            .any(|(_, view)| view.read(cx).holds_pane(pane))
     }
 
     /// Whether this strip presents the server Tab `tab`, and the server Pane `pane` within it
     /// when both are given.
-    pub(crate) fn presents_shared_target(
+    pub(crate) fn presents_target(
         &self,
         tab: Option<spaceterm_server::hierarchy::Id>,
         pane: Option<spaceterm_server::hierarchy::Id>,
         cx: &App,
     ) -> bool {
         let tab_id = match tab {
-            Some(tab) => match self.shared.local_tab(tab) {
+            Some(tab) => match self.binding.local_tab(tab) {
                 Some(tab_id) => Some(tab_id),
                 None => return false,
             },
@@ -751,14 +747,14 @@ impl TabManager {
         };
         pane.is_none_or(|pane| {
             self.tabs.iter().any(|(id, view)| {
-                tab_id.is_none_or(|tab_id| tab_id == id) && view.read(cx).holds_shared_pane(pane)
+                tab_id.is_none_or(|tab_id| tab_id == id) && view.read(cx).holds_pane(pane)
             })
         })
     }
 
     /// Presents the prepared File Preview for the server Pane `pane`. `false` when no Tab of
     /// this strip holds the Pane or it cannot preview a local file.
-    pub(crate) fn preview_shared_local_file(
+    pub(crate) fn preview_local_file(
         &mut self,
         pane: spaceterm_server::hierarchy::Id,
         prepared: crate::terminal::native_services::PreparedFilePreview,
@@ -768,13 +764,13 @@ impl TabManager {
         let Some(view) = self
             .tabs
             .iter()
-            .find(|(_, view)| view.read(cx).holds_shared_pane(pane))
+            .find(|(_, view)| view.read(cx).holds_pane(pane))
             .map(|(_, view)| view.clone())
         else {
             return false;
         };
         view.update(cx, |view, cx| {
-            view.preview_shared_local_file(pane, prepared, window, cx)
+            view.preview_local_file(pane, prepared, window, cx)
         })
     }
 
@@ -1163,7 +1159,7 @@ impl TabManager {
     /// Asks the server for another Tab. The Tab appears here with the published membership, and
     /// its initiating interaction presents it provisionally until then.
     pub(crate) fn create_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_shared_tab(window, cx);
+        self.request_tab(window, cx);
     }
 
     /// The Active Tab's Worktree.
@@ -1337,7 +1333,7 @@ impl TabManager {
                 if self.tab_menu == Some(tab_id) {
                     self.tab_menu = None;
                 }
-                self.forget_shared_tab(tab_id);
+                self.forget_tab(tab_id);
                 self.sync_terminal_focus_blocker(cx);
                 debug_assert_eq!(active_tab_id, self.tabs.active_tab_id());
                 // Closing another Tab leaves the bar where it was scrolled.
@@ -1361,7 +1357,7 @@ impl TabManager {
     }
 
     fn request_close_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
-        // A shared Tab's close goes up to the Workspace Window, which asks the server after Close
+        // A Tab's close goes up to the Workspace Window, which asks the server after Close
         // Confirmation. Nothing here closes it locally.
         if self.close_workspace_requested || self.tabs.tab(tab_id).is_none() {
             return;
@@ -1434,7 +1430,7 @@ impl TabManager {
         self.request_close_tab(self.tabs.active_tab_id(), cx);
     }
 
-    fn on_create_tab(&mut self, _: &CreateTab, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.create_tab(window, cx);
     }
 
@@ -1518,7 +1514,7 @@ impl TabManager {
                 under_pointer: true,
             },
             &presentation,
-            self.shared_strip_controls(),
+            self.strip_controls(),
             manager,
             appearance,
             window,
@@ -1549,7 +1545,7 @@ impl TabManager {
         role: TabItemRole,
         hover: TabHover,
         presentation: &TabChromePresentation,
-        shared: SharedStripControls,
+        binding: WorkspaceStripControls,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
         window: &Window,
@@ -1579,10 +1575,10 @@ impl TabManager {
         // Native activation can precede dispatch of an accepts-first-mouse event. Retain whether
         // this action was visible in the pre-activation frame so a hidden inactive-Tab control
         // cannot close its Tab through a stale hitbox. The selected Tab remains available.
-        // A shared Tab's close asks the server, so its control waits, and says why, while this
+        // A Tab's close asks the server, so its control waits, and says why, while this
         // client cannot ask.
-        let shared_close_reason = (!shared.edits).then_some(shared.edits_reason);
-        let close_action_available = (active || appearance.active) && shared_close_reason.is_none();
+        let close_reason = (!binding.edits).then_some(binding.edits_reason);
+        let close_action_available = (active || appearance.active) && close_reason.is_none();
         let status = presentation.tab_status(active, under_pointer, &appearance.colors);
         let status_host = presentation.tab_surface(active, under_pointer);
         let close_button_size = cx
@@ -1660,7 +1656,7 @@ impl TabManager {
             )
             .variant(ButtonVariant::Ghost)
             .disabled(!close_action_available)
-            .when_some(shared_close_reason, |button, reason| {
+            .when_some(close_reason, |button, reason| {
                 button.accessibility_description(reason)
             })
             .accept_first_mouse(active)
@@ -1790,7 +1786,7 @@ impl TabManager {
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
         let active_tab_id = self.tabs.active_tab_id();
-        let shared_strip = self.shared_strip_controls();
+        let strip = self.strip_controls();
         let desktop_presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let background = presentation.background;
         let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
@@ -1896,7 +1892,7 @@ impl TabManager {
                     TabItemRole::InBar,
                     hover,
                     presentation,
-                    shared_strip,
+                    strip,
                     manager.clone(),
                     appearance,
                     window,
@@ -1929,7 +1925,7 @@ impl TabManager {
                             active,
                             index == 0,
                             index == last_index,
-                            shared_strip,
+                            strip,
                             desktop_presentation,
                         ),
                     )
@@ -1973,10 +1969,10 @@ impl TabManager {
 
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
-        // A shared Workspace's New Tab asks the server, so it waits while this client is offline
+        // A Workspace's New Tab asks the server, so it waits while this client is offline
         // or an earlier edit is unanswered.
-        let create_tab_available = shared_strip.edits;
-        let create_tab_unavailable = (!shared_strip.edits).then_some(shared_strip.edits_reason);
+        let create_tab_available = strip.edits;
+        let create_tab_unavailable = (!strip.edits).then_some(strip.edits_reason);
         #[cfg(test)]
         let rendered_create_tab_icon = Rc::clone(&self.rendered_create_tab_icon);
         // The window paints its own edge over the top of the bar, so the Tabs and the create
@@ -2188,7 +2184,7 @@ impl Render for TabManager {
                     .font
                     .clone(),
             )
-            .on_action(cx.listener(Self::on_create_tab))
+            .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_activate_tab_1))
             .on_action(cx.listener(Self::on_activate_tab_2))
             .on_action(cx.listener(Self::on_activate_tab_3))
@@ -2680,32 +2676,32 @@ fn render_tab_identity(
 
 /// Every Tab command carries a symbol, so all labels share the icon column. A Shortcut acts on
 /// the Active Tab, so only the Active Tab's menu advertises one.
-/// Shared server Workspaces: how this Tab strip presents one server Workspace's Tabs and submits
+/// Server Workspaces: how this Tab strip presents one server Workspace's Tabs and submits
 /// their edits.
 impl TabManager {
-    pub(crate) fn shared_arrangement(
+    pub(crate) fn arrangement(
         &self,
         cx: &App,
     ) -> Option<spaceterm_server::client_view::WorkspaceView> {
         use spaceterm_server::client_view::{TabView, WorkspaceView};
-        let shared = &self.shared;
+        let binding = &self.binding;
         let tabs = self
             .tabs
             .iter()
             .map(|(id, view)| {
                 Some(TabView {
-                    tab: shared.server_tab(id)?,
-                    layout: view.read(cx).shared_layout()?,
+                    tab: binding.server_tab(id)?,
+                    layout: view.read(cx).layout()?,
                 })
             })
             .collect::<Option<Vec<_>>>()?;
         Some(WorkspaceView {
-            workspace: shared.workspace(),
+            workspace: binding.workspace(),
             tabs,
         })
     }
 
-    pub(crate) fn restore_shared_arrangement(
+    pub(crate) fn restore_arrangement(
         &mut self,
         saved: &spaceterm_server::client_view::WorkspaceView,
         workspace: &spaceterm_server::hierarchy::Workspace,
@@ -2713,12 +2709,12 @@ impl TabManager {
     ) {
         let saved = saved.reconcile(workspace);
         for (position, tab) in saved.tabs.iter().enumerate() {
-            let Some(id) = self.shared.local_tab(tab.tab) else {
+            let Some(id) = self.binding.local_tab(tab.tab) else {
                 continue;
             };
             let _ = self.tabs.move_tab(id, position);
             if let Some(view) = self.tabs.tab(id) {
-                view.update(cx, |view, cx| view.restore_shared_layout(&tab.layout, cx));
+                view.update(cx, |view, cx| view.restore_layout(&tab.layout, cx));
             }
         }
         cx.notify();
@@ -2730,14 +2726,14 @@ impl TabManager {
         &self,
         cx: &App,
     ) -> Option<crate::ui::remembered_view::RememberedWorkspace> {
-        let shared = &self.shared;
+        let binding = &self.binding;
         Some(crate::ui::remembered_view::RememberedWorkspace {
-            active_tab: shared.server_tab(self.tabs.active_tab_id()),
+            active_tab: binding.server_tab(self.tabs.active_tab_id()),
             tabs: self
                 .tabs
                 .iter()
                 .filter_map(|(tab_id, view)| {
-                    Some((shared.server_tab(tab_id)?, view.read(cx).remember(cx)?))
+                    Some((binding.server_tab(tab_id)?, view.read(cx).remember(cx)?))
                 })
                 .collect(),
             worktrees_expanded: None,
@@ -2778,12 +2774,12 @@ impl TabManager {
         Entity<TabView>,
         &'a crate::ui::remembered_view::RememberedTab,
     )> {
-        let shared = &self.shared;
+        let binding = &self.binding;
         remembered
             .tabs
             .iter()
             .filter_map(|(server, tab)| {
-                Some((self.tabs.tab(shared.local_tab(*server)?)?.clone(), tab))
+                Some((self.tabs.tab(binding.local_tab(*server)?)?.clone(), tab))
             })
             .collect()
     }
@@ -2794,10 +2790,10 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let shared = &self.shared;
+        let binding = &self.binding;
         let tab_id = remembered
             .active_tab
-            .and_then(|server| shared.local_tab(server))
+            .and_then(|server| binding.local_tab(server))
             .unwrap_or_else(|| self.tabs.root_tab_id());
         if tab_id != self.tabs.active_tab_id() {
             self.activate_tab_focusing(tab_id, false, window, cx);
@@ -2807,41 +2803,41 @@ impl TabManager {
 
     /// Adds the Tabs the server published that this strip does not present yet, then reconciles
     /// each Tab's Panes. A new Tab joins at the end of the strip and never takes the Active Tab.
-    pub(crate) fn reconcile_shared(
+    pub(crate) fn reconcile(
         &mut self,
         workspace: &spaceterm_server::hierarchy::Workspace,
-        removal: super::shared_workspaces::SharedRemoval,
+        removal: super::workspaces::WorkspaceRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let close_keyboard = std::mem::take(&mut self.shared_close_keyboard);
-        let shared = &mut self.shared;
-        let applied_aliases = shared.aliases_to_apply();
-        let edits = shared.edits();
-        shared.canonicalize();
+        let close_keyboard = std::mem::take(&mut self.close_keyboard);
+        let binding = &mut self.binding;
+        let applied_aliases = binding.aliases_to_apply();
+        let edits = binding.edits();
+        binding.canonicalize();
         // Every Tab the server published joins before any Tab it removed leaves, so one poll
         // carrying both never closes this Workspace through membership it has not applied yet.
         let mut changed = false;
         let restoring = self
-            .parked_shared_tabs
+            .parked_tabs
             .keys()
             .copied()
             .filter(|id| {
-                self.shared
+                self.binding
                     .server_tab(*id)
                     .is_some_and(|server| workspace.tabs.iter().any(|tab| tab.id == server))
             })
             .collect::<Vec<_>>();
         for id in restoring {
-            if let Some(parked) = self.parked_shared_tabs.remove(&id) {
+            if let Some(parked) = self.parked_tabs.remove(&id) {
                 self.tabs.restore_parked_tab(parked);
                 changed = true;
             }
         }
         for tab in &workspace.tabs {
-            let tab_id = match self.shared.local_tab(tab.id) {
+            let tab_id = match self.binding.local_tab(tab.id) {
                 Some(tab_id) => tab_id,
-                None => match self.create_shared_tab(&workspace.tabs, tab, window, cx) {
+                None => match self.submit_tab_creation(&workspace.tabs, tab, window, cx) {
                     Some(tab_id) => {
                         changed = true;
                         tab_id
@@ -2852,29 +2848,29 @@ impl TabManager {
             let Some(view) = self.tabs.tab(tab_id).cloned() else {
                 continue;
             };
-            changed |= view.update(cx, |view, cx| view.reconcile_shared(tab, window, cx));
+            changed |= view.update(cx, |view, cx| view.reconcile(tab, window, cx));
         }
-        changed |= self.remove_absent_shared_tabs(workspace, removal, close_keyboard, window, cx);
+        changed |= self.remove_absent_tabs(workspace, removal, close_keyboard, window, cx);
         let retired = self
-            .parked_shared_tabs
+            .parked_tabs
             .keys()
             .copied()
-            .filter(|id| !self.shared.optimistically_closing(*id))
+            .filter(|id| !self.binding.optimistically_closing(*id))
             .collect::<Vec<_>>();
         for id in retired {
-            if let Some(parked) = self.parked_shared_tabs.remove(&id) {
+            if let Some(parked) = self.parked_tabs.remove(&id) {
                 self.tabs
                     .discard_parked_tab(parked)
                     .update(cx, |view, cx| view.close_all(cx));
-                self.forget_shared_tab(id);
+                self.forget_tab(id);
             }
         }
         // Every Tab view, including a parked one, must translate its containing identities
         // before their aliases retire. Pane aliases retire individually when binding succeeds.
-        for parked in self.parked_shared_tabs.values() {
+        for parked in self.parked_tabs.values() {
             parked
                 .payload()
-                .update(cx, |view, _| view.canonicalize_shared_ids());
+                .update(cx, |view, _| view.canonicalize_ids());
         }
         for id in applied_aliases {
             edits.retire_alias(id);
@@ -2894,10 +2890,10 @@ impl TabManager {
     /// that Tab, whether the server's answer arrived yet or not, opens the Tab that takes its
     /// place, as a local close does. Every reconciliation clears the record, so a later
     /// publication or the close's own settlement selects nothing.
-    pub(crate) fn prepare_shared_close_keyboard(&mut self, held_keyboard: bool, cx: &App) {
+    pub(crate) fn prepare_close_keyboard(&mut self, held_keyboard: bool, cx: &App) {
         let closes_active =
-            held_keyboard && self.active && self.tabs.active_tab().read(cx).shared_closing();
-        self.shared_close_keyboard = closes_active.then(|| self.tabs.active_tab_id());
+            held_keyboard && self.active && self.tabs.active_tab().read(cx).closing();
+        self.close_keyboard = closes_active.then(|| self.tabs.active_tab_id());
     }
 
     /// Removes the Tabs the server no longer has.
@@ -2906,24 +2902,24 @@ impl TabManager {
     /// Panes may never have connected, so membership alone decides this rather than a Terminal
     /// Session reporting its own end.
     ///
-    /// `close_keyboard` is [`Self::prepare_shared_close_keyboard`]'s record. When this
+    /// `close_keyboard` is [`Self::prepare_close_keyboard`]'s record. When this
     /// reconciliation removes that Tab, the Tab that takes its place opens once, after every
     /// removal, so no Pane of a Tab closing alongside it is selected.
-    fn remove_absent_shared_tabs(
+    fn remove_absent_tabs(
         &mut self,
         workspace: &spaceterm_server::hierarchy::Workspace,
-        removal: super::shared_workspaces::SharedRemoval,
+        removal: super::workspaces::WorkspaceRemoval,
         close_keyboard: Option<TabId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let shared = &self.shared;
+        let binding = &self.binding;
         let absent: Vec<TabId> = self
             .tabs
             .iter()
             .map(|(tab_id, _)| tab_id)
             .filter(|&tab_id| {
-                shared
+                binding
                     .server_tab(tab_id)
                     .is_some_and(|server| !workspace.tabs.iter().any(|tab| tab.id == server))
             })
@@ -2931,8 +2927,8 @@ impl TabManager {
         let opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
         let mut removed = false;
         for tab_id in absent {
-            let optimistic = self.shared.optimistically_closing(tab_id);
-            let own = removal == super::shared_workspaces::SharedRemoval::OwnClose;
+            let optimistic = self.binding.optimistically_closing(tab_id);
+            let own = removal == super::workspaces::WorkspaceRemoval::OwnClose;
             let held_keyboard = self
                 .tabs
                 .tab(tab_id)
@@ -2941,7 +2937,7 @@ impl TabManager {
                 let was_active = self.tabs.active_tab_id() == tab_id;
                 if let Ok(Some(parked)) = self.tabs.park_tab(tab_id) {
                     parked.payload().update(cx, |view, cx| view.deactivate(cx));
-                    self.parked_shared_tabs.insert(tab_id, parked);
+                    self.parked_tabs.insert(tab_id, parked);
                     if was_active && self.active {
                         self.tabs
                             .active_tab()
@@ -2977,14 +2973,14 @@ impl TabManager {
     }
 
     /// Activates the Tab or focuses the Pane one accepted creation of this client's own made.
-    pub(crate) fn open_accepted_shared(
+    pub(crate) fn open_accepted(
         &mut self,
         target: spaceterm_server::hierarchy::Id,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let shared = &self.shared;
-        if let Some(tab_id) = shared.local_tab(target) {
+        let binding = &self.binding;
+        if let Some(tab_id) = binding.local_tab(target) {
             self.activate_tab(tab_id, window, cx);
             return;
         }
@@ -2992,14 +2988,14 @@ impl TabManager {
         let holder = self
             .tabs
             .iter()
-            .find(|(_, view)| view.read(cx).holds_shared_pane(target))
+            .find(|(_, view)| view.read(cx).holds_pane(target))
             .map(|(tab_id, view)| (tab_id, view.clone()));
         if let Some((tab_id, view)) = holder {
             if !self.activate_tab(tab_id, window, cx) {
                 return;
             }
             view.update(cx, |view, cx| {
-                view.focus_shared_pane_explicitly(target, window, cx);
+                view.focus_pane_explicitly(target, window, cx);
             });
         }
     }
@@ -3010,22 +3006,22 @@ impl TabManager {
     ///
     /// The Tab joins the Worktree of a presented Tab the server places in the same Worktree, so
     /// it appears in that Worktree's strip before the server's Git facts name the Worktree.
-    fn create_shared_tab(
+    fn submit_tab_creation(
         &mut self,
         workspace_tabs: &[spaceterm_server::hierarchy::Tab],
         tab: &spaceterm_server::hierarchy::Tab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<TabId> {
-        let shared = &self.shared;
-        let workspace = shared.workspace();
-        let edits = shared.edits();
-        let sessions = shared.sessions().clone();
+        let binding = &self.binding;
+        let workspace = binding.workspace();
+        let edits = binding.edits();
+        let sessions = binding.sessions().clone();
         let (session_factory, state) = sessions.open(tab.root_pane)?;
         let pane_construction = sessions.panes().clone();
         let active_tab_id = self.tabs.active_tab_id();
         let scope = self.presented_worktree(workspace_tabs, tab);
-        let panes = super::shared_workspaces::SharedPanes::new(edits, sessions, workspace, tab.id);
+        let panes = super::workspaces::WorkspacePanes::new(edits, sessions, workspace, tab.id);
         let created = self.tabs.create_tab_in(scope, |tab_id| {
             Self::create_tab_view(
                 tab_id,
@@ -3040,7 +3036,7 @@ impl TabManager {
         let tab_id = match created {
             Ok(tab_id) => tab_id,
             Err(error) => {
-                Self::report_tab_error("present a shared", error);
+                Self::report_tab_error("present a Tab", error);
                 return None;
             }
         };
@@ -3054,7 +3050,7 @@ impl TabManager {
         view.update(cx, |view, cx| {
             view.deactivate(cx);
         });
-        self.shared.register(tab_id, tab.id);
+        self.binding.register(tab_id, tab.id);
         self.sync_terminal_focus_blocker(cx);
         Some(tab_id)
     }
@@ -3066,7 +3062,7 @@ impl TabManager {
         workspace_tabs: &[spaceterm_server::hierarchy::Tab],
         tab: &spaceterm_server::hierarchy::Tab,
     ) -> Option<WorktreeId> {
-        let shared = &self.shared;
+        let binding = &self.binding;
         tab.worktree.as_ref()?;
         workspace_tabs
             .iter()
@@ -3077,70 +3073,68 @@ impl TabManager {
             })
             .find_map(|other| {
                 self.tabs
-                    .scope_of(shared.local_tab(other.id)?)
+                    .scope_of(binding.local_tab(other.id)?)
                     .ok()
                     .flatten()
             })
     }
 
-    /// Asks the server for another Tab in this shared Workspace.
-    fn request_shared_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use super::shared_workspaces::SharedSubmission;
+    /// Asks the server for another Tab in this Workspace.
+    fn request_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use super::workspaces::WorkspaceSubmission;
 
-        let shared = &self.shared;
+        let binding = &self.binding;
         self.tab_selector_pressed = None;
         let active = self.tabs.active_tab().read(cx);
-        let Some(source) = active.shared_server_pane(active.focused_pane_id()) else {
+        let Some(source) = active.server_pane(active.focused_pane_id()) else {
             return;
         };
-        let edits = shared.edits();
-        if let SharedSubmission::Refused(reason) = shared.create_tab(source) {
+        let edits = binding.edits();
+        if let WorkspaceSubmission::Refused(reason) = binding.create_tab(source) {
             let detail = match reason {
-                super::shared_workspaces::SharedRefusalReason::Offline => {
-                    "Reconnect, then try again."
-                }
-                super::shared_workspaces::SharedRefusalReason::Pending => {
+                super::workspaces::WorkspaceRefusalReason::Offline => "Reconnect, then try again.",
+                super::workspaces::WorkspaceRefusalReason::Pending => {
                     "Wait for the current changes to finish, then try again."
                 }
-                super::shared_workspaces::SharedRefusalReason::Value => {
+                super::workspaces::WorkspaceRefusalReason::Value => {
                     "A name or directory is too long."
                 }
             };
             let _ = Alert::new(
-                ModalId::new("shared-tab-unavailable"),
-                "Shared change unavailable",
+                ModalId::new("workspace-tab-unavailable"),
+                "Tab change unavailable",
                 "Couldn\u{2019}t Create Tab",
                 detail,
                 vec![ModalAction::new(
                     (),
                     "OK",
                     ModalActionRole::Cancel,
-                    "shared-tab-unavailable-ok",
+                    "workspace-tab-unavailable-ok",
                 )],
             )
             .intent(AlertIntent::Warning)
             .present(window, cx, |_, _| {});
         } else {
             let presentation = edits.take_presentation();
-            let workspace = self.shared.presentation_workspace();
+            let workspace = self.binding.presentation_workspace();
             let target = presentation.map(|event| edits.canonical(event.target));
             if let Some(workspace) = workspace {
-                self.reconcile_shared(
+                self.reconcile(
                     &workspace,
-                    super::shared_workspaces::SharedRemoval::Published,
+                    super::workspaces::WorkspaceRemoval::Published,
                     window,
                     cx,
                 );
             }
             if let Some(target) = target {
-                self.open_accepted_shared(target, window, cx);
+                self.open_accepted(target, window, cx);
             }
         }
         cx.notify();
     }
 
-    fn forget_shared_tab(&mut self, tab_id: TabId) {
-        self.shared.forget(tab_id);
+    fn forget_tab(&mut self, tab_id: TabId) {
+        self.binding.forget(tab_id);
     }
 
     /// Whether the keyboard rests in one of this strip's Tabs or their Panes.
@@ -3150,24 +3144,24 @@ impl TabManager {
             .any(|(_, view)| view.read(cx).holds_keyboard(window, cx))
     }
 
-    /// Tags each shared Tab with the Worktree the server says it belongs to. The server owns
+    /// Tags each Tab with the Worktree the server says it belongs to. The server owns
     /// membership, so this client only mirrors it; the Tab strip and the Tab Commands then act on
     /// the Active Worktree's Tabs, as they do in a local Workspace.
     ///
     /// `scope` answers `None` for a Tab the server has not published yet. Such a Tab keeps the
     /// Worktree it was presented in, so a pending new Tab never leaves its Worktree's strip.
-    pub(crate) fn apply_shared_worktrees(
+    pub(crate) fn apply_worktrees(
         &mut self,
         scope: &dyn Fn(spaceterm_server::hierarchy::Id) -> Option<Option<WorktreeId>>,
         cx: &mut Context<Self>,
     ) {
-        let shared = &self.shared;
+        let binding = &self.binding;
         let scopes: Vec<_> = self
             .tabs
             .iter()
-            .filter_map(|(tab_id, _)| Some((tab_id, scope(shared.server_tab(tab_id)?)?)))
+            .filter_map(|(tab_id, _)| Some((tab_id, scope(binding.server_tab(tab_id)?)?)))
             .collect();
-        // Only the scope changes. A shared Tab's launch policy never takes the server's root,
+        // Only the scope changes. A Tab's launch policy never takes the server's root,
         // which names no directory this client may validate or start in.
         let mut changed = false;
         for (tab_id, scope) in scopes {
@@ -3187,9 +3181,9 @@ impl TabManager {
         }
     }
 
-    /// Shows a shared Worktree's most recent Tab, and reports whether it has one. It never opens a
+    /// Shows a Worktree's most recent Tab, and reports whether it has one. It never opens a
     /// Tab: the server opens none in a chosen Worktree yet.
-    pub(crate) fn show_shared_worktree(
+    pub(crate) fn show_worktree(
         &mut self,
         id: WorktreeId,
         focus: bool,
@@ -3205,7 +3199,7 @@ impl TabManager {
 
     /// The server Pane a Worktree row describes: the Focused Pane of the Worktree's most recently
     /// active Tab.
-    pub(crate) fn shared_worktree_pane(
+    pub(crate) fn worktree_pane(
         &self,
         id: WorktreeId,
         cx: &App,
@@ -3214,25 +3208,25 @@ impl TabManager {
             .tabs
             .tab(self.tabs.most_recent_tab_in(Some(id))?)?
             .read(cx);
-        view.shared_server_pane(view.focused_pane_id())
+        view.server_pane(view.focused_pane_id())
     }
 
-    /// Presents the Repository Status the server read for every shared Pane in this strip,
+    /// Presents the Repository Status the server read for every Pane in this strip,
     /// including Tabs outside the Active Worktree.
-    pub(crate) fn present_shared_repositories(
+    pub(crate) fn present_repositories(
         &mut self,
         view: &dyn Fn(spaceterm_server::hierarchy::Id) -> crate::repository_status::RepositoryView,
         cx: &mut Context<Self>,
     ) {
         let tabs: Vec<_> = self.tabs.iter().map(|(_, tab)| tab.clone()).collect();
         for tab in tabs {
-            tab.update(cx, |tab, cx| tab.present_shared_repositories(view, cx));
+            tab.update(cx, |tab, cx| tab.present_repositories(view, cx));
         }
     }
 
-    /// Presents the Terminal Metadata the server published for every shared Pane in this strip,
+    /// Presents the Terminal Metadata the server published for every Pane in this strip,
     /// including Tabs outside the Active Worktree and Tabs this client never opened.
-    pub(crate) fn present_shared_metadata<'p>(
+    pub(crate) fn present_metadata<'p>(
         &mut self,
         published: &dyn Fn(
             spaceterm_server::hierarchy::Id,
@@ -3244,29 +3238,26 @@ impl TabManager {
     ) {
         let tabs: Vec<_> = self.tabs.iter().map(|(_, tab)| tab.clone()).collect();
         for tab in tabs {
-            tab.update(cx, |tab, cx| tab.present_shared_metadata(published, cx));
+            tab.update(cx, |tab, cx| tab.present_metadata(published, cx));
         }
     }
 
-    /// The server identity of one shared Tab this strip presents.
-    pub(crate) fn shared_server_tab(
-        &self,
-        tab_id: TabId,
-    ) -> Option<spaceterm_server::hierarchy::Id> {
-        self.shared.server_tab(tab_id)
+    /// The server identity of one Tab this strip presents.
+    pub(crate) fn server_tab(&self, tab_id: TabId) -> Option<spaceterm_server::hierarchy::Id> {
+        self.binding.server_tab(tab_id)
     }
 
-    /// The server identity of one shared Pane in one of this strip's Tabs.
-    pub(crate) fn shared_server_pane(
+    /// The server identity of one Pane in one of this strip's Tabs.
+    pub(crate) fn server_pane(
         &self,
         tab_id: TabId,
         pane_id: PaneId,
         cx: &App,
     ) -> Option<spaceterm_server::hierarchy::Id> {
-        self.tabs.tab(tab_id)?.read(cx).shared_server_pane(pane_id)
+        self.tabs.tab(tab_id)?.read(cx).server_pane(pane_id)
     }
 
-    pub(crate) fn shared_pane_closes_directly(
+    pub(crate) fn pane_closes_directly(
         &self,
         server: spaceterm_server::hierarchy::Id,
         live_session: bool,
@@ -3274,26 +3265,23 @@ impl TabManager {
     ) -> bool {
         self.tabs
             .iter()
-            .find_map(|(_, view)| {
-                view.read(cx)
-                    .shared_pane_closes_directly(server, live_session, cx)
-            })
+            .find_map(|(_, view)| view.read(cx).pane_closes_directly(server, live_session, cx))
             .unwrap_or(false)
     }
 
     /// Delivers the Active Tab's Focused Pane exit, as its Terminal Session does when the server
     /// ends it.
     #[cfg(test)]
-    pub(crate) fn exit_shared_pane_for_test(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn exit_pane_for_test(&mut self, cx: &mut Context<Self>) {
         self.tabs
             .active_tab()
             .clone()
             .update(cx, |view, cx| view.exit_focused_pane_for_test(cx));
     }
 
-    fn shared_strip_controls(&self) -> SharedStripControls {
-        let editability = self.shared.editability();
-        SharedStripControls {
+    fn strip_controls(&self) -> WorkspaceStripControls {
+        let editability = self.binding.editability();
+        WorkspaceStripControls {
             edits: editability.available(),
             edits_reason: editability.explanation(),
         }
@@ -3304,12 +3292,12 @@ fn tab_menu_entries(
     active: bool,
     first: bool,
     last: bool,
-    shared: SharedStripControls,
+    binding: WorkspaceStripControls,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TabMenuCommand>> {
-    // A shared Workspace's creations and Tab close wait for the server.
-    let shared_edits = shared.edits;
-    let child_launch_available = shared_edits;
+    // A Workspace's creations and Tab close wait for the server.
+    let edits = binding.edits;
+    let child_launch_available = edits;
     let with_shortcut =
         |entry: MenuEntry<TabMenuCommand>, action: &dyn gpui::Action| match presentation
             .shortcut(action)
@@ -3321,7 +3309,7 @@ fn tab_menu_entries(
     vec![
         with_shortcut(
             MenuEntry::action("New Tab", TabMenuCommand::NewTab),
-            &CreateTab,
+            &NewTab,
         )
         .icon(|foreground, size| {
             Icon::new(IconName::SquarePlus, size, foreground).into_any_element()
@@ -3367,8 +3355,8 @@ fn tab_menu_entries(
             MenuEntry::action("Close Tab", TabMenuCommand::Close),
             &CloseTab,
         )
-        .destructive(shared_edits)
-        .disabled(!shared_edits)
+        .destructive(edits)
+        .disabled(!edits)
         .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("tab-menu-row-close"),
     ]
@@ -3381,7 +3369,7 @@ fn title_bar_control_focus_ring(appearance: &super::appearance::ChromeAppearance
 fn create_tab_shortcut(
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Option<gpui::SharedString> {
-    presentation.shortcut(&crate::ui::CreateTab)
+    presentation.shortcut(&crate::ui::NewTab)
 }
 
 #[cfg(test)]
@@ -3937,7 +3925,7 @@ mod tests {
         assert_eq!(
             rendered_icon_foreground("create-tab-button", false, &create_icon, cx),
             normal,
-            "the new-tab SVG must retain the shared icon tint in an inactive window"
+            "the new-tab SVG must retain the icon tint in an inactive window"
         );
     }
 
@@ -4085,8 +4073,8 @@ mod tests {
     fn standalone_tab_manager(
         cx: &mut TestAppContext,
     ) -> (Entity<TabManager>, &mut VisualTestContext) {
-        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions, SharedTabs};
+        use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions, WorkspaceTabs};
 
         let directory = PathBuf::from("/tmp/spaceterm-tab-manager-test");
         let edits = Rc::new(ScriptedEdits::applying(directory.clone()));
@@ -4099,27 +4087,26 @@ mod tests {
             ),
         ));
         let panes = ScriptedPanes::connected(factory.clone());
-        let sessions = SharedPaneSessions::with_opener(
+        let sessions = WorkspacePaneSessions::with_opener(
             Rc::clone(&panes) as Rc<_>,
             &crate::ui::pane_lifecycle::PaneConstruction::testing(),
         );
-        let (_, state) =
-            crate::ui::shared_workspaces::SharedPaneOpener::open(&*panes, root.root_pane)
-                .expect("the Root Pane opens");
-        let shared = SharedTabs::new(
-            SharedEditSource::new(edits as Rc<_>),
+        let (_, state) = crate::ui::workspaces::WorkspacePaneOpener::open(&*panes, root.root_pane)
+            .expect("the Root Pane opens");
+        let binding = WorkspaceTabs::new(
+            WorkspaceEditSource::new(edits as Rc<_>),
             sessions,
             workspace.id,
         );
-        let root = SharedRoot {
+        let root = WorkspaceRoot {
             tab: root.id,
             pane: root.root_pane,
             state,
         };
         let (harness, cx) = cx.add_window_view(|window, cx| TabManagerActivityHarness {
             manager: cx.new(|cx| {
-                TabManager::shared(
-                    shared,
+                TabManager::new(
+                    binding,
                     root,
                     factory,
                     Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
@@ -5183,7 +5170,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         // Closing a Pane whose shell runs asks first.
-        click("modal-action-shared-close-confirm", cx);
+        click("modal-action-close-confirm", cx);
         let restored_title = tab_title(cx);
 
         assert_eq!(
@@ -6571,7 +6558,7 @@ mod tests {
             // A Tab opens from the keyboard part way between two frames.
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(10));
-            cx.dispatch_action(crate::ui::CreateTab);
+            cx.dispatch_action(crate::ui::NewTab);
             frames.push(cx.debug_bounds(chip).unwrap().origin.x);
             for _ in 0..2 {
                 next_frame(cx);

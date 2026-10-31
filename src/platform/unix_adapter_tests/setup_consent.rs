@@ -862,7 +862,7 @@ fn default_hostname_offers_the_authenticated_interface_instead_of_an_unrelated_l
 }
 
 #[test]
-fn default_hostname_preserves_a_configured_wildcard_bind_when_enabling_exposure() {
+fn default_hostname_preserves_a_configured_wildcard_bind_when_enabling_network_access() {
     let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
     let mut current = status();
     current.policy = Some(NetworkPolicy::new("0.0.0.0:9231".parse().unwrap()).unwrap());
@@ -890,7 +890,7 @@ fn default_hostname_preserves_a_configured_wildcard_bind_when_enabling_exposure(
 /// addresses, such as a tailnet name next to an earlier LAN route. Setup asks no network approval
 /// and goes on to enroll the address this client reached; the fixture's storage stops it there.
 #[test]
-fn enabled_every_interface_exposure_enrolls_another_route_without_a_network_offer() {
+fn enabled_every_interface_network_access_enrolls_another_route_without_a_network_offer() {
     let mut remote = discovery(true);
     remote.ssh_local_address = Some("100.64.0.9".parse().unwrap());
     let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());

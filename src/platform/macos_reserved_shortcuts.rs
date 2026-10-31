@@ -203,7 +203,7 @@ mod tests {
         profile
             .assign(
                 &mut preferences,
-                Command::CreateTab,
+                Command::NewTab,
                 Some(Shortcut::from_keystroke(&native).unwrap()),
             )
             .unwrap();
@@ -211,17 +211,17 @@ mod tests {
         assert_eq!(resolved.shortcut(Command::NewWorkspace), None);
         assert_eq!(
             resolved.owner(&Shortcut::parse("cmd-+").unwrap()),
-            Some(Command::CreateTab)
+            Some(Command::NewTab)
         );
         assert!(resolved.key_bindings().iter().any(|binding| {
             binding
                 .action()
-                .partial_eq(Command::CreateTab.action().as_ref())
+                .partial_eq(Command::NewTab.action().as_ref())
                 && native.should_match(&binding.keystrokes()[0])
         }));
         assert!(
             serde_json::from_str::<KeybindingPreferences>(
-                r#"{"new_workspace":"shift-cmd-=","create_tab":"cmd-+"}"#
+                r#"{"new_workspace":"shift-cmd-=","new_tab":"cmd-+"}"#
             )
             .unwrap()
             .validate()

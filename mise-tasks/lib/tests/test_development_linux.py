@@ -25,7 +25,7 @@ ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 FAKE_CARGO = """import json, os, pathlib, sys
 arguments = sys.argv[1:]
 assert not any(name in os.environ for name in (
-    "SPACETERM_PACKAGED", "SPACETERM_RELEASE_TAG", "SPACETERM_SERVER_ARCHIVE", "SPACETERM_SERVER_SIGNATURE"
+    "SPACETERM_PACKAGED", "SPACETERM_RELEASE_TAG", "SPACETERM_CLI_ARCHIVE", "SPACETERM_CLI_SIGNATURE"
 ))
 assert arguments[0] == "build" and "--locked" in arguments and "--features" not in arguments
 binary = arguments[arguments.index("--bin") + 1]
@@ -61,7 +61,7 @@ shutil.copyfile(archive, entry / "artifact.tar.gz")
 shutil.copyfile(signature, entry / "artifact.sig")
 import hashlib
 (entry / "artifact.sha256").write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + "\\n")
-os.environ["SPACETERM_SERVER_ARTIFACTS"] = str(catalog)
+os.environ["SPACETERM_CLI_ARTIFACTS"] = str(catalog)
 sys.argv = sys.argv[2:]
 def package(identity, *, target):
     assert identity == "spaceterm-development"
@@ -98,6 +98,9 @@ class LinuxPrefixTests(unittest.TestCase):
             )
         for name in ("server-nonproduction-trust.json", "server-resources.json"):
             shutil.copyfile(ROOT / "packaging" / name, self.root / "packaging" / name)
+        major = self.root / server_package.PROTOCOL_MAJOR_SOURCE
+        major.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
         (self.root / ".gitignore").write_text("target/\nrecord\n__pycache__/\n")
         for arguments in (
             ("init", "-q"),
@@ -130,7 +133,7 @@ class LinuxPrefixTests(unittest.TestCase):
                 "target": target,
                 "commit": "a" * 40,
                 "version": "dev.aaaaaaaaaaaa",
-                "protocol_major": 4,
+                "protocol_major": server_package.PROTOCOL_MAJOR,
             }
             if target == "x86_64-unknown-linux-gnu":
                 source = f"""
@@ -234,8 +237,8 @@ int main(int argc, char **argv) {{
             overrides={
                 "SPACETERM_PACKAGED": "1",
                 "SPACETERM_RELEASE_TAG": "v1.0.0",
-                "SPACETERM_SERVER_ARCHIVE": "/absent/archive",
-                "SPACETERM_SERVER_SIGNATURE": "/absent/signature",
+                "SPACETERM_CLI_ARCHIVE": "/absent/archive",
+                "SPACETERM_CLI_SIGNATURE": "/absent/signature",
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)

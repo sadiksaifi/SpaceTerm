@@ -35,7 +35,7 @@ pub enum Operation {
         channel: Channel,
         style: PresentationStyle,
     },
-    /// A shared Workspace edit, or its Original Operation dispatched again with the same
+    /// A Workspace edit, or its Original Operation dispatched again with the same
     /// identity. The server replays an outcome it already recorded. The reply carries the
     /// validated outcome after the inventory revision that contains it, once that revision is
     /// retained, and waits for a Worktree write the outcome depends on.

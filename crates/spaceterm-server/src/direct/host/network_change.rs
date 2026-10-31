@@ -1,4 +1,4 @@
-//! Network Access changes the service lane plans and applies. A plan reads the saved exposure,
+//! Network Access changes the service lane plans and applies. A plan reads the saved Network Access,
 //! the listener and the routes of live paired connections under the direct-network lock, so the
 //! change it describes is the change `SetPolicy` makes in the same hold.
 use super::*;
@@ -35,7 +35,7 @@ pub(crate) fn listener(state: &Shared) -> ListenerView {
         .listener_view()
 }
 
-/// What a plan applies: the policy `SetPolicy` saves and whether exposure is on.
+/// What a plan applies: the policy `SetPolicy` saves and whether Network Access is on.
 struct Target {
     policy: Option<NetworkPolicy>,
     enabled: bool,
@@ -108,7 +108,7 @@ impl State {
             from: setting(self.record.policy.as_ref(), self.record.enabled),
             to: setting(target.policy.as_ref(), target.enabled),
             generation: self.generation,
-            // With exposure off no paired connection is live, so a new listener ends none.
+            // With Network Access off no paired connection is live, so a new listener ends none.
             ends_connections: self.record.enabled && !keeps_listener,
             caller,
             disconnects,

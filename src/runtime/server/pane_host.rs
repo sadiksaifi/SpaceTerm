@@ -1,7 +1,7 @@
-//! Pane selection, claim, input and lifecycle for the Development host.
+//! Pane selection, claim, input and lifecycle for the server's Pane host.
 use super::*;
 
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     /// Offers Take Over to `asking`, naming who controls the Pane now.
     pub(super) fn takeover(
         &self,

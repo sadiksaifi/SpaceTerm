@@ -229,9 +229,12 @@ impl PreparedShellLaunch {
         launch
     }
 
-    #[allow(
-        dead_code,
-        reason = "Only adapters that remove inherited variables use this operation"
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "only the Linux service PTY removes inherited variables"
+        )
     )]
     pub(crate) fn without_environment_value(mut self, name: &str) -> Self {
         self.environment.retain(|(key, _)| key != name);

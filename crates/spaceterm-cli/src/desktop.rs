@@ -132,7 +132,7 @@ pub fn start(cli: &Cli) -> Option<Output> {
         pane: pane.as_deref(),
         session: session.as_deref(),
     };
-    let identity = env!("SPACETERM_SERVER_IDENTITY");
+    let identity = env!("SPACETERM_CLI_IDENTITY");
     let desktop = LocalDesktop {
         identity,
         deadline: Instant::now() + cli.global.timeout.unwrap_or(OPEN_TIMEOUT),

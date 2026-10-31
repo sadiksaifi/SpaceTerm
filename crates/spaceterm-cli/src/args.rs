@@ -12,7 +12,7 @@ use std::time::Duration;
 #[derive(Debug, Parser)]
 #[command(
     name = "spaceterm",
-    version = env!("SPACETERM_SERVER_VERSION"),
+    version = env!("SPACETERM_CLI_VERSION"),
     disable_help_subcommand = true,
     propagate_version = true
 )]
@@ -932,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn every_command_has_a_dotted_path() {
+    fn pane_run_and_list_report_their_command_paths() {
         let cli = parse(&["pane", "run", "true"]).unwrap();
         assert_eq!(cli.command.path(), "pane.run");
         let cli = parse(&["list"]).unwrap();

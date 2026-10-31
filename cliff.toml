@@ -1,13 +1,18 @@
 [changelog]
 header = ""
+# The first release lists no commits.
 body = """
+{% if not previous.version %}\
+First release of SpaceTerm.
+{% else %}\
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group }}
 
 {% for commit in commits %}\
 - {% if commit.breaking %}**Breaking:** {% endif %}{% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/sadiksaifi/SpaceTerm/commit/{{ commit.id }}))
 {% endfor %}\
-{% endfor %}
+{% endfor %}\
+{% endif %}
 """
 trim = true
 footer = ""
@@ -18,7 +23,8 @@ filter_unconventional = false
 filter_commits = false
 split_commits = false
 protect_breaking_commits = true
-tag_pattern = '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+# Releases start at 1.0.0.
+tag_pattern = '^v([1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 use_branch_tags = true
 sort_commits = "oldest"
 commit_parsers = [

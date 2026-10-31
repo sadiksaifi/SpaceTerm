@@ -2,7 +2,7 @@
 //! shell with SpaceTerm shell integration; shells that are not installed are skipped.
 use super::dispatch::Served;
 use super::pane_host::decode_key;
-use super::tests::{create_shared, shared_inventory, size};
+use super::tests::{create_workspace, size, workspace_inventory};
 use super::*;
 use spaceterm_server::attachments::Attachment;
 use spaceterm_server::connection::outbox::Outbox;
@@ -87,7 +87,7 @@ fn installed(shell: &str) -> Option<std::path::PathBuf> {
     found
 }
 
-fn integrated_host(shell: &std::path::Path, home: &Home) -> DevelopmentPaneHost {
+fn integrated_host(shell: &std::path::Path, home: &Home) -> ServerPaneHost {
     let filesystem = local_filesystem();
     let directory = filesystem.validate_directory(&home.0).unwrap();
     let factory = NativeTerminalSessionFactory::new(
@@ -110,12 +110,12 @@ fn integrated_host(shell: &std::path::Path, home: &Home) -> DevelopmentPaneHost 
         filesystem,
         LocalMachine::default(),
     );
-    DevelopmentPaneHost::new(factory, directory).unwrap()
+    ServerPaneHost::new(factory, directory).unwrap()
 }
 
 /// One server, one Pane, and the clients that use it.
 struct Bench {
-    served: Served<SharedWorkspaceHost>,
+    served: Served<WorkspaceHost>,
     workspace: [u8; 32],
     pane: [u8; 32],
     outbox: Outbox,
@@ -133,9 +133,9 @@ impl Bench {
     }
 
     fn with_home(shell: &std::path::Path, home: Home) -> Self {
-        let mut shared = SharedWorkspaceHost::new(integrated_host(shell, &home));
-        let workspace = create_shared(&mut shared, 1);
-        let pane = shared_inventory(&mut shared)
+        let mut binding = WorkspaceHost::new(integrated_host(shell, &home));
+        let workspace = create_workspace(&mut binding, 1);
+        let pane = workspace_inventory(&mut binding)
             .workspaces
             .iter()
             .find(|candidate| candidate.id == workspace)
@@ -143,7 +143,7 @@ impl Bench {
             .and_then(|tab| tab.panes.first())
             .unwrap()
             .id;
-        let mut served = Served::new(shared);
+        let mut served = Served::new(binding);
         served.ticker(Arc::new(|| {}));
         let outbox = Outbox::new(Arc::new(|| {}));
         served.admitted(&AGENT, "Agent".into(), outbox.clone());
@@ -658,7 +658,7 @@ struct Client {
 }
 
 impl Client {
-    fn admit(served: &mut Served<SharedWorkspaceHost>, peer: Peer, name: &str) -> Self {
+    fn admit(served: &mut Served<WorkspaceHost>, peer: Peer, name: &str) -> Self {
         let outbox = Outbox::new(Arc::new(|| {}));
         served.admitted(&peer, name.into(), outbox.clone());
         Self {
@@ -673,7 +673,7 @@ impl Client {
 
     fn reply(
         &self,
-        served: &mut Served<SharedWorkspaceHost>,
+        served: &mut Served<WorkspaceHost>,
         operation: Operation,
     ) -> Result<ReplyBody, Refusal> {
         match served.request(&self.peer, RequestId(1), operation) {
@@ -682,7 +682,7 @@ impl Client {
         }
     }
 
-    fn show(&self, served: &mut Served<SharedWorkspaceHost>, channel: Channel, visible: bool) {
+    fn show(&self, served: &mut Served<WorkspaceHost>, channel: Channel, visible: bool) {
         self.outbox.view(channel, visible);
         served.view(
             &self.peer,
@@ -694,7 +694,7 @@ impl Client {
         );
     }
 
-    fn pump(&mut self, served: &mut Served<SharedWorkspaceHost>) {
+    fn pump(&mut self, served: &mut Served<WorkspaceHost>) {
         if self.outbox.take_publication() {
             served.publish(&self.peer);
         }
@@ -737,7 +737,7 @@ impl Client {
 }
 
 fn pump_until(
-    served: &mut Served<SharedWorkspaceHost>,
+    served: &mut Served<WorkspaceHost>,
     clients: &mut [&mut Client],
     done: impl Fn(&[&mut Client]) -> bool,
 ) {
@@ -780,9 +780,9 @@ const OBSERVER: Peer = Peer {
 /// reads Scrollback, and ends with Release or with the Session.
 #[test]
 fn observing_a_controlled_pane_changes_nothing_about_it() {
-    let mut shared = SharedWorkspaceHost::new(super::tests::host());
-    let workspace = create_shared(&mut shared, 1);
-    let pane = shared_inventory(&mut shared)
+    let mut binding = WorkspaceHost::new(super::tests::host());
+    let workspace = create_workspace(&mut binding, 1);
+    let pane = workspace_inventory(&mut binding)
         .workspaces
         .iter()
         .find(|candidate| candidate.id == workspace)
@@ -790,7 +790,7 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         .and_then(|tab| tab.panes.first())
         .unwrap()
         .id;
-    let mut served = Served::new(shared);
+    let mut served = Served::new(binding);
     served.ticker(Arc::new(|| {}));
     let mut person = Client::admit(&mut served, CONTROLLER, "Person");
     let mut agent = Client::admit(&mut served, OBSERVER, "Agent");
@@ -999,10 +999,10 @@ fn observing_publishes_names_and_clears_them_on_release_and_disconnect() {
         inventory.expect("observer changes push inventory at once")["workspaces"][0]["tabs"][0]
             ["panes"][0]["observers"].clone()
     }
-    let mut shared = SharedWorkspaceHost::new(super::tests::host());
-    let workspace = create_shared(&mut shared, 1);
-    let pane = shared_inventory(&mut shared).workspaces[0].tabs[0].root_pane;
-    let mut served = Served::new(shared);
+    let mut binding = WorkspaceHost::new(super::tests::host());
+    let workspace = create_workspace(&mut binding, 1);
+    let pane = workspace_inventory(&mut binding).workspaces[0].tabs[0].root_pane;
+    let mut served = Served::new(binding);
     let person = Client::admit(&mut served, CONTROLLER, "Desktop");
     let agent = Client::admit(&mut served, OBSERVER, "Build CLI");
     assert!(matches!(

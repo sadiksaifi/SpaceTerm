@@ -21,9 +21,9 @@ use super::{
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
     ActivateWorkspace3, ActivateWorkspace4, ActivateWorkspace5, ActivateWorkspace6,
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
-    CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
-    FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    MoveTabLeft, MoveTabRight, NewWorkspace, NextTab, OpenTerminalFind, PreviousTab,
+    CloseTerminalFind, CopySelection, FindNext, FindPrevious, FocusNextPane, FocusPaneDown,
+    FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane, KillWorkspace, MoveTabLeft,
+    MoveTabRight, NewTab, NewWorkspace, NextTab, OpenTerminalFind, PreviousTab,
     ShowRepositoryStatus, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
@@ -1369,7 +1369,7 @@ impl Render for DirectoryPicker {
                     .capture_action(block_parent_action::<super::NewWorktree>)
                     .capture_action(block_parent_action::<super::NextWorktree>)
                     .capture_action(block_parent_action::<super::PreviousWorktree>)
-                    .capture_action(block_parent_action::<CloseWorkspace>)
+                    .capture_action(block_parent_action::<KillWorkspace>)
                     .capture_action(block_parent_action::<ActivateWorkspace1>)
                     .capture_action(block_parent_action::<ActivateWorkspace2>)
                     .capture_action(block_parent_action::<ActivateWorkspace3>)
@@ -1382,7 +1382,7 @@ impl Render for DirectoryPicker {
                     .capture_action(block_parent_action::<ToggleSidebar>)
                     .capture_action(block_parent_action::<ToggleSidebarFocus>)
                     .capture_action(block_parent_action::<CopySelection>)
-                    .capture_action(block_parent_action::<CreateTab>)
+                    .capture_action(block_parent_action::<NewTab>)
                     .capture_action(block_parent_action::<ActivateTab1>)
                     .capture_action(block_parent_action::<ActivateTab2>)
                     .capture_action(block_parent_action::<ActivateTab3>)

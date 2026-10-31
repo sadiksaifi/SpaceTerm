@@ -2,7 +2,7 @@
 
 A SpaceTerm Client draws a printable key typed at the shell's line editor before the SpaceTerm Server's echo arrives, once the round trip to that server is 30 ms or more. It turns prediction off again below 20 ms. Under 30 ms the echo arrives within about two frames at 60 Hz, so a prediction gains little and risks a visible correction. mosh and VS Code turn prediction on at 30 ms, and wezterm at 100 ms.
 
-The server reads each Terminal Session's Line Mode from the PTY master. `tcgetattr` returns the ICANON, ECHO and ISIG flags, and `tcgetpgrp` tells whether the shell's process group owns the foreground. One read costs about 3 µs on macOS and under 1 µs on Linux. The server reads after it writes input, after output and after focus changes. Each of those also schedules one more read 200 ms later, because programs may print their prompt before they change the mode. The server pushes a Line Mode Pane event only when the mode changes. The event carries an epoch that increases by 1 at each change, and it goes before the frame captured with it. It carries flags only, never terminal contents. It replaces the hidden-input Pane event, because hidden input is ICANON on with ECHO off.
+The server reads each Terminal Session's Line Mode from the PTY master. `tcgetattr` returns the ICANON, ECHO and ISIG flags, and `tcgetpgrp` tells whether the shell's process group owns the foreground. One read costs about 3 µs on macOS and under 1 µs on Linux. The server reads after it writes input, after output and after focus changes. Each of those also schedules one more read 200 ms later, because programs may print their prompt before they change the mode. The server pushes a Line Mode Pane event only when the mode changes. The event carries an epoch that increases by 1 at each change, and it goes before the frame captured with it. It carries flags only, never terminal contents. Clients derive hidden input from it, because hidden input is ICANON on with ECHO off.
 
 The PTY spike and the real PTY tests measured these modes:
 
@@ -40,4 +40,4 @@ These limits follow from the rule:
 - Inside a nested ssh session the local PTY shows ssh in raw mode and the remote mode is invisible, so prediction stays off.
 - Only ASCII is predicted, so wide and combining characters wait for the echo.
 
-This decision amends the Pane events in [ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) and the frozen screen in [ADR 0045](0045-freeze-terminal-screens-while-reconnecting.md).
+[ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) owns the other Pane events, and [ADR 0045](0045-freeze-terminal-screens-while-reconnecting.md) the frozen screen.

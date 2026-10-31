@@ -117,7 +117,7 @@ impl From<CandidateError> for ServerError {
 /// Read the pinned candidate without staging files or changing service policy.
 /// Run off the UI thread. Native executable verification occurs during explicit staging.
 pub fn discover_candidate() -> Result<Candidate, CandidateError> {
-    let digest = env!("SPACETERM_SERVER_SHA256");
+    let digest = env!("SPACETERM_CLI_SHA256");
     if digest.is_empty() {
         return Err(CandidateError::Unavailable);
     }
@@ -125,8 +125,8 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
         cfg!(spaceterm_packaged),
         env!("SPACETERM_TARGET") == "aarch64-apple-darwin",
         &std::env::current_exe().map_err(|_| CandidateError::Unavailable)?,
-        std::env::var_os("SPACETERM_SERVER_ARCHIVE").map(PathBuf::from),
-        std::env::var_os("SPACETERM_SERVER_SIGNATURE").map(PathBuf::from),
+        std::env::var_os("SPACETERM_CLI_ARCHIVE").map(PathBuf::from),
+        std::env::var_os("SPACETERM_CLI_SIGNATURE").map(PathBuf::from),
     )?
     .present()?;
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();

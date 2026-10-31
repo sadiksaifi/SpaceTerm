@@ -8,4 +8,4 @@ Pane directory retention follows [ADR 0044](0044-restore-panes-in-their-last-con
 
 Intentional Workspace deletion follows [ADR 0032](0032-keep-workspace-attachments-specific-to-each-client.md).
 
-Git remains the source of truth for Worktrees under [ADR 0019](0019-create-and-remove-worktrees-by-running-git.md), and the server reads that list on its machine. Saved Tab-to-Worktree membership follows [ADR 0020](0020-keep-one-tab-order-per-workspace-tagged-by-worktree.md) and must be reconciled with that list when restoring a Workspace.
+Git remains the source of truth for Worktrees under [ADR 0019](0019-create-and-remove-worktrees-by-running-git.md), and the server reads that list on its machine. Saved Tab-to-Worktree membership follows [ADR 0020](0020-tag-tabs-by-worktree.md) and must be reconciled with that list when restoring a Workspace.

@@ -93,7 +93,7 @@ fn native_server_owned_work(
     if identity() != "spaceterm-preflight" {
         return Err("QUIC fixture requires the installed Preflight identity".into());
     }
-    let journal = api("quic-open-fixture-journal", server.shared_journal())?;
+    let journal = api("quic-open-fixture-journal", server.operation_journal())?;
     if journal.pending().is_some() {
         return Err("QUIC fixture has an unresolved original; preserve it before new work".into());
     }
@@ -373,7 +373,7 @@ fn native_server_owned_work(
     if let Err(failure) = &exercise {
         eprintln!("QUIC fixture exercise failed: {failure}");
     }
-    if api("quic-cleanup-journal-check", server.shared_journal())?
+    if api("quic-cleanup-journal-check", server.operation_journal())?
         .pending()
         .is_some()
     {
@@ -392,7 +392,7 @@ fn native_server_owned_work(
     } else {
         Ok(())
     };
-    let target = CloseTarget::Workspace { workspace };
+    let target = CloseTarget::KillWorkspace { workspace };
     let current = api("quic-cleanup-inventory", repository::inventory(&connection))?.0;
     let confirmation = current
         .close_confirmation(target)
@@ -1013,7 +1013,7 @@ fn native_request(approvals: Arc<NativeApprovals>) -> SetupRequest {
     }
 }
 fn configured_catalog() -> Option<PathBuf> {
-    std::env::var_os("SPACETERM_SERVER_ARTIFACTS").map(PathBuf::from)
+    std::env::var_os("SPACETERM_CLI_ARTIFACTS").map(PathBuf::from)
 }
 fn wait_for(stage: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -1212,7 +1212,7 @@ fn accepted_permissions() -> (bool, bool) {
     let confirmed = |key| std::env::var(key).as_deref() == Ok("1");
     assert!(
         confirmed("SPACETERM_SETUP_NATIVE_EXPOSE"),
-        "explicit network exposure authorization required"
+        "explicit Network Access authorization required"
     );
     let install = confirmed("SPACETERM_SETUP_NATIVE_INSTALL");
     let start = confirmed("SPACETERM_SETUP_NATIVE_START");
@@ -1363,7 +1363,10 @@ fn native_server_setup_acceptance() {
         !server.is_account_local(),
         "setup returned local file authority"
     );
-    assert_eq!(server.refresh().unwrap().protocol_major, 4);
+    assert_eq!(
+        server.refresh().unwrap().protocol_major,
+        spaceterm_server::protocol::MAJOR
+    );
     let spawns = fixture.adapter.seal();
     let counts = backend.process_counts();
     assert_eq!(counts.active(), 0);
@@ -1419,7 +1422,10 @@ fn native_server_setup_acceptance() {
         relaunched.status(&route) == Some(DirectRouteStatus::Connected)
     });
     let server = relaunched.server(&route).unwrap();
-    assert_eq!(server.refresh().unwrap().protocol_major, 4);
+    assert_eq!(
+        server.refresh().unwrap().protocol_major,
+        spaceterm_server::protocol::MAJOR
+    );
     assert!(
         server
             .paired_devices()
@@ -1446,7 +1452,7 @@ fn native_server_setup_acceptance() {
 
 #[test]
 #[ignore = "requires installed Preflight and reachable QUIC; overlaps read-only admission on one saved pairing, then revokes only that pairing"]
-fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admission() {
+fn native_server_setup_refresh_overlaps_first_pane_without_losing_admission() {
     use spaceterm_server::ServerError;
     use std::sync::{Barrier, mpsc};
 
@@ -1539,7 +1545,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                     cycle,
                                     "refresh-protocol",
                                     started,
-                                    if status.protocol_major == 4 {
+                                    if status.protocol_major == spaceterm_server::protocol::MAJOR {
                                         Ok(())
                                     } else {
                                         Err(ServerError::Protocol)
@@ -1562,8 +1568,7 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                                 .map_err(|_| ServerError::Protocol),
                         )?;
-                        // Protocol major 3 implies every capability, so a request that changes
-                        // nothing checks the admitted connection.
+                        // A request that changes nothing checks the admitted connection.
                         let reply = observed(
                             cycle,
                             "sibling-round-trip",

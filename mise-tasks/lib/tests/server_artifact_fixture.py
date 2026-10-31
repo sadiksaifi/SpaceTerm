@@ -35,7 +35,7 @@ def prepare(
     expected = {
         "schema": 1,
         "source_sha256": _source(root)[2] if include_catalog and not release_tag else None,
-        "protocol_major": 4,
+        "protocol_major": server_package.PROTOCOL_MAJOR,
         "identity": "spaceterm" if release_tag else "spaceterm-preflight",
         "target": "aarch64-apple-darwin"
         if sys.platform == "darwin"
@@ -118,9 +118,9 @@ int main(int argc, char **argv) {{
                 capture_output=True,
             )
     archive, signature = archive_tree(root, tree, expected)
-    environment["SPACETERM_SERVER_ARCHIVE"] = str(archive)
-    environment["SPACETERM_SERVER_SIGNATURE"] = str(signature)
-    environment.pop("SPACETERM_SERVER_ARTIFACTS", None)
+    environment["SPACETERM_CLI_ARCHIVE"] = str(archive)
+    environment["SPACETERM_CLI_SIGNATURE"] = str(signature)
+    environment.pop("SPACETERM_CLI_ARTIFACTS", None)
     if release_tag or include_catalog:
         # Catalog verification checks both signed targets and executes only the native one.
         catalog = directory / "catalog"
@@ -148,7 +148,7 @@ int main(int argc, char **argv) {{
         shutil.copyfile(other_archive, output / "artifact.tar.gz")
         shutil.copyfile(other_signature, output / "artifact.sig")
         (output / "artifact.sha256").write_text(release.sha256(other_archive) + "\n")
-        environment["SPACETERM_SERVER_ARTIFACTS"] = str(catalog)
+        environment["SPACETERM_CLI_ARTIFACTS"] = str(catalog)
     return archive, signature
 
 

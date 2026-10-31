@@ -284,7 +284,7 @@ fn invitations_advertise_dns_and_nat_authorities_without_local_interface_checks(
 }
 
 #[test]
-fn exposure_refuses_an_address_this_machine_doesnt_have() {
+fn network_access_refuses_an_address_this_machine_doesnt_have() {
     let fixture = fixture(network(&["127.0.0.1", "10.0.0.5"], &["10.0.0.5"]));
     let bind = fixture.listen_at("127.0.0.1".parse().unwrap());
     let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();

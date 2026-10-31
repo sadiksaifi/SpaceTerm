@@ -42,8 +42,8 @@
       "code": "client_major_differs",
       "message": "After this update, work commands need a CLI with the server's protocol major.",
       "details": {
-        "client_major": 4,
-        "server_major": 5
+        "client_major": 1,
+        "server_major": 2
       }
     }
   ]

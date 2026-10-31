@@ -1,5 +1,5 @@
 use crate::directory_selection::GpuiDirectorySelection;
-use crate::domain::RemoteConnectionPhase;
+use crate::domain::ServerConnectionPhase;
 use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::TerminalSessionFactory;
 use crate::ui::drag_and_drop::finish_slides;
@@ -156,7 +156,7 @@ fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppCon
     server.edits.set_inventory(inventory);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -259,19 +259,19 @@ fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
 #[test]
 fn remote_connection_phases_have_expected_status_labels() {
     assert_eq!(
-        remote_connection_status(RemoteConnectionPhase::Connected),
+        remote_connection_status(ServerConnectionPhase::Connected),
         None
     );
     assert_eq!(
-        remote_connection_status(RemoteConnectionPhase::Reconnecting),
+        remote_connection_status(ServerConnectionPhase::Reconnecting),
         Some("Reconnecting…")
     );
     assert_eq!(
-        remote_connection_status(RemoteConnectionPhase::Disconnected),
+        remote_connection_status(ServerConnectionPhase::Disconnected),
         Some("Not connected")
     );
     assert_eq!(
-        remote_connection_status(RemoteConnectionPhase::Failed),
+        remote_connection_status(ServerConnectionPhase::Failed),
         Some("Connection failed")
     );
 }
@@ -419,7 +419,7 @@ fn publish_workspace(cx: &mut VisualTestContext) {
             .flatten()
             .expect("the window presents a Workspace manager");
         manager.update(cx, |manager, cx| {
-            manager.create_shared_workspace(String::new(), None, window, cx);
+            manager.create_workspace(String::new(), None, window, cx);
         });
     });
     cx.run_until_parked();
@@ -429,8 +429,8 @@ fn publish_workspace(cx: &mut VisualTestContext) {
 /// edit as the server does, and its Panes run their Terminal Sessions in a test factory.
 #[derive(Clone)]
 pub(crate) struct LocalServer {
-    pub(crate) edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-    pub(crate) panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    pub(crate) edits: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+    pub(crate) panes: Rc<crate::ui::workspaces::testing::ScriptedPanes>,
 }
 
 impl gpui::Global for LocalServer {}
@@ -441,13 +441,13 @@ impl LocalServer {
         session_factory: Rc<dyn TerminalSessionFactory>,
         home_directory: PathBuf,
     ) -> Self {
-        let panes = crate::ui::shared_workspaces::testing::ScriptedPanes::connected(
+        let panes = crate::ui::workspaces::testing::ScriptedPanes::connected(
             WorkspaceTerminalSessionFactory::new_server(session_factory),
         );
         Self {
-            edits: Rc::new(
-                crate::ui::shared_workspaces::testing::ScriptedEdits::applying(home_directory),
-            ),
+            edits: Rc::new(crate::ui::workspaces::testing::ScriptedEdits::applying(
+                home_directory,
+            )),
             panes,
         }
     }
@@ -459,20 +459,20 @@ impl LocalServer {
         window: &mut Window,
         cx: &mut Context<WorkspaceManager>,
     ) {
-        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+        use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
         cx.set_global(self.clone());
-        let sessions = SharedPaneSessions::with_opener(
+        let sessions = WorkspacePaneSessions::with_opener(
             Rc::clone(&self.panes) as Rc<_>,
             &manager.pane_construction,
         );
-        manager.present_shared_workspaces(
-            SharedEditSource::new(Rc::clone(&self.edits) as Rc<_>),
+        manager.present_workspaces(
+            WorkspaceEditSource::new(Rc::clone(&self.edits) as Rc<_>),
             sessions,
             window,
             cx,
         );
-        manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+        manager.sync_workspaces(ServerKey::LOCAL, window, cx);
     }
 }
 
@@ -1761,7 +1761,7 @@ fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
 
     cx.simulate_keystrokes("ctrl-cmd-w");
     cx.run_until_parked();
-    let workspace = Some(CloseTarget::Workspace(WorkspaceId::new(1)));
+    let workspace = Some(CloseTarget::KillWorkspace(WorkspaceId::new(1)));
     assert_eq!(pending(cx), workspace);
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
@@ -1769,7 +1769,7 @@ fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
     assert!(!cx.has_pending_prompt());
     // Command-Q leaves the window's own confirmation to answer first.
     assert_eq!(application_quit.requests(), 0);
-    click("modal-action-shared-close-cancel", cx);
+    click("modal-action-close-cancel", cx);
 }
 
 #[gpui::test]
@@ -3155,7 +3155,7 @@ fn dragging_sidebar_divider_should_resize_sidebar_chrome_and_content(cx: &mut Te
 }
 
 #[gpui::test]
-fn shared_sidebar_handle_should_clamp_to_the_application_maximum(cx: &mut TestAppContext) {
+fn sidebar_handle_should_clamp_to_the_application_maximum(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let root = cx
         .debug_bounds("workspace-manager")
@@ -3183,7 +3183,7 @@ fn sidebar_resize_interaction_should_block_then_restore_terminal_focus(cx: &mut 
     let (manager, _records, cx) = workspace_manager(cx);
     let start = cx
         .debug_bounds("workspace-sidebar-resize-handle-hitbox")
-        .expect("the shared sidebar handle was rendered")
+        .expect("the sidebar handle was rendered")
         .center();
 
     cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
@@ -3918,7 +3918,7 @@ fn collapsed_top_chrome_should_fit_a_short_name_with_its_pin_indicator(cx: &mut 
     choose_pin_directory(&manager, cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            assert!(manager.rename_shared_workspace(WorkspaceId::new(1), "A", None, window, cx));
+            assert!(manager.rename_workspace(WorkspaceId::new(1), "A", None, window, cx));
         })
     });
     cx.run_until_parked();
@@ -4180,7 +4180,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let name = "Surviving Active Workspace";
-            assert!(manager.rename_shared_workspace(WorkspaceId::new(2), name, None, window, cx));
+            assert!(manager.rename_workspace(WorkspaceId::new(2), name, None, window, cx));
         })
     });
     cx.run_until_parked();
@@ -4461,7 +4461,7 @@ fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext
 
     right_click("workspace-row-1-inactive", cx);
     click("workspace-menu-row-close", cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     let closing = cx
         .debug_bounds("workspace-row-2-active")
         .map(|row| row.origin);
@@ -4927,7 +4927,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 
     right_click("workspace-row-2-inactive", cx);
     click("workspace-menu-row-close", cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     finish_slides(cx);
 
     let state = manager.read_with(cx, |manager, cx| {
@@ -5358,7 +5358,7 @@ pub(crate) fn assert_scroll_shortcuts_from_sidebar_focus(
         crate::keybindings::runtime::install(profile, cx);
     });
     let shortcut = |command| keymap.shortcut(command).unwrap().to_string();
-    cx.simulate_keystrokes(&shortcut(Command::CreateTab));
+    cx.simulate_keystrokes(&shortcut(Command::NewTab));
     cx.run_until_parked();
     cx.simulate_keystrokes(&shortcut(Command::SplitRight));
     cx.run_until_parked();
@@ -5511,10 +5511,10 @@ fn clicking_the_active_inline_rename_should_keep_it_editable(cx: &mut TestAppCon
 
     let input_bounds = cx
         .debug_bounds("workspace-rename-input")
-        .expect("the shared rename input should be rendered");
+        .expect("the rename input should be rendered");
     assert!(
         input_bounds.size.width > px(0.0) && input_bounds.size.height > px(0.0),
-        "the shared rename input collapsed inside its context-menu decorator: {input_bounds:?}"
+        "the rename input collapsed inside its context-menu decorator: {input_bounds:?}"
     );
     click("workspace-rename-input-1", cx);
     let focus_state = cx.update(|window, cx| {
@@ -7520,14 +7520,14 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
     assert!(active_terminal_has_input_focus(&manager, cx));
 }
 
-/// The pin version a shared Workspace's chooser opened at, carried through the completion route
+/// The pin version a Workspace's chooser opened at, carried through the completion route
 /// the Directory Picker and System Directory Selection share.
 #[gpui::test]
-fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at(
+fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at(
     cx: &mut TestAppContext,
 ) {
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+    use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
     use spaceterm_server::hierarchy::{Axis, Inventory, Mutation, Pane, Tab, Workspace};
 
     const SERVER_WORKSPACE: [u8; 32] = [1; 32];
@@ -7568,7 +7568,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
         }],
     };
 
-    let chosen = temporary_directory("shared-pin-draft");
+    let chosen = temporary_directory("workspace-pin-draft");
     fs::create_dir_all(&chosen).unwrap();
     let (manager, _records, cx) = open_workspace_window(
         directory_selection_adapters([Ok(Some(chosen.clone()))]),
@@ -7581,26 +7581,26 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
             let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
                 server_sessions(TestTerminalSessionRecords::default()),
             ));
-            manager.present_shared_workspaces(
-                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
+            manager.present_workspaces(
+                WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
+                WorkspacePaneSessions::with_opener(
                     ScriptedPanes::new(session_factory) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
-    let shared_workspace_id = manager
+    let server_workspace_id = manager
         .read_with(cx, |manager, _| {
             manager
                 .workspaces
                 .iter()
                 .map(|workspace| workspace.id())
-                .find(|id| manager.is_shared_workspace(*id))
+                .find(|id| manager.has_workspace(*id))
         })
         .expect("the published Workspace should join the sidebar");
 
@@ -7608,14 +7608,14 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
     // system chooser from it.
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_pin_directory(shared_workspace_id, window, cx);
+            manager.choose_pin_directory(server_workspace_id, window, cx);
         });
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.choose_local_pin_directory(
-                PinTarget::Workspace(shared_workspace_id),
+                PinTarget::Workspace(server_workspace_id),
                 window,
                 cx,
             );
@@ -7627,7 +7627,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
     edits.set_inventory(published(2, 1, Some(PathBuf::from("/server/theirs"))));
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx)
         });
     });
     cx.run_until_parked();
@@ -7651,8 +7651,8 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
 fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_server(
     cx: &mut TestAppContext,
 ) {
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+    use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
     use spaceterm_server::hierarchy::{Axis, Inventory, Mutation, Pane, Tab, Workspace};
 
     // Both servers name their only Workspace, Tab, and Pane with the same identities.
@@ -7698,31 +7698,31 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
     let remote_key = cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let sessions = || {
-                SharedPaneSessions::with_opener(
+                WorkspacePaneSessions::with_opener(
                     ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_server(Rc::new(
                         server_sessions(TestTerminalSessionRecords::default()),
                     ))) as Rc<_>,
                     &PaneConstruction::testing(),
                 )
             };
-            manager.present_shared_workspaces(
-                SharedEditSource::new(Rc::clone(&local) as Rc<_>),
+            manager.present_workspaces(
+                WorkspaceEditSource::new(Rc::clone(&local) as Rc<_>),
                 sessions(),
                 window,
                 cx,
             );
             let remote_key = manager.present_server_workspaces(
-                ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
                     route: named_route("penguin"),
                     name: "penguin".into(),
                 }),
-                SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
+                WorkspaceEditSource::new(Rc::clone(&remote) as Rc<_>),
                 sessions(),
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
-            manager.sync_shared_workspaces(remote_key, window, cx);
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(remote_key, window, cx);
             remote_key
         })
     });
@@ -7742,7 +7742,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            assert!(manager.rename_shared_workspace(there, "Renamed", None, window, cx));
+            assert!(manager.rename_workspace(there, "Renamed", None, window, cx));
         });
     });
     assert_eq!(
@@ -7836,7 +7836,7 @@ fn server_inventory(
     }
 }
 
-use crate::ui::shared_workspaces::testing::FixedOwner;
+use crate::ui::workspaces::testing::FixedOwner;
 
 /// The account-local presentation's owner in [`MultiServerHarness`].
 const LOCAL_OWNER: spaceterm_server::hierarchy::Id = [0xA0; 32];
@@ -7844,7 +7844,7 @@ const LOCAL_OWNER: spaceterm_server::hierarchy::Id = [0xA0; 32];
 /// A window presenting the account-local server beside paired servers, each with scripted edits.
 struct MultiServerHarness {
     manager: Entity<WorkspaceManager>,
-    local: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    local: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
     /// The revision the next publication carries, so every server reads it as new.
     revision: std::cell::Cell<u64>,
 }
@@ -7859,27 +7859,27 @@ impl MultiServerHarness {
         adapters: WorkspaceManagerAdapters,
         cx: &mut TestAppContext,
     ) -> (Self, &mut VisualTestContext) {
-        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+        use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
         // A test installs the paired registry its machines need.
         let (manager, _records, cx) = open_workspace_window(adapters, false, cx);
         let local = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[]))));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.present_shared_workspaces(
-                    SharedEditSource::new(Rc::clone(&local) as Rc<_>),
-                    SharedPaneSessions::with_opener(
+                manager.present_workspaces(
+                    WorkspaceEditSource::new(Rc::clone(&local) as Rc<_>),
+                    WorkspacePaneSessions::with_opener(
                         ScriptedPanes::connected(Self::session_factory()) as Rc<_>,
                         &PaneConstruction::testing(),
                     ),
                     window,
                     cx,
                 );
-                if let Some(shared) = manager.shared.local_mut() {
-                    shared.identify(Rc::new(FixedOwner(LOCAL_OWNER)));
+                if let Some(binding) = manager.binding.local_mut() {
+                    binding.identify(Rc::new(FixedOwner(LOCAL_OWNER)));
                 }
-                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+                manager.sync_workspaces(ServerKey::LOCAL, window, cx);
             });
         });
         cx.run_until_parked();
@@ -7905,10 +7905,7 @@ impl MultiServerHarness {
         route: crate::direct_connections::DirectRouteId,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
-    ) -> (
-        ServerKey,
-        Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-    ) {
+    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedEdits>) {
         let (key, edits, _) = self.present_direct_panes(name, route, workspaces, cx);
         (key, edits)
     }
@@ -7923,12 +7920,12 @@ impl MultiServerHarness {
         cx: &mut VisualTestContext,
     ) -> (
         ServerKey,
-        Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+        Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+        Rc<crate::ui::workspaces::testing::ScriptedPanes>,
     ) {
-        let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-            Some(server_inventory(self.next_revision(), workspaces)),
-        ));
+        let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(Some(
+            server_inventory(self.next_revision(), workspaces),
+        )));
         let (key, panes) = self.present_direct_edits(name, route, &edits, cx);
         self.attach(key, workspaces, cx);
         (key, edits, panes)
@@ -7939,12 +7936,9 @@ impl MultiServerHarness {
         &self,
         name: &str,
         route: crate::direct_connections::DirectRouteId,
-        edits: &Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+        edits: &Rc<crate::ui::workspaces::testing::ScriptedEdits>,
         cx: &mut VisualTestContext,
-    ) -> (
-        ServerKey,
-        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
-    ) {
+    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedPanes>) {
         // Each route has its own owner, which keeps its identity across reconnects.
         self.present_direct_edits_identified(name, route, Rc::new(FixedOwner(route)), edits, cx)
     }
@@ -7955,16 +7949,13 @@ impl MultiServerHarness {
         &self,
         name: &str,
         route: crate::direct_connections::DirectRouteId,
-        identity: Rc<dyn crate::ui::shared_workspaces::WorkspaceOwner>,
+        identity: Rc<dyn crate::ui::workspaces::WorkspaceOwner>,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
-    ) -> (
-        ServerKey,
-        Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-    ) {
-        let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-            Some(server_inventory(self.next_revision(), workspaces)),
-        ));
+    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedEdits>) {
+        let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(Some(
+            server_inventory(self.next_revision(), workspaces),
+        )));
         let (key, _) = self.present_direct_edits_identified(name, route, identity, &edits, cx);
         self.attach(key, workspaces, cx);
         (key, edits)
@@ -7975,15 +7966,12 @@ impl MultiServerHarness {
         &self,
         name: &str,
         route: crate::direct_connections::DirectRouteId,
-        identity: Rc<dyn crate::ui::shared_workspaces::WorkspaceOwner>,
-        edits: &Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+        identity: Rc<dyn crate::ui::workspaces::WorkspaceOwner>,
+        edits: &Rc<crate::ui::workspaces::testing::ScriptedEdits>,
         cx: &mut VisualTestContext,
-    ) -> (
-        ServerKey,
-        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
-    ) {
-        use crate::ui::shared_workspaces::testing::ScriptedPanes;
-        use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
+    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedPanes>) {
+        use crate::ui::workspaces::testing::ScriptedPanes;
+        use crate::ui::workspaces::{DirectServer, WorkspaceEditSource, WorkspacePaneSessions};
 
         let panes = ScriptedPanes::new(Self::session_factory());
         let key = cx.update(|window, cx| {
@@ -7999,18 +7987,18 @@ impl MultiServerHarness {
                         route,
                         name: name.to_owned().into(),
                     }),
-                    SharedEditSource::new(Rc::clone(edits) as Rc<_>),
-                    SharedPaneSessions::with_opener(
+                    WorkspaceEditSource::new(Rc::clone(edits) as Rc<_>),
+                    WorkspacePaneSessions::with_opener(
                         Rc::clone(&panes) as Rc<_>,
                         &PaneConstruction::testing(),
                     ),
                     window,
                     cx,
                 );
-                if let Some(shared) = manager.shared.get_mut(key) {
-                    shared.identify(identity);
+                if let Some(binding) = manager.binding.get_mut(key) {
+                    binding.identify(identity);
                 }
-                manager.sync_shared_workspaces(key, window, cx);
+                manager.sync_workspaces(key, window, cx);
                 key
             })
         });
@@ -8022,14 +8010,14 @@ impl MultiServerHarness {
     fn publish(
         &self,
         key: ServerKey,
-        edits: &crate::ui::shared_workspaces::testing::ScriptedEdits,
+        edits: &crate::ui::workspaces::testing::ScriptedEdits,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
     ) {
         edits.set_inventory(server_inventory(self.next_revision(), workspaces));
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
-                manager.sync_shared_workspaces(key, window, cx);
+                manager.sync_workspaces(key, window, cx);
             });
         });
         self.attach(key, workspaces, cx);
@@ -8043,9 +8031,9 @@ impl MultiServerHarness {
                 for (_, number) in workspaces {
                     let server = [*number; 32];
                     if manager
-                        .shared
+                        .binding
                         .get(key)
-                        .is_some_and(|shared| shared.local(server).is_none())
+                        .is_some_and(|binding| binding.local(server).is_none())
                     {
                         manager.attach_detached_workspace(key, server, window, cx);
                     }
@@ -8275,14 +8263,14 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
     cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
     let connection = |route| {
         Rc::new(direct.server(route).expect("the route is connected"))
-            as Rc<dyn crate::ui::shared_workspaces::WorkspaceOwner>
+            as Rc<dyn crate::ui::workspaces::WorkspaceOwner>
     };
     let owners = |cx: &mut VisualTestContext| {
         harness.manager.read_with(cx, |manager, _| {
             manager
                 .workspaces
                 .iter()
-                .map(|workspace| manager.shared.owner(workspace.id()))
+                .map(|workspace| manager.binding.owner(workspace.id()))
                 .collect::<Vec<_>>()
         })
     };
@@ -8303,9 +8291,9 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
     let presented = owners(cx);
     let newer_far = harness.manager.read_with(cx, |manager, _| {
         manager
-            .shared
+            .binding
             .get(newer)
-            .and_then(|shared| shared.local([1; 32]))
+            .and_then(|binding| binding.local([1; 32]))
     });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
@@ -8333,15 +8321,15 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
     earlier_edits.set_connected(false);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(earlier, window, cx);
+            manager.sync_workspaces(earlier, window, cx);
         });
     });
     cx.run_until_parked();
     let earlier_offline = harness.manager.read_with(cx, |manager, _| {
         manager
-            .shared
+            .binding
             .get(earlier)
-            .is_some_and(|shared| !shared.accepts_edits())
+            .is_some_and(|binding| !binding.accepts_edits())
     });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
@@ -8391,7 +8379,7 @@ fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppCont
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -8574,25 +8562,25 @@ fn reconnecting_a_remote_workspace_should_resume_its_route_alone(cx: &mut TestAp
     );
 }
 
-/// A shared server Workspace presented in this window, with the server Pane its scripted
+/// A server Workspace presented in this window, with the server Pane its scripted
 /// connection drives. Its Panes reach the same presentation the local Development server's do.
-struct SharedPaneHarness {
+struct WorkspacePaneHarness {
     manager: Entity<WorkspaceManager>,
-    panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    panes: Rc<crate::ui::workspaces::testing::ScriptedPanes>,
 }
 
-const SHARED_FOCUS_WORKSPACE: [u8; 32] = [11; 32];
-const SHARED_FOCUS_TAB: [u8; 32] = [12; 32];
-const SHARED_FOCUS_PANE: [u8; 32] = [13; 32];
+const FOCUS_WORKSPACE: [u8; 32] = [11; 32];
+const FOCUS_TAB: [u8; 32] = [12; 32];
+const FOCUS_PANE: [u8; 32] = [13; 32];
 
-/// The Workspace the sidebar lists first, which is the shared one every harness here publishes.
-const SHARED_WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(1);
+/// The Workspace the sidebar lists first, which every harness here publishes.
+const WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(1);
 
-/// One connected shared Workspace, opened from the sidebar so its Pane is the Focused Pane of the
+/// One connected Workspace, opened from the sidebar so its Pane is the Focused Pane of the
 /// Active Workspace and holds the keyboard.
-fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut VisualTestContext) {
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTestContext) {
+    use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
     use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
 
     let (manager, _records, cx) = serverless_workspace_manager(cx);
@@ -8604,20 +8592,20 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
         close: None,
         workspaces: vec![
             Workspace {
-                id: SHARED_FOCUS_WORKSPACE,
+                id: FOCUS_WORKSPACE,
                 name: "Build".to_owned(),
                 name_version: 0,
                 pin_version: 0,
                 pinned_directory: None,
-                root_tab: SHARED_FOCUS_TAB,
+                root_tab: FOCUS_TAB,
                 tabs: vec![Tab {
                     worktree: None,
                     worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                     worktree_repository: None,
-                    id: SHARED_FOCUS_TAB,
-                    root_pane: SHARED_FOCUS_PANE,
+                    id: FOCUS_TAB,
+                    root_pane: FOCUS_PANE,
                     panes: vec![Pane {
-                        id: SHARED_FOCUS_PANE,
+                        id: FOCUS_PANE,
                         source: None,
                         axis: Axis::Right,
                         starting_directory: PathBuf::from("/server/work"),
@@ -8630,7 +8618,7 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
                     }],
                 }],
             },
-            shared_close_other(),
+            close_other(),
         ],
     };
     let edits = Rc::new(ScriptedEdits::new(Some(published)));
@@ -8638,45 +8626,41 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
     let panes = ScriptedPanes::new(session_factory);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.present_shared_workspaces(
-                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
+            manager.present_workspaces(
+                WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
+                WorkspacePaneSessions::with_opener(
                     Rc::clone(&panes) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
-    let harness = SharedPaneHarness { manager, panes };
+    let harness = WorkspacePaneHarness { manager, panes };
     assert!(
-        harness.manager.read_with(cx, |manager, _| manager
-            .is_shared_workspace(SHARED_WORKSPACE_ROW)),
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.has_workspace(WORKSPACE_ROW)),
         "the published Workspace should join the sidebar as the first row"
     );
     // The person attaches the server's other Workspace, then returns to this one.
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.attach_detached_workspace(
-                ServerKey::LOCAL,
-                SHARED_CLOSE_OTHER_WORKSPACE,
-                window,
-                cx,
-            );
-            manager.activate_workspace(SHARED_WORKSPACE_ROW, window, cx);
+            manager.attach_detached_workspace(ServerKey::LOCAL, CLOSE_OTHER_WORKSPACE, window, cx);
+            manager.activate_workspace(WORKSPACE_ROW, window, cx);
         });
     });
     // The server reaches the Pane and publishes this client's screen, as a fresh connection does.
-    harness.panes.pane(SHARED_FOCUS_PANE).reconnect();
-    settle_shared_panes(cx);
+    harness.panes.pane(FOCUS_PANE).reconnect();
+    settle_panes(cx);
     // A new client's first view opens the server's Workspace and focuses its Focused Pane.
     focus_active_workspace(&harness.manager, cx);
     assert!(
-        shared_terminal_is_focused(&harness, cx),
-        "opening the shared Workspace should leave the keyboard in its Pane"
+        terminal_is_focused(&harness, cx),
+        "opening the Workspace should leave the keyboard in its Pane"
     );
     (harness, cx)
 }
@@ -8687,14 +8671,14 @@ fn focus_active_workspace(manager: &Entity<WorkspaceManager>, cx: &mut VisualTes
     cx.run_until_parked();
 }
 
-/// Lets every shared Pane read its connection and paints the frame that follows.
-fn settle_shared_panes(cx: &mut VisualTestContext) {
+/// Lets every Pane read its connection and paints the frame that follows.
+fn settle_panes(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
 
-fn shared_terminal_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestContext) -> bool {
+fn terminal_is_focused(harness: &WorkspacePaneHarness, cx: &mut VisualTestContext) -> bool {
     cx.update(|window, cx| {
         harness
             .manager
@@ -8707,7 +8691,7 @@ fn shared_terminal_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestCo
     })
 }
 
-fn sidebar_rename_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestContext) -> bool {
+fn sidebar_rename_is_focused(harness: &WorkspacePaneHarness, cx: &mut VisualTestContext) -> bool {
     cx.update(|window, cx| {
         harness
             .manager
@@ -8718,9 +8702,9 @@ fn sidebar_rename_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestCon
     })
 }
 
-/// Starts the inline rename of the Workspace the sidebar lists first, which the shared Workspace
+/// Starts the inline rename of the Workspace the sidebar lists first, which the Workspace
 /// is not, so the keyboard sits in an editor outside the Pane.
-fn start_sidebar_rename(harness: &SharedPaneHarness, cx: &mut VisualTestContext) {
+fn start_sidebar_rename(harness: &WorkspacePaneHarness, cx: &mut VisualTestContext) {
     right_click("workspace-row-2-inactive", cx);
     click("workspace-menu-row-rename", cx);
     assert!(
@@ -8732,26 +8716,24 @@ fn start_sidebar_rename(harness: &SharedPaneHarness, cx: &mut VisualTestContext)
 /// A reconnection is server news rather than a person's action, so it returns the keyboard only to
 /// the Pane that already held it.
 #[gpui::test]
-fn a_shared_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(
-    cx: &mut TestAppContext,
-) {
-    use crate::terminal::server_session::DevelopmentPaneStatus;
+fn a_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(cx: &mut TestAppContext) {
+    use crate::terminal::server_session::ServerPaneStatus;
 
-    let (harness, cx) = shared_pane_harness(cx);
-    let pane = harness.panes.pane(SHARED_FOCUS_PANE);
+    let (harness, cx) = pane_harness(cx);
+    let pane = harness.panes.pane(FOCUS_PANE);
     start_sidebar_rename(&harness, cx);
 
-    pane.set(DevelopmentPaneStatus::Reconnecting);
-    settle_shared_panes(cx);
+    pane.set(ServerPaneStatus::Reconnecting);
+    settle_panes(cx);
     pane.reconnect();
-    settle_shared_panes(cx);
+    settle_panes(cx);
 
     assert!(
         sidebar_rename_is_focused(&harness, cx),
         "a reconnection must leave the keyboard in the editor a person is typing in"
     );
     assert!(
-        !shared_terminal_is_focused(&harness, cx),
+        !terminal_is_focused(&harness, cx),
         "a reconnection must not pull focus into the Pane's terminal"
     );
 
@@ -8759,14 +8741,14 @@ fn a_shared_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     click("workspace-row-1-active", cx);
-    assert!(shared_terminal_is_focused(&harness, cx));
-    pane.set(DevelopmentPaneStatus::Reconnecting);
-    settle_shared_panes(cx);
+    assert!(terminal_is_focused(&harness, cx));
+    pane.set(ServerPaneStatus::Reconnecting);
+    settle_panes(cx);
     pane.reconnect();
-    settle_shared_panes(cx);
+    settle_panes(cx);
 
     assert!(
-        shared_terminal_is_focused(&harness, cx),
+        terminal_is_focused(&harness, cx),
         "the Pane that held the keyboard should keep it once its screens return"
     );
 }
@@ -8774,45 +8756,43 @@ fn a_shared_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(
 /// Another client's takeover replaces the Pane, so the keyboard leaves its terminal for the screen
 /// that explains the change, and nothing else loses the keyboard.
 #[gpui::test]
-fn a_shared_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(
-    cx: &mut TestAppContext,
-) {
-    use crate::terminal::server_session::DevelopmentPaneStatus;
+fn a_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(cx: &mut TestAppContext) {
+    use crate::terminal::server_session::ServerPaneStatus;
 
-    let (harness, cx) = shared_pane_harness(cx);
-    let pane = harness.panes.pane(SHARED_FOCUS_PANE);
+    let (harness, cx) = pane_harness(cx);
+    let pane = harness.panes.pane(FOCUS_PANE);
 
-    pane.set(DevelopmentPaneStatus::Takeover);
-    settle_shared_panes(cx);
+    pane.set(ServerPaneStatus::Takeover);
+    settle_panes(cx);
 
     assert!(
-        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        cx.debug_bounds("pane-takeover-1").is_some(),
         "another client's control should replace the Pane with its screen"
     );
     assert!(
-        !shared_terminal_is_focused(&harness, cx),
+        !terminal_is_focused(&harness, cx),
         "typing must not reach a shell this client no longer controls"
     );
 
     // Control returns, so the screen hands the keyboard back to the terminal it replaced.
     pane.reconnect();
-    settle_shared_panes(cx);
+    settle_panes(cx);
     assert!(
-        shared_terminal_is_focused(&harness, cx),
+        terminal_is_focused(&harness, cx),
         "the Pane should take the keyboard back from the screen it replaced"
     );
 
     // The same takeover while a person types in the sidebar leaves that editor alone.
     start_sidebar_rename(&harness, cx);
-    pane.set(DevelopmentPaneStatus::Takeover);
-    settle_shared_panes(cx);
+    pane.set(ServerPaneStatus::Takeover);
+    settle_panes(cx);
 
     assert!(
         sidebar_rename_is_focused(&harness, cx),
         "another client's takeover must not pull the keyboard out of the rename editor"
     );
     assert!(
-        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        cx.debug_bounds("pane-takeover-1").is_some(),
         "the screen should still replace the Pane it took over"
     );
 }
@@ -8820,23 +8800,23 @@ fn a_shared_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(
 /// A notice over a screen follows the screen's content in a short Pane, so it never covers the
 /// action that recovers the Pane.
 #[gpui::test]
-fn a_shared_pane_notice_should_never_cover_its_screen_actions(cx: &mut TestAppContext) {
+fn a_pane_notice_should_never_cover_its_screen_actions(cx: &mut TestAppContext) {
     use crate::server_connection::ServerError;
-    use crate::terminal::server_session::DevelopmentPaneStatus;
+    use crate::terminal::server_session::ServerPaneStatus;
 
-    let (harness, cx) = shared_pane_harness(cx);
-    let pane = harness.panes.pane(SHARED_FOCUS_PANE);
-    pane.set(DevelopmentPaneStatus::Restored);
-    settle_shared_panes(cx);
-    pane.set(DevelopmentPaneStatus::Failed(ServerError::Protocol));
+    let (harness, cx) = pane_harness(cx);
+    let pane = harness.panes.pane(FOCUS_PANE);
+    pane.set(ServerPaneStatus::Restored);
+    settle_panes(cx);
+    pane.set(ServerPaneStatus::Failed(ServerError::Protocol));
     cx.simulate_resize(gpui::size(px(640.0), px(260.0)));
-    settle_shared_panes(cx);
+    settle_panes(cx);
 
     let action = cx
-        .debug_bounds("shared-pane-start-shell-1")
+        .debug_bounds("pane-start-shell-1")
         .expect("the restored screen keeps Start New Shell");
     let notice = cx
-        .debug_bounds("shared-pane-notice-1")
+        .debug_bounds("pane-notice-1")
         .expect("the failure is explained");
     assert!(
         notice.top() >= action.bottom(),
@@ -8845,49 +8825,49 @@ fn a_shared_pane_notice_should_never_cover_its_screen_actions(cx: &mut TestAppCo
     );
 }
 
-/// A shared Workspace whose Root Tab is split in two beside a second Tab, presented in this window
+/// A Workspace whose Root Tab is split in two beside a second Tab, presented in this window
 /// with the scripted server that answers its edits.
-struct SharedCloseHarness {
+struct WorkspaceCloseHarness {
     manager: Entity<WorkspaceManager>,
-    edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-    panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    edits: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+    panes: Rc<crate::ui::workspaces::testing::ScriptedPanes>,
 }
 
-const SHARED_CLOSE_WORKSPACE: [u8; 32] = [21; 32];
-const SHARED_CLOSE_ROOT_TAB: [u8; 32] = [22; 32];
-const SHARED_CLOSE_ROOT_PANE: [u8; 32] = [23; 32];
-const SHARED_CLOSE_SPLIT_PANE: [u8; 32] = [24; 32];
-const SHARED_CLOSE_SECOND_TAB: [u8; 32] = [25; 32];
-const SHARED_CLOSE_SECOND_PANE: [u8; 32] = [26; 32];
-const SHARED_CLOSE_NEW_PANE: [u8; 32] = [27; 32];
-const SHARED_CLOSE_BOOT: [u8; 32] = [29; 32];
+const CLOSE_WORKSPACE: [u8; 32] = [21; 32];
+const CLOSE_ROOT_TAB: [u8; 32] = [22; 32];
+const CLOSE_ROOT_PANE: [u8; 32] = [23; 32];
+const CLOSE_SPLIT_PANE: [u8; 32] = [24; 32];
+const CLOSE_SECOND_TAB: [u8; 32] = [25; 32];
+const CLOSE_SECOND_PANE: [u8; 32] = [26; 32];
+const CLOSE_NEW_PANE: [u8; 32] = [27; 32];
+const CLOSE_BOOT: [u8; 32] = [29; 32];
 /// Another Workspace of the same server, which this window presents beside the one it closes.
-const SHARED_CLOSE_OTHER_WORKSPACE: [u8; 32] = [41; 32];
-const SHARED_CLOSE_OTHER_TAB: [u8; 32] = [42; 32];
-const SHARED_CLOSE_OTHER_PANE: [u8; 32] = [43; 32];
+const CLOSE_OTHER_WORKSPACE: [u8; 32] = [41; 32];
+const CLOSE_OTHER_TAB: [u8; 32] = [42; 32];
+const CLOSE_OTHER_PANE: [u8; 32] = [43; 32];
 
 /// One published Pane and the live Session it presents, if a shell runs.
-type SharedClosePane = ([u8; 32], Option<[u8; 32]>);
+type WorkspaceClosePane = ([u8; 32], Option<[u8; 32]>);
 
 /// The other Workspace the server publishes, whose one Pane runs no shell.
-fn shared_close_other() -> spaceterm_server::hierarchy::Workspace {
+fn close_other() -> spaceterm_server::hierarchy::Workspace {
     use spaceterm_server::hierarchy::{Axis, Pane, Tab, Workspace};
 
     Workspace {
-        id: SHARED_CLOSE_OTHER_WORKSPACE,
+        id: CLOSE_OTHER_WORKSPACE,
         name: "Other".to_owned(),
         name_version: 0,
         pin_version: 0,
         pinned_directory: None,
-        root_tab: SHARED_CLOSE_OTHER_TAB,
+        root_tab: CLOSE_OTHER_TAB,
         tabs: vec![Tab {
             worktree: None,
             worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
             worktree_repository: None,
-            id: SHARED_CLOSE_OTHER_TAB,
-            root_pane: SHARED_CLOSE_OTHER_PANE,
+            id: CLOSE_OTHER_TAB,
+            root_pane: CLOSE_OTHER_PANE,
             panes: vec![Pane {
-                id: SHARED_CLOSE_OTHER_PANE,
+                id: CLOSE_OTHER_PANE,
                 source: None,
                 axis: Axis::Right,
                 starting_directory: PathBuf::from("/server/work"),
@@ -8903,7 +8883,7 @@ fn shared_close_other() -> spaceterm_server::hierarchy::Workspace {
 }
 
 /// The published inventory once the closed Workspace is gone, leaving only the other one.
-fn shared_close_remaining(revision: u64) -> spaceterm_server::hierarchy::Inventory {
+fn close_remaining(revision: u64) -> spaceterm_server::hierarchy::Inventory {
     use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Inventory};
 
     Inventory {
@@ -8911,21 +8891,21 @@ fn shared_close_remaining(revision: u64) -> spaceterm_server::hierarchy::Invento
         revision,
         close: Some(CloseInventory {
             controls: Vec::new(),
-            boot: SHARED_CLOSE_BOOT,
+            boot: CLOSE_BOOT,
             sessions: vec![ConfirmedPane {
-                id: SHARED_CLOSE_OTHER_PANE,
+                id: CLOSE_OTHER_PANE,
                 session: None,
             }],
         }),
-        workspaces: vec![shared_close_other()],
+        workspaces: vec![close_other()],
     }
 }
 
 /// The published inventory: each Tab and its Panes, with every Pane's live Session, beside the
 /// other Workspace.
-fn shared_close_inventory(
+fn close_inventory(
     revision: u64,
-    tabs: &[([u8; 32], &[SharedClosePane])],
+    tabs: &[([u8; 32], &[WorkspaceClosePane])],
 ) -> spaceterm_server::hierarchy::Inventory {
     use spaceterm_server::hierarchy::{
         Axis, CloseInventory, ConfirmedPane, Inventory, Pane, Tab, Workspace,
@@ -8963,7 +8943,7 @@ fn shared_close_inventory(
         revision,
         close: Some(CloseInventory {
             controls: Vec::new(),
-            boot: SHARED_CLOSE_BOOT,
+            boot: CLOSE_BOOT,
             sessions: tabs
                 .iter()
                 .flat_map(|(_, panes)| panes.iter())
@@ -8972,14 +8952,14 @@ fn shared_close_inventory(
                     session: *session,
                 })
                 .chain([ConfirmedPane {
-                    id: SHARED_CLOSE_OTHER_PANE,
+                    id: CLOSE_OTHER_PANE,
                     session: None,
                 }])
                 .collect(),
         }),
         workspaces: vec![
             Workspace {
-                id: SHARED_CLOSE_WORKSPACE,
+                id: CLOSE_WORKSPACE,
                 name: "Build".to_owned(),
                 name_version: 0,
                 pin_version: 0,
@@ -8987,54 +8967,54 @@ fn shared_close_inventory(
                 root_tab: tabs[0].0,
                 tabs: workspace_tabs,
             },
-            shared_close_other(),
+            close_other(),
         ],
     }
 }
 
-fn shared_close_published() -> spaceterm_server::hierarchy::Inventory {
-    shared_close_inventory(
+fn close_published() -> spaceterm_server::hierarchy::Inventory {
+    close_inventory(
         1,
         &[
             (
-                SHARED_CLOSE_ROOT_TAB,
+                CLOSE_ROOT_TAB,
                 &[
-                    (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
-                    (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+                    (CLOSE_ROOT_PANE, Some([31; 32])),
+                    (CLOSE_SPLIT_PANE, Some([32; 32])),
                 ],
             ),
-            (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+            (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)]),
         ],
     )
 }
 
-/// Opens the shared Workspace so its Root Pane holds the keyboard, with the server's other
+/// Opens the Workspace so its Root Pane holds the keyboard, with the server's other
 /// Workspace attached beside it.
-fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut VisualTestContext) {
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+fn close_harness(cx: &mut TestAppContext) -> (WorkspaceCloseHarness, &mut VisualTestContext) {
+    use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
     let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    let edits = Rc::new(ScriptedEdits::new(Some(shared_close_published())));
+    let edits = Rc::new(ScriptedEdits::new(Some(close_published())));
     let panes = ScriptedPanes::new(server_session_factory());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.present_shared_workspaces(
-                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
+            manager.present_workspaces(
+                WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
+                WorkspacePaneSessions::with_opener(
                     Rc::clone(&panes) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
-    let harness = SharedCloseHarness {
+    let harness = WorkspaceCloseHarness {
         manager,
         edits,
         panes,
@@ -9042,23 +9022,18 @@ fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut Vi
     // The person attaches the other Workspace, then returns to the one they started in.
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.attach_detached_workspace(
-                ServerKey::LOCAL,
-                SHARED_CLOSE_OTHER_WORKSPACE,
-                window,
-                cx,
-            );
-            manager.activate_workspace(SHARED_WORKSPACE_ROW, window, cx);
+            manager.attach_detached_workspace(ServerKey::LOCAL, CLOSE_OTHER_WORKSPACE, window, cx);
+            manager.activate_workspace(WORKSPACE_ROW, window, cx);
         });
     });
-    harness.panes.pane(SHARED_CLOSE_ROOT_PANE).reconnect();
-    harness.panes.pane(SHARED_CLOSE_OTHER_PANE).reconnect();
-    settle_shared_panes(cx);
+    harness.panes.pane(CLOSE_ROOT_PANE).reconnect();
+    harness.panes.pane(CLOSE_OTHER_PANE).reconnect();
+    settle_panes(cx);
     focus_active_workspace(&harness.manager, cx);
     (harness, cx)
 }
 
-impl SharedCloseHarness {
+impl WorkspaceCloseHarness {
     /// The server publishes `inventory`, and the window reads it.
     fn publish(
         &self,
@@ -9072,7 +9047,7 @@ impl SharedCloseHarness {
     fn sync(&self, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
-                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+                manager.sync_workspaces(ServerKey::LOCAL, window, cx)
             });
         });
         redraw(cx);
@@ -9092,17 +9067,17 @@ impl SharedCloseHarness {
     }
 
     /// How many rows present the Workspace these tests close, which is 1 or 0.
-    fn shared_rows(&self, cx: &mut VisualTestContext) -> usize {
+    fn rows(&self, cx: &mut VisualTestContext) -> usize {
         self.manager.read_with(cx, |manager, _| {
             let other = manager
-                .shared
+                .binding
                 .local()
-                .and_then(|shared| shared.local(SHARED_CLOSE_OTHER_WORKSPACE));
+                .and_then(|binding| binding.local(CLOSE_OTHER_WORKSPACE));
             manager
                 .workspaces
                 .iter()
                 .filter(|workspace| {
-                    manager.is_shared_workspace(workspace.id()) && Some(workspace.id()) != other
+                    manager.has_workspace(workspace.id()) && Some(workspace.id()) != other
                 })
                 .count()
         })
@@ -9113,30 +9088,30 @@ impl SharedCloseHarness {
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
                 let other = manager
-                    .shared
+                    .binding
                     .local()
-                    .and_then(|shared| shared.local(SHARED_CLOSE_OTHER_WORKSPACE))
+                    .and_then(|binding| binding.local(CLOSE_OTHER_WORKSPACE))
                     .expect("the other Workspace is presented");
-                manager.detach_shared_workspace(other, window, cx);
-                manager.activate_workspace(SHARED_WORKSPACE_ROW, window, cx);
+                manager.detach_workspace(other, window, cx);
+                manager.activate_workspace(WORKSPACE_ROW, window, cx);
             });
         });
-        settle_shared_panes(cx);
+        settle_panes(cx);
     }
 }
 
 /// The largest part of the hierarchy a shared close removes, as the server reports it.
 #[derive(Clone, Copy)]
-enum SharedCloseRemoves {
+enum WorkspaceCloseRemoves {
     Pane,
     Tab,
     Workspace,
 }
 
-fn shared_close_mutation(
+fn close_mutation(
     target: spaceterm_server::hierarchy::CloseTarget,
-    panes: &[SharedClosePane],
-    removes: SharedCloseRemoves,
+    panes: &[WorkspaceClosePane],
+    removes: WorkspaceCloseRemoves,
 ) -> spaceterm_server::hierarchy::Mutation {
     use spaceterm_server::hierarchy::{CloseConfirmation, ConfirmedPane, Mutation};
 
@@ -9144,7 +9119,7 @@ fn shared_close_mutation(
         target,
         confirmation: CloseConfirmation {
             own_controls: None,
-            boot: SHARED_CLOSE_BOOT,
+            boot: CLOSE_BOOT,
             panes: panes
                 .iter()
                 .map(|(id, session)| ConfirmedPane {
@@ -9152,28 +9127,28 @@ fn shared_close_mutation(
                     session: *session,
                 })
                 .collect(),
-            removes_tab: !matches!(removes, SharedCloseRemoves::Pane),
-            removes_workspace: matches!(removes, SharedCloseRemoves::Workspace),
+            removes_tab: !matches!(removes, WorkspaceCloseRemoves::Pane),
+            removes_workspace: matches!(removes, WorkspaceCloseRemoves::Workspace),
         },
     }
 }
 
-/// Kill Workspace on a shared Workspace asks its server. Its confirmation starts on
+/// Kill Workspace on a Workspace asks its server. Its confirmation starts on
 /// Cancel, and confirming asks the server to end every Pane and Session it showed; the Workspace
 /// leaves this window immediately while its server decides the exact operation.
 #[gpui::test]
-fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_client(
+fn kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_client(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Outcome};
 
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-close", cx);
     redraw(cx);
 
     assert!(
-        cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")
+        cx.debug_bounds("modal-action-close-cancel-keyboard-focus")
             .is_some(),
         "a destructive confirmation should start on Cancel"
     );
@@ -9181,44 +9156,44 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
         harness.closes().is_empty(),
         "nothing ends before confirmation"
     );
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
     assert_eq!(
         harness.closes(),
-        vec![shared_close_mutation(
-            ServerCloseTarget::Workspace {
-                workspace: SHARED_CLOSE_WORKSPACE,
+        vec![close_mutation(
+            ServerCloseTarget::KillWorkspace {
+                workspace: CLOSE_WORKSPACE,
             },
             &[
-                (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
-                (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
-                (SHARED_CLOSE_SECOND_PANE, None),
+                (CLOSE_ROOT_PANE, Some([31; 32])),
+                (CLOSE_SPLIT_PANE, Some([32; 32])),
+                (CLOSE_SECOND_PANE, None),
             ],
-            SharedCloseRemoves::Workspace,
+            WorkspaceCloseRemoves::Workspace,
         )]
     );
     assert_eq!(
-        harness.shared_rows(cx),
+        harness.rows(cx),
         0,
         "the approved Workspace close hides it before the server answers"
     );
     harness.manager.read_with(cx, |manager, _| {
         assert_eq!(
-            manager.shared.local().unwrap().latest_inventory(),
-            Some(&shared_close_published()),
+            manager.binding.local().unwrap().latest_inventory(),
+            Some(&close_published()),
             "hiding the Workspace changes no authoritative membership or Session facts"
         );
         assert_eq!(manager.workspaces.len(), 1);
     });
-    assert!(shared_close_terminal_is_focused(&harness, cx));
+    assert!(close_terminal_is_focused(&harness, cx));
 
     harness.edits.answer(Outcome::Accepted {
-        target: SHARED_CLOSE_WORKSPACE,
+        target: CLOSE_WORKSPACE,
     });
-    harness.publish(shared_close_remaining(2), cx);
-    assert_eq!(harness.shared_rows(cx), 0);
+    harness.publish(close_remaining(2), cx);
+    assert_eq!(harness.rows(cx), 0);
     assert!(
         harness
             .manager
@@ -9227,73 +9202,68 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
         "this window keeps its own Workspace"
     );
     assert!(
-        shared_close_terminal_is_focused(&harness, cx),
+        close_terminal_is_focused(&harness, cx),
         "the Workspace that takes its place takes the keyboard, as a local close does"
     );
 }
 
-/// Control-Command-W runs the retained close_workspace Command, which opens Kill Workspace on a
-/// shared Workspace rather than Close Pane.
+/// Control-Command-W runs the kill_workspace Command, which opens Kill Workspace on a
+/// Workspace rather than Close Pane.
 #[gpui::test]
-fn shared_control_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_close_harness(cx);
+fn control_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
 
     cx.simulate_keystrokes("ctrl-cmd-w");
     redraw(cx);
 
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_some());
     assert!(matches!(
         harness.manager.read_with(cx, |manager, _| manager
             .close_confirmation
             .pending()
             .map(|pending| pending.target)),
-        Some(CloseTarget::Workspace(_))
+        Some(CloseTarget::KillWorkspace(_))
     ));
-    click("modal-action-shared-close-cancel", cx);
+    click("modal-action-close-cancel", cx);
     redraw(cx);
     assert!(harness.closes().is_empty(), "Cancel ends nothing");
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 /// Closing a Tab ends Panes another client controls without taking them over first.
 #[gpui::test]
-fn shared_tab_close_should_end_panes_another_client_controls_without_taking_over(
-    cx: &mut TestAppContext,
-) {
-    use crate::terminal::server_session::DevelopmentPaneStatus;
+fn tab_close_should_end_panes_another_client_controls_without_taking_over(cx: &mut TestAppContext) {
+    use crate::terminal::server_session::ServerPaneStatus;
     use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
 
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     harness
         .panes
-        .pane(SHARED_CLOSE_ROOT_PANE)
-        .set(DevelopmentPaneStatus::Takeover);
-    settle_shared_panes(cx);
+        .pane(CLOSE_ROOT_PANE)
+        .set(ServerPaneStatus::Takeover);
+    settle_panes(cx);
 
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
 
     assert_eq!(
         harness.closes(),
-        vec![shared_close_mutation(
+        vec![close_mutation(
             ServerCloseTarget::Tab {
-                workspace: SHARED_CLOSE_WORKSPACE,
-                tab: SHARED_CLOSE_ROOT_TAB,
+                workspace: CLOSE_WORKSPACE,
+                tab: CLOSE_ROOT_TAB,
             },
             &[
-                (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
-                (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+                (CLOSE_ROOT_PANE, Some([31; 32])),
+                (CLOSE_SPLIT_PANE, Some([32; 32])),
             ],
-            SharedCloseRemoves::Tab,
+            WorkspaceCloseRemoves::Tab,
         )]
     );
     assert_eq!(
-        harness.panes.pane(SHARED_CLOSE_ROOT_PANE).take_overs(),
+        harness.panes.pane(CLOSE_ROOT_PANE).take_overs(),
         0,
         "closing needs no control of the Pane"
     );
@@ -9302,60 +9272,53 @@ fn shared_tab_close_should_end_panes_another_client_controls_without_taking_over
 /// Another client's change while the confirmation is open withdraws it, ends nothing, and Review
 /// opens a fresh confirmation of what the server holds now.
 #[gpui::test]
-fn shared_close_made_stale_by_another_client_should_end_nothing_until_reviewed_again(
+fn close_made_stale_by_another_client_should_end_nothing_until_reviewed_again(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
 
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_some());
 
     // Another client splits the Tab while this confirmation is open.
     let grown = [
-        (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
-        (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
-        (SHARED_CLOSE_NEW_PANE, None),
+        (CLOSE_ROOT_PANE, Some([31; 32])),
+        (CLOSE_SPLIT_PANE, Some([32; 32])),
+        (CLOSE_NEW_PANE, None),
     ];
     harness.publish(
-        shared_close_inventory(
+        close_inventory(
             2,
             &[
-                (SHARED_CLOSE_ROOT_TAB, &grown),
-                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+                (CLOSE_ROOT_TAB, &grown),
+                (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)]),
             ],
         ),
         cx,
     );
 
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_none(),
+        cx.debug_bounds("modal-action-close-confirm").is_none(),
         "the stale confirmation is withdrawn"
     );
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-review")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("modal-action-close-review").is_some());
     assert!(harness.closes().is_empty(), "a stale approval ends nothing");
 
-    click("modal-action-shared-close-review", cx);
+    click("modal-action-close-review", cx);
     redraw(cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
     assert_eq!(
         harness.closes(),
-        vec![shared_close_mutation(
+        vec![close_mutation(
             ServerCloseTarget::Tab {
-                workspace: SHARED_CLOSE_WORKSPACE,
-                tab: SHARED_CLOSE_ROOT_TAB,
+                workspace: CLOSE_WORKSPACE,
+                tab: CLOSE_ROOT_TAB,
             },
             &grown,
-            SharedCloseRemoves::Tab,
+            WorkspaceCloseRemoves::Tab,
         )],
         "the fresh review approves the Pane the other client added"
     );
@@ -9365,48 +9328,41 @@ fn shared_close_made_stale_by_another_client_should_end_nothing_until_reviewed_a
 /// stay the same, but closing it now removes the Workspace, so the confirmation is withdrawn and
 /// only a fresh review that says so can approve it.
 #[gpui::test]
-fn shared_tab_close_made_final_by_a_sibling_close_should_end_nothing_until_reviewed_again(
+fn tab_close_made_final_by_a_sibling_close_should_end_nothing_until_reviewed_again(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
 
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_some());
 
     let root = [
-        (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
-        (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+        (CLOSE_ROOT_PANE, Some([31; 32])),
+        (CLOSE_SPLIT_PANE, Some([32; 32])),
     ];
-    harness.publish(
-        shared_close_inventory(2, &[(SHARED_CLOSE_ROOT_TAB, &root)]),
-        cx,
-    );
+    harness.publish(close_inventory(2, &[(CLOSE_ROOT_TAB, &root)]), cx);
 
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_none(),
+        cx.debug_bounds("modal-action-close-confirm").is_none(),
         "a confirmation that never said the Workspace is removed is withdrawn"
     );
     assert!(harness.closes().is_empty(), "a stale approval ends nothing");
 
-    click("modal-action-shared-close-review", cx);
+    click("modal-action-close-review", cx);
     redraw(cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
     assert_eq!(
         harness.closes(),
-        vec![shared_close_mutation(
+        vec![close_mutation(
             ServerCloseTarget::Tab {
-                workspace: SHARED_CLOSE_WORKSPACE,
-                tab: SHARED_CLOSE_ROOT_TAB,
+                workspace: CLOSE_WORKSPACE,
+                tab: CLOSE_ROOT_TAB,
             },
             &root,
-            SharedCloseRemoves::Workspace,
+            WorkspaceCloseRemoves::Workspace,
         )],
         "the fresh review approves the Workspace's removal"
     );
@@ -9415,30 +9371,27 @@ fn shared_tab_close_made_final_by_a_sibling_close_should_end_nothing_until_revie
 /// The server refuses an approval that went stale before it arrived. Nothing ends, nothing asks
 /// again on its own, and Review stays a person's choice.
 #[gpui::test]
-fn shared_close_stale_answer_should_offer_review_without_retrying(cx: &mut TestAppContext) {
+fn close_stale_answer_should_offer_review_without_retrying(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Outcome;
 
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
     assert_eq!(harness.closes().len(), 1);
 
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.sync(cx);
 
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-review")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("modal-action-close-review").is_some());
     assert_eq!(
         harness.closes().len(),
         1,
         "a stale approval is never retried"
     );
-    assert_eq!(harness.shared_rows(cx), 1);
-    click("modal-action-shared-close-dismiss", cx);
+    assert_eq!(harness.rows(cx), 1);
+    click("modal-action-close-dismiss", cx);
     redraw(cx);
     assert_eq!(harness.closes().len(), 1);
 }
@@ -9446,50 +9399,35 @@ fn shared_close_stale_answer_should_offer_review_without_retrying(cx: &mut TestA
 /// A Tab another client closes while this confirmation is open is gone, so the confirmation says
 /// so instead of asking for anything.
 #[gpui::test]
-fn shared_close_of_a_target_another_client_closed_should_be_withdrawn(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_close_harness(cx);
+fn close_of_a_target_another_client_closed_should_be_withdrawn(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
 
     harness.publish(
-        shared_close_inventory(
-            2,
-            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
-        ),
+        close_inventory(2, &[(CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)])]),
         cx,
     );
 
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_none()
-    );
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-review")
-            .is_none()
-    );
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-dismiss")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+    assert!(cx.debug_bounds("modal-action-close-review").is_none());
+    assert!(cx.debug_bounds("modal-action-close-dismiss").is_some());
     assert!(harness.closes().is_empty());
 }
 
 /// An offline client offers no shared close and keeps nothing for later.
 #[gpui::test]
-fn shared_close_offline_should_close_nothing_and_say_why(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_close_harness(cx);
+fn close_offline_should_close_nothing_and_say_why(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
     harness.edits.set_connected(false);
     harness.sync(cx);
 
     cx.dispatch_action(crate::ui::ClosePane);
     redraw(cx);
 
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_none()
-    );
-    assert!(
-        cx.debug_bounds("modal-action-shared-workspace-unavailable-ok")
+        cx.debug_bounds("modal-action-workspace-unavailable-ok")
             .is_some()
     );
     harness.edits.set_connected(true);
@@ -9502,25 +9440,25 @@ fn shared_close_offline_should_close_nothing_and_say_why(cx: &mut TestAppContext
 
 /// Close Pane on a split Pane closes that Pane only, after confirmation.
 #[gpui::test]
-fn shared_pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppContext) {
+fn pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
 
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::ClosePane);
     redraw(cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
 
     assert_eq!(
         harness.closes(),
-        vec![shared_close_mutation(
+        vec![close_mutation(
             ServerCloseTarget::Pane {
-                workspace: SHARED_CLOSE_WORKSPACE,
-                tab: SHARED_CLOSE_ROOT_TAB,
-                pane: SHARED_CLOSE_ROOT_PANE,
+                workspace: CLOSE_WORKSPACE,
+                tab: CLOSE_ROOT_TAB,
+                pane: CLOSE_ROOT_PANE,
             },
-            &[(SHARED_CLOSE_ROOT_PANE, Some([31; 32]))],
-            SharedCloseRemoves::Pane,
+            &[(CLOSE_ROOT_PANE, Some([31; 32]))],
+            WorkspaceCloseRemoves::Pane,
         )]
     );
 }
@@ -9529,28 +9467,23 @@ fn shared_pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppCo
 /// so neither Cancel nor the approval starts its shell first. The Pane still takes the keyboard,
 /// and Cancel returns it there.
 #[gpui::test]
-fn shared_caption_close_should_confirm_a_retained_pane_without_starting_it(
-    cx: &mut TestAppContext,
-) {
+fn caption_close_should_confirm_a_retained_pane_without_starting_it(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
 
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     // After a server restart the split Pane is retained without a shell.
-    let retained = [
-        (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
-        (SHARED_CLOSE_SPLIT_PANE, None),
-    ];
+    let retained = [(CLOSE_ROOT_PANE, Some([31; 32])), (CLOSE_SPLIT_PANE, None)];
     harness.publish(
-        shared_close_inventory(
+        close_inventory(
             2,
             &[
-                (SHARED_CLOSE_ROOT_TAB, &retained),
-                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+                (CLOSE_ROOT_TAB, &retained),
+                (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)]),
             ],
         ),
         cx,
     );
-    let split = harness.panes.pane(SHARED_CLOSE_SPLIT_PANE);
+    let split = harness.panes.pane(CLOSE_SPLIT_PANE);
     assert_eq!(split.selections(), 0);
     let close_split = |cx: &mut VisualTestContext| {
         // The unfocused Pane reveals its controls under the pointer before they take a click.
@@ -9563,7 +9496,7 @@ fn shared_caption_close_should_confirm_a_retained_pane_without_starting_it(
 
     close_split(cx);
     assert!(
-        cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")
+        cx.debug_bounds("modal-action-close-cancel-keyboard-focus")
             .is_some()
     );
     assert_eq!(
@@ -9572,42 +9505,36 @@ fn shared_caption_close_should_confirm_a_retained_pane_without_starting_it(
         "reviewing a close must not start the retained shell"
     );
 
-    click("modal-action-shared-close-cancel", cx);
+    click("modal-action-close-cancel", cx);
     redraw(cx);
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_none()
-    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
     assert!(harness.closes().is_empty(), "Cancel ends nothing");
     assert_eq!(split.selections(), 0, "Cancel leaves no shell started");
     assert!(
-        shared_close_terminal_is_focused(&harness, cx),
+        close_terminal_is_focused(&harness, cx),
         "the keyboard returns to the Pane"
     );
 
     close_split(cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
     assert_eq!(
         harness.closes(),
-        vec![shared_close_mutation(
+        vec![close_mutation(
             ServerCloseTarget::Pane {
-                workspace: SHARED_CLOSE_WORKSPACE,
-                tab: SHARED_CLOSE_ROOT_TAB,
-                pane: SHARED_CLOSE_SPLIT_PANE,
+                workspace: CLOSE_WORKSPACE,
+                tab: CLOSE_ROOT_TAB,
+                pane: CLOSE_SPLIT_PANE,
             },
-            &[(SHARED_CLOSE_SPLIT_PANE, None)],
-            SharedCloseRemoves::Pane,
+            &[(CLOSE_SPLIT_PANE, None)],
+            WorkspaceCloseRemoves::Pane,
         )],
         "the approval ends the Pane as it was reviewed"
     );
     assert_eq!(split.selections(), 0);
 }
 
-fn shared_close_terminal_is_focused(
-    harness: &SharedCloseHarness,
-    cx: &mut VisualTestContext,
-) -> bool {
+fn close_terminal_is_focused(harness: &WorkspaceCloseHarness, cx: &mut VisualTestContext) -> bool {
     cx.update(|window, cx| {
         harness
             .manager
@@ -9620,7 +9547,7 @@ fn shared_close_terminal_is_focused(
     })
 }
 
-fn shared_close_counts(harness: &SharedCloseHarness, cx: &mut VisualTestContext) -> (usize, usize) {
+fn close_counts(harness: &WorkspaceCloseHarness, cx: &mut VisualTestContext) -> (usize, usize) {
     harness.manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
@@ -9634,27 +9561,24 @@ fn shared_close_counts(harness: &SharedCloseHarness, cx: &mut VisualTestContext)
 /// The Close Pane Shortcut opens the shared confirmation on Cancel, and Escape cancels it,
 /// ending nothing and returning the keyboard to the Pane.
 #[gpui::test]
-fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_close_harness(cx);
-    assert!(shared_close_terminal_is_focused(&harness, cx));
+fn close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
+    assert!(close_terminal_is_focused(&harness, cx));
 
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
     assert!(
-        cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")
+        cx.debug_bounds("modal-action-close-cancel-keyboard-focus")
             .is_some()
     );
 
     cx.simulate_keystrokes("escape");
     redraw(cx);
-    assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
-            .is_none()
-    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
     assert!(harness.closes().is_empty(), "Escape ends nothing");
-    assert_eq!(shared_close_counts(&harness, cx), (2, 3));
+    assert_eq!(close_counts(&harness, cx), (2, 3));
     assert!(
-        shared_close_terminal_is_focused(&harness, cx),
+        close_terminal_is_focused(&harness, cx),
         "the keyboard returns to the Pane"
     );
 }
@@ -9662,94 +9586,86 @@ fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut T
 /// An approved Tab close hides its exact membership and focuses the surviving Tab immediately.
 /// The final Tab's close hides the Workspace while the server decides the operation.
 #[gpui::test]
-fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
-    cx: &mut TestAppContext,
-) {
+fn tab_closes_should_reconcile_through_publication_down_to_the_final_tab(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Outcome};
 
-    let (harness, cx) = shared_close_harness(cx);
-    harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
-    settle_shared_panes(cx);
+    let (harness, cx) = close_harness(cx);
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    settle_panes(cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
-    assert_eq!(shared_close_counts(&harness, cx), (2, 3));
+    assert_eq!(close_counts(&harness, cx), (2, 3));
     assert!(harness.closes().is_empty());
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
     assert_eq!(
         harness.closes(),
-        [shared_close_mutation(
+        [close_mutation(
             ServerCloseTarget::Tab {
-                workspace: SHARED_CLOSE_WORKSPACE,
-                tab: SHARED_CLOSE_ROOT_TAB,
+                workspace: CLOSE_WORKSPACE,
+                tab: CLOSE_ROOT_TAB,
             },
             &[
-                (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
-                (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+                (CLOSE_ROOT_PANE, Some([31; 32])),
+                (CLOSE_SPLIT_PANE, Some([32; 32])),
             ],
-            SharedCloseRemoves::Tab,
+            WorkspaceCloseRemoves::Tab,
         )]
     );
     assert_eq!(
-        shared_close_counts(&harness, cx),
+        close_counts(&harness, cx),
         (1, 1),
         "the approved Tab close hides its Panes before the server answers"
     );
     harness.manager.read_with(cx, |manager, _| {
         assert_eq!(
-            manager.shared.local().unwrap().latest_inventory(),
-            Some(&shared_close_published())
+            manager.binding.local().unwrap().latest_inventory(),
+            Some(&close_published())
         );
     });
-    assert!(shared_close_terminal_is_focused(&harness, cx));
+    assert!(close_terminal_is_focused(&harness, cx));
 
     harness.edits.answer(Outcome::Accepted {
-        target: SHARED_CLOSE_ROOT_TAB,
+        target: CLOSE_ROOT_TAB,
     });
     harness.publish(
-        shared_close_inventory(
-            2,
-            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
-        ),
+        close_inventory(2, &[(CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)])]),
         cx,
     );
-    assert_eq!(shared_close_counts(&harness, cx), (1, 1));
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(close_counts(&harness, cx), (1, 1));
+    assert_eq!(harness.rows(cx), 1);
     redraw(cx);
     assert!(
-        shared_close_terminal_is_focused(&harness, cx),
+        close_terminal_is_focused(&harness, cx),
         "the surviving Tab's Pane takes the keyboard after this client's own close"
     );
 
     // The final Tab's close is its Workspace's removal.
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     redraw(cx);
     assert_eq!(
         harness.closes().last(),
-        Some(&shared_close_mutation(
+        Some(&close_mutation(
             ServerCloseTarget::Tab {
-                workspace: SHARED_CLOSE_WORKSPACE,
-                tab: SHARED_CLOSE_SECOND_TAB,
+                workspace: CLOSE_WORKSPACE,
+                tab: CLOSE_SECOND_TAB,
             },
-            &[(SHARED_CLOSE_SECOND_PANE, None)],
-            SharedCloseRemoves::Workspace,
+            &[(CLOSE_SECOND_PANE, None)],
+            WorkspaceCloseRemoves::Workspace,
         ))
     );
-    assert_eq!(harness.shared_rows(cx), 0);
-    assert!(shared_close_terminal_is_focused(&harness, cx));
+    assert_eq!(harness.rows(cx), 0);
+    assert!(close_terminal_is_focused(&harness, cx));
     harness.edits.answer(Outcome::Accepted {
-        target: SHARED_CLOSE_SECOND_TAB,
+        target: CLOSE_SECOND_TAB,
     });
-    harness.publish(shared_close_remaining(3), cx);
-    assert_eq!(harness.shared_rows(cx), 0);
+    harness.publish(close_remaining(3), cx);
+    assert_eq!(harness.rows(cx), 0);
 }
 
-fn shared_close_rename_is_focused(
-    harness: &SharedCloseHarness,
-    cx: &mut VisualTestContext,
-) -> bool {
+fn close_rename_is_focused(harness: &WorkspaceCloseHarness, cx: &mut VisualTestContext) -> bool {
     cx.update(|window, cx| {
         harness
             .manager
@@ -9766,48 +9682,45 @@ fn shared_close_rename_is_focused(
 fn another_clients_removals_should_leave_the_keyboard_where_a_person_is_typing(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = shared_close_harness(cx);
+    let (harness, cx) = close_harness(cx);
     right_click("workspace-row-2-inactive", cx);
     click("workspace-menu-row-rename", cx);
-    assert!(shared_close_rename_is_focused(&harness, cx));
+    assert!(close_rename_is_focused(&harness, cx));
 
     harness.publish(
-        shared_close_inventory(
+        close_inventory(
             2,
             &[
-                (SHARED_CLOSE_ROOT_TAB, &[(SHARED_CLOSE_ROOT_PANE, None)]),
-                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+                (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, None)]),
+                (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)]),
             ],
         ),
         cx,
     );
-    assert_eq!(shared_close_counts(&harness, cx), (2, 2));
+    assert_eq!(close_counts(&harness, cx), (2, 2));
     assert!(
-        shared_close_rename_is_focused(&harness, cx),
+        close_rename_is_focused(&harness, cx),
         "another client's Pane close must not pull the keyboard into the remaining Pane"
     );
 
     harness.publish(
-        shared_close_inventory(
-            3,
-            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
-        ),
+        close_inventory(3, &[(CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)])]),
         cx,
     );
-    assert_eq!(shared_close_counts(&harness, cx), (1, 1));
+    assert_eq!(close_counts(&harness, cx), (1, 1));
     assert!(
-        shared_close_rename_is_focused(&harness, cx),
+        close_rename_is_focused(&harness, cx),
         "another client's Tab close must not pull the keyboard into the Tab that remains"
     );
 
-    harness.publish(shared_close_remaining(4), cx);
-    assert_eq!(harness.shared_rows(cx), 0);
+    harness.publish(close_remaining(4), cx);
+    assert_eq!(harness.rows(cx), 0);
     assert!(
-        shared_close_rename_is_focused(&harness, cx),
+        close_rename_is_focused(&harness, cx),
         "another client's Kill Workspace must not end a rename in this window's own Workspace"
     );
     assert_eq!(
-        harness.panes.pane(SHARED_CLOSE_SECOND_PANE).selections(),
+        harness.panes.pane(CLOSE_SECOND_PANE).selections(),
         0,
         "nobody here selected the Pane that remained, so the server is asked for nothing"
     );
@@ -9819,58 +9732,55 @@ fn another_clients_removals_should_leave_the_keyboard_where_a_person_is_typing(
 fn another_clients_removal_of_where_the_keyboard_rests_should_hand_it_to_what_remains(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = shared_close_harness(cx);
-    harness.panes.pane(SHARED_CLOSE_SPLIT_PANE).reconnect();
-    harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
-    settle_shared_panes(cx);
+    let (harness, cx) = close_harness(cx);
+    harness.panes.pane(CLOSE_SPLIT_PANE).reconnect();
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    settle_panes(cx);
     click("pane-surface-2", cx);
-    assert!(shared_close_terminal_is_focused(&harness, cx));
-    let root_selections = harness.panes.pane(SHARED_CLOSE_ROOT_PANE).selections();
+    assert!(close_terminal_is_focused(&harness, cx));
+    let root_selections = harness.panes.pane(CLOSE_ROOT_PANE).selections();
 
     // Another client closes the split Pane the keyboard is in.
     harness.publish(
-        shared_close_inventory(
+        close_inventory(
             2,
             &[
-                (SHARED_CLOSE_ROOT_TAB, &[(SHARED_CLOSE_ROOT_PANE, None)]),
-                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+                (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, None)]),
+                (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)]),
             ],
         ),
         cx,
     );
     assert!(
-        shared_close_terminal_is_focused(&harness, cx),
+        close_terminal_is_focused(&harness, cx),
         "the keyboard should rest in the Pane that remains rather than nowhere"
     );
     assert_eq!(
-        harness.panes.pane(SHARED_CLOSE_ROOT_PANE).selections(),
+        harness.panes.pane(CLOSE_ROOT_PANE).selections(),
         root_selections,
         "resting the keyboard is not a Pane selection"
     );
 
     // Another client closes the Active Tab the keyboard is in.
     harness.publish(
-        shared_close_inventory(
-            3,
-            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
-        ),
+        close_inventory(3, &[(CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)])]),
         cx,
     );
     assert!(
-        shared_close_terminal_is_focused(&harness, cx),
+        close_terminal_is_focused(&harness, cx),
         "the keyboard should rest in the Tab that becomes active"
     );
     assert_eq!(
-        harness.panes.pane(SHARED_CLOSE_SECOND_PANE).selections(),
+        harness.panes.pane(CLOSE_SECOND_PANE).selections(),
         0,
         "the Tab that becomes active asks the server for nothing"
     );
 
     // Another client kills the Workspace the keyboard is in.
-    harness.publish(shared_close_remaining(4), cx);
-    assert_eq!(harness.shared_rows(cx), 0);
+    harness.publish(close_remaining(4), cx);
+    assert_eq!(harness.rows(cx), 0);
     assert!(
-        shared_close_terminal_is_focused(&harness, cx),
+        close_terminal_is_focused(&harness, cx),
         "the keyboard should rest in the Workspace that becomes active"
     );
 }
@@ -9885,13 +9795,13 @@ const ATTACHED_DOCS_PANE: [u8; 32] = [26; 32];
 const DETACHED_BUILD_RESULT: &str = "workspace-switcher-detached-15151515";
 const DETACHED_DOCS_RESULT: &str = "workspace-switcher-detached-18181818";
 
-/// Two shared Workspaces, Build and Docs, beside this window's own Workspace. A new client
+/// Two Workspaces, Build and Docs, beside this window's own Workspace. A new client
 /// attaches Build, and the person attaches Docs, so the sidebar lists the desktop Workspace
 /// first, then Build as Workspace 2 and Docs as Workspace 3.
 struct AttachmentHarness {
     manager: Entity<WorkspaceManager>,
-    edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-    panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    edits: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+    panes: Rc<crate::ui::workspaces::testing::ScriptedPanes>,
 }
 
 fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
@@ -9947,8 +9857,8 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
 }
 
 fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut VisualTestContext) {
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+    use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
     let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
@@ -9957,9 +9867,9 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     let panes = ScriptedPanes::new(server_session_factory());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.present_shared_workspaces(
-                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
+            manager.present_workspaces(
+                WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
+                WorkspacePaneSessions::with_opener(
                     Rc::clone(&panes) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
@@ -9987,7 +9897,7 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
             manager.focus(window, cx);
         });
     });
-    settle_shared_panes(cx);
+    settle_panes(cx);
     assert_eq!(harness.presented(cx), vec![1, 2]);
     (harness, cx)
 }
@@ -9996,10 +9906,10 @@ impl AttachmentHarness {
     fn sync(&self, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
-                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+                manager.sync_workspaces(ServerKey::LOCAL, window, cx)
             });
         });
-        settle_shared_panes(cx);
+        settle_panes(cx);
     }
 
     /// The Workspaces this window presents, in sidebar order.
@@ -10016,15 +9926,15 @@ impl AttachmentHarness {
     fn detach(&self, workspace: u64, cx: &mut VisualTestContext) {
         right_click(workspace_row(&self.manager, workspace, cx), cx);
         click("workspace-menu-row-detach", cx);
-        settle_shared_panes(cx);
+        settle_panes(cx);
     }
 
     /// Kills a Workspace through its menu and confirms.
     fn kill(&self, workspace: u64, cx: &mut VisualTestContext) {
         right_click(workspace_row(&self.manager, workspace, cx), cx);
         click("workspace-menu-row-close", cx);
-        click("modal-action-shared-close-confirm", cx);
-        settle_shared_panes(cx);
+        click("modal-action-close-confirm", cx);
+        settle_panes(cx);
     }
 }
 
@@ -10065,9 +9975,7 @@ fn detach_workspace_should_stop_presenting_it_here_and_offer_it_detached_in_the_
 
     harness.detach(2, cx);
     let presented = harness.presented(cx);
-    let confirmation = cx
-        .debug_bounds("modal-action-shared-close-confirm")
-        .is_some();
+    let confirmation = cx.debug_bounds("modal-action-close-confirm").is_some();
     open_workspace_switcher(cx);
     let tree = A11yTree::read(cx);
     let detached = tree
@@ -10111,9 +10019,9 @@ fn choosing_a_detached_workspace_should_attach_and_activate_it_without_taking_ov
     harness.sync(cx);
     let reattached = harness.manager.read_with(cx, |manager, _| {
         manager
-            .shared
+            .binding
             .local()
-            .and_then(|shared| shared.local(ATTACHED_DOCS))
+            .and_then(|binding| binding.local(ATTACHED_DOCS))
     });
     let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
 
@@ -10147,7 +10055,7 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
     for pane in [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE] {
         harness.panes.pane(pane).reconnect();
     }
-    settle_shared_panes(cx);
+    settle_panes(cx);
     focus_active_workspace(&harness.manager, cx);
     let selections = || {
         [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE].map(|pane| harness.panes.pane(pane).selections())
@@ -10180,7 +10088,7 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
 fn returning_to_an_ended_pane_should_keep_session_ended_without_starting_a_shell(
     cx: &mut TestAppContext,
 ) {
-    use crate::terminal::server_session::DevelopmentPaneStatus;
+    use crate::terminal::server_session::ServerPaneStatus;
     use spaceterm_server::pane::SessionEnd;
     use spaceterm_ui::a11y_testing::A11yTree;
 
@@ -10192,13 +10100,13 @@ fn returning_to_an_ended_pane_should_keep_session_ended_without_starting_a_shell
                 manager.activate_workspace(WorkspaceId::new(workspace), window, cx);
             });
         });
-        settle_shared_panes(cx);
+        settle_panes(cx);
     };
     activate(1, cx);
-    pane.set(DevelopmentPaneStatus::SessionEnded(SessionEnd::Exited {
+    pane.set(ServerPaneStatus::SessionEnded(SessionEnd::Exited {
         code: 1,
     }));
-    settle_shared_panes(cx);
+    settle_panes(cx);
     let cause = "Session Ended. The shell exited with code 1.";
     assert!(A11yTree::read(cx).find(cause).is_some());
 
@@ -10226,9 +10134,9 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
         harness
             .panes
             .pane(pane)
-            .set(crate::terminal::server_session::DevelopmentPaneStatus::Restored);
+            .set(crate::terminal::server_session::ServerPaneStatus::Restored);
     }
-    settle_shared_panes(cx);
+    settle_panes(cx);
     let selections = harness.panes.pane(ATTACHED_DOCS_PANE).selections();
 
     harness.kill(1, cx);
@@ -10263,7 +10171,7 @@ fn detaching_the_active_workspace_should_open_its_neighbor_without_selecting_its
             manager.activate_workspace(WorkspaceId::new(2), window, cx);
         });
     });
-    settle_shared_panes(cx);
+    settle_panes(cx);
     let before = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
 
     harness.detach(2, cx);
@@ -10373,13 +10281,13 @@ fn detach_workspace_should_be_named_apart_from_kill_and_carry_no_shortcut(cx: &m
     let (harness, cx) = attachment_harness(cx);
 
     right_click(workspace_row(&harness.manager, 2, cx), cx);
-    let shared_menu = menu_item_labels(cx);
+    let menu = menu_item_labels(cx);
     let detach = A11yTree::read(cx).node("Detach Workspace").clone();
 
-    let position = |label: &str| shared_menu.iter().position(|item| item == label);
+    let position = |label: &str| menu.iter().position(|item| item == label);
     assert!(
         position("Detach Workspace") < position("Kill Workspace"),
-        "Detach Workspace sits apart from Kill Workspace: {shared_menu:?}"
+        "Detach Workspace sits apart from Kill Workspace: {menu:?}"
     );
     assert!(
         detach["aria"]["keyboard_shortcut"].is_null(),
@@ -10389,7 +10297,7 @@ fn detach_workspace_should_be_named_apart_from_kill_and_carry_no_shortcut(cx: &m
 }
 
 #[gpui::test]
-fn offline_detach_should_still_stop_presenting_while_shared_edits_stay_unavailable(
+fn offline_detach_should_still_stop_presenting_while_edits_stay_unavailable(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
@@ -10406,7 +10314,7 @@ fn offline_detach_should_still_stop_presenting_while_shared_edits_stay_unavailab
     let detach_disabled = tree.node("Detach Workspace")["aria"]["disabled"].clone();
     let kill_disabled = tree.node("Kill Workspace")["aria"]["disabled"].clone();
     click("workspace-menu-row-detach", cx);
-    settle_shared_panes(cx);
+    settle_panes(cx);
     let after_detach = harness.presented(cx);
     open_workspace_switcher(cx);
     let offered_offline = cx.debug_bounds(DETACHED_BUILD_RESULT).is_some();
@@ -10761,9 +10669,9 @@ fn the_empty_views_workspace_switcher_should_slide_with_the_sidebar_like_its_tog
     );
 }
 
-/// One shared Workspace with a Tab in each of two Worktrees, its Git facts published by the
+/// One Workspace with a Tab in each of two Worktrees, its Git facts published by the
 /// server, beside the local Workspace the window keeps active.
-mod shared_repositories {
+mod workspace_repositories {
     use std::path::PathBuf;
     use std::rc::Rc;
 
@@ -10776,9 +10684,9 @@ mod shared_repositories {
     };
 
     use super::*;
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
     use crate::ui::workspace_sidebar::WorktreeRemoval;
+    use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
     const WORKSPACE: [u8; 32] = [21; 32];
     const ROOT_TAB: [u8; 32] = [22; 32];
@@ -10961,25 +10869,23 @@ mod shared_repositories {
             harness.manager.read_with(cx, |manager, _| {
                 manager
                     .workspaces
-                    .workspace(harness.shared)
-                    .expect("the shared Workspace")
+                    .workspace(harness.binding)
+                    .expect("the Workspace")
                     .payload()
                     .clone()
             })
         }
 
-        /// The shared Workspace is active with its Root Tab's Pane focused.
+        /// The Workspace is active with its Root Tab's Pane focused.
         fn opened(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
             let (harness, cx) = harness(cx, published(1, "main", false));
             let tabs = tabs(&harness, cx);
             cx.update(|window, cx| {
                 window.activate_window();
                 harness.manager.update(cx, |manager, cx| {
-                    manager.activate_workspace(harness.shared, window, cx);
+                    manager.activate_workspace(harness.binding, window, cx);
                 });
-                tabs.update(cx, |tabs, cx| {
-                    tabs.open_accepted_shared(ROOT_PANE, window, cx)
-                });
+                tabs.update(cx, |tabs, cx| tabs.open_accepted(ROOT_PANE, window, cx));
             });
             cx.run_until_parked();
             (harness, cx)
@@ -10993,7 +10899,7 @@ mod shared_repositories {
         fn reveal(harness: &Harness, origin: (TabId, PaneId), cx: &mut VisualTestContext) {
             cx.update(|window, cx| {
                 harness.manager.update(cx, |manager, cx| {
-                    manager.request_reveal(harness.shared, origin, TARGET, window, cx);
+                    manager.request_reveal(harness.binding, origin, TARGET, window, cx);
                 });
             });
             cx.run_until_parked();
@@ -11022,9 +10928,7 @@ mod shared_repositories {
             let origin = tabs.read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx));
             reveal(&harness, origin, cx);
             cx.update(|window, cx| {
-                tabs.update(cx, |tabs, cx| {
-                    tabs.open_accepted_shared(FEATURE_PANE, window, cx)
-                });
+                tabs.update(cx, |tabs, cx| tabs.open_accepted(FEATURE_PANE, window, cx));
             });
             cx.run_until_parked();
             harness.publish(with_new_tab(), cx);
@@ -11172,7 +11076,7 @@ mod shared_repositories {
                 let active = manager.workspaces.active_workspace_id();
                 let focused = manager
                     .workspaces
-                    .workspace(harness.shared)
+                    .workspace(harness.binding)
                     .and_then(|entry| entry.payload().read(cx).focused_server_pane(cx));
                 (active, focused)
             })
@@ -11220,7 +11124,7 @@ mod shared_repositories {
             assert_eq!(reply, Reply::Done);
             assert_eq!(
                 view(&harness, cx),
-                (Some(harness.shared), Some(FEATURE_PANE))
+                (Some(harness.binding), Some(FEATURE_PANE))
             );
         }
 
@@ -11531,7 +11435,7 @@ mod shared_repositories {
             assert_eq!(*preview.0.borrow(), [files.file()]);
             assert_eq!(
                 view(&harness, cx),
-                (Some(harness.shared), Some(FEATURE_PANE))
+                (Some(harness.binding), Some(FEATURE_PANE))
             );
             assert_eq!(cx.opened_url(), None);
         }
@@ -11627,11 +11531,11 @@ mod shared_repositories {
 
         /// A paired route's Panes, which carry no local filesystem authority.
         struct RemotePanes(Rc<ScriptedPanes>);
-        impl crate::ui::shared_workspaces::SharedPaneOpener for RemotePanes {
+        impl crate::ui::workspaces::WorkspacePaneOpener for RemotePanes {
             fn open(
                 &self,
                 pane: [u8; 32],
-            ) -> Option<crate::ui::shared_workspaces::SharedPaneSubscription> {
+            ) -> Option<crate::ui::workspaces::WorkspacePaneSubscription> {
                 self.0.open(pane)
             }
             fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
@@ -11653,19 +11557,19 @@ mod shared_repositories {
                         TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                     ));
                     let key = manager.present_server_workspaces(
-                        ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                        ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
                             route: penguin,
                             name: "penguin".into(),
                         }),
                         source,
-                        SharedPaneSessions::with_opener(
+                        WorkspacePaneSessions::with_opener(
                             Rc::new(RemotePanes(ScriptedPanes::new(session_factory))) as Rc<_>,
                             &PaneConstruction::testing(),
                         ),
                         window,
                         cx,
                     );
-                    manager.sync_shared_workspaces(key, window, cx);
+                    manager.sync_workspaces(key, window, cx);
                 });
             });
             cx.run_until_parked();
@@ -11685,8 +11589,8 @@ mod shared_repositories {
     struct Harness {
         manager: Entity<WorkspaceManager>,
         edits: Rc<ScriptedEdits>,
-        shared: WorkspaceId,
-        /// What the shared Panes' Terminal Sessions were asked.
+        binding: WorkspaceId,
+        /// What the Panes' Terminal Sessions were asked.
         sessions: TestTerminalSessionRecords,
     }
 
@@ -11732,7 +11636,7 @@ mod shared_repositories {
             self.edits.set_inventory(with_other(inventory));
             cx.update(|window, cx| {
                 self.manager.update(cx, |manager, cx| {
-                    manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+                    manager.sync_workspaces(ServerKey::LOCAL, window, cx)
                 });
             });
             cx.run_until_parked();
@@ -11744,19 +11648,19 @@ mod shared_repositories {
                     .read(cx)
                     .sidebar_rows(cx)
                     .into_iter()
-                    .find(|row| row.workspace_id == self.shared)
-                    .expect("the shared Workspace has a row")
+                    .find(|row| row.workspace_id == self.binding)
+                    .expect("the Workspace has a row")
             })
         }
 
-        /// Each shared Pane's Repository Status caption, as its Pane presents it.
+        /// Each Pane's Repository Status caption, as its Pane presents it.
         fn captions(&self, cx: &mut VisualTestContext) -> Vec<Option<String>> {
             cx.update(|_, cx| {
                 let manager = self.manager.read(cx);
                 let tabs = manager
                     .workspaces
-                    .workspace(self.shared)
-                    .expect("the shared Workspace")
+                    .workspace(self.binding)
+                    .expect("the Workspace")
                     .payload()
                     .read(cx);
                 tabs.terminal_panes(cx)
@@ -11778,7 +11682,7 @@ mod shared_repositories {
         )
     }
 
-    /// [`harness`] whose shared Panes are built by `construction` over `sessions`, with the
+    /// [`harness`] whose Panes are built by `construction` over `sessions`, with the
     /// account-local route's filesystem authority `local_files`.
     fn harness_constructing<'a>(
         cx: &'a mut TestAppContext,
@@ -11811,16 +11715,16 @@ mod shared_repositories {
         let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(sessions));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
-                manager.present_shared_workspaces(
-                    SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                    SharedPaneSessions::with_opener(
+                manager.present_workspaces(
+                    WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
+                    WorkspacePaneSessions::with_opener(
                         ScriptedPanes::with_local_files(session_factory, local_files) as Rc<_>,
                         construction,
                     ),
                     window,
                     cx,
                 );
-                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+                manager.sync_workspaces(ServerKey::LOCAL, window, cx);
                 // The person attaches this Workspace, then returns to the other one, so this
                 // one is inactive.
                 manager.attach_detached_workspace(ServerKey::LOCAL, WORKSPACE, window, cx);
@@ -11828,19 +11732,19 @@ mod shared_repositories {
             });
         });
         cx.run_until_parked();
-        let shared = manager
+        let binding = manager
             .read_with(cx, |manager, _| {
                 manager
-                    .shared
+                    .binding
                     .local()
-                    .and_then(|shared| shared.local(WORKSPACE))
+                    .and_then(|binding| binding.local(WORKSPACE))
             })
             .expect("the published Workspace joins the sidebar");
         (
             Harness {
                 manager,
                 edits,
-                shared,
+                binding,
                 sessions: records,
             },
             cx,
@@ -11873,14 +11777,14 @@ mod shared_repositories {
             });
         });
         cx.run_until_parked();
-        let shared = manager
+        let binding = manager
             .read_with(cx, |manager, _| {
                 manager
                     .workspaces
                     .iter()
                     .map(|workspace| workspace.id())
                     .find(|id| {
-                        manager.is_shared_workspace(*id) && !manager.is_local_server_workspace(*id)
+                        manager.has_workspace(*id) && !manager.is_local_server_workspace(*id)
                     })
             })
             .expect("penguin's Workspace joins the sidebar");
@@ -11888,7 +11792,7 @@ mod shared_repositories {
             Harness {
                 manager,
                 edits: Rc::clone(&edits),
-                shared,
+                binding,
                 sessions,
             },
             edits,
@@ -11913,19 +11817,19 @@ mod shared_repositories {
         let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
         source.replace_transport(Rc::clone(edits) as Rc<_>);
         let key = manager.present_server_workspaces(
-            ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+            ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
                 route: penguin,
                 name: "penguin".into(),
             }),
             source.clone(),
-            SharedPaneSessions::with_opener(
+            WorkspacePaneSessions::with_opener(
                 ScriptedPanes::new(session_factory) as Rc<_>,
                 &PaneConstruction::testing(),
             ),
             window,
             cx,
         );
-        manager.sync_shared_workspaces(key, window, cx);
+        manager.sync_workspaces(key, window, cx);
     }
 
     /// Closes `cx`'s window, as Cmd+Q does while SpaceTerm keeps running.
@@ -12030,8 +11934,8 @@ mod shared_repositories {
 
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                assert!(manager.new_worktree(harness.shared, window, cx));
-                manager.request_server_worktree_removal(harness.shared, feature, window, cx);
+                assert!(manager.new_worktree(harness.binding, window, cx));
+                manager.request_server_worktree_removal(harness.binding, feature, window, cx);
             })
         });
         cx.run_until_parked();
@@ -12069,7 +11973,7 @@ mod shared_repositories {
     }
 
     #[gpui::test]
-    fn a_new_shared_worktree_uses_the_owning_servers_location(cx: &mut TestAppContext) {
+    fn a_new_worktree_uses_the_owning_servers_location(cx: &mut TestAppContext) {
         use spaceterm_server::hierarchy::Mutation;
         use spaceterm_server::worktree::{Branch, BranchName, Operation};
         use spaceterm_ui::a11y_testing::A11yTree;
@@ -12079,7 +11983,7 @@ mod shared_repositories {
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
-                assert!(manager.new_worktree(harness.shared, window, cx));
+                assert!(manager.new_worktree(harness.binding, window, cx));
             });
         });
         cx.run_until_parked();
@@ -12108,7 +12012,7 @@ mod shared_repositories {
     }
 
     /// Opens the New Worktree form for penguin's Workspace and asks git for `topic/new`.
-    fn create_shared_worktree(harness: &Harness, cx: &mut VisualTestContext) {
+    fn create_worktree(harness: &Harness, cx: &mut VisualTestContext) {
         create_named_worktree(harness, "topic/new", cx);
     }
 
@@ -12117,7 +12021,7 @@ mod shared_repositories {
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
-                assert!(manager.new_worktree(harness.shared, window, cx));
+                assert!(manager.new_worktree(harness.binding, window, cx));
             });
         });
         cx.run_until_parked();
@@ -12151,7 +12055,7 @@ mod shared_repositories {
     }
 
     /// Answers the form's Create, which reads the answer on its next poll.
-    fn answer_shared_worktree(
+    fn answer_worktree(
         edits: &ScriptedEdits,
         error: spaceterm_server::worktree::Error,
         cx: &mut VisualTestContext,
@@ -12167,9 +12071,9 @@ mod shared_repositories {
         use spaceterm_ui::a11y_testing::A11yTree;
 
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        create_shared_worktree(&harness, cx);
+        create_worktree(&harness, cx);
 
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
 
         let tree = A11yTree::read(cx);
         assert!(
@@ -12185,8 +12089,8 @@ mod shared_repositories {
     #[gpui::test]
     fn a_failure_the_form_presented_should_never_alert(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        create_shared_worktree(&harness, cx);
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        create_worktree(&harness, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
         let reported = form_reports("Branch name already exists.", cx);
         click("modal-action-new-worktree-cancel", cx);
         let alerted = alerts_worktree_failure(cx);
@@ -12212,7 +12116,7 @@ mod shared_repositories {
     #[gpui::test]
     fn an_answer_a_crash_interrupted_should_alert_once_after_the_relaunch(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        create_shared_worktree(&harness, cx);
+        create_worktree(&harness, cx);
         edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(
             spaceterm_server::worktree::Error::BranchExists,
         ));
@@ -12248,8 +12152,8 @@ mod shared_repositories {
         create_and_abandon(&harness, &edits, "topic/one", cx);
         create_named_worktree(&harness, "topic/two", cx);
 
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
         let reported = form_reports("Branch name already exists.", cx);
         let alerted_behind_the_form = alerts_worktree_failure(cx);
         click("modal-action-new-worktree-cancel", cx);
@@ -12279,7 +12183,7 @@ mod shared_repositories {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_and_abandon(&harness, &edits, "topic/one", cx);
         open_worktree_form(&harness, "topic/two", cx);
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
         let queued = !alerts_worktree_failure(cx) && edits.unseen().len() == 1;
 
         close_window(cx);
@@ -12306,8 +12210,8 @@ mod shared_repositories {
     #[gpui::test]
     fn an_interrupted_create_should_ask_for_a_check_once(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        create_shared_worktree(&harness, cx);
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Interrupted, cx);
+        create_worktree(&harness, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::Interrupted, cx);
         let form_closed = cx
             .debug_bounds("modal-action-new-worktree-create")
             .is_none();
@@ -12377,8 +12281,8 @@ mod shared_repositories {
     #[gpui::test]
     fn a_form_closed_without_a_response_should_hand_its_failure_back(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        create_shared_worktree(&harness, cx);
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        create_worktree(&harness, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
         let reported = form_reports("Branch name already exists.", cx);
 
         close_window(cx);
@@ -12437,8 +12341,8 @@ mod shared_repositories {
     #[gpui::test]
     fn a_retry_whose_form_closed_should_alert_its_own_failure_once(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        create_shared_worktree(&harness, cx);
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        create_worktree(&harness, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
         click("modal-action-new-worktree-create", cx);
         edits.set_connected(false);
         cx.executor()
@@ -12447,7 +12351,7 @@ mod shared_repositories {
         click("modal-action-new-worktree-cancel", cx);
         edits.set_connected(true);
 
-        answer_shared_worktree(&edits, spaceterm_server::worktree::Error::Branch, cx);
+        answer_worktree(&edits, spaceterm_server::worktree::Error::Branch, cx);
         let alerted = alerts_worktree_failure(cx);
         click("modal-action-server-worktree-operation-failed-ok", cx);
         close_window(cx);
@@ -12466,7 +12370,7 @@ mod shared_repositories {
     /// The server reads Git for a Workspace nobody is looking at, and a new reading reaches its
     /// row and every Pane even though its organization revision never changes.
     #[gpui::test]
-    fn an_inactive_shared_workspace_should_present_each_new_git_reading(cx: &mut TestAppContext) {
+    fn an_inactive_workspace_should_present_each_new_git_reading(cx: &mut TestAppContext) {
         let (harness, cx) = harness(cx, published(1, "main", true));
         let first_badge = harness
             .row(cx)
@@ -12487,7 +12391,7 @@ mod shared_repositories {
 
         assert_ne!(
             active,
-            Some(harness.shared),
+            Some(harness.binding),
             "the local Workspace stays active"
         );
         assert_eq!(first_badge.as_deref(), Some("main"));
@@ -12506,7 +12410,7 @@ mod shared_repositories {
 
     /// Worktree actions follow the owning server's availability and existing Tab membership.
     #[gpui::test]
-    fn shared_worktree_rows_should_follow_server_membership_and_available_actions(
+    fn worktree_rows_should_follow_server_membership_and_available_actions(
         cx: &mut TestAppContext,
     ) {
         let (harness, cx) = harness(cx, published(1, "main", true));
@@ -12567,7 +12471,7 @@ mod shared_repositories {
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         redraw(cx);
@@ -12576,7 +12480,7 @@ mod shared_repositories {
             .rows()
             .find(|row| row.name.as_ref() == "app-feature")
             .unwrap();
-        right_click(worktree_row(harness.shared, feature.worktree_id, cx), cx);
+        right_click(worktree_row(harness.binding, feature.worktree_id, cx), cx);
         assert_eq!(A11yTree::read(cx).node(label)["aria"]["disabled"], true);
         assert!(harness.edits.submitted().is_empty());
         feature.removal
@@ -12624,9 +12528,7 @@ mod shared_repositories {
     /// additions, and a prune. Nothing asks the server to recreate it, and its row opens only the
     /// Tab it has.
     #[gpui::test]
-    fn an_externally_removed_shared_worktree_should_stay_missing_with_its_tab(
-        cx: &mut TestAppContext,
-    ) {
+    fn an_externally_removed_worktree_should_stay_missing_with_its_tab(cx: &mut TestAppContext) {
         let both = [
             record(MAIN_ROOT, "main", false),
             record(FEATURE_ROOT, "feature", false),
@@ -12868,9 +12770,9 @@ mod shared_repositories {
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 
-    /// Activating a shared Worktree row shows its Tab, and one without Tabs opens nothing.
+    /// Activating a Worktree row shows its Tab, and one without Tabs opens nothing.
     #[gpui::test]
-    fn activating_a_shared_worktree_should_show_its_tab_without_asking_the_server(
+    fn activating_a_worktree_should_show_its_tab_without_asking_the_server(
         cx: &mut TestAppContext,
     ) {
         let (harness, cx) = harness(cx, published(1, "main", true));
@@ -12889,7 +12791,7 @@ mod shared_repositories {
             harness.manager.update(cx, |manager, cx| {
                 manager.handle_sidebar_event(
                     SidebarEvent::ActivateWorktree {
-                        workspace_id: harness.shared,
+                        workspace_id: harness.binding,
                         worktree_id: feature,
                         focus_pane: false,
                     },
@@ -12902,11 +12804,11 @@ mod shared_repositories {
         let active_worktree = harness.manager.read_with(cx, |manager, cx| {
             manager
                 .workspaces
-                .workspace(harness.shared)
+                .workspace(harness.binding)
                 .and_then(|workspace| workspace.payload().read(cx).active_worktree())
         });
         let copied_root = harness.manager.read_with(cx, |manager, _| {
-            manager.shared_worktree_root(harness.shared, feature)
+            manager.worktree_root(harness.binding, feature)
         });
 
         assert_eq!(active_worktree, Some(feature));
@@ -12984,7 +12886,7 @@ mod shared_repositories {
             harness.manager.update(cx, |manager, cx| {
                 manager.handle_sidebar_event(
                     SidebarEvent::ActivateWorktree {
-                        workspace_id: harness.shared,
+                        workspace_id: harness.binding,
                         worktree_id: app,
                         focus_pane: false,
                     },
@@ -12997,7 +12899,7 @@ mod shared_repositories {
         let active_worktree = harness.manager.read_with(cx, |manager, cx| {
             manager
                 .workspaces
-                .workspace(harness.shared)
+                .workspace(harness.binding)
                 .and_then(|workspace| workspace.payload().read(cx).active_worktree())
         });
 
@@ -13085,12 +12987,12 @@ mod shared_repositories {
         );
     }
 
-    /// The shared Workspace, active, with its two Worktree rows disclosed.
+    /// The Workspace, active, with its two Worktree rows disclosed.
     fn active_harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
         let (harness, cx) = harness(cx, published(1, "main", true));
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         cx.run_until_parked();
@@ -13110,7 +13012,7 @@ mod shared_repositories {
     /// Worktree's Tabs in the strip and opens the latest new Tab there, even when a reading that
     /// does not yet carry the new Tabs arrives in between.
     #[gpui::test]
-    fn new_tabs_in_a_shared_worktree_should_stay_in_its_strip_before_the_server_answers(
+    fn new_tabs_in_a_worktree_should_stay_in_its_strip_before_the_server_answers(
         cx: &mut TestAppContext,
     ) {
         let with_second_main_tab = |revision| {
@@ -13126,10 +13028,10 @@ mod shared_repositories {
         let (main, _) = worktree_ids(&harness, cx);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
                 manager.handle_sidebar_event(
                     SidebarEvent::ActivateWorktree {
-                        workspace_id: harness.shared,
+                        workspace_id: harness.binding,
                         worktree_id: main,
                         focus_pane: true,
                     },
@@ -13142,8 +13044,8 @@ mod shared_repositories {
         let tabs = harness.manager.read_with(cx, |manager, _| {
             manager
                 .workspaces
-                .workspace(harness.shared)
-                .expect("the shared Workspace")
+                .workspace(harness.binding)
+                .expect("the Workspace")
                 .payload()
                 .clone()
         });
@@ -13194,14 +13096,14 @@ mod shared_repositories {
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
                 manager
                     .workspaces
-                    .workspace(harness.shared)
+                    .workspace(harness.binding)
                     .unwrap()
                     .payload()
                     .update(cx, |tabs, cx| {
-                        tabs.open_accepted_shared([70; 32], window, cx);
+                        tabs.open_accepted([70; 32], window, cx);
                     });
             });
         });
@@ -13209,12 +13111,12 @@ mod shared_repositories {
         cx.dispatch_action(crate::ui::FocusPaneRight);
         cx.run_until_parked();
         let (main, feature) = worktree_ids(&harness, cx);
-        click(worktree_row(harness.shared, main, cx), cx);
+        click(worktree_row(harness.binding, main, cx), cx);
         cx.update(|_, cx| {
             let sidebar = harness.manager.read(cx).sidebar.clone();
             sidebar.update(cx, |_, cx| {
                 cx.emit(SidebarEvent::WorktreeCommand {
-                    workspace_id: harness.shared,
+                    workspace_id: harness.binding,
                     worktree_id: feature,
                     command: WorktreeMenuCommand::NewTab,
                 });
@@ -13262,18 +13164,18 @@ mod shared_repositories {
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         redraw(cx);
         let (_, feature) = worktree_ids(&harness, cx);
-        right_click(worktree_row(harness.shared, feature, cx), cx);
+        right_click(worktree_row(harness.binding, feature, cx), cx);
         click("worktree-menu-row-copy-path", cx);
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
             Some(FEATURE_ROOT.into())
         );
-        right_click(worktree_row(harness.shared, feature, cx), cx);
+        right_click(worktree_row(harness.binding, feature, cx), cx);
         click("worktree-menu-row-close-tabs", cx);
         assert!(
             harness.edits.submitted().is_empty(),
@@ -13284,7 +13186,7 @@ mod shared_repositories {
                 .find("Close Tabs?")
                 .is_some()
         );
-        click("modal-action-shared-close-confirm", cx);
+        click("modal-action-close-confirm", cx);
         let target = ServerCloseTarget::Worktree {
             workspace: WORKSPACE,
             tab: FEATURE_TAB,
@@ -13307,7 +13209,7 @@ mod shared_repositories {
         );
         harness.manager.read_with(cx, |manager, _| {
             assert_eq!(
-                manager.shared.local().unwrap().latest_inventory(),
+                manager.binding.local().unwrap().latest_inventory(),
                 Some(&with_other(initial.clone())),
                 "optimistic presentation changes no server membership"
             );
@@ -13337,7 +13239,7 @@ mod shared_repositories {
     fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext) {
         let (harness, cx) = active_harness(cx);
         redraw(cx);
-        let id = harness.shared.get();
+        let id = harness.binding.get();
         let name = cx
             .debug_bounds(format!("workspace-row-name-{id}").leak())
             .expect("the Workspace name");
@@ -13378,7 +13280,7 @@ mod shared_repositories {
         let expanded = |cx: &mut VisualTestContext| {
             harness.manager.read_with(cx, |manager, cx| {
                 manager
-                    .worktree_section(harness.shared, cx)
+                    .worktree_section(harness.binding, cx)
                     .unwrap()
                     .expanded
             })
@@ -13410,17 +13312,17 @@ mod shared_repositories {
         let (harness, cx) = active_harness(cx);
         let (_, feature) = worktree_ids(&harness, cx);
         redraw(cx);
-        let row = worktree_row(harness.shared, feature, cx);
+        let row = worktree_row(harness.binding, feature, cx);
         let worktree = cx.debug_bounds(row).expect("the feature Worktree row");
 
         harness.manager.update(cx, |manager, cx| {
-            manager.set_worktrees_expanded(harness.shared, false);
+            manager.set_worktrees_expanded(harness.binding, false);
             cx.notify();
         });
         cx.run_until_parked();
         redraw(cx);
         let workspace = cx
-            .debug_bounds(format!("workspace-row-{}-active", harness.shared.get()).leak())
+            .debug_bounds(format!("workspace-row-{}-active", harness.binding.get()).leak())
             .expect("the collapsed Workspace row");
 
         assert_eq!(worktree.size.height, workspace.size.height);
@@ -13439,7 +13341,7 @@ mod shared_repositories {
             harness.manager.read_with(cx, |manager, cx| {
                 manager
                     .workspaces
-                    .workspace(harness.shared)
+                    .workspace(harness.binding)
                     .and_then(|workspace| workspace.payload().read(cx).active_worktree())
             })
         };
@@ -13487,7 +13389,7 @@ mod shared_repositories {
         redraw(cx);
         let selected = selected_tree_item_labels(cx);
 
-        right_click(worktree_row(harness.shared, feature, cx), cx);
+        right_click(worktree_row(harness.binding, feature, cx), cx);
         let selected_with_menu = selected_tree_item_labels(cx);
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
@@ -13567,9 +13469,12 @@ mod shared_repositories {
         harness
             .manager
             .read_with(cx, |manager, cx| {
-                manager.sidebar.read(cx).worktrees_disclosed(harness.shared)
+                manager
+                    .sidebar
+                    .read(cx)
+                    .worktrees_disclosed(harness.binding)
             })
-            .expect("the shared Workspace's group")
+            .expect("the Workspace's group")
     }
 
     fn resizes(sessions: &TestTerminalSessionRecords) -> usize {
@@ -13608,7 +13513,7 @@ mod shared_repositories {
         }
     }
 
-    /// The shared Workspace with only its Main Worktree and its Root Tab, so it has no Worktree
+    /// The Workspace with only its Main Worktree and its Root Tab, so it has no Worktree
     /// section, at organization revision `revision`.
     fn single_worktree(revision: u64) -> Inventory {
         let mut inventory = published(revision, "main", false);
@@ -13627,7 +13532,7 @@ mod shared_repositories {
         let (main, feature) = worktree_ids(&harness, cx);
         finish_slides(cx);
         animate(cx);
-        let workspace = harness.shared;
+        let workspace = harness.binding;
         let selection = worktree_chip(workspace, main, cx);
         let main_row = bounds_of(worktree_row(workspace, main, cx).to_owned(), cx);
         let feature_row = bounds_of(worktree_row(workspace, feature, cx).to_owned(), cx);
@@ -13659,7 +13564,7 @@ mod shared_repositories {
         cx.update(|window, cx| sidebar_focus.focus(window, cx));
         finish_slides(cx);
         animate(cx);
-        let workspace = harness.shared;
+        let workspace = harness.binding;
         let child = worktree_chip(workspace, main, cx);
 
         cx.simulate_keystrokes("up");
@@ -13688,7 +13593,7 @@ mod shared_repositories {
         finish_slides(cx);
         animate(cx);
         let desktop = WorkspaceId::new(1);
-        let workspace = harness.shared;
+        let workspace = harness.binding;
         let worktree = worktree_chip(workspace, main, cx);
 
         click("workspace-row-1-inactive", cx);
@@ -13717,26 +13622,26 @@ mod shared_repositories {
         let first_frame = worktrees_disclosed(&harness, cx);
         publish_workspace(cx);
         finish_slides(cx);
-        let id = harness.shared.get();
+        let id = harness.binding.get();
         let below = WorkspaceId::new(id + 1);
         let (main, _) = worktree_ids(&harness, cx);
         let expanded = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
             workspace_row_bounds(below, cx),
         );
         let resized = resizes(&harness.sessions);
 
         click(format!("workspace-disclosure-{id}-expanded").leak(), cx);
         let leaving = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
             workspace_row_bounds(below, cx),
         );
         quarter_frame(cx);
         let closing = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
             workspace_row_bounds(below, cx),
         );
         let turning = worktrees_disclosed(&harness, cx);
@@ -13748,13 +13653,13 @@ mod shared_repositories {
             .iter()
             .any(|item| item["aria"]["label"] == "app-feature");
         click(format!("workspace-disclosure-{id}-collapsed").leak(), cx);
-        let reversed = workspace_row_bounds(harness.shared, cx);
+        let reversed = workspace_row_bounds(harness.binding, cx);
         quarter_frame(cx);
-        let reopening = workspace_row_bounds(harness.shared, cx);
+        let reopening = workspace_row_bounds(harness.binding, cx);
         finish_slides(cx);
         let reopened = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
             workspace_row_bounds(below, cx),
         );
 
@@ -13804,23 +13709,23 @@ mod shared_repositories {
         let (harness, cx) = harness(cx, published(1, "main", true));
         finish_slides(cx);
         animate(cx);
-        let rest = group_bounds(harness.shared, cx).size.height;
+        let rest = group_bounds(harness.binding, cx).size.height;
         let extra = |records: &mut Vec<WorktreeRecord>| {
             records.push(record(EXTRA_ROOT, "extra", false));
         };
 
         harness.publish(relisted(published(1, "main", true), 2, extra), cx);
-        let arriving = group_bounds(harness.shared, cx).size.height;
+        let arriving = group_bounds(harness.binding, cx).size.height;
         quarter_frame(cx);
-        let growing = group_bounds(harness.shared, cx).size.height;
+        let growing = group_bounds(harness.binding, cx).size.height;
         finish_slides(cx);
-        let grown = group_bounds(harness.shared, cx).size.height;
+        let grown = group_bounds(harness.binding, cx).size.height;
         harness.publish(relisted(published(1, "main", true), 3, |_| {}), cx);
-        let leaving = group_bounds(harness.shared, cx).size.height;
+        let leaving = group_bounds(harness.binding, cx).size.height;
         quarter_frame(cx);
-        let closing = group_bounds(harness.shared, cx).size.height;
+        let closing = group_bounds(harness.binding, cx).size.height;
         finish_slides(cx);
-        let closed = group_bounds(harness.shared, cx).size.height;
+        let closed = group_bounds(harness.binding, cx).size.height;
 
         assert_eq!(
             (arriving, leaving, closed),
@@ -13840,7 +13745,7 @@ mod shared_repositories {
     fn a_worktree_row_that_changes_state_should_stay_in_place(cx: &mut TestAppContext) {
         let (harness, cx) = active_harness(cx);
         let (main, feature) = worktree_ids(&harness, cx);
-        let workspace = harness.shared;
+        let workspace = harness.binding;
         click(worktree_row(workspace, feature, cx), cx);
         finish_slides(cx);
         animate(cx);
@@ -13893,8 +13798,8 @@ mod shared_repositories {
         finish_slides(cx);
         animate(cx);
         let alone = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
         );
         let mut listed = published(2, "main", true);
         listed.revision = 2;
@@ -13902,26 +13807,26 @@ mod shared_repositories {
 
         harness.publish(listed, cx);
         let appearing = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
         );
         quarter_frame(cx);
         let disclosing = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
         );
         finish_slides(cx);
         let disclosed = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
         );
         harness.publish(single_worktree(3), cx);
         let leaving = (
-            workspace_row_bounds(harness.shared, cx),
-            group_bounds(harness.shared, cx),
+            workspace_row_bounds(harness.binding, cx),
+            group_bounds(harness.binding, cx),
         );
         quarter_frame(cx);
-        let closing = group_bounds(harness.shared, cx);
+        let closing = group_bounds(harness.binding, cx);
         finish_slides(cx);
 
         assert_eq!(
@@ -13944,8 +13849,8 @@ mod shared_repositories {
         );
         assert_eq!(
             (
-                workspace_row_bounds(harness.shared, cx),
-                group_bounds(harness.shared, cx)
+                workspace_row_bounds(harness.binding, cx),
+                group_bounds(harness.binding, cx)
             ),
             alone
         );
@@ -13956,17 +13861,17 @@ mod shared_repositories {
         let (harness, cx) = harness(cx, published(1, "main", true));
         finish_slides(cx);
         animate(cx);
-        let rest = group_bounds(harness.shared, cx).size.height;
+        let rest = group_bounds(harness.binding, cx).size.height;
 
         harness.publish(moved_to_orbit(2, "/srv/app/src"), cx);
-        let arriving = group_bounds(harness.shared, cx).size.height;
+        let arriving = group_bounds(harness.binding, cx).size.height;
         quarter_frame(cx);
-        let growing = group_bounds(harness.shared, cx).size.height;
+        let growing = group_bounds(harness.binding, cx).size.height;
         finish_slides(cx);
         let label = cx
             .debug_bounds("worktree-former-repository-app")
             .expect("the former repository's label");
-        let grown = group_bounds(harness.shared, cx).size.height;
+        let grown = group_bounds(harness.binding, cx).size.height;
 
         assert_eq!(
             arriving, rest,
@@ -13993,7 +13898,7 @@ mod shared_repositories {
         let (harness, cx) = harness(cx, initial);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         finish_slides(cx);
@@ -14010,7 +13915,7 @@ mod shared_repositories {
         let selection = tab_chip(cx);
         let create = end(cx);
 
-        click(worktree_row(harness.shared, feature, cx), cx);
+        click(worktree_row(harness.binding, feature, cx), cx);
         let (leaving, growing) = (tab_chip(cx), end(cx));
         finish_slides(cx);
         let grown = end(cx);
@@ -14036,21 +13941,21 @@ mod shared_repositories {
     fn reduce_motion_should_show_each_sidebar_change_at_rest(cx: &mut TestAppContext) {
         let (harness, cx) = active_harness(cx);
         let (_, feature) = worktree_ids(&harness, cx);
-        let id = harness.shared.get();
+        let id = harness.binding.get();
         finish_slides(cx);
-        let expanded = group_bounds(harness.shared, cx);
+        let expanded = group_bounds(harness.binding, cx);
         let feature_selection = {
-            click(worktree_row(harness.shared, feature, cx), cx);
-            let at_once = worktree_chip(harness.shared, feature, cx);
+            click(worktree_row(harness.binding, feature, cx), cx);
+            let at_once = worktree_chip(harness.binding, feature, cx);
             finish_slides(cx);
-            (at_once, worktree_chip(harness.shared, feature, cx))
+            (at_once, worktree_chip(harness.binding, feature, cx))
         };
         click(format!("workspace-disclosure-{id}-expanded").leak(), cx);
-        let collapsed_at_once = group_bounds(harness.shared, cx);
+        let collapsed_at_once = group_bounds(harness.binding, cx);
         finish_slides(cx);
-        let collapsed = group_bounds(harness.shared, cx);
+        let collapsed = group_bounds(harness.binding, cx);
         click(format!("workspace-disclosure-{id}-collapsed").leak(), cx);
-        let expanded_at_once = group_bounds(harness.shared, cx);
+        let expanded_at_once = group_bounds(harness.binding, cx);
         click("workspace-row-1-inactive", cx);
         finish_slides(cx);
 
@@ -14059,20 +13964,20 @@ mod shared_repositories {
         click(format!("workspace-row-{id}-inactive").leak(), cx);
         quarter_frame(cx);
         let moving = (
-            group_bounds(harness.shared, cx),
-            workspace_chip(harness.shared, cx),
+            group_bounds(harness.binding, cx),
+            workspace_chip(harness.binding, cx),
         );
         reduce_motion(cx);
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
         let reduced = (
-            group_bounds(harness.shared, cx),
-            workspace_chip(harness.shared, cx),
+            group_bounds(harness.binding, cx),
+            workspace_chip(harness.binding, cx),
         );
         finish_slides(cx);
         let rest = (
-            group_bounds(harness.shared, cx),
-            workspace_chip(harness.shared, cx),
+            group_bounds(harness.binding, cx),
+            workspace_chip(harness.binding, cx),
         );
 
         assert_eq!(feature_selection.0, feature_selection.1);
@@ -14132,7 +14037,7 @@ mod shared_repositories {
             .map(|row| row.worktree_id)
             .expect("the extra Worktree row");
         animate(cx);
-        let departing = format!("worktree-row-{}-{extra_id}-closing", harness.shared.get());
+        let departing = format!("worktree-row-{}-{extra_id}-closing", harness.binding.get());
         let drawn = |cx: &mut VisualTestContext| cx.debug_bounds(departing.clone().leak());
 
         harness.publish(relisted(published(1, "main", true), 3, |_| {}), cx);
@@ -14159,14 +14064,14 @@ mod shared_repositories {
         publish_workspace(cx);
         finish_slides(cx);
         animate(cx);
-        let id = harness.shared.get();
+        let id = harness.binding.get();
         let below = WorkspaceId::new(id + 1);
         let extra = |records: &mut Vec<WorktreeRecord>| {
             records.push(record(EXTRA_ROOT, "extra", false));
         };
         let drawn = |cx: &mut VisualTestContext| {
             (
-                group_bounds(harness.shared, cx).size.height,
+                group_bounds(harness.binding, cx).size.height,
                 workspace_row_bounds(below, cx).top(),
             )
         };
@@ -14209,7 +14114,7 @@ mod shared_repositories {
         let (harness, cx) = harness(cx, initial);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         finish_slides(cx);
@@ -14221,7 +14126,7 @@ mod shared_repositories {
                 .unwrap_or_else(|| panic!("the {name} Worktree row"))
         };
         let (feature, extra) = (id_of("app-feature"), id_of("app-extra"));
-        click(worktree_row(harness.shared, extra, cx), cx);
+        click(worktree_row(harness.binding, extra, cx), cx);
         let sidebar_focus = harness
             .manager
             .read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
@@ -14238,10 +14143,10 @@ mod shared_repositories {
 
         harness.publish(without_feature, cx);
         quarter_frame(cx);
-        let drawn = worktree_chip(harness.shared, extra, cx);
+        let drawn = worktree_chip(harness.binding, extra, cx);
         cx.simulate_keystrokes("left");
         cx.run_until_parked();
-        let leaving = workspace_chip(harness.shared, cx);
+        let leaving = workspace_chip(harness.binding, cx);
 
         assert!(
             !harness
@@ -14270,7 +14175,7 @@ mod shared_repositories {
         publish_workspace(cx);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         finish_slides(cx);
@@ -14282,7 +14187,7 @@ mod shared_repositories {
             .find(|row| row.name.as_ref() == "app-extra")
             .map(|row| row.worktree_id)
             .expect("the extra Worktree row");
-        click(worktree_row(harness.shared, extra, cx), cx);
+        click(worktree_row(harness.binding, extra, cx), cx);
         cx.update(|window, cx| {
             harness
                 .manager
@@ -14309,18 +14214,18 @@ mod shared_repositories {
             frame(cx);
         }
         let painted = bounds_of(
-            format!("worktree-row-{}-{extra}-selection", harness.shared.get()),
+            format!("worktree-row-{}-{extra}-selection", harness.binding.get()),
             cx,
         );
         cx.simulate_keystrokes("left");
         cx.run_until_parked();
         let leaving = bounds_of(
-            format!("workspace-row-selection-{}", harness.shared.get()),
+            format!("workspace-row-selection-{}", harness.binding.get()),
             cx,
         );
         finish_slides(cx);
         let landed = bounds_of(
-            format!("workspace-row-selection-{}", harness.shared.get()),
+            format!("workspace-row-selection-{}", harness.binding.get()),
             cx,
         );
 
@@ -14344,7 +14249,7 @@ mod shared_repositories {
         finish_slides(cx);
         let layout = |cx: &mut VisualTestContext| {
             (
-                group_bounds(harness.shared, cx),
+                group_bounds(harness.binding, cx),
                 cx.debug_bounds("worktree-former-repository-app"),
             )
         };
@@ -14382,30 +14287,30 @@ mod shared_repositories {
         harness.publish(both, cx);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         finish_slides(cx);
         let (main, _) = worktree_ids(&harness, cx);
         animate(cx);
-        let id = harness.shared.get();
-        let rest = group_bounds(harness.shared, cx).size.height;
+        let id = harness.binding.get();
+        let rest = group_bounds(harness.binding, cx).size.height;
         let departing = format!("worktree-row-{id}-{main}-closing");
         let active_worktree = |cx: &mut VisualTestContext| {
             harness.manager.read_with(cx, |manager, cx| {
                 manager
                     .workspaces
-                    .workspace(harness.shared)
+                    .workspace(harness.binding)
                     .and_then(|workspace| workspace.payload().read(cx).active_worktree())
             })
         };
 
         harness.publish(followed_into_orbit_with_worktrees(3), cx);
         let leaving = (
-            group_bounds(harness.shared, cx).size.height,
+            group_bounds(harness.binding, cx).size.height,
             cx.debug_bounds(departing.clone().leak()),
         );
-        let parent = workspace_row_bounds(harness.shared, cx);
+        let parent = workspace_row_bounds(harness.binding, cx);
         let active = active_worktree(cx);
         let announced = spaceterm_ui::a11y_testing::A11yTree::read(cx)
             .with_role("TreeItem")
@@ -14419,7 +14324,7 @@ mod shared_repositories {
         let clicked = active_worktree(cx);
         quarter_frame(cx);
         let closing = (
-            group_bounds(harness.shared, cx).size.height,
+            group_bounds(harness.binding, cx).size.height,
             cx.debug_bounds(departing.clone().leak()).is_some(),
         );
         finish_slides(cx);
@@ -14483,8 +14388,8 @@ mod shared_repositories {
             .retain(|tab| tab.id != FEATURE_TAB);
 
         harness.publish(without_main_tab, cx);
-        let departing =
-            cx.debug_bounds(format!("worktree-row-{}-{main}-closing", harness.shared.get()).leak());
+        let departing = cx
+            .debug_bounds(format!("worktree-row-{}-{main}-closing", harness.binding.get()).leak());
         let label_leaving = cx.debug_bounds("worktree-former-repository-app");
         finish_slides(cx);
 
@@ -14520,9 +14425,9 @@ mod shared_repositories {
 
         harness.publish(single_worktree(2), cx);
         quarter_frame(cx);
-        let row = workspace_row_bounds(harness.shared, cx);
+        let row = workspace_row_bounds(harness.binding, cx);
         let lines = cx
-            .debug_bounds(format!("workspace-row-lines-{}", harness.shared.get()).leak())
+            .debug_bounds(format!("workspace-row-lines-{}", harness.binding.get()).leak())
             .expect("the Workspace row's lines while the row changes height");
 
         assert!(
@@ -14546,41 +14451,41 @@ mod shared_repositories {
             .read_with(cx, |manager, _| manager.workspaces.len() - 1);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.set_worktrees_expanded(harness.shared, false);
+                manager.set_worktrees_expanded(harness.binding, false);
                 manager.handle_sidebar_event(
                     SidebarEvent::Move {
-                        workspace_id: harness.shared,
+                        workspace_id: harness.binding,
                         position: last,
                     },
                     window,
                     cx,
                 );
-                manager.activate_workspace(harness.shared, window, cx);
+                manager.activate_workspace(harness.binding, window, cx);
             });
         });
         redraw(cx);
         cx.update(|_, cx| {
             harness.manager.update(cx, |manager, cx| {
                 manager.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.reveal_workspace(harness.shared, cx)
+                    sidebar.reveal_workspace(harness.binding, cx)
                 });
             });
         });
         finish_slides(cx);
         redraw(cx);
         let (main, _) = worktree_ids(&harness, cx);
-        let collapsed = workspace_row_bounds(harness.shared, cx);
+        let collapsed = workspace_row_bounds(harness.binding, cx);
         animate(cx);
 
         click(
-            format!("workspace-disclosure-{}-collapsed", harness.shared.get()).leak(),
+            format!("workspace-disclosure-{}-collapsed", harness.binding.get()).leak(),
             cx,
         );
         finish_slides(cx);
         redraw(cx);
         let viewport = cx.debug_bounds("workspace-list").unwrap();
-        let row = bounds_of(worktree_row(harness.shared, main, cx).to_owned(), cx);
-        let expanded = workspace_row_bounds(harness.shared, cx);
+        let row = bounds_of(worktree_row(harness.binding, main, cx).to_owned(), cx);
+        let expanded = workspace_row_bounds(harness.binding, cx);
 
         assert!(
             collapsed.top() + expanded.size.height + row.size.height > viewport.bottom(),
@@ -14645,7 +14550,7 @@ fn named_route(name: &str) -> crate::direct_connections::DirectRouteId {
 fn saved_servers(
     harness: &MultiServerHarness,
     cx: &mut VisualTestContext,
-) -> Rc<crate::ui::shared_workspaces::testing::ScriptedEdits> {
+) -> Rc<crate::ui::workspaces::testing::ScriptedEdits> {
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
         ("penguin", "quic://192.168.1.2:9231"),
         ("studio", "quic://192.168.1.3:9231"),
@@ -14948,7 +14853,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
     penguin_edits.set_inventory(inventory);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.sync_workspaces(key, window, cx);
         })
     });
     cx.run_until_parked();
@@ -14980,7 +14885,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
     let pinned = harness.manager.read_with(cx, |manager, _| {
         let active = manager.workspaces.active_workspace_id()?;
         let on_penguin = matches!(
-            manager.shared.owner(active).and_then(|key| manager.shared.origin(key)),
+            manager.binding.owner(active).and_then(|key| manager.binding.origin(key)),
             Some(ServerOrigin::Direct(direct)) if direct.route == route
         );
         on_penguin.then(|| manager.workspaces.active().name().to_owned())
@@ -15146,7 +15051,7 @@ fn late_directory_answer_after(
     harness.local.set_inventory(inventory);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
         })
     });
     let route = named_route("penguin");
@@ -15156,7 +15061,7 @@ fn late_directory_answer_after(
     penguin_edits.set_inventory(inventory);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.sync_workspaces(key, window, cx);
         })
     });
     redraw(cx);
@@ -15257,9 +15162,7 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
     use spaceterm_server::hierarchy::Mutation;
 
     let (harness, cx) = MultiServerHarness::new(cx);
-    let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-        None,
-    ));
+    let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(None));
     edits.set_connected(false);
     let (key, _) = harness.present_direct_edits("penguin", named_route("penguin"), &edits, cx);
 
@@ -15289,9 +15192,9 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
     edits.set_connected(true);
     edits.set_inventory(server_inventory(harness.next_revision(), &[]));
     cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(key, window, cx)
-        })
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.sync_workspaces(key, window, cx))
     });
     cx.run_until_parked();
 
@@ -15316,9 +15219,7 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
 #[gpui::test]
 fn open_remote_directory_should_end_when_its_server_is_withdrawn(cx: &mut TestAppContext) {
     let (harness, cx) = MultiServerHarness::new(cx);
-    let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-        None,
-    ));
+    let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(None));
     edits.set_connected(false);
     let (key, _) = harness.present_direct_edits("penguin", named_route("penguin"), &edits, cx);
     cx.update(|window, cx| {

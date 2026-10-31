@@ -9,7 +9,7 @@ use spaceterm_server::protocol::{
 
 /// Tags input with the current epoch and focus generation, or discards it now.
 pub(super) fn submit_input(
-    state: &DevelopmentPaneState,
+    state: &ServerPaneState,
     sender: &mpsc::SyncSender<SubmittedInput>,
     input: Input,
 ) -> bool {
@@ -19,7 +19,7 @@ pub(super) fn submit_input(
         Input::Pointer(epoch, _) | Input::Wheel(epoch, _) => *epoch,
         _ => current_epoch,
     };
-    let connected = state.status() == DevelopmentPaneStatus::Connected;
+    let connected = state.status() == ServerPaneStatus::Connected;
     let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
     let eligible = input.eligible(interaction.target)
         && match &input {
@@ -86,7 +86,7 @@ pub(super) fn submit_input(
     }
     accepted
 }
-fn discard_input(state: &DevelopmentPaneState, epoch: u64, input: Input) {
+fn discard_input(state: &ServerPaneState, epoch: u64, input: Input) {
     match input {
         Input::Commit(_, reply) => {
             let _ = reply.try_send(InputMethodOutcome::Interrupted);
@@ -129,7 +129,7 @@ pub(super) struct ActiveInput {
 impl ActiveInput {
     pub(super) fn sync_focus(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
         let focus = {
@@ -158,7 +158,7 @@ impl ActiveInput {
     /// Returns whether it stopped at the bound, so more input may wait for the next turn.
     pub(super) fn drain(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         input: &mpsc::Receiver<SubmittedInput>,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
         paste_unconfirmed: &mut bool,
@@ -189,7 +189,7 @@ impl ActiveInput {
     /// unknown invalidates the connection like a single key would, and is never sent again.
     fn send_keys(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         submitted: Vec<SubmittedInput>,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
@@ -242,7 +242,7 @@ impl ActiveInput {
     /// before the next command; a failed or stale chunk ends the commit without replay.
     fn write_input_method(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         generation: u64,
         text: &str,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
@@ -293,7 +293,7 @@ impl ActiveInput {
 
     pub(super) fn process(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         submitted: SubmittedInput,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
         paste_unconfirmed: &mut bool,
@@ -576,7 +576,7 @@ impl ActiveInput {
         }
         Ok(())
     }
-    fn finish_paste_request(&self, state: &DevelopmentPaneState, generation: u64) {
+    fn finish_paste_request(&self, state: &ServerPaneState, generation: u64) {
         let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
         if interaction.paste_request == Some((self.epoch, generation)) {
             interaction.paste_request = None;
@@ -1133,7 +1133,7 @@ impl PaneLink {
             Request::Mutate { sequence, mutation } => {
                 mutation_reply(self.request(Operation::Mutate { sequence, mutation })?)
             }
-            // The shared Workspace client reads pushed inventory and resolves by dispatching.
+            // The Workspace client reads pushed inventory and resolves by dispatching.
             Request::Inventory | Request::Resolve { .. } => Err(ServerError::Unsupported),
             Request::Acknowledge { sequence } => {
                 self.link.acknowledge(sequence)?;
@@ -1195,7 +1195,7 @@ fn mutation_reply(body: ReplyBody) -> Result<Reply, ServerError> {
     }
 }
 
-impl TerminalSessionFactory for DevelopmentServerSessionFactory {
+impl TerminalSessionFactory for ServerSessionFactory {
     fn allows_local_file_insertion(&self) -> bool {
         self.local_files.is_some()
     }
@@ -1288,7 +1288,7 @@ pub(super) fn expect_unchanged(reply: Reply) -> Result<(), ServerError> {
 }
 
 pub(super) fn present(
-    factory: DevelopmentServerSessionFactory,
+    factory: ServerSessionFactory,
     (reservation, alive): (control::Reservation, Arc<AtomicBool>),
     input: mpsc::Receiver<SubmittedInput>,
     (events, semantics): (
@@ -1299,7 +1299,7 @@ pub(super) fn present(
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
     (mut effects, max_hz): (ClientEffects, u8),
 ) {
-    let DevelopmentServerSessionFactory {
+    let ServerSessionFactory {
         server,
         local_files,
         remote_metadata,
@@ -1485,7 +1485,7 @@ pub(super) fn present(
                                 }
                                 PaneEvent::Ended => {
                                     connection.release();
-                                    state.set(DevelopmentPaneStatus::Ended);
+                                    state.set(ServerPaneStatus::Ended);
                                     let _ = events.force_send(TerminalSessionEvent::Exited(
                                         TerminalSessionExit::Success,
                                     ));
@@ -1743,7 +1743,7 @@ pub(super) fn present(
                     error
                 };
                 if error == ServerError::SessionUnavailable {
-                    state.set(DevelopmentPaneStatus::Ended);
+                    state.set(ServerPaneStatus::Ended);
                     let _ = events
                         .force_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success));
                     return;
@@ -1782,7 +1782,7 @@ pub(super) fn present(
     }
 }
 
-fn drain_input(state: &DevelopmentPaneState, input: &mpsc::Receiver<SubmittedInput>) {
+fn drain_input(state: &ServerPaneState, input: &mpsc::Receiver<SubmittedInput>) {
     while let Ok(submitted) = input.try_recv() {
         discard_input(state, submitted.epoch, submitted.command);
     }
@@ -2005,10 +2005,10 @@ mod tests {
             r#"stty raw -echo; python3 -c 'import sys,hashlib; sys.stdout.write("READY\r\n"); sys.stdout.flush(); b=sys.stdin.buffer.read({}); sys.stdout.write(hashlib.sha256(b).hexdigest()+"\r\n"); sys.stdout.flush()'"#,
             expected.len()
         );
-        let send = |host: &mut crate::runtime::SharedWorkspaceHost, key| {
+        let send = |host: &mut crate::runtime::WorkspaceHost, key| {
             crate::runtime::directory_testing::type_keys(host, lease, vec![encode_key(key)])
         };
-        let wait = |host: &mut crate::runtime::SharedWorkspaceHost, marker: Option<&str>| {
+        let wait = |host: &mut crate::runtime::WorkspaceHost, marker: Option<&str>| {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 if crate::terminal::server_session::screen_decoder::observed_lines(host, lease)
@@ -2129,10 +2129,7 @@ mod tests {
         assert_eq!(chunks, 1);
         assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Interrupted);
         assert_eq!(adapter.handle.state.epoch.load(Ordering::Acquire), epoch);
-        assert_eq!(
-            adapter.handle.state.status(),
-            DevelopmentPaneStatus::Connected
-        );
+        assert_eq!(adapter.handle.state.status(), ServerPaneStatus::Connected);
     }
 
     #[test]

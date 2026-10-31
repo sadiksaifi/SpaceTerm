@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://spaceterm.dev/schema/settings-v4.json",
+  "$id": "https://spaceterm.dev/schema/settings-v1.json",
   "title": "SpaceTerm Settings",
   "type": "object",
   "additionalProperties": false,
@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 7
+      "const": 1
     },
     "revision": {
       "type": "integer",
@@ -464,7 +464,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "switch_workspace": {
+        "choose_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
         "new_workspace": {
@@ -482,7 +482,7 @@
         "previous_worktree": {
           "$ref": "#/$defs/shortcutOverride"
         },
-        "close_workspace": {
+        "kill_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
         "activate_workspace1": {
@@ -512,7 +512,7 @@
         "activate_workspace9": {
           "$ref": "#/$defs/shortcutOverride"
         },
-        "create_tab": {
+        "new_tab": {
           "$ref": "#/$defs/shortcutOverride"
         },
         "close_tab": {

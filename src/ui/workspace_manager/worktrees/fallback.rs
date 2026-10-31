@@ -41,10 +41,10 @@ impl WorkspaceManager {
         let ServerCloseTarget::Worktree { workspace, tab } = server_target else {
             return false;
         };
-        let Some(shared) = self.shared.owning(workspace_id) else {
+        let Some(binding) = self.binding.owning(workspace_id) else {
             return false;
         };
-        let Some(authoritative) = shared.latest_inventory().and_then(|inventory| {
+        let Some(authoritative) = binding.latest_inventory().and_then(|inventory| {
             inventory
                 .workspaces
                 .iter()
@@ -59,7 +59,7 @@ impl WorkspaceManager {
             return false;
         };
         let repository = anchor.worktree_repository.clone();
-        let candidate = shared.latest_inventory().and_then(|inventory| {
+        let candidate = binding.latest_inventory().and_then(|inventory| {
             let repositories = inventory.repositories.as_ref()?;
             spaceterm_server::organize::worktree_close_plan(inventory, repositories, workspace, tab)
                 .ok()
@@ -70,10 +70,10 @@ impl WorkspaceManager {
         {
             return false;
         }
-        if !shared.editability().available() {
-            Self::show_shared_refusal(
+        if !binding.editability().available() {
+            Self::show_refusal(
                 "establish a Tab outside the Worktree",
-                shared.editability().into(),
+                binding.editability().into(),
                 window,
                 cx,
             );
@@ -106,19 +106,14 @@ impl WorkspaceManager {
         });
         // The fallback presents its own failure, so the window presents it only if the person
         // never answers that alert.
-        let answer = shared.edits().owner();
-        let completion = match shared
+        let answer = binding.edits().owner();
+        let completion = match binding
             .edits()
             .submit_owned(mutation.clone(), answer.ticket())
         {
             Ok(completion) => completion,
             Err(reason) => {
-                Self::show_shared_refusal(
-                    "establish a Tab outside the Worktree",
-                    reason,
-                    window,
-                    cx,
-                );
+                Self::show_refusal("establish a Tab outside the Worktree", reason, window, cx);
                 return true;
             }
         };
@@ -129,8 +124,8 @@ impl WorkspaceManager {
             let result = completion.recv().await;
             let _ = handle.update(cx, |manager, window, cx| {
                 // Reconcile first. Optimistic membership never satisfies this check.
-                if let Some(owner) = manager.shared.owner(workspace_id) {
-                    manager.sync_shared_workspaces(owner, window, cx);
+                if let Some(owner) = manager.binding.owner(workspace_id) {
+                    manager.sync_workspaces(owner, window, cx);
                 }
                 manager
                     .sidebar_worktrees
@@ -155,9 +150,9 @@ impl WorkspaceManager {
                     return;
                 };
                 let current = manager
-                    .shared
+                    .binding
                     .owning(workspace_id)
-                    .and_then(|shared| shared.latest_inventory())
+                    .and_then(|binding| binding.latest_inventory())
                     .and_then(|inventory| {
                         inventory
                             .workspaces
@@ -189,7 +184,7 @@ impl WorkspaceManager {
                     })
                 }) {
                     // Capture current exact targets and fresh consent through the original path.
-                    manager.request_shared_close(target, window, cx);
+                    manager.request_server_close(target, window, cx);
                 }
             });
         })

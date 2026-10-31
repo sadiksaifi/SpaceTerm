@@ -20,7 +20,7 @@ pub struct ScrollbackRead {
 /// Receives the encoded page, or the refusal, on the terminal worker.
 pub type PageReply = Box<dyn FnOnce(Result<Page, Refusal>) + Send>;
 
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     /// Reads a page of the Pane `lease` controls, under the same lease checks as its other
     /// commands.
     pub(super) fn scrollback_page(

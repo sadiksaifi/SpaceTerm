@@ -1,7 +1,7 @@
 //! Repository discovery, configuration, and `HEAD` facts from git's probe output.
 //!
-//! Every function here parses bytes a local or remote probe already produced, so both paths share
-//! one classification.
+//! Every function here parses bytes a git probe already produced, so Repository Status and
+//! Worktree reads share one classification.
 
 use std::fmt;
 use std::sync::Arc;

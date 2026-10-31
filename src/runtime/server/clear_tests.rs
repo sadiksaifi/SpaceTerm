@@ -28,7 +28,7 @@ fn clear_screen_and_scrollback_preserves_the_prompt_screen_until_shell_redraw() 
 }
 
 fn clear_under_lease(preserve_prompt: bool) {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
     let Reply::Inventory { inventory, .. } = exchange(&mut host, 1, 1, Request::Inventory) else {
         panic!("inventory missing")

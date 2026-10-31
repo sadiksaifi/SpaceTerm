@@ -21,7 +21,7 @@ impl PinResolver for HostPins {
         pins: &BTreeSet<PathBuf>,
         root: &Path,
     ) -> Result<bool, spaceterm_server::worktree::Error> {
-        super::super::shared::pinned_in_worktree(pins.iter().map(PathBuf::as_path), root)
+        super::super::workspaces::pinned_in_worktree(pins.iter().map(PathBuf::as_path), root)
     }
 }
 

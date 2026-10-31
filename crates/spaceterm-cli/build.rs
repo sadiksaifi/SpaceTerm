@@ -1,7 +1,7 @@
 #[path = "../../build/identity.rs"]
 mod identity;
-
-const PROTOCOL_MAJOR: u16 = 4;
+#[path = "../spaceterm-server/src/protocol/major.rs"]
+mod major;
 
 fn main() {
     let root = std::path::PathBuf::from(
@@ -11,7 +11,7 @@ fn main() {
     for input in [
         "SPACETERM_PACKAGED",
         "SPACETERM_RELEASE_TAG",
-        "SPACETERM_SERVER_SOURCE_STATE",
+        "SPACETERM_CLI_SOURCE_STATE",
     ] {
         println!("cargo:rerun-if-env-changed={input}");
     }
@@ -19,6 +19,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-changed=../../build/identity.rs");
+    println!("cargo:rerun-if-changed=../spaceterm-server/src/protocol/major.rs");
     println!("cargo:rerun-if-changed=src");
     let release = std::env::var("SPACETERM_RELEASE_TAG").ok();
     let packaged = std::env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
@@ -29,15 +30,15 @@ fn main() {
         (true, false) => "spaceterm-preflight",
         (true, true) => "spaceterm",
     };
-    println!("cargo:rustc-env=SPACETERM_SERVER_IDENTITY={name}");
-    println!("cargo:rustc-env=SPACETERM_SERVER_VERSION={}", build.version);
+    println!("cargo:rustc-env=SPACETERM_CLI_IDENTITY={name}");
+    println!("cargo:rustc-env=SPACETERM_CLI_VERSION={}", build.version);
     let target = std::env::var("TARGET").expect("Cargo supplies the target");
-    println!("cargo:rustc-env=SPACETERM_SERVER_TARGET={target}");
-    println!("cargo:rustc-env=SPACETERM_SERVER_COMMIT={}", build.commit);
+    println!("cargo:rustc-env=SPACETERM_CLI_TARGET={target}");
+    println!("cargo:rustc-env=SPACETERM_CLI_COMMIT={}", build.commit);
     let output = std::path::PathBuf::from(
         std::env::var_os("OUT_DIR").expect("Cargo supplies the output directory"),
     );
-    let source = std::env::var("SPACETERM_SERVER_SOURCE_STATE").ok();
+    let source = std::env::var("SPACETERM_CLI_SOURCE_STATE").ok();
     assert!(
         source.as_deref().is_none_or(|value| value.len() == 64
             && value
@@ -48,13 +49,10 @@ fn main() {
     let source = source.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
     // All strings come from the validated build identity or Cargo's target triple.
     let document = format!(
-        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{PROTOCOL_MAJOR}}}\n",
-        build.version, build.commit,
+        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{}}}\n",
+        build.version,
+        build.commit,
+        major::MAJOR,
     );
     std::fs::write(output.join("build-info.json"), document).expect("write server build metadata");
-    std::fs::write(
-        output.join("build-info.rs"),
-        format!("const PROTOCOL_MAJOR: u16 = {PROTOCOL_MAJOR};\n"),
-    )
-    .expect("write server admission metadata");
 }

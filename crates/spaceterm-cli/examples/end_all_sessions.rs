@@ -52,7 +52,7 @@ mod exercise {
     }
 
     fn mutate(server: &ServerConnection, link: &ServerLink, mutation: Mutation) -> Result<Id> {
-        let mut journal = server.shared_journal()?;
+        let mut journal = server.operation_journal()?;
         if journal.pending().is_some() {
             return Err("resolve the original fixture operation before continuing".into());
         }
@@ -369,7 +369,7 @@ mod exercise {
             return Err("End All Sessions changed a repository-file witness".into());
         }
         let current = inventory(&a)?.0;
-        let target = CloseTarget::Workspace { workspace };
+        let target = CloseTarget::KillWorkspace { workspace };
         let confirmation = current
             .close_confirmation(target)
             .ok_or("fixture cleanup confirmation unavailable")?;

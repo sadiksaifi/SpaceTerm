@@ -450,9 +450,14 @@ fn is_host_lint_allowance(compact: &str) -> bool {
     else {
         return false;
     };
-    rest.strip_prefix("cfg_attr(not(target_os=\"macos\"),allow(dead_code,reason=\"")
-        .and_then(|reason| reason.strip_suffix("\"))]"))
-        .is_some_and(|reason| !reason.is_empty() && !reason.contains(['"', '\\']))
+    [
+        "cfg_attr(not(target_os=\"macos\"),allow(dead_code,reason=\"",
+        "cfg_attr(target_os=\"macos\",allow(dead_code,reason=\"",
+    ]
+    .into_iter()
+    .find_map(|prefix| rest.strip_prefix(prefix))
+    .and_then(|reason| reason.strip_suffix("\"))]"))
+    .is_some_and(|reason| !reason.is_empty() && !reason.contains(['"', '\\']))
 }
 
 fn native_suite_gate(line: &str) -> Option<NativeSuitePlatform> {
@@ -613,6 +618,7 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "#[cfg(all(test, any(target_os = \"macos\", target_os = \"linux\"), feature = \"native-tests\"))]\n#[path = \"../platform/unix_adapter_tests/session.rs\"]\nmod unix_adapter_tests;",
         "#[cfg(all(test, any(target_os = \"macos\", target_os = \"linux\"), feature = \"native-tests\"))]\nmod unix_adapter_tests {\ninclude!(\"../platform/unix_adapter_tests/session.rs\");\n}",
         "#[cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]\nstruct Endpoint;",
+        "#[cfg_attr(target_os = \"macos\", allow(dead_code, reason = \"only a native Adapter consumes it\"))]\nstruct Endpoint;",
         "#[cfg_attr(\n    not(target_os = \"macos\"),\n    allow(dead_code, reason = \"only a native Adapter consumes it\")\n)]\nstruct Endpoint;",
         "#![cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]",
         "let profile = TextInputKeybindingProfile::Linux;",
@@ -656,7 +662,7 @@ fn every_native_suite_mount_requires_test_target_and_feature_gates() {
     }
 }
 
-fn shared_presentation_violation(source: &str) -> Option<&'static str> {
+fn workspace_presentation_violation(source: &str) -> Option<&'static str> {
     let source = source
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
@@ -687,7 +693,7 @@ fn shared_presentation_violation(source: &str) -> Option<&'static str> {
 }
 
 #[test]
-fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
+fn workspace_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect_rust_sources(&root.join("ui"), &mut files);
@@ -708,7 +714,7 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
         } else {
             production.to_owned()
         };
-        if let Some(forbidden) = shared_presentation_violation(&production) {
+        if let Some(forbidden) = workspace_presentation_violation(&production) {
             panic!("{} contains host presentation {forbidden}", path.display());
         }
     }
@@ -726,7 +732,7 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
         &production[..profile_start],
         &production[portable_start..]
     );
-    if let Some(forbidden) = shared_presentation_violation(&portable) {
+    if let Some(forbidden) = workspace_presentation_violation(&portable) {
         panic!("reusable Command Palette contains host presentation {forbidden}");
     }
 }

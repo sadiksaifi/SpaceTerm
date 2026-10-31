@@ -100,10 +100,10 @@ def prepare(destination, identity):
     if destination.exists() or destination.is_symlink():
         raise TaskError("the server catalog destination already exists")
     local = host_target()
-    source_catalog = os.environ.get("SPACETERM_SERVER_ARTIFACTS")
+    source_catalog = os.environ.get("SPACETERM_CLI_ARTIFACTS")
     if local != TARGETS["darwin"] and not source_catalog:
         raise TaskError(
-            "Linux catalogs need a Mac-built catalog in SPACETERM_SERVER_ARTIFACTS from the same source snapshot"
+            "Linux catalogs need a Mac-built catalog in SPACETERM_CLI_ARTIFACTS from the same source snapshot"
         )
     cache = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "server"
     cache.mkdir(parents=True, exist_ok=True)
@@ -113,7 +113,7 @@ def prepare(destination, identity):
         digest = _source(ROOT)[2]
         overrides = {
             "CARGO_TARGET_DIR": str(cache / identity),
-            "SPACETERM_SERVER_SOURCE_STATE": digest,
+            "SPACETERM_CLI_SOURCE_STATE": digest,
         }
         previous = {name: os.environ.get(name) for name in overrides}
         os.environ.update(overrides)

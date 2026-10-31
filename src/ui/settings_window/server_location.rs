@@ -14,8 +14,8 @@ use crate::server_context::LastKnownFacts;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::server_worktrees::{Client, WriteError};
-use crate::ui::shared_workspaces::SharedRefusalReason;
 use crate::ui::sidebar_window::form::CaptionTone;
+use crate::ui::workspaces::WorkspaceRefusalReason;
 use gpui::{Subscription, Task, Text};
 use spaceterm_server::worktree::path_template::{self, WorktreePathTemplateError};
 use spaceterm_server::worktree::{Error, Operation, Read, ReadReply, Settings};
@@ -52,7 +52,7 @@ struct LocationModel {
 enum LocationNotice {
     /// Another device changed the value first, and the field now shows that device's value.
     Changed,
-    Refused(SharedRefusalReason),
+    Refused(WorkspaceRefusalReason),
     Failed,
 }
 
@@ -249,12 +249,12 @@ pub(super) struct ServerLocation {
     /// A failed change the section shows, until the person edits the location, chooses another
     /// server or closes Settings. Settings going away any other way, or no longer showing the
     /// row, leaves it to the Workspace Window.
-    unanswered: Option<crate::ui::shared_workspaces::OutcomeOwner>,
+    unanswered: Option<crate::ui::workspaces::OutcomeOwner>,
     /// Whether the latest render drew the Location row, so the person can see its failure.
     rendered: bool,
     /// The held failure's sequence once a render has drawn its error. Only then can the
     /// person's response answer it.
-    displayed: crate::ui::shared_workspaces::DrawnAnswer,
+    displayed: crate::ui::workspaces::DrawnAnswer,
 }
 
 impl ServerLocation {
@@ -286,7 +286,7 @@ impl ServerLocation {
             check: None,
             unanswered: None,
             rendered: false,
-            displayed: crate::ui::shared_workspaces::DrawnAnswer::default(),
+            displayed: crate::ui::workspaces::DrawnAnswer::default(),
         }
     }
 
@@ -704,7 +704,7 @@ impl SettingsWindow {
                 .server_location
                 .unanswered
                 .as_ref()
-                .and_then(crate::ui::shared_workspaces::OutcomeOwner::sequence);
+                .and_then(crate::ui::workspaces::OutcomeOwner::sequence);
             self.server_location.displayed.drawn(sequence);
         }
         let input = self.server_location.input.clone();

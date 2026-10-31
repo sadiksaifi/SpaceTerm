@@ -11,12 +11,12 @@ use crate::ui::updates::{
     CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenReleaseNotes, RELEASE_NOTES_TITLE,
 };
 use crate::ui::{
-    ClosePane, CloseTab, CloseWorkspace, CreateTab, DecreaseTerminalFontSize,
-    ExportTerminalDiagnostics, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, IncreaseTerminalFontSize, MoveTabLeft, MoveTabRight, NewWorkspace,
+    ChooseWorkspace, ClosePane, CloseTab, DecreaseTerminalFontSize, ExportTerminalDiagnostics,
+    FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    IncreaseTerminalFontSize, KillWorkspace, MoveTabLeft, MoveTabRight, NewTab, NewWorkspace,
     NextTab, NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree, ResetTerminalFontSize,
     ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown, SplitRight,
-    SwitchWorkspace, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
 pub(crate) const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
@@ -68,14 +68,14 @@ pub(crate) fn file_menu() -> Menu {
             MenuItem::action("New Workspace", NewWorkspace),
             MenuItem::action("Add Server…", crate::ui::settings_window::AddServer),
             MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
-            MenuItem::action("Choose Workspace…", SwitchWorkspace),
+            MenuItem::action("Choose Workspace…", ChooseWorkspace),
             MenuItem::separator(),
-            MenuItem::action("New Tab", CreateTab),
+            MenuItem::action("New Tab", NewTab),
             MenuItem::action("New Worktree…", crate::ui::NewWorktree),
             MenuItem::separator(),
             MenuItem::action("Close Pane", ClosePane),
             MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Kill Workspace", CloseWorkspace),
+            MenuItem::action("Kill Workspace", KillWorkspace),
             MenuItem::separator(),
             MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
         ],

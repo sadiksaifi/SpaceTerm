@@ -507,7 +507,7 @@ impl<T> Tab<T> {
     /// Reconciles server membership regardless of local screen size. Unlike a local split,
     /// another client's creation must preserve this client's focus, zoom, and surviving layout.
     #[cfg(any(feature = "desktop", test))]
-    pub(crate) fn insert_shared_pane(
+    pub(crate) fn insert_pane(
         &mut self,
         source: PaneId,
         axis: SplitAxis,
@@ -1289,14 +1289,14 @@ mod tests {
     }
 
     #[test]
-    fn shared_insertion_preserves_focus_zoom_and_server_root() {
+    fn insertion_preserves_focus_zoom_and_server_root() {
         let mut tab = four_pane_tab();
         let focused = tab.focused_pane_id();
         let root = tab.root_pane_id();
         tab.toggle_zoom();
         let zoom = tab.zoom_state();
         let added = tab
-            .insert_shared_pane(PaneId::new(1), SplitAxis::Horizontal, |_| ())
+            .insert_pane(PaneId::new(1), SplitAxis::Horizontal, |_| ())
             .unwrap();
         assert!(tab.pane(added).is_some());
         assert_eq!(tab.focused_pane_id(), focused);

@@ -198,7 +198,7 @@ impl Fetcher {
     /// Republishes the retained document for a newer Screen while semantics are demanded.
     pub(super) fn rebind(
         &self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         generation: PresentationGeneration,
     ) -> Option<Arc<TerminalAccessibilityModel>> {
         if !state.accessibility_demand.load(Ordering::Acquire) {
@@ -215,7 +215,7 @@ impl Fetcher {
     /// completes. Input is serviced between chunks.
     pub(super) fn poll(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         generation: PresentationGeneration,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<Option<Arc<TerminalAccessibilityModel>>, ServerError> {
@@ -540,8 +540,8 @@ mod tests {
         }
     }
 
-    fn demanded() -> DevelopmentPaneState {
-        let state = DevelopmentPaneState::new();
+    fn demanded() -> ServerPaneState {
+        let state = ServerPaneState::new();
         state.accessibility_demand.store(true, Ordering::Release);
         state
     }

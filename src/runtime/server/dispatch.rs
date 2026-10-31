@@ -1,4 +1,4 @@
-//! Request dispatch, and the connection-facing service boundary of the Development host.
+//! Request dispatch, and the connection-facing service boundary of the server's Pane host.
 use super::publish::{Observed, Publication};
 use super::*;
 use crate::terminal::session::SubscriptionNotifier;
@@ -11,7 +11,7 @@ use spaceterm_server::protocol::{
 };
 use std::collections::BTreeMap;
 
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     /// Answers one command for this Pane. A refusal is the reply [`Reply::Refused`].
     pub(super) fn request(
         &mut self,
@@ -198,7 +198,7 @@ impl DevelopmentPaneHost {
         }
     }
 }
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     pub(super) fn admitted(&mut self, client: [u8; 32], name: control::ClientName) {
         self.names
             .lock()
@@ -291,7 +291,7 @@ pub trait HostCommands: Send {
     /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
     /// [`Self::disconnected`].
     fn connected(&mut self, _client: [u8; 32], _connection: [u8; 32], _outbox: &Outbox) {}
-    /// A shared Workspace edit, or with `None` the resolution of a recorded one, replied to after
+    /// A Workspace edit, or with `None` the resolution of a recorded one, replied to after
     /// the inventory revision that holds its outcome.
     fn mutate(
         &mut self,

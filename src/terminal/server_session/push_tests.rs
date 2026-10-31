@@ -125,7 +125,7 @@ fn ticking(
 
 /// A real server and loopback connection shared by Pane presentation tests.
 pub(crate) struct ConnectedPane {
-    pub(crate) factory: DevelopmentServerSessionFactory,
+    pub(crate) factory: ServerSessionFactory,
     traffic: Arc<Traffic>,
     stop: Option<Box<dyn FnOnce()>>,
 }
@@ -185,7 +185,7 @@ impl ConnectedPane {
             .permit(pane_id)
             .expect("an attached Pane has a permit");
         let controls = PaneControls::default();
-        let (factory, state) = DevelopmentServerSessionFactory::for_pane(
+        let (factory, state) = ServerSessionFactory::for_pane(
             connection,
             &controls,
             crate::platform::runtime_local_filesystem(),

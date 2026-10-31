@@ -7,11 +7,11 @@ use gpui::{TestAppContext, VisualTestContext};
 use spaceterm_server::client_view::RetainedInventory;
 use spaceterm_server::hierarchy::{Inventory, Mutation};
 
-use super::{MultiServerHarness, ServerKey, named_route, server_inventory, settle_shared_panes};
+use super::{MultiServerHarness, ServerKey, named_route, server_inventory, settle_panes};
 use crate::direct_connections::DirectRouteId;
 use crate::domain::{PresentedWorkspace as _, WorkspaceId};
-use crate::ui::shared_workspaces::testing::{FixedOwner, ScriptedEdits, ScriptedPanes};
-use crate::ui::shared_workspaces::{DirectServer, SharedRefusalReason, SharedSubmission};
+use crate::ui::workspaces::testing::{FixedOwner, ScriptedEdits, ScriptedPanes};
+use crate::ui::workspaces::{DirectServer, WorkspaceRefusalReason, WorkspaceSubmission};
 
 /// `workspaces` as the server publishes them, each Pane titled by the program running in it.
 fn titled_inventory(revision: u64, workspaces: &[(&str, u8)]) -> Inventory {
@@ -67,19 +67,19 @@ impl MultiServerHarness {
                         cx,
                     )
                     .expect("the route is presented");
-                if let Some(shared) = manager.shared.get_mut(key) {
-                    shared.identify(Rc::new(FixedOwner(route)));
+                if let Some(binding) = manager.binding.get_mut(key) {
+                    binding.identify(Rc::new(FixedOwner(route)));
                     match retained {
-                        Some(copy) => shared.retain_copy_for_test(copy),
-                        None => shared.retain_inventory_copies(),
+                        Some(copy) => binding.retain_copy_for_test(copy),
+                        None => binding.retain_inventory_copies(),
                     }
                 }
                 manager.present_retained_copy(&route);
-                manager.sync_shared_workspaces(key, window, cx);
+                manager.sync_workspaces(key, window, cx);
                 key
             })
         });
-        settle_shared_panes(cx);
+        settle_panes(cx);
         key
     }
 
@@ -118,18 +118,18 @@ impl MultiServerHarness {
                 let key = manager
                     .server_key(&crate::ui::ServerTarget::Direct(route))
                     .expect("the route stays presented");
-                manager.sync_shared_workspaces(key, window, cx);
+                manager.sync_workspaces(key, window, cx);
                 key
             })
         });
-        settle_shared_panes(cx);
+        settle_panes(cx);
         key
     }
 
     /// The local Workspace presenting the server Workspace `server` at `key`.
     fn local(&self, key: ServerKey, server: u8, cx: &mut VisualTestContext) -> Option<WorkspaceId> {
         self.manager.read_with(cx, |manager, _| {
-            manager.shared.get(key)?.local([server; 32])
+            manager.binding.get(key)?.local([server; 32])
         })
     }
 
@@ -142,7 +142,7 @@ impl MultiServerHarness {
     ) -> Option<&'static str> {
         self.manager.read_with(cx, |manager, _| {
             manager
-                .shared
+                .binding
                 .get(key)?
                 .row_status([server; 32], None)
                 .map(|status| status.text)
@@ -153,9 +153,9 @@ impl MultiServerHarness {
     fn permits(&self, key: ServerKey, pane: u8, cx: &mut VisualTestContext) -> bool {
         self.manager.read_with(cx, |manager, _| {
             manager
-                .shared
+                .binding
                 .get(key)
-                .is_some_and(|shared| shared.permits([pane; 32]))
+                .is_some_and(|binding| binding.permits([pane; 32]))
         })
     }
 
@@ -170,10 +170,10 @@ impl MultiServerHarness {
         edits.set_inventory(inventory);
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
-                manager.sync_shared_workspaces(key, window, cx);
+                manager.sync_workspaces(key, window, cx);
             });
         });
-        settle_shared_panes(cx);
+        settle_panes(cx);
     }
 
     /// The Active Workspace's Active Tab title and how many Tabs it has.
@@ -193,7 +193,7 @@ impl MultiServerHarness {
                 manager.activate_workspace(workspace, window, cx);
             });
         });
-        settle_shared_panes(cx);
+        settle_panes(cx);
     }
 
     /// Asks the route at `key` for a new Tab in its Workspace `server`.
@@ -202,10 +202,13 @@ impl MultiServerHarness {
         key: ServerKey,
         server: u8,
         cx: &mut VisualTestContext,
-    ) -> SharedSubmission {
+    ) -> WorkspaceSubmission {
         self.manager.update(cx, |manager, _| {
-            let shared = manager.shared.get_mut(key).expect("the route is presented");
-            shared.edits().submit(Mutation::CreateTab {
+            let binding = manager
+                .binding
+                .get_mut(key)
+                .expect("the route is presented");
+            binding.edits().submit(Mutation::CreateTab {
                 workspace: [server; 32],
                 source: Some([server + 50; 32]),
                 control: spaceterm_server::hierarchy::CreateControl::Creator,
@@ -246,13 +249,13 @@ fn a_saved_route_should_present_what_it_retained_before_it_connects(cx: &mut Tes
     assert!(offline_notice_shown(cx), "the Pane says it isn't connected");
     assert_eq!(
         harness.create_tab(key, 2, cx),
-        SharedSubmission::Refused(SharedRefusalReason::Offline)
+        WorkspaceSubmission::Refused(WorkspaceRefusalReason::Offline)
     );
     assert!(harness.manager.read_with(cx, |manager, _| {
         manager
-            .shared
+            .binding
             .get(key)
-            .is_some_and(|shared| shared.presents_retained_copy())
+            .is_some_and(|binding| binding.presents_retained_copy())
             && !manager.direct_route_connected(&route)
     }));
 }
@@ -287,7 +290,7 @@ fn disconnect_should_keep_the_routes_workspaces_until_reconnecting_reconciles_th
     );
     let retained = harness
         .manager
-        .read_with(cx, |manager, _| manager.shared.get(key)?.retained_copy());
+        .read_with(cx, |manager, _| manager.binding.get(key)?.retained_copy());
 
     let mut reconciled = titled_inventory(harness.next_revision(), &[("Farther", 2)]);
     let mut second_tab = reconciled.workspaces[0].tabs[0].clone();
@@ -309,7 +312,7 @@ fn disconnect_should_keep_the_routes_workspaces_until_reconnecting_reconciles_th
             Some("Not connected"),
             ("vim Farther".to_owned(), 1),
             true,
-            SharedSubmission::Refused(SharedRefusalReason::Offline),
+            WorkspaceSubmission::Refused(WorkspaceRefusalReason::Offline),
         )
     );
     assert_eq!(
@@ -331,7 +334,10 @@ fn disconnect_should_keep_the_routes_workspaces_until_reconnecting_reconciles_th
         "each Pane opens again through the new connection"
     );
     assert!(!offline_notice_shown(cx));
-    assert_eq!(harness.create_tab(key, 2, cx), SharedSubmission::Submitted);
+    assert_eq!(
+        harness.create_tab(key, 2, cx),
+        WorkspaceSubmission::Submitted
+    );
     assert_eq!(edits.submitted(), Vec::new());
 }
 
@@ -345,9 +351,9 @@ fn discarding_a_routes_copy_should_leave_nothing_to_present(cx: &mut TestAppCont
     let key = harness.present_saved_route("penguin", route, Some(retained), cx);
 
     let copy = harness.manager.update(cx, |manager, _| {
-        let shared = manager.shared.get_mut(key)?;
-        shared.discard_retained_copy();
-        shared.retained_copy()
+        let binding = manager.binding.get_mut(key)?;
+        binding.discard_retained_copy();
+        binding.retained_copy()
     });
 
     assert_eq!(copy, None);
@@ -387,7 +393,10 @@ fn a_server_publishing_the_retained_revision_should_open_the_routes_panes(cx: &m
     );
     assert!(!offline_notice_shown(cx));
     assert_eq!(harness.row_status(key, 1, cx), None);
-    assert_eq!(harness.create_tab(key, 1, cx), SharedSubmission::Submitted);
+    assert_eq!(
+        harness.create_tab(key, 1, cx),
+        WorkspaceSubmission::Submitted
+    );
 }
 
 /// Reconnecting to a server that changed nothing while this client was disconnected opens the
@@ -412,7 +421,10 @@ fn reconnecting_at_the_same_revision_should_open_the_routes_panes_again(cx: &mut
     assert!(harness.permits(key, 101, cx));
     assert!(!panes.opened().is_empty());
     assert!(!offline_notice_shown(cx));
-    assert_eq!(harness.create_tab(key, 1, cx), SharedSubmission::Submitted);
+    assert_eq!(
+        harness.create_tab(key, 1, cx),
+        WorkspaceSubmission::Submitted
+    );
 }
 
 /// A connection that has not published its inventory yet leaves the retained copy presented and
@@ -443,12 +455,15 @@ fn a_connection_should_take_edits_only_once_the_server_publishes(cx: &mut TestAp
         (
             vec!["Far".to_owned()],
             Some("Not connected"),
-            SharedSubmission::Refused(SharedRefusalReason::Offline),
+            WorkspaceSubmission::Refused(WorkspaceRefusalReason::Offline),
         )
     );
     assert_eq!(harness.row_status(key, 1, cx), None);
     assert!(harness.permits(key, 101, cx));
-    assert_eq!(harness.create_tab(key, 1, cx), SharedSubmission::Submitted);
+    assert_eq!(
+        harness.create_tab(key, 1, cx),
+        WorkspaceSubmission::Submitted
+    );
     assert_eq!(edits.submitted().len(), 1);
 }
 
@@ -465,9 +480,9 @@ fn only_a_structural_change_should_write_the_routes_copy(cx: &mut TestAppContext
     let saved = |cx: &mut VisualTestContext| {
         harness.manager.read_with(cx, |manager, _| {
             manager
-                .shared
+                .binding
                 .get(key)
-                .and_then(|shared| shared.saved_copy().cloned())
+                .and_then(|binding| binding.saved_copy().cloned())
         })
     };
     let written = saved(cx);

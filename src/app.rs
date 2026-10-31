@@ -22,7 +22,7 @@ use crate::ssh::host_config::HostConfigFilesystem;
 use crate::ssh::process::SshProcessAdapter;
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{NativeServiceOrigin, NativeServiceStatus, SelectionCopy};
-use crate::ui::{NewWorkspace, SwitchWorkspace, WorkspaceManager};
+use crate::ui::{ChooseWorkspace, NewWorkspace, WorkspaceManager};
 
 struct NativeLocalUpdates;
 
@@ -312,7 +312,7 @@ pub(crate) fn init(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::init(cx);
     crate::ui::updates::init(cx);
-    cx.on_action(switch_workspace_from_global_action);
+    cx.on_action(choose_workspace_from_global_action);
     cx.on_action(|_: &CloseAllWindows, cx| {
         // Window action dispatch temporarily owns its Window, so close after it returns.
         cx.defer(close_all_windows);
@@ -352,7 +352,7 @@ pub(crate) fn menu_command_chosen(cx: &mut App) {
     }
 }
 
-fn switch_workspace_from_global_action(_: &SwitchWorkspace, cx: &mut App) {
+fn choose_workspace_from_global_action(_: &ChooseWorkspace, cx: &mut App) {
     let Some(workspace) = workspace_windows(cx).into_iter().next() else {
         return;
     };
@@ -1190,10 +1190,6 @@ struct DefaultWorkspaceWindowHost(Rc<HostComposition>);
 impl gpui::Global for DefaultWorkspaceWindowHost {}
 
 /// Reopening belongs to application lifecycle, including when only Settings remains open.
-#[allow(
-    dead_code,
-    reason = "external activation sources are selected by host composition"
-)]
 pub(crate) fn activate_default_window(cx: &mut App, token: Option<&str>) {
     leave_menu_only(cx);
     if let Some(host) = cx
@@ -3229,18 +3225,18 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn switch_workspace_without_focused_content_does_not_redispatch(cx: &mut gpui::TestAppContext) {
-        assert_switch_workspace_without_focused_content(cx, false);
+    fn choose_workspace_without_focused_content_does_not_redispatch(cx: &mut gpui::TestAppContext) {
+        assert_choose_workspace_without_focused_content(cx, false);
     }
 
     #[gpui::test]
-    fn switch_workspace_from_settings_without_target_focus_does_not_redispatch(
+    fn choose_workspace_from_settings_without_target_focus_does_not_redispatch(
         cx: &mut gpui::TestAppContext,
     ) {
-        assert_switch_workspace_without_focused_content(cx, true);
+        assert_choose_workspace_without_focused_content(cx, true);
     }
 
-    fn assert_switch_workspace_without_focused_content(
+    fn assert_choose_workspace_without_focused_content(
         cx: &mut gpui::TestAppContext,
         from_settings: bool,
     ) {
@@ -3261,14 +3257,14 @@ mod runtime_tests {
         cx.update(|cx| {
             // Global bubble listeners run newest first. Allow the real fallback once, but
             // stop a second dispatch so a regression fails rather than hanging the executor.
-            cx.on_action(move |_: &SwitchWorkspace, cx| {
+            cx.on_action(move |_: &ChooseWorkspace, cx| {
                 let visits = observed_visits.get() + 1;
                 observed_visits.set(visits);
                 if visits == 1 {
                     cx.propagate();
                 }
             });
-            cx.dispatch_action(&SwitchWorkspace);
+            cx.dispatch_action(&ChooseWorkspace);
         });
         cx.run_until_parked();
 
@@ -3287,7 +3283,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn switch_workspace_action_should_open_the_switcher_from_settings(
+    fn choose_workspace_action_should_open_the_switcher_from_settings(
         cx: &mut gpui::TestAppContext,
     ) {
         let host = host_with_settings();
@@ -3296,7 +3292,7 @@ mod runtime_tests {
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
 
-        cx.update(|cx| cx.dispatch_action(&crate::ui::SwitchWorkspace));
+        cx.update(|cx| cx.dispatch_action(&crate::ui::ChooseWorkspace));
         cx.run_until_parked();
 
         assert_eq!(

@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
         {
             let confirmation = abandoned
-                .close_confirmation(CloseTarget::Workspace {
+                .close_confirmation(CloseTarget::KillWorkspace {
                     workspace: workspace.id,
                 })
                 .ok_or("abandoned fixture confirmation")?;
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             close(
                 &first,
-                CloseTarget::Workspace {
+                CloseTarget::KillWorkspace {
                     workspace: workspace.id,
                 },
             )?;
@@ -323,7 +323,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert!(matches!(support::mutate(&first, sequence, mutation)?, o if o == stopped));
     assert!(!stopped_path.exists());
     first.acknowledge(sequence)?;
-    close(&first, CloseTarget::Workspace { workspace })?;
+    close(&first, CloseTarget::KillWorkspace { workspace })?;
     support::done(&first, protocol::Operation::Shutdown)?;
     restarted.0.wait()?;
     println!(

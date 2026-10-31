@@ -51,7 +51,7 @@ impl OwnedPane {
     }
 }
 
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     /// Starts an observation of this Pane's running Terminal Session. `fence` refuses another
     /// running Session as `Stale`. A Pane where nothing runs says why, fenced or not.
     pub(super) fn observe_start(

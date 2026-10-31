@@ -662,7 +662,7 @@ fn saved_state(data: &Directory) -> Result<[u8; 32], ServerError> {
     // The proof covers server organization and direct identity/policy/revocation together.
     // Client files are not rolled back. Presence is distinct from a JSON null document.
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-    digest.update(b"spaceterm-server-saved-state-2\0");
+    digest.update(b"spaceterm-server-saved-state-1\0");
     let identity = zeroize::Zeroizing::new(
         serde_json::to_vec(&data.read()?).map_err(|_| ServerError::StorageUnavailable)?,
     );

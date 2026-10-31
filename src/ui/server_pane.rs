@@ -816,23 +816,23 @@ mod connection {
 
     use super::{Controller, Dormant, ScreenAnnouncements, SessionEnd};
     use crate::server_connection::ServerError;
-    use crate::terminal::server_session::{DevelopmentPaneState, DevelopmentPaneStatus};
+    use crate::terminal::server_session::{ServerPaneState, ServerPaneStatus};
 
     /// What a Pane needs from the server connection behind it.
     ///
     /// Only an explicit request reaches the server through this: rendering, reconciliation, and
     /// reconnection never select, take over, or start a shell.
     pub(crate) trait ServerPaneConnection: Send + Sync {
-        fn status(&self) -> DevelopmentPaneStatus;
+        fn status(&self) -> ServerPaneStatus;
 
         /// Whether the original presentation admission still occupies a startup slot. Receiving
         /// a screen is a separate input barrier and may wait while this Pane is hidden.
         fn startup_pending(&self) -> bool {
             matches!(
                 self.status(),
-                DevelopmentPaneStatus::Connecting
-                    | DevelopmentPaneStatus::TakingOver
-                    | DevelopmentPaneStatus::Reconnecting
+                ServerPaneStatus::Connecting
+                    | ServerPaneStatus::TakingOver
+                    | ServerPaneStatus::Reconnecting
             )
         }
 
@@ -895,8 +895,8 @@ mod connection {
         }
     }
 
-    impl ServerPaneConnection for DevelopmentPaneState {
-        fn status(&self) -> DevelopmentPaneStatus {
+    impl ServerPaneConnection for ServerPaneState {
+        fn status(&self) -> ServerPaneStatus {
             Self::status(self)
         }
 
@@ -1016,7 +1016,7 @@ mod connection {
     pub(crate) struct ServerPaneView {
         announcements: ScreenAnnouncements,
         connection: Arc<dyn ServerPaneConnection>,
-        status: DevelopmentPaneStatus,
+        status: ServerPaneStatus,
         controller: Option<Controller>,
         session_end: Option<SessionEnd>,
         generation: u64,
@@ -1106,12 +1106,12 @@ mod connection {
             // Take Over that returns to the Takeover Screen on the same connection generation is
             // unconfirmed: the server may have refused it, or committed it and lost the reply.
             // A new generation means this client held control and another client took it since.
-            if self.status == DevelopmentPaneStatus::TakingOver
+            if self.status == ServerPaneStatus::TakingOver
                 && matches!(
                     status,
-                    DevelopmentPaneStatus::Takeover
-                        | DevelopmentPaneStatus::TakeoverReconnecting
-                        | DevelopmentPaneStatus::TakeoverFailed(_)
+                    ServerPaneStatus::Takeover
+                        | ServerPaneStatus::TakeoverReconnecting
+                        | ServerPaneStatus::TakeoverFailed(_)
                 )
             {
                 self.take_over_unconfirmed = !generation_changed;
@@ -1122,7 +1122,7 @@ mod connection {
                 && generation_changed
                 && matches!(
                     status,
-                    DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::SessionEnded(_)
+                    ServerPaneStatus::Restored | ServerPaneStatus::SessionEnded(_)
                 )
             {
                 self.start_pending = false;
@@ -1136,7 +1136,7 @@ mod connection {
         }
 
         fn apply(&mut self) -> ServerPaneSync {
-            if self.status == DevelopmentPaneStatus::Connected {
+            if self.status == ServerPaneStatus::Connected {
                 self.announcements = ScreenAnnouncements::default();
                 self.takeover_shown = false;
                 self.take_over_unconfirmed = false;
@@ -1152,16 +1152,16 @@ mod connection {
             let entering_takeover = !self.takeover_shown
                 && matches!(
                     self.status,
-                    DevelopmentPaneStatus::Takeover
-                        | DevelopmentPaneStatus::TakeoverReconnecting
-                        | DevelopmentPaneStatus::TakeoverFailed(_)
-                        | DevelopmentPaneStatus::TakingOver
+                    ServerPaneStatus::Takeover
+                        | ServerPaneStatus::TakeoverReconnecting
+                        | ServerPaneStatus::TakeoverFailed(_)
+                        | ServerPaneStatus::TakingOver
                 );
             let controlled_elsewhere = matches!(
                 self.status,
-                DevelopmentPaneStatus::Takeover
-                    | DevelopmentPaneStatus::TakeoverReconnecting
-                    | DevelopmentPaneStatus::TakeoverFailed(_)
+                ServerPaneStatus::Takeover
+                    | ServerPaneStatus::TakeoverReconnecting
+                    | ServerPaneStatus::TakeoverFailed(_)
             );
             if entering_takeover {
                 self.takeover_shown = true;
@@ -1173,17 +1173,17 @@ mod connection {
             // A start in flight that meets an interruption has lost its answer, whether a click or
             // a first selection sent it. The Pane says so through checks and reconnects until the
             // server settles the start.
-            if !self.start_unknown || self.status == DevelopmentPaneStatus::Connected {
+            if !self.start_unknown || self.status == ServerPaneStatus::Connected {
                 self.unknown_shown = false;
             }
             let entering_unknown = !self.unknown_shown
                 && self.start_unknown
                 && matches!(
                     self.status,
-                    DevelopmentPaneStatus::Reconnecting
-                        | DevelopmentPaneStatus::TakeoverReconnecting
-                        | DevelopmentPaneStatus::Failed(_)
-                        | DevelopmentPaneStatus::TakeoverFailed(_)
+                    ServerPaneStatus::Reconnecting
+                        | ServerPaneStatus::TakeoverReconnecting
+                        | ServerPaneStatus::Failed(_)
+                        | ServerPaneStatus::TakeoverFailed(_)
                 );
             if entering_unknown {
                 self.unknown_shown = true;
@@ -1195,7 +1195,7 @@ mod connection {
                     || self.dormant.is_some()
                     || self.unknown_shown,
                 entering_screen: entering_takeover || entering_dormant || entering_unknown,
-                interrupted: self.status != DevelopmentPaneStatus::Connected,
+                interrupted: self.status != ServerPaneStatus::Connected,
             }
         }
 
@@ -1203,14 +1203,14 @@ mod connection {
         /// programs that ended with the server. Only an explicit Start New Shell starts a shell.
         fn apply_dormancy(&mut self) -> bool {
             let dormant = match self.status {
-                DevelopmentPaneStatus::Restored => Dormant::Restored,
-                DevelopmentPaneStatus::SessionEnded(end) => Dormant::Ended(end),
-                DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable) => {
+                ServerPaneStatus::Restored => Dormant::Restored,
+                ServerPaneStatus::SessionEnded(end) => Dormant::Ended(end),
+                ServerPaneStatus::Failed(ServerError::DirectoryUnavailable) => {
                     Dormant::DirectoryUnavailable
                 }
                 // An interruption while starting leaves the outcome unknown. Reconnecting
                 // answers it.
-                DevelopmentPaneStatus::Reconnecting | DevelopmentPaneStatus::Failed(_)
+                ServerPaneStatus::Reconnecting | ServerPaneStatus::Failed(_)
                     if self.start_pending =>
                 {
                     self.start_pending = false;
@@ -1233,7 +1233,7 @@ mod connection {
 
         /// The Session ended while another client controlled it, so nothing remains to take over.
         pub(crate) fn session_ended(&self) -> bool {
-            self.status == DevelopmentPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
+            self.status == ServerPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
         }
 
         /// The screen replacing the Pane, if one does.
@@ -1263,7 +1263,7 @@ mod connection {
                     },
                 });
             }
-            let taking_over = self.status == DevelopmentPaneStatus::TakingOver;
+            let taking_over = self.status == ServerPaneStatus::TakingOver;
             let offered = self.can_take_over();
             // Nothing runs to take over in an ended Session, so this client sees the same Session
             // Ended screen as the one holding its grant, and its Start Session takes over.
@@ -1295,10 +1295,10 @@ mod connection {
             self.start_pending
                 && matches!(
                     self.status,
-                    DevelopmentPaneStatus::Restored
-                        | DevelopmentPaneStatus::SessionEnded(_)
-                        | DevelopmentPaneStatus::Connecting
-                        | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                    ServerPaneStatus::Restored
+                        | ServerPaneStatus::SessionEnded(_)
+                        | ServerPaneStatus::Connecting
+                        | ServerPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 )
         }
 
@@ -1315,9 +1315,9 @@ mod connection {
             !self.start_unknown
                 && matches!(
                     self.status,
-                    DevelopmentPaneStatus::Restored
-                        | DevelopmentPaneStatus::SessionEnded(_)
-                        | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                    ServerPaneStatus::Restored
+                        | ServerPaneStatus::SessionEnded(_)
+                        | ServerPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 )
                 && !self.start_pending
                 && !self.directory_progress.0
@@ -1334,7 +1334,7 @@ mod connection {
         }
 
         pub(crate) fn can_take_over(&self) -> bool {
-            self.status == DevelopmentPaneStatus::Takeover && !self.start_unknown
+            self.status == ServerPaneStatus::Takeover && !self.start_unknown
         }
 
         /// The interruption notice's title, detail, and intent, or `None` while nothing
@@ -1344,8 +1344,7 @@ mod connection {
         ) -> Option<(gpui::SharedString, gpui::SharedString, super::StatusIntent)> {
             use gpui::SharedString;
             match self.status {
-                DevelopmentPaneStatus::Reconnecting
-                | DevelopmentPaneStatus::TakeoverReconnecting => Some((
+                ServerPaneStatus::Reconnecting | ServerPaneStatus::TakeoverReconnecting => Some((
                     SharedString::new_static("Reconnecting…"),
                     // The screen explains the unconfirmed start and offers its check, so the notice
                     // adds only what reconnecting does.
@@ -1364,26 +1363,25 @@ mod connection {
                     }),
                     super::StatusIntent::Warning,
                 )),
-                DevelopmentPaneStatus::Offline => Some((
+                ServerPaneStatus::Offline => Some((
                     SharedString::new_static(super::OFFLINE_TITLE),
                     SharedString::new_static(super::OFFLINE_DETAIL),
                     super::StatusIntent::Warning,
                 )),
                 // The screen replacing the Pane says what happened, and nothing here repairs it.
-                DevelopmentPaneStatus::TakeoverFailed(_) if self.session_ended() => None,
-                DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                ServerPaneStatus::TakeoverFailed(_) if self.session_ended() => None,
+                ServerPaneStatus::Failed(ServerError::DirectoryUnavailable)
                     if self.dormant == Some(Dormant::DirectoryUnavailable) =>
                 {
                     None
                 }
-                DevelopmentPaneStatus::Failed(ServerError::Stopped)
-                | DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped) => Some((
+                ServerPaneStatus::Failed(ServerError::Stopped)
+                | ServerPaneStatus::TakeoverFailed(ServerError::Stopped) => Some((
                     SharedString::new_static("Server Stopped"),
                     SharedString::new_static("The programs in this Pane ended."),
                     super::StatusIntent::Warning,
                 )),
-                DevelopmentPaneStatus::Failed(error)
-                | DevelopmentPaneStatus::TakeoverFailed(error) => {
+                ServerPaneStatus::Failed(error) | ServerPaneStatus::TakeoverFailed(error) => {
                     let (title, cause) = super::failure_copy(error);
                     // The screen explains an unconfirmed start, so the notice names only the cause.
                     let next = if self.unknown_shown {
@@ -1425,8 +1423,8 @@ mod connection {
         pub(crate) fn server_stopped(&self) -> bool {
             matches!(
                 self.status,
-                DevelopmentPaneStatus::Failed(ServerError::Stopped)
-                    | DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
+                ServerPaneStatus::Failed(ServerError::Stopped)
+                    | ServerPaneStatus::TakeoverFailed(ServerError::Stopped)
             )
         }
 
@@ -1435,13 +1433,13 @@ mod connection {
         /// can be checked from any status, because the check is passive.
         pub(crate) fn can_retry(&self) -> bool {
             let interrupted = self.status
-                != DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                != ServerPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 && matches!(
                     self.status,
-                    DevelopmentPaneStatus::Reconnecting
-                        | DevelopmentPaneStatus::TakeoverReconnecting
-                        | DevelopmentPaneStatus::TakeoverFailed(_)
-                        | DevelopmentPaneStatus::Failed(_)
+                    ServerPaneStatus::Reconnecting
+                        | ServerPaneStatus::TakeoverReconnecting
+                        | ServerPaneStatus::TakeoverFailed(_)
+                        | ServerPaneStatus::Failed(_)
                 );
             !self.session_ended()
                 && !self.server_stopped()

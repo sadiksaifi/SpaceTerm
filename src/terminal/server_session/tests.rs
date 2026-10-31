@@ -28,7 +28,7 @@ fn paired_panes_have_no_local_file_authority_even_with_local_composition() {
         Arc::new(Route),
     )
     .unwrap();
-    let (factory, _) = DevelopmentServerSessionFactory::for_pane(
+    let (factory, _) = ServerSessionFactory::for_pane(
         server,
         &PaneControls::default(),
         crate::platform::runtime_local_filesystem(),
@@ -68,7 +68,7 @@ fn a_closed_windows_view_returns_with_the_next_presentation_of_the_same_session(
     .unwrap();
     let controls = PaneControls::default();
     let present = || {
-        DevelopmentServerSessionFactory::for_pane(
+        ServerSessionFactory::for_pane(
             server.clone(),
             &controls,
             crate::platform::runtime_local_filesystem(),
@@ -450,7 +450,7 @@ impl Adapter {
         Self::with_epoch(|state| state.attach(presenter))
     }
     fn with_epoch(
-        attach: impl FnOnce(&DevelopmentPaneState) -> Result<u64, ServerError>,
+        attach: impl FnOnce(&ServerPaneState) -> Result<u64, ServerError>,
     ) -> Result<Self, ServerError> {
         use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
         let geometry = TerminalGeometry::from_grid(
@@ -458,9 +458,9 @@ impl Adapter {
             LogicalCellSize::new(10.0, 20.0),
             BackingScale::ONE,
         );
-        let state = Arc::new(DevelopmentPaneState::new());
+        let state = Arc::new(ServerPaneState::new());
         let epoch = attach(&state)?;
-        state.set(DevelopmentPaneStatus::Connected);
+        state.set(ServerPaneStatus::Connected);
         state.interaction.lock().unwrap().interactive = true;
         state.interaction.lock().unwrap().reading = true;
         let (sender, input) = mpsc::sync_channel(512);
@@ -722,7 +722,7 @@ fn a_dismissed_presentations_paused_input_cannot_follow_its_successors_focus() {
 #[test]
 fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_successor() {
     let controls = PaneControls::default();
-    let (old, _) = DevelopmentServerSessionFactory::for_pane(
+    let (old, _) = ServerSessionFactory::for_pane(
         ServerConnection::for_identity("spaceterm-development").unwrap(),
         &controls,
         crate::platform::runtime_local_filesystem(),
@@ -902,7 +902,7 @@ fn a_confirmation_queued_before_reconnection_cannot_authorize_the_replacement_le
         .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
     let previous_generation = adapter.handle.input_generation();
     let epoch = adapter.handle.state.invalidate();
-    adapter.handle.state.set(DevelopmentPaneStatus::Connected);
+    adapter.handle.state.set(ServerPaneStatus::Connected);
     adapter.handle.state.interaction.lock().unwrap().interactive = true;
     adapter.handle.interactive_focus(true, true);
     adapter.active.epoch = epoch;
@@ -1136,10 +1136,7 @@ fn an_unsupported_refusal_drops_only_that_message() {
         })
         .unwrap();
     assert!(adapter.handle.interactive_input_available());
-    assert_eq!(
-        adapter.handle.state.status(),
-        DevelopmentPaneStatus::Connected
-    );
+    assert_eq!(adapter.handle.state.status(), ServerPaneStatus::Connected);
     adapter.handle.key(KeyInput::input_method_commit("after"));
     let mut sent = 0;
     adapter
@@ -1597,26 +1594,26 @@ fn pointer_coordinates_use_fitted_cells_and_the_authoritative_screen_revision() 
 
 #[test]
 fn an_ended_session_is_a_permanent_failure_after_control_loss() {
-    let state = DevelopmentPaneState::new();
-    state.set(DevelopmentPaneStatus::Takeover);
+    let state = ServerPaneState::new();
+    state.set(ServerPaneStatus::Takeover);
     assert!(!state.connection_failed(ServerError::SessionUnavailable, true));
     assert_eq!(
         state.status(),
-        DevelopmentPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
+        ServerPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
     );
 }
 
 #[test]
 fn only_an_interactive_connection_accepts_input() {
     use crate::terminal::InteractiveInput;
-    let state = DevelopmentPaneState::new();
+    let state = ServerPaneState::new();
     assert_eq!(
         state.interactive_input(),
         InteractiveInput::Pending,
         "a Pane still attaching takes no input yet"
     );
     state.interaction.lock().unwrap().interactive = true;
-    state.set(DevelopmentPaneStatus::Connected);
+    state.set(ServerPaneStatus::Connected);
     assert_eq!(state.interactive_input(), InteractiveInput::Accepted);
     state.invalidate();
     assert_eq!(
@@ -1624,17 +1621,17 @@ fn only_an_interactive_connection_accepts_input() {
         InteractiveInput::Pending,
         "an interrupted connection takes no input until it is interactive again"
     );
-    state.set(DevelopmentPaneStatus::Connected);
+    state.set(ServerPaneStatus::Connected);
     assert_eq!(state.interactive_input(), InteractiveInput::Pending);
 }
 
 #[test]
 fn a_resolving_update_keeps_the_pane_reconnecting_without_carrying_a_click() {
     for (takeover, reconnecting) in [
-        (false, DevelopmentPaneStatus::Reconnecting),
-        (true, DevelopmentPaneStatus::TakeoverReconnecting),
+        (false, ServerPaneStatus::Reconnecting),
+        (true, ServerPaneStatus::TakeoverReconnecting),
     ] {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         state.take_over.store(true, Ordering::Release);
         state.start_restored.store(true, Ordering::Release);
         assert!(state.connection_failed(ServerError::ActivationUnresolved, takeover));
@@ -1649,9 +1646,9 @@ fn a_resolving_update_keeps_the_pane_reconnecting_without_carrying_a_click() {
         ServerError::AuthenticationRefused,
         ServerError::IncompatibleProtocol,
     ] {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         assert!(!state.connection_failed(error, false), "{error:?}");
-        assert_eq!(state.status(), DevelopmentPaneStatus::Failed(error));
+        assert_eq!(state.status(), ServerPaneStatus::Failed(error));
     }
 }
 
@@ -1662,10 +1659,10 @@ fn each_take_over_offer_names_the_current_controlling_client() {
         name: name.into(),
         this_client: false,
     };
-    let state = DevelopmentPaneState::new();
+    let state = ServerPaneState::new();
     assert_eq!(state.controller(), None);
     state.offered_take_over(client("Studio"), None);
-    assert_eq!(state.status(), DevelopmentPaneStatus::Takeover);
+    assert_eq!(state.status(), ServerPaneStatus::Takeover);
     assert_eq!(state.controller(), Some(client("Studio")));
     state.offered_take_over(Controller::Nobody, Some(pane::SessionEnd::Signaled));
     assert_eq!(state.controller(), Some(Controller::Nobody));
@@ -1675,7 +1672,7 @@ fn each_take_over_offer_names_the_current_controlling_client() {
     assert_eq!(state.session_end(), None);
     assert_eq!(
         state.status(),
-        DevelopmentPaneStatus::TakingOver,
+        ServerPaneStatus::TakingOver,
         "an offer that crosses Take Over leaves it waiting for its answer"
     );
     assert_eq!(state.controller(), Some(client("Laptop")));
@@ -1683,16 +1680,16 @@ fn each_take_over_offer_names_the_current_controlling_client() {
 
 #[test]
 fn a_transport_outage_keeps_the_takeover_screen_reconnecting() {
-    let state = DevelopmentPaneState::new();
-    state.set(DevelopmentPaneStatus::Takeover);
+    let state = ServerPaneState::new();
+    state.set(ServerPaneStatus::Takeover);
     assert!(state.connection_failed(ServerError::NotRunning, true));
-    assert_eq!(state.status(), DevelopmentPaneStatus::TakeoverReconnecting);
+    assert_eq!(state.status(), ServerPaneStatus::TakeoverReconnecting);
 }
 
 #[test]
 fn persistent_protocol_failure_stops_after_three_automatic_reconnections() {
     for takeover in [false, true] {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         for _ in 0..3 {
             assert!(state.connection_failed(ServerError::Protocol, takeover));
         }
@@ -1700,9 +1697,9 @@ fn persistent_protocol_failure_stops_after_three_automatic_reconnections() {
         assert_eq!(
             state.status(),
             if takeover {
-                DevelopmentPaneStatus::TakeoverFailed(ServerError::Protocol)
+                ServerPaneStatus::TakeoverFailed(ServerError::Protocol)
             } else {
-                DevelopmentPaneStatus::Failed(ServerError::Protocol)
+                ServerPaneStatus::Failed(ServerError::Protocol)
             }
         );
     }
@@ -1719,7 +1716,7 @@ fn a_brief_screen_between_protocol_failures_does_not_renew_automatic_retries() {
     assert!(!state.connection_failed(ServerError::Protocol, false));
     assert_eq!(
         state.status(),
-        DevelopmentPaneStatus::Failed(ServerError::Protocol)
+        ServerPaneStatus::Failed(ServerError::Protocol)
     );
     state.retry();
     assert!(state.connection_failed(ServerError::Protocol, false));
@@ -1727,14 +1724,14 @@ fn a_brief_screen_between_protocol_failures_does_not_renew_automatic_retries() {
 
 #[test]
 fn an_outage_during_protocol_recovery_retains_the_original_failure() {
-    let state = DevelopmentPaneState::new();
+    let state = ServerPaneState::new();
     assert!(state.connection_failed(ServerError::Protocol, false));
     assert!(state.connection_failed(ServerError::NotRunning, false));
     assert!(state.connection_failed(ServerError::NotRunning, false));
     assert!(!state.connection_failed(ServerError::NotRunning, false));
     assert_eq!(
         state.status(),
-        DevelopmentPaneStatus::Failed(ServerError::Protocol)
+        ServerPaneStatus::Failed(ServerError::Protocol)
     );
 }
 
@@ -1743,22 +1740,22 @@ fn an_outage_during_protocol_recovery_retains_the_original_failure() {
 #[test]
 fn selecting_an_ended_pane_queues_no_start() {
     use pane::control::Controller;
-    let ended = DevelopmentPaneState::new();
-    ended.set(DevelopmentPaneStatus::SessionEnded(
-        pane::SessionEnd::Exited { code: 1 },
-    ));
+    let ended = ServerPaneState::new();
+    ended.set(ServerPaneStatus::SessionEnded(pane::SessionEnd::Exited {
+        code: 1,
+    }));
     ended.set_session_end(Some(pane::SessionEnd::Exited { code: 1 }));
     ended.select();
     assert!(!ended.selected.load(Ordering::Acquire));
 
-    let elsewhere = DevelopmentPaneState::new();
+    let elsewhere = ServerPaneState::new();
     elsewhere.offered_take_over(Controller::Nobody, Some(pane::SessionEnd::EndAllSessions));
     elsewhere.select();
     assert!(!elsewhere.selected.load(Ordering::Acquire));
 
     // A Pane retained across a server restart still starts on first use.
-    let restored = DevelopmentPaneState::new();
-    restored.set(DevelopmentPaneStatus::Restored);
+    let restored = ServerPaneState::new();
+    restored.set(ServerPaneStatus::Restored);
     restored.select();
     assert!(restored.selected.load(Ordering::Acquire));
 }

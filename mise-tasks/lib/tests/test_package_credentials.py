@@ -36,8 +36,8 @@ class PackageCredentialsTests(unittest.TestCase):
             patch(
                 "spaceterm_tasks.server_package.prepare_desktop_artifact",
                 return_value={
-                    "SPACETERM_SERVER_ARCHIVE": "/verified/artifact.tar.gz",
-                    "SPACETERM_SERVER_SIGNATURE": "/verified/artifact.sig",
+                    "SPACETERM_CLI_ARCHIVE": "/verified/artifact.tar.gz",
+                    "SPACETERM_CLI_SIGNATURE": "/verified/artifact.sig",
                 },
             ),
             patch.object(package_linux.sys, "platform", "linux"),

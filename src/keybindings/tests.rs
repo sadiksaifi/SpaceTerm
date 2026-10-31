@@ -22,8 +22,8 @@ fn profile() -> KeymapProfile {
                 Command::NewWorkspace,
                 Some(DefaultBinding::new("cmd-n", &[])),
             ),
-            (Command::CloseWorkspace, None),
-            (Command::CreateTab, Some(DefaultBinding::new("cmd-t", &[]))),
+            (Command::KillWorkspace, None),
+            (Command::NewTab, Some(DefaultBinding::new("cmd-t", &[]))),
             (
                 Command::CloseTab,
                 Some(DefaultBinding::new("shift-cmd-w", &[])),
@@ -108,12 +108,12 @@ fn command_ids_round_trip_and_groups_are_contiguous_in_settings_order() {
 #[test]
 fn command_scopes_match_their_dispatch_contexts() {
     let application_commands = [
-        Command::SwitchWorkspace,
+        Command::ChooseWorkspace,
         Command::NewWorkspace,
         Command::OpenLocalDirectory,
         Command::NewWorktree,
-        Command::CloseWorkspace,
-        Command::CreateTab,
+        Command::KillWorkspace,
+        Command::NewTab,
         Command::ClosePane,
         Command::CloseTab,
         Command::KeyboardShortcuts,
@@ -148,7 +148,7 @@ fn preferences_are_sparse_and_validate_only_override_conflicts() {
         prefs.get(Command::NewWorkspace),
         Some(&Some(shortcut("shift-cmd-t")))
     );
-    assert!(!prefs.is_overridden(Command::CreateTab));
+    assert!(!prefs.is_overridden(Command::NewTab));
     assert_eq!(prefs.iter().count(), 2);
     assert_eq!(prefs.validate(), Ok(()));
     assert_eq!(
@@ -285,10 +285,10 @@ fn resolve_defaults_preserves_primary_alias_order_and_separates_fixed_controls()
         &[shortcut("cmd-="), shortcut("cmd-+"), shortcut("alt-cmd-=")]
     );
     assert_eq!(
-        resolved.state(Command::CloseWorkspace),
+        resolved.state(Command::KillWorkspace),
         KeybindingState::Unassigned
     );
-    assert_eq!(resolved.shortcut(Command::CloseWorkspace), None);
+    assert_eq!(resolved.shortcut(Command::KillWorkspace), None);
     assert_eq!(
         resolved.owner(&shortcut("cmd-+")),
         Some(Command::IncreaseTerminalFontSize)
@@ -312,7 +312,7 @@ fn resolve_defaults_preserves_primary_alias_order_and_separates_fixed_controls()
 fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
     let profile = profile();
     let prefs = preferences(
-        r#"{"new_workspace":"ctrl-1","close_tab":null,"split_right":"cmd-+","create_tab":"cmd-q"}"#,
+        r#"{"new_workspace":"ctrl-1","close_tab":null,"split_right":"cmd-+","new_tab":"cmd-q"}"#,
     );
     let resolved = profile.resolve(&prefs);
     assert_eq!(
@@ -335,12 +335,12 @@ fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
         KeybindingState::Unassigned
     );
     // A Reserved override is inactive, and its Command keeps the host default.
-    assert_eq!(resolved.state(Command::CreateTab), KeybindingState::Default);
+    assert_eq!(resolved.state(Command::NewTab), KeybindingState::Default);
     assert_eq!(
-        resolved.inactive_override(Command::CreateTab),
+        resolved.inactive_override(Command::NewTab),
         Some(Reservation::System(SystemReservation::Quit))
     );
-    assert_eq!(resolved.shortcuts(Command::CreateTab), &[shortcut("cmd-t")]);
+    assert_eq!(resolved.shortcuts(Command::NewTab), &[shortcut("cmd-t")]);
     assert_eq!(resolved.inactive_override(Command::NewWorkspace), None);
     assert_eq!(
         resolved.state(Command::IncreaseTerminalFontSize),
@@ -351,7 +351,7 @@ fn resolve_overrides_displace_default_primaries_and_drop_claimed_aliases() {
         &[shortcut("cmd-="), shortcut("alt-cmd-=")]
     );
     assert_eq!(resolved.owner(&shortcut("cmd-n")), None);
-    assert_eq!(resolved.owner(&shortcut("cmd-t")), Some(Command::CreateTab));
+    assert_eq!(resolved.owner(&shortcut("cmd-t")), Some(Command::NewTab));
     assert_eq!(profile.resolve(&prefs), resolved);
 }
 
@@ -425,7 +425,7 @@ fn every_system_reason_blocks_hand_edits_and_rejects_assign_without_mutation() {
             Err(Reservation::System(reason))
         );
         assert_eq!(
-            profile.assign(&mut prefs, Command::CreateTab, Some(shortcut("cmd-q"))),
+            profile.assign(&mut prefs, Command::NewTab, Some(shortcut("cmd-q"))),
             Err(Reservation::System(reason))
         );
         assert_eq!(prefs, before);
@@ -510,14 +510,14 @@ fn assigning_defaults_normalizes_only_alias_free_defaults() {
         &[shortcut("cmd-=")]
     );
     profile
-        .assign(&mut prefs, Command::CloseWorkspace, None)
+        .assign(&mut prefs, Command::KillWorkspace, None)
         .unwrap();
-    assert!(!prefs.is_overridden(Command::CloseWorkspace));
+    assert!(!prefs.is_overridden(Command::KillWorkspace));
     profile
-        .assign(&mut prefs, Command::CloseWorkspace, Some(shortcut("cmd-y")))
+        .assign(&mut prefs, Command::KillWorkspace, Some(shortcut("cmd-y")))
         .unwrap();
-    profile.reset(&mut prefs, Command::CloseWorkspace);
-    assert!(!prefs.is_overridden(Command::CloseWorkspace));
+    profile.reset(&mut prefs, Command::KillWorkspace);
+    assert!(!prefs.is_overridden(Command::KillWorkspace));
 }
 
 #[test]
@@ -549,11 +549,11 @@ fn assigning_an_owned_shortcut_keeps_the_command_assigned() {
 fn reset_reclaims_the_primary_and_every_alias_from_current_owners() {
     let profile = profile();
     let mut prefs = preferences(
-        r#"{"increase_terminal_font_size":null,"new_workspace":"cmd-=","create_tab":"cmd-+","close_tab":"alt-cmd-="}"#,
+        r#"{"increase_terminal_font_size":null,"new_workspace":"cmd-=","new_tab":"cmd-+","close_tab":"alt-cmd-="}"#,
     );
     profile.reset(&mut prefs, Command::IncreaseTerminalFontSize);
     assert!(!prefs.is_overridden(Command::IncreaseTerminalFontSize));
-    for command in [Command::NewWorkspace, Command::CreateTab, Command::CloseTab] {
+    for command in [Command::NewWorkspace, Command::NewTab, Command::CloseTab] {
         assert_eq!(prefs.get(command), Some(&None));
     }
     let resolved = profile.resolve(&prefs);
@@ -579,16 +579,16 @@ fn reset_reclaims_a_default_even_without_an_override_on_the_reset_command() {
 #[test]
 fn a_displacement_that_restores_a_default_retains_no_override() {
     let profile = profile();
-    let mut prefs = preferences(r#"{"close_workspace":"cmd-n"}"#);
+    let mut prefs = preferences(r#"{"kill_workspace":"cmd-n"}"#);
     profile.reset(&mut prefs, Command::NewWorkspace);
-    assert_eq!(prefs.get(Command::CloseWorkspace), None);
-    let mut prefs = preferences(r#"{"close_workspace":"cmd-y"}"#);
+    assert_eq!(prefs.get(Command::KillWorkspace), None);
+    let mut prefs = preferences(r#"{"kill_workspace":"cmd-y"}"#);
     let displaced = profile
-        .assign(&mut prefs, Command::CreateTab, Some(shortcut("cmd-y")))
+        .assign(&mut prefs, Command::NewTab, Some(shortcut("cmd-y")))
         .unwrap()
         .displaced;
-    assert_eq!(displaced, Some(Command::CloseWorkspace));
-    assert_eq!(prefs.get(Command::CloseWorkspace), None);
+    assert_eq!(displaced, Some(Command::KillWorkspace));
+    assert_eq!(prefs.get(Command::KillWorkspace), None);
 }
 
 #[test]
@@ -616,7 +616,7 @@ fn bindings_follow_command_order_and_mirror_each_find_shortcut_immediately() {
             "ctrl-1",
             Some(crate::ui::TERMINAL_KEY_CONTEXT),
         ),
-        (Command::CreateTab, "cmd-t", None),
+        (Command::NewTab, "cmd-t", None),
         (Command::CloseTab, "cmd-shift-w", None),
         (
             Command::SplitRight,
@@ -746,7 +746,7 @@ fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord()
     profile
         .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
         .unwrap();
-    let prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
+    let prefs = preferences(r#"{"new_workspace":"shift-cmd-7","new_tab":"cmd-/"}"#);
     assert_eq!(prefs.validate(), Ok(()));
     let resolved = profile.resolve(&prefs);
     assert_eq!(
@@ -754,12 +754,12 @@ fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord()
         Some(Command::NewWorkspace)
     );
     assert_eq!(
-        resolved.state(Command::CreateTab),
+        resolved.state(Command::NewTab),
         KeybindingState::Displaced {
             by: Command::NewWorkspace
         }
     );
-    for target in [Command::CloseTab, Command::NewWorkspace, Command::CreateTab] {
+    for target in [Command::CloseTab, Command::NewWorkspace, Command::NewTab] {
         let mut assigned = prefs.clone();
         let displaced = profile
             .assign(&mut assigned, target, Some(shortcut("cmd-/")))
@@ -772,7 +772,7 @@ fn layout_collisions_have_one_owner_and_recording_reassigns_the_resolved_chord()
         assert_eq!(assigned.validate(), Ok(()));
         let resolved = profile.resolve(&assigned);
         assert_eq!(resolved.owner(&shortcut("cmd-/")), Some(target));
-        for previous in [Command::NewWorkspace, Command::CreateTab] {
+        for previous in [Command::NewWorkspace, Command::NewTab] {
             if previous != target {
                 assert_eq!(resolved.shortcut(previous), None);
             }
@@ -805,11 +805,7 @@ fn layout_derived_terminal_controls_cannot_be_installed_or_recorded() {
         Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
     );
     assert_eq!(
-        profile.assign(
-            &mut prefs,
-            Command::CreateTab,
-            Some(shortcut("ctrl-shift-7"))
-        ),
+        profile.assign(&mut prefs, Command::NewTab, Some(shortcut("ctrl-shift-7"))),
         Err(Reservation::Terminal(TerminalConvention::ControlCharacter))
     );
     assert_eq!(prefs, before);
@@ -831,7 +827,7 @@ fn resetting_a_default_reclaims_it_from_every_layout_conflict() {
     profile
         .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
         .unwrap();
-    let mut prefs = preferences(r#"{"new_workspace":"shift-cmd-7","create_tab":"cmd-/"}"#);
+    let mut prefs = preferences(r#"{"new_workspace":"shift-cmd-7","new_tab":"cmd-/"}"#);
     profile.reset(&mut prefs, Command::CloseTab);
     assert_eq!(prefs.validate(), Ok(()));
     assert_eq!(
@@ -856,7 +852,7 @@ fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
     profile
         .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
         .unwrap();
-    let prefs = preferences(r#"{"new_workspace":"shift-cmd-ı","create_tab":"shift-cmd-i"}"#);
+    let prefs = preferences(r#"{"new_workspace":"shift-cmd-ı","new_tab":"shift-cmd-i"}"#);
     let resolved = profile.resolve(&prefs);
     let native = gpui::Keystroke {
         modifiers: gpui::Modifiers::command(),
@@ -866,7 +862,7 @@ fn shifted_ascii_outputs_keep_native_identity_when_bindings_are_installed() {
     let other = gpui::Keystroke::parse("shift-cmd-i").unwrap();
     for (command, matches, excludes) in [
         (Command::NewWorkspace, &native, &other),
-        (Command::CreateTab, &other, &native),
+        (Command::NewTab, &other, &native),
     ] {
         let bindings = resolved.key_bindings();
         let binding = bindings
@@ -889,7 +885,7 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
     let mut json = serde_json::to_value(crate::settings::SettingsDocument::default()).unwrap();
     json["keybindings"] = serde_json::json!({
         "new_workspace": "ctrl-shift-2",
-        "create_tab": "ctrl-shift-6",
+        "new_tab": "ctrl-shift-6",
         "close_tab": "ctrl-shift--",
     });
     let document = crate::settings::parse_settings(&serde_json::to_vec(&json).unwrap()).unwrap();
@@ -902,7 +898,7 @@ fn control_shift_reservations_are_resolved_after_the_settings_document_is_read()
         vec![],
     )
     .unwrap();
-    for command in [Command::NewWorkspace, Command::CreateTab, Command::CloseTab] {
+    for command in [Command::NewWorkspace, Command::NewTab, Command::CloseTab] {
         assert_eq!(
             us.resolve(&document.keybindings).inactive_override(command),
             Some(Reservation::Terminal(TerminalConvention::ControlCharacter))
@@ -948,7 +944,7 @@ fn an_inactive_override_keeps_its_reason_when_another_override_owns_its_default(
         TerminalConventions::ControlShiftShortcuts,
         [
             (
-                Command::CreateTab,
+                Command::NewTab,
                 Some(DefaultBinding::new("ctrl-shift-t", &[])),
             ),
             (
@@ -972,21 +968,21 @@ fn an_inactive_override_keeps_its_reason_when_another_override_owns_its_default(
         ),
     ] {
         let mut prefs = KeybindingPreferences::default();
-        prefs.set(Command::CreateTab, Some(shortcut(retained)));
+        prefs.set(Command::NewTab, Some(shortcut(retained)));
         prefs.set(Command::SplitRight, Some(shortcut("ctrl-shift-t")));
         let original = prefs.clone();
         assert_eq!(prefs.validate(), Ok(()));
 
         let resolved = profile.resolve(&prefs);
 
-        assert_eq!(resolved.inactive_override(Command::CreateTab), Some(reason));
+        assert_eq!(resolved.inactive_override(Command::NewTab), Some(reason));
         assert_eq!(
-            resolved.state(Command::CreateTab),
+            resolved.state(Command::NewTab),
             KeybindingState::Displaced {
                 by: Command::SplitRight
             }
         );
-        assert_eq!(resolved.shortcut(Command::CreateTab), None);
+        assert_eq!(resolved.shortcut(Command::NewTab), None);
         assert_eq!(
             resolved.owner(&shortcut("ctrl-shift-t")),
             Some(Command::SplitRight)
@@ -1002,7 +998,7 @@ fn an_inactive_override_keeps_its_reason_when_another_override_owns_its_default(
         assert!(!resolved.key_bindings().iter().any(|binding| {
             binding
                 .action()
-                .partial_eq(Command::CreateTab.action().as_ref())
+                .partial_eq(Command::NewTab.action().as_ref())
         }));
         assert_eq!(prefs, original);
     }

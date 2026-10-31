@@ -18,7 +18,7 @@ mod server;
 pub(super) struct SidebarWorktrees {
     form: Option<Entity<WorktreeForm>>,
     close_fallbacks: std::collections::HashMap<WorkspaceId, spaceterm_server::hierarchy::Mutation>,
-    created_shared: Option<(WorkspaceId, PathBuf, u64)>,
+    created: Option<(WorkspaceId, PathBuf, u64)>,
     /// The removal being checked, confirmed, or run. One runs at a time.
     removal: Option<u64>,
     removal_generation: u64,
@@ -57,7 +57,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.open_shared_worktree(workspace_id, worktree_id, focus, window, cx)
+        self.open_server_worktree(workspace_id, worktree_id, focus, window, cx)
             .unwrap_or(false)
     }
 
@@ -70,7 +70,7 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) -> bool {
         // The owning server opens the first Tab.
-        self.is_shared_workspace(workspace_id)
+        self.has_workspace(workspace_id)
             && self.open_server_worktree_tab(workspace_id, worktree_id, window, cx)
     }
 
@@ -78,7 +78,7 @@ impl WorkspaceManager {
     /// own computer, whichever route reaches it.
     pub(super) fn creates_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
         self.owner_writes_worktrees(workspace_id, cx)
-            && self.shared_inventory(workspace_id).is_some()
+            && self.workspace_inventory(workspace_id).is_some()
     }
 
     /// Whether this client has a writer for the server that owns a Workspace, which takes its
@@ -87,9 +87,9 @@ impl WorkspaceManager {
         use crate::ui::server_worktrees::Client;
 
         let Some(origin) = self
-            .shared
+            .binding
             .owner(workspace_id)
-            .and_then(|key| self.shared.origin(key))
+            .and_then(|key| self.binding.origin(key))
         else {
             return false;
         };
@@ -113,9 +113,9 @@ impl WorkspaceManager {
     /// The name of the other computer whose server owns a Workspace, or `None` for this
     /// computer's.
     pub(super) fn owning_machine(&self, workspace_id: WorkspaceId) -> Option<String> {
-        self.shared
+        self.binding
             .owner(workspace_id)
-            .and_then(|key| self.shared.origin(key))
+            .and_then(|key| self.binding.origin(key))
             .and_then(super::ServerOrigin::remote_name)
     }
 
@@ -134,11 +134,11 @@ impl WorkspaceManager {
         {
             return false;
         }
-        self.is_shared_workspace(workspace_id) && self.new_shared_worktree(workspace_id, window, cx)
+        self.has_workspace(workspace_id) && self.new_server_worktree(workspace_id, window, cx)
     }
 
     pub(super) fn set_worktrees_expanded(&mut self, workspace_id: WorkspaceId, expanded: bool) {
-        self.set_shared_worktrees_expanded(workspace_id, expanded);
+        self.set_server_worktrees_expanded(workspace_id, expanded);
     }
 
     /// The Worktrees a Workspace row discloses, or `None` for a Workspace outside a repository.
@@ -147,7 +147,7 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         cx: &App,
     ) -> Option<WorktreeSection> {
-        self.shared_worktree_section(workspace_id, cx)
+        self.server_worktree_section(workspace_id, cx)
     }
 }
 

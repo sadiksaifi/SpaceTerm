@@ -123,7 +123,7 @@ impl Drop for PermissionSetupPreparation {
     not(target_os = "macos"),
     allow(
         dead_code,
-        reason = "only the macOS permission worker retains setup cancellation signals in production"
+        reason = "only the macOS server permission adapter retains setup cancellation signals in production"
     )
 )]
 pub(crate) struct PermissionSetupCancellation {
@@ -135,7 +135,7 @@ impl PermissionSetupCancellation {
         not(target_os = "macos"),
         allow(
             dead_code,
-            reason = "only the macOS permission worker checks setup cancellation in production"
+            reason = "only the macOS server permission adapter checks setup cancellation in production"
         )
     )]
     pub(crate) fn is_cancelled(&self) -> bool {

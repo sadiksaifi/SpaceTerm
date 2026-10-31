@@ -213,7 +213,7 @@ impl Store {
     }
 }
 
-/// The Network Access policy, its exposure and the unrevoked paired devices of a stopped
+/// The Network Access policy, whether it is on and the unrevoked paired devices of a stopped
 /// server, read without creating or changing its state. A server that never stored direct
 /// state has no policy and no devices.
 pub(crate) fn observe(

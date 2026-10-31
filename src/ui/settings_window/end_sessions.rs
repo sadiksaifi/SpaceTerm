@@ -10,8 +10,8 @@ use super::server_list::ServerChoice;
 use super::*;
 use crate::ui::chrome_typography::ChromeTextStyleExt as _;
 use crate::ui::server_worktrees::Client;
-use crate::ui::shared_workspaces::SharedRefusalReason;
 use crate::ui::sidebar_window::form::CaptionTone;
+use crate::ui::workspaces::WorkspaceRefusalReason;
 use gpui::Task;
 use spaceterm_server::hierarchy::{CloseInventory, Id, Mutation, Outcome, RetainedOutcome};
 use spaceterm_ui::{
@@ -41,7 +41,7 @@ pub(super) enum Availability {
 }
 
 impl Availability {
-    fn of(snapshot: &crate::terminal::shared_workspace::SharedWorkspaceSnapshot) -> Self {
+    fn of(snapshot: &crate::terminal::workspace_client::WorkspaceSnapshot) -> Self {
         if !snapshot.connected {
             return Self::Offline;
         }
@@ -97,7 +97,7 @@ pub(super) enum Ended {
     /// The server's Sessions changed after the person confirmed. The server answers a stale
     /// confirmation this way too, restart or not.
     Changed,
-    Refused(SharedRefusalReason),
+    Refused(WorkspaceRefusalReason),
     /// The server answered with a refusal that has no specific explanation.
     Failed,
     /// The answer never arrived. The writer's recovery resolves the original request.
@@ -389,12 +389,12 @@ impl SettingsWindow {
                 }
             }
             Availability::Offline | Availability::Unknown => {
-                state.ended = Some(Ended::Refused(SharedRefusalReason::Offline));
+                state.ended = Some(Ended::Refused(WorkspaceRefusalReason::Offline));
                 cx.notify();
                 return;
             }
             Availability::Pending => {
-                state.ended = Some(Ended::Refused(SharedRefusalReason::Pending));
+                state.ended = Some(Ended::Refused(WorkspaceRefusalReason::Pending));
                 cx.notify();
                 return;
             }

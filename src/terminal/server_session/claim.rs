@@ -6,7 +6,7 @@ use spaceterm_server::connection::link::{LinkEvent, LinkSink};
 mod process_tests;
 
 pub(super) struct ClaimWorker<'a> {
-    pub state: &'a DevelopmentPaneState,
+    pub state: &'a ServerPaneState,
     pub pane_id: spaceterm_server::hierarchy::Id,
     pub alive: &'a AtomicBool,
     pub attachment: &'a Option<spaceterm_server::attachments::AttachmentPermit>,
@@ -28,7 +28,7 @@ pub(super) struct Granted {
 /// facts, a detached Workspace, or the end of the link. A person's Start, selection, repair or
 /// Take Over wakes the claim directly, so the claim never asks the server again on a timer.
 pub(super) struct ControlWatch {
-    state: Arc<DevelopmentPaneState>,
+    state: Arc<ServerPaneState>,
     pane: spaceterm_server::hierarchy::Id,
     /// This Pane's control facts in the last inventory delivered.
     seen: Mutex<Option<ControlFacts>>,
@@ -65,7 +65,7 @@ impl ControlFacts {
 
 impl ControlWatch {
     pub(super) fn new(
-        state: Arc<DevelopmentPaneState>,
+        state: Arc<ServerPaneState>,
         pane: spaceterm_server::hierarchy::Id,
     ) -> Arc<Self> {
         let detached: Arc<dyn Fn() + Send + Sync> = {
@@ -84,7 +84,7 @@ impl ControlWatch {
     /// the returned watch lives.
     pub(super) fn start(
         server: &ServerConnection,
-        state: Arc<DevelopmentPaneState>,
+        state: Arc<ServerPaneState>,
         pane: spaceterm_server::hierarchy::Id,
         permit: Option<&spaceterm_server::attachments::AttachmentPermit>,
     ) -> Arc<Self> {
@@ -119,7 +119,7 @@ impl LinkSink for ControlWatch {
 
 /// Runs in the presenter's send turn, so replacement cannot overtake recovery bookkeeping.
 pub(super) fn exchange(
-    state: &DevelopmentPaneState,
+    state: &ServerPaneState,
     pane_id: spaceterm_server::hierarchy::Id,
     request: &Request,
     exchange: impl FnOnce(&Request) -> Result<Reply, ServerError>,
@@ -131,7 +131,7 @@ pub(super) fn exchange(
 }
 
 fn bookkept(
-    state: &DevelopmentPaneState,
+    state: &ServerPaneState,
     pane_id: spaceterm_server::hierarchy::Id,
     request: &Request,
     exchange: impl FnOnce(&Request) -> Result<Reply, ServerError>,
@@ -275,13 +275,13 @@ impl ClaimWorker<'_> {
                 state.set_session_end(session_ended);
                 state.admission(Admission::Waiting);
                 state.set(if unavailable {
-                    DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                    ServerPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 } else if let Some(end) = session_ended {
-                    DevelopmentPaneStatus::SessionEnded(end)
+                    ServerPaneStatus::SessionEnded(end)
                 } else if fresh {
-                    DevelopmentPaneStatus::Connecting
+                    ServerPaneStatus::Connecting
                 } else {
-                    DevelopmentPaneStatus::Restored
+                    ServerPaneStatus::Restored
                 });
                 if !alive.load(Ordering::Acquire)
                     || attachment.as_ref().is_some_and(|permit| !permit.active())
@@ -391,7 +391,7 @@ impl ClaimWorker<'_> {
                 }
                 if state.take_over.swap(false, Ordering::AcqRel) {
                     state.admission(Admission::Pending);
-                    state.set(DevelopmentPaneStatus::TakingOver);
+                    state.set(ServerPaneStatus::TakingOver);
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = Some(update.generation);
@@ -443,7 +443,7 @@ mod tests {
     use super::*;
 
     fn run_claim(
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         mut server: impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<Option<Granted>, ServerError> {
         ClaimWorker {
@@ -516,7 +516,7 @@ mod tests {
                 panic!("new Tab inventory unavailable");
             };
             let pane = inventory.workspaces[0].tabs.last().unwrap().root_pane;
-            let state = DevelopmentPaneState::new();
+            let state = ServerPaneState::new();
             state.start_created();
             let grant = ClaimWorker {
                 state: &state,
@@ -555,7 +555,7 @@ mod tests {
         host.shutdown().unwrap();
         assert_eq!(observations.len(), 15);
         for (pending, status, input) in observations {
-            assert_eq!(status, DevelopmentPaneStatus::Connecting);
+            assert_eq!(status, ServerPaneStatus::Connecting);
             assert_eq!(input, crate::terminal::InteractiveInput::Pending);
             assert!(
                 !pending,
@@ -581,7 +581,7 @@ mod tests {
             LogicalCellSize::new(8.0, 16.0),
             BackingScale::ONE,
         );
-        let state = Arc::new(DevelopmentPaneState::new());
+        let state = Arc::new(ServerPaneState::new());
         state.start_created();
         let (input, _receiver) = mpsc::sync_channel(1);
         let handle = PresentationHandle {
@@ -714,7 +714,7 @@ mod tests {
                 if revoked {
                     host.revoked([1; 32]);
                 }
-                let state = Arc::new(DevelopmentPaneState::new());
+                let state = Arc::new(ServerPaneState::new());
                 let mut view = ServerPaneView::new(state.clone());
                 if !delayed {
                     state.select();
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn creation_starts_only_a_fresh_controlled_pane_and_never_rearms_on_reconnect() {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         state.start_created();
         let mut starts = 0;
         let result = run_claim(&state, |request| match request {
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn creation_and_selection_are_consumed_together_before_a_later_server_restart() {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         state.start_created();
         state.select();
         let lease = Lease {
@@ -833,7 +833,7 @@ mod tests {
         assert!(granted.is_some());
         // A hidden grant has not received a screen yet. Reselecting its Connecting placeholder
         // selects the admitted shell and cannot authorize first use after a later restart.
-        assert_eq!(state.status(), DevelopmentPaneStatus::Connecting);
+        assert_eq!(state.status(), ServerPaneStatus::Connecting);
         state.select();
         let mut observations = 0;
         let _ = run_claim(&state, |request| {
@@ -860,7 +860,7 @@ mod tests {
     #[test]
     fn creation_intent_does_not_start_retained_or_taken_over_work() {
         for taken_over in [false, true] {
-            let state = DevelopmentPaneState::new();
+            let state = ServerPaneState::new();
             state.start_created();
             let mut observations = 0;
             let _ = run_claim(&state, |request| {
@@ -899,7 +899,7 @@ mod tests {
         }
     }
 
-    fn lose_start(state: &DevelopmentPaneState) {
+    fn lose_start(state: &ServerPaneState) {
         let mut starts = 0;
         let result = run_claim(state, |request| match request {
             Request::SelectPane {
@@ -922,7 +922,7 @@ mod tests {
 
     #[test]
     fn a_lost_takeover_of_another_clients_restored_pane_blocks_another_start() {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         let offered = || Reply::Takeover {
             target: pane::PaneTarget {
                 server: [1; 32],
@@ -982,7 +982,7 @@ mod tests {
 
     #[test]
     fn a_dormant_observation_cannot_replace_a_delayed_start_on_the_old_connection() {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         lose_start(&state);
         // The old request is still queued at the host. The fresh connection overtakes it.
         let mut observations = 0;
@@ -1006,7 +1006,7 @@ mod tests {
         assert!(matches!(result, Err(ServerError::Protocol)));
         assert!(state.start_unconfirmed());
         // Even an explicit action reaching the backend cannot produce another shell start.
-        state.set(DevelopmentPaneStatus::SessionEnded(
+        state.set(ServerPaneStatus::SessionEnded(
             pane::SessionEnd::EndAllSessions,
         ));
         state.start_restored();
@@ -1025,9 +1025,7 @@ mod tests {
             original: "/original".into(),
         };
         *state.recovery.lock().unwrap() = Some(target.clone());
-        state.set(DevelopmentPaneStatus::Failed(
-            ServerError::DirectoryUnavailable,
-        ));
+        state.set(ServerPaneStatus::Failed(ServerError::DirectoryUnavailable));
         state.repair_directory(target, "/replacement".into());
         assert!(state.repair.lock().unwrap().is_none());
         // The delayed original finally runs. Observing its live grant settles it without replay.
@@ -1055,7 +1053,7 @@ mod tests {
 
     #[test]
     fn a_new_server_boot_settles_the_old_start_before_a_fresh_start() {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         state.select();
         lose_start(&state);
         let mut starts = 0;
@@ -1090,7 +1088,7 @@ mod tests {
         let controls = PaneControls::default();
         let server = ServerConnection::for_identity("spaceterm-development").unwrap();
         let open = |controls: &PaneControls, pane| {
-            DevelopmentServerSessionFactory::for_origin(server.clone(), controls, None, None, pane)
+            ServerSessionFactory::for_origin(server.clone(), controls, None, None, pane)
         };
         let (old, state) = open(&controls, [2; 32]);
         lose_start(&state);
@@ -1161,7 +1159,7 @@ mod tests {
             // entirely in memory while retaining the validated pairing fences.
             let server = disconnected_direct_handle(31, 32, 6);
             let client = cx.update(|cx| Client::for_direct([31; 32], server.clone(), cx));
-            let (factory, state) = DevelopmentServerSessionFactory::for_origin(
+            let (factory, state) = ServerSessionFactory::for_origin(
                 server.clone(),
                 &client.controls,
                 None,
@@ -1177,7 +1175,7 @@ mod tests {
             drop(state);
             drop(client);
             let client = cx.update(|cx| Client::for_direct([31; 32], server.clone(), cx));
-            let (_, state) = DevelopmentServerSessionFactory::for_origin(
+            let (_, state) = ServerSessionFactory::for_origin(
                 server.clone(),
                 &client.controls,
                 None,
@@ -1209,7 +1207,7 @@ mod tests {
             let same_identity = disconnected_direct_handle(31, 32, 6);
             let replacement =
                 cx.update(|cx| Client::for_direct([31; 32], same_identity.clone(), cx));
-            let (_, replacement_state) = DevelopmentServerSessionFactory::for_origin(
+            let (_, replacement_state) = ServerSessionFactory::for_origin(
                 same_identity,
                 &replacement.controls,
                 None,
@@ -1224,17 +1222,12 @@ mod tests {
                 disconnected_direct_handle(31, 32, 7),
             ] {
                 let client = cx.update(|cx| Client::for_direct([31; 32], other.clone(), cx));
-                let (_, other_state) = DevelopmentServerSessionFactory::for_origin(
-                    other,
-                    &client.controls,
-                    None,
-                    None,
-                    [2; 32],
-                );
+                let (_, other_state) =
+                    ServerSessionFactory::for_origin(other, &client.controls, None, None, [2; 32]);
                 assert!(!other_state.start_unconfirmed());
             }
             let independent = cx.update(|cx| Client::for_direct([34; 32], server.clone(), cx));
-            let (_, independent_state) = DevelopmentServerSessionFactory::for_origin(
+            let (_, independent_state) = ServerSessionFactory::for_origin(
                 server,
                 &independent.controls,
                 None,
@@ -1314,7 +1307,7 @@ mod tests {
                 next_sequence: 1,
             }))
         };
-        let state = Arc::new(DevelopmentPaneState::new());
+        let state = Arc::new(ServerPaneState::new());
         let watch = ControlWatch::new(Arc::clone(&state), pane);
         // The first revision the watch sees is new to it.
         watch.deliver(revision(9, 1, 1));
@@ -1390,7 +1383,7 @@ mod tests {
     /// Pane waits on Session Ended until Start Session.
     #[test]
     fn a_selection_never_starts_an_ended_pane() {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         let alive = AtomicBool::new(true);
         let size = Mutex::new(PaneSize {
             columns: 80,
@@ -1449,9 +1442,7 @@ mod tests {
                         );
                         assert_eq!(
                             state.status(),
-                            DevelopmentPaneStatus::SessionEnded(pane::SessionEnd::Exited {
-                                code: 1
-                            })
+                            ServerPaneStatus::SessionEnded(pane::SessionEnd::Exited { code: 1 })
                         );
                         state.start_restored();
                         ended()
@@ -1478,7 +1469,7 @@ mod tests {
 
     #[test]
     fn takeover_of_an_ended_pane_starts_it_in_one_request() {
-        let state = DevelopmentPaneState::new();
+        let state = ServerPaneState::new();
         let alive = AtomicBool::new(true);
         let size = Mutex::new(PaneSize {
             columns: 80,

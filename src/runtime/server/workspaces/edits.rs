@@ -22,7 +22,7 @@ pub(super) struct Waiting {
     mutation: Option<Mutation>,
 }
 
-impl SharedWorkspaceHost {
+impl WorkspaceHost {
     /// Starts pushing inventory to a connection, beginning with the current revision.
     pub(super) fn subscribe(&mut self, device: Id, connection: Id, outbox: Outbox) {
         self.repositories.subscribe(connection);

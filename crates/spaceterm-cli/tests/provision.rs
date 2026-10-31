@@ -15,10 +15,10 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
     assert!(output.stderr.is_empty());
     let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(info["schema"], 1);
-    assert_eq!(info["identity"], env!("SPACETERM_SERVER_IDENTITY"));
-    assert_eq!(info["target"], env!("SPACETERM_SERVER_TARGET"));
-    assert_eq!(info["version"], env!("SPACETERM_SERVER_VERSION"));
-    assert_eq!(info["commit"], env!("SPACETERM_SERVER_COMMIT"));
+    assert_eq!(info["identity"], env!("SPACETERM_CLI_IDENTITY"));
+    assert_eq!(info["target"], env!("SPACETERM_CLI_TARGET"));
+    assert_eq!(info["version"], env!("SPACETERM_CLI_VERSION"));
+    assert_eq!(info["commit"], env!("SPACETERM_CLI_COMMIT"));
     assert_eq!(info["protocol_major"], spaceterm_server::protocol::MAJOR);
     assert_eq!(info.as_object().unwrap().len(), 7, "{info}");
 }

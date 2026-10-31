@@ -1,14 +1,14 @@
 use super::*;
-use crate::runtime::server::tests::{host, shared_inventory, size};
+use crate::runtime::server::tests::{host, size, workspace_inventory};
 use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
 
 #[test]
 fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_session() {
     for close_tab in [false, true] {
         for take_back in [false, true] {
-            let mut host = SharedWorkspaceHost::new(host());
+            let mut host = WorkspaceHost::new(host());
             host.prepare_initial_organization().unwrap();
-            let initial = shared_inventory(&mut host);
+            let initial = workspace_inventory(&mut host);
             let workspace = &initial.workspaces[0];
             let tab = workspace.root_tab;
             let pane = workspace.tabs[0].root_pane;
@@ -37,7 +37,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
                     pane,
                 }
             };
-            let reviewed = shared_inventory(&mut host);
+            let reviewed = workspace_inventory(&mut host);
             let mut confirmation = reviewed.close_confirmation(target).unwrap();
             confirmation.own_controls = Some(
                 reviewed
@@ -56,7 +56,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
             }), Reply::Attached { lease } if lease.session == original.session)
             );
             assert_eq!(
-                shared_inventory(&mut host).close,
+                workspace_inventory(&mut host).close,
                 reviewed.close,
                 "resuming the same grant does not invalidate an idle own close"
             );
@@ -67,7 +67,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
                 }), Reply::Attached { lease } if lease.session == original.session)
                 );
             }
-            let current = shared_inventory(&mut host);
+            let current = workspace_inventory(&mut host);
             assert_eq!(
                 current.close.as_ref().unwrap().sessions,
                 reviewed.close.as_ref().unwrap().sessions
@@ -79,7 +79,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
             assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
                 sequence: 2, mutation: Mutation::Close { target, confirmation },
             }), Reply::Outcome(result) if result.outcome == Outcome::StaleConfirmation));
-            let after = shared_inventory(&mut host);
+            let after = workspace_inventory(&mut host);
             assert_eq!(
                 after.workspaces[0]
                     .tabs
@@ -103,7 +103,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
             assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
                 sequence: 3, mutation: Mutation::Close { target, confirmation },
             }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
-            assert_eq!(shared_inventory(&mut host).workspaces[0].tabs.len(), 1);
+            assert_eq!(workspace_inventory(&mut host).workspaces[0].tabs.len(), 1);
             host.shutdown().unwrap();
         }
     }
@@ -111,9 +111,9 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
 
 #[test]
 fn end_all_sessions_ignores_control_changes_after_its_review() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let Reply::Attached { lease } = host.request(
         [1; 32],
         [1; 32],
@@ -126,7 +126,7 @@ fn end_all_sessions_ignores_control_changes_after_its_review() {
     ) else {
         panic!("Pane starts");
     };
-    let confirmation = shared_inventory(&mut host).close.unwrap();
+    let confirmation = workspace_inventory(&mut host).close.unwrap();
     assert!(matches!(
         host.request(
             [2; 32],
@@ -143,7 +143,7 @@ fn end_all_sessions_ignores_control_changes_after_its_review() {
         sequence: 1, mutation: Mutation::EndAllSessions { confirmation },
     }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
     assert_eq!(
-        shared_inventory(&mut host).close.unwrap().sessions[0].session,
+        workspace_inventory(&mut host).close.unwrap().sessions[0].session,
         None
     );
     host.shutdown().unwrap();

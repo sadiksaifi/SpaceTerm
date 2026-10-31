@@ -29,7 +29,7 @@ const SERVER_MACHINE: &str = "spaceterm-server";
 
 /// The server's latest Git facts, and when this client first saw each directory's current facts.
 #[derive(Debug, Default)]
-pub(crate) struct SharedRepositories {
+pub(crate) struct ServerRepositories {
     snapshot: Option<Snapshot>,
     /// A status reads this as its update time. It changes only when the facts do, so an unchanged
     /// reading presents an unchanged view.
@@ -46,7 +46,7 @@ pub(crate) struct LocalPresentation<'a> {
     pub(crate) pull_request: &'a dyn Fn(&ServerPullRequestKey) -> Option<PullRequest>,
 }
 
-impl SharedRepositories {
+impl ServerRepositories {
     /// Accepts the server's latest reading, and reports whether it differs from the one
     /// presented. A new revision can arrive while the organization revision stays the same, and a
     /// restarted server starts a new revision sequence, so the server boot identifies it too.
@@ -326,7 +326,7 @@ mod tests {
     }
 
     fn present(
-        repositories: &SharedRepositories,
+        repositories: &ServerRepositories,
         preferences: RepositoryStatusPreferences,
         connected: bool,
     ) -> RepositoryView {
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_new_revision_or_server_boot_should_present_new_facts_and_a_repeat_should_not() {
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         let now = Instant::now();
         let restarted = Snapshot {
             boot: [2; 32],
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn unchanged_facts_should_keep_their_update_time_and_changed_facts_should_take_a_new_one() {
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         let first = Instant::now();
         let later = first + Duration::from_secs(30);
         repositories.accept(
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn a_failed_read_or_a_lost_connection_should_present_the_last_facts_as_last_known() {
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         let now = Instant::now();
         repositories.accept(
             Some(&snapshot(
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn decoded_count_failure_keeps_fresh_facts_and_client_pull_request_lookup() {
         let now = Instant::now();
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         repositories.accept(
             Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
             now,
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn decoded_count_progress_keeps_branch_and_last_known_changes_visible() {
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         let now = Instant::now();
         for (revision, counting, changes, expected) in [
             (
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn client_settings_should_decide_what_server_facts_present() {
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         repositories.accept(
             Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
             Instant::now(),
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn a_server_root_should_never_present_as_a_local_path() {
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         repositories.accept(
             Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
             Instant::now(),
@@ -630,7 +630,7 @@ mod tests {
         }
     }
 
-    fn listed(repositories: &SharedRepositories, directory: &str) -> Vec<PathBuf> {
+    fn listed(repositories: &ServerRepositories, directory: &str) -> Vec<PathBuf> {
         repositories
             .worktrees(Path::new(directory))
             .expect("the directory has a listing")
@@ -651,9 +651,9 @@ mod tests {
             listing("/srv/app-a", "/srv/app", &["/srv/app", "/srv/app-a"]),
             listing("/srv/other", "/srv/other", &["/srv/other"]),
         ];
-        let mut forward = SharedRepositories::default();
-        let mut reversed = SharedRepositories::default();
-        let mut alone = SharedRepositories::default();
+        let mut forward = ServerRepositories::default();
+        let mut reversed = ServerRepositories::default();
+        let mut alone = ServerRepositories::default();
         let mut directories = vec![failed.clone()];
         directories.extend(siblings.iter().cloned());
         forward.accept(Some(&snapshot(1, directories.clone())), Instant::now());
@@ -720,7 +720,7 @@ mod tests {
         // Consume the hierarchy as an observer receives it over SpaceTerm Protocol.
         let mut workspace: Workspace =
             serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         let mut source = listing("/srv/app/src", "/srv/app", &["/srv/app", "/srv/feature"]);
         source.repository = Some(repository("owner"));
         let mut nested = listing("/srv/nested", "/srv/nested", &["/srv/nested"]);
@@ -769,7 +769,7 @@ mod tests {
         );
     }
 
-    fn workspace_listing(repositories: &SharedRepositories) -> Option<Vec<PathBuf>> {
+    fn workspace_listing(repositories: &ServerRepositories) -> Option<Vec<PathBuf>> {
         let inventory = repositories.workspace_worktrees(&workspace_in_removed_worktree())?;
         Some(
             inventory
@@ -794,9 +794,9 @@ mod tests {
         };
         let main = listing("/srv/app", "/srv/app", &["/srv/app", "/srv/app-extra"]);
         let other = listing("/srv/other", "/srv/other", &["/srv/other"]);
-        let mut restarted = SharedRepositories::default();
-        let mut outside_git = SharedRepositories::default();
-        let mut main_unread = SharedRepositories::default();
+        let mut restarted = ServerRepositories::default();
+        let mut outside_git = ServerRepositories::default();
+        let mut main_unread = ServerRepositories::default();
         restarted.accept(
             Some(&snapshot(
                 1,
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn a_directory_outside_a_repository_or_unreported_should_present_nothing() {
-        let mut repositories = SharedRepositories::default();
+        let mut repositories = ServerRepositories::default();
         repositories.accept(
             Some(&snapshot(
                 1,

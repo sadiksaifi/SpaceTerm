@@ -1,6 +1,6 @@
 use super::tests::{
-    Driven, attach, await_screen, await_text, command, create_shared, effects, focus, host,
-    identity, input, lines, native_command, screen, shared_inventory, size, text_key,
+    Driven, attach, await_screen, await_text, command, create_workspace, effects, focus, host,
+    identity, input, lines, native_command, screen, size, text_key, workspace_inventory,
 };
 use super::*;
 use spaceterm_server::protocol::{PaneEvent, screen::ScreenUpdate};
@@ -84,7 +84,7 @@ fn interactive_input_requires_current_focus() {
     host.shutdown().unwrap();
 }
 
-fn capture(host: &mut DevelopmentPaneHost, lease: Lease, bytes: usize, modes: &str) {
+fn capture(host: &mut ServerPaneHost, lease: Lease, bytes: usize, modes: &str) {
     // macOS sh can race process-group creation when a short pipeline leader exits.
     // Keep this byte-capture pipeline in the shell's group so job-control diagnostics cannot corrupt its witness.
     command(
@@ -277,7 +277,7 @@ fn focus_edges_and_focused_pane_ime_are_observable_at_the_pty() {
     host.shutdown().unwrap();
 }
 
-fn unsafe_paste(host: &mut DevelopmentPaneHost, lease: Lease, generation: u64) -> u64 {
+fn unsafe_paste(host: &mut ServerPaneHost, lease: Lease, generation: u64) -> u64 {
     let Reply::Paste(PasteOutcome::ConfirmationRequired(confirmation)) = input(
         host,
         lease,
@@ -368,7 +368,7 @@ fn paste_confirmation_preserves_exact_modal_authority_and_focus_loss_cancels_it(
     host.shutdown().unwrap();
 }
 
-fn screen_with_marker(host: &mut DevelopmentPaneHost, lease: Lease, marker: &str) -> ScreenUpdate {
+fn screen_with_marker(host: &mut ServerPaneHost, lease: Lease, marker: &str) -> ScreenUpdate {
     await_screen(host, [1; 32], lease, |update| {
         lines(update)
             .iter()
@@ -948,10 +948,10 @@ fn application_input_never_starts_selection_or_scrolls_server_history() {
 }
 
 #[test]
-fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearance() {
-    let mut host = SharedWorkspaceHost::new(host());
-    create_shared(&mut host, 1);
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+fn interactive_input_uses_controlling_size_and_terminal_visible_appearance() {
+    let mut host = WorkspaceHost::new(host());
+    create_workspace(&mut host, 1);
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let Reply::Attached { lease } = host.request(
         [1; 32],
         [1; 32],
@@ -962,7 +962,7 @@ fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearanc
             style: None,
         },
     ) else {
-        panic!("shared Pane missing")
+        panic!("server Pane missing")
     };
     let style = PresentationStyle {
         light: true,
@@ -1047,7 +1047,7 @@ fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearanc
 }
 
 /// An explicit selection of `host`'s Pane by `device` over `connection`.
-fn select(host: &mut DevelopmentPaneHost, device: u8, connection: u8) -> Reply {
+fn select(host: &mut ServerPaneHost, device: u8, connection: u8) -> Reply {
     host.select([device; 32], [connection; 32], true, size(), None)
         .unwrap_or_else(Reply::Refused)
 }
@@ -1164,7 +1164,7 @@ fn takeover_preserves_work_and_rejects_former_controller_operations() {
 #[test]
 fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reattachment() {
     use spaceterm_server::{attachments::Attachment, hierarchy::Mutation};
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.request(
         [1; 32],
         [1; 32],
@@ -1177,7 +1177,7 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
             },
         },
     );
-    let inventory = shared_inventory(&mut host);
+    let inventory = workspace_inventory(&mut host);
     let workspace = inventory.workspaces[0].id;
     let pane = inventory.workspaces[0].tabs[0].root_pane;
     let original = Attachment {
@@ -1209,7 +1209,7 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
             },
         },
     );
-    let split = shared_inventory(&mut host).workspaces[0].tabs[0].panes[1].id;
+    let split = workspace_inventory(&mut host).workspaces[0].tabs[0].panes[1].id;
     let Reply::Attached { lease: split_lease } = host.request(
         [1; 32],
         [6; 32],
@@ -1290,7 +1290,7 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
         Request::ReleaseAttachment { attachment: later },
     );
     assert!(screen(&mut host, [9; 32], other).is_ok());
-    assert_eq!(shared_inventory(&mut host).workspaces.len(), 1);
+    assert_eq!(workspace_inventory(&mut host).workspaces.len(), 1);
     host.shutdown().unwrap();
 }
 
@@ -1385,8 +1385,7 @@ fn reconnect_keeps_running_work_and_fences_the_old_connection() {
 fn reconnect_and_stale_generations_cannot_start_or_mutate_a_replacement() {
     let mut host = host();
     host.identity = Some(identity(host.directory.clone()));
-    let passive =
-        |host: &mut DevelopmentPaneHost| host.select([1; 32], [2; 32], false, size(), None);
+    let passive = |host: &mut ServerPaneHost| host.select([1; 32], [2; 32], false, size(), None);
     assert!(matches!(passive(&mut host), Ok(Reply::Restored { .. })));
     assert!(host.pane.is_none(), "a passive selection starts no Session");
     let old = attach(&mut host, 2, true);

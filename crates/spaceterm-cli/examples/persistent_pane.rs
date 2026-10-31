@@ -7,7 +7,7 @@
 mod repository;
 #[expect(
     dead_code,
-    reason = "this exercise selects shared Panes and never uses `support::attach`"
+    reason = "this exercise selects Panes and never uses `support::attach`"
 )]
 mod support;
 #[path = "support/terminal_semantics.rs"]
@@ -138,12 +138,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("IPC fixture exercise failed: {failure}");
     }
     // Never erase an unresolved original or close its Workspace while a write may still run.
-    if server.shared_journal()?.pending().is_some() {
+    if server.operation_journal()?.pending().is_some() {
         return Err("fixture cleanup waits for original-operation recovery".into());
     }
     let cleanup = repository::connect(&server)?;
     let current = repository::inventory(&cleanup)?.0;
-    let target = CloseTarget::Workspace { workspace };
+    let target = CloseTarget::KillWorkspace { workspace };
     let confirmation = current
         .close_confirmation(target)
         .ok_or("fixture close target missing")?;

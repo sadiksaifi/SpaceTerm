@@ -64,9 +64,12 @@ pub(crate) enum ShortcutSelection {
     NativeMenu,
     /// The binding that reaches the terminal first, for a desktop without a native menu whose
     /// text fields use other chords than the terminal.
-    #[allow(
-        dead_code,
-        reason = "only a desktop without a native menu bar composes this selection"
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "only the Linux desktop, which has no native menu bar, composes this selection"
+        )
     )]
     TerminalSurface,
 }
@@ -476,7 +479,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{NewWorkspace, SwitchWorkspace};
+    use crate::ui::{ChooseWorkspace, NewWorkspace};
     use gpui::KeyBinding;
 
     #[gpui::test]
@@ -696,7 +699,7 @@ mod tests {
                 presentation.shortcut(&NewWorkspace).as_deref(),
                 Some("Primary+Y")
             );
-            assert_eq!(presentation.shortcut(&SwitchWorkspace), None);
+            assert_eq!(presentation.shortcut(&ChooseWorkspace), None);
             cx.clear_key_bindings();
             presentation.refresh(cx);
             assert_eq!(presentation.shortcut(&NewWorkspace), None);

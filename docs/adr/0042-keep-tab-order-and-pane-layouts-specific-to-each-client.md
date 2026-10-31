@@ -8,4 +8,4 @@ When a client has no saved arrangement for a Workspace, it starts with the exist
 
 A Tab created by another client appends to the receiving client's Tab display order without becoming active. A Pane created by a split on another client is inserted beside its source Pane in the receiving client's own Pane Layout, without changing focus or zoom state under [ADR 0041](0041-keep-each-clients-view-independent.md). The creator controls the new Pane, and other clients present its Takeover Screen under [ADR 0022](0022-give-one-client-control-of-each-pane.md).
 
-This decision supersedes the single shared Tab order in [ADR 0020](0020-keep-one-tab-order-per-workspace-tagged-by-worktree.md). Pane control remains independent of arrangement.
+[ADR 0020](0020-tag-tabs-by-worktree.md) owns Tab-to-Worktree membership. Pane control remains independent of arrangement.

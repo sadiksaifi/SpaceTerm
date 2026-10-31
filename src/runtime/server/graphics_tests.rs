@@ -4,7 +4,7 @@ use pane::graphics::{CHUNK_BYTES, Error, ImageKey};
 use spaceterm_server::protocol::screen::ScreenUpdate;
 use std::time::Instant;
 
-fn image_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> ScreenUpdate {
+fn image_screen(host: &mut ServerPaneHost, lease: Lease) -> ScreenUpdate {
     await_screen(host, [1; 32], lease, |update| {
         update
             .graphics
@@ -12,7 +12,7 @@ fn image_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> ScreenUpdate {
             .is_some_and(|g| g.as_ref().is_ok_and(|g| !g.images.is_empty()))
     })
 }
-fn chunk(host: &mut DevelopmentPaneHost, lease: Lease, image: ImageKey, offset: usize) -> Reply {
+fn chunk(host: &mut ServerPaneHost, lease: Lease, image: ImageKey, offset: usize) -> Reply {
     host.request(
         [1; 32],
         lease.connection,

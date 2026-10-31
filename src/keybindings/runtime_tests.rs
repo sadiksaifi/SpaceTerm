@@ -2,7 +2,7 @@ use super::*;
 use crate::desktop_profile::DesktopPresentation;
 use crate::keybindings::{Command, Shortcut};
 use crate::platform::application_menu::testing::RecordingApplicationMenuAdapter;
-use crate::ui::CreateTab;
+use crate::ui::NewTab;
 use gpui::{Context, IntoElement, KeyBinding, Render, TestAppContext, Window, div};
 use std::cell::Cell;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ fn rebind_dispatches_the_new_shortcut_and_retires_the_old_one(cx: &mut TestAppCo
     let observed = Rc::clone(&dispatches);
     cx.update(|cx| {
         crate::ui::init(cx).unwrap();
-        cx.on_action(move |_: &CreateTab, _| observed.set(observed.get() + 1));
+        cx.on_action(move |_: &NewTab, _| observed.set(observed.get() + 1));
     });
     let (_, cx) = cx.add_window_view(|_, _| DispatchView);
     cx.simulate_keystrokes("cmd-t");
@@ -32,7 +32,7 @@ fn rebind_dispatches_the_new_shortcut_and_retires_the_old_one(cx: &mut TestAppCo
         KeymapRuntime::profile(cx)
             .assign(
                 &mut preferences,
-                Command::CreateTab,
+                Command::NewTab,
                 Some(Shortcut::parse("cmd-y").unwrap()),
             )
             .unwrap();
@@ -78,21 +78,20 @@ fn replacement_preserves_untagged_positions_and_default_restoration(cx: &mut Tes
         assert!(version == cx.key_bindings().borrow().version());
         assert!(Rc::ptr_eq(&installed, &InstalledKeymap::get(cx)));
 
-        let preferences = serde_json::from_str(r#"{"create_tab":"cmd-y"}"#).unwrap();
+        let preferences = serde_json::from_str(r#"{"new_tab":"cmd-y"}"#).unwrap();
         apply(&preferences, cx);
         let mut expected = baseline.clone();
         let index = expected
             .iter()
             .position(|binding| {
                 binding.meta() == Some(CUSTOMIZABLE_BINDINGS)
-                    && binding.action().partial_eq(&CreateTab)
+                    && binding.action().partial_eq(&NewTab)
             })
             .unwrap();
-        expected[index] =
-            KeyBinding::new("cmd-y", CreateTab, None).with_meta(CUSTOMIZABLE_BINDINGS);
+        expected[index] = KeyBinding::new("cmd-y", NewTab, None).with_meta(CUSTOMIZABLE_BINDINGS);
         assert_bindings_eq(&bindings(cx), &expected);
         assert_eq!(
-            DesktopPresentation::get(cx).shortcut(&CreateTab).as_deref(),
+            DesktopPresentation::get(cx).shortcut(&NewTab).as_deref(),
             Some("Primary+Y")
         );
 
@@ -152,7 +151,7 @@ fn menu_reinstalls_only_when_the_resolved_keymap_changes(cx: &mut TestAppContext
         apply(&same, cx);
         assert_eq!(menu.installs(), 1);
 
-        let changed = serde_json::from_str(r#"{"create_tab":"cmd-y"}"#).unwrap();
+        let changed = serde_json::from_str(r#"{"new_tab":"cmd-y"}"#).unwrap();
         apply(&changed, cx);
         assert_eq!(menu.installs(), 2);
         apply(&changed, cx);
@@ -185,17 +184,17 @@ fn follow_applies_the_current_candidate_immediately(cx: &mut TestAppContext) {
     let settings = settings();
     let token = settings.begin_preview(0).unwrap();
     let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.keybindings = serde_json::from_str(r#"{"create_tab":"cmd-y"}"#).unwrap();
+    candidate.keybindings = serde_json::from_str(r#"{"new_tab":"cmd-y"}"#).unwrap();
     settings.update_preview(&token, candidate).unwrap();
     cx.update(|cx| {
         crate::ui::init(cx).unwrap();
         follow(&settings, cx);
         assert_eq!(
-            InstalledKeymap::get(cx).shortcut(Command::CreateTab),
+            InstalledKeymap::get(cx).shortcut(Command::NewTab),
             Some(&Shortcut::parse("cmd-y").unwrap())
         );
         assert_eq!(
-            DesktopPresentation::get(cx).shortcut(&CreateTab).as_deref(),
+            DesktopPresentation::get(cx).shortcut(&NewTab).as_deref(),
             Some("Primary+Y")
         );
     });
@@ -215,11 +214,11 @@ fn follow_applies_preview_changes_and_reverts_on_cancel_or_drop(cx: &mut TestApp
         cx.observe_global::<InstalledKeymap>(move |cx| {
             observed.set(observed.get() + 1);
             let installed = InstalledKeymap::get(cx);
-            let hint = DesktopPresentation::get(cx).shortcut(&CreateTab);
+            let hint = DesktopPresentation::get(cx).shortcut(&NewTab);
             assert_eq!(
                 hint,
                 installed
-                    .shortcut(Command::CreateTab)
+                    .shortcut(Command::NewTab)
                     .map(|shortcut| DesktopPresentation::get(cx).format(shortcut))
             );
         })
@@ -229,16 +228,16 @@ fn follow_applies_preview_changes_and_reverts_on_cancel_or_drop(cx: &mut TestApp
     for cancel_explicitly in [true, false] {
         let token = settings.begin_preview(0).unwrap();
         let mut candidate = (*settings.snapshot().candidate).clone();
-        candidate.keybindings = serde_json::from_str(r#"{"create_tab":"cmd-y"}"#).unwrap();
+        candidate.keybindings = serde_json::from_str(r#"{"new_tab":"cmd-y"}"#).unwrap();
         settings.update_preview(&token, candidate).unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
             assert_eq!(
-                InstalledKeymap::get(cx).shortcut(Command::CreateTab),
+                InstalledKeymap::get(cx).shortcut(Command::NewTab),
                 Some(&Shortcut::parse("cmd-y").unwrap())
             );
             assert_eq!(
-                DesktopPresentation::get(cx).shortcut(&CreateTab).as_deref(),
+                DesktopPresentation::get(cx).shortcut(&NewTab).as_deref(),
                 Some("Primary+Y")
             );
         });
@@ -263,12 +262,12 @@ fn following_another_settings_owner_retires_the_previous_subscription(cx: &mut T
     });
     let token = previous.begin_preview(0).unwrap();
     let mut candidate = (*previous.snapshot().candidate).clone();
-    candidate.keybindings = serde_json::from_str(r#"{"create_tab":"cmd-y"}"#).unwrap();
+    candidate.keybindings = serde_json::from_str(r#"{"new_tab":"cmd-y"}"#).unwrap();
     previous.update_preview(&token, candidate).unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
         assert_eq!(
-            InstalledKeymap::get(cx).shortcut(Command::CreateTab),
+            InstalledKeymap::get(cx).shortcut(Command::NewTab),
             Some(&Shortcut::parse("cmd-t").unwrap())
         );
     });
@@ -300,7 +299,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
             .unwrap(),
     )));
     let preferences: KeybindingPreferences =
-        serde_json::from_str(r#"{"create_tab":"shift-cmd-7","new_workspace":"cmd-§"}"#).unwrap();
+        serde_json::from_str(r#"{"new_tab":"shift-cmd-7","new_workspace":"cmd-§"}"#).unwrap();
     let retained = serde_json::to_value(&preferences).unwrap();
     let menu = Rc::new(RecordingApplicationMenuAdapter::default());
     let dispatches = Rc::new(Cell::new(0));
@@ -319,7 +318,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
         install(profile, cx);
         attach_application_menu(menu.clone(), cx);
         apply(&preferences, cx);
-        cx.on_action(move |_: &CreateTab, _| observed.set(observed.get() + 1));
+        cx.on_action(move |_: &NewTab, _| observed.set(observed.get() + 1));
     });
     let (_, cx) = cx.add_window_view(|_, _| DispatchView);
     cx.simulate_keystrokes("cmd-&");
@@ -350,7 +349,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
             ))
         );
         assert_eq!(
-            DesktopPresentation::get(cx).shortcut(&CreateTab).as_deref(),
+            DesktopPresentation::get(cx).shortcut(&NewTab).as_deref(),
             Some("Primary+/")
         );
         assert!(
@@ -421,10 +420,10 @@ fn layout_changes_replace_fixed_and_control_bindings_without_changing_their_posi
         )
         .unwrap();
         cx.clear_key_bindings();
-        cx.bind_keys([KeyBinding::new("ctrl-shift-a", CreateTab, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-a", NewTab, None)]);
         cx.bind_keys(profile.control_bindings().iter().cloned());
         cx.bind_keys(profile.fixed_bindings().iter().cloned());
-        cx.bind_keys([KeyBinding::new("ctrl-shift-b", CreateTab, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-b", NewTab, None)]);
         install(profile, cx);
         attach_application_menu(menu.clone(), cx);
         cx.on_action(move |_: &crate::ui::settings_window::OpenSettings, _| {

@@ -19,7 +19,7 @@ pub(crate) enum CloseTarget {
         workspace_id: WorkspaceId,
         worktree_id: WorktreeId,
     },
-    Workspace(WorkspaceId),
+    KillWorkspace(WorkspaceId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

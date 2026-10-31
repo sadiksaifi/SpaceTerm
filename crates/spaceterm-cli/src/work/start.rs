@@ -21,7 +21,7 @@ pub fn start(cli: &Cli) -> Option<Output> {
     if !execute::handles(&cli.command) {
         return None;
     }
-    let credentials = CliCredentials::new(env!("SPACETERM_SERVER_IDENTITY"));
+    let credentials = CliCredentials::new(env!("SPACETERM_CLI_IDENTITY"));
     let mut output = selected(cli, &credentials);
     credentials.report(&mut output.envelope);
     Some(output)
@@ -45,7 +45,7 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
     if let Err(failure) = execute::validate(&cli.command, local) {
         return failed(failure);
     }
-    let identity = env!("SPACETERM_SERVER_IDENTITY");
+    let identity = env!("SPACETERM_CLI_IDENTITY");
     let timeout = cli.global.timeout.unwrap_or_else(|| {
         if matches!(
             cli.command,

@@ -7,7 +7,7 @@
 """Prepare both signed nonproduction server targets from the current source.
 
 macOS builds natively on a Mac, including current uncommitted source. Linux cross-builds
-locally. Linux hosts need SPACETERM_SERVER_ARTIFACTS with a Mac-built target from the same
+locally. Linux hosts need SPACETERM_CLI_ARTIFACTS with a Mac-built target from the same
 source snapshot. No production signing credentials are required.
 """
 

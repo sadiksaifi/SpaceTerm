@@ -1,11 +1,11 @@
 use super::*;
 use crate::runtime::server::tests::{
-    await_screen, await_text, command, focus, history_text, host, lines, screen, shared_inventory,
-    size,
+    await_screen, await_text, command, focus, history_text, host, lines, screen, size,
+    workspace_inventory,
 };
 use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
 
-fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) -> Reply {
+fn select(host: &mut WorkspaceHost, device: u8, pane: Id, explicit: bool) -> Reply {
     host.request(
         [device; 32],
         [device; 32],
@@ -19,7 +19,7 @@ fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) 
 }
 
 /// Commits one edit, then ticks as the server does, which ends the work a retained edit deleted.
-fn mutate(host: &mut SharedWorkspaceHost, device: u8, sequence: u64, mutation: Mutation) -> Id {
+fn mutate(host: &mut WorkspaceHost, device: u8, sequence: u64, mutation: Mutation) -> Id {
     let reply = host.request(
         [device; 32],
         [device; 32],
@@ -35,8 +35,8 @@ fn mutate(host: &mut SharedWorkspaceHost, device: u8, sequence: u64, mutation: M
     }
 }
 
-fn end_all(host: &mut SharedWorkspaceHost, device: u8, sequence: u64) {
-    let confirmation = shared_inventory(host).close.unwrap();
+fn end_all(host: &mut WorkspaceHost, device: u8, sequence: u64) {
+    let confirmation = workspace_inventory(host).close.unwrap();
     let confirmed: Vec<_> = confirmation
         .sessions
         .iter()
@@ -51,7 +51,7 @@ fn end_all(host: &mut SharedWorkspaceHost, device: u8, sequence: u64) {
     // The edit ends the confirmed Sessions once it is on disk, which a loaded host may finish
     // after the tick.
     let until = Instant::now() + Duration::from_secs(12);
-    while shared_inventory(host).close.is_some_and(|close| {
+    while workspace_inventory(host).close.is_some_and(|close| {
         close.sessions.iter().any(|pane| {
             pane.session
                 .is_some_and(|session| confirmed.contains(&session))
@@ -64,7 +64,7 @@ fn end_all(host: &mut SharedWorkspaceHost, device: u8, sequence: u64) {
 }
 
 /// Chooses Start Session, the only request that starts a shell in an ended Pane.
-fn start_ended(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Reply {
+fn start_ended(host: &mut WorkspaceHost, device: u8, pane: Id) -> Reply {
     let server = host.prototype.boot;
     host.request(
         [device; 32],
@@ -79,7 +79,7 @@ fn start_ended(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Reply {
 }
 
 /// Starts the Pane's shell: by first use, or by Start Session once its Session ended.
-fn start(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Lease {
+fn start(host: &mut WorkspaceHost, device: u8, pane: Id) -> Lease {
     let reply = match select(host, device, pane, true) {
         Reply::Restored {
             session_ended: Some(_),
@@ -109,11 +109,11 @@ fn start(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Lease {
 
 #[test]
 fn end_all_sessions_missing_original_cannot_end_replacement_work_during_recovery() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let old = start(&mut host, 1, pane);
-    let confirmation = shared_inventory(&mut host).close.unwrap();
+    let confirmation = workspace_inventory(&mut host).close.unwrap();
     let pending = Mutation::EndAllSessions { confirmation };
     // Client 1 retains this original locally, but its first dispatch never reaches the server.
     mutate(&mut host, 2, 1, pending.clone());
@@ -139,7 +139,7 @@ fn end_all_sessions_missing_original_cannot_end_replacement_work_during_recovery
         Reply::Outcome(result) if result.outcome == Outcome::StaleConfirmation)
     );
     assert_eq!(
-        shared_inventory(&mut host).close.unwrap().sessions[0].session,
+        workspace_inventory(&mut host).close.unwrap().sessions[0].session,
         Some(replacement.session)
     );
     assert!(
@@ -150,11 +150,11 @@ fn end_all_sessions_missing_original_cannot_end_replacement_work_during_recovery
 
 #[test]
 fn end_all_sessions_retains_directory_confirmed_between_admission_and_shutdown() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let lease = start(&mut host, 1, pane);
-    let confirmation = shared_inventory(&mut host).close.unwrap();
+    let confirmation = workspace_inventory(&mut host).close.unwrap();
     // Stage the admitted mutation before cleanup, matching the production commit boundary.
     let mut next = host.state.clone();
     next.inventory.close = Some(confirmation.clone());
@@ -198,7 +198,7 @@ fn end_all_sessions_retains_directory_confirmed_between_admission_and_shutdown()
         host.request([2; 32], [2; 32], Request::Resolve { sequence: 1 }),
         Reply::Outcome(_)
     ));
-    let saved = shared_inventory(&mut host);
+    let saved = workspace_inventory(&mut host);
     assert_eq!(
         saved.workspaces[0].tabs[0].panes[0]
             .confirmed_directory
@@ -245,9 +245,9 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
     } else {
         restoration.clone()
     };
-    let mut host = SharedWorkspaceHost::new(prototype);
+    let mut host = WorkspaceHost::new(prototype);
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let old = start(&mut host, 1, pane);
     if confirmed {
         command(
@@ -347,7 +347,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
         ),
         "live presentation cannot authorize recovery"
     );
-    let unavailable = shared_inventory(&mut host);
+    let unavailable = workspace_inventory(&mut host);
     assert_eq!(
         &repositories::pane_directory(&unavailable.workspaces[0].tabs[0].panes[0]),
         source
@@ -380,7 +380,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
         ),
     );
     await_text(&mut host, fresh, "RECOVERED-DIRECTORY");
-    let after = shared_inventory(&mut host);
+    let after = workspace_inventory(&mut host);
     assert_eq!(after.workspaces.len(), 1);
     let recovered = &after.workspaces[0];
     assert_eq!(recovered.id, workspace.id);
@@ -409,11 +409,11 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
 /// An ended Session has nothing to take over, so Take Over is the other client's Start Session:
 /// it moves the grant and starts a fresh shell in one request.
 fn ended_takeover_starts_a_session(attached: bool) {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
     host.admitted([1; 32], "Studio".into());
     host.admitted([2; 32], "Laptop".into());
-    let inventory = shared_inventory(&mut host);
+    let inventory = workspace_inventory(&mut host);
     let workspace = &inventory.workspaces[0];
     let pane = workspace.tabs[0].root_pane;
     let attachment = spaceterm_server::attachments::Attachment {
@@ -431,7 +431,7 @@ fn ended_takeover_starts_a_session(attached: bool) {
         panic!("ended Pane offers takeover");
     };
     assert_eq!(
-        shared_inventory(&mut host).close.unwrap().sessions[0].session,
+        workspace_inventory(&mut host).close.unwrap().sessions[0].session,
         None,
         "observing the ended Pane starts nothing"
     );
@@ -455,7 +455,7 @@ fn ended_takeover_starts_a_session(attached: bool) {
     };
     assert_ne!(fresh.session, old.session);
     assert_eq!(
-        shared_inventory(&mut host).close.unwrap().sessions[0].session,
+        workspace_inventory(&mut host).close.unwrap().sessions[0].session,
         Some(fresh.session)
     );
     assert!(
@@ -478,14 +478,14 @@ fn end_all_sessions_attached_takeover_starts_a_session() {
 
 #[test]
 fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_servers() {
-    let mut selected = SharedWorkspaceHost::new(host());
-    let mut unrelated = SharedWorkspaceHost::new(host());
+    let mut selected = WorkspaceHost::new(host());
+    let mut unrelated = WorkspaceHost::new(host());
     selected.prepare_initial_organization().unwrap();
     unrelated.prepare_initial_organization().unwrap();
     selected.admitted([1; 32], "Studio".into());
     selected.admitted([2; 32], "Laptop".into());
-    let first = shared_inventory(&mut selected).workspaces[0].tabs[0].root_pane;
-    let other_pane = shared_inventory(&mut unrelated).workspaces[0].tabs[0].root_pane;
+    let first = workspace_inventory(&mut selected).workspaces[0].tabs[0].root_pane;
+    let other_pane = workspace_inventory(&mut unrelated).workspaces[0].tabs[0].root_pane;
     let other = start(&mut unrelated, 1, other_pane);
     mutate(
         &mut selected,
@@ -497,7 +497,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     );
-    let inventory = shared_inventory(&mut selected);
+    let inventory = workspace_inventory(&mut selected);
     let second_workspace = &inventory.workspaces[1];
     let second_tab = &second_workspace.tabs[0];
     let second = second_tab.root_pane;
@@ -525,7 +525,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let before = loop {
-        let workspaces = shared_inventory(&mut selected).workspaces;
+        let workspaces = workspace_inventory(&mut selected).workspaces;
         if workspaces[0].tabs[0].panes[0]
             .presentation
             .as_ref()
@@ -548,7 +548,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
         pane.presentation = None;
     }
     end_all(&mut selected, 3, 1);
-    let ended = shared_inventory(&mut selected);
+    let ended = workspace_inventory(&mut selected);
     assert!(
         ended
             .workspaces
@@ -593,7 +593,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
     ));
     start(&mut selected, 3, unclaimed);
     assert_eq!(
-        shared_inventory(&mut unrelated).close.unwrap().sessions[0].session,
+        workspace_inventory(&mut unrelated).close.unwrap().sessions[0].session,
         Some(other.session)
     );
     selected.shutdown().unwrap();
@@ -602,15 +602,15 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
 
 #[test]
 fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let first = start(&mut host, 1, pane);
     let mut originals = Vec::new();
     let mut previous = first;
     for sequence in 1..=3 {
         let mutation = Mutation::EndAllSessions {
-            confirmation: shared_inventory(&mut host).close.unwrap(),
+            confirmation: workspace_inventory(&mut host).close.unwrap(),
         };
         originals.push(mutation.clone());
         mutate(&mut host, 2, sequence, mutation);
@@ -635,7 +635,7 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
             serde_json::from_slice(&serde_json::to_vec(&host.state.envelope()).unwrap()).unwrap();
         host.restore_organization(Some(&record));
         assert_eq!(
-            shared_inventory(&mut host).close.unwrap().sessions[0].session,
+            workspace_inventory(&mut host).close.unwrap().sessions[0].session,
             Some(replacement.session)
         );
         previous = replacement;
@@ -647,7 +647,7 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
         ));
     }
     assert_eq!(
-        shared_inventory(&mut host).close.unwrap().sessions[0].session,
+        workspace_inventory(&mut host).close.unwrap().sessions[0].session,
         Some(previous.session)
     );
     host.shutdown().unwrap();
@@ -655,9 +655,9 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
 
 #[test]
 fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let old = start(&mut host, 1, pane);
     command(
         &mut host,
@@ -747,7 +747,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
         u128::from_ne_bytes(nonce().unwrap()[..16].try_into().unwrap())
     ));
     std::fs::create_dir(&root).unwrap();
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     mutate(
         &mut host,
         1,
@@ -758,7 +758,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         },
     );
-    let before = shared_inventory(&mut host).workspaces;
+    let before = workspace_inventory(&mut host).workspaces;
     let pane = before[0].tabs[0].root_pane;
     let lease = start(&mut host, 1, pane);
     host.admitted([2; 32], "Laptop".into());
@@ -807,7 +807,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
         matches!(host.request([1; 32], [1; 32], repair), Reply::Takeover { target, .. } if target == repaired.into()),
         "a repair cannot replace the running shell"
     );
-    let after = shared_inventory(&mut host).workspaces;
+    let after = workspace_inventory(&mut host).workspaces;
     assert_eq!(
         (after[0].id, after[0].tabs[0].id, after[0].tabs[0].root_pane),
         (
@@ -828,9 +828,9 @@ fn end_all_sessions_retains_the_controller_if_replacement_directory_disappears_d
     ));
     std::fs::create_dir(&root).unwrap();
     let directory = local_filesystem().validate_directory(&root).unwrap();
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let old = start(&mut host, 1, pane);
     host.request(
         [2; 32],

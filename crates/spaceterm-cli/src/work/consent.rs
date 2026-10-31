@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn exact_review_is_scoped_to_actor_server_and_expiry() {
-        let target = CloseTarget::Workspace { workspace: [3; 32] };
+        let target = CloseTarget::KillWorkspace { workspace: [3; 32] };
         let review = Review::Close {
             target,
             confirmation: CloseConfirmation {

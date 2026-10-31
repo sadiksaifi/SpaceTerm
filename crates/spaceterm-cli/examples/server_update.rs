@@ -11,6 +11,7 @@ use spaceterm_server::{
     connection::link::ServerLink,
     hierarchy::{Mutation, Outcome},
     pane::*,
+    protocol::MAJOR,
     service::{RetainedInstallation, Service},
 };
 use std::{
@@ -21,8 +22,6 @@ use std::{
 use support::Claimed;
 
 const IDENTITY: &str = "spaceterm-development";
-/// The SpaceTerm Protocol major of this build and of the signed candidates.
-const MAJOR: u16 = 4;
 const SIZE: PaneSize = PaneSize {
     columns: 100,
     rows: 30,

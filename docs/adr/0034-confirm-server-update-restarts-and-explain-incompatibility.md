@@ -1,6 +1,6 @@
 # Confirm server updates and explain incompatibility
 
-Client and server release numbers may differ. Work admission requires the [supported protocol major and required capabilities](0035-negotiate-one-protocol-major.md). Refusal distinguishes an unsupported major from a missing capability and leaves other connections and server work intact. Explain which side needs updating only when verified information establishes the direction.
+Client and server release numbers may differ. Work admission requires a [shared protocol major](0035-negotiate-one-protocol-major.md). Refusal reports the unsupported major and leaves other connections and server work intact. Explain which side needs updating only when verified information establishes the direction.
 
 Client updates restart the client and preserve server-owned work. A server update stages a verified candidate and activates it after confirmation. The candidate comes from the client's own catalog on the same machine, from the server's fetch of its target's signed release asset, or from a paired client's upload. The server verifies it before staging. Confirmation binds the server's own observations. Settings, status controls and local incompatibility recovery open the account-local Update Server journey when a verified different candidate is available. The CLI offers remote Update Server over the [service lane](0057-administer-servers-over-the-service-lane.md).
 

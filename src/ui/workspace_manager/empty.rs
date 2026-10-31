@@ -21,7 +21,7 @@ use super::super::sidebar_motion::SidebarMotion;
 use super::super::workspace_creation::WorkspaceCreation;
 use super::super::workspace_frame::WorkspaceFrame;
 use super::launch::LaunchAction;
-use super::{SwitchWorkspace, WindowDragRegion, WorkspaceManager};
+use super::{ChooseWorkspace, WindowDragRegion, WorkspaceManager};
 use crate::ui::appearance::gpui_color;
 
 pub(super) const EMPTY_TITLE: &str = "No Workspaces Attached";
@@ -281,10 +281,10 @@ impl WorkspaceManager {
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let reachable = self.shared_reachable();
+        let reachable = self.local_server_reachable();
         let place = presentation.wording().this_computer_phrase;
-        let local = self.shared.local();
-        let stopped = local.and_then(|shared| shared.connection_error())
+        let local = self.binding.local();
+        let stopped = local.and_then(|binding| binding.connection_error())
             == Some(spaceterm_server::ServerError::Stopped);
         let (title, detail): (&'static str, SharedString) = if reachable {
             // A reachable server ends any reconnect the person asked for.
@@ -305,7 +305,7 @@ impl WorkspaceManager {
                 .debug_selector("empty-workspace-choose")
                 .tooltip(
                     Tooltip::new("empty-workspace-choose-tooltip", "Choose Workspace")
-                        .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                        .shortcut(presentation.shortcut(&ChooseWorkspace).unwrap_or_default()),
                 )
                 .on_activate(move |_, window, cx| {
                     let _ = choose_manager.update(cx, |manager, cx| {
@@ -387,22 +387,22 @@ impl WorkspaceManager {
     /// Asks this computer's server connection to reconnect now, and remembers the failed
     /// attempts so far, so the view can say whether this attempt failed.
     fn reconnect_local(&mut self, cx: &mut Context<Self>) {
-        let Some(shared) = self.shared.local() else {
+        let Some(binding) = self.binding.local() else {
             return;
         };
         self.launch
             .reconnect_from
-            .set(Some(shared.failed_attempts()));
-        shared.retry_connection();
+            .set(Some(binding.failed_attempts()));
+        binding.retry_connection();
         cx.notify();
     }
 
     /// Where the reconnect the person asked for stands, if they asked for one.
     fn reconnect_status(&self, _: &Context<Self>) -> Option<Reconnect> {
         let from = self.launch.reconnect_from.get()?;
-        let shared = self.shared.local()?;
-        Some(if shared.failed_attempts() > from {
-            Reconnect::Failed(shared.connection_error())
+        let binding = self.binding.local()?;
+        Some(if binding.failed_attempts() > from {
+            Reconnect::Failed(binding.connection_error())
         } else {
             Reconnect::Trying
         })
@@ -477,7 +477,7 @@ pub(super) fn offline_detail(place: &str) -> SharedString {
 }
 
 /// Plain Tab moves from the view's own focus to its action, as it does on the screens that
-/// replace a shared Pane.
+/// replace a Pane.
 fn with_tab_traversal(surface: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
     surface.on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
         let modifiers = event.keystroke.modifiers;

@@ -348,7 +348,7 @@ impl WorkspaceSidebar {
             worktrees,
             creates_worktrees,
             active,
-            shared,
+            binding,
         } = row;
         let row_background = row_background(appearance);
         let emphasized = appearance.active && self.has_visible_focus(window);
@@ -415,16 +415,13 @@ impl WorkspaceSidebar {
         } else {
             crate::ui::workspace_frame::base_surface(&appearance.colors)
         });
-        let shared_status = shared.as_ref().and_then(|shared| shared.status);
-        let (detail, detail_color, detail_selector) = if let Some(status) = shared_status {
+        let workspace_status = binding.as_ref().and_then(|binding| binding.status);
+        let (detail, detail_color, detail_selector) = if let Some(status) = workspace_status {
             (
                 status.text.into(),
                 // Work in progress keeps the directory's quiet color; only a problem warns.
                 status.warning.then_some(row_colors.warning),
-                Some(format!(
-                    "workspace-row-shared-status-{}",
-                    workspace_id.get()
-                )),
+                Some(format!("workspace-row-status-{}", workspace_id.get())),
             )
         } else if let Some(status) = remote_status {
             (
@@ -474,11 +471,11 @@ impl WorkspaceSidebar {
         let on_machine = machine
             .as_ref()
             .map_or_else(String::new, |machine| format!(" on {machine}"));
-        let accessibility_name = match (shared_status, remote_status) {
+        let accessibility_name = match (workspace_status, remote_status) {
             (Some(status), _) => {
                 format!("Workspace actions for {name}{on_machine}, {}", status.text)
             }
-            (None, Some(status)) if shared.is_none() => {
+            (None, Some(status)) if binding.is_none() => {
                 format!("Workspace actions for {name}{on_machine}, connection {status}")
             }
             (None, _) => format!("Workspace actions for {name}{on_machine}"),
@@ -512,7 +509,7 @@ impl WorkspaceSidebar {
             .map(|status| format!("{tooltip}: {status}"))
             .unwrap_or_else(|| tooltip.to_string());
         let tooltip_text = format!("{name}\n{tooltip_text}");
-        let tooltip_label = if shared.is_some() {
+        let tooltip_label = if binding.is_some() {
             "Workspace"
         } else if remote_status.is_some() {
             "Workspace connection"
@@ -557,7 +554,7 @@ impl WorkspaceSidebar {
                                 // shifts.
                                 (if selected { 1.0 } else { hover }) * disclosed,
                                 sidebar.clone(),
-                                shared.as_ref().is_none_or(|s| s.edits),
+                                binding.as_ref().is_none_or(|s| s.edits),
                                 appearance,
                             ))
                         },
@@ -781,7 +778,7 @@ impl WorkspaceSidebar {
                     collapsed_worktree,
                     pinned,
                     remote_connection_phase,
-                    shared.as_ref(),
+                    binding.as_ref(),
                     presentation,
                 ),
                 target,
@@ -1902,7 +1899,7 @@ fn new_tab_entry<A: Clone>(
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> MenuEntry<A> {
     let entry = MenuEntry::action("New Tab", command);
-    match presentation.shortcut(&crate::ui::CreateTab) {
+    match presentation.shortcut(&crate::ui::NewTab) {
         Some(shortcut) => entry.shortcut(shortcut),
         None => entry,
     }
@@ -2220,14 +2217,14 @@ fn workspace_menu_entries(
     new_worktree: bool,
     active_worktree: Option<(WorktreeId, SharedString, WorktreeRemoval)>,
     pinned: bool,
-    remote_connection_phase: Option<RemoteConnectionPhase>,
-    shared: Option<&SharedWorkspaceRow>,
+    remote_connection_phase: Option<ServerConnectionPhase>,
+    binding: Option<&WorkspaceRow>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<RowMenuCommand>> {
-    // A shared Workspace's New Tab, Rename, and pin commands ask the server, so they wait while
+    // A Workspace's New Tab, Rename, and pin commands ask the server, so they wait while
     // this client is offline or an earlier edit is unanswered.
-    let shared_edits = shared.is_none_or(|shared| shared.edits);
-    let new_tab = new_tab && shared_edits;
+    let edits = binding.is_none_or(|binding| binding.edits);
+    let new_tab = new_tab && edits;
     let mut entries = Vec::new();
     if new_tab {
         entries.push(new_tab_entry(
@@ -2241,15 +2238,15 @@ fn workspace_menu_entries(
             new_worktree_entry(
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::NewWorktree),
                 "workspace-menu-row-new-worktree",
-                shared_edits,
+                edits,
                 presentation,
             )
-            .disabled(!shared_edits),
+            .disabled(!edits),
         );
     }
     entries.push(
         MenuEntry::action("Rename Workspace", RowMenuCommand::Rename)
-            .disabled(!shared_edits)
+            .disabled(!edits)
             .icon(|foreground, size| {
                 Icon::new(IconName::Pencil, size, foreground).into_any_element()
             })
@@ -2264,7 +2261,7 @@ fn workspace_menu_entries(
             },
             RowMenuCommand::Workspace(WorkspaceMenuCommand::PinDirectory),
         )
-        .disabled(!shared_edits)
+        .disabled(!edits)
         .icon(|foreground, size| Icon::new(IconName::Pin, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-pin-directory"),
     );
@@ -2274,7 +2271,7 @@ fn workspace_menu_entries(
                 "Unpin Directory",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::UnpinDirectory),
             )
-            .disabled(!shared_edits)
+            .disabled(!edits)
             .icon(|foreground, size| {
                 Icon::new(IconName::PinOff, size, foreground).into_any_element()
             })
@@ -2283,7 +2280,7 @@ fn workspace_menu_entries(
     }
     if matches!(
         remote_connection_phase,
-        Some(RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Failed)
+        Some(ServerConnectionPhase::Disconnected | ServerConnectionPhase::Failed)
     ) {
         entries.push(
             MenuEntry::action(
@@ -2300,13 +2297,13 @@ fn workspace_menu_entries(
     // of its Panes. The Workspace and its Terminal Sessions keep running on the server, so it
     // sits apart from Kill Workspace, which ends them for every client. It needs no server, so
     // it stays available while this client is offline.
-    if let Some(shared) = shared {
+    if let Some(binding) = binding {
         entries.push(
             MenuEntry::action(
                 "Detach Workspace",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::Detach),
             )
-            .disabled(!shared.detaches)
+            .disabled(!binding.detaches)
             .icon(|foreground, size| {
                 Icon::new(IconName::Minus, size, foreground).into_any_element()
             })
@@ -2326,14 +2323,14 @@ fn workspace_menu_entries(
         entries.push(entry);
     }
     entries.push(
-        // Kill Workspace ends every Pane in the Workspace after a confirmation. A shared
-        // Workspace's kill asks its server, so it waits while this client cannot ask.
+        // Kill Workspace ends every Pane in the Workspace after a confirmation. It asks the
+        // server, so it waits while this client cannot ask.
         MenuEntry::action(
             "Kill Workspace",
             RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
         )
-        .destructive(shared_edits)
-        .disabled(!shared_edits)
+        .destructive(edits)
+        .disabled(!edits)
         .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-close"),
     );

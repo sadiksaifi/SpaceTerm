@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 /// The protocol's own ALPN.
-pub const ALPN: &[u8] = b"spaceterm/2";
+pub const ALPN: &[u8] = b"spaceterm/1";
 /// Received frame bytes that `receive` has not taken yet. Above it the carrier stops reading
 /// streams, so the peer's sending waits on QUIC flow control.
 const INBOUND_BYTES: usize = 2 * limits::MAX_FRAME_BYTES;
@@ -857,7 +857,7 @@ impl QuicListener {
     }
 
     /// Widens the listener from one address to every interface at the same port and keeps its
-    /// connections, as when exposure widens. When the wildcard can't be bound the listener keeps
+    /// connections, as when Network Access widens. When the wildcard can't be bound the listener keeps
     /// its old address.
     pub fn widen(&self) -> Result<(), QuicError> {
         let (done, result) = std::sync::mpsc::sync_channel(1);

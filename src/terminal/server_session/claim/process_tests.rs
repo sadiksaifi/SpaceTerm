@@ -298,7 +298,7 @@ fn accept(listener: &UnixListener) -> UnixStream {
     }
 }
 
-fn prove_shell_started(host: &mut crate::runtime::SharedWorkspaceHost, lease: Lease) {
+fn prove_shell_started(host: &mut crate::runtime::WorkspaceHost, lease: Lease) {
     // Attached can precede the worker's PTY startup. Execute a shell command and observe its
     // output before dropping that acknowledgement, so the test proves a successful shell start.
     for key in [
@@ -494,7 +494,7 @@ fn client_process() {
     let controls = PaneControls::default();
     let control = controls.pane(pane);
     let presenter = control.reserve().activate(&AtomicBool::new(true));
-    let mut state = DevelopmentPaneState::new();
+    let mut state = ServerPaneState::new();
     state.connection_recovery = Arc::clone(&control.recovery);
     let losing_start = std::env::var("SPACETERM_START_TEST_PHASE").unwrap() == "lose-start";
     let mut pane_observed = false;
@@ -519,11 +519,9 @@ fn client_process() {
             // Connecting is also the initial status, before the server has reported control.
             // Model first use only after ClaimWorker has processed that initial observation.
             match state.status() {
-                DevelopmentPaneStatus::Connecting if losing_start && pane_observed => {
-                    state.select()
-                }
-                DevelopmentPaneStatus::Restored if losing_start => state.start_restored(),
-                DevelopmentPaneStatus::Takeover => state.take_over(),
+                ServerPaneStatus::Connecting if losing_start && pane_observed => state.select(),
+                ServerPaneStatus::Restored if losing_start => state.start_restored(),
+                ServerPaneStatus::Takeover => state.take_over(),
                 _ => {}
             }
             let result = presenter.send(request, |request| {

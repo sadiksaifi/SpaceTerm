@@ -33,7 +33,7 @@ pub enum CloseTarget {
         workspace: Id,
         tab: Id,
     },
-    Workspace {
+    KillWorkspace {
         workspace: Id,
     },
     /// One surviving Tab identifies the server-owned Worktree membership to close.
@@ -122,7 +122,7 @@ impl Inventory {
         let workspace = match target {
             CloseTarget::Pane { workspace, .. }
             | CloseTarget::Tab { workspace, .. }
-            | CloseTarget::Workspace { workspace }
+            | CloseTarget::KillWorkspace { workspace }
             | CloseTarget::Worktree { workspace, .. } => workspace,
         };
         let workspace = self.workspaces.iter().find(|w| w.id == workspace)?;
@@ -132,7 +132,7 @@ impl Inventory {
                 workspace.tabs.iter().find(|t| t.id == tab)?.panes.len() == 1
             }
             CloseTarget::Tab { .. }
-            | CloseTarget::Workspace { .. }
+            | CloseTarget::KillWorkspace { .. }
             | CloseTarget::Worktree { .. } => true,
         };
         let removes_workspace =
@@ -154,7 +154,7 @@ impl Inventory {
         let workspace = match target {
             CloseTarget::Pane { workspace, .. }
             | CloseTarget::Tab { workspace, .. }
-            | CloseTarget::Workspace { workspace }
+            | CloseTarget::KillWorkspace { workspace }
             | CloseTarget::Worktree { workspace, .. } => workspace,
         };
         let w = self.workspaces.iter().find(|w| w.id == workspace)?;
@@ -174,7 +174,7 @@ impl Inventory {
                         .collect(),
                 )
             }
-            CloseTarget::Workspace { .. } => {
+            CloseTarget::KillWorkspace { .. } => {
                 Some(w.tabs.iter().flat_map(|t| &t.panes).map(|p| p.id).collect())
             }
             CloseTarget::Tab { tab, .. } => Some(
@@ -846,7 +846,7 @@ impl State {
                 match target {
                     CloseTarget::Pane { pane, .. } => *pane,
                     CloseTarget::Tab { tab, .. } => *tab,
-                    CloseTarget::Workspace { workspace }
+                    CloseTarget::KillWorkspace { workspace }
                     | CloseTarget::Worktree { workspace, .. } => *workspace,
                 }
             }

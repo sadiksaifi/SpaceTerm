@@ -19,7 +19,7 @@ use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::server_connection::{ServerConnection, ServerError};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::settings_window::{AuthorizationPrompt, AuthorizedRequest};
-use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
 pub(super) const LAUNCH_SELECTOR: &str = "server-launch";
 pub(super) const LAUNCH_START_SELECTOR: &str = "server-launch-start";
@@ -67,21 +67,21 @@ pub(crate) trait LocalLaunch: Send + Sync {
 }
 
 /// The Workspaces a ready server presents, and the connection that retains this client's views.
-pub(crate) struct SharedServerConnection {
-    pub(crate) edits: SharedEditSource,
-    pub(crate) sessions: SharedPaneSessions,
+pub(crate) struct WorkspaceServerConnection {
+    pub(crate) edits: WorkspaceEditSource,
+    pub(crate) sessions: WorkspacePaneSessions,
     /// Retains attachments and arrangements across relaunch.
     pub(crate) retained: Option<ServerConnection>,
 }
 
 /// Connects the Workspace Window to a ready server on the event thread.
-pub(crate) trait SharedServerConnector {
+pub(crate) trait WorkspaceServerConnector {
     fn connect(
         &self,
         local_files: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         cx: &mut App,
-    ) -> Option<SharedServerConnection>;
+    ) -> Option<WorkspaceServerConnection>;
 
     /// The account-local connection whose client directory retains this desktop's Workspace
     /// order, or `None` to keep the order for the window's life. Opening it needs no running
@@ -95,7 +95,7 @@ pub(crate) trait SharedServerConnector {
 #[derive(Clone)]
 pub(crate) struct LocalServerAdapters {
     pub(crate) launch: Arc<dyn LocalLaunch>,
-    pub(crate) connector: Rc<dyn SharedServerConnector>,
+    pub(crate) connector: Rc<dyn WorkspaceServerConnector>,
 }
 
 impl LocalServerAdapters {
@@ -156,19 +156,24 @@ impl LocalLaunch for AccountLaunch {
 
 struct AccountConnector;
 
-impl SharedServerConnector for AccountConnector {
+impl WorkspaceServerConnector for AccountConnector {
     fn connect(
         &self,
         local_files: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         cx: &mut App,
-    ) -> Option<SharedServerConnection> {
+    ) -> Option<WorkspaceServerConnection> {
         // Server Settings and the Workspace Window share one edit writer for this client.
         let client = crate::ui::server_worktrees::Client::get(cx)?;
         let server = client.server.clone();
-        Some(SharedServerConnection {
+        Some(WorkspaceServerConnection {
             edits: client.source,
-            sessions: SharedPaneSessions::new(server.clone(), client.controls, local_files, panes),
+            sessions: WorkspacePaneSessions::new(
+                server.clone(),
+                client.controls,
+                local_files,
+                panes,
+            ),
             retained: Some(server),
         })
     }
@@ -727,8 +732,8 @@ impl WorkspaceManager {
         // window's own connection reconnects without waiting for its delay.
         if state == LaunchState::Ready {
             self.server_started(cx);
-            if let Some(shared) = self.shared.local() {
-                shared.retry_connection();
+            if let Some(binding) = self.binding.local() {
+                binding.retry_connection();
             }
         }
         // While Workspaces are presented the launch screen is hidden, so a step that could not
@@ -753,7 +758,7 @@ impl WorkspaceManager {
     fn server_started(&self, cx: &mut App) {
         for workspace in self.workspaces.iter() {
             if self
-                .shared
+                .binding
                 .owner(workspace.id())
                 .is_some_and(|key| key != super::ServerKey::LOCAL)
             {
@@ -767,12 +772,12 @@ impl WorkspaceManager {
 
     /// Presents a ready server's Workspaces in this window.
     fn connect_local_server(&mut self, window: &mut Window, cx: &mut Context<Self>) -> LaunchState {
-        if self.shared.local().is_some() {
+        if self.binding.local().is_some() {
             return LaunchState::Ready;
         }
         // One device presents its servers in one Workspace Window. Another window comes forward
         // instead; this one may already present a paired server and adds the local one beside it.
-        if let Some(existing) = crate::ui::shared_workspaces::presenting_window(cx)
+        if let Some(existing) = crate::ui::workspaces::presenting_window(cx)
             && existing.window_id() != window.window_handle().window_id()
         {
             cx.defer(move |cx| {
@@ -786,15 +791,15 @@ impl WorkspaceManager {
         else {
             return LaunchState::Failed(ServerError::Protocol);
         };
-        self.present_shared_workspaces(connection.edits, connection.sessions, window, cx);
-        if let (Some(shared), Some(server)) = (self.shared.local_mut(), connection.retained) {
-            shared.identify(Rc::new(server.clone()));
-            shared.retain_client_views(server);
-            let read = shared.client_views_read();
+        self.present_workspaces(connection.edits, connection.sessions, window, cx);
+        if let (Some(binding), Some(server)) = (self.binding.local_mut(), connection.retained) {
+            binding.identify(Rc::new(server.clone()));
+            binding.retain_client_views(server);
+            let read = binding.client_views_read();
             self.launch._views_read = Some(cx.spawn_in(window, async move |manager, cx| {
                 read.await;
                 let _ = manager.update_in(cx, |manager, window, cx| {
-                    manager.sync_shared_workspaces(super::ServerKey::LOCAL, window, cx);
+                    manager.sync_workspaces(super::ServerKey::LOCAL, window, cx);
                 });
             }));
         }
@@ -828,8 +833,8 @@ impl WorkspaceManager {
     /// It stays until the server's first inventory arrives, so a person never sees "No
     /// Workspaces" while their Workspaces are on the way.
     pub(super) fn launch_presentation(&self) -> Option<LaunchPresentation> {
-        match self.shared.local() {
-            Some(shared) if shared.latest_inventory().is_some() => None,
+        match self.binding.local() {
+            Some(binding) if binding.latest_inventory().is_some() => None,
             // A step the person chose, or its refusal, says so until launch runs again.
             Some(_)
                 if !matches!(
@@ -839,7 +844,7 @@ impl WorkspaceManager {
             {
                 Some(present(self.launch.state))
             }
-            Some(shared) => Some(present(match shared.connection_error() {
+            Some(binding) => Some(present(match binding.connection_error() {
                 Some(ServerError::Stopped) => LaunchState::Stopped,
                 // The connection waits for the operation again by itself.
                 Some(ServerError::ServiceBusy) => LaunchState::Working(LaunchStep::WaitForService),
@@ -864,8 +869,8 @@ impl WorkspaceManager {
     pub(super) fn startup_recovery(&self) -> bool {
         self.workspaces.active_workspace_id().is_none()
             && self.launch_presentation().is_some()
-            && !self.shared.iter().any(|(key, shared)| {
-                key != super::ServerKey::LOCAL && shared.latest_inventory().is_some()
+            && !self.binding.iter().any(|(key, binding)| {
+                key != super::ServerKey::LOCAL && binding.latest_inventory().is_some()
             })
     }
 
@@ -874,10 +879,10 @@ impl WorkspaceManager {
     /// capability, so this refusal reads the same offer launch reads, once per refusal.
     pub(super) fn read_refusal_offer(&mut self, cx: &mut Context<Self>) {
         let refused = self
-            .shared
+            .binding
             .local()
-            .filter(|shared| shared.latest_inventory().is_none())
-            .and_then(|shared| shared.connection_error())
+            .filter(|binding| binding.latest_inventory().is_none())
+            .and_then(|binding| binding.connection_error())
             .filter(|error| incompatible(*error));
         let Some(error) = refused else {
             self.launch.refusal_offer = None;
@@ -1073,25 +1078,25 @@ pub(crate) mod testing {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    use super::{LaunchOutcome, LocalLaunch, LocalServerAdapters, SharedServerConnector};
+    use super::{LaunchOutcome, LocalLaunch, LocalServerAdapters, WorkspaceServerConnector};
     use crate::server_connection::ServerError;
 
     /// A ready server presenting one Workspace, "Default", whose Panes run in `session_factory`.
     pub(crate) fn presenting(
         session_factory: Rc<dyn crate::terminal::TerminalSessionFactory>,
     ) -> LocalServerAdapters {
-        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+        use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
         use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
 
         struct Presenting(Rc<dyn crate::terminal::TerminalSessionFactory>);
-        impl SharedServerConnector for Presenting {
+        impl WorkspaceServerConnector for Presenting {
             fn connect(
                 &self,
                 _: crate::platform::local_filesystem::LocalFilesystemAuthority,
                 panes: &crate::ui::pane_lifecycle::PaneConstruction,
                 _: &mut gpui::App,
-            ) -> Option<super::SharedServerConnection> {
+            ) -> Option<super::WorkspaceServerConnection> {
                 let inventory = Inventory {
                     repositories: None,
                     revision: 1,
@@ -1130,9 +1135,9 @@ pub(crate) mod testing {
                         &self.0,
                     )),
                 );
-                Some(super::SharedServerConnection {
-                    edits: SharedEditSource::new(Rc::new(ScriptedEdits::new(Some(inventory)))),
-                    sessions: SharedPaneSessions::with_opener(opener, panes),
+                Some(super::WorkspaceServerConnection {
+                    edits: WorkspaceEditSource::new(Rc::new(ScriptedEdits::new(Some(inventory)))),
+                    sessions: WorkspacePaneSessions::with_opener(opener, panes),
                     retained: None,
                 })
             }
@@ -1149,13 +1154,13 @@ pub(crate) mod testing {
     /// A server whose launch never answers, for windows a test does not launch.
     pub(crate) fn unanswered() -> LocalServerAdapters {
         struct Unreachable;
-        impl SharedServerConnector for Unreachable {
+        impl WorkspaceServerConnector for Unreachable {
             fn connect(
                 &self,
                 _: crate::platform::local_filesystem::LocalFilesystemAuthority,
                 _: &crate::ui::pane_lifecycle::PaneConstruction,
                 _: &mut gpui::App,
-            ) -> Option<super::SharedServerConnection> {
+            ) -> Option<super::WorkspaceServerConnection> {
                 None
             }
         }

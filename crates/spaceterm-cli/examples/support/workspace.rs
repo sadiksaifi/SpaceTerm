@@ -46,7 +46,7 @@ impl<'a> Workspace<'a> {
             return Err("cleanup refused a replacement server".into());
         }
         if inventory.workspaces.iter().any(|w| w.id == workspace) {
-            let target = CloseTarget::Workspace { workspace };
+            let target = CloseTarget::KillWorkspace { workspace };
             let confirmation = inventory
                 .close_confirmation(target)
                 .ok_or("cleanup authority missing")?;

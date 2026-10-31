@@ -38,13 +38,13 @@ class ReleaseNotesTests(unittest.TestCase):
         )
 
     def test_notes_cover_only_the_release_at_head_and_mark_breaking_changes(self):
-        self.git("tag", "-a", "v0.1.0", "-m", "Release")
+        self.git("tag", "-a", "v1.0.0", "-m", "Release")
         self.git("commit", "-qm", "fix(updates)!: preserve active sessions", "--allow-empty")
         self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
-        self.git("tag", "-a", "v0.2.0", "-m", "Release")
+        self.git("tag", "-a", "v1.1.0", "-m", "Release")
         self.git("commit", "-qm", "feat: future change", "--allow-empty")
-        self.git("tag", "-a", "v0.3.0", "-m", "Release")
-        self.git("checkout", "-q", "v0.2.0")
+        self.git("tag", "-a", "v1.2.0", "-m", "Release")
+        self.git("checkout", "-q", "v1.1.0")
         text = notes(self.root)
         self.assertIn("### Fixes", text)
         self.assertIn("**Breaking:** **updates:** Preserve active sessions", text)
@@ -53,10 +53,29 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn("Initial", text)
         self.assertNotIn("Future change", text)
 
+    def test_first_release_notes_list_no_commits_since_the_previous_application(self):
+        self.git("commit", "-qm", "feat: old application feature", "--allow-empty")
+        self.git("tag", "-a", "v0.6.8", "-m", "Release")
+        self.git("commit", "-qm", "chore: remove legacy compatibility", "--allow-empty")
+        self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
+        self.git("tag", "-a", "v1.0.0", "-m", "Release")
+        text = notes(self.root)
+        self.assertIn("First release of SpaceTerm.", text)
+        self.assertNotIn("Old application feature", text)
+        self.assertNotIn("Remove legacy compatibility", text)
+        self.assertNotIn("Add terminal panes", text)
+
     def test_notes_require_a_stable_release_tag_at_head(self):
-        self.git("tag", "-a", "v0.1.0", "-m", "Release")
+        self.git("tag", "-a", "v1.0.0", "-m", "Release")
         self.git("commit", "-qm", "feat: unreleased", "--allow-empty")
-        self.git("tag", "-a", "v0.2.0-beta.1", "-m", "Prerelease")
+        self.git("tag", "-a", "v1.1.0-beta.1", "-m", "Prerelease")
+        with self.assertRaises(TaskError):
+            notes(self.root)
+
+    def test_notes_require_a_release_of_the_new_application_at_head(self):
+        self.git("tag", "-a", "v0.6.8", "-m", "Release")
+        self.git("commit", "-qm", "feat: unreleased", "--allow-empty")
+        self.git("tag", "-a", "v0.7.0", "-m", "Release")
         with self.assertRaises(TaskError):
             notes(self.root)
 

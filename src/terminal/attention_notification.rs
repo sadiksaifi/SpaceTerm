@@ -8,7 +8,7 @@ use super::attention_runtime::{AttentionFailure, NotificationDelivery, Notificat
     not(target_os = "macos"),
     allow(
         dead_code,
-        reason = "desktops without notification authorization report only denial"
+        reason = "the Linux notification adapter reports only Authorized"
     )
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -179,7 +179,7 @@ impl Fixture {
     pub(crate) fn enable(&self) {
         self.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
     }
-    /// Enables exposure on a free UDP port of `ip`, and returns the address the server listens
+    /// Enables Network Access on a free UDP port of `ip`, and returns the address the server listens
     /// at. Another test can take the port between finding it and binding it, so a failed bind
     /// tries another.
     pub(crate) fn listen_at(&self, ip: std::net::IpAddr) -> std::net::SocketAddr {
@@ -346,7 +346,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn exposure_defaults_off_and_retains_only_the_explicit_listener_across_restart() {
+fn network_access_defaults_off_and_retains_only_the_explicit_listener_across_restart() {
     let fixture = Fixture::new();
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
@@ -1361,7 +1361,8 @@ fn a_valid_tls_pin_does_not_replace_validation_of_the_servers_public_claim_proof
 }
 
 #[test]
-fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_after_reenable() {
+fn a_retired_network_access_generation_refuses_inflight_proof_and_late_registration_after_reenable()
+{
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -1429,7 +1430,7 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
     assert_eq!(
         state.authorized(&paired),
         Ok(()),
-        "the pairing remains valid under new explicit exposure"
+        "the pairing remains valid under new explicit Network Access"
     );
 }
 
@@ -2174,7 +2175,7 @@ fn unknown_current_generation_requires_account_cancellation_to_fence_delayed_pre
 }
 
 #[test]
-fn configured_listener_survives_off_on_and_can_be_selected_before_exposure() {
+fn configured_listener_survives_off_on_and_can_be_selected_before_network_access() {
     let mut fixture = Fixture::new();
     assert!(matches!(
         fixture.management(Management::SetPolicy {
@@ -3052,11 +3053,11 @@ mod quic_connections {
         drop(server.join().unwrap());
     }
 
-    /// Turning exposure off and on at the same address while a client is connected takes the
+    /// Turning Network Access off and on at the same address while a client is connected takes the
     /// listener back instead of binding a socket the old connection still holds, and that
     /// connection still receives its goodbye.
     #[test]
-    fn toggling_exposure_with_a_connected_client_keeps_the_listener() {
+    fn toggling_network_access_with_a_connected_client_keeps_the_listener() {
         let fixture = Fixture::new();
         fixture.enable();
         let credential = DeviceCredential::generate().unwrap();
@@ -3621,7 +3622,7 @@ mod quic_connections {
         status.listener
     }
 
-    /// Moving exposure from the wildcard to one address of the same port binds at once when
+    /// Moving Network Access from the wildcard to one address of the same port binds at once when
     /// no connection holds the old socket.
     #[test]
     fn changing_the_address_without_connections_binds_at_once() {
@@ -3702,7 +3703,7 @@ mod quic_connections {
         Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback())
     }
 
-    /// Widening exposure from one address to every interface at the same port keeps the paired
+    /// Widening Network Access from one address to every interface at the same port keeps the paired
     /// connection of that address and its invitations. Clients of the
     /// server's other addresses then connect too, each answered from the address it dialed.
     #[test]
@@ -3962,7 +3963,7 @@ fn an_expired_client_deadline_sends_no_authentication() {
 }
 
 #[test]
-fn authentication_accepts_a_signed_future_work_major_for_service_admission() {
+fn authentication_accepts_signed_work_majors_for_service_admission() {
     struct Exchange {
         frames: std::collections::VecDeque<serde_json::Value>,
         sent: usize,
@@ -3986,13 +3987,13 @@ fn authentication_accepts_a_signed_future_work_major_for_service_admission() {
         build: "Development".into(),
     };
     for (major, tampered, expected) in [
+        (crate::protocol::MAJOR, false, None),
         (crate::protocol::MAJOR + 1, false, None),
         (
             crate::protocol::MAJOR + 1,
             true,
             Some(DirectError::AuthenticationRefused),
         ),
-        (3, false, Some(DirectError::IncompatibleProtocol)),
     ] {
         let mut challenge = wire::Challenge {
             major,

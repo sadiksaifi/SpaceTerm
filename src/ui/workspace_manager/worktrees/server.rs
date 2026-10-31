@@ -6,35 +6,35 @@ use gpui::AppContext as _;
 use super::*;
 use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::ui::server_worktrees::{Client, FormBackend, WriteError};
-use crate::ui::shared_workspaces::{OutcomeNotice, SharedSubmission};
+use crate::ui::workspaces::{OutcomeNotice, WorkspaceSubmission};
 use crate::ui::worktree_form::{WorktreeFormContext, WorktreeFormEvent};
 use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 use spaceterm_server::hierarchy::Mutation;
 use spaceterm_server::worktree::{Operation, Read, ReadReply};
 impl WorkspaceManager {
-    pub(in crate::ui::workspace_manager) fn new_shared_worktree(
+    pub(in crate::ui::workspace_manager) fn new_server_worktree(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         // The Workspace's own server runs Git, on its own computer.
-        let Some(shared) = self.shared.owning(workspace_id) else {
+        let Some(binding) = self.binding.owning(workspace_id) else {
             return false;
         };
-        if !shared.editability().available() {
-            Self::show_shared_refusal(
+        if !binding.editability().available() {
+            Self::show_refusal(
                 "create the Worktree",
-                shared.editability().into(),
+                binding.editability().into(),
                 window,
                 cx,
             );
             return false;
         }
-        let Some(workspace) = shared.server_workspace(workspace_id).map(|w| w.id) else {
+        let Some(workspace) = binding.server_workspace(workspace_id).map(|w| w.id) else {
             return false;
         };
-        let Some(inventory) = self.shared_inventory(workspace_id).cloned() else {
+        let Some(inventory) = self.workspace_inventory(workspace_id).cloned() else {
             return false;
         };
         let Some(client) = self.owning_worktree_client(workspace_id, cx) else {
@@ -48,7 +48,7 @@ impl WorkspaceManager {
             .workspaces
             .workspace(workspace_id)
             .and_then(|w| w.payload().read(cx).active_worktree())
-            .and_then(|id| self.shared_worktree_root(workspace_id, id));
+            .and_then(|id| self.worktree_root(workspace_id, id));
         let context = client.read(Read::Context { root: root.clone() }, cx);
         let handle = window.window_handle().downcast::<WorkspaceManager>();
         cx.spawn(async move |_, cx| {
@@ -62,9 +62,9 @@ impl WorkspaceManager {
                 if let Some(handle) = handle {
                     let _ = handle.update(cx, |_, window, cx| {
                         if !client.availability().0 {
-                            Self::show_shared_refusal(
+                            Self::show_refusal(
                                 "create the Worktree",
-                                crate::ui::shared_workspaces::SharedRefusalReason::Offline,
+                                crate::ui::workspaces::WorkspaceRefusalReason::Offline,
                                 window,
                                 cx,
                             );
@@ -136,7 +136,7 @@ impl WorkspaceManager {
                         if let WorktreeFormEvent::Created(path) = event {
                             let revision =
                                 client.source.snapshot().inventory.map_or(0, |i| i.revision);
-                            manager.sidebar_worktrees.created_shared =
+                            manager.sidebar_worktrees.created =
                                 Some((workspace_id, path.clone(), revision));
                             manager.set_worktrees_expanded(workspace_id, true);
                             manager.open_created_server_worktree(window, cx);
@@ -157,17 +157,16 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((workspace, path, minimum_revision)) =
-            self.sidebar_worktrees.created_shared.as_ref()
+        let Some((workspace, path, minimum_revision)) = self.sidebar_worktrees.created.as_ref()
         else {
             return;
         };
         let Some(server) = self
-            .shared
+            .binding
             .owning(*workspace)
             .and_then(|s| s.server_workspace(*workspace))
         else {
-            self.sidebar_worktrees.created_shared = None;
+            self.sidebar_worktrees.created = None;
             return;
         };
         let Some(tab) = server
@@ -177,24 +176,24 @@ impl WorkspaceManager {
             .map(|t| t.id)
         else {
             if self
-                .shared
+                .binding
                 .owning(*workspace)
                 .and_then(|s| s.latest_inventory())
                 .is_some_and(|i| i.revision >= *minimum_revision)
             {
-                self.sidebar_worktrees.created_shared = None;
+                self.sidebar_worktrees.created = None;
             }
             return;
         };
         let workspace = *workspace;
-        self.sidebar_worktrees.created_shared = None;
+        self.sidebar_worktrees.created = None;
         if self.activate_workspace(workspace, window, cx)
             && let Some(manager) = self
                 .workspaces
                 .workspace(workspace)
                 .map(|w| w.payload().clone())
         {
-            manager.update(cx, |m, cx| m.open_accepted_shared(tab, window, cx));
+            manager.update(cx, |m, cx| m.open_accepted(tab, window, cx));
         }
     }
     pub(in crate::ui::workspace_manager) fn open_server_worktree_tab(
@@ -204,30 +203,35 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(shared) = self.shared.owning(workspace_id) else {
+        let Some(binding) = self.binding.owning(workspace_id) else {
             return false;
         };
-        let Some(workspace) = shared.server_workspace(workspace_id).map(|w| w.id) else {
+        let Some(workspace) = binding.server_workspace(workspace_id).map(|w| w.id) else {
             return false;
         };
         let Some(root) = self
-            .shared_inventory(workspace_id)
+            .workspace_inventory(workspace_id)
             .map(|i| i.main_root.clone())
         else {
             return false;
         };
-        let Some(path) = self.shared_worktree_root(workspace_id, worktree_id) else {
+        let Some(path) = self.worktree_root(workspace_id, worktree_id) else {
             return false;
         };
-        if !shared.editability().available() {
-            Self::show_shared_refusal("open the Worktree", shared.editability().into(), window, cx);
+        if !binding.editability().available() {
+            Self::show_refusal(
+                "open the Worktree",
+                binding.editability().into(),
+                window,
+                cx,
+            );
             return false;
         }
         let source = self
             .workspaces
             .workspace(workspace_id)
-            .and_then(|w| w.payload().read(cx).shared_worktree_pane(worktree_id, cx));
-        let submission = shared
+            .and_then(|w| w.payload().read(cx).worktree_pane(worktree_id, cx));
+        let submission = binding
             .edits()
             .submit(Mutation::Worktree(Operation::OpenTab {
                 workspace,
@@ -236,8 +240,8 @@ impl WorkspaceManager {
                 path,
                 control: spaceterm_server::hierarchy::CreateControl::Creator,
             }));
-        if let SharedSubmission::Refused(reason) = submission {
-            Self::show_shared_refusal("open the Worktree", reason, window, cx);
+        if let WorkspaceSubmission::Refused(reason) = submission {
+            Self::show_refusal("open the Worktree", reason, window, cx);
             return false;
         }
         true
@@ -266,25 +270,25 @@ impl WorkspaceManager {
         if self.sidebar_worktrees.removal.is_some() {
             return;
         }
-        let Some(shared) = self.shared.owning(workspace_id) else {
+        let Some(binding) = self.binding.owning(workspace_id) else {
             return;
         };
-        if !shared.editability().available() {
-            Self::show_shared_refusal(
+        if !binding.editability().available() {
+            Self::show_refusal(
                 "remove the Worktree",
-                shared.editability().into(),
+                binding.editability().into(),
                 window,
                 cx,
             );
             return;
         }
         let Some(root) = self
-            .shared_inventory(workspace_id)
+            .workspace_inventory(workspace_id)
             .map(|i| i.main_root.clone())
         else {
             return;
         };
-        let Some(path) = self.shared_worktree_root(workspace_id, worktree_id) else {
+        let Some(path) = self.worktree_root(workspace_id, worktree_id) else {
             return;
         };
         let Some(client) = self.owning_worktree_client(workspace_id, cx) else {
@@ -319,9 +323,9 @@ impl WorkspaceManager {
                         manager.sidebar_worktrees.removal = None;
                         let error = result.err().unwrap_or(Error::Unavailable);
                         if !client.availability().0 {
-                            Self::show_shared_refusal(
+                            Self::show_refusal(
                                 "remove the Worktree",
-                                crate::ui::shared_workspaces::SharedRefusalReason::Offline,
+                                crate::ui::workspaces::WorkspaceRefusalReason::Offline,
                                 window,
                                 cx,
                             );
@@ -373,7 +377,7 @@ impl WorkspaceManager {
         let title = format!("Remove Worktree \u{201C}{name}\u{201D}?");
         let machine = self.owning_machine(workspace);
         let branch = self
-            .shared_inventory(workspace)
+            .workspace_inventory(workspace)
             .and_then(|i| i.worktrees.iter().find(|r| r.root == review.path))
             .and_then(|r| match &r.head {
                 WorktreeHead::Branch(branch) => {
@@ -392,7 +396,7 @@ impl WorkspaceManager {
             .tabs
             .iter()
             .filter(|tab| {
-                self.shared
+                self.binding
                     .owning(workspace)
                     .and_then(|server| server.local(tab.workspace))
                     != Some(workspace)
@@ -503,12 +507,7 @@ impl WorkspaceManager {
                                 manager.sidebar_worktrees.removal = None;
                             }
                             if let Err(WriteError::Refused(reason)) = result {
-                                Self::show_shared_refusal(
-                                    "remove the Worktree",
-                                    reason,
-                                    window,
-                                    cx,
-                                );
+                                Self::show_refusal("remove the Worktree", reason, window, cx);
                             }
                             cx.notify();
                         });
@@ -538,14 +537,14 @@ impl WorkspaceManager {
             return;
         };
         let Some(inventory) = self
-            .shared
+            .binding
             .owning(review.workspace)
             .and_then(|s| s.latest_inventory())
         else {
             return;
         };
         let missing = self
-            .shared_inventory(review.workspace)
+            .workspace_inventory(review.workspace)
             .is_some_and(|i| !i.worktrees.iter().any(|r| r.root == review.review.path));
         if missing || !review.review.matches_inventory(inventory) {
             let Some(review) = self.sidebar_worktrees.server_review.take() else {
@@ -626,10 +625,10 @@ impl WorkspaceManager {
         if matches!(operation, Operation::Remove { .. }) {
             let review = self.workspaces.iter().find_map(|workspace| {
                 let id = workspace.id();
-                self.shared_worktree_section(id, cx)?
+                self.server_worktree_section(id, cx)?
                     .rows()
                     .find_map(|row| {
-                        (self.shared_worktree_root(id, row.worktree_id).as_ref() == Some(path))
+                        (self.worktree_root(id, row.worktree_id).as_ref() == Some(path))
                             .then_some((id, row.worktree_id))
                     })
             });

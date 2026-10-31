@@ -17,7 +17,7 @@ impl WorkspaceManager {
     ) {
         // A Worktree's root is the server's path, copied as text and nothing more.
         let Some(root) = self
-            .shared_worktree_root(workspace_id, worktree_id)
+            .worktree_root(workspace_id, worktree_id)
             .map(|root| root.display().to_string())
         else {
             return;
@@ -40,7 +40,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_shared_workspace(workspace_id) {
+        if self.has_workspace(workspace_id) {
             self.request_server_worktree_removal(workspace_id, worktree_id, window, cx);
         }
     }

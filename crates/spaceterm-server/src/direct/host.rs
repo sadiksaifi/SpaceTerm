@@ -23,7 +23,7 @@ enum Prepared {
     /// The current listener on every interface holds the narrower new address, which binds
     /// once that listener retires.
     Deferred,
-    /// Exposure turns off.
+    /// Network Access turns off.
     Off,
 }
 /// What a revocation also forgets outside this store.
@@ -193,8 +193,8 @@ impl State {
     }
     /// Readies the listener `next` needs before anything is committed or retired, so a change
     /// whose address can't be bound leaves the current listener and its connections as they are.
-    /// A listener whose saved exposure covers the address it listens at stays, widened in place
-    /// when exposure widens from one address to every interface at the same port. Otherwise a new
+    /// A listener whose saved Network Access covers the address it listens at stays, widened in place
+    /// when Network Access widens from one address to every interface at the same port. Otherwise a new
     /// listener binds now. Only this server's own listener on every interface can hold an
     /// address it covers, so a narrowing that it blocks defers the bind until it retires.
     fn prepare_listener(&mut self, next: &storage::Record) -> Result<Prepared, DirectError> {
@@ -557,7 +557,7 @@ impl State {
         }
         device.info.last_connected_at_unix_seconds = Some(now);
         // This locked snapshot changes metadata only. A failed metadata write must
-        // not fence existing connections, rotate exposure, or change authority.
+        // not fence existing connections, replace the Network Access listener, or change authority.
         let _ = self.store.save(&self.record);
         Ok(())
     }
@@ -1968,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_storage_recovery_fences_registration_from_the_prior_exposure_generation() {
+    fn uncertain_storage_recovery_fences_registration_from_the_prior_network_access_generation() {
         let fixture = super::super::tests::Fixture::new();
         fixture.enable();
         let credential = DeviceCredential::generate().unwrap();
@@ -1987,7 +1987,7 @@ mod tests {
         };
         let generation = state.generation;
         // A failed atomic save leaves its durable outcome uncertain. Its next authority
-        // check reloads the document and rotates exposure before registering a stream.
+        // check reloads the document and replaces the Network Access listener before registering a stream.
         state.uncertain = true;
         let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
         let registered = state.register(

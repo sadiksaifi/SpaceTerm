@@ -241,7 +241,7 @@ mod tests {
     fn reviewed_membership_is_never_broadened_by_a_later_session() {
         let mut snapshot = fixture();
         let facts = live(&mut snapshot);
-        let target = CloseTarget::Workspace { workspace: id(1) };
+        let target = CloseTarget::KillWorkspace { workspace: id(1) };
         let Review::Confirm { confirmation, .. } =
             review(&snapshot, target, id(5), &facts).unwrap()
         else {

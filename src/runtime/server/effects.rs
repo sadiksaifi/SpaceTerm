@@ -15,7 +15,7 @@ pub(super) struct NativeEffects {
     server: VecDeque<(Effect, std::time::Instant)>,
 }
 
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     /// Queues `effect` for this Pane's channel when `controller` controls its running Session.
     /// No other client receives it.
     pub(super) fn send_server_effect(&mut self, controller: [u8; 32], effect: Effect) {

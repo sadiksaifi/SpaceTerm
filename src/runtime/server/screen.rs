@@ -1,4 +1,4 @@
-//! Screen generations, presentation style and palette for the Development host.
+//! Screen generations, presentation style and palette for the server's Pane host.
 use super::*;
 
 impl OwnedPane {

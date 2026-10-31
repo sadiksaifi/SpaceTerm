@@ -1,11 +1,11 @@
 //! A shell that exits with code zero closes its Pane. Any other exit keeps the Pane, which every
 //! client presents as Session Ended until someone starts a fresh Session or closes it.
 use super::*;
-use crate::runtime::server::tests::{await_text, command, host, screen, shared_inventory, size};
+use crate::runtime::server::tests::{await_text, command, host, screen, size, workspace_inventory};
 use spaceterm_server::hierarchy::{Axis, CloseTarget, Mutation, Outcome};
 use spaceterm_server::pane::SessionEnd;
 
-fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) -> Reply {
+fn select(host: &mut WorkspaceHost, device: u8, pane: Id, explicit: bool) -> Reply {
     host.request(
         [device; 32],
         [device; 32],
@@ -18,7 +18,7 @@ fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) 
     )
 }
 
-fn start(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Lease {
+fn start(host: &mut WorkspaceHost, device: u8, pane: Id) -> Lease {
     match select(host, device, pane, true) {
         Reply::Attached { lease } => lease,
         other => panic!("explicit startup unavailable: {other:?}"),
@@ -26,9 +26,9 @@ fn start(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Lease {
 }
 
 /// Splits the initial Workspace's Root Pane and returns the Tab and both Panes.
-fn split(host: &mut SharedWorkspaceHost) -> (Id, Id, Id, Id) {
+fn split(host: &mut WorkspaceHost) -> (Id, Id, Id, Id) {
     host.prepare_initial_organization().unwrap();
-    let inventory = shared_inventory(host);
+    let inventory = workspace_inventory(host);
     let workspace = &inventory.workspaces[0];
     let tab = &workspace.tabs[0];
     let reply = host.request(
@@ -55,7 +55,7 @@ fn split(host: &mut SharedWorkspaceHost) -> (Id, Id, Id, Id) {
 }
 
 /// Runs `line` in the shell behind `lease` and returns its channel's last event once it exits.
-fn exit_with(host: &mut SharedWorkspaceHost, device: u8, lease: Lease, line: &str) -> PaneEvent {
+fn exit_with(host: &mut WorkspaceHost, device: u8, lease: Lease, line: &str) -> PaneEvent {
     command(host, device, lease, line);
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -68,8 +68,8 @@ fn exit_with(host: &mut SharedWorkspaceHost, device: u8, lease: Lease, line: &st
     }
 }
 
-fn panes(host: &mut SharedWorkspaceHost) -> Vec<Id> {
-    shared_inventory(host)
+fn panes(host: &mut WorkspaceHost) -> Vec<Id> {
+    workspace_inventory(host)
         .workspaces
         .iter()
         .flat_map(|w| &w.tabs)
@@ -78,8 +78,8 @@ fn panes(host: &mut SharedWorkspaceHost) -> Vec<Id> {
         .collect()
 }
 
-fn session(host: &mut SharedWorkspaceHost, pane: Id) -> Option<Id> {
-    shared_inventory(host)
+fn session(host: &mut WorkspaceHost, pane: Id) -> Option<Id> {
+    workspace_inventory(host)
         .close
         .unwrap()
         .sessions
@@ -91,7 +91,7 @@ fn session(host: &mut SharedWorkspaceHost, pane: Id) -> Option<Id> {
 
 #[test]
 fn a_zero_exit_closes_only_its_pane_even_without_a_connected_client() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     let (_, tab, root, second) = split(&mut host);
     let lease = start(&mut host, 1, second);
 
@@ -105,7 +105,7 @@ fn a_zero_exit_closes_only_its_pane_even_without_a_connected_client() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    assert_eq!(shared_inventory(&mut host).workspaces[0].tabs[0].id, tab);
+    assert_eq!(workspace_inventory(&mut host).workspaces[0].tabs[0].id, tab);
     assert!(matches!(
         screen(&mut host, [1; 32], lease),
         Err(PaneEvent::Ended)
@@ -115,10 +115,10 @@ fn a_zero_exit_closes_only_its_pane_even_without_a_connected_client() {
 
 #[test]
 fn a_nonzero_exit_keeps_the_last_pane_and_says_why_to_every_client() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
     host.admitted([1; 32], "Studio".into());
-    let before = shared_inventory(&mut host).workspaces;
+    let before = workspace_inventory(&mut host).workspaces;
     let pane = before[0].tabs[0].root_pane;
     let lease = start(&mut host, 1, pane);
 
@@ -128,7 +128,7 @@ fn a_nonzero_exit_keeps_the_last_pane_and_says_why_to_every_client() {
     ));
     host.tick(Instant::now());
 
-    let after = shared_inventory(&mut host);
+    let after = workspace_inventory(&mut host);
     assert_eq!(after.workspaces.len(), 1, "the Workspace stays");
     assert_eq!(after.workspaces[0].tabs.len(), 1, "the Tab stays");
     assert_eq!(panes(&mut host), vec![pane], "the Pane stays");
@@ -152,9 +152,9 @@ fn a_nonzero_exit_keeps_the_last_pane_and_says_why_to_every_client() {
 
 #[test]
 fn a_signal_keeps_the_pane() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let lease = start(&mut host, 1, pane);
 
     assert!(matches!(
@@ -174,9 +174,9 @@ fn a_signal_keeps_the_pane() {
 
 #[test]
 fn start_session_replaces_an_exited_shell_for_its_controller() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let old = start(&mut host, 1, pane);
     exit_with(&mut host, 1, old, "exit 1");
     let Reply::Restored { server, .. } = select(&mut host, 1, pane, false) else {
@@ -210,10 +210,10 @@ fn start_session_replaces_an_exited_shell_for_its_controller() {
 
 #[test]
 fn start_session_from_another_client_takes_over_the_exited_pane() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
     host.admitted([2; 32], "Laptop".into());
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let old = start(&mut host, 1, pane);
     exit_with(&mut host, 1, old, "exit 2");
     let Reply::Takeover { target, .. } = select(&mut host, 2, pane, false) else {
@@ -244,7 +244,7 @@ fn start_session_from_another_client_takes_over_the_exited_pane() {
 
 #[test]
 fn close_pane_from_another_client_removes_an_exited_pane() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     let (workspace, tab, root, second) = split(&mut host);
     let lease = start(&mut host, 1, second);
     exit_with(&mut host, 1, lease, "exit 1");
@@ -254,7 +254,7 @@ fn close_pane_from_another_client_removes_an_exited_pane() {
         tab,
         pane: second,
     };
-    let confirmation = shared_inventory(&mut host)
+    let confirmation = workspace_inventory(&mut host)
         .close_confirmation(target)
         .unwrap();
     assert!(!confirmation.removes_tab);
@@ -279,9 +279,9 @@ fn close_pane_from_another_client_removes_an_exited_pane() {
 /// waits for first use like every other retained Pane.
 #[test]
 fn a_server_restart_keeps_the_exited_pane_but_not_its_exit() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let lease = start(&mut host, 1, pane);
     exit_with(&mut host, 1, lease, "exit 4");
     host.tick(Instant::now());
@@ -289,7 +289,7 @@ fn a_server_restart_keeps_the_exited_pane_but_not_its_exit() {
         serde_json::from_slice(&serde_json::to_vec(&host.state.envelope()).unwrap()).unwrap();
     host.shutdown().unwrap();
 
-    let mut restarted = SharedWorkspaceHost::new(super::super::tests::host());
+    let mut restarted = WorkspaceHost::new(super::super::tests::host());
     restarted.restore_organization(Some(&record));
 
     assert_eq!(panes(&mut restarted), vec![pane]);
@@ -315,10 +315,10 @@ fn a_server_restart_keeps_the_exited_pane_but_not_its_exit() {
 /// Session Ended screen and its cause on every client. Only Start Session starts a shell.
 #[test]
 fn selecting_an_ended_pane_keeps_its_cause_until_start_session() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let workspace = shared_inventory(&mut host).workspaces[0].id;
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let workspace = workspace_inventory(&mut host).workspaces[0].id;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let lease = start(&mut host, 1, pane);
     exit_with(&mut host, 1, lease, "exit 5");
     let ended = Some(SessionEnd::Exited { code: 5 });
@@ -379,11 +379,11 @@ fn selecting_an_ended_pane_keeps_its_cause_until_start_session() {
 /// End All Sessions leaves the same Session Ended screen, which selection keeps too.
 #[test]
 fn selecting_a_pane_end_all_sessions_ended_starts_nothing() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     start(&mut host, 1, pane);
-    let confirmation = shared_inventory(&mut host).close.unwrap();
+    let confirmation = workspace_inventory(&mut host).close.unwrap();
     assert!(matches!(
         host.request(
             [1; 32],
@@ -412,9 +412,9 @@ fn selecting_a_pane_end_all_sessions_ended_starts_nothing() {
 /// noticed. It answers Stale, so that client claims again and sees Session Ended.
 #[test]
 fn take_over_racing_a_shell_exit_leads_to_session_ended() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let lease = start(&mut host, 1, pane);
     command(&mut host, 1, lease, "exit 1");
     // Wait for the exit without draining it, as no tick or observation has run yet.

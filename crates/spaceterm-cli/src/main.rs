@@ -13,7 +13,7 @@ use spaceterm_server::{
 };
 use std::{ffi::OsString, io::Write, process::ExitCode};
 
-const IDENTITY: &str = env!("SPACETERM_SERVER_IDENTITY");
+const IDENTITY: &str = env!("SPACETERM_CLI_IDENTITY");
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         let result = spaceterm_cli::connection::execute(
             command,
             &cli.global,
-            env!("SPACETERM_SERVER_IDENTITY"),
+            env!("SPACETERM_CLI_IDENTITY"),
         );
         return ExitCode::from(result.render(
             (&cli.global).into(),
@@ -184,7 +184,7 @@ fn main() -> ExitCode {
         )
     {
         let reply =
-            spaceterm_cli::server::run(env!("SPACETERM_SERVER_IDENTITY"), &cli.global, command);
+            spaceterm_cli::server::run(env!("SPACETERM_CLI_IDENTITY"), &cli.global, command);
         return ExitCode::from(reply.write(
             (&cli.global).into(),
             &mut std::io::stdout().lock(),
@@ -245,7 +245,7 @@ fn run_server(service: bool, owned: bool) -> Result<(), ServerError> {
     check::resources()?;
     let panes = spaceterm_server::panes(|sync| {
         Ok(spaceterm::runtime::Served::new(
-            spaceterm::runtime::SharedWorkspaceHost::account_service(sync)?
+            spaceterm::runtime::WorkspaceHost::account_service(sync)?
                 .with_session_context(spaceterm::runtime::ServerSessionContext::current(IDENTITY)?),
         ))
     });

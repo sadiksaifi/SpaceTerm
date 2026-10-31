@@ -15,7 +15,7 @@ fn open_local_directory_alias_activates_the_workspace_and_keeps_its_spelling(
     accept_creation(&harness, Some(alias.clone()), cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            let first = manager.shared.local().unwrap().local(WORKSPACE).unwrap();
+            let first = manager.binding.local().unwrap().local(WORKSPACE).unwrap();
             assert!(manager.activate_workspace(first, window, cx));
         })
     });
@@ -28,7 +28,7 @@ fn open_local_directory_alias_activates_the_workspace_and_keeps_its_spelling(
     assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
     assert_eq!(
         harness.manager.read_with(cx, |manager, _| manager
-            .shared
+            .binding
             .local()
             .unwrap()
             .latest_inventory()

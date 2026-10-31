@@ -383,15 +383,26 @@ fn native_settings_are_canonical_strict_and_round_trip() {
     document.appearance.terminal.themes.light = ThemeId::builtin("builtin.spaceterm.light");
     let encoded = export_settings(&document).unwrap();
     let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(encoded_value["schema_version"], 7);
+    let current = document::SETTINGS_SCHEMA_VERSION;
+    assert_eq!(encoded_value["schema_version"], current);
     assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    let unsupported = encoded.replacen("\"schema_version\": 7", "\"schema_version\": 2", 1);
+    let unsupported = encoded.replacen(
+        &format!("\"schema_version\": {current}"),
+        &format!("\"schema_version\": {}", current + 1),
+        1,
+    );
+    assert_ne!(unsupported, encoded);
     assert!(matches!(
         parse_settings(unsupported.as_bytes()),
         Err(SettingsDocumentError::UnsupportedVersion)
     ));
-    assert!(matches!(parse_settings(br#"{"schema_version":7,"schema_version":7,"revision":0,"appearance":{},"terminal_themes":[]}"#),
-        Err(SettingsDocumentError::DuplicateKey)));
+    let duplicate = format!(
+        r#"{{"schema_version":{current},"schema_version":{current},"revision":0,"appearance":{{}},"terminal_themes":[]}}"#
+    );
+    assert!(matches!(
+        parse_settings(duplicate.as_bytes()),
+        Err(SettingsDocumentError::DuplicateKey)
+    ));
 
     let unknown = encoded.replacen(
         "\"revision\": 0,",

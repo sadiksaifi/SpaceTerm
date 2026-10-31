@@ -190,7 +190,7 @@ impl PresentationHandle {
     }
 
     fn reading_mapping(&self) -> Option<ScreenMapping> {
-        if self.state.status() != DevelopmentPaneStatus::Connected {
+        if self.state.status() != ServerPaneStatus::Connected {
             return None;
         }
         let interaction = self
@@ -423,7 +423,7 @@ pub(super) const PAGE_RETRY: Duration = Duration::from_millis(16);
 /// Presents this client's view as `generation`: of `frame` when a new frame arrived, otherwise of
 /// the last frame after the reading changed. Returns the frame's mapping to that presentation.
 pub(super) fn show(
-    state: &DevelopmentPaneState,
+    state: &ServerPaneState,
     events: &async_channel::Sender<TerminalSessionEvent>,
     frame: Option<Arc<ScreenSnapshot>>,
     (epoch, generation, mut mapping): (u64, PresentationGeneration, ScreenMapping),

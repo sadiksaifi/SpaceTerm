@@ -52,8 +52,21 @@ SHARED_RESOURCES = "share/spaceterm"
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
-# The SpaceTerm Protocol major that `crates/spaceterm-cli/build.rs` stamps into server builds.
-PROTOCOL_MAJOR = 4
+# The file that owns the SpaceTerm Protocol major. `crates/spaceterm-cli/build.rs` stamps the
+# same major into server builds.
+PROTOCOL_MAJOR_SOURCE = "crates/spaceterm-server/src/protocol/major.rs"
+PROTOCOL_MAJOR_LINE = re.compile(r"^pub const MAJOR: u16 = ([1-9][0-9]*);$", re.MULTILINE)
+
+
+def protocol_major(root=ROOT):
+    """Returns the SpaceTerm Protocol major of the source tree at `root`."""
+    found = PROTOCOL_MAJOR_LINE.findall((root / PROTOCOL_MAJOR_SOURCE).read_text())
+    if len(found) != 1:
+        raise TaskError("the protocol major source must declare one major")
+    return int(found[0])
+
+
+PROTOCOL_MAJOR = protocol_major()
 BUILD_KEYS = {
     "schema",
     "identity",
@@ -690,7 +703,7 @@ def package(identity, release_tag=None, *, target=None):
     from spaceterm_tasks.server_builds import _source
 
     source = _source(ROOT)[2]
-    environment["SPACETERM_SERVER_SOURCE_STATE"] = source
+    environment["SPACETERM_CLI_SOURCE_STATE"] = source
     seed = artifact_signing_seed(identity)
     executable, metadata = build_executable(
         "--release",
@@ -827,8 +840,8 @@ def stage_desktop_artifact(archive, signature, destination, expected=None, *, id
         for path in destination.iterdir():
             path.chmod(0o644)
     return {
-        "SPACETERM_SERVER_ARCHIVE": str((destination / "artifact.tar.gz").resolve()),
-        "SPACETERM_SERVER_SIGNATURE": str((destination / "artifact.sig").resolve()),
+        "SPACETERM_CLI_ARCHIVE": str((destination / "artifact.tar.gz").resolve()),
+        "SPACETERM_CLI_SIGNATURE": str((destination / "artifact.sig").resolve()),
     }
 
 
@@ -845,13 +858,13 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
     An explicit pair reuses its signed bytes across client releases. Without that pair,
     build the independent package using the existing candidate signing workflow.
     """
-    archive = os.environ.get("SPACETERM_SERVER_ARCHIVE")
-    signature = os.environ.get("SPACETERM_SERVER_SIGNATURE")
+    archive = os.environ.get("SPACETERM_CLI_ARCHIVE")
+    signature = os.environ.get("SPACETERM_CLI_SIGNATURE")
     if (archive is not None or signature is not None) and (not archive or not signature):
-        raise TaskError("supply both SPACETERM_SERVER_ARCHIVE and SPACETERM_SERVER_SIGNATURE")
+        raise TaskError("supply both SPACETERM_CLI_ARCHIVE and SPACETERM_CLI_SIGNATURE")
     if release_tag:
         require_clean_checkout()
-    source = os.environ.get("SPACETERM_SERVER_ARTIFACTS")
+    source = os.environ.get("SPACETERM_CLI_ARTIFACTS")
     if source is not None and not release_tag and host_target() == TARGETS["linux"]:
         from spaceterm_tasks.server_builds import _source
         from spaceterm_tasks.server_catalog import collect_target
@@ -876,8 +889,8 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
         from spaceterm_tasks.server_catalog import stage_catalog
 
         stage_catalog(
-            environment["SPACETERM_SERVER_ARCHIVE"],
-            environment["SPACETERM_SERVER_SIGNATURE"],
+            environment["SPACETERM_CLI_ARCHIVE"],
+            environment["SPACETERM_CLI_SIGNATURE"],
             catalog_destination,
             identity,
             source=source,

@@ -12,18 +12,18 @@ use std::time::Duration;
 
 use spaceterm_server::hierarchy::{Id, Mutation};
 
-use super::{DirectServer, SharedPaneOpener, SharedPaneSubscription, SharedWorkspaceEdits};
+use super::{DirectServer, WorkspaceEdits, WorkspacePaneOpener, WorkspacePaneSubscription};
 use crate::direct_connections::DirectRouteId;
 use crate::server_connection::ServerError;
 use crate::terminal::WorkspaceTerminalSessionFactory;
-use crate::terminal::server_session::DevelopmentPaneStatus;
-use crate::terminal::shared_workspace::SharedWorkspaceSnapshot;
+use crate::terminal::server_session::ServerPaneStatus;
+use crate::terminal::workspace_client::WorkspaceSnapshot;
 use crate::ui::server_pane::ServerPaneConnection;
 
 /// Opens one paired route's Panes through its current connection, or as unavailable without one.
 pub(crate) struct DirectRoutePanes {
     direct: DirectServer,
-    connected: RefCell<Option<Rc<dyn SharedPaneOpener>>>,
+    connected: RefCell<Option<Rc<dyn WorkspacePaneOpener>>>,
     /// The title each of the route's Panes presents without a connection.
     titles: RefCell<BTreeMap<Id, String>>,
     generation: Cell<u64>,
@@ -41,7 +41,7 @@ impl DirectRoutePanes {
 
     /// Opens Panes through `connected`, or as unavailable when `None`. Every Pane opened earlier
     /// opens again.
-    pub(crate) fn follow(&self, connected: Option<Rc<dyn SharedPaneOpener>>) {
+    pub(crate) fn follow(&self, connected: Option<Rc<dyn WorkspacePaneOpener>>) {
         *self.connected.borrow_mut() = connected;
         self.generation.set(self.generation.get().wrapping_add(1));
     }
@@ -52,8 +52,8 @@ impl DirectRoutePanes {
     }
 }
 
-impl SharedPaneOpener for DirectRoutePanes {
-    fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
+impl WorkspacePaneOpener for DirectRoutePanes {
+    fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription> {
         if let Some(connected) = self.connected.borrow().as_ref() {
             return connected.open(pane);
         }
@@ -81,8 +81,8 @@ impl SharedPaneOpener for DirectRoutePanes {
 struct UnavailablePane;
 
 impl ServerPaneConnection for UnavailablePane {
-    fn status(&self) -> DevelopmentPaneStatus {
-        DevelopmentPaneStatus::Offline
+    fn status(&self) -> ServerPaneStatus {
+        ServerPaneStatus::Offline
     }
     fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
         None
@@ -112,11 +112,11 @@ pub(crate) trait PresentationRecord: Send + Sync {
 /// it.
 impl PresentationRecord for spaceterm_server::ServerConnection {
     fn presented(&self, sequence: u64) -> Result<(), ServerError> {
-        self.shared_journal()?.presented(sequence)
+        self.operation_journal()?.presented(sequence)
     }
 
     fn forgotten_presented(&self, total: u64) -> Result<(), ServerError> {
-        self.shared_journal()?.forgotten_presented(total)
+        self.operation_journal()?.forgotten_presented(total)
     }
 }
 
@@ -204,10 +204,10 @@ impl PresentationRetries {
         if std::mem::replace(&mut retries.retrying, true) {
             return;
         }
-        let shared = Arc::clone(&self.0);
+        let binding = Arc::clone(&self.0);
         let started = std::thread::Builder::new()
             .name("spaceterm-presentation-retries".into())
-            .spawn(move || retry(&shared));
+            .spawn(move || retry(&binding));
         // Without the thread, the route's next connection still takes what waits.
         retries.retrying = started.is_ok();
     }
@@ -279,9 +279,9 @@ impl UnavailableEdits {
     }
 }
 
-impl SharedWorkspaceEdits for UnavailableEdits {
-    fn snapshot(&self) -> SharedWorkspaceSnapshot {
-        SharedWorkspaceSnapshot {
+impl WorkspaceEdits for UnavailableEdits {
+    fn snapshot(&self) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
             inventory: None,
             connected: false,
             pending: false,

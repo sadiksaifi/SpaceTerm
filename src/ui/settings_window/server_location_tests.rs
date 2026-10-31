@@ -191,7 +191,7 @@ mod presented {
     use crate::repository_status::ToolVersion;
     use crate::server_context::ServerKey;
     use crate::ui::server_worktrees::testing::{ScriptedReads, present_direct};
-    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use crate::ui::workspaces::testing::ScriptedEdits;
 
     const GIT_SECTION: &str = "settings-navigation-settings-section-git";
     const SAVED: &str = "~/penguin/{repository}/{branch}";

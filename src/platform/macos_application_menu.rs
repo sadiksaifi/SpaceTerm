@@ -5,8 +5,8 @@ use crate::application_identity::ApplicationIdentity;
 use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, RELEASE_NOTES_TITLE};
 #[cfg(test)]
 use crate::ui::{
-    ClosePane, CloseTab, CloseWorkspace, CreateTab, ExportTerminalDiagnostics, NewWorkspace,
-    SwitchWorkspace,
+    ChooseWorkspace, ClosePane, CloseTab, ExportTerminalDiagnostics, KillWorkspace, NewTab,
+    NewWorkspace,
 };
 use gpui::{App, Keymap, Menu, MenuItem, Modifiers, SharedString};
 
@@ -1056,12 +1056,12 @@ mod tests {
                 NewWorkspace.name(),
                 crate::ui::settings_window::AddServer.name(),
                 crate::ui::OpenLocalDirectory.name(),
-                SwitchWorkspace.name(),
-                CreateTab.name(),
+                ChooseWorkspace.name(),
+                NewTab.name(),
                 crate::ui::NewWorktree.name(),
                 ClosePane.name(),
                 CloseTab.name(),
-                CloseWorkspace.name(),
+                KillWorkspace.name(),
                 ExportTerminalDiagnostics.name(),
             ]
         );

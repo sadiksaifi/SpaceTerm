@@ -5,10 +5,7 @@
     reason = "Shared edits use the handle's shared connection instead of the fixture connection helper."
 )]
 mod lifecycle;
-#[expect(
-    dead_code,
-    reason = "The shared-Pane exercise never uses `support::attach`."
-)]
+#[expect(dead_code, reason = "The Pane exercise never uses `support::attach`.")]
 mod support;
 use lifecycle::{Server, require_idle, size};
 use spaceterm_server::{
@@ -163,7 +160,7 @@ fn attachment_workflow(a: &ServerConnection, b: &ServerConnection) -> Result<(),
     choices.detach(workspace)?;
     choices.release_pending(&first)?;
     assert!(!choices.is_attached(workspace));
-    close(&first, CloseTarget::Workspace { workspace })?;
+    close(&first, CloseTarget::KillWorkspace { workspace })?;
     choices.reconcile(&inventory(&first)?.0)?;
     assert!(!choices.attach(workspace)?);
     Ok(())
@@ -363,7 +360,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let current = inventory(&first)?.0;
-    let target = CloseTarget::Workspace { workspace };
+    let target = CloseTarget::KillWorkspace { workspace };
     let confirmation = current
         .close_confirmation(target)
         .ok_or("Kill confirmation")?;
@@ -419,7 +416,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ));
     close(
         &first,
-        CloseTarget::Workspace {
+        CloseTarget::KillWorkspace {
             workspace: survivor,
         },
     )?;

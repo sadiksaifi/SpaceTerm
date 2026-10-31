@@ -117,7 +117,7 @@ mod exercise {
         connection: &ServerLink,
         mutation: Mutation,
     ) -> Result<Id> {
-        let mut journal = api(server.shared_journal())?;
+        let mut journal = api(server.operation_journal())?;
         require(
             journal.pending().is_none(),
             "resolve this test client's original mutation first",
@@ -438,7 +438,7 @@ mod exercise {
                 && owned.pane.is_none_or(|pane| work.tabs[0].root_pane == pane),
             "cleanup refused: test Workspace changed",
         )?;
-        let target = CloseTarget::Workspace {
+        let target = CloseTarget::KillWorkspace {
             workspace: owned.workspace,
         };
         let confirmation = current
@@ -518,12 +518,12 @@ mod exercise {
             }
             require(
                 api(self.owner.paired_devices())?.is_empty(),
-                "cleanup preserved an unrelated pairing; exposure requires owner review",
+                "cleanup preserved an unrelated pairing; Network Access requires owner review",
             )?;
             let policy = api(self.owner.direct_status())?.policy;
             require(
                 policy.as_ref() == Some(&self.policy) || policy.is_none(),
-                "cleanup preserved a changed exposure policy",
+                "cleanup preserved a changed Network Access policy",
             )?;
             if policy.is_some() {
                 api(self.owner.set_direct_policy(None, false))?;
@@ -612,8 +612,8 @@ mod exercise {
         let name = format!("direct541-owner-{}", &hex(&random()?)[..6]);
         let owner = api(ServerConnection::for_development_client(&name))?;
         require(
-            api(owner.refresh())?.protocol_major == 4,
-            "expected protocol major 4",
+            api(owner.refresh())?.protocol_major == spaceterm_server::protocol::MAJOR,
+            "expected this build's protocol major",
         )?;
         let mut connection = api(support::connect(&owner))?;
         let baseline = inventory(&connection)?.0;
@@ -628,7 +628,7 @@ mod exercise {
                 && initial.listener == ListenerState::Off
                 && api(owner.paired_devices())?.is_empty()
                 && api(owner.pairing_claims(None))?.is_empty(),
-            "scope guard refused: exposure, paired devices or pending claims already exist",
+            "scope guard refused: Network Access, paired devices or pending claims already exist",
         )?;
         let policy = api(NetworkPolicy::new(bind))?;
         require(
@@ -656,7 +656,7 @@ mod exercise {
             require(
                 status.pin == initial.pin
                     && status.listener == ListenerState::Listening { addr: bind },
-                "explicit exposure did not bind the requested endpoint",
+                "explicit Network Access did not bind the requested endpoint",
             )?;
             if restart {
                 idle(&inventory(&connection)?.0)?;
@@ -679,7 +679,9 @@ mod exercise {
                     "restart did not retain exact network policy and server identity",
                 )?;
                 idle(&inventory(&connection)?.0)?;
-                println!("PASS explicit idle restart retained exposure policy and server identity");
+                println!(
+                    "PASS explicit idle restart retained Network Access policy and server identity"
+                );
             }
             let mut peer = Peer::penguin()?;
             require(
@@ -688,7 +690,8 @@ mod exercise {
             )?;
             let paired = scope.enroll(&mut peer)?;
             println!(
-                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 4"
+                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major {}",
+                spaceterm_server::protocol::MAJOR
             );
             let failed = peer.message(json!({"create_workspace": format!("Direct devices cleanup {}", &hex(&random()?)[..12]), "fail_before_handoff": true}))?;
             scope.workspace = Some(api(serde_json::from_value(
@@ -908,7 +911,7 @@ mod exercise {
         let cleanup = scope.cleanup();
         if cleanup.is_ok() {
             println!(
-                "PASS scoped cleanup: baseline Workspaces retained, test pairings revoked, exposure off"
+                "PASS scoped cleanup: baseline Workspaces retained, test pairings revoked, Network Access off"
             );
         } else {
             eprintln!(
@@ -1018,8 +1021,8 @@ mod exercise {
             connector.clone(),
         ))?;
         require(
-            api(server.refresh())?.protocol_major == 4,
-            "QUIC did not negotiate major 3",
+            api(server.refresh())?.protocol_major == spaceterm_server::protocol::MAJOR,
+            "QUIC did not negotiate this build's protocol major",
         )?;
         send_json(output, json!({"paired": paired}))?;
         Ok((server, connector))
@@ -1401,7 +1404,7 @@ mod exercise {
                 "Confirms no user Terminal Sessions, paired devices, pending claims or outstanding invitations."
             );
             println!(
-                "Touches one test-created Workspace, two temporary pairings and its own exposure policy; restores exposure off."
+                "Touches one test-created Workspace, two temporary pairings and its own Network Access policy; restores Network Access off."
             );
             println!(
                 "Optional --restart-idle-service authorizes restart before any fixture Terminal Session exists."

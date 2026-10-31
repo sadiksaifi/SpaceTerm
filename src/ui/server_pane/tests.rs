@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 
 use super::{ServerPaneConnection, ServerPaneScreen, ServerPaneView};
 use crate::server_connection::ServerError;
-use crate::terminal::server_session::DevelopmentPaneStatus;
+use crate::terminal::server_session::ServerPaneStatus;
 use spaceterm_server::pane::{SessionEnd, control::Controller};
 
 /// A Pane connection whose answers a test sets and whose explicit requests it counts.
 struct Connection {
-    status: Mutex<DevelopmentPaneStatus>,
+    status: Mutex<ServerPaneStatus>,
     session_end: Mutex<Option<SessionEnd>>,
     start_unconfirmed: AtomicBool,
     generation: AtomicU64,
@@ -18,7 +18,7 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(status: DevelopmentPaneStatus) -> Arc<Self> {
+    fn new(status: ServerPaneStatus) -> Arc<Self> {
         Arc::new(Self {
             status: Mutex::new(status),
             session_end: Mutex::default(),
@@ -30,12 +30,12 @@ impl Connection {
         })
     }
 
-    fn set(&self, status: DevelopmentPaneStatus) {
+    fn set(&self, status: ServerPaneStatus) {
         *self.status.lock().expect("status") = status;
     }
 
     /// A new connection reached the server, which answered with `status`.
-    fn answer(&self, status: DevelopmentPaneStatus) {
+    fn answer(&self, status: ServerPaneStatus) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.set(status);
     }
@@ -46,7 +46,7 @@ impl Connection {
 }
 
 impl ServerPaneConnection for Connection {
-    fn status(&self) -> DevelopmentPaneStatus {
+    fn status(&self) -> ServerPaneStatus {
         *self.status.lock().expect("status")
     }
 
@@ -95,10 +95,10 @@ fn notice(view: &ServerPaneView) -> Option<(String, String)> {
 /// A restored Pane whose Start New Shell was clicked and then lost its connection before the
 /// server answered.
 fn lost_start() -> (Arc<Connection>, ServerPaneView) {
-    let connection = Connection::new(DevelopmentPaneStatus::Restored);
+    let connection = Connection::new(ServerPaneStatus::Restored);
     let mut view = ServerPaneView::new(connection.clone());
     view.start_shell();
-    connection.set(DevelopmentPaneStatus::Reconnecting);
+    connection.set(ServerPaneStatus::Reconnecting);
     view.sync();
     (connection, view)
 }
@@ -132,7 +132,7 @@ fn a_lost_start_offers_only_a_check_while_reconnecting() {
 #[test]
 fn exhausted_recovery_after_a_lost_start_names_the_cause_and_never_starts_again() {
     let (connection, mut view) = lost_start();
-    connection.answer(DevelopmentPaneStatus::Failed(ServerError::Protocol));
+    connection.answer(ServerPaneStatus::Failed(ServerError::Protocol));
     view.sync();
 
     assert_eq!(
@@ -162,11 +162,11 @@ fn exhausted_recovery_after_a_lost_start_names_the_cause_and_never_starts_again(
 #[test]
 fn a_check_that_settles_nothing_says_so_and_can_run_again() {
     let (connection, mut view) = lost_start();
-    connection.answer(DevelopmentPaneStatus::Failed(ServerError::Protocol));
+    connection.answer(ServerPaneStatus::Failed(ServerError::Protocol));
     view.sync();
     view.retry();
 
-    connection.answer(DevelopmentPaneStatus::Failed(ServerError::Protocol));
+    connection.answer(ServerPaneStatus::Failed(ServerError::Protocol));
     view.sync();
 
     assert_eq!(
@@ -184,7 +184,7 @@ fn a_check_that_settles_nothing_says_so_and_can_run_again() {
 fn a_different_server_boot_offers_start_new_shell_again() {
     let (connection, mut view) = lost_start();
     connection.set_start_unconfirmed(false);
-    connection.answer(DevelopmentPaneStatus::Restored);
+    connection.answer(ServerPaneStatus::Restored);
     view.sync();
 
     assert!(matches!(
@@ -198,7 +198,7 @@ fn a_different_server_boot_offers_start_new_shell_again() {
 fn a_live_shell_found_by_a_check_replaces_the_screen() {
     let (connection, mut view) = lost_start();
     connection.set_start_unconfirmed(false);
-    connection.answer(DevelopmentPaneStatus::Connected);
+    connection.answer(ServerPaneStatus::Connected);
     view.sync();
 
     assert_eq!(view.screen(), None);
@@ -207,7 +207,7 @@ fn a_live_shell_found_by_a_check_replaces_the_screen() {
 
 #[test]
 fn take_over_waits_while_a_start_may_have_run() {
-    let connection = Connection::new(DevelopmentPaneStatus::Takeover);
+    let connection = Connection::new(ServerPaneStatus::Takeover);
     connection.set_start_unconfirmed(true);
     let mut view = ServerPaneView::new(connection.clone());
 
@@ -223,9 +223,9 @@ fn take_over_waits_while_a_start_may_have_run() {
 
 #[test]
 fn a_restored_pane_that_stopped_reconnecting_names_the_failure() {
-    let connection = Connection::new(DevelopmentPaneStatus::Restored);
+    let connection = Connection::new(ServerPaneStatus::Restored);
     let mut view = ServerPaneView::new(connection.clone());
-    connection.set(DevelopmentPaneStatus::Failed(ServerError::Protocol));
+    connection.set(ServerPaneStatus::Failed(ServerError::Protocol));
     view.sync();
 
     assert_eq!(
@@ -240,11 +240,9 @@ fn a_restored_pane_that_stopped_reconnecting_names_the_failure() {
 
 #[test]
 fn an_incompatible_server_is_named_without_claiming_which_side_is_older() {
-    let connection = Connection::new(DevelopmentPaneStatus::Connected);
+    let connection = Connection::new(ServerPaneStatus::Connected);
     let mut view = ServerPaneView::new(connection.clone());
-    connection.set(DevelopmentPaneStatus::Failed(
-        ServerError::IncompatibleProtocol,
-    ));
+    connection.set(ServerPaneStatus::Failed(ServerError::IncompatibleProtocol));
     view.sync();
 
     assert_eq!(
@@ -258,13 +256,13 @@ fn an_incompatible_server_is_named_without_claiming_which_side_is_older() {
 
 #[test]
 fn a_first_selection_whose_answer_was_lost_shows_the_unconfirmed_start() {
-    let connection = Connection::new(DevelopmentPaneStatus::Connecting);
+    let connection = Connection::new(ServerPaneStatus::Connecting);
     let mut view = ServerPaneView::new(connection.clone());
     connection.set_start_unconfirmed(true);
     view.sync();
     assert_eq!(view.screen(), None, "a start in flight replaces nothing");
 
-    connection.set(DevelopmentPaneStatus::Reconnecting);
+    connection.set(ServerPaneStatus::Reconnecting);
     let sync = view.sync();
 
     assert!(sync.entering_screen && sync.clear_presentation);
@@ -280,7 +278,7 @@ fn a_first_selection_whose_answer_was_lost_shows_the_unconfirmed_start() {
 
 #[test]
 fn a_restored_pane_whose_start_is_in_flight_shows_it_starting() {
-    let connection = Connection::new(DevelopmentPaneStatus::Restored);
+    let connection = Connection::new(ServerPaneStatus::Restored);
     connection.set_start_unconfirmed(true);
     let view = ServerPaneView::new(connection);
 
@@ -299,7 +297,7 @@ fn a_restored_pane_whose_start_is_in_flight_shows_it_starting() {
 fn the_unconfirmed_start_stays_through_a_check_that_reconnects() {
     let (connection, mut view) = lost_start();
     view.retry();
-    connection.set(DevelopmentPaneStatus::Connecting);
+    connection.set(ServerPaneStatus::Connecting);
     view.sync();
 
     assert_eq!(
@@ -332,7 +330,7 @@ fn the_session_ended_screen_says_why_the_shell_ended() {
 #[test]
 fn an_exited_shell_offers_start_session_without_starting_one() {
     let end = SessionEnd::Exited { code: 127 };
-    let connection = Connection::new(DevelopmentPaneStatus::SessionEnded(end));
+    let connection = Connection::new(ServerPaneStatus::SessionEnded(end));
     let mut view = ServerPaneView::new(connection.clone());
 
     assert_eq!(
@@ -357,7 +355,7 @@ fn an_exited_shell_offers_start_session_without_starting_one() {
 #[test]
 fn another_clients_exited_shell_offers_start_session_through_take_over() {
     let end = SessionEnd::Exited { code: 1 };
-    let connection = Connection::new(DevelopmentPaneStatus::Takeover);
+    let connection = Connection::new(ServerPaneStatus::Takeover);
     *connection.session_end.lock().unwrap() = Some(end);
     let mut view = ServerPaneView::new(connection.clone());
 
@@ -376,7 +374,7 @@ fn another_clients_exited_shell_offers_start_session_through_take_over() {
 
     assert_eq!(connection.take_overs.load(Ordering::SeqCst), 1);
     assert_eq!(connection.starts.load(Ordering::SeqCst), 0);
-    connection.set(DevelopmentPaneStatus::TakingOver);
+    connection.set(ServerPaneStatus::TakingOver);
     view.sync();
     assert!(matches!(
         view.screen(),

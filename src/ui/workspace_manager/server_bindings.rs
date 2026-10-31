@@ -1,14 +1,14 @@
 //! The SpaceTerm Servers whose Workspaces one Workspace Window presents.
 //!
 //! The account-local server and each saved paired server publish their own inventory,
-//! answers, and attachments. Each one keeps its own binding, so a shared Workspace's edits, closes, and
+//! answers, and attachments. Each one keeps its own binding, so a Workspace's edits, closes, and
 //! Pane connections always reach the server that owns it, and losing one server leaves the
 //! others' Workspaces untouched.
 
 use gpui::Task;
 
 use crate::domain::WorkspaceId;
-use crate::ui::shared_workspaces::SharedWorkspaces;
+use crate::ui::workspaces::Workspaces;
 
 /// Names one presented server for the window's lifetime. Deferred answers, such as an alert's
 /// choice or a Workspace Switcher item, carry it to reach the server they were shown for.
@@ -25,7 +25,7 @@ impl ServerKey {
 pub(crate) enum ServerOrigin {
     Local,
     /// A server reached over a paired route, with the name it gave.
-    Direct(crate::ui::shared_workspaces::DirectServer),
+    Direct(crate::ui::workspaces::DirectServer),
 }
 
 impl ServerOrigin {
@@ -41,7 +41,7 @@ impl ServerOrigin {
 struct Binding {
     key: ServerKey,
     origin: ServerOrigin,
-    workspaces: SharedWorkspaces,
+    workspaces: Workspaces,
     _poll: Option<Task<()>>,
 }
 
@@ -69,7 +69,7 @@ impl ServerBindings {
     pub(crate) fn insert(
         &mut self,
         origin: ServerOrigin,
-        workspaces: SharedWorkspaces,
+        workspaces: Workspaces,
     ) -> (ServerKey, bool) {
         if let Some(key) = self.key_of(&origin) {
             return (key, false);
@@ -102,7 +102,7 @@ impl ServerBindings {
     }
 
     /// Removes a binding, which stops reading its server.
-    pub(crate) fn remove(&mut self, key: ServerKey) -> Option<SharedWorkspaces> {
+    pub(crate) fn remove(&mut self, key: ServerKey) -> Option<Workspaces> {
         let index = self
             .bindings
             .iter()
@@ -114,14 +114,14 @@ impl ServerBindings {
         self.bindings.iter_mut().find(|binding| binding.key == key)
     }
 
-    pub(crate) fn get(&self, key: ServerKey) -> Option<&SharedWorkspaces> {
+    pub(crate) fn get(&self, key: ServerKey) -> Option<&Workspaces> {
         self.bindings
             .iter()
             .find(|binding| binding.key == key)
             .map(|binding| &binding.workspaces)
     }
 
-    pub(crate) fn get_mut(&mut self, key: ServerKey) -> Option<&mut SharedWorkspaces> {
+    pub(crate) fn get_mut(&mut self, key: ServerKey) -> Option<&mut Workspaces> {
         self.binding_mut(key).map(|binding| &mut binding.workspaces)
     }
 
@@ -133,11 +133,11 @@ impl ServerBindings {
     }
 
     /// The account-local server's binding.
-    pub(crate) fn local(&self) -> Option<&SharedWorkspaces> {
+    pub(crate) fn local(&self) -> Option<&Workspaces> {
         self.get(ServerKey::LOCAL)
     }
 
-    pub(crate) fn local_mut(&mut self) -> Option<&mut SharedWorkspaces> {
+    pub(crate) fn local_mut(&mut self) -> Option<&mut Workspaces> {
         self.get_mut(ServerKey::LOCAL)
     }
 
@@ -145,38 +145,35 @@ impl ServerBindings {
     pub(crate) fn owner(&self, workspace_id: WorkspaceId) -> Option<ServerKey> {
         self.bindings
             .iter()
-            .find(|binding| binding.workspaces.is_shared(workspace_id))
+            .find(|binding| binding.workspaces.contains_workspace(workspace_id))
             .map(|binding| binding.key)
     }
 
-    pub(crate) fn owning(&self, workspace_id: WorkspaceId) -> Option<&SharedWorkspaces> {
+    pub(crate) fn owning(&self, workspace_id: WorkspaceId) -> Option<&Workspaces> {
         self.bindings
             .iter()
             .map(|binding| &binding.workspaces)
-            .find(|workspaces| workspaces.is_shared(workspace_id))
+            .find(|workspaces| workspaces.contains_workspace(workspace_id))
     }
 
-    pub(crate) fn owning_mut(
-        &mut self,
-        workspace_id: WorkspaceId,
-    ) -> Option<&mut SharedWorkspaces> {
+    pub(crate) fn owning_mut(&mut self, workspace_id: WorkspaceId) -> Option<&mut Workspaces> {
         self.bindings
             .iter_mut()
             .map(|binding| &mut binding.workspaces)
-            .find(|workspaces| workspaces.is_shared(workspace_id))
+            .find(|workspaces| workspaces.contains_workspace(workspace_id))
     }
 
     pub(crate) fn keys(&self) -> Vec<ServerKey> {
         self.bindings.iter().map(|binding| binding.key).collect()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (ServerKey, &SharedWorkspaces)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ServerKey, &Workspaces)> {
         self.bindings
             .iter()
             .map(|binding| (binding.key, &binding.workspaces))
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut SharedWorkspaces> {
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Workspaces> {
         self.bindings
             .iter_mut()
             .map(|binding| &mut binding.workspaces)

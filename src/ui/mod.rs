@@ -28,9 +28,12 @@ pub(crate) mod remembered_view;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
-#[allow(
-    dead_code,
-    reason = "only a status item without native alerts opens this window"
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "only a status item without native alerts opens this window"
+    )
 )]
 pub(crate) mod server_control_window;
 pub(crate) mod server_pane;
@@ -38,7 +41,6 @@ pub(crate) mod server_worktrees;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
-pub(crate) mod shared_workspaces;
 mod sidebar_motion;
 mod sidebar_window;
 pub(crate) mod ssh_setup;
@@ -62,6 +64,7 @@ mod workspace_manager;
 mod workspace_order_state;
 mod workspace_sidebar;
 mod workspace_status;
+pub(crate) mod workspaces;
 mod worktree_form;
 
 use gpui::{App, actions};
@@ -124,7 +127,7 @@ actions!(
         FocusNextPane,
         TogglePaneZoom,
         ShowRepositoryStatus,
-        CreateTab,
+        NewTab,
         ActivateTab1,
         ActivateTab2,
         ActivateTab3,
@@ -149,8 +152,8 @@ actions!(
         ActivateWorkspace9,
         ClosePane,
         CloseTab,
-        CloseWorkspace,
-        SwitchWorkspace,
+        KillWorkspace,
+        ChooseWorkspace,
         NewWorkspace,
         OpenLocalDirectory,
         NewWorktree,
@@ -340,13 +343,13 @@ mod tests {
     fn workspace_and_hierarchy_shortcuts_should_be_global(cx: &mut TestAppContext) {
         cx.update(|cx| init(cx).expect("UI initialization should succeed"));
         let expected = [
-            ("cmd-shift-k", SwitchWorkspace.name()),
+            ("cmd-shift-k", ChooseWorkspace.name()),
             ("cmd-n", NewWorkspace.name()),
             ("cmd-o", OpenLocalDirectory.name()),
-            ("cmd-t", CreateTab.name()),
+            ("cmd-t", NewTab.name()),
             ("cmd-w", ClosePane.name()),
             ("cmd-shift-w", CloseTab.name()),
-            ("ctrl-cmd-w", CloseWorkspace.name()),
+            ("ctrl-cmd-w", KillWorkspace.name()),
         ];
         let actual = cx.update(|cx| {
             expected

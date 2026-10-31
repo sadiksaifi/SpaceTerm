@@ -38,22 +38,22 @@
 	<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
 	<true/>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on your Desktop.</string>
+	<string>SpaceTerm opens and previews local files on your Desktop.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in in Documents.</string>
+	<string>SpaceTerm opens and previews local files in your Documents folder.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
-	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in in Downloads.</string>
+	<string>SpaceTerm opens and previews local files in your Downloads folder.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Sadik Saifi</string>
-	<key>NSNetworkVolumesUsageDescription</key>
-	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on a network volume.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SpaceTerm uses your local network to connect to servers you add and devices you pair.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>SpaceTerm opens and previews local files on network volumes.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>SpaceTerm opens and previews local files on removable volumes.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>NSRemovableVolumesUsageDescription</key>
-	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on a removable volume.</string>
 </dict>
 </plist>

@@ -209,7 +209,7 @@ class Probe:
     def activate_control(self, name, root=None):
         control_id = {
             "New Workspace": "new_workspace",
-            "Switch Workspace": "switch_workspace",
+            "Choose Workspace": "choose_workspace",
             "Local Workspace": "local_workspace",
             "Rename Workspace": "rename_workspace",
             "Kill Workspace": "kill_workspace",
@@ -315,7 +315,7 @@ class Probe:
         )
         # Supply the unique name in the creation request. Native proxy replacement cannot
         # prove which unnamed row is new, and renaming a guessed row can touch retained work.
-        self.activate_control("Switch Workspace")
+        self.activate_control("Choose Workspace")
         field = self.wait(
             lambda: self.find_named_control("Workspace name"), "server_workspace_query_missing"
         )

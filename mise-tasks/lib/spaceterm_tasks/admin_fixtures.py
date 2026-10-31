@@ -51,7 +51,8 @@ def _record(archive, signature, role, target):
     if (
         info["identity"] != "spaceterm-preflight"
         or info["target"] != target
-        or info["protocol_major"] != (5 if role == "major5" else 4)
+        or info["protocol_major"]
+        != server_package.PROTOCOL_MAJOR + (1 if role == "next-major" else 0)
     ):
         raise TaskError("the fixture has a different identity, target or protocol major")
     with tempfile.TemporaryDirectory(prefix="spaceterm-resume-fixture-") as temporary:
@@ -182,26 +183,19 @@ def prepare(destination, selected, *, resume=False):
         _build(root, destination, "normal", targets, result, resume)
         for target in targets:
             _broken_verification(destination, target, result)
-        build = root / "crates/spaceterm-cli/build.rs"
-        admission = root / "crates/spaceterm-server/src/protocol/admission.rs"
-        build.write_text(
-            build.read_text().replace(
-                "const PROTOCOL_MAJOR: u16 = 4;", "const PROTOCOL_MAJOR: u16 = 5;"
+        major = root / server_package.PROTOCOL_MAJOR_SOURCE
+        current = major.read_text()
+        major.write_text(
+            current.replace(
+                f"pub const MAJOR: u16 = {server_package.PROTOCOL_MAJOR};",
+                f"pub const MAJOR: u16 = {server_package.PROTOCOL_MAJOR + 1};",
             )
         )
-        admission.write_text(
-            admission.read_text().replace("pub const MAJOR: u16 = 4;", "pub const MAJOR: u16 = 5;")
-        )
-        _commit(root, "fixture: protocol major 5 candidate")
-        _build(root, destination, "major5", targets, result, resume)
-        build.write_text(
-            build.read_text().replace(
-                "const PROTOCOL_MAJOR: u16 = 5;", "const PROTOCOL_MAJOR: u16 = 4;"
-            )
-        )
-        admission.write_text(
-            admission.read_text().replace("pub const MAJOR: u16 = 5;", "pub const MAJOR: u16 = 4;")
-        )
+        if server_package.protocol_major(root) != server_package.PROTOCOL_MAJOR + 1:
+            raise TaskError("the next-major fixture did not change the protocol major")
+        _commit(root, "fixture: next protocol major candidate")
+        _build(root, destination, "next-major", targets, result, resume)
+        major.write_text(current)
         entry = root / "crates/spaceterm-cli/src/main.rs"
         text = entry.read_text()
         start, end = text.index("fn run_server("), text.index("\nfn complete")

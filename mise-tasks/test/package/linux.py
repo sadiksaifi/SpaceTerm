@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import ROOT
+from spaceterm_tasks import ROOT, server_package
 from tests.server_artifact_fixture import configure_trust, prepare
 
 FIXTURE = r"""
@@ -71,6 +71,9 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
+        major = self.root / server_package.PROTOCOL_MAJOR_SOURCE
+        major.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
         configure_trust(self.root)
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")

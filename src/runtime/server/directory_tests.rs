@@ -12,7 +12,7 @@ fn explicit_directory_creation_is_recursive_idempotent_and_does_not_edit_workspa
     ));
     std::fs::create_dir(&root).unwrap();
     let path = root.join("parent/child");
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     let before = host.request([1; 32], [2; 32], Request::Inventory);
     for id in [1, 2] {
         let creation = HostRead::Creation(Creation { path: path.clone() });
@@ -100,7 +100,7 @@ fn a_directory_read_replies_when_it_settles_without_being_polled() {
         connection: [1; 32],
         pairing: None,
     };
-    let mut served = super::dispatch::Served::new(SharedWorkspaceHost::new(host()));
+    let mut served = super::dispatch::Served::new(WorkspaceHost::new(host()));
     let outbox = Outbox::new(Arc::new(|| {}));
     served.admitted(&PEER, "Test".into(), outbox.clone());
     let replies = |outbox: &Outbox| {
