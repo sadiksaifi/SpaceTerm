@@ -32,6 +32,21 @@ const POLL: Duration = Duration::from_millis(100);
 /// forward while an exchange runs, as an interrupt does.
 pub type Deadline<'a> = &'a dyn Fn() -> Instant;
 
+/// Local and cross-process readings of the same monotonic clock.
+trait Clock {
+    fn now(&self) -> Instant;
+    fn host(&self) -> u64;
+}
+struct HostClock;
+impl Clock for HostClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn host(&self) -> u64 {
+        host_clock()
+    }
+}
+
 pub type Id = [u8; 32];
 
 /// The Terminal Session `spaceterm` runs in, from its Session context.
@@ -167,16 +182,27 @@ impl<T: ChannelIo + ?Sized> ChannelIo for Box<T> {
 /// Sends one request on a connected, authenticated stream and reads the desktop's reply by
 /// `deadline`.
 pub fn exchange(
-    mut stream: impl ChannelIo,
+    stream: impl ChannelIo,
     identity: &str,
     request: &Request,
     deadline: Deadline<'_>,
 ) -> Result<Reply, ChannelError> {
-    let within = remaining(deadline)?;
+    exchange_on(stream, identity, request, deadline, &HostClock)
+}
+
+fn exchange_on(
+    mut stream: impl ChannelIo,
+    identity: &str,
+    request: &Request,
+    deadline: Deadline<'_>,
+    clock: &impl Clock,
+) -> Result<Reply, ChannelError> {
+    let within = remaining(deadline, clock)?;
     let message = serde_json::to_vec(&RequestEnvelope {
         schema: SCHEMA.to_owned(),
         identity: identity.to_owned(),
-        expires_at: host_clock()
+        expires_at: clock
+            .host()
             .saturating_add(u64::try_from(within.as_nanos()).unwrap_or(u64::MAX)),
         body: request,
     })
@@ -184,9 +210,9 @@ pub fn exchange(
     if message.len() > MAX_MESSAGE_BYTES {
         return Err(ChannelError::Protocol);
     }
-    write_by(&mut stream, &message, deadline)?;
+    write_by(&mut stream, &message, deadline, clock)?;
     stream.close_write().map_err(|_| ChannelError::Protocol)?;
-    let reply = match read_by(&mut stream, deadline) {
+    let reply = match read_by(&mut stream, deadline, clock) {
         Ok(reply) => reply,
         Err(ChannelError::Timeout) => return Err(ChannelError::Timeout),
         Err(_) => return Err(ChannelError::Unanswered),
@@ -207,13 +233,23 @@ pub fn exchange(
 /// request in another schema or for another application identity is refused without reaching
 /// `handle`. A malformed, oversized or late request gets no answer.
 pub fn serve(
-    mut stream: impl ChannelIo,
+    stream: impl ChannelIo,
     identity: &str,
     request_by: Instant,
     handle: impl FnOnce(Request, Instant) -> Option<Reply>,
 ) -> Result<(), ChannelError> {
-    let message = read_by(&mut stream, &|| request_by)?;
-    let received = Instant::now();
+    serve_on(stream, identity, request_by, handle, &HostClock)
+}
+
+fn serve_on(
+    mut stream: impl ChannelIo,
+    identity: &str,
+    request_by: Instant,
+    handle: impl FnOnce(Request, Instant) -> Option<Reply>,
+    clock: &impl Clock,
+) -> Result<(), ChannelError> {
+    let message = read_by(&mut stream, &|| request_by, clock)?;
+    let received = clock.now();
     let value: serde_json::Value =
         serde_json::from_slice(&message).map_err(|_| ChannelError::Protocol)?;
     let reply = if value.get("schema").and_then(|schema| schema.as_str()) != Some(SCHEMA) {
@@ -224,7 +260,7 @@ pub fn serve(
         if request.identity != identity {
             Reply::Refused(Refusal::Incompatible)
         } else {
-            let Some(act_by) = act_by(request.expires_at, received) else {
+            let Some(act_by) = act_by(request.expires_at, received, clock) else {
                 return Ok(());
             };
             match handle(request.body, act_by) {
@@ -239,8 +275,8 @@ pub fn serve(
         body: reply,
     })
     .map_err(|_| ChannelError::Protocol)?;
-    let reply_by = Instant::now() + TRANSFER_WINDOW;
-    write_by(&mut stream, &message, &|| reply_by)
+    let reply_by = clock.now() + TRANSFER_WINDOW;
+    write_by(&mut stream, &message, &|| reply_by, clock)
 }
 
 /// A connection from a peer the desktop authenticated as its own account.
@@ -267,15 +303,15 @@ fn host_clock() -> u64 {
 /// The instant a request received at `received` stops acting: [`REPLY_MARGIN`] before its
 /// client's expiry, and never later than [`MAX_EFFECT_WINDOW`] after it arrived. `None` when that
 /// already passed.
-fn act_by(expires_at: u64, received: Instant) -> Option<Instant> {
-    let left = Duration::from_nanos(expires_at.saturating_sub(host_clock()));
+fn act_by(expires_at: u64, received: Instant, clock: &impl Clock) -> Option<Instant> {
+    let left = Duration::from_nanos(expires_at.saturating_sub(clock.host()));
     let act_by =
-        (Instant::now() + left.saturating_sub(REPLY_MARGIN)).min(received + MAX_EFFECT_WINDOW);
-    (Instant::now() < act_by).then_some(act_by)
+        (clock.now() + left.saturating_sub(REPLY_MARGIN)).min(received + MAX_EFFECT_WINDOW);
+    (clock.now() < act_by).then_some(act_by)
 }
 
-fn remaining(deadline: Deadline<'_>) -> Result<Duration, ChannelError> {
-    let remaining = deadline().saturating_duration_since(Instant::now());
+fn remaining(deadline: Deadline<'_>, clock: &impl Clock) -> Result<Duration, ChannelError> {
+    let remaining = deadline().saturating_duration_since(clock.now());
     if remaining.is_zero() {
         Err(ChannelError::Timeout)
     } else {
@@ -284,8 +320,8 @@ fn remaining(deadline: Deadline<'_>) -> Result<Duration, ChannelError> {
 }
 
 /// The next wait by the deadline: at most [`POLL`], so a deadline brought forward takes effect.
-fn wait(deadline: Deadline<'_>) -> Result<Duration, ChannelError> {
-    Ok(remaining(deadline)?.min(POLL))
+fn wait(deadline: Deadline<'_>, clock: &impl Clock) -> Result<Duration, ChannelError> {
+    Ok(remaining(deadline, clock)?.min(POLL))
 }
 
 fn retried(error: &std::io::Error) -> bool {
@@ -298,12 +334,16 @@ fn retried(error: &std::io::Error) -> bool {
 }
 
 /// Reads to the end of the stream by `deadline`, refusing more than [`MAX_MESSAGE_BYTES`].
-fn read_by(stream: &mut impl ChannelIo, deadline: Deadline<'_>) -> Result<Vec<u8>, ChannelError> {
+fn read_by(
+    stream: &mut impl ChannelIo,
+    deadline: Deadline<'_>,
+    clock: &impl Clock,
+) -> Result<Vec<u8>, ChannelError> {
     let mut message = Vec::new();
     let mut buffer = [0; 4096];
     loop {
         stream
-            .limit_read(wait(deadline)?)
+            .limit_read(wait(deadline, clock)?)
             .map_err(|_| ChannelError::Protocol)?;
         match stream.read(&mut buffer) {
             Ok(0) => return Ok(message),
@@ -323,10 +363,11 @@ fn write_by(
     stream: &mut impl ChannelIo,
     mut message: &[u8],
     deadline: Deadline<'_>,
+    clock: &impl Clock,
 ) -> Result<(), ChannelError> {
     while !message.is_empty() {
         stream
-            .limit_write(wait(deadline)?)
+            .limit_write(wait(deadline, clock)?)
             .map_err(|_| ChannelError::Protocol)?;
         match stream.write(message) {
             Ok(0) => return Err(ChannelError::Protocol),
@@ -400,6 +441,111 @@ mod tests {
         (result, served.join().unwrap())
     }
 
+    struct ManualClock {
+        start: Instant,
+        elapsed: std::cell::Cell<Duration>,
+    }
+    impl ManualClock {
+        fn new() -> Self {
+            Self {
+                start: Instant::now(),
+                elapsed: std::cell::Cell::new(Duration::ZERO),
+            }
+        }
+        fn advance(&self, by: Duration) {
+            self.elapsed.set(self.elapsed.get() + by);
+        }
+    }
+    impl Clock for ManualClock {
+        fn now(&self) -> Instant {
+            self.start + self.elapsed.get()
+        }
+        fn host(&self) -> u64 {
+            10_000_000_000 + self.elapsed.get().as_nanos() as u64
+        }
+    }
+
+    struct Peer<'a> {
+        clock: &'a ManualClock,
+        input: std::collections::VecDeque<(Duration, Vec<u8>)>,
+        output: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        interrupt: Option<&'a std::cell::Cell<Instant>>,
+    }
+    impl<'a> Peer<'a> {
+        fn new(clock: &'a ManualClock, input: Vec<(Duration, Vec<u8>)>) -> Self {
+            Self {
+                clock,
+                input: input.into(),
+                output: Default::default(),
+                interrupt: None,
+            }
+        }
+    }
+    impl Read for Peer<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let Some((delay, bytes)) = self.input.front_mut() else {
+                return Ok(0);
+            };
+            if !delay.is_zero() {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let count = bytes.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&bytes[..count]);
+            bytes.drain(..count);
+            if bytes.is_empty() {
+                self.input.pop_front();
+            }
+            Ok(count)
+        }
+    }
+    impl Write for Peer<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.output.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl ChannelIo for Peer<'_> {
+        fn close_write(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn limit_read(&mut self, wait: Duration) -> std::io::Result<()> {
+            assert!(!wait.is_zero() && wait <= Duration::from_millis(100));
+            if let Some(deadline) = self.interrupt.take() {
+                deadline.set(self.clock.now() + Duration::from_millis(150));
+            }
+            if let Some((delay, _)) = self.input.front_mut() {
+                let elapsed = wait.min(*delay);
+                self.clock.advance(elapsed);
+                *delay -= elapsed;
+            }
+            Ok(())
+        }
+        fn limit_write(&mut self, wait: Duration) -> std::io::Result<()> {
+            assert!(!wait.is_zero() && wait <= Duration::from_millis(100));
+            Ok(())
+        }
+    }
+
+    fn outgoing(clock: &ManualClock, duration: Duration) -> Vec<u8> {
+        let peer = Peer::new(clock, vec![]);
+        let output = peer.output.clone();
+        let deadline = clock.now() + duration;
+        assert_eq!(
+            exchange_on(peer, IDENTITY, &open(false), &|| deadline, clock),
+            Err(ChannelError::Unanswered)
+        );
+        let bytes = output.borrow().clone();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["expires_at"],
+            clock.host() + duration.as_nanos() as u64
+        );
+        bytes
+    }
+
     #[test]
     fn one_request_reaches_the_desktop_and_returns_its_reply() {
         for request in [
@@ -432,51 +578,68 @@ mod tests {
 
     #[test]
     fn the_desktop_acts_only_while_its_client_still_waits() {
-        let sent = Instant::now();
-        let (_, received) = answer(
-            IDENTITY,
-            open(false),
-            Some(Reply::Done),
-            Duration::from_secs(3),
-        );
-        let (_, by) = received.unwrap();
-        // The expiry is absolute: the client's own deadline, less the reply margin.
-        let deadline = sent + Duration::from_secs(3);
-        assert!(by <= deadline - REPLY_MARGIN + Duration::from_millis(50));
-        assert!(by >= deadline - REPLY_MARGIN - Duration::from_millis(50));
-        // However long the client waits, a request acts within the desktop's own bound.
-        let (_, received) = answer(
-            IDENTITY,
-            open(false),
-            Some(Reply::Done),
-            Duration::from_secs(24 * 60 * 60),
-        );
-        assert!(received.unwrap().1 <= Instant::now() + MAX_EFFECT_WINDOW);
+        for (window, expected) in [
+            (Duration::from_secs(3), Duration::from_millis(2750)),
+            (Duration::from_secs(24 * 60 * 60), Duration::from_secs(61)),
+        ] {
+            let clock = ManualClock::new();
+            let message = outgoing(&clock, window);
+            // The desktop receives the complete request one second after dispatch.
+            clock.advance(Duration::from_secs(1));
+            let peer = Peer::new(&clock, vec![(Duration::ZERO, message)]);
+            let mut called = false;
+            assert_eq!(
+                serve_on(
+                    peer,
+                    IDENTITY,
+                    clock.now() + TRANSFER_WINDOW,
+                    |request, by| {
+                        assert_eq!(request, open(false));
+                        assert_eq!(by, clock.start + expected);
+                        called = true;
+                        Some(Reply::Done)
+                    },
+                    &clock
+                ),
+                Ok(())
+            );
+            assert!(called);
+        }
     }
 
     #[test]
     fn a_request_read_after_its_client_stopped_waiting_never_acts() {
-        let (client, desktop) = UnixStream::pair().unwrap();
-        let deadline = after(Duration::from_millis(300));
-        let waiting =
-            std::thread::spawn(move || exchange(client, IDENTITY, &open(false), &|| deadline));
-        // The desktop is still busy with an earlier request when this one arrives.
-        std::thread::sleep(Duration::from_millis(500));
-        let served = serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |_, _| {
-            panic!("a request acted after its client stopped waiting")
-        });
-        assert_eq!(served, Ok(()));
-        assert_eq!(waiting.join().unwrap(), Err(ChannelError::Timeout));
+        let clock = ManualClock::new();
+        let message = outgoing(&clock, Duration::from_secs(3));
+        clock.advance(Duration::from_secs(3));
+        let peer = Peer::new(&clock, vec![(Duration::ZERO, message)]);
+        let output = peer.output.clone();
+        assert_eq!(
+            serve_on(
+                peer,
+                IDENTITY,
+                clock.now() + TRANSFER_WINDOW,
+                |_, _| panic!("an expired request reached its handler"),
+                &clock
+            ),
+            Ok(())
+        );
+        assert!(output.borrow().is_empty());
     }
 
     #[test]
     fn the_shared_clock_is_the_one_instant_reads() {
-        let before = host_clock();
-        let instant = Instant::now();
-        std::thread::sleep(Duration::from_millis(20));
-        let elapsed = Duration::from_nanos(host_clock() - before);
-        assert!(elapsed >= instant.elapsed().saturating_sub(Duration::from_millis(5)));
-        assert!(elapsed < Duration::from_secs(1));
+        let instant_before = Instant::now();
+        let host_before = host_clock();
+        let instant_inner_before = Instant::now();
+        let host_middle = host_clock();
+        let instant_inner_after = Instant::now();
+        let host_after = host_clock();
+        let instant_after = Instant::now();
+        assert!(host_before <= host_middle && host_middle <= host_after);
+        let host_elapsed = Duration::from_nanos(host_after - host_before);
+        assert!(instant_inner_after.duration_since(instant_inner_before) <= host_elapsed);
+        assert!(host_elapsed <= instant_after.duration_since(instant_before));
     }
 
     #[test]
@@ -488,56 +651,49 @@ mod tests {
 
     #[test]
     fn the_client_stops_at_its_deadline_even_when_it_moves_earlier() {
-        let (client, desktop) = UnixStream::pair().unwrap();
-        let started = Instant::now();
-        let deadline = after(Duration::from_millis(300));
-        assert_eq!(
-            exchange(client, IDENTITY, &open(false), &|| deadline),
-            Err(ChannelError::Timeout)
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
-        drop(desktop);
-
-        let (client, _desktop) = UnixStream::pair().unwrap();
-        let started = Instant::now();
-        let original = after(Duration::from_secs(30));
-        let moved = after(Duration::from_millis(300));
-        // An interrupt brings the deadline forward while the client waits.
-        let deadline = || {
-            if started.elapsed() > Duration::from_millis(100) {
-                moved
+        for interrupted in [false, true] {
+            let clock = ManualClock::new();
+            let initial = if interrupted {
+                Duration::from_secs(30)
             } else {
-                original
+                Duration::from_millis(300)
+            };
+            let deadline = std::cell::Cell::new(clock.now() + initial);
+            let mut peer = Peer::new(&clock, vec![(Duration::from_secs(60), vec![])]);
+            if interrupted {
+                peer.interrupt = Some(&deadline);
             }
-        };
-        assert_eq!(
-            exchange(client, IDENTITY, &open(false), &deadline),
-            Err(ChannelError::Timeout)
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(
+                exchange_on(peer, IDENTITY, &open(false), &|| deadline.get(), &clock),
+                Err(ChannelError::Timeout)
+            );
+            assert_eq!(
+                clock.elapsed.get(),
+                if interrupted {
+                    Duration::from_millis(150)
+                } else {
+                    Duration::from_millis(300)
+                }
+            );
+        }
     }
 
     #[test]
     fn a_client_trickling_its_request_holds_the_desktop_only_until_the_request_deadline() {
-        let (mut client, desktop) = UnixStream::pair().unwrap();
-        let trickle = std::thread::spawn(move || {
-            for _ in 0..20 {
-                if client.write_all(b" ").is_err() {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        });
-        let started = Instant::now();
-        let served = serve(
-            desktop,
-            IDENTITY,
-            after(Duration::from_millis(500)),
-            |_, _| panic!("a late request was handled"),
+        let clock = ManualClock::new();
+        let peer = Peer::new(&clock, vec![(Duration::from_millis(100), vec![b' ']); 20]);
+        let by = clock.now() + Duration::from_millis(500);
+        assert_eq!(
+            serve_on(
+                peer,
+                IDENTITY,
+                by,
+                |_, _| panic!("a late request reached its handler"),
+                &clock
+            ),
+            Err(ChannelError::Timeout)
         );
-        assert_eq!(served, Err(ChannelError::Timeout));
-        assert!(started.elapsed() < Duration::from_millis(900));
-        trickle.join().unwrap();
+        assert_eq!(clock.elapsed.get(), Duration::from_millis(500));
     }
 
     #[test]
@@ -563,7 +719,8 @@ mod tests {
         client.close_write().unwrap();
         let deadline = after(Duration::from_secs(5));
         let reply: ReplyEnvelope =
-            serde_json::from_slice(&read_by(&mut client, &|| deadline).unwrap()).unwrap();
+            serde_json::from_slice(&read_by(&mut client, &|| deadline, &HostClock).unwrap())
+                .unwrap();
         assert_eq!(reply.body, Reply::Refused(Refusal::Incompatible));
         served.join().unwrap().unwrap();
     }

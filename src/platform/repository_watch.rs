@@ -76,40 +76,41 @@ mod change_tests {
     use super::*;
 
     #[test]
-    fn reads_and_other_nonwriting_access_do_not_report_changes() {
-        for kind in [
-            AccessKind::Any,
-            AccessKind::Read,
-            AccessKind::Open(AccessMode::Any),
-            AccessKind::Open(AccessMode::Read),
-            AccessKind::Open(AccessMode::Write),
-            AccessKind::Open(AccessMode::Other),
-            AccessKind::Close(AccessMode::Any),
-            AccessKind::Close(AccessMode::Read),
-            AccessKind::Close(AccessMode::Other),
-            AccessKind::Other,
+    fn repository_watch_classifies_access_writes_changes_and_rescans() {
+        for (kind, changed) in [
+            (EventKind::Access(AccessKind::Any), false),
+            (EventKind::Access(AccessKind::Read), false),
+            (EventKind::Access(AccessKind::Open(AccessMode::Any)), false),
+            (EventKind::Access(AccessKind::Open(AccessMode::Read)), false),
+            (
+                EventKind::Access(AccessKind::Open(AccessMode::Write)),
+                false,
+            ),
+            (
+                EventKind::Access(AccessKind::Open(AccessMode::Other)),
+                false,
+            ),
+            (EventKind::Access(AccessKind::Close(AccessMode::Any)), false),
+            (
+                EventKind::Access(AccessKind::Close(AccessMode::Read)),
+                false,
+            ),
+            (
+                EventKind::Access(AccessKind::Close(AccessMode::Other)),
+                false,
+            ),
+            (EventKind::Access(AccessKind::Other), false),
+            (
+                EventKind::Access(AccessKind::Close(AccessMode::Write)),
+                true,
+            ),
+            (EventKind::Any, true),
+            (EventKind::Create(CreateKind::Any), true),
+            (EventKind::Modify(ModifyKind::Any), true),
+            (EventKind::Remove(RemoveKind::Any), true),
+            (EventKind::Other, true),
         ] {
-            assert!(!is_change(EventKind::Access(kind)), "{kind:?}");
-        }
-    }
-
-    #[test]
-    fn closing_a_writer_reports_a_change() {
-        assert!(is_change(EventKind::Access(AccessKind::Close(
-            AccessMode::Write
-        ))));
-    }
-
-    #[test]
-    fn filesystem_changes_and_rescans_report_changes() {
-        for kind in [
-            EventKind::Any,
-            EventKind::Create(CreateKind::Any),
-            EventKind::Modify(ModifyKind::Any),
-            EventKind::Remove(RemoveKind::Any),
-            EventKind::Other,
-        ] {
-            assert!(is_change(kind), "{kind:?}");
+            assert_eq!(is_change(kind), changed, "{kind:?}");
         }
     }
 }
