@@ -603,27 +603,6 @@ fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut Tes
 }
 
 #[gpui::test]
-fn reset_all_restores_every_keybinding(cx: &mut TestAppContext) {
-    let (window, cx) = open_keybindings(
-        with_keybindings(r#"{"new_workspace":"cmd-shift-y","close_tab":null}"#),
-        cx,
-    );
-    click("settings-navigation-settings-section-advanced", cx);
-    click("settings-reset-all", cx);
-    click("modal-action-settings-reset-all-confirm", cx);
-
-    assert!(window.read_with(cx, |settings, _| {
-        settings
-            .editor
-            .document()
-            .keybindings
-            .iter()
-            .next()
-            .is_none()
-    }));
-}
-
-#[gpui::test]
 fn searching_by_text_keeps_the_commands_it_names(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     assert!(

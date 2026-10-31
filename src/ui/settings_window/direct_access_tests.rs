@@ -29,7 +29,6 @@ use crate::appearance::Appearance;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairProgress};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::server_connection::ServerError;
 use crate::server_connection::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
 use crate::server_context::{
     LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts,
@@ -233,8 +232,8 @@ impl LocalServerControl for ScriptedLocal {
         Some(Arc::clone(&self.0) as Arc<dyn DirectAccessControl>)
     }
 
-    fn refresh(&self) -> Result<ConnectedServer, ServerError> {
-        Ok(connected(2))
+    fn refresh(&self) -> super::super::servers::ServerAnswer<'_, ConnectedServer> {
+        Box::pin(async move { Ok(connected(2)) })
     }
 }
 
@@ -409,19 +408,8 @@ fn reread(cx: &mut VisualTestContext) {
 
 /// Repaints until `done` holds, while the registry's worker runs on its own threads.
 #[track_caller]
-fn settle(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        cx.run_until_parked();
-        if done(cx) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the registry reaches the expected state"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+fn settle(cx: &mut VisualTestContext, done: impl FnMut(&mut VisualTestContext) -> bool) {
+    super::super::server_list::tests::settle(cx, done);
 }
 
 /// Whether assistive technology reads `text` anywhere in the window: in a label, an error under
@@ -896,19 +884,36 @@ fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut Tes
 fn another_servers_retained_access_never_shows_for_this_one(cx: &mut TestAppContext) {
     let (direct, routes) = paired(&["penguin"]);
     let penguin = ServerKey::Direct(routes[0]);
-    cx.update(|cx| retain(penguin.clone(), retained_on(), cx));
+    let mut foreign = retained_on();
+    foreign.network_access.as_mut().unwrap().policy = Some("10.20.30.40:4567".parse().unwrap());
+    foreign.network_access.as_mut().unwrap().server_name = "Foreign computer".into();
+    foreign.network_access.as_mut().unwrap().listener =
+        NetworkListenerFacts::Listening("10.20.30.40:4567".parse().unwrap());
+    foreign.paired_devices.as_mut().unwrap().devices[0].name = "Foreign device".into();
+    foreign.paired_devices.as_mut().unwrap().devices[0].pairing = [4; 32];
+    foreign.paired_devices.as_mut().unwrap().devices[0].fingerprint = fingerprint(4);
+    let mut local = retained_on();
+    local.paired_devices.as_mut().unwrap().devices[0].name = "Local device".into();
+    cx.update(|cx| {
+        retain(penguin.clone(), foreign.clone(), cx);
+        retain(ServerKey::Local, local, cx);
+    });
     let access = ScriptedAccess::listening();
     access.become_unreachable();
     let (window, cx) = open_servers_with(&access, Some(direct), cx);
 
-    assert!(
+    assert_eq!(
         cx.update(|_, cx| server_selection::facts(&penguin, cx))
-            .is_some(),
-        "penguin's record is still there to leak"
+            .unwrap()
+            .network_access,
+        foreign.network_access
     );
-    assert!(!access_on(&window, cx));
-    assert!(reads("Unknown", cx));
-    assert!(!reads("Shown values are from", cx));
+    assert!(access_on(&window, cx));
+    assert!(reads("Last known address: 192.168.1.20:9231.", cx));
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(reads("Local device", cx));
+    assert!(!reads("Foreign device", cx));
+    assert!(!reads("10.20.30.40:4567", cx));
 }
 
 #[gpui::test]

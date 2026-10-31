@@ -1448,7 +1448,7 @@ fn clamp_axis_origin(origin: Pixels, length: Pixels, minimum: Pixels, maximum: P
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use gpui::{
         AppContext as _, Context, Entity, FocusHandle, Modifiers, MouseButton, Render,
         ScrollHandle, StatefulInteractiveElement as _, TestAppContext, VisualTestContext,
@@ -1464,20 +1464,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn tooltip_text_uses_body_secondary_and_shortcut_font_mapping() {
-        let regular = gpui::font("Regular");
-        let caption = gpui::font("Caption");
-        let badge = gpui::font("Badge");
-        let shortcut = gpui::font("Shortcut");
-        let typography =
-            crate::ControlTypography::new(regular.clone(), regular.clone(), regular.clone())
-                .semantic_fonts(shortcut.clone(), caption, badge);
-
-        assert_eq!(
-            tooltip_fonts(&typography),
-            [regular.clone(), regular, shortcut]
-        );
+    pub(crate) fn consumer_fonts(typography: &crate::ControlTypography) -> Vec<gpui::Font> {
+        super::tooltip_fonts(typography).to_vec()
     }
 
     #[test]

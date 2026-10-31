@@ -1164,12 +1164,9 @@ mod tests {
             let connection = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
             let other =
                 direct::tests::admitted(connection, &paired.client, "Other view", &paired).unwrap();
-            let policy = change_address.then(|| {
-                direct::NetworkPolicy::new(direct::tests::free_udp(
-                    std::net::Ipv4Addr::LOCALHOST.into(),
-                ))
-                .unwrap()
-            });
+            let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let policy = change_address
+                .then(|| direct::NetworkPolicy::new(occupied.local_addr().unwrap()).unwrap());
             let local = ServerConnection::with_paths(fixture.paths.clone())
                 .unwrap()
                 .with_direct(
@@ -1248,8 +1245,9 @@ mod tests {
         paired: crate::direct::PairedDevice,
     ) -> ServerConnection {
         let mut local = ServerConnection::for_development_client("first").unwrap();
+        local.identity = paired.pin.build.clone();
         local.paths = Paths {
-            identity: "spaceterm-development".into(),
+            identity: paired.pin.build.clone(),
             data: root.join("data"),
             runtime: root.join("runtime"),
         };
@@ -1264,6 +1262,11 @@ mod tests {
             .workspace_reference([42; 32])
             .unwrap();
         for (field, changed) in [
+            ("application identity", {
+                let mut changed = paired.clone();
+                changed.pin.build = "spaceterm-preflight".into();
+                changed
+            }),
             ("server", {
                 let mut changed = paired.clone();
                 changed.pin.server[0] ^= 1;
@@ -1343,20 +1346,6 @@ mod tests {
                 relaunched.workspace_owner().unwrap()
             ],
             [original.workspace_owner().unwrap(); 2]
-        );
-    }
-
-    #[test]
-    fn workspace_owners_distinguish_application_identity() {
-        let original = direct_fixture(std::path::Path::new("/unused"), paired_identity());
-        let mut paired = paired_identity();
-        paired.pin.build = "spaceterm-preflight".into();
-        let other =
-            ServerConnection::direct("spaceterm-preflight", [3; 32], paired, Arc::new(NoConnect))
-                .unwrap();
-        assert_ne!(
-            original.workspace_owner().unwrap(),
-            other.workspace_owner().unwrap()
         );
     }
 

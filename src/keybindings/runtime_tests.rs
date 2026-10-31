@@ -301,6 +301,10 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
     let preferences: KeybindingPreferences =
         serde_json::from_str(r#"{"new_tab":"shift-cmd-7","new_workspace":"cmd-§"}"#).unwrap();
     let retained = serde_json::to_value(&preferences).unwrap();
+    assert_eq!(
+        retained,
+        serde_json::json!({"new_tab": "shift-cmd-7", "new_workspace": "cmd-§"})
+    );
     let menu = Rc::new(RecordingApplicationMenuAdapter::default());
     let dispatches = Rc::new(Cell::new(0));
     let observed = dispatches.clone();

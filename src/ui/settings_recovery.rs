@@ -202,11 +202,17 @@ mod tests {
         let alert = tree.node("Couldn\u{2019}t read settings");
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(alert["aria"]["modal"], true);
+        tree.text("Couldn\u{2019}t Read Settings");
+        tree.text("SpaceTerm is using default settings.");
         assert_eq!(tree.node("Reset Settings")["aria"]["role"], "Button");
         perform(cx, tree.node("Not Now"), Action::Click);
         cx.run_until_parked();
         assert_eq!(*outcome.borrow(), Some(RecoveryAction::NotNow));
-        assert!(A11yTree::read(cx).find("Couldn't read settings").is_none());
+        assert!(
+            A11yTree::read(cx)
+                .find("Couldn\u{2019}t read settings")
+                .is_none()
+        );
     }
 
     #[test]

@@ -523,7 +523,8 @@ fn later_cancellations_never_revive_a_waiting_setup() {
         lane.answer(cancel, &LOCAL_ACTOR),
         LaneReply::PermissionSetupCancelled
     );
-    for index in 0..17 {
+    let bound = super::setups::MAX_EARLY_CANCELLATIONS;
+    for index in 0..(bound + 16) {
         assert_eq!(
             lane.answer(
                 LaneRequest::CancelPermissionSetup {
@@ -531,7 +532,13 @@ fn later_cancellations_never_revive_a_waiting_setup() {
                 },
                 &LOCAL_ACTOR,
             ),
-            LaneReply::PermissionSetupCancelled
+            if index < bound {
+                LaneReply::PermissionSetupCancelled
+            } else {
+                LaneReply::Error {
+                    code: "service_busy".into(),
+                }
+            }
         );
     }
     release.send(()).unwrap();

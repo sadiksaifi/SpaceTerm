@@ -499,16 +499,33 @@ mod tests {
             &requests[0],
             "/src/app/src",
             true,
-            &DISCOVERY_ARGUMENTS,
-            Some(PROBE_OUTPUT_LIMIT),
+            &[
+                "rev-parse",
+                "--is-inside-git-dir",
+                "--is-bare-repository",
+                "--absolute-git-dir",
+                "--git-common-dir",
+                "--show-toplevel",
+                "--show-prefix",
+            ],
+            Some(64 * 1024),
             false,
         );
         assert_git_request(
             &requests[1],
             "/src/app",
             true,
-            &HEADER_ARGUMENTS,
-            Some(PROBE_OUTPUT_LIMIT),
+            &[
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "-z",
+                "--untracked-files=no",
+                "--ignore-submodules=all",
+                "--",
+                ":(top,exclude)*",
+            ],
+            Some(64 * 1024),
             false,
         );
         assert_eq!(
@@ -521,7 +538,7 @@ mod tests {
                 "config",
                 "-z",
                 "--get-regexp",
-                CONFIG_ARGUMENTS[3],
+                r"^(core\.fsmonitor|push\.default|remote\.pushdefault|remote\..*\.url|branch\..*\.(remote|merge|pushremote))$",
             ]
         );
         assert_eq!(requests[2].directory, Path::new("/src/app"));
@@ -532,79 +549,6 @@ mod tests {
             *markers.reads.lock().unwrap(),
             [PathBuf::from("/src/app/.git")]
         );
-    }
-
-    #[test]
-    fn probe_arguments_should_match_the_contract_spelling() {
-        assert_eq!(
-            CONFIG_ARGUMENTS[3],
-            "^(core\\.fsmonitor|push\\.default|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$"
-        );
-        assert_eq!(HEADER_ARGUMENTS[6..], ["--", ":(top,exclude)*"]);
-    }
-
-    #[test]
-    fn header_and_config_reads_should_use_the_exact_corrected_arguments() {
-        let runner = FakeRunner::new([
-            exit(0, &discovery("src/")),
-            exit(0, &headers()),
-            exit(0, "core.fsmonitor\ntrue\0"),
-        ]);
-
-        let outcome = reader(&runner, &Arc::default())
-            .probe(Path::new("/src/app/src"), &CancellationToken::default())
-            .unwrap();
-
-        let requests = runner.requests();
-        assert_eq!(
-            strings(&requests[1].arguments),
-            [
-                "--no-optional-locks",
-                "--no-pager",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "color.ui=false",
-                "-c",
-                "core.quotePath=false",
-                "-c",
-                "status.relativePaths=false",
-                "-c",
-                "advice.statusHints=false",
-                "-C",
-                "/src/app",
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "-z",
-                "--untracked-files=no",
-                "--ignore-submodules=all",
-                "--",
-                ":(top,exclude)*",
-            ]
-        );
-        // No `-c` setting reaches `git config`, so the repository's own fsmonitor value survives.
-        assert_eq!(
-            strings(&requests[2].arguments),
-            [
-                "--no-optional-locks",
-                "--no-pager",
-                "-C",
-                "/src/app",
-                "config",
-                "-z",
-                "--get-regexp",
-                "^(core\\.fsmonitor|push\\.default|remote\\.pushdefault|remote\\..*\\.url|branch\\..*\\.(remote|merge|pushremote))$",
-            ]
-        );
-        let ProbeOutcome::Repository(repository) = outcome else {
-            panic!("expected a repository");
-        };
-        assert_eq!(repository.config.fsmonitor, FsmonitorPolicy::Builtin);
     }
 
     #[test]
@@ -727,32 +671,42 @@ mod tests {
     #[test]
     fn count_should_stream_chunks_into_the_parser_without_an_output_limit() {
         let output = headers() + "1 .M N... 100644 100644 100644 a b src/main.rs\0? new.rs\0";
-        let chunks = output
-            .as_bytes()
-            .chunks(5)
-            .map(<[u8]>::to_vec)
-            .collect::<Vec<_>>();
-        let runner = FakeRunner::new([Ok((Some(0), chunks))]);
+        for chunk_size in [1, 5, output.len()] {
+            let chunks = output
+                .as_bytes()
+                .chunks(chunk_size)
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>();
+            let runner = FakeRunner::new([Ok((Some(0), chunks))]);
 
-        let summary = reader(&runner, &Arc::default())
-            .count(
-                Path::new("/src/app"),
-                FsmonitorPolicy::Disabled,
-                &CancellationToken::default(),
-            )
-            .unwrap();
+            let summary = reader(&runner, &Arc::default())
+                .count(
+                    Path::new("/src/app"),
+                    FsmonitorPolicy::Disabled,
+                    &CancellationToken::default(),
+                )
+                .unwrap();
 
-        assert_eq!(summary.headers.branch.as_deref(), Some("main"));
-        assert_eq!(summary.changes.modified, 1);
-        assert_eq!(summary.changes.untracked, 1);
-        assert_git_request(
-            &runner.requests()[0],
-            "/src/app",
-            true,
-            &COUNT_ARGUMENTS,
-            None,
-            false,
-        );
+            assert_eq!(summary.headers.branch.as_deref(), Some("main"));
+            assert_eq!(summary.headers.upstream.as_deref(), Some("origin/main"));
+            assert_eq!(
+                summary.headers.divergence,
+                Some(Divergence {
+                    ahead: 1,
+                    behind: 2
+                })
+            );
+            assert_eq!(summary.changes.modified, 1);
+            assert_eq!(summary.changes.untracked, 1);
+            assert_git_request(
+                &runner.requests()[0],
+                "/src/app",
+                true,
+                &["status", "--porcelain=v2", "--branch", "-z"],
+                None,
+                false,
+            );
+        }
     }
 
     #[test]
@@ -771,7 +725,7 @@ mod tests {
             &runner.requests()[0],
             "/src/app",
             false,
-            &COUNT_ARGUMENTS,
+            &["status", "--porcelain=v2", "--branch", "-z"],
             None,
             true,
         );

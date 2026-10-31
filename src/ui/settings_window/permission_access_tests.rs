@@ -22,7 +22,7 @@ use crate::ui::appearance_runtime;
 use super::super::permission_access::{
     ACCESSIBILITY, PermissionAccessAction, PermissionAccessStatus, RecoveryNotice, SCREEN_RECORDING,
 };
-use super::super::{PermissionCapabilities, SettingsRowId, SettingsSectionId, SettingsWindow};
+use super::super::{PermissionCapabilities, SettingsWindow};
 use crate::settings::storage::testing::MemoryStorage;
 
 use PermissionAuthorization::{Granted, NotGranted};
@@ -229,27 +229,6 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
     assert!(access.opened.borrow().is_empty());
 }
 
-#[gpui::test]
-fn settings_search_reveals_a_permission_from_another_section(cx: &mut TestAppContext) {
-    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(NotGranted));
-    let (window, cx) = open_settings(Some(access), Some(ScriptedSetupGuideHost::new()), cx);
-
-    cx.update(|_, cx| {
-        let search = window.read(cx).search.clone();
-        search.update(cx, |search, cx| {
-            search.set_value("accessibility".to_owned(), cx);
-        });
-    });
-    cx.run_until_parked();
-
-    window.read_with(cx, |settings, _| {
-        assert_eq!(settings.active_section, SettingsSectionId::Privacy);
-        assert_eq!(settings.revealed, Some(SettingsRowId::AccessibilityAccess));
-    });
-    assert!(cx.debug_bounds(ACCESSIBILITY_ROW).is_some());
-    assert!(cx.debug_bounds(ACCESSIBILITY.set_up).is_some());
-}
-
 /// Set Up starts a Permission Setup, the row follows it, and only a read reports the grant.
 #[gpui::test]
 fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppContext) {
@@ -404,13 +383,7 @@ fn settings_opens_at_the_normal_window_level_so_system_settings_stays_visible(
     let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (_window, cx) = open_settings(Some(access), None, cx);
 
-    let options = cx.update(|_, cx| {
-        crate::ui::sidebar_window::window_options(
-            "Settings",
-            gpui::size(gpui::px(1.), gpui::px(1.)),
-            cx,
-        )
-    });
+    let options = cx.update(|_, cx| super::super::window_options(cx));
     assert!(options.kind == gpui::WindowKind::Normal);
 }
 

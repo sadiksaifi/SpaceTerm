@@ -1192,7 +1192,7 @@ impl ResizeHandleState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
 
     use gpui::{
@@ -1238,16 +1238,11 @@ mod tests {
         assert_eq!(metrics.hitbox_thickness, px(MAXIMUM_METRIC));
     }
 
-    #[test]
-    fn density_scales_resize_target_but_not_visible_hairline() {
-        let original = test_theme();
-        let comfortable = original.scaled_spacing(1.25);
-
-        assert!(comfortable.metrics.hitbox_thickness > original.metrics.hitbox_thickness);
-        assert_eq!(
-            comfortable.metrics.visible_thickness,
-            original.metrics.visible_thickness
-        );
+    pub(crate) fn density_extents(theme: ResizeHandleTheme) -> (gpui::Pixels, gpui::Pixels) {
+        (
+            theme.metrics.hitbox_thickness,
+            theme.metrics.visible_thickness,
+        )
     }
 
     #[test]

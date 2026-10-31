@@ -86,15 +86,40 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let directory = std::env::temp_dir().join("spaceterm-settings-import-tests");
-        std::fs::create_dir_all(&directory).expect("scratch directory");
-        directory.join(name)
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            loop {
+                let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let directory = std::env::temp_dir().join(format!(
+                    "spaceterm-settings-import-{}-{sequence}",
+                    std::process::id()
+                ));
+                match std::fs::create_dir(&directory) {
+                    Ok(()) => return Self(directory),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("scratch directory: {error}"),
+                }
+            }
+        }
+
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove scratch directory");
+        }
     }
 
     #[test]
     fn a_bounded_document_is_read() {
-        let path = scratch("bounded.json");
+        let scratch = Scratch::new();
+        let path = scratch.path("bounded.json");
         std::fs::write(&path, b"{\"schema_version\":1}").expect("fixture");
 
         let bytes = read_selected_document(&path, &FixtureFileOpener)
@@ -136,7 +161,8 @@ mod tests {
 
     #[test]
     fn replacing_the_selected_path_does_not_replace_the_open_document() {
-        let path = scratch("replaced.json");
+        let scratch = Scratch::new();
+        let path = scratch.path("replaced.json");
         std::fs::write(&path, b"original").expect("fixture");
         let file = FixtureFileOpener.open(&path).expect("open fixture");
         std::fs::remove_file(&path).expect("remove fixture");
@@ -150,7 +176,8 @@ mod tests {
 
     #[test]
     fn a_document_beyond_the_bound_is_refused_before_it_is_read() {
-        let path = scratch("oversized.json");
+        let scratch = Scratch::new();
+        let path = scratch.path("oversized.json");
         let oversized = vec![b'x'; (MAXIMUM_IMPORT_BYTES + 1) as usize];
         std::fs::write(&path, &oversized).expect("fixture");
 
@@ -162,7 +189,8 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_refused() {
-        let path = scratch("missing.json");
+        let scratch = Scratch::new();
+        let path = scratch.path("missing.json");
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(
@@ -173,7 +201,8 @@ mod tests {
 
     #[test]
     fn a_directory_is_refused() {
-        let path = scratch("directory-fixture");
+        let scratch = Scratch::new();
+        let path = scratch.path("directory-fixture");
         std::fs::create_dir_all(&path).expect("fixture");
 
         assert_eq!(
@@ -184,10 +213,11 @@ mod tests {
 
     #[test]
     fn every_failure_reports_content_free_wording() {
-        for error in [ImportError::Unreadable, ImportError::TooLarge] {
-            let message = error.message();
-            assert!(!message.is_empty());
-            assert!(!message.contains('/'), "{message} should carry no path");
+        for (error, expected) in [
+            (ImportError::Unreadable, "That file could not be read."),
+            (ImportError::TooLarge, "Theme file too large."),
+        ] {
+            assert_eq!(error.message(), expected);
         }
     }
 }

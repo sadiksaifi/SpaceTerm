@@ -1599,7 +1599,11 @@ mod tests {
         cx.update(|_, cx| put_off(cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("update-control").is_some());
-        assert!(cx.debug_bounds("update-reminder-dismiss").is_none());
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        let buttons = tree.with_role("Button");
+        assert_eq!(buttons.len(), 2);
+        tree.node("Install 0.4.2");
+        assert!(cx.debug_bounds("update-control-menu").is_some());
         updates.read_with(cx, |updates, _| {
             assert_eq!(updates.pending_version(), PENDING);
             assert_eq!(updates.state(), &UpdateState::Ready { version: version() });
@@ -1794,6 +1798,8 @@ mod tests {
         tree.text(
             "SpaceTerm quits, installs the update, and opens again. Your Terminal Sessions keep running.",
         );
-        assert!(cx.debug_bounds("modal-alert-detail").is_none());
+        let alert = tree.node("Install update");
+        assert_eq!(alert["aria"]["role"], "AlertDialog");
+        assert_eq!(tree.with_role("Button").len(), 3);
     }
 }

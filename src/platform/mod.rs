@@ -540,7 +540,13 @@ mod linux_pty_host;
 #[cfg(target_os = "linux")]
 mod linux_service_pty;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
+mod bounded_path;
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "Linux adapter tests also run on macOS")
+)]
 pub(crate) mod linux_repository_tools;
 
 #[cfg(target_os = "linux")]
@@ -576,7 +582,7 @@ mod linux_desktop_events;
 #[cfg(feature = "desktop")]
 mod linux_session_bus;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 #[cfg(feature = "desktop")]
 mod linux_ssh_executable;
 

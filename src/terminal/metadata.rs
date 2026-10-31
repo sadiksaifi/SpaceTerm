@@ -1087,6 +1087,49 @@ mod tests {
     }
 
     #[test]
+    fn current_directory_requires_live_metadata_and_keeps_its_machine_authority() {
+        let local = TerminalMetadataContext::local(
+            LocalPathSemantics::Posix,
+            "/local/start",
+            LocalMachine::default(),
+        );
+        let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
+            "remote".into(),
+            RemoteDirectory::new("~/remote/start".into()).unwrap(),
+        ));
+        for (context, path, expected) in [
+            (
+                local.clone(),
+                "/local/current",
+                Some(CurrentDirectory::Local("/local/current".into())),
+            ),
+            (local, "relative", None),
+            (
+                remote.clone(),
+                "/remote/current",
+                Some(CurrentDirectory::Remote(
+                    RemoteDirectory::new("/remote/current".into()).unwrap(),
+                )),
+            ),
+            (
+                remote.clone(),
+                "~/remote/current",
+                Some(CurrentDirectory::Remote(
+                    RemoteDirectory::new("~/remote/current".into()).unwrap(),
+                )),
+            ),
+            (remote, "relative", None),
+        ] {
+            let tracker = MetadataTracker::new_with_context(context, "shell", Instant::now());
+            let mut snapshot = (*tracker.snapshot()).clone();
+            snapshot.directory.path = Arc::from(path);
+            assert_eq!(snapshot.current_directory(), expected);
+            snapshot.freshness = MetadataFreshness::Stale;
+            assert_eq!(snapshot.current_directory(), None);
+        }
+    }
+
+    #[test]
     fn selected_local_paths_preserve_reported_spelling_without_granting_remote_authority() {
         let local = TerminalMetadataContext::local(
             LocalPathSemantics::Posix,
@@ -1189,24 +1232,22 @@ mod tests {
         tracker.apply_semantic_prompt("C;cmdline=another", epoch + Duration::from_secs(4));
         tracker.set_reported_title("◐ another", epoch + Duration::from_secs(4));
         assert_eq!(glyph(&tracker).as_deref(), Some("◐"));
-    }
+        {
+            let epoch = Instant::now();
+            let mut tracker = MetadataTracker::new(
+                LocalPathSemantics::Posix,
+                "/tmp",
+                "zsh",
+                LocalMachine::default(),
+                epoch,
+            );
 
-    #[test]
-    fn first_activity_frame_remains_reported_while_confirmation_is_pending() {
-        let epoch = Instant::now();
-        let mut tracker = MetadataTracker::new(
-            LocalPathSemantics::Posix,
-            "/tmp",
-            "zsh",
-            LocalMachine::default(),
-            epoch,
-        );
+            tracker.set_reported_title("◐ agent", epoch);
 
-        tracker.set_reported_title("◐ agent", epoch);
-
-        let snapshot = tracker.snapshot();
-        let reported = super::super::title::reported_title(&snapshot.title.value);
-        assert_eq!(snapshot.title_glyph.resolve(reported.glyph), Some("◐"));
+            let snapshot = tracker.snapshot();
+            let reported = super::super::title::reported_title(&snapshot.title.value);
+            assert_eq!(snapshot.title_glyph.resolve(reported.glyph), Some("◐"));
+        }
     }
 
     #[test]

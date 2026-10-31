@@ -192,11 +192,18 @@ mod tests {
 
     #[test]
     fn contiguous_match_ranks_above_non_contiguous_match() {
-        let items = ["remote operation", "projects"];
+        let items = ["remote operation", "projects", "projects"];
 
         let matches = fuzzy_filter(&items, "ro", |item| FuzzyTarget::new(item));
 
-        assert_eq!(matches[0].item_index(), 1, "matches: {matches:?}");
+        assert_eq!(
+            matches
+                .iter()
+                .map(super::FuzzyMatch::item_index)
+                .collect::<Vec<_>>(),
+            [1, 2, 0],
+            "contiguous matches rank first and equal scores preserve source order"
+        );
     }
 
     #[test]
@@ -230,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn target_fields_report_relative_highlight_indices() {
+    fn target_fields_preserve_relative_highlights_and_prioritize_the_label() {
         let items = [("Open", "Choose a directory", ["folder"])];
 
         let matches = fuzzy_filter(&items, "directory", |item| {
@@ -240,6 +247,17 @@ mod tests {
         assert_eq!(
             matches[0].field_highlight_indices(1),
             (9..18).collect::<Vec<_>>()
+        );
+        let items = [("Open", "window"), ("Window Settings", "")];
+        let matches = fuzzy_filter(&items, "window", |item| {
+            FuzzyTarget::new(item.0).field(item.1)
+        });
+        assert_eq!(
+            matches
+                .iter()
+                .map(super::FuzzyMatch::item_index)
+                .collect::<Vec<_>>(),
+            [1, 0]
         );
     }
 

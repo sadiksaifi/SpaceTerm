@@ -39,6 +39,26 @@ fn retained_window_effects() -> SettingsDocument {
     document
 }
 
+fn distinct_appearance_document() -> SettingsDocument {
+    let mut document = retained_window_effects();
+    document.appearance.mode = AppearanceMode::Auto;
+    document.appearance.window.density = ChromeDensity::Comfortable;
+    document.terminal_themes = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).unwrap();
+    document.appearance.terminal.themes.light = document.terminal_themes[0].id.clone();
+    document.appearance.terminal.typography.base_size = 27.0;
+    document.appearance.terminal.typography.line_height = 1.7;
+    document.appearance.terminal.typography.italic = false;
+    document.appearance.terminal.rendering.bold_as_bright = false;
+    document.appearance.terminal.overrides.insert(
+        document.appearance.terminal.themes.dark.clone(),
+        crate::appearance::TerminalColorOverrides {
+            foreground: Some(crate::appearance::Color::rgb(0xa1b2c3)),
+            ..Default::default()
+        },
+    );
+    document
+}
+
 /// Configures the desktop's window-effect capabilities and lets Settings observe them.
 fn set_window_effects(harness: &Harness, opacity: bool, blur: bool, cx: &mut VisualTestContext) {
     harness
@@ -148,6 +168,8 @@ fn assert_unavailable_window_effects_show_disabled_defaults(
         let retained = retained_window_effects();
         let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&retained));
         set_window_effects(&harness, opacity, blur, cx);
+        harness.platform.set_require_opaque_surfaces(true);
+        cx.run_until_parked();
         let case = format!("opacity={opacity} blur={blur}");
 
         // The rows show the defaults, not the retained choices.
@@ -172,6 +194,8 @@ fn assert_unavailable_window_effects_show_disabled_defaults(
             "{case}"
         );
 
+        harness.platform.set_require_opaque_surfaces(false);
+        cx.run_until_parked();
         // What renders is the defaults, floating surfaces included.
         let composition = cx.update(|_, cx| {
             let chrome = &appearance_runtime::current(cx).chrome;
@@ -264,6 +288,30 @@ fn assert_unavailable_window_effects_show_disabled_defaults(
             WindowBackgroundAppearance::Transparent,
             "{case}"
         );
+        let guidance = window.read_with(cx, |settings, cx| {
+            (
+                settings.row_description(SettingsRowId::Opacity, cx),
+                settings.row_description(SettingsRowId::Blur, cx),
+            )
+        });
+        assert!(
+            guidance
+                .0
+                .unwrap()
+                .contains("0 is transparent; 1 is opaque")
+        );
+        assert_eq!(guidance.1, Some("Soften content behind windows."));
+        set_window_effects(&harness, false, true, cx);
+        assert_eq!(
+            document_of(&window, cx).appearance.window,
+            retained.appearance.window
+        );
+        assert_eq!(
+            harness.storage.document().unwrap().appearance.window,
+            retained.appearance.window
+        );
+        assert_eq!(harness.storage.writes(), 0);
+        set_window_effects(&harness, true, true, cx);
         click("settings-blur", cx);
         settle(cx);
         assert!(harness.storage.document().unwrap().appearance.window.blur);
@@ -278,41 +326,6 @@ fn assert_unavailable_window_effects_show_disabled_defaults(
             0.2
         );
     }
-}
-
-/// Require Opaque Surfaces still explains floating surfaces while a missing window effect keeps the
-/// rows at their disabled defaults.
-#[gpui::test]
-fn unavailable_window_effect_guidance_names_accessibility_for_floating_surfaces(
-    cx: &mut TestAppContext,
-) {
-    let (window, harness, cx) =
-        open_settings_with(cx, MemoryStorage::with_document(&retained_window_effects()));
-    set_window_effects(&harness, true, false, cx);
-    harness.platform.set_require_opaque_surfaces(true);
-    cx.run_until_parked();
-    let description = |row, cx: &mut VisualTestContext| {
-        window.read_with(cx, |settings, cx| settings.row_description(row, cx))
-    };
-    assert_eq!(
-        description(SettingsRowId::Opacity, cx),
-        Some("Desktop blur is unavailable on this system.")
-    );
-    assert_eq!(
-        description(SettingsRowId::Blur, cx),
-        Some("Desktop blur is unavailable on this system.")
-    );
-    harness.platform.set_native_window_opacity_supported(false);
-    cx.run_until_parked();
-    assert_eq!(
-        description(SettingsRowId::Opacity, cx),
-        Some("Window transparency is unavailable on this system.")
-    );
-    assert_eq!(
-        description(SettingsRowId::Blur, cx),
-        Some("Window transparency is unavailable on this system.")
-    );
-    assert!(!window_background_rows(&window, cx).adjustable());
 }
 
 pub(super) fn open_settings(
@@ -775,7 +788,10 @@ fn closing_the_window_writes_a_change_that_has_not_settled(cx: &mut TestAppConte
 
 #[gpui::test]
 fn appearance_mode_preserves_window_and_terminal_preferences(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
+    let (window, _harness, cx) = open_settings_with(
+        cx,
+        MemoryStorage::with_document(&distinct_appearance_document()),
+    );
     select_section(SettingsSectionId::Themes, cx);
     let before = document_of(&window, cx).appearance;
     for (selector, mode) in [
@@ -905,39 +921,23 @@ fn auto_theme_slots_publish_a_radio_group_that_selects_on_press(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn changing_one_theme_slot_preserves_the_mode_and_other_slot(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    for mode in [
-        AppearanceMode::Light,
-        AppearanceMode::Dark,
-        AppearanceMode::Auto,
-    ] {
-        cx.update(|_, cx| window.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx)));
-        {
-            for slot in [Appearance::Light, Appearance::Dark] {
-                let before = document_of(&window, cx).appearance;
-                let id = crate::appearance::ThemeId::new(
-                    format!("custom.{slot:?}").to_ascii_lowercase(),
-                )
-                .unwrap();
-                let mut expected = before.clone();
-                expected.terminal.themes.set(slot, id.clone());
-                cx.update(|_, cx| {
-                    window.update(cx, |settings, cx| settings.set_theme(slot, id, cx))
-                });
-                assert_eq!(document_of(&window, cx).appearance, expected);
-            }
-        }
-    }
-}
-
-#[gpui::test]
 fn resetting_appearance_mode_preserves_all_theme_choices(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
+    let (window, _harness, cx) = open_settings_with(
+        cx,
+        MemoryStorage::with_document(&distinct_appearance_document()),
+    );
     select_section(SettingsSectionId::Themes, cx);
     click("settings-appearance-mode-light", cx);
     let mut expected = document_of(&window, cx).appearance;
     expected.mode = AppearanceMode::default();
+    assert_ne!(
+        expected.window,
+        SettingsDocument::default().appearance.window
+    );
+    assert_ne!(
+        expected.terminal,
+        SettingsDocument::default().appearance.terminal
+    );
     click("settings-row-appearance-mode-reset", cx);
     assert_eq!(document_of(&window, cx).appearance, expected);
 }
@@ -1205,6 +1205,177 @@ fn only_installed_themes_offer_removal(cx: &mut TestAppContext) {
 // Reset --------------------------------------------------------------------------------------
 
 #[gpui::test]
+fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
+    use crate::appearance::{AppearancePreferences, TerminalFontFamily, ThemeId};
+    type ExpectedReset = fn(&mut AppearancePreferences, Appearance);
+
+    for row in super::catalog::rows().map(|descriptor| descriptor.id) {
+        let expected_reset: ExpectedReset = match row {
+            SettingsRowId::AppearanceMode => |value, _| value.mode = AppearanceMode::default(),
+            SettingsRowId::Opacity => |value, _| value.window.opacity = 0.65,
+            SettingsRowId::Blur => |value, _| value.window.blur = true,
+            SettingsRowId::BackgroundImage => |value, _| value.window.background_image = None,
+            SettingsRowId::Density => |value, _| value.window.density = ChromeDensity::Compact,
+            SettingsRowId::TerminalTheme => |value, slot| match slot {
+                Appearance::Light => {
+                    value.terminal.themes.light = ThemeId::new("builtin.spaceterm.light").unwrap()
+                }
+                Appearance::Dark => {
+                    value.terminal.themes.dark = ThemeId::new("builtin.spaceterm.dark").unwrap()
+                }
+            },
+            SettingsRowId::TerminalFontFamily => {
+                |value, _| value.terminal.typography.family = TerminalFontFamily::DefaultMonospace
+            }
+            SettingsRowId::TerminalBaseSize => |value, _| {
+                value.terminal.typography.base_size = AppearancePreferences::default()
+                    .terminal
+                    .typography
+                    .base_size
+            },
+            SettingsRowId::TerminalRegularWeight => {
+                |value, _| value.terminal.typography.regular_weight = 400
+            }
+            SettingsRowId::TerminalBoldWeight => {
+                |value, _| value.terminal.typography.bold_weight = 700
+            }
+            SettingsRowId::TerminalLineHeight => |value, _| {
+                value.terminal.typography.line_height = AppearancePreferences::default()
+                    .terminal
+                    .typography
+                    .line_height
+            },
+            SettingsRowId::TerminalItalic => |value, _| value.terminal.typography.italic = true,
+            SettingsRowId::TerminalBoldAsBright => {
+                |value, _| value.terminal.rendering.bold_as_bright = true
+            }
+            SettingsRowId::SidebarDefaultState
+            | SettingsRowId::InstalledThemes
+            | SettingsRowId::MicrophoneAccess
+            | SettingsRowId::CameraAccess
+            | SettingsRowId::ScreenRecordingAccess
+            | SettingsRowId::AccessibilityAccess
+            | SettingsRowId::ClipboardWrites
+            | SettingsRowId::ClipboardReads
+            | SettingsRowId::ShowRepositoryStatus
+            | SettingsRowId::GitTool
+            | SettingsRowId::ShowPullRequests
+            | SettingsRowId::GitHubCli
+            | SettingsRowId::ServerWorktreeLocation
+            | SettingsRowId::ServerStatus
+            | SettingsRowId::ServerAutoStart
+            | SettingsRowId::EndAllSessions
+            | SettingsRowId::NetworkAccess
+            | SettingsRowId::PairedDevices
+            | SettingsRowId::AllServers
+            | SettingsRowId::AddServer
+            | SettingsRowId::CommandLineTool
+            | SettingsRowId::UpdateStatus
+            | SettingsRowId::AutomaticUpdateDownloads
+            | SettingsRowId::UpdateCheckInterval
+            | SettingsRowId::UpdateReminderInterval
+            | SettingsRowId::Shortcut(_)
+            | SettingsRowId::SettingsFile
+            | SettingsRowId::ExportSettings
+            | SettingsRowId::ImportSettings
+            | SettingsRowId::ResetAllSettings => continue,
+        };
+        let slots = if row == SettingsRowId::TerminalTheme {
+            &[Appearance::Light, Appearance::Dark][..]
+        } else {
+            &[Appearance::Light][..]
+        };
+        for &slot in slots {
+            let store = Arc::new(crate::background_image::testing::store().0);
+            let image = store
+                .install(crate::background_image::testing::PNG)
+                .unwrap();
+            let mut document = distinct_appearance_document();
+            let dark = crate::appearance::translate_zed_family(br##"{"name":"Reset Dark","themes":[{"name":"Reset Dark","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##).unwrap();
+            document.appearance.terminal.themes.dark = dark[0].id.clone();
+            document.terminal_themes.extend(dark);
+            document.appearance.mode = slot.into();
+            document.appearance.window.background_image = Some(image);
+            document.appearance.terminal.typography.family = TerminalFontFamily::Named {
+                family: "Reset Fixture Mono".into(),
+            };
+            document.appearance.terminal.typography.regular_weight = 800;
+            document.appearance.terminal.typography.bold_weight = 900;
+            document.validate().unwrap();
+            let mut expected = document.appearance.clone();
+            expected_reset(&mut expected, slot);
+            assert_ne!(
+                expected, document.appearance,
+                "{row:?}/{slot:?} starts non-default"
+            );
+            let themes = document.terminal_themes.clone();
+            let (window, harness, cx) = open_settings_with_capabilities(
+                cx,
+                MemoryStorage::with_document(&document),
+                Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+                crate::theme_registry::testing::offline(),
+                Some(store),
+            );
+            set_window_effects(&harness, true, true, cx);
+            select_section(row.descriptor().section, cx);
+            set_query(
+                &window,
+                row.descriptor()
+                    .label(crate::platform::permission_access::AccessibilityNaming::Accessibility),
+                cx,
+            );
+            let reset = leaked_owned(format!("{}-reset", row.descriptor().selector));
+            if row == SettingsRowId::TerminalTheme {
+                // The full-width theme preview hides its label and Reset button. Exercise the
+                // window's pending reset so its slot association remains covered as well.
+                cx.update(|_, cx| {
+                    window.update(cx, |settings, cx| {
+                        let Some(super::RowReset::Appearance(target)) =
+                            settings.pending_reset(row, cx)
+                        else {
+                            panic!("{row:?}/{slot:?} has a pending reset");
+                        };
+                        assert_eq!(target, crate::appearance::ResetTarget::TerminalTheme(slot));
+                        settings.editor.reset(target, cx);
+                    })
+                });
+            } else {
+                assert!(
+                    cx.debug_bounds(reset).is_some(),
+                    "{row:?}/{slot:?} offers its row Reset"
+                );
+                click(reset, cx);
+            }
+            settle(cx);
+            let after = document_of(&window, cx);
+            assert_eq!(
+                after.appearance, expected,
+                "{row:?}/{slot:?} resets only its field"
+            );
+            assert_eq!(
+                after.terminal_themes, themes,
+                "{row:?}/{slot:?} keeps installed themes"
+            );
+            assert!(
+                !window.read_with(cx, |window, cx| window.pending_reset(row, cx).is_some()),
+                "{row:?}/{slot:?} is now default"
+            );
+            let saved = harness
+                .storage
+                .document()
+                .expect("the row reset is persisted");
+            assert_eq!(
+                saved.appearance, expected,
+                "{row:?}/{slot:?} persists only its field reset"
+            );
+            assert_eq!(saved.terminal_themes, themes);
+            cx.update(|window, _| window.remove_window());
+            cx.run_until_parked();
+        }
+    }
+}
+
+#[gpui::test]
 fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     assert!(!window.read_with(cx, |window, cx| {
@@ -1422,12 +1593,33 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
     document.appearance.window.density = ChromeDensity::Comfortable;
     document.terminal_themes =
         crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
+    document.keybindings = serde_json::from_value(serde_json::json!({
+        "new_workspace": "shift-cmd-y", "close_tab": null
+    }))
+    .unwrap();
+    let overrides = document.keybindings.clone();
+    let imported = document.terminal_themes[0].id.clone();
+    let slot = document.terminal_themes[0].appearance;
+    document
+        .appearance
+        .terminal
+        .themes
+        .set(slot, imported.clone());
     let (window, harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     assert!(
         installed_count(&window, cx) > 0,
         "the fixture should install one theme"
     );
 
+    assert_eq!(
+        document_of(&window, cx)
+            .appearance
+            .terminal
+            .themes
+            .get(slot),
+        &imported
+    );
+    assert_eq!(document_of(&window, cx).keybindings, overrides);
     select_section(SettingsSectionId::Advanced, cx);
     click("settings-reset-all", cx);
     click("modal-action-settings-reset-all-confirm", cx);
@@ -1440,48 +1632,25 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
         "Reset All should empty the imported catalog, got {} themes",
         after.terminal_themes.len()
     );
+    assert_eq!(after.appearance, SettingsDocument::default().appearance);
+    after.validate().expect("reset selections remain valid");
+    assert_eq!(
+        serde_json::to_value(&after.keybindings).unwrap(),
+        serde_json::json!({})
+    );
     let retained = harness
         .storage
         .document()
         .expect("the retained document should parse");
+    assert_eq!(retained.appearance, SettingsDocument::default().appearance);
+    assert_eq!(
+        serde_json::to_value(&retained.keybindings).unwrap(),
+        serde_json::json!({})
+    );
     assert!(
         retained.terminal_themes.is_empty(),
         "the emptied catalog should reach storage"
     );
-}
-
-/// A theme the preferences select cannot survive the catalog that defines it, so the reset must
-/// return the selection to a built-in theme in the same edit the catalog is emptied by.
-#[gpui::test]
-fn resetting_everything_releases_a_selected_imported_theme(cx: &mut TestAppContext) {
-    let mut document = SettingsDocument {
-        terminal_themes: crate::appearance::translate_zed_family(IMPORTABLE_FAMILY)
-            .expect("fixture Zed family"),
-        ..Default::default()
-    };
-    let imported = document.terminal_themes[0].id.clone();
-    document.appearance.terminal.themes.light = imported.clone();
-    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
-    assert_eq!(
-        document_of(&window, cx).appearance.terminal.themes.light,
-        imported,
-        "the fixture should select the imported theme"
-    );
-
-    select_section(SettingsSectionId::Advanced, cx);
-    click("settings-reset-all", cx);
-    click("modal-action-settings-reset-all-confirm", cx);
-    settle(cx);
-
-    let after = document_of(&window, cx);
-    assert_eq!(
-        after.appearance.terminal.themes.light,
-        SettingsDocument::default().appearance.terminal.themes.light
-    );
-    assert!(after.terminal_themes.is_empty());
-    after
-        .validate()
-        .expect("the reset document should stay valid");
 }
 
 // Search and navigation ----------------------------------------------------------------------
@@ -1516,18 +1685,25 @@ fn search_narrows_the_detail_pane_to_matching_rows(cx: &mut TestAppContext) {
         Some(SettingsRowId::Opacity)
     );
     assert!(cx.debug_bounds("settings-row-opacity").is_some());
-}
 
-#[gpui::test]
-fn search_reveals_the_first_match(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-
-    set_query(&window, "leading", cx);
-
-    assert_eq!(
-        window.read_with(cx, |window, _| window.revealed),
-        Some(SettingsRowId::TerminalLineHeight)
-    );
+    for mode in [
+        AppearanceMode::Light,
+        AppearanceMode::Auto,
+        AppearanceMode::Dark,
+    ] {
+        cx.update(|_, cx| window.update(cx, |window, cx| window.set_appearance_mode(mode, cx)));
+        set_query(&window, "theme", cx);
+        assert_eq!(
+            window.read_with(cx, |window, _| window.revealed),
+            Some(SettingsRowId::TerminalTheme)
+        );
+        assert!(!window.read_with(cx, |window, _| {
+            window
+                .navigable_sections()
+                .contains(&SettingsSectionId::Interface)
+        }));
+        assert!(cx.debug_bounds("settings-current-theme").is_some());
+    }
 }
 
 #[gpui::test]
@@ -1596,37 +1772,6 @@ fn search_highlight_keeps_the_setting_label_geometry_stable(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn a_theme_search_reveals_the_theme_in_use_in_every_mode(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    set_query(&window, "theme", cx);
-    for mode in [
-        AppearanceMode::Light,
-        AppearanceMode::Auto,
-        AppearanceMode::Dark,
-    ] {
-        cx.update(|_, cx| window.update(cx, |settings, cx| settings.set_appearance_mode(mode, cx)));
-
-        assert_eq!(
-            window.read_with(cx, |window, _| window.revealed),
-            Some(SettingsRowId::TerminalTheme)
-        );
-    }
-}
-
-#[gpui::test]
-fn a_theme_search_navigates_only_to_sections_it_matches(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-
-    set_query(&window, "theme", cx);
-
-    assert!(!window.read_with(cx, |window, _| {
-        window
-            .navigable_sections()
-            .contains(&SettingsSectionId::Interface)
-    }));
-}
-
-#[gpui::test]
 fn an_unmatched_query_reports_that_nothing_matched(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
@@ -1654,23 +1799,15 @@ fn clearing_search_restores_every_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn selecting_a_section_makes_it_active(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-
-    click("settings-navigation-settings-section-font", cx);
-
-    assert_eq!(
-        window.read_with(cx, |window, _| window.active_section),
-        SettingsSectionId::Font
-    );
-}
-
-#[gpui::test]
 fn every_section_presents_its_own_rows_when_it_is_selected(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
 
     for section in SettingsSectionId::ALL {
         select_section(section, cx);
+        assert_eq!(
+            window.read_with(cx, |window, _| window.active_section),
+            section
+        );
 
         assert!(
             cx.debug_bounds(section.selector()).is_some(),
@@ -1779,7 +1916,18 @@ fn dragging_the_settings_titlebar_blurs_search_without_interrupting_window_movem
 
     cx.simulate_mouse_down(drag_target, MouseButton::Left, Modifiers::none());
     cx.simulate_mouse_move(
+        point(drag_target.x + px(2.0), drag_target.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    assert_eq!(records.counts(), (1, 0, 0));
+    cx.simulate_mouse_move(
         point(drag_target.x + px(8.0), drag_target.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(
+        point(drag_target.x + px(16.0), drag_target.y),
         MouseButton::Left,
         Modifiers::none(),
     );
@@ -1792,6 +1940,13 @@ fn dragging_the_settings_titlebar_blurs_search_without_interrupting_window_movem
         ),
         (false, (1, 1, 1))
     );
+
+    let search = cx
+        .debug_bounds("settings-search-frame")
+        .expect("search field")
+        .center();
+    cx.simulate_click(search, Modifiers::none());
+    assert_eq!(records.counts(), (1, 1, 1), "Search owns no native drag");
 }
 
 #[gpui::test]
@@ -1885,33 +2040,6 @@ fn cancelling_the_reset_confirmation_changes_nothing(cx: &mut TestAppContext) {
         ChromeDensity::Comfortable
     );
     assert_eq!(harness.storage.writes(), writes);
-}
-
-#[gpui::test]
-fn confirming_the_reset_restores_defaults(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
-    click("settings-density-comfortable", cx);
-    settle(cx);
-
-    select_section(SettingsSectionId::Advanced, cx);
-    click("settings-reset-all", cx);
-    click("modal-action-settings-reset-all-confirm", cx);
-    settle(cx);
-
-    assert_eq!(
-        document_of(&window, cx).appearance.window.density,
-        ChromeDensity::Compact
-    );
-    assert_eq!(
-        harness
-            .storage
-            .document()
-            .expect("the retained document should parse")
-            .appearance
-            .window
-            .density,
-        ChromeDensity::Compact
-    );
 }
 
 // Content --------------------------------------------------------------------------------------
@@ -2052,66 +2180,6 @@ fn settings_backdrop_tracks_blur_and_accessibility_live(cx: &mut TestAppContext)
     assert_eq!(
         harness.platform.backdrop_presence(),
         vec![false, true, false, true, false, true]
-    );
-}
-
-#[gpui::test]
-fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
-    cx: &mut TestAppContext,
-) {
-    let (window, harness, cx) =
-        open_settings_with(cx, MemoryStorage::with_document(&retained_window_effects()));
-    let retained = retained_window_effects().appearance.window;
-    let guidance = |row, cx: &mut VisualTestContext| {
-        window.read_with(cx, |settings, cx| settings.row_description(row, cx))
-    };
-    assert!(
-        guidance(SettingsRowId::Opacity, cx)
-            .unwrap()
-            .starts_with("Window transparency is unavailable on this system.")
-    );
-    assert!(
-        guidance(SettingsRowId::Blur, cx)
-            .unwrap()
-            .starts_with("Window transparency is unavailable on this system.")
-    );
-
-    // The fallback shows the defaults it renders and leaves the retained choices for a desktop
-    // that can present them.
-    click("settings-opacity-increase", cx);
-    click("settings-blur", cx);
-    settle(cx);
-    assert_eq!(document_of(&window, cx).appearance.window, retained);
-    assert_eq!(harness.storage.writes(), 0);
-
-    harness.platform.set_native_window_opacity_supported(true);
-    cx.run_until_parked();
-    assert_eq!(document_of(&window, cx).appearance.window, retained);
-    assert_eq!(
-        guidance(SettingsRowId::Blur, cx),
-        Some("Soften content behind windows.")
-    );
-    assert!(
-        guidance(SettingsRowId::Opacity, cx)
-            .unwrap()
-            .contains("0 is transparent; 1 is opaque")
-    );
-    assert_eq!(
-        cx.update(|_, cx| appearance_runtime::current(cx).chrome.composition.effective),
-        crate::appearance::WindowBackgroundAppearance::Transparent
-    );
-
-    harness.platform.set_native_window_opacity_supported(false);
-    cx.run_until_parked();
-    assert!(
-        guidance(SettingsRowId::Opacity, cx)
-            .unwrap()
-            .starts_with("Window transparency is unavailable on this system.")
-    );
-    assert_eq!(document_of(&window, cx).appearance.window, retained);
-    assert_eq!(
-        harness.storage.document().unwrap().appearance.window,
-        retained
     );
 }
 
@@ -2279,6 +2347,10 @@ fn the_default_themes_page_has_no_warning(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Themes, cx);
 
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    tree.text("SpaceTerm Dark");
+    tree.text("Built into SpaceTerm");
+    assert!(cx.debug_bounds("settings-current-theme-name").is_some());
     assert_eq!(cx.debug_bounds("settings-diagnostics-notice"), None);
     assert!(
         cx.debug_bounds("settings-current-theme").is_some(),
@@ -2490,6 +2562,7 @@ fn the_footer_tracks_the_content_gutter_with_comfortable_density(cx: &mut TestAp
 #[gpui::test]
 fn the_footer_carries_only_the_save_status(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Advanced, cx);
     let footer = cx.debug_bounds("settings-footer").unwrap();
 
     for selector in [
@@ -2498,8 +2571,7 @@ fn the_footer_carries_only_the_save_status(cx: &mut TestAppContext) {
         "settings-import",
     ] {
         assert!(
-            cx.debug_bounds(selector)
-                .is_none_or(|bounds| !footer.intersects(&bounds)),
+            !footer.intersects(&cx.debug_bounds(selector).expect("Advanced action renders")),
             "{selector} should not sit in the footer"
         );
     }
@@ -2645,54 +2717,6 @@ fn settings_window_titlebar_preserves_modal_focus_while_moving(cx: &mut TestAppC
     }
     assert_eq!(records.counts(), (2, 2, 2));
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-}
-
-#[gpui::test]
-fn settings_titlebar_forwards_one_threshold_crossing_to_native_window_movement(
-    cx: &mut TestAppContext,
-) {
-    let records = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
-    let window_drag: Rc<dyn OperatingSystemWindowDragPlatform> = records.clone();
-    let (_window, _harness, cx) = open_settings_with_drag(
-        cx,
-        MemoryStorage::with_document(&SettingsDocument::default()),
-        window_drag,
-    );
-    let drag_target = cx
-        .debug_bounds("settings-detail-drag-region-hitbox")
-        .expect("Settings heading drag target")
-        .center();
-
-    cx.simulate_mouse_down(drag_target, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(
-        point(drag_target.x + px(2.0), drag_target.y),
-        MouseButton::Left,
-        Modifiers::none(),
-    );
-    cx.simulate_mouse_move(
-        point(drag_target.x + px(8.0), drag_target.y),
-        MouseButton::Left,
-        Modifiers::none(),
-    );
-    cx.simulate_mouse_move(
-        point(drag_target.x + px(16.0), drag_target.y),
-        MouseButton::Left,
-        Modifiers::none(),
-    );
-    cx.simulate_mouse_up(drag_target, MouseButton::Left, Modifiers::none());
-
-    assert_eq!(records.counts(), (1, 1, 1));
-
-    let search = cx
-        .debug_bounds("settings-search-frame")
-        .expect("search field")
-        .center();
-    cx.simulate_click(search, Modifiers::none());
-    assert_eq!(
-        records.counts(),
-        (1, 1, 1),
-        "Search interaction must remain outside the titlebar drag owner"
-    );
 }
 
 #[gpui::test]
@@ -2968,30 +2992,6 @@ fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
     );
 }
 
-/// A selector shares the right edge and height of the stepper beside it.
-#[gpui::test]
-fn a_selector_aligns_with_the_stepper_beside_it(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Font, cx);
-
-    let selector = cx
-        .debug_bounds("settings-row-terminal-regular-weight-control")
-        .expect("the weight selector should render");
-    let stepper = cx
-        .debug_bounds("settings-terminal-base-size")
-        .expect("the size stepper should render");
-
-    assert_eq!(
-        selector.right(),
-        stepper.right(),
-        "a selector and a stepper should end at one edge"
-    );
-    assert_eq!(
-        selector.size.height, stepper.size.height,
-        "a selector and a stepper should share one height"
-    );
-}
-
 #[gpui::test]
 fn a_selector_takes_only_the_width_its_value_needs(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
@@ -3143,33 +3143,6 @@ fn an_open_selector_shows_its_filter_glyph_and_marks_the_current_value(cx: &mut 
         "the current value should be marked"
     );
     assert_eq!(cx.debug_bounds("combo-box-row-0-check"), None);
-}
-
-#[gpui::test]
-fn pressing_a_segment_keeps_the_control_height(cx: &mut TestAppContext) {
-    // GPUI replaces an element's text style when an interaction refinement carries one, so a
-    // refinement that forgot the segment's line height would reflow the row under the pointer.
-    let (_window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Themes, cx);
-    let light = cx
-        .debug_bounds("settings-appearance-mode-light")
-        .expect("the light card should render")
-        .center();
-    let idle = cx
-        .debug_bounds("settings-appearance-mode")
-        .expect("the control should render");
-
-    cx.simulate_mouse_move(light, None, Modifiers::none());
-    cx.run_until_parked();
-    let hovered = cx.debug_bounds("settings-appearance-mode");
-    cx.simulate_mouse_down(light, gpui::MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-    let pressed = cx.debug_bounds("settings-appearance-mode");
-    cx.simulate_mouse_up(light, gpui::MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-
-    assert_eq!(hovered, Some(idle), "hover should not resize the control");
-    assert_eq!(pressed, Some(idle), "a press should not resize the control");
 }
 
 #[gpui::test]
@@ -3845,8 +3818,17 @@ fn a_settings_file_too_large_to_show_says_so_instead_of_showing_an_earlier_one(
 ) {
     let (window, harness, cx) = open_settings(cx);
     let file = install_settings_file(&harness, cx);
+    let mut earlier = SettingsDocument::default();
+    earlier.appearance.terminal.typography.base_size = 29.0;
+    harness.storage.save_elsewhere(&earlier);
+    follow_outside_save(&file, cx);
     select_section(SettingsSectionId::Advanced, cx);
-    assert!(!settings_file_text(&window, cx).is_empty());
+    earlier.revision = 1;
+    let earlier_text = settings_file_text(&window, cx);
+    assert_eq!(
+        earlier_text,
+        crate::settings::export_settings(&earlier).unwrap()
+    );
 
     let family = crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture");
     let wide = "\u{1F600}";
@@ -3874,6 +3856,11 @@ fn a_settings_file_too_large_to_show_says_so_instead_of_showing_an_earlier_one(
     assert_eq!(document_of(&window, cx).terminal_themes.len(), 512);
     // The empty view shows its placeholder, which says why.
     assert_eq!(settings_file_text(&window, cx), "");
+    assert_ne!(settings_file_text(&window, cx), earlier_text);
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Settings file")["aria"]["placeholder"],
+        "File too large to show. Choose Edit JSON."
+    );
 }
 
 /// A full-width row holds a block rather than one centered line, so the block sits the same
@@ -3974,12 +3961,19 @@ fn edit_json_saves_pending_changes_before_opening_the_file(cx: &mut TestAppConte
 #[gpui::test]
 fn edit_json_is_unavailable_without_a_settings_file(cx: &mut TestAppContext) {
     let (_window, harness, cx) = open_settings(cx);
+    let file = install_settings_file(&harness, cx);
+    cx.update(|_, cx| {
+        cx.remove_global::<crate::ui::settings_file::SettingsFile>();
+    });
     select_section(SettingsSectionId::Advanced, cx);
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert_eq!(tree.node("Edit JSON")["aria"]["disabled"], true);
     let writes = harness.storage.writes();
 
     click("settings-file-edit", cx);
 
     assert_eq!(harness.storage.writes(), writes);
+    assert_eq!(file.opened.get(), 0);
 }
 
 #[gpui::test]
@@ -4749,34 +4743,6 @@ fn about_sits_apart_at_the_foot_of_the_sidebar_and_requests_about(cx: &mut TestA
 }
 
 #[gpui::test]
-fn about_is_a_named_button_for_assistive_technology(cx: &mut TestAppContext) {
-    let (_window, _harness, cx) = open_settings(cx);
-    let requests = count_about_requests(cx);
-    cx.activate_accessibility();
-    let tree: serde_json::Value = cx
-        .update(|window, _| serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap());
-    let label = crate::keybindings::Command::About.label();
-    let (_, node) = tree["nodes"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .find(|(_, node)| node["aria"]["label"] == label)
-        .unwrap_or_else(|| panic!("{label} must be exposed to screen readers"));
-    assert_eq!(node["aria"]["role"], "Button");
-
-    cx.simulate_accessibility_action(gpui::accesskit::ActionRequest {
-        action: gpui::AccessibleAction::Click,
-        target_tree: gpui::accesskit::TreeId::ROOT,
-        target_node: gpui::accesskit::NodeId(
-            node["accesskit_id"].as_str().unwrap().parse().unwrap(),
-        ),
-        data: None,
-    });
-    cx.run_until_parked();
-    assert_eq!(requests.get(), 1);
-}
-
-#[gpui::test]
 fn about_follows_the_sections_in_keyboard_order_and_activates_from_the_keyboard(
     cx: &mut TestAppContext,
 ) {
@@ -4915,8 +4881,21 @@ fn settings_publish_headings_row_titles_and_guidance_in_reading_order(cx: &mut T
 fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (window, _harness, cx) = open_settings(cx);
+    let mut document = SettingsDocument {
+        terminal_themes: crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).unwrap(),
+        ..Default::default()
+    };
+    let custom = document
+        .terminal_themes
+        .iter_mut()
+        .find(|theme| theme.appearance == Appearance::Light)
+        .unwrap();
+    custom.name = "Distinct imported daylight".into();
+    custom.metadata.origin.as_mut().unwrap().family = "Distinct family".into();
+    document.appearance.terminal.themes.light = custom.id.clone();
+    let (window, _harness, cx) = open_settings_with(cx, MemoryStorage::with_document(&document));
     select_section(SettingsSectionId::Themes, cx);
+    A11yTree::read(cx).text("SpaceTerm Dark");
     cx.update(|_, cx| {
         window.update(cx, |settings, cx| {
             settings.set_appearance_mode(AppearanceMode::Light, cx)
@@ -4930,7 +4909,13 @@ fn a_fixed_appearance_publishes_the_current_theme_and_its_origin(cx: &mut TestAp
         .into_iter()
         .filter_map(|node| node["aria"]["value"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(text, ["SpaceTerm Light", "Built into SpaceTerm"]);
+    assert_eq!(
+        text,
+        [
+            "Distinct imported daylight",
+            "Distinct family · Imported file"
+        ]
+    );
 
     set_query(&window, "zzzz", cx);
     let tree = A11yTree::read(cx);

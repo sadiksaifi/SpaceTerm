@@ -744,8 +744,10 @@ impl ToggleCore {
         let pressed_font = font.clone();
         let font_size = style.metrics.font_size;
         let line_height = style.metrics.line_height;
+        // GPUI dispatches group-active pointer events only to parts with their own hitboxes.
         let label = div()
             .id(SharedString::from(label_state_id))
+            .cursor_default()
             .min_w_0()
             .text_color(paint.label)
             .text_size(font_size)
@@ -981,6 +983,7 @@ fn checkbox_indicator(
     let indicator = div()
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
+        .cursor_default()
         .relative()
         .flex()
         .flex_none()
@@ -1000,6 +1003,7 @@ fn checkbox_indicator(
             indicator.child(
                 div()
                     .id(mark_state_id.clone())
+                    .cursor_default()
                     .text_color(paint.foreground)
                     .text_size(metrics.checkbox_extent * 0.8)
                     .line_height(metrics.checkbox_extent)
@@ -1018,6 +1022,7 @@ fn checkbox_indicator(
             indicator.child(
                 div()
                     .id(mark_state_id)
+                    .cursor_default()
                     .w(metrics.checkbox_extent * 0.5)
                     .h(metrics.border_width * 2.0)
                     .rounded(metrics.border_width)
@@ -1079,6 +1084,7 @@ fn switch_indicator(
     let indicator = div()
         .id(SharedString::from(state_id))
         .debug_selector(move || selector)
+        .cursor_default()
         .relative()
         .flex()
         .items_center()
@@ -1099,6 +1105,7 @@ fn switch_indicator(
             div()
                 .id(thumb_state_id)
                 .debug_selector(move || thumb_selector)
+                .cursor_default()
                 .relative()
                 .left(thumb_offset)
                 .size(thumb_extent)
@@ -1192,7 +1199,7 @@ impl ToggleControlState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{
@@ -1237,14 +1244,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn density_scales_toggle_bounds_but_not_checkbox_radius() {
-        let scaled = test_theme().scaled_spacing(1.25);
-        let original = test_theme().resolve(ToggleSize::Regular, false).metrics;
-        let comfortable = scaled.resolve(ToggleSize::Regular, false).metrics;
-
-        assert!(comfortable.checkbox_extent > original.checkbox_extent);
-        assert_eq!(comfortable.checkbox_radius, original.checkbox_radius);
+    pub(crate) fn density_extents(theme: ToggleTheme) -> (gpui::Pixels, gpui::Pixels) {
+        (
+            theme
+                .resolve(ToggleSize::Regular, false)
+                .metrics
+                .checkbox_extent,
+            theme
+                .resolve(ToggleSize::Regular, false)
+                .metrics
+                .checkbox_radius,
+        )
     }
 
     #[test]
@@ -1312,53 +1322,307 @@ mod tests {
         }
     }
 
-    #[test]
-    fn interaction_paint_should_refine_every_rendered_part() {
-        let paint = TogglePaint::new(
-            rgba(0x111111ff),
-            rgba(0x121212ff),
-            rgba(0x131313ff),
-            rgba(0x141414ff),
+    #[gpui::test]
+    fn interaction_paint_reaches_toggle_indicators_marks_and_thumbs(cx: &mut TestAppContext) {
+        let (root, _, _, _, _, cx) = toggle_window(cx, false);
+        let mut normal = TogglePaint::new(
+            rgba(0x112233ff),
+            rgba(0x445566ff),
+            rgba(0x778899ff),
+            rgba(0xaabbccff),
         );
-        let refinement = TogglePaintRefinement(paint);
+        let mut hovered = TogglePaint::new(
+            rgba(0x223344ff),
+            rgba(0x556677ff),
+            rgba(0x8899aaff),
+            rgba(0xbbccddff),
+        );
+        normal.thumb_border = rgba(0x102030ff);
+        hovered.thumb_border = rgba(0x203040ff);
+        let pressed = TogglePaint {
+            thumb_border: rgba(0xddeeffff),
+            thumb_shadow: ControlShadow::single(crate::ControlShadowLayer::new(
+                rgba(0x12345680).into(),
+                px(1.0),
+                px(2.0),
+                px(3.0),
+                px(4.0),
+            )),
+            shadow: ControlShadow::single(crate::ControlShadowLayer::new(
+                rgba(0x65432180).into(),
+                px(2.0),
+                px(3.0),
+                px(4.0),
+                px(5.0),
+            )),
+            ..TogglePaint::new(
+                rgba(0x334455ff),
+                rgba(0x667788ff),
+                rgba(0x99aabbff),
+                rgba(0xccddeeff),
+            )
+        };
+        let values = |paint| ToggleValuePaints::new(paint, paint);
+        let metrics = ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0));
+        cx.update(|window, cx| {
+            cx.set_global(ToggleTheme::new(
+                TogglePaints::new(
+                    values(normal),
+                    values(hovered),
+                    values(pressed),
+                    values(normal),
+                ),
+                ToggleSizes::new(metrics, metrics),
+                rgba(0x00aaffff),
+            ));
+            window.refresh();
+        });
+        for checked in [false, true] {
+            root.update(cx, |root, cx| {
+                root.checkbox_state = if checked {
+                    CheckboxState::Checked
+                } else {
+                    CheckboxState::Mixed
+                };
+                root.switch_on = checked;
+                cx.notify();
+            });
+            for (selector, indicator_selector, thumb_selector) in [
+                ("test-checkbox", "test-checkbox-indicator", None),
+                (
+                    "test-switch",
+                    "test-switch-indicator",
+                    Some("test-switch-thumb"),
+                ),
+            ] {
+                cx.simulate_mouse_move(point(px(500.0), px(500.0)), None, Modifiers::none());
+                cx.run_until_parked();
+                let row = cx.debug_bounds(selector).unwrap();
+                let indicator = cx.debug_bounds(indicator_selector).unwrap();
+                for (state, paint) in [(0, normal), (1, hovered), (2, pressed), (3, pressed)] {
+                    if state == 1 {
+                        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+                        // Resolve the hover transition before checking its endpoint.
+                        crate::hover_fade::settle(cx);
+                    } else if state == 3 {
+                        cx.simulate_mouse_up(
+                            indicator.center(),
+                            gpui::MouseButton::Left,
+                            Modifiers::none(),
+                        );
+                        let other = root.read_with(cx, |root, _| root.other_focus.clone());
+                        cx.update(|window, cx| {
+                            other.focus(window, cx);
+                            window.focus_next(cx);
+                            if thumb_selector.is_some() {
+                                window.focus_next(cx);
+                            }
+                        });
+                        cx.simulate_event(KeyDownEvent {
+                            keystroke: Keystroke::parse("space").unwrap(),
+                            prefer_character_input: false,
+                            is_held: false,
+                        });
+                    } else if state == 2 {
+                        cx.simulate_mouse_move(indicator.center(), None, Modifiers::none());
+                        crate::hover_fade::settle(cx);
+                        cx.simulate_mouse_down(
+                            indicator.center(),
+                            gpui::MouseButton::Left,
+                            Modifiers::none(),
+                        );
+                    }
+                    cx.run_until_parked();
+                    assert_eq!(
+                        cx.debug_bounds(selector),
+                        Some(row),
+                        "{selector} reflowed in state {state}"
+                    );
+                    let thumb = thumb_selector.map(|s| cx.debug_bounds(s).unwrap());
+                    cx.update(|window, _| {
+                        let scale = window.scale_factor();
+                        let indicator = indicator.scale(scale);
+                        let quads = window.painted_quads();
+                        assert!(
+                            quads.iter().any(|q| q.bounds == indicator
+                                && q.background == paint.background.into()),
+                            "{selector} fill state {state}"
+                        );
+                        assert!(
+                            quads.iter().any(|q| q.bounds == indicator
+                                && q.border_color == paint.border.into()
+                                && !q.bounds.intersect(&q.content_mask.bounds).is_empty()),
+                            "{selector} border state {state}"
+                        );
+                        if let Some(thumb) = thumb {
+                            assert!(
+                                quads.iter().any(|q| q.bounds == thumb.scale(scale)
+                                    && q.background == paint.foreground.into()),
+                                "switch thumb state {state}"
+                            );
+                            assert!(
+                                quads.iter().any(|q| q.bounds == thumb.scale(scale)
+                                    && q.border_color == paint.thumb_border.into()
+                                    && !q.bounds.intersect(&q.content_mask.bounds).is_empty()),
+                                "switch thumb border state {state}"
+                            );
+                        } else if !checked {
+                            assert!(
+                                quads
+                                    .iter()
+                                    .any(|q| q.bounds.intersect(&indicator) == q.bounds
+                                        && q.background == paint.foreground.into()
+                                        && q.bounds.size.width > gpui::ScaledPixels::from(0.0)),
+                                "mixed mark state {state}"
+                            );
+                        }
+                    });
+                }
+                cx.simulate_event(KeyUpEvent {
+                    keystroke: Keystroke::parse("space").unwrap(),
+                });
+                cx.run_until_parked();
+            }
+        }
+        // GPUI exposes painted quads but no shadow accessor, so keep the shadow refinements too.
+        let refinement = TogglePaintRefinement(pressed);
+        assert_eq!(
+            refinement.thumb(StyleRefinement::default()).box_shadow,
+            Some(vec![gpui::BoxShadow {
+                inset: false,
+                color: rgba(0x12345680).into(),
+                offset: point(px(1.0), px(2.0)),
+                blur_radius: px(3.0),
+                spread_radius: px(4.0),
+            }]),
+            "pointer-pressed thumb refinement must retain its distinct shadow"
+        );
+        assert_eq!(
+            refinement.indicator(StyleRefinement::default()).box_shadow,
+            Some(vec![gpui::BoxShadow {
+                inset: false,
+                color: rgba(0x65432180).into(),
+                offset: point(px(2.0), px(3.0)),
+                blur_radius: px(4.0),
+                spread_radius: px(5.0),
+            }]),
+            "pointer-pressed indicator refinement must retain its distinct shadow"
+        );
+    }
 
+    struct ToggleTextPaintFixture {
+        observed: Rc<std::cell::RefCell<Vec<gpui::TextStyle>>>,
+    }
+
+    impl Render for ToggleTextPaintFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let paint = TogglePaint::new(
+                rgba(0x112233ff),
+                rgba(0x445566ff),
+                rgba(0x778899ff),
+                rgba(0xaabbccff),
+            );
+            let refinement = TogglePaintRefinement(paint);
+            let font = gpui::font("Test Font");
+            let observed_label = Rc::clone(&self.observed);
+            let observed_mark = Rc::clone(&self.observed);
+            self.observed.borrow_mut().clear();
+            // Distinct inherited typography makes every active refinement supply its own rules.
+            // The cursor gives each text probe a hitbox for GPUI's held-pointer dispatch.
+            div()
+                .id("text-probes")
+                .debug_selector(|| "toggle-text-probes".to_owned())
+                .group(INTERACTION_GROUP)
+                .font(gpui::font("Inherited Font"))
+                .text_size(px(20.0))
+                .line_height(px(30.0))
+                .w(px(80.0))
+                .h(px(40.0))
+                .flex()
+                .on_click(|_, _, _| {})
+                .child(
+                    div()
+                        .id("label-probe")
+                        .cursor_default()
+                        .text_color(rgba(0xff0000ff))
+                        .group_active(INTERACTION_GROUP, move |style| {
+                            refinement.label(style, &font, px(12.0), 1.2)
+                        })
+                        .child(
+                            gpui::canvas(
+                                |_, _, _| {},
+                                move |_, _, window, _| {
+                                    observed_label.borrow_mut().push(window.text_style())
+                                },
+                            )
+                            .size(px(20.0)),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("mark-probe")
+                        .cursor_default()
+                        .text_color(rgba(0xff0000ff))
+                        .group_active(INTERACTION_GROUP, move |style| {
+                            refinement.foreground_text(style, px(12.8), px(16.0))
+                        })
+                        .child(
+                            gpui::canvas(
+                                |_, _, _| {},
+                                move |_, _, window, _| {
+                                    observed_mark.borrow_mut().push(window.text_style())
+                                },
+                            )
+                            .size(px(20.0)),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn held_pointer_applies_toggle_label_and_check_mark_typography(cx: &mut TestAppContext) {
+        let observed = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = Rc::clone(&observed);
+        let (_, cx) = cx.add_window_view(move |_, _| ToggleTextPaintFixture { observed: captured });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let before = observed.borrow().clone();
+        assert_eq!(before.len(), 2);
+        for text in &before {
+            assert_eq!(text.line_height, px(30.0).into());
+        }
+        let target =
+            cx.debug_bounds("toggle-text-probes").unwrap().origin + point(px(5.0), px(5.0));
+        cx.simulate_mouse_move(target, None, Modifiers::none());
+        cx.simulate_mouse_down(target, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let after = observed.borrow().clone();
+        assert_eq!(after.len(), 2);
         assert_eq!(
-            refinement.indicator(StyleRefinement::default()),
-            StyleRefinement::default()
-                .bg(paint.background)
-                .border_color(paint.border)
-                .shadow(paint.shadow.layers())
+            after[0].color,
+            rgba(0xaabbccff).into(),
+            "held pointer must reach the label refinement"
         );
         assert_eq!(
-            refinement.foreground_fill(StyleRefinement::default()),
-            StyleRefinement::default().bg(paint.foreground)
+            after[1].color,
+            rgba(0x445566ff).into(),
+            "held pointer must reach the mark refinement"
         );
-        assert_eq!(
-            refinement.thumb(StyleRefinement::default()),
-            StyleRefinement::default()
-                .bg(paint.foreground)
-                .border_color(paint.thumb_border)
-                .shadow(paint.thumb_shadow.layers())
-        );
-        // Both text refinements restate the metrics their base style uses, because GPUI replaces
-        // an element's text style rather than merging it.
-        assert_eq!(
-            refinement.foreground_text(StyleRefinement::default(), px(12.0), px(16.0)),
-            StyleRefinement::default()
-                .text_color(paint.foreground)
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-        );
-        let font = gpui::font("Test Font");
-        assert_eq!(
-            refinement.label(StyleRefinement::default(), &font, px(12.0), 1.2),
-            StyleRefinement::default()
-                .font(font)
-                .text_size(px(12.0))
-                .line_height(gpui::relative(1.2))
-                .text_color(paint.label)
-        );
+        assert_eq!(after[0].font(), gpui::font("Test Font"));
+        assert_eq!(after[0].font_size, px(12.0).into());
+        assert_eq!(after[0].line_height, gpui::relative(1.2));
+        assert_eq!(after[1].font_size, px(12.8).into());
+        assert_eq!(after[1].line_height, px(16.0).into());
+        assert_eq!(after[1].font_weight, gpui::FontWeight::SEMIBOLD);
+        cx.simulate_mouse_up(target, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let released = observed.borrow();
+        assert_eq!(released.len(), 2);
+        assert_eq!(released[0].color, rgba(0xff0000ff).into());
+        assert_eq!(released[1].color, rgba(0xff0000ff).into());
+        for text in released.iter() {
+            assert_eq!(text.line_height, px(30.0).into());
+        }
     }
 
     struct TestRoot {

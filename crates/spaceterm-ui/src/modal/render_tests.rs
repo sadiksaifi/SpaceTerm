@@ -261,16 +261,39 @@ fn test_modal_theme(metrics: ModalMetrics) -> ModalTheme {
     )
 }
 
-fn test_modal_theme_with_equal_focus_colors(metrics: ModalMetrics) -> ModalTheme {
-    ModalTheme::new(
-        ModalPaint::new(
-            rgba(0xffffffff),
-            rgba(0xb0b0b8ff),
-            rgba(0x5599ffff),
-            rgba(0xffbb55ff),
-            rgba(0xff6677ff),
+fn install_test_catalogs_with_equal_focus_colors(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    let color = rgba(0x606060ff);
+    let paint = ButtonPaint::new(color, rgba(0xffffffff), color);
+    let variant = ButtonVariantStyle::new(paint, paint, paint, paint);
+    cx.set_global(ButtonTheme::new(
+        ButtonVariants::new(
+            variant, variant, variant, variant, variant, variant, variant,
         ),
-        metrics,
+        ButtonSizes::new(
+            ButtonMetrics::new(px(24.0))
+                .horizontal_padding(px(8.0))
+                .gap(px(6.0))
+                .corner_radius(px(5.0))
+                .font_size(px(12.0)),
+            ButtonMetrics::new(px(24.0)),
+            ButtonMetrics::new(px(24.0)),
+            ButtonMetrics::new(px(24.0)),
+        ),
+        color,
+    ));
+    let toggle = test_toggle_theme_with_equal_focus_colors(color);
+    cx.set_global(toggle);
+}
+
+fn test_toggle_theme_with_equal_focus_colors(color: Rgba) -> crate::ToggleTheme {
+    let paint = crate::TogglePaint::new(color, rgba(0xffffffff), color, rgba(0xffffffff));
+    let values = crate::ToggleValuePaints::new(paint, paint);
+    let metrics = crate::ToggleMetrics::new(px(24.0), px(16.0), px(34.0), px(18.0));
+    crate::ToggleTheme::new(
+        crate::TogglePaints::new(values, values, values, values),
+        crate::ToggleSizes::new(metrics, metrics),
+        color,
     )
 }
 
@@ -1324,9 +1347,8 @@ fn standard_default_action_paints_bounded_macos_emphasis(cx: &mut TestAppContext
 fn modal_keyboard_focus_ring_remains_distinct_from_filled_default_emphasis(
     cx: &mut TestAppContext,
 ) {
-    install_test_catalogs(cx);
-    cx.set_global(test_button_theme_scaled_with_focus(1.0, rgba(0x606060ff)));
-    cx.set_global(test_modal_theme_with_equal_focus_colors(ModalMetrics::new(
+    install_test_catalogs_with_equal_focus_colors(cx);
+    cx.set_global(test_modal_theme(ModalMetrics::new(
         px(360.0),
         px(480.0),
         px(640.0),
@@ -1381,6 +1403,22 @@ fn modal_keyboard_focus_ring_remains_distinct_from_filled_default_emphasis(
     let suppression = cx
         .debug_bounds("modal-alert-suppression-indicator")
         .expect("suppression checkbox should render");
+    let equal = gpui::Hsla::from(rgba(0x606060ff));
+    let painted_ring = |cx: &mut VisualTestContext, ring: Bounds<Pixels>| {
+        cx.update(|window, _| {
+            let ring = ring.scale(window.scale_factor());
+            window.painted_quads().iter().any(|quad| {
+                quad.border_color == equal
+                    && quad.bounds == ring
+                    && !quad.bounds.intersect(&quad.content_mask.bounds).is_empty()
+            })
+        })
+    };
+    assert!(action_focus.left() < action.left() && action_focus.right() > action.right());
+    assert!(
+        painted_ring(cx, action_focus),
+        "equal-color action focus must paint an outset ring"
+    );
     let suppression_was_unfocused = cx
         .debug_bounds("modal-alert-suppression-keyboard-focus")
         .is_none();
@@ -1394,6 +1432,15 @@ fn modal_keyboard_focus_ring_remains_distinct_from_filled_default_emphasis(
     let retained_default_emphasis =
         cx.debug_bounds("modal-action-default-emphasis-equal-focus-save");
     assert!(
+        cx.debug_bounds("modal-action-equal-focus-save-keyboard-focus")
+            .is_none()
+    );
+    assert!(
+        painted_ring(cx, suppression_focus),
+        "equal-color suppression focus must paint an outset ring"
+    );
+
+    assert!(
         suppression_was_unfocused
             && bounds_contains(action_focus, action)
             && bounds_contains(suppression_focus, suppression)
@@ -1401,42 +1448,6 @@ fn modal_keyboard_focus_ring_remains_distinct_from_filled_default_emphasis(
             && retained_default_emphasis == Some(default_emphasis),
         "suppression_was_unfocused={suppression_was_unfocused}, action={action:?}, action_focus={action_focus:?}, suppression={suppression:?}, suppression_focus={suppression_focus:?}, default_emphasis={default_emphasis:?}, retained_default_emphasis={retained_default_emphasis:?}"
     );
-}
-
-#[gpui::test]
-fn informational_alert_renders_bounded_semantic_treatment_without_accessory(
-    cx: &mut TestAppContext,
-) {
-    let window = open_alert_intent_window(cx, super::super::AlertIntent::Informational);
-    let root = window.root(cx).expect("intent Alert root should exist");
-    let mut cx = VisualTestContext::from_window(window.into(), cx);
-    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
-    cx.run_until_parked();
-    let treatment = cx
-        .debug_bounds("modal-alert-intent-informational")
-        .expect("informational treatment should render");
-    let marker = cx
-        .debug_bounds("modal-alert-intent-mark-informational")
-        .expect("informational marker should render");
-
-    assert!(bounds_contains(treatment, marker) && marker.size.width > px(0.0));
-}
-
-#[gpui::test]
-fn warning_alert_renders_bounded_semantic_treatment_without_accessory(cx: &mut TestAppContext) {
-    let window = open_alert_intent_window(cx, super::super::AlertIntent::Warning);
-    let root = window.root(cx).expect("intent Alert root should exist");
-    let mut cx = VisualTestContext::from_window(window.into(), cx);
-    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
-    cx.run_until_parked();
-    let treatment = cx
-        .debug_bounds("modal-alert-intent-warning")
-        .expect("warning treatment should render");
-    let marker = cx
-        .debug_bounds("modal-alert-intent-mark-warning")
-        .expect("warning marker should render");
-
-    assert!(bounds_contains(treatment, marker) && marker.size.width > px(0.0));
 }
 
 #[gpui::test]
@@ -1612,23 +1623,6 @@ fn title_only_alert_presents_its_heading_and_decisions_without_a_message(cx: &mu
         ),
         "Return should activate the focused default decision"
     );
-}
-
-#[gpui::test]
-fn critical_alert_renders_bounded_semantic_treatment_without_accessory(cx: &mut TestAppContext) {
-    let window = open_alert_intent_window(cx, super::super::AlertIntent::Critical);
-    let root = window.root(cx).expect("intent Alert root should exist");
-    let mut cx = VisualTestContext::from_window(window.into(), cx);
-    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
-    cx.run_until_parked();
-    let treatment = cx
-        .debug_bounds("modal-alert-intent-critical")
-        .expect("critical treatment should render");
-    let marker = cx
-        .debug_bounds("modal-alert-intent-mark-critical")
-        .expect("critical marker should render");
-
-    assert!(bounds_contains(treatment, marker) && marker.size.width > px(0.0));
 }
 
 /// A destructive decision already signals danger, so the Alert draws no intent mark beside its
@@ -2469,6 +2463,11 @@ fn tiny_width_keeps_wrapped_action_hitboxes_inside_the_footer(cx: &mut TestAppCo
     let mut cx = VisualTestContext::from_window(window.into(), cx);
     cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
     cx.run_until_parked();
+    let surface = cx
+        .debug_bounds("modal-surface-1")
+        .expect("tiny modal surface");
+    assert_eq!(surface.size.width, px(188.0));
+    assert!(surface.left() >= px(16.0) && surface.right() <= px(204.0));
     let footer = cx
         .debug_bounds("modal-footer-1")
         .expect("footer should render");
@@ -2567,6 +2566,11 @@ fn short_height_footer_scroll_reaches_every_action_without_horizontal_escape(
     let mut cx = VisualTestContext::from_window(window.into(), cx);
     cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
     cx.run_until_parked();
+    let surface = cx
+        .debug_bounds("modal-surface-1")
+        .expect("short modal surface");
+    assert!(surface.top() >= px(16.0) && surface.bottom() <= px(180.0));
+    assert!(surface.size.height <= px(148.0));
     let selectors = [
         "modal-action-short-save",
         "modal-action-short-replace",
@@ -8749,4 +8753,57 @@ fn an_unavailable_dialog_action_dispatches_nothing_from_pointer_or_return(cx: &m
         ))
     );
     assert_eq!(unknown, Err(ModalUpdateError::UnknownAction));
+}
+
+#[gpui::test]
+fn alert_intents_render_bounded_semantic_treatments_without_accessories(cx: &mut TestAppContext) {
+    for (intent, name, treatment_selector, marker_selector) in [
+        (
+            crate::AlertIntent::Informational,
+            "informational",
+            "modal-alert-intent-informational",
+            "modal-alert-intent-mark-informational",
+        ),
+        (
+            crate::AlertIntent::Warning,
+            "warning",
+            "modal-alert-intent-warning",
+            "modal-alert-intent-mark-warning",
+        ),
+        (
+            crate::AlertIntent::Critical,
+            "critical",
+            "modal-alert-intent-critical",
+            "modal-alert-intent-mark-critical",
+        ),
+    ] {
+        let window = open_alert_intent_window(cx, intent);
+        let root = window.root(cx).expect("intent Alert root should exist");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+        cx.run_until_parked();
+        let treatment = cx
+            .debug_bounds(treatment_selector)
+            .expect("intent treatment");
+        let marker = cx.debug_bounds(marker_selector).expect("intent marker");
+        assert!(
+            bounds_contains(treatment, marker) && marker.size.width > px(0.0),
+            "{name}"
+        );
+        let message = cx
+            .debug_bounds("modal-alert-message")
+            .expect("intent message");
+        let viewport = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("body viewport");
+        assert_eq!(
+            treatment.top() - viewport.top(),
+            px(16.0),
+            "{name} must not reserve an accessory row"
+        );
+        assert!(
+            bounds_contains(treatment, message),
+            "{name} message must share the treatment"
+        );
+    }
 }

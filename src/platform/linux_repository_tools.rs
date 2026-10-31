@@ -1,14 +1,10 @@
 //! Finds git and the GitHub CLI on the PATH captured from the desktop launch environment.
-//!
-//! The PATH bounds match the OpenSSH selection in `linux_ssh_executable.rs`.
 
+use super::bounded_path::{directories, is_executable_file};
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::repository_status::{RepositoryToolDiscovery, ToolInventory};
-
-const MAXIMUM_PATH_BYTES: usize = 16 * 1024;
-const MAXIMUM_PATH_ENTRIES: usize = 128;
 
 /// Searches the absolute entries of the captured PATH, then the fallback directory.
 pub(crate) struct LinuxRepositoryToolDiscovery {
@@ -22,18 +18,7 @@ impl LinuxRepositoryToolDiscovery {
     }
 
     pub(crate) fn with_fallback(path: Option<&OsStr>, fallback: PathBuf) -> Self {
-        let mut directories: Vec<PathBuf> = path
-            .filter(|path| {
-                let bytes = path.as_encoded_bytes();
-                bytes.len() <= MAXIMUM_PATH_BYTES && !bytes.iter().any(u8::is_ascii_control)
-            })
-            .map(|path| {
-                std::env::split_paths(path)
-                    .take(MAXIMUM_PATH_ENTRIES)
-                    .filter(|directory| directory.is_absolute())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut directories: Vec<PathBuf> = directories(path).collect();
         directories.push(fallback);
         Self { directories }
     }
@@ -54,17 +39,6 @@ impl RepositoryToolDiscovery for LinuxRepositoryToolDiscovery {
             github_cli: self.find("gh"),
         }
     }
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    if !path.is_absolute() || !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return false;
-    }
-    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
-        return false;
-    };
-    // SAFETY: the NUL-terminated local path stays live during this non-mutating access check.
-    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 #[cfg(test)]
@@ -139,15 +113,11 @@ mod tests {
         let listed = fixture.directory("listed", &[("git", true), ("gh", true)]);
         let fallback = fixture.directory("fallback", &[("git", true)]);
         let too_many = std::env::join_paths(
-            std::iter::repeat_n(PathBuf::from("relative"), MAXIMUM_PATH_ENTRIES)
+            std::iter::repeat_n(PathBuf::from("relative"), 128)
                 .chain(std::iter::once(listed.clone())),
         )
         .unwrap();
-        let oversized = OsString::from(format!(
-            "{}:{}",
-            "x".repeat(MAXIMUM_PATH_BYTES),
-            listed.display()
-        ));
+        let oversized = OsString::from(format!("{}:{}", "x".repeat(16 * 1024), listed.display()));
         let unsafe_value = OsString::from(format!("{}:/unsafe\nvalue", listed.display()));
 
         for path in [

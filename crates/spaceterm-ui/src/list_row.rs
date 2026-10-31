@@ -157,29 +157,24 @@ mod tests {
             ListRowPaints::new(row(110), row(120), row(130), row(140), row(150), row(160));
         let paints = active.unfocused_selection(prepared);
 
-        assert_eq!(
-            paints.resolve_for_collection(true, false, false, false),
-            row(10)
-        );
-        assert_eq!(
-            paints.resolve_for_collection(true, false, true, false),
-            row(20)
-        );
-        assert_eq!(
-            paints.resolve_for_collection(false, true, true, false),
-            row(60)
-        );
-        assert_eq!(
-            paints.resolve_for_collection(true, true, false, false),
-            row(130)
-        );
-        assert_eq!(
-            paints.resolve_for_collection(true, true, true, false),
-            row(140)
-        );
-        assert_eq!(
-            paints.resolve_for_collection(true, true, false, true),
-            row(30)
-        );
+        // Each row lists the expected unfocused and focused paints independently.
+        for (enabled, selected, hovered, [unfocused, focused]) in [
+            (false, false, false, [50, 50]),
+            (false, false, true, [50, 50]),
+            (false, true, false, [60, 60]),
+            (false, true, true, [60, 60]),
+            (true, false, false, [10, 10]),
+            (true, false, true, [20, 20]),
+            (true, true, false, [130, 30]),
+            (true, true, true, [140, 40]),
+        ] {
+            for (has_focus, expected) in [(false, unfocused), (true, focused)] {
+                assert_eq!(
+                    paints.resolve_for_collection(enabled, selected, hovered, has_focus),
+                    row(expected),
+                    "enabled={enabled}, selected={selected}, hovered={hovered}, focused={has_focus}"
+                );
+            }
+        }
     }
 }

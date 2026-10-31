@@ -475,7 +475,7 @@ fn clear_mark(metrics: SearchFieldMetrics, fill: Rgba, glyph: Rgba) -> gpui::Any
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[gpui::test]
@@ -561,13 +561,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn density_scales_field_bounds_but_not_radius() {
-        let metrics = SearchFieldMetrics::new(px(28.0)).spacing(px(8.0), px(7.0), px(6.0));
-        let comfortable = metrics.scaled(1.25);
-
-        assert!(comfortable.height > metrics.height);
-        assert_eq!(comfortable.corner_radius, metrics.corner_radius);
+    pub(crate) fn density_extents(theme: SearchFieldTheme) -> (gpui::Pixels, gpui::Pixels) {
+        (theme.metrics.height, theme.metrics.corner_radius)
     }
 
     #[test]

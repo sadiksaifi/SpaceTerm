@@ -357,75 +357,6 @@ fn frame_spinner_selects_bounded_frames_at_intervals() {
     assert_eq!(spinner_frame_index(1.0), 9);
 }
 
-#[gpui::test]
-fn indeterminate_bar_keeps_a_visible_activity_mark_with_reduced_motion(cx: &mut TestAppContext) {
-    let cx = fixture_window(
-        cx,
-        FixtureKind::Bar {
-            right_to_left: false,
-        },
-        ProgressState::Indeterminate,
-        ProgressSize::Regular,
-        ControlMotion::Reduced,
-    );
-
-    assert!(cx.debug_bounds("test-progress-activity").is_some());
-    assert!(cx.debug_bounds("test-progress-reduced-motion").is_some());
-}
-
-#[gpui::test]
-fn standard_indeterminate_bar_uses_the_animated_activity_structure(cx: &mut TestAppContext) {
-    let cx = fixture_window(
-        cx,
-        FixtureKind::Bar {
-            right_to_left: false,
-        },
-        ProgressState::Indeterminate,
-        ProgressSize::Regular,
-        ControlMotion::Standard,
-    );
-
-    assert!(cx.debug_bounds("test-progress-activity").is_some());
-    assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
-}
-
-#[gpui::test]
-fn indeterminate_ring_keeps_a_visible_activity_mark_with_reduced_motion(cx: &mut TestAppContext) {
-    let cx = fixture_window(
-        cx,
-        FixtureKind::Ring,
-        ProgressState::Indeterminate,
-        ProgressSize::Regular,
-        ControlMotion::Reduced,
-    );
-
-    assert!(cx.debug_bounds("test-progress-activity").is_some());
-    assert!(cx.debug_bounds("test-progress-reduced-motion").is_some());
-}
-
-#[gpui::test]
-fn standard_indeterminate_ring_uses_the_animated_activity_structure(cx: &mut TestAppContext) {
-    let cx = fixture_window(
-        cx,
-        FixtureKind::Ring,
-        ProgressState::Indeterminate,
-        ProgressSize::Compact,
-        ControlMotion::Standard,
-    );
-
-    let track = cx
-        .debug_bounds("test-progress-track")
-        .expect("indeterminate ring should keep its square");
-    let activity = cx
-        .debug_bounds("test-progress-activity")
-        .expect("indeterminate ring should render its trail");
-
-    assert_eq!(track.size, gpui::size(px(20.0), px(20.0)));
-    assert_eq!(activity, track);
-    assert!(cx.debug_bounds("test-progress-indicator").is_none());
-    assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
-}
-
 #[test]
 fn ring_trail_strokes_follow_the_leading_end_and_leave_a_gap() {
     for head in [0.0, 0.25, 0.9] {
@@ -467,34 +398,6 @@ fn ring_trail_is_nearly_solid_at_its_leading_end_and_fades_toward_its_tail() {
             "the trail never brightens toward its tail"
         );
     }
-}
-
-#[gpui::test]
-fn frame_spinner_keeps_a_static_frame_with_reduced_motion(cx: &mut TestAppContext) {
-    let cx = fixture_window(
-        cx,
-        FixtureKind::Spinner,
-        ProgressState::Indeterminate,
-        ProgressSize::Regular,
-        ControlMotion::Reduced,
-    );
-
-    assert!(cx.debug_bounds("test-progress-reduced-motion").is_some());
-    assert!(cx.debug_bounds("test-progress-frame").is_some());
-}
-
-#[gpui::test]
-fn standard_frame_spinner_uses_the_animated_frame_structure(cx: &mut TestAppContext) {
-    let cx = fixture_window(
-        cx,
-        FixtureKind::Spinner,
-        ProgressState::Indeterminate,
-        ProgressSize::Regular,
-        ControlMotion::Standard,
-    );
-
-    assert!(cx.debug_bounds("test-progress-frame").is_some());
-    assert!(cx.debug_bounds("test-progress-reduced-motion").is_none());
 }
 
 #[gpui::test]
@@ -546,5 +449,45 @@ fn progress_indicators_publish_named_progress_and_clear_indeterminate_values(
         assert_eq!(node_id(progress), id);
         assert!(progress["aria"]["numeric_value"].is_null());
         assert!(progress["aria"]["on_action"].is_null());
+    }
+}
+
+#[gpui::test]
+fn indeterminate_indicators_keep_visible_marks_and_respect_motion(cx: &mut TestAppContext) {
+    for kind in [
+        FixtureKind::Bar {
+            right_to_left: false,
+        },
+        FixtureKind::Ring,
+        FixtureKind::Spinner,
+    ] {
+        for motion in [ControlMotion::Reduced, ControlMotion::Standard] {
+            for size in [ProgressSize::Compact, ProgressSize::Regular] {
+                let cx = fixture_window(cx, kind, ProgressState::Indeterminate, size, motion);
+                let mark = cx
+                    .debug_bounds(if matches!(kind, FixtureKind::Spinner) {
+                        "test-progress-frame"
+                    } else {
+                        "test-progress-activity"
+                    })
+                    .expect("indeterminate progress should retain a visible mark");
+                assert!(mark.size.width > px(0.0) && mark.size.height > px(0.0));
+                assert_eq!(
+                    cx.debug_bounds("test-progress-reduced-motion").is_some(),
+                    motion == ControlMotion::Reduced
+                );
+                if matches!(kind, FixtureKind::Ring) && motion == ControlMotion::Standard {
+                    let track = cx.debug_bounds("test-progress-track").expect("ring track");
+                    let extent = if size == ProgressSize::Compact {
+                        20.0
+                    } else {
+                        32.0
+                    };
+                    assert_eq!(track.size, gpui::size(px(extent), px(extent)));
+                    assert_eq!(mark, track);
+                    assert!(cx.debug_bounds("test-progress-indicator").is_none());
+                }
+            }
+        }
     }
 }

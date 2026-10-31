@@ -589,6 +589,13 @@ fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
         "Version 1.2.0 \u{b7} 1.3.0 is available"
     );
 
+    let late = remote.hold_read();
+    click(
+        super::super::server_card::VERSION_CHECK_SELECTOR,
+        servers.cx,
+    );
+    servers.cx.run_until_parked();
+    late.wait_started(&servers.cx.cx);
     // Someone updated penguin from its own command line, and SpaceTerm's connection to it is
     // replaced.
     let before = servers.direct.server(&route).expect("a connection");
@@ -601,6 +608,26 @@ fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
             && direct.status(&route)
                 == Some(crate::direct_connections::DirectRouteStatus::Connected)
     });
+    let replacement_lane = ScriptedRemote::new();
+    *replacement_lane.read.lock().unwrap() = Ok(Reading {
+        status: status(version("2.4.0", "cccccccccc")),
+        check: LaneCheck {
+            approved: version("2.4.0", "cccccccccc"),
+            latest: None,
+            staged: Vec::new(),
+        },
+        settled: Vec::new(),
+    });
+    servers.cx.update(|_, cx| replacement_lane.install(cx));
+    late.release(Ok(Reading {
+        status: status(version("1.1.0", "dddddddddd")),
+        check: LaneCheck {
+            approved: version("1.1.0", "dddddddddd"),
+            latest: Some(version("1.9.0", "eeeeeeeeee")),
+            staged: Vec::new(),
+        },
+        settled: Vec::new(),
+    }));
     servers.cx.run_until_parked();
     let key = super::super::server_list::ServerChoice::Direct(route).key();
     let observed = servers.cx.update(|_, cx| {
@@ -614,6 +641,18 @@ fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
     );
     assert_eq!(subtitle(&servers).as_ref(), expected);
     assert!(!subtitle(&servers).contains("1.2.0"));
+    assert!(!subtitle(&servers).contains("1.1.0"));
+    assert!(!subtitle(&servers).contains("1.9.0"));
+    click(
+        super::super::server_card::VERSION_CHECK_SELECTOR,
+        servers.cx,
+    );
+    servers.cx.run_until_parked();
+    servers
+        .window
+        .update(servers.cx, |settings, cx| settings.read_remote(route, cx));
+    servers.cx.run_until_parked();
+    assert_eq!(subtitle(&servers).as_ref(), "Version 2.4.0");
     assert!(
         servers.cx.debug_bounds(UPDATE_SELECTOR).is_none(),
         "the update the old reading offered is gone"

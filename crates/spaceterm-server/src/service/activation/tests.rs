@@ -1013,21 +1013,47 @@ fn unknown_safety_intent_and_contradictory_target_are_refused_without_mutation()
 
 #[test]
 fn confirmation_token_changes_with_run_stop_and_candidate_observations() {
-    with_service(|service, _, candidate, _| {
-        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
-        let first = approval.confirmation_token().unwrap();
+    with_service(|service, _, candidate, supervisor| {
+        let token = |candidate: &RetainedInstallation| {
+            service
+                .prepare_activation(candidate)
+                .unwrap()
+                .unwrap()
+                .confirmation_token()
+                .unwrap()
+        };
+        let stopped = token(&candidate);
+        assert_eq!(stopped.len(), 64);
         let data = Directory::open(&service.paths.data, false).unwrap();
         let mut state = Service::state(&data).unwrap().unwrap();
         state.stopped = false;
         data.write_json(c"service.json", &state).unwrap();
-        let second = service
-            .prepare_activation(&candidate)
-            .unwrap()
-            .unwrap()
-            .confirmation_token()
-            .unwrap();
-        assert_ne!(first, second);
-        assert_eq!(first.len(), 64);
+        let idle = token(&candidate);
+        assert_ne!(stopped, idle, "stop policy must be part of the observation");
+        supervisor.running.store(true, Ordering::SeqCst);
+        let running = token(&candidate);
+        assert_ne!(idle, running, "running must be part of the observation");
+        use runtime::test_support::{COMMIT, VERSION, target, with_artifact};
+        with_artifact(
+            &service.paths.data.join("third-source"),
+            &service.identity,
+            |archive, signature| {
+                let mut bytes = std::fs::read(archive).unwrap();
+                bytes[4] = 2;
+                let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap();
+                std::fs::write(archive, &bytes).unwrap();
+                std::fs::write(signature, key.sign(&bytes).as_ref()).unwrap();
+                let other = service
+                    .provision(archive, signature, target(), COMMIT, VERSION)
+                    .unwrap();
+                assert_ne!(other.directory, candidate.directory);
+                assert_ne!(
+                    running,
+                    token(&other),
+                    "candidate must be part of the observation"
+                );
+            },
+        );
     });
 }
 
