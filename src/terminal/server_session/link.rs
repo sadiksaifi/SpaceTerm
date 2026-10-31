@@ -1154,16 +1154,12 @@ impl PaneLink {
                 .request(Operation::ReleaseAttachment { attachment })
                 .map(|_| Reply::Unchanged),
             Request::Shutdown => self.request(Operation::Shutdown).map(|_| Reply::Closed),
-            // Claims need this Pane's attachment permit. The single-key form predates focus
-            // generations.
+            // Claims need this Pane's attachment permit.
             Request::SelectPane { .. }
             | Request::StartRestored { .. }
             | Request::TakeOver { .. }
             | Request::RepairDirectory { .. }
-            | Request::ClaimPane { .. }
-            | Request::Attach { .. }
-            | Request::Select { .. }
-            | Request::Key { .. } => Err(ServerError::Unsupported),
+            | Request::ClaimPane { .. } => Err(ServerError::Unsupported),
         }
     }
 }
@@ -2028,18 +2024,7 @@ mod tests {
             cell_width: 8,
             cell_height: 16,
         };
-        let Reply::Attached { lease } = host.request(
-            [1; 32],
-            [1; 32],
-            Request::Attach {
-                create: true,
-                size,
-                resume: None,
-                style: None,
-            },
-        ) else {
-            panic!("fixture Pane did not start")
-        };
+        let lease = crate::runtime::directory_testing::started_pane(&mut host, size);
         let text = "界🙂".repeat(2200) + "尾";
         let expected = text.clone() + "!";
         let command = format!(
@@ -2047,14 +2032,7 @@ mod tests {
             expected.len()
         );
         let send = |host: &mut crate::runtime::SharedWorkspaceHost, key| {
-            host.request(
-                [1; 32],
-                [1; 32],
-                Request::Key {
-                    lease,
-                    key: encode_key(key),
-                },
-            )
+            crate::runtime::directory_testing::type_keys(host, lease, vec![encode_key(key)])
         };
         let wait = |host: &mut crate::runtime::SharedWorkspaceHost, marker: Option<&str>| {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);

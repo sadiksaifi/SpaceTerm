@@ -311,14 +311,7 @@ fn prove_shell_started(host: &mut crate::runtime::SharedWorkspaceHost, lease: Le
         },
     ] {
         assert!(matches!(
-            host.request(
-                [1; 32],
-                lease.connection,
-                Request::Key {
-                    lease,
-                    key: encode_key(key)
-                }
-            ),
+            crate::runtime::directory_testing::type_keys(host, lease, vec![encode_key(key)]),
             Reply::Unchanged
         ));
     }

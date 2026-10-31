@@ -1,5 +1,6 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
+use spaceterm_server::organization::Organization;
 use spaceterm_server::hierarchy::{
     CloseInventory, ConfirmedControl, ConfirmedPane, CreateControl, Id, Inventory, Mutation,
     Outcome, RetainedOutcome, State,
@@ -179,10 +180,8 @@ impl SharedWorkspaceHost {
         }
         let mut next = self.state.clone();
         if next.inventory.workspaces.is_empty() {
-            let organization = Organization::first(self.prototype.directory.clone())
-                .map_err(|_| Refusal::Failed)?;
-            let settings = next.worktree_settings.take();
-            next = State::from_organization(&organization);
+            let settings = std::mem::take(&mut next.worktree_settings);
+            next = State::first(&self.prototype.directory).map_err(|_| Refusal::Failed)?;
             next.worktree_settings = settings;
             next.begin_boot(self.prototype.boot);
         }
@@ -207,15 +206,10 @@ impl SharedWorkspaceHost {
         // Runtime facts authorize an in-memory comparison, never a later recovery read.
         next.inventory.close = None;
         next.inventory.repositories = None;
-        let revision = match &self.journal {
-            Some(journal) => Some(
-                journal.submit(
-                    next.envelope(&self.prototype.directory)
-                        .map_err(|_| Refusal::StorageUnavailable)?,
-                ),
-            ),
-            None => None,
-        };
+        let revision = self
+            .journal
+            .as_ref()
+            .map(|journal| journal.submit(next.envelope()));
         self.state = next;
         self.fresh_panes.retain(|id| self.state.pane(*id).is_some());
         self.organization_prepared = true;
@@ -278,7 +272,7 @@ impl SharedWorkspaceHost {
         result
     }
     fn restore_organization(&mut self, record: Option<&Organization>) {
-        self.state = record.map_or_else(State::empty, State::from_organization);
+        self.state = record.map_or_else(State::empty, |record| (*record.shared).clone());
         // Recovery in the same boot preserves creator reservations; a restart clears them.
         self.state.begin_boot(self.prototype.boot);
         self.fresh_panes.retain(|id| self.state.pane(*id).is_some());
@@ -314,7 +308,7 @@ impl SharedWorkspaceHost {
         let mut next = self.state.clone();
         let mut commands = BTreeMap::new();
         for (id, host) in &mut self.panes {
-            host.retain_directory()?;
+            host.retain_directory();
             host.retire_exited()?;
             if let Some(metadata) = host
                 .pane
@@ -330,8 +324,8 @@ impl SharedWorkspaceHost {
                     metadata.repository_directory.as_ref().into(),
                 );
             }
-            if let Some(org) = &host.organization {
-                if let Some(path) = &org.confirmed_directory {
+            if let Some(identity) = &host.identity {
+                if let Some(path) = &identity.confirmed_directory {
                     next.confirm_directory(*id, path.clone());
                 }
             } else if next.pane(*id).is_some() {
@@ -459,20 +453,19 @@ impl SharedWorkspaceHost {
     fn pane_host(&mut self, id: Id) -> Result<&mut DevelopmentPaneHost, Refusal> {
         let (w, t, p) = self.state.pane(id).ok_or(Refusal::Missing)?;
         if !self.panes.contains_key(&id) {
-            let mut org =
-                Organization::first(p.starting_directory.clone()).map_err(|_| Refusal::Failed)?;
-            org.workspace = w.id;
-            org.tab = t.id;
-            org.pane = p.id;
-            org.confirmed_directory.clone_from(&p.confirmed_directory);
+            let identity = PaneIdentity {
+                workspace: w.id,
+                tab: t.id,
+                pane: p.id,
+                starting_directory: p.starting_directory.clone(),
+                confirmed_directory: p.confirmed_directory.clone(),
+            };
             let host = DevelopmentPaneHost {
                 boot: self.prototype.boot,
                 pane: None,
                 factory: self.prototype.factory.clone(),
                 directory: p.starting_directory.clone(),
-                organization: Some(org),
-                store: None,
-                uncertain: false,
+                identity: Some(identity),
                 directory_unavailable: false,
                 failed_directory_session: None,
                 dormant: None,
@@ -485,9 +478,11 @@ impl SharedWorkspaceHost {
         }
         let host = self.panes.get_mut(&id).ok_or(Refusal::Missing)?;
         if host.pane.is_none()
-            && let Some(org) = &mut host.organization
+            && let Some(identity) = &mut host.identity
         {
-            org.confirmed_directory.clone_from(&p.confirmed_directory);
+            identity
+                .confirmed_directory
+                .clone_from(&p.confirmed_directory);
         }
         Ok(host)
     }
@@ -541,7 +536,7 @@ impl SharedWorkspaceHost {
         {
             return Ok(host.takeover(pane.lease.into(), pane.device, device));
         }
-        let mut reply = host.select(device, connection, explicit, size, None, style)?;
+        let mut reply = host.select(device, connection, explicit, size, style)?;
         if let Reply::Restored {
             fresh: reply_fresh,
             session_ended,
@@ -577,7 +572,7 @@ impl SharedWorkspaceHost {
         }
         if target.original
             != host
-                .organization
+                .identity
                 .as_ref()
                 .ok_or(Refusal::Missing)?
                 .startup_directory()
@@ -594,7 +589,7 @@ impl SharedWorkspaceHost {
             let revision = self.commit(next)?;
             self.retained(revision)?;
             self.pane_host(id)?
-                .organization
+                .identity
                 .as_mut()
                 .ok_or(Refusal::Missing)?
                 .confirmed_directory = Some(directory.path().to_owned());
@@ -837,7 +832,7 @@ impl SharedWorkspaceHost {
                             if PaneTarget::from(pane.lease) != target {
                                 return Err(Refusal::Stale);
                             }
-                            host.handle(
+                            match host.request(
                                 device,
                                 connection,
                                 Request::TakeOver {
@@ -845,7 +840,10 @@ impl SharedWorkspaceHost {
                                     size,
                                     style,
                                 },
-                            )?
+                            ) {
+                                Reply::Refused(refusal) => return Err(refusal),
+                                reply => reply,
+                            }
                         } else {
                             if target.server != host.boot || target.session != id {
                                 return Err(Refusal::Stale);
@@ -995,42 +993,6 @@ impl SharedWorkspaceHost {
                 }
                 self.select(device, connection, pane, Selection::Start, size, style)
             }
-            Request::Attach {
-                create,
-                size,
-                resume,
-                style,
-            } => {
-                let id = self.legacy_pane(create)?;
-                self.pane_host(id)?.handle(
-                    device,
-                    connection,
-                    Request::Attach {
-                        create,
-                        size,
-                        resume,
-                        style,
-                    },
-                )
-            }
-            Request::Select {
-                create,
-                size,
-                resume,
-                style,
-            } => {
-                let id = self.legacy_pane(create)?;
-                self.pane_host(id)?.handle(
-                    device,
-                    connection,
-                    Request::Select {
-                        create,
-                        size,
-                        resume,
-                        style,
-                    },
-                )
-            }
             request => {
                 let target = match &request {
                     Request::TakeOver { target, .. } => *target,
@@ -1042,7 +1004,6 @@ impl SharedWorkspaceHost {
                     | Request::Focus { lease, .. }
                     | Request::Input { lease, .. }
                     | Request::Keys { lease, .. }
-                    | Request::Key { lease, .. }
                     | Request::Resize { lease, .. }
                     | Request::ClearScreenAndScrollback { lease }
                     | Request::Style { lease, .. }
@@ -1079,32 +1040,15 @@ impl SharedWorkspaceHost {
                             Refusal::Missing
                         }
                     })?;
-                host.handle(device, connection, request)
+                Ok(host.request(device, connection, request))
             }
         }
-    }
-    fn legacy_pane(&mut self, create: bool) -> Result<Id, Refusal> {
-        if create {
-            self.prepare_initial_organization()?;
-        }
-        self.state
-            .inventory
-            .workspaces
-            .first()
-            .and_then(|w| w.tabs.first())
-            .and_then(|t| t.panes.first())
-            .map(|p| p.id)
-            .ok_or(Refusal::Missing)
     }
 }
 impl SharedWorkspaceHost {
     fn retain_in(&mut self, retention: Box<dyn Retention>) -> Result<(), ServerError> {
         let record = retention.read()?;
         self.restore_organization(record.as_ref());
-        // Existing organization predates seeding and must never be overwritten by a client.
-        if self.state.worktree_settings.is_none() && record.is_some() {
-            self.state.worktree_settings = Some(Default::default());
-        }
         let publication = Arc::clone(&self.publication);
         self.journal = Some(Arc::new(Journal::new(
             retention,
@@ -1245,8 +1189,6 @@ impl HostCommands for SharedWorkspaceHost {
                 | Request::ReleaseAttachment { .. }
                 | Request::Release { .. }
                 | Request::Close { .. }
-                | Request::Attach { .. }
-                | Request::Select { .. }
         );
         let reply = self
             .handle(device, connection, request)
@@ -1482,9 +1424,8 @@ impl HostCommands for SharedWorkspaceHost {
         self.runs.forget(&client);
         // First, because reading back an uncertain journal restores the state from storage.
         self.forget(client);
-        self.prototype.revoked(client);
         for host in self.panes.values_mut() {
-            host.revoked(client);
+            host.release_control(client);
         }
         for workspace in &mut self.state.inventory.workspaces {
             for tab in &mut workspace.tabs {
@@ -1503,7 +1444,6 @@ impl HostCommands for SharedWorkspaceHost {
         self.state.holds(client) || self.runs.holds(&client)
     }
     fn release_control(&mut self, client: Id) {
-        self.prototype.release_control(client);
         for host in self.panes.values_mut() {
             host.release_control(client);
         }
@@ -1535,7 +1475,7 @@ mod tests {
 
     fn retained(host: &SharedWorkspaceHost) -> Organization {
         serde_json::from_slice(
-            &serde_json::to_vec(&host.state.envelope(&host.prototype.directory).unwrap()).unwrap(),
+            &serde_json::to_vec(&host.state.envelope()).unwrap(),
         )
         .unwrap()
     }
@@ -1558,7 +1498,10 @@ mod tests {
     }
 
     fn retained_outcome(memory: &journal::memory::Memory, device: Id, sequence: u64) -> bool {
-        State::from_organization(&memory.retained().unwrap())
+        memory
+            .retained()
+            .unwrap()
+            .shared
             .outcome(device, sequence)
             .is_some()
     }
@@ -2140,19 +2083,6 @@ mod tests {
         restored.restore_organization(Some(&record));
         restored.prepare_initial_organization().unwrap();
         assert!(shared_inventory(&mut restored).workspaces.is_empty());
-        assert!(matches!(
-            restored.request(
-                [1; 32],
-                [1; 32],
-                Request::Select {
-                    create: true,
-                    size: size(),
-                    resume: None,
-                    style: None,
-                }
-            ),
-            Reply::Refused(Refusal::Missing)
-        ));
         restored.shutdown().unwrap();
     }
 

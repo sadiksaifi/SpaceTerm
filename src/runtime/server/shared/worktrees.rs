@@ -255,7 +255,7 @@ impl SharedWorkspaceHost {
     ) -> Result<Option<ReadReply>, Error> {
         if let Read::Settings = read {
             return Ok(Some(ReadReply::Settings(
-                self.state.worktree_settings.clone().unwrap_or_default(),
+                self.state.worktree_settings.clone(),
             )));
         }
         if matches!(read, Read::CheckRemoval { .. }) && !self.state.pending_worktrees().is_empty() {
@@ -263,7 +263,7 @@ impl SharedWorkspaceHost {
         }
         let mut inventory = self.inventory();
         inventory.repositories = None;
-        let settings = self.state.worktree_settings.clone().unwrap_or_default();
+        let settings = self.state.worktree_settings.clone();
         self.writes
             .reads
             .begin((connection, id), device, read, inventory, settings)?;
@@ -316,15 +316,15 @@ impl SharedWorkspaceHost {
         )?;
         if let Operation::SetLocation { version, template } = operation {
             let checked = (|| {
-                let current = next.worktree_settings.clone().unwrap_or_default();
+                let current = next.worktree_settings.clone();
                 if version != current.version {
                     return Err(Error::Changed);
                 }
                 crate::server_settings::validate_location_template(&template)?;
-                next.worktree_settings = Some(Settings {
+                next.worktree_settings = Settings {
                     template,
                     version: current.version.checked_add(1).ok_or(Error::Unavailable)?,
-                });
+                };
                 Ok(())
             })();
             next.finish_worktree(
@@ -1267,14 +1267,16 @@ mod tests {
                 |_| false,
             )
             .unwrap();
-        let bytes = serde_json::to_vec(&pending.envelope(&git.0).unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&pending.envelope()).unwrap();
         original.shutdown().unwrap();
         std::fs::remove_dir_all(&git.0).unwrap();
 
         let mut prototype = host();
         prototype.directory = git.0.clone();
         let mut restored = SharedWorkspaceHost::new(prototype);
-        restored.state = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
+        restored.state = *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+        .unwrap()
+        .shared;
         restored.state.begin_boot(restored.prototype.boot);
         assert!(matches!(
             restored.request([1; 32], [1; 32], Request::Inventory),

@@ -311,7 +311,7 @@ fn await_frame(
 ) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        assert!(publication.publish(HostCommands::observe(host, [1; 32], &lease)));
+        assert!(publication.publish(host.observe([1; 32], &lease)));
         for frame in frames(&drain(outbox)) {
             rows.apply(frame);
             if until(rows) {
@@ -338,7 +338,7 @@ fn await_frame(
 fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
     let mut host = super::super::tests::host();
     let wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    host.set_notifier({
+    host.notifier = Some({
         let wake = Arc::clone(&wake);
         Arc::new(move |_| {
             let wake = Arc::clone(&wake);
@@ -371,17 +371,17 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
     // A hidden Pane publishes nothing; revealing it pushes the screen it missed.
     outbox.view(CHANNEL, false);
     publication.view(false);
-    HostCommands::view(&mut host, &lease, false, 120);
+    host.view(&lease, false, 120);
     assert!(matches!(
         super::super::tests::command(&mut host, 1, lease, "printf 'HIDD%s\\n' EN"),
         Reply::Unchanged
     ));
     std::thread::sleep(Duration::from_millis(200));
-    assert!(publication.publish(HostCommands::observe(&mut host, [1; 32], &lease)));
+    assert!(publication.publish(host.observe([1; 32], &lease)));
     assert!(frames(&drain(&outbox)).is_empty());
     outbox.view(CHANNEL, true);
     publication.view(true);
-    HostCommands::view(&mut host, &lease, true, 120);
+    host.view(&lease, true, 120);
     await_frame(
         &mut host,
         lease,

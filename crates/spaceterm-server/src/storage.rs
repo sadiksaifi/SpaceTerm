@@ -846,11 +846,12 @@ mod tests {
         let _lock = data.lock("setup.lock", false).unwrap();
         let original = data.read_or_create().unwrap();
         let mut value = serde_json::to_value(&original).unwrap();
-        value["organization"] = serde_json::json!({
-            "version": 1, "workspace": vec![1; 32], "tab": vec![2; 32], "pane": vec![3; 32],
-            "name": "Development", "pinned_directory": null,
-            "starting_directory": "/tmp", "confirmed_directory": null
-        });
+        value["organization"] = serde_json::to_value(
+            crate::hierarchy::State::first("/tmp".as_ref())
+                .unwrap()
+                .envelope(),
+        )
+        .unwrap();
         std::fs::write(
             fixture.0.join("identity.json"),
             serde_json::to_vec(&value).unwrap(),
@@ -867,11 +868,10 @@ mod tests {
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
         let mut record = data.read_or_create().unwrap();
-        let first = crate::organization::Organization::first(fixture.0.clone()).unwrap();
         record.organization = Some(
-            crate::hierarchy::State::from_organization(&first)
-                .envelope(&fixture.0)
-                .unwrap(),
+            crate::hierarchy::State::first(&fixture.0)
+                .unwrap()
+                .envelope(),
         );
         let mut value = serde_json::to_value(&record).unwrap();
         let shared = value["organization"]["shared"].as_object_mut().unwrap();
@@ -1081,20 +1081,18 @@ mod tests {
         let _lock = data.lock("setup.lock", false).unwrap();
         let mut record = data.read_or_create().unwrap();
         record.server = [42; 32];
-        let mut organization = crate::organization::Organization::first(fixture.0.clone()).unwrap();
-        organization.name = "Retained work".into();
-        organization.pinned_directory = Some(fixture.0.clone());
-        organization.confirmed_directory = Some("/".into());
-        let mut shared = crate::hierarchy::State::from_organization(&organization);
+        let mut shared = crate::hierarchy::State::first(&fixture.0).unwrap();
+        shared.inventory.workspaces[0].pinned_directory = Some(fixture.0.clone());
+        shared.inventory.workspaces[0].tabs[0].panes[0].confirmed_directory = Some("/".into());
         let creation = crate::hierarchy::Mutation::CreateTab {
-            workspace: organization.workspace,
+            workspace: shared.inventory.workspaces[0].id,
             source: None,
             control: crate::hierarchy::CreateControl::Creator,
         };
         let accepted = shared
             .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)
             .unwrap();
-        organization = shared.envelope(&fixture.0).unwrap();
+        let organization = shared.envelope();
         record.organization = Some(organization.clone());
         let fault = sync_failure::fail_directory(&data.0);
         assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
@@ -1108,8 +1106,7 @@ mod tests {
         assert_eq!(recovered.server, record.server);
         assert_eq!(recovered.server, [42; 32]);
         assert!(recovered.organization.as_ref() == Some(&organization));
-        let mut restored =
-            crate::hierarchy::State::from_organization(recovered.organization.as_ref().unwrap());
+        let mut restored = *recovered.organization.unwrap().shared;
         assert_eq!(
             restored
                 .apply([42; 32], 1, creation, &fixture.0, |_| true)
@@ -1129,7 +1126,9 @@ mod tests {
             data.read_or_create().unwrap();
         }
         let store = crate::organization::OrganizationStore(fixture.open());
-        let organization = crate::organization::Organization::first(fixture.0.clone()).unwrap();
+        let organization = crate::hierarchy::State::first(&fixture.0)
+            .unwrap()
+            .envelope();
         let syncs = sync_failure::count(|| store.write(Some(&organization)).unwrap());
         assert_eq!(syncs, 2, "the new file and the directory");
         assert!(store.read().unwrap() == Some(organization));
@@ -1142,10 +1141,19 @@ mod tests {
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
         let mut record = data.read_or_create().unwrap();
-        let original = crate::organization::Organization::first(fixture.0.clone()).unwrap();
+        let original = crate::hierarchy::State::first(&fixture.0)
+            .unwrap()
+            .envelope();
         record.organization = Some(original.clone());
         data.write(&record).unwrap();
-        record.organization.as_mut().unwrap().name = "Uncommitted".into();
+        record
+            .organization
+            .as_mut()
+            .unwrap()
+            .shared
+            .inventory
+            .workspaces[0]
+            .name = "Uncommitted".into();
         let fault = sync_failure::fail_files();
         assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
         assert!(matches!(

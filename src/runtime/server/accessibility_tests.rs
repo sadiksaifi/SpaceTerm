@@ -181,7 +181,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             lease.connection,
             Request::AccessibilitySelection {
                 lease,
-                focus_generation: 1,
+                focus_generation: 2,
                 selection: Some(selection)
             }
         ),
@@ -193,7 +193,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             lease.connection,
             Request::Focus {
                 lease,
-                generation: 1,
+                generation: 2,
                 target: FocusTarget::Terminal
             }
         ),
@@ -205,7 +205,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             lease.connection,
             Request::AccessibilitySelection {
                 lease,
-                focus_generation: 1,
+                focus_generation: 2,
                 selection: Some(selection)
             }
         ),
@@ -230,7 +230,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             lease.connection,
             Request::AccessibilitySelection {
                 lease,
-                focus_generation: 1,
+                focus_generation: 2,
                 selection: Some(rectangle)
             }
         ),
@@ -241,7 +241,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         lease.connection,
         Request::AccessibilitySelection {
             lease,
-            focus_generation: 1,
+            focus_generation: 2,
             selection: None,
         },
     );
@@ -263,7 +263,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         lease.connection,
         Request::AccessibilitySelection {
             lease,
-            focus_generation: 1,
+            focus_generation: 2,
             selection: Some(stale),
         },
     );

@@ -1,10 +1,10 @@
 use super::tests::{
-    attach, await_screen, await_text, command, create_shared, effects, focus, host, input, lines,
-    native_command, screen, shared_inventory, size, text_key,
+    Driven, attach, await_screen, await_text, command, create_shared, effects, focus, host, identity,
+    input, lines, native_command, screen, shared_inventory, size, text_key,
 };
 use super::*;
 use spaceterm_server::protocol::{PaneEvent, screen::ScreenUpdate};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[test]
 fn native_clipboard_requests_reach_only_the_current_controller() {
@@ -20,7 +20,7 @@ fn native_clipboard_requests_reach_only_the_current_controller() {
 }
 
 #[test]
-fn interactive_input_requires_current_focus_and_legacy_keys_cannot_bypass_it() {
+fn interactive_input_requires_current_focus() {
     let mut host = host();
     let lease = attach(&mut host, 1, true);
     let key = Key {
@@ -44,17 +44,6 @@ fn interactive_input_requires_current_focus_and_legacy_keys_cannot_bypass_it() {
             }
         ),
         Reply::Unchanged
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Key {
-                lease,
-                key: key.clone()
-            }
-        ),
-        Reply::Refused(Refusal::Unsupported)
     ));
     assert!(matches!(
         host.request(
@@ -116,8 +105,8 @@ fn batch_key(text: &str, ime: bool) -> Key {
     key
 }
 
-fn key_batch(host: &mut impl HostCommands, lease: Lease, generation: u64, keys: Vec<Key>) -> Reply {
-    host.request(
+fn key_batch(host: &mut impl Driven, lease: Lease, generation: u64, keys: Vec<Key>) -> Reply {
+    host.send(
         [1; 32],
         lease.connection,
         Request::Keys {
@@ -235,18 +224,18 @@ fn key_batches_prevalidate_focused_pane_ime_eligibility_before_any_commit() {
     let mut host = host();
     let lease = attach(&mut host, 1, true);
     capture(&mut host, lease, 3, "");
-    focus(&mut host, lease, 1, FocusTarget::FocusedPane);
+    focus(&mut host, lease, 2, FocusTarget::FocusedPane);
     assert!(matches!(
         key_batch(
             &mut host,
             lease,
-            1,
+            2,
             vec![batch_key("X", true), batch_key("A", false)]
         ),
         Reply::Refused(Refusal::Stale)
     ));
     assert!(matches!(
-        key_batch(&mut host, lease, 1, vec![batch_key("界", true)]),
+        key_batch(&mut host, lease, 2, vec![batch_key("界", true)]),
         Reply::Unchanged
     ));
     await_text(&mut host, lease, "e7958c");
@@ -257,32 +246,34 @@ fn key_batches_prevalidate_focused_pane_ime_eligibility_before_any_commit() {
 fn focus_edges_and_focused_pane_ime_are_observable_at_the_pty() {
     let mut host = host();
     let lease = attach(&mut host, 1, true);
-    capture(&mut host, lease, 16, "\\033[?1004h");
-    focus(&mut host, lease, 1, FocusTarget::Terminal);
-    focus(&mut host, lease, 2, FocusTarget::FocusedPane);
+    capture(&mut host, lease, 19, "\\033[?1004h");
+    // Turning focus reports on sends the current focus, which `command` left on the terminal.
+    focus(&mut host, lease, 2, FocusTarget::Unfocused);
+    focus(&mut host, lease, 3, FocusTarget::Terminal);
+    focus(&mut host, lease, 4, FocusTarget::FocusedPane);
     assert!(matches!(
-        input(&mut host, lease, 2, text_key("discarded", false)),
+        input(&mut host, lease, 4, text_key("discarded", false)),
         Reply::Refused(Refusal::Stale)
     ));
     assert!(matches!(
-        input(&mut host, lease, 2, text_key("界", true)),
+        input(&mut host, lease, 4, text_key("界", true)),
         Reply::Unchanged
     ));
-    focus(&mut host, lease, 3, FocusTarget::Unfocused);
+    focus(&mut host, lease, 5, FocusTarget::Unfocused);
     assert!(matches!(
-        input(&mut host, lease, 3, text_key("discarded", true)),
+        input(&mut host, lease, 5, text_key("discarded", true)),
         Reply::Refused(Refusal::Stale)
     ));
-    focus(&mut host, lease, 4, FocusTarget::Terminal);
+    focus(&mut host, lease, 6, FocusTarget::Terminal);
     assert!(matches!(
-        input(&mut host, lease, 1, text_key("discarded", false)),
+        input(&mut host, lease, 3, text_key("discarded", false)),
         Reply::Refused(Refusal::Stale)
     ));
     assert!(matches!(
-        input(&mut host, lease, 4, text_key("K", false)),
+        input(&mut host, lease, 6, text_key("K", false)),
         Reply::Unchanged
     ));
-    await_text(&mut host, lease, "1b5b4f1b5b491b5b4fe7958c1b5b494b");
+    await_text(&mut host, lease, "1b5b491b5b4f1b5b491b5b4fe7958c1b5b494b");
     host.shutdown().unwrap();
 }
 
@@ -1055,94 +1046,10 @@ fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearanc
     host.shutdown().unwrap();
 }
 
+/// An explicit selection of `host`'s Pane by `device` over `connection`.
 fn select(host: &mut DevelopmentPaneHost, device: u8, connection: u8) -> Reply {
-    host.request(
-        [device; 32],
-        [connection; 32],
-        Request::Select {
-            create: true,
-            size: size(),
-            resume: None,
-            style: None,
-        },
-    )
-}
-
-#[test]
-fn a_restored_pane_waits_for_explicit_first_use_and_starts_only_once() {
-    let mut host = host();
-    host.organization = Some(Organization::first(host.directory.clone()).unwrap());
-    let pane_id = host.organization.as_ref().unwrap().pane;
-    for resume in [
-        None,
-        Some(PaneTarget {
-            server: [8; 32],
-            session: [9; 32],
-        }),
-    ] {
-        assert!(matches!(host.request([1; 32], [1; 32], Request::Select {
-            create: false, size: size(), resume, style: None,
-        }), Reply::Restored { pane, .. } if pane == pane_id));
-        host.tick(std::time::Instant::now());
-        assert!(host.pane.is_none());
-    }
-    let request = Request::StartRestored {
-        server: host.boot,
-        pane: pane_id,
-        size: size(),
-        style: None,
-    };
-    let Reply::Attached { lease } = host.request([1; 32], [1; 32], request.clone()) else {
-        panic!("first use");
-    };
-    assert!(
-        matches!(host.request([2; 32], [2; 32], request), Reply::Takeover { target, .. } if target == lease.into())
-    );
-    assert_eq!(host.organization.as_ref().unwrap().pane, pane_id);
-    host.shutdown().unwrap();
-}
-
-#[test]
-fn a_missing_confirmed_directory_refuses_startup_without_falling_back() {
-    let mut host = host();
-    let mut organization = Organization::first(host.directory.clone()).unwrap();
-    organization.confirmed_directory = Some(host.directory.join(format!(
-        "missing-{:x}",
-        u128::from_be_bytes(nonce().unwrap()[..16].try_into().unwrap())
-    )));
-    host.organization = Some(organization.clone());
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::StartRestored {
-                server: host.boot,
-                pane: organization.pane,
-                size: size(),
-                style: None,
-            }
-        ),
-        Reply::Refused(Refusal::DirectoryUnavailable)
-    ));
-    assert!(host.pane.is_none());
-    assert!(host.organization.as_ref() == Some(&organization));
-}
-
-#[test]
-fn ordinary_exit_retires_organization_without_a_connected_client() {
-    let mut host = host();
-    let lease = attach(&mut host, 1, true);
-    command(&mut host, 1, lease, "exit 0");
-    host.disconnected([1; 32]);
-    let until = Instant::now() + Duration::from_secs(3);
-    while host.organization.is_some() && Instant::now() < until {
-        host.tick(std::time::Instant::now());
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        host.organization.is_none(),
-        "ordinary exit closes the final Pane even without a client polling"
-    );
+    host.select([device; 32], [connection; 32], true, size(), None)
+        .unwrap_or_else(Reply::Refused)
 }
 
 #[test]
@@ -1156,13 +1063,9 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         "stty -echo; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HCONFIRMED\\n'",
     );
     await_text(&mut host, lease, "CONFIRMED");
-    host.tick(std::time::Instant::now());
+    host.retain_directory();
     assert_eq!(
-        host.organization
-            .as_ref()
-            .unwrap()
-            .confirmed_directory
-            .as_deref(),
+        host.identity.as_ref().unwrap().confirmed_directory.as_deref(),
         Some(std::path::Path::new("/"))
     );
     command(
@@ -1172,13 +1075,9 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         "printf '\\033]7;file://localhost/tmp\\007\\033]133;A;spaceterm=foreign\\007'; printf 'NESTED\\n'",
     );
     await_text(&mut host, lease, "NESTED");
-    host.tick(std::time::Instant::now());
+    host.retain_directory();
     assert_eq!(
-        host.organization
-            .as_ref()
-            .unwrap()
-            .confirmed_directory
-            .as_deref(),
+        host.identity.as_ref().unwrap().confirmed_directory.as_deref(),
         Some(std::path::Path::new("/"))
     );
     host.shutdown().unwrap();
@@ -1236,19 +1135,7 @@ fn takeover_preserves_work_and_rejects_former_controller_operations() {
         command(&mut host, 2, original, "printf 'STALE'\n"),
         Reply::Refused(Refusal::Stale)
     ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [3; 32],
-            Request::Select {
-                create: false,
-                size: size(),
-                resume: Some(original.into()),
-                style: None,
-            }
-        ),
-        Reply::Takeover { .. }
-    ));
+    assert!(matches!(select(&mut host, 1, 3), Reply::Takeover { .. }));
     // Take it back explicitly, keeping the running command and the same Session.
     let Reply::Attached { lease: returned } = host.request(
         [1; 32],
@@ -1400,11 +1287,11 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
 }
 
 #[test]
-fn revoking_a_device_releases_control_without_ending_its_terminal_session() {
+fn releasing_a_clients_control_keeps_its_terminal_session_running() {
     let mut host = host();
-    host.admitted([1; 32], "Revoked desktop".into());
+    host.admitted([1; 32], "Released desktop".into());
     let original = attach(&mut host, 2, true);
-    host.revoked([1; 32]);
+    host.release_control([1; 32]);
     assert!(matches!(
         screen(&mut host, [1; 32], original),
         Err(PaneEvent::Takeover(_))
@@ -1414,7 +1301,7 @@ fn revoking_a_device_releases_control_without_ending_its_terminal_session() {
     };
     assert_eq!(later.session, original.session);
     assert_ne!(later.control, original.control);
-    host.revoked([1; 32]);
+    host.release_control([1; 32]);
     assert!(screen(&mut host, [9; 32], later).is_ok());
     host.shutdown().unwrap();
 }
@@ -1426,19 +1313,6 @@ fn released_control_has_one_selection_winner_and_never_resumes_old_grants() {
     assert!(matches!(
         host.request([1; 32], [2; 32], Request::Release { lease: original }),
         Reply::Unchanged
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [3; 32],
-            Request::Select {
-                create: false,
-                size: size(),
-                resume: Some(original.into()),
-                style: None,
-            }
-        ),
-        Reply::Takeover { .. }
     ));
     let host = Arc::new(std::sync::Mutex::new(host));
     let start = Arc::new(std::sync::Barrier::new(3));
@@ -1494,19 +1368,7 @@ fn reconnect_keeps_running_work_and_fences_the_old_connection() {
         command(&mut host, 2, first, "printf 'STALE'\n"),
         Reply::Refused(Refusal::Stale)
     ));
-    assert!(matches!(
-        host.request(
-            [9; 32],
-            [9; 32],
-            Request::Attach {
-                create: false,
-                size: size(),
-                resume: None,
-                style: None
-            }
-        ),
-        Reply::Refused(Refusal::Controlled)
-    ));
+    assert!(matches!(select(&mut host, 9, 9), Reply::Takeover { .. }));
     await_text(&mut host, second, "CONTINUED");
     host.shutdown().unwrap();
 }
@@ -1514,54 +1376,15 @@ fn reconnect_keeps_running_work_and_fences_the_old_connection() {
 #[test]
 fn reconnect_and_stale_generations_cannot_start_or_mutate_a_replacement() {
     let mut host = host();
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [2; 32],
-            Request::Attach {
-                create: false,
-                size: size(),
-                resume: None,
-                style: None
-            }
-        ),
-        Reply::Refused(Refusal::Missing)
-    ));
+    host.identity = Some(identity(host.directory.clone()));
+    let passive = |host: &mut DevelopmentPaneHost| host.select([1; 32], [2; 32], false, size(), None);
+    assert!(matches!(passive(&mut host), Ok(Reply::Restored { .. })));
+    assert!(host.pane.is_none(), "a passive selection starts no Session");
     let old = attach(&mut host, 2, true);
-    assert!(matches!(
-        host.request([1; 32], [2; 32], Request::Close { lease: old }),
-        Reply::Closed
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [2; 32],
-            Request::Attach {
-                create: false,
-                size: size(),
-                resume: None,
-                style: None
-            }
-        ),
-        Reply::Refused(Refusal::Missing)
-    ));
+    host.shutdown().unwrap();
+    assert!(matches!(passive(&mut host), Ok(Reply::Restored { .. })));
+    assert!(host.pane.is_none(), "a reconnect never starts a replacement");
     let live = attach(&mut host, 2, true);
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [2; 32],
-            Request::Attach {
-                create: false,
-                size: PaneSize {
-                    columns: 90,
-                    ..size()
-                },
-                style: None,
-                resume: Some(old)
-            }
-        ),
-        Reply::Refused(Refusal::Stale)
-    ));
     for stale in [
         Lease {
             server: old.server.map(|b| b ^ 1),
@@ -1602,106 +1425,12 @@ fn reconnect_and_stale_generations_cannot_start_or_mutate_a_replacement() {
         "stty -echo; printf '\\033[2J\\033[HLIVE\\n'; stty size\n",
     );
     await_text(&mut host, live, "24 80");
-    host.shutdown().unwrap();
-}
-
-#[test]
-fn a_waiting_client_observes_exit_without_the_controller_polling() {
-    let mut host = host();
-    let lease = attach(&mut host, 2, true);
-    // The shell exits once the test has seen its screen and disconnected its controller.
-    let release = std::env::temp_dir().join(format!(
-        "spaceterm-exit-{}-{:x}",
-        std::process::id(),
-        u64::from_ne_bytes(nonce().unwrap()[..8].try_into().unwrap())
-    ));
-    command(
-        &mut host,
-        2,
-        lease,
-        &format!(
-            "stty -echo; printf '\\033[2J\\033[HEXITING\\n'; \
-             while [ ! -e '{}' ]; do sleep 0.02; done; exit\n",
-            release.display()
-        ),
-    );
-    await_text(&mut host, lease, "EXITING");
-    host.disconnected([2; 32]);
-    std::fs::write(&release, "").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let reply = host.request(
-            [9; 32],
-            [9; 32],
-            Request::Select {
-                create: false,
-                size: size(),
-                resume: Some(lease.into()),
-                style: None,
-            },
-        );
-        if matches!(reply, Reply::Refused(Refusal::Missing)) {
-            break;
-        }
-        assert!(matches!(reply, Reply::Takeover { .. }));
-        assert!(
-            Instant::now() < deadline,
-            "an exited shell still offers takeover"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert!(matches!(
-        host.request(
-            [9; 32],
-            [9; 32],
-            Request::TakeOver {
-                target: lease.into(),
-                size: size(),
-                style: None,
-            }
-        ),
-        Reply::Refused(Refusal::Missing)
+        host.request([1; 32], [2; 32], Request::Close { lease: live }),
+        Reply::Closed
     ));
-    let replacement = attach(&mut host, 3, true);
-    assert_ne!(replacement.session, lease.session);
-    host.shutdown().unwrap();
-    let _ = std::fs::remove_file(&release);
-}
-
-#[test]
-fn ordinary_exit_allows_a_later_explicit_launch_but_never_a_reconnect() {
-    let mut host = host();
-    let old = attach(&mut host, 2, true);
-    command(&mut host, 2, old, "exit 0\n");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if matches!(screen(&mut host, [1; 32], old), Err(PaneEvent::Ended)) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "shell exit did not arrive");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [3; 32],
-            Request::Attach {
-                create: false,
-                size: size(),
-                resume: Some(old),
-                style: None,
-            }
-        ),
-        Reply::Refused(Refusal::Missing)
-    ));
-    let fresh = attach(&mut host, 3, true);
-    assert_ne!(fresh.session, old.session);
-    command(
-        &mut host,
-        3,
-        fresh,
-        "stty -echo; printf '\\033[2J\\033[HNEW-SHELL\\n'\n",
+    assert!(
+        matches!(select(&mut host, 1, 2), Reply::Refused(Refusal::Missing)),
+        "a closed Pane never starts again"
     );
-    await_text(&mut host, fresh, "NEW-SHELL");
-    host.shutdown().unwrap();
 }

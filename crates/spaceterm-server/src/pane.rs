@@ -328,19 +328,6 @@ pub enum Request {
         size: PaneSize,
         style: Option<PresentationStyle>,
     },
-    Attach {
-        create: bool,
-        size: PaneSize,
-        resume: Option<Lease>,
-        style: Option<PresentationStyle>,
-    },
-    /// Selection acquires an unclaimed Pane, but never takes it from another client.
-    Select {
-        create: bool,
-        size: PaneSize,
-        resume: Option<PaneTarget>,
-        style: Option<PresentationStyle>,
-    },
     /// Explicit first use of a retained Pane, fenced by stable identity and current server boot.
     StartRestored {
         server: [u8; 32],
@@ -362,10 +349,6 @@ pub enum Request {
         lease: Lease,
         visible: bool,
         max_hz: u8,
-    },
-    Key {
-        lease: Lease,
-        key: Key,
     },
     Resize {
         lease: Lease,

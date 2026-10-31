@@ -1,4 +1,4 @@
-use super::tests::{command, host, size};
+use super::tests::{COMMAND_FOCUS, command, host, size};
 use super::*;
 use crate::terminal::{metadata::*, server_metadata};
 use std::time::Instant;
@@ -268,9 +268,10 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
             host.request(
                 [1; 32],
                 [1; 32],
-                Request::Key {
+                Request::Keys {
                     lease,
-                    key: Key {
+                    generation: COMMAND_FOCUS,
+                    keys: vec![Key {
                         physical: PhysicalKey::Unidentified as u32,
                         action: 0,
                         logical: "text-input".into(),
@@ -279,7 +280,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
                         modifiers: 0,
                         consumed: 0,
                         option_as_alt: false,
-                    }
+                    }],
                 }
             ),
             Reply::Unchanged
@@ -297,8 +298,8 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
 #[test]
 fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fits_a_frame() {
     use spaceterm_server::hierarchy::{MAX_PANES, State};
-    let organization = Organization::first("/tmp".into()).unwrap();
-    let mut state = State::from_organization(&organization);
+    let mut state = State::first("/tmp".as_ref()).unwrap();
+    let pane = state.inventory.workspaces[0].tabs[0].root_pane;
     let tracker = MetadataTracker::new(
         LocalPathSemantics::Posix,
         "/tmp",
@@ -307,8 +308,8 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
         Instant::now(),
     );
     let mut metadata = metadata::encode(&tracker.snapshot());
-    state.present_presentation(organization.pane, Some(Box::new(metadata.clone())));
-    let retained = serde_json::to_value(state.envelope("/tmp".as_ref()).unwrap()).unwrap();
+    state.present_presentation(pane, Some(Box::new(metadata.clone())));
+    let retained = serde_json::to_value(state.envelope()).unwrap();
     let panes = &retained["shared"]["inventory"]["workspaces"][0]["tabs"][0]["panes"];
     assert!(panes.as_array().unwrap().iter().all(|pane| {
         pane.get("presentation")

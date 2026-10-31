@@ -314,6 +314,21 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
         ),
         "Retry must revalidate the restoration target rather than reject it as stale"
     );
+    let missing = git.0.join("missing-replacement");
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::RepairDirectory {
+                target: target.clone(),
+                replacement: Some(missing.clone()),
+                size: size(),
+                style: None,
+            }
+        ),
+        Reply::Refused(Refusal::DirectoryUnavailable)
+    ));
+    assert!(!missing.exists(), "a repair never creates its replacement");
     let mut wrong = target.clone();
     wrong.original = live.clone();
     assert!(
@@ -617,7 +632,7 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
             mutate(&mut host, 2, old, originals[old as usize - 1].clone());
         }
         let record: Organization = serde_json::from_slice(
-            &serde_json::to_vec(&host.state.envelope(&host.prototype.directory).unwrap()).unwrap(),
+            &serde_json::to_vec(&host.state.envelope()).unwrap(),
         )
         .unwrap();
         host.restore_organization(Some(&record));
@@ -787,10 +802,13 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
         session_ended: Some(spaceterm_server::pane::SessionEnd::EndAllSessions), controller: control::Controller::Client { name, .. }, ..
     } if name.as_str() == "Laptop")
     );
-    assert!(matches!(
-        host.request([2; 32], [2; 32], repair),
-        Reply::Attached { .. }
-    ));
+    let Reply::Attached { lease: repaired } = host.request([2; 32], [2; 32], repair.clone()) else {
+        panic!("the preserved controller repairs the Pane");
+    };
+    assert!(
+        matches!(host.request([1; 32], [1; 32], repair), Reply::Takeover { target, .. } if target == repaired.into()),
+        "a repair cannot replace the running shell"
+    );
     let after = shared_inventory(&mut host).workspaces;
     assert_eq!(
         (after[0].id, after[0].tabs[0].id, after[0].tabs[0].root_pane),

@@ -1,5 +1,7 @@
 //! Production emulator, server protocol and PTY dimension boundaries.
-use super::tests::{await_screen, await_text, command, frame_bytes, host, lines, size};
+use super::tests::{
+    attach_sized, await_screen, await_text, command, frame_bytes, host, lines, size,
+};
 use super::*;
 
 #[test]
@@ -10,18 +12,7 @@ fn large_grid_dimensions_reach_the_emulator_screen_and_pty_together() {
         rows: 120,
         ..size()
     };
-    let Reply::Attached { lease } = host.request(
-        [1; 32],
-        [1; 32],
-        Request::Attach {
-            create: true,
-            size,
-            resume: None,
-            style: None,
-        },
-    ) else {
-        panic!("large grid must attach")
-    };
+    let lease = attach_sized(&mut host, 1, true, size);
     // Each command prints on a new line below the last, without clearing the screen. A debug
     // build takes about a second to present a whole 512×256 grid again, so a clear adds one such
     // redraw to the resize's, and a loaded host stretched the two past the wait for the output.

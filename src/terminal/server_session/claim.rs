@@ -633,14 +633,7 @@ mod tests {
             },
         ] {
             assert!(matches!(
-                host.request(
-                    [1; 32],
-                    [1; 32],
-                    Request::Key {
-                        lease,
-                        key: encode_key(key),
-                    }
-                ),
+                crate::runtime::directory_testing::type_keys(&mut host, lease, vec![encode_key(key)]),
                 Reply::Unchanged
             ));
         }
