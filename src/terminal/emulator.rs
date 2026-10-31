@@ -27,10 +27,6 @@ use libghostty_vt::screen::{
     CellContentTag, CellSemanticContent, CellWide, Screen, TrackedGridRef,
 };
 use libghostty_vt::selection::FormatOptions;
-use libghostty_vt::selection::gesture::{
-    Autoscroll, AutoscrollTickEvent, DragEvent, Geometry as SelectionGeometry, Gesture, PressEvent,
-    ReleaseEvent,
-};
 use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{
     ColorScheme, HyperlinkResolution, Mode, Point, PointCoordinate, PointSpace, ProgressState,
@@ -44,11 +40,10 @@ use crate::appearance::{
 use crate::terminal::TerminalAppearanceUpdate;
 use crate::terminal::accessibility::{
     AccessibilityCell, AccessibilityCellRef, AccessibilityRowId, AccessibilityRowUpdate,
-    AccessibilityScreen, AccessibilitySelectionRefs, AccessibilitySelectionRequest,
+    AccessibilityScreen, AccessibilitySelectionRefs,
     AccessibilityUpdate, TerminalAccessibilityModel, TerminalAccessibilityState,
 };
 use crate::terminal::attention::AttentionEvent;
-use crate::terminal::find::TerminalFindState;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
 use crate::terminal::graphics::{
     APC_TRANSMISSION_LIMIT, GraphicsBudgetWake, GraphicsReservation, GraphicsSnapshot,
@@ -67,7 +62,7 @@ use crate::terminal::pointer_input::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
-use crate::terminal::{FindDirection, FindQueryGeneration, TerminalFindSnapshot};
+use crate::terminal::TerminalFindSnapshot;
 const MAX_WHEEL_STEPS: i32 = 100;
 const MAX_SCROLLBACK_ROWS: usize = 10_000;
 // Match Ghostty's application default in third_party/ghostty/src/config/Config.zig.
@@ -77,9 +72,6 @@ pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_sec
 pub(crate) const PROMPT_REDRAW_HOLD: Duration = Duration::from_millis(200);
 /// How long shell output must pause before a redraw without a prompt-end mark counts as drawn.
 pub(crate) const PROMPT_REDRAW_SETTLE: Duration = Duration::from_millis(30);
-const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
-const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
-const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
 
 impl From<RgbColor> for Color {
     fn from(value: RgbColor) -> Self {
@@ -778,11 +770,6 @@ pub(crate) struct TerminalEmulator {
     mouse_event: MouseEvent<'static>,
     cached_mouse_modes: Option<MouseModeState>,
     cached_mouse_size: Option<MouseEncoderSize>,
-    selection_gesture: Gesture<'static>,
-    selection_press: PressEvent<'static>,
-    selection_drag: DragEvent<'static>,
-    selection_release: ReleaseEvent<'static>,
-    selection_autoscroll_tick: AutoscrollTickEvent<'static>,
     pty_responses: Rc<RefCell<Vec<u8>>>,
     pending_metadata: Rc<RefCell<Vec<MetadataEvent>>>,
     pending_attention: Rc<RefCell<Vec<AttentionEvent>>>,
@@ -819,15 +806,11 @@ pub(crate) struct TerminalEmulator {
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
     application_pointer_generation: Option<u64>,
-    selection_drag_position: Option<SurfacePosition>,
-    pointer_mapping_invalidated: bool,
-    gesture_clock: GestureClock,
     presentation_generation: PresentationGeneration,
     /// The client Input serial the next snapshot reports.
     input_serial: u32,
     synchronized_output_last_activity: Option<Instant>,
     prompt_redraw: PromptRedraw,
-    find: TerminalFindState,
     history: history::HistoryTracker,
     /// Owner-marked markers a pending run follows, with where each was observed.
     run_observations: Vec<spaceterm_server::pane::run::Observation>,
@@ -846,32 +829,9 @@ enum MetadataEvent {
 #[derive(Clone, Copy, Debug)]
 struct ActivePointer {
     button: PointerButton,
-    route: PointerRoute,
     generation: PresentationGeneration,
     position: SurfacePosition,
     modifiers: InputModifiers,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum PointerRoute {
-    Application,
-    Selection,
-}
-
-enum GestureClock {
-    System(Instant),
-    #[cfg(test)]
-    Manual(Duration),
-}
-
-impl GestureClock {
-    fn elapsed(&self) -> Duration {
-        match self {
-            Self::System(epoch) => epoch.elapsed(),
-            #[cfg(test)]
-            Self::Manual(elapsed) => *elapsed,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -899,7 +859,6 @@ pub enum ScrollbackMovement {
 pub(crate) struct EmulatorAction {
     pub(crate) bytes: Vec<u8>,
     pub(crate) screen_changed: bool,
-    pub(crate) selection_completed: bool,
 }
 
 impl EmulatorAction {
@@ -907,7 +866,6 @@ impl EmulatorAction {
         Self {
             bytes,
             screen_changed: false,
-            selection_completed: false,
         }
     }
 
@@ -915,23 +873,6 @@ impl EmulatorAction {
         Self {
             bytes: Vec::new(),
             screen_changed: true,
-            selection_completed: false,
-        }
-    }
-
-    fn screen_changed_if(changed: bool) -> Self {
-        if changed {
-            Self::screen_changed()
-        } else {
-            Self::none()
-        }
-    }
-
-    fn selection_completed() -> Self {
-        Self {
-            bytes: Vec::new(),
-            screen_changed: false,
-            selection_completed: true,
         }
     }
 
@@ -939,7 +880,6 @@ impl EmulatorAction {
         Self {
             bytes: Vec::new(),
             screen_changed: false,
-            selection_completed: false,
         }
     }
 }
@@ -1238,11 +1178,6 @@ impl TerminalEmulator {
             mouse_event: MouseEvent::new()?,
             cached_mouse_modes: None,
             cached_mouse_size: None,
-            selection_gesture: Gesture::new()?,
-            selection_press: PressEvent::new()?,
-            selection_drag: DragEvent::new()?,
-            selection_release: ReleaseEvent::new()?,
-            selection_autoscroll_tick: AutoscrollTickEvent::new()?,
             pty_responses,
             pending_metadata,
             pending_attention,
@@ -1279,14 +1214,10 @@ impl TerminalEmulator {
             geometry,
             active_pointer: None,
             application_pointer_generation: None,
-            selection_drag_position: None,
-            pointer_mapping_invalidated: false,
-            gesture_clock: GestureClock::System(Instant::now()),
             presentation_generation: PresentationGeneration::default(),
             input_serial: 0,
             synchronized_output_last_activity: None,
             prompt_redraw: PromptRedraw::default(),
-            find: TerminalFindState::default(),
             history: history::HistoryTracker::default(),
             run_observations: Vec::new(),
             integration_expected: false,
@@ -1295,12 +1226,7 @@ impl TerminalEmulator {
         })
     }
 
-    pub(crate) fn enable_client_clipboard(&mut self) {
-        self.xtgettcap.enable_clipboard();
-    }
-
     pub(crate) fn restrict_client_effects(&mut self) -> Result<(), Error> {
-        self.xtgettcap.disable_clipboard();
         self.terminal.set_glyph_protocol_enabled(false)?;
         self.terminal.on_device_attributes(|_| {
             let mut attributes = identity::device_attributes();
@@ -1321,17 +1247,6 @@ impl TerminalEmulator {
         if !bytes.is_empty() {
             self.invalidate_selection_copy();
             self.accessibility_capture_needed = true;
-        }
-        if !bytes.is_empty()
-            && matches!(
-                self.active_pointer,
-                Some(ActivePointer {
-                    route: PointerRoute::Selection,
-                    ..
-                })
-            )
-        {
-            self.pointer_mapping_invalidated = true;
         }
         self.xtgettcap
             .feed(bytes, &mut self.pty_responses.borrow_mut());
@@ -1389,9 +1304,6 @@ impl TerminalEmulator {
         }
         self.observe_run_markers();
         if !bytes.is_empty() {
-            self.find.invalidate();
-        }
-        if !bytes.is_empty() {
             self.prompt_redraw.note_output(now);
         }
         let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
@@ -1421,7 +1333,6 @@ impl TerminalEmulator {
                 Vec::new()
             },
             screen_changed: true,
-            selection_completed: false,
         }
     }
 
@@ -1471,6 +1382,7 @@ impl TerminalEmulator {
             .min()
     }
 
+    #[cfg(test)]
     pub(crate) fn presentation_generation(&self) -> PresentationGeneration {
         self.presentation_generation
     }
@@ -1534,10 +1446,7 @@ impl TerminalEmulator {
         }
         self.end_explicit_synchronized_output()?;
         self.invalidate_selection_copy();
-        self.selection_gesture.reset(&self.terminal);
         self.active_pointer = None;
-        self.selection_drag_position = None;
-        self.pointer_mapping_invalidated = false;
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         if winsize_changed {
@@ -1557,7 +1466,6 @@ impl TerminalEmulator {
             debug_assert_eq!(grid, self.geometry.grid());
             debug_assert_eq!(cell, self.geometry.backing_cell_size());
         }
-        self.find.invalidate();
         self.geometry = geometry;
         Ok(())
     }
@@ -1609,7 +1517,6 @@ impl TerminalEmulator {
         Ok(EmulatorAction {
             bytes,
             screen_changed: true,
-            selection_completed: false,
         })
     }
 
@@ -1617,34 +1524,6 @@ impl TerminalEmulator {
         self.terminal.mode(Mode::FOCUS_EVENT).map_err(|error| {
             TerminalFailure::emulator_error("query-terminal-focus-reporting-mode", error)
         })
-    }
-
-    pub(crate) fn set_find_query(
-        &mut self,
-        generation: FindQueryGeneration,
-        query: String,
-    ) -> EmulatorAction {
-        self.find.set_query(generation, query);
-        EmulatorAction::screen_changed()
-    }
-
-    pub(crate) fn end_find(&mut self, generation: FindQueryGeneration) -> EmulatorAction {
-        self.find.end(generation);
-        EmulatorAction::screen_changed()
-    }
-
-    pub(crate) fn navigate_find(
-        &mut self,
-        generation: FindQueryGeneration,
-        direction: FindDirection,
-    ) -> Result<EmulatorAction, TerminalFailure> {
-        let cols = self.geometry.grid().cols;
-        self.find
-            .navigate(&mut self.terminal, cols, generation, direction)
-            .map(EmulatorAction::screen_changed_if)
-            .map_err(|error| {
-                TerminalFailure::emulator_error("navigate-terminal-find-results", error)
-            })
     }
 
     pub(crate) fn focus(&self, focused: bool) -> Result<EmulatorAction, TerminalFailure> {
@@ -1670,9 +1549,7 @@ impl TerminalEmulator {
         snapshot: u64,
         current_snapshot: u64,
     ) -> Result<EmulatorAction, TerminalFailure> {
-        let active = self
-            .active_pointer
-            .filter(|active| matches!(active.route, PointerRoute::Application));
+        let active = self.active_pointer;
         if active.is_none() {
             self.application_pointer_generation = None;
         }
@@ -1759,10 +1636,7 @@ impl TerminalEmulator {
             TerminalFailure::emulator_error("query-synchronized-output-mode", error)
         })? || !self.accept_pointer_generation(input.generation)
         {
-            self.selection_gesture.reset(&self.terminal);
             self.active_pointer = None;
-            self.selection_drag_position = None;
-            self.pointer_mapping_invalidated = false;
             return Ok(EmulatorAction::none());
         }
         match input.phase {
@@ -1770,37 +1644,6 @@ impl TerminalEmulator {
             PointerPhase::Motion => self.pointer_motion(input),
             PointerPhase::Release => self.pointer_release(input),
         }
-    }
-
-    pub(crate) fn scroll_to(&mut self, offset_rows: u64) -> EmulatorAction {
-        let row = usize::try_from(offset_rows).unwrap_or(usize::MAX);
-        self.terminal.scroll_viewport(ScrollViewport::Row(row));
-        EmulatorAction::screen_changed()
-    }
-
-    /// Moves the viewport through Scrollback a page at a time or to either end, writing nothing
-    /// to the PTY. The alternate screen has no Scrollback, so its viewport stays put, as it does
-    /// for the wheel when the program has not requested alternate-scroll mode.
-    pub(crate) fn scroll_scrollback(&mut self, movement: ScrollbackMovement) -> EmulatorAction {
-        let page = isize::try_from(self.geometry.grid().rows.max(1)).unwrap_or(isize::MAX);
-        self.terminal.scroll_viewport(match movement {
-            ScrollbackMovement::PageUp => ScrollViewport::Delta(-page),
-            ScrollbackMovement::PageDown => ScrollViewport::Delta(page),
-            ScrollbackMovement::Top => ScrollViewport::Top,
-            ScrollbackMovement::Bottom => ScrollViewport::Bottom,
-        });
-        EmulatorAction::screen_changed()
-    }
-
-    pub(crate) fn scroll_to_at(
-        &mut self,
-        offset_rows: u64,
-        generation: PresentationGeneration,
-    ) -> EmulatorAction {
-        if generation != self.presentation_generation {
-            return EmulatorAction::none();
-        }
-        self.scroll_to(offset_rows)
     }
 
     pub(crate) fn wheel(&mut self, input: WheelInput) -> Result<EmulatorAction, TerminalFailure> {
@@ -1847,7 +1690,6 @@ impl TerminalEmulator {
             return Ok(EmulatorAction {
                 bytes,
                 screen_changed: true,
-                selection_completed: false,
             });
         }
 
@@ -1881,17 +1723,11 @@ impl TerminalEmulator {
             return Ok(EmulatorAction {
                 bytes,
                 screen_changed: true,
-                selection_completed: false,
             });
         }
 
-        if vertical == 0 {
-            return Ok(EmulatorAction::none());
-        }
-
-        self.terminal
-            .scroll_viewport(ScrollViewport::Delta(-(vertical as isize)));
-        Ok(EmulatorAction::screen_changed())
+        // Without mouse tracking or alternate scroll the client scrolls its own view.
+        Ok(EmulatorAction::none())
     }
 
     pub(crate) fn paste(&mut self, text: String) -> Result<EmulatorAction, TerminalFailure> {
@@ -1921,7 +1757,6 @@ impl TerminalEmulator {
         Ok(EmulatorAction {
             bytes,
             screen_changed: true,
-            selection_completed: false,
         })
     }
 
@@ -1934,6 +1769,37 @@ impl TerminalEmulator {
     #[cfg(test)]
     pub(crate) fn selection_text(&self) -> Result<Option<String>, TerminalFailure> {
         self.format_selection(Format::Plain, SelectionCopyOptions::default())
+    }
+
+    /// Selects from `start` to `end`, each a visible `(line, column)`, through the accessible
+    /// Selection a server client sends. Returns whether the Selection changed.
+    #[cfg(test)]
+    pub(crate) fn select_visible(&mut self, start: (usize, u16), end: (usize, u16)) -> bool {
+        let model = (0..128)
+            .find_map(|_| match self.accessibility_snapshot_for_current_presentation() {
+                Ok((model, false)) => Some(model),
+                _ => None,
+            })
+            .flatten()
+            .expect("bounded accessibility publication produces the current model");
+        let reference = |(line, column): (usize, u16)| {
+            model
+                .row(line)
+                .map(|row| AccessibilityCellRef {
+                    row: row.id,
+                    row_revision: row.revision,
+                    column,
+                })
+        };
+        let (Some(start), Some(end)) = (reference(start), reference(end)) else {
+            return false;
+        };
+        self.set_accessibility_selection_refs(Some(AccessibilitySelectionRefs {
+            start,
+            end,
+            rectangle: false,
+        }))
+        .unwrap_or(false)
     }
 
     fn invalidate_selection_copy(&mut self) {
@@ -2001,14 +1867,6 @@ impl TerminalEmulator {
         let Some(active) = self.active_pointer.as_mut() else {
             return generation == self.presentation_generation;
         };
-        if self.pointer_mapping_invalidated {
-            if generation == self.presentation_generation && generation != active.generation {
-                active.generation = generation;
-                self.pointer_mapping_invalidated = false;
-                return true;
-            }
-            return false;
-        }
         if generation < active.generation || generation > self.presentation_generation {
             return false;
         }
@@ -2027,54 +1885,32 @@ impl TerminalEmulator {
         let Some(button) = input.button else {
             return Ok(EmulatorAction::none());
         };
-        let route = match button {
-            PointerButton::Left => {
-                if !tracking
-                    || shift_overrides_application_mouse(input.modifiers, input.shift_selection)
-                {
-                    PointerRoute::Selection
-                } else {
-                    PointerRoute::Application
-                }
-            }
-            PointerButton::Middle | PointerButton::Right if tracking => PointerRoute::Application,
-            PointerButton::Middle | PointerButton::Right => {
-                self.active_pointer = None;
-                return Ok(EmulatorAction::none());
-            }
-        };
+        // Selection belongs to the client, so a program that does not track the mouse gets no
+        // press, and the Shift override stays with the client too.
+        if !tracking || shift_overrides_application_mouse(input.modifiers, input.shift_selection) {
+            self.active_pointer = None;
+            return Ok(EmulatorAction::none());
+        }
         self.active_pointer = Some(ActivePointer {
             button,
-            route,
             generation: input.generation,
             position: input.position,
             modifiers: input.modifiers,
         });
-
-        match route {
-            PointerRoute::Application => {
-                self.clear_selection()?;
-                let mut bytes = Vec::new();
-                self.encode_mouse_event(
-                    MouseAction::Press,
-                    Some(mouse_button(button)),
-                    input.position,
-                    input.modifiers,
-                    true,
-                    &mut bytes,
-                )?;
-                Ok(EmulatorAction {
-                    bytes,
-                    screen_changed: true,
-                    selection_completed: false,
-                })
-            }
-            PointerRoute::Selection => {
-                self.selection_drag_position = Some(input.position);
-                self.selection_press(input.position)?;
-                Ok(EmulatorAction::screen_changed())
-            }
-        }
+        self.clear_selection()?;
+        let mut bytes = Vec::new();
+        self.encode_mouse_event(
+            MouseAction::Press,
+            Some(mouse_button(button)),
+            input.position,
+            input.modifiers,
+            true,
+            &mut bytes,
+        )?;
+        Ok(EmulatorAction {
+            bytes,
+            screen_changed: true,
+        })
     }
 
     fn pointer_motion(&mut self, input: PointerInput) -> Result<EmulatorAction, TerminalFailure> {
@@ -2083,11 +1919,7 @@ impl TerminalEmulator {
             active.modifiers = input.modifiers;
         }
         match self.active_pointer {
-            Some(ActivePointer {
-                button,
-                route: PointerRoute::Application,
-                ..
-            }) => {
+            Some(ActivePointer { button, .. }) => {
                 let mut bytes = Vec::new();
                 self.encode_mouse_event(
                     MouseAction::Motion,
@@ -2098,14 +1930,6 @@ impl TerminalEmulator {
                     &mut bytes,
                 )?;
                 Ok(EmulatorAction::bytes(bytes))
-            }
-            Some(ActivePointer {
-                route: PointerRoute::Selection,
-                ..
-            }) => {
-                self.selection_drag_position = Some(input.position);
-                self.selection_drag(input.position)?;
-                Ok(EmulatorAction::screen_changed())
             }
             None => {
                 let tracking = self.terminal.is_mouse_tracking().map_err(|error| {
@@ -2139,26 +1963,16 @@ impl TerminalEmulator {
             return Ok(EmulatorAction::none());
         }
         self.active_pointer = None;
-        self.selection_drag_position = None;
-
-        match active.route {
-            PointerRoute::Application => {
-                let mut bytes = Vec::new();
-                self.encode_mouse_event(
-                    MouseAction::Release,
-                    Some(mouse_button(active.button)),
-                    input.position,
-                    input.modifiers,
-                    false,
-                    &mut bytes,
-                )?;
-                Ok(EmulatorAction::bytes(bytes))
-            }
-            PointerRoute::Selection => {
-                self.selection_release(input.position)?;
-                Ok(EmulatorAction::selection_completed())
-            }
-        }
+        let mut bytes = Vec::new();
+        self.encode_mouse_event(
+            MouseAction::Release,
+            Some(mouse_button(active.button)),
+            input.position,
+            input.modifiers,
+            false,
+            &mut bytes,
+        )?;
+        Ok(EmulatorAction::bytes(bytes))
     }
 
     pub(super) fn enhanced_keyboard_active(&self) -> bool {
@@ -2216,28 +2030,7 @@ impl TerminalEmulator {
         self.terminal
             .set_selection(None)
             .map_err(|error| TerminalFailure::emulator_error("clear-terminal-selection", error))?;
-        self.selection_gesture.reset(&self.terminal);
-        self.selection_drag_position = None;
         Ok(())
-    }
-
-    pub(crate) fn set_accessibility_selection(
-        &mut self,
-        request: AccessibilitySelectionRequest,
-    ) -> Result<EmulatorAction, TerminalFailure> {
-        if request.generation != self.presentation_generation {
-            return Ok(EmulatorAction::none());
-        }
-        if self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
-            TerminalFailure::emulator_error("query-synchronized-output-mode", error)
-        })? {
-            return Ok(EmulatorAction::none());
-        }
-        let Some(selection) = self.accessibility.resolve_selection(&request) else {
-            return Ok(EmulatorAction::none());
-        };
-        self.apply_accessibility_selection(selection)
-            .map(EmulatorAction::screen_changed_if)
     }
 
     /// Applies Selection endpoints named by a server client's accessible snapshot.
@@ -2293,218 +2086,25 @@ impl TerminalEmulator {
         if changed {
             self.invalidate_selection_copy();
             self.active_pointer = None;
-            self.selection_gesture.reset(&self.terminal);
-            self.selection_drag_position = None;
-            self.pointer_mapping_invalidated = false;
         }
         Ok(changed)
     }
-
-    fn selection_press(&mut self, position: SurfacePosition) -> Result<(), TerminalFailure> {
-        self.invalidate_selection_copy();
-        let point = self.selection_viewport_point(position)?;
-        let grid_ref = self
-            .terminal
-            .grid_ref(Point::Viewport(point))
-            .map_err(|error| {
-                TerminalFailure::emulator_error("resolve-selection-press-position", error)
-            })?;
-        let selection = self
-            .selection_press
-            .set_position(f64::from(position.x), f64::from(position.y))
-            .and_then(|event| event.set_repeat_distance(REPEAT_CLICK_DISTANCE_PX))
-            .and_then(|event| event.set_time(self.gesture_clock.elapsed()))
-            .and_then(|event| event.set_repeat_interval(REPEAT_CLICK_INTERVAL))
-            .and_then(|event| event.apply(&mut self.selection_gesture, &self.terminal, grid_ref))
-            .map_err(|error| {
-                TerminalFailure::emulator_error("apply-terminal-selection-press", error)
-            })?;
-        self.terminal
-            .set_selection(selection.as_ref())
-            .map_err(|error| {
-                TerminalFailure::emulator_error("install-terminal-selection", error)
-            })?;
-        Ok(())
-    }
-
-    fn selection_drag(&mut self, position: SurfacePosition) -> Result<(), TerminalFailure> {
-        self.invalidate_selection_copy();
-        let point = self.selection_viewport_point(position)?;
-        let geometry = self.selection_geometry();
-        let grid_ref = self
-            .terminal
-            .grid_ref(Point::Viewport(point))
-            .map_err(|error| {
-                TerminalFailure::emulator_error("resolve-selection-drag-position", error)
-            })?;
-        let selection = self
-            .selection_drag
-            .set_position(f64::from(position.x), f64::from(position.y))
-            .and_then(|event| event.set_rectangle(false))
-            .and_then(|event| {
-                event.apply(
-                    &mut self.selection_gesture,
-                    &self.terminal,
-                    grid_ref,
-                    geometry,
-                )
-            })
-            .map_err(|error| {
-                TerminalFailure::emulator_error("apply-terminal-selection-drag", error)
-            })?;
-        self.terminal
-            .set_selection(selection.as_ref())
-            .map_err(|error| {
-                TerminalFailure::emulator_error("install-terminal-selection", error)
-            })?;
-        Ok(())
-    }
-
-    fn selection_release(&mut self, position: SurfacePosition) -> Result<(), TerminalFailure> {
-        let point = self.selection_viewport_point(position)?;
-        let grid_ref = self
-            .terminal
-            .grid_ref(Point::Viewport(point))
-            .map_err(|error| {
-                TerminalFailure::emulator_error("resolve-selection-release-position", error)
-            })?;
-        self.selection_release
-            .apply(&mut self.selection_gesture, &self.terminal, Some(grid_ref))
-            .map_err(|error| {
-                TerminalFailure::emulator_error("apply-terminal-selection-release", error)
-            })
-    }
-
     pub(crate) fn cancel_pointer_drag(&mut self) -> Result<EmulatorAction, TerminalFailure> {
         self.application_pointer_generation = None;
         let Some(active) = self.active_pointer.take() else {
             return Ok(EmulatorAction::none());
         };
-        self.selection_gesture.reset(&self.terminal);
-        self.selection_drag_position = None;
-        self.pointer_mapping_invalidated = false;
-
-        if matches!(active.route, PointerRoute::Application) {
-            let mut bytes = Vec::new();
-            self.encode_mouse_event(
-                MouseAction::Release,
-                Some(mouse_button(active.button)),
-                active.position,
-                active.modifiers,
-                false,
-                &mut bytes,
-            )?;
-            return Ok(EmulatorAction::bytes(bytes));
-        }
-        Ok(EmulatorAction::none())
+        let mut bytes = Vec::new();
+        self.encode_mouse_event(
+            MouseAction::Release,
+            Some(mouse_button(active.button)),
+            active.position,
+            active.modifiers,
+            false,
+            &mut bytes,
+        )?;
+        Ok(EmulatorAction::bytes(bytes))
     }
-
-    pub(crate) fn selection_autoscroll_interval(
-        &self,
-    ) -> Result<Option<Duration>, TerminalFailure> {
-        if !matches!(
-            self.active_pointer,
-            Some(ActivePointer {
-                route: PointerRoute::Selection,
-                ..
-            })
-        ) {
-            return Ok(None);
-        }
-        let Some(_) = self.selection_drag_position else {
-            return Ok(None);
-        };
-        let direction = self
-            .selection_gesture
-            .autoscroll(&self.terminal)
-            .map_err(|error| {
-                TerminalFailure::emulator_error("query-selection-autoscroll", error)
-            })?;
-        if direction == Autoscroll::None {
-            return Ok(None);
-        }
-        Ok(Some(SELECTION_AUTOSCROLL_INTERVAL))
-    }
-
-    pub(crate) fn selection_autoscroll_tick(&mut self) -> Result<EmulatorAction, TerminalFailure> {
-        // The worker owns this gesture; publishing a new snapshot does not end the drag.
-        // libghostty-vt validates the tracked content anchor before scrolling.
-        let Some(position) = self.selection_drag_position else {
-            return Ok(EmulatorAction::none());
-        };
-        let direction = self
-            .selection_gesture
-            .autoscroll(&self.terminal)
-            .map_err(|error| {
-                TerminalFailure::emulator_error("query-selection-autoscroll", error)
-            })?;
-        if !matches!(direction, Autoscroll::Up | Autoscroll::Down) {
-            return Ok(EmulatorAction::none());
-        }
-        // The gesture resolves this coordinate after scrolling. Inspecting the old
-        // row here can shift the endpoint when it contains a wide-cell spacer.
-        let cell = self
-            .geometry
-            .cell_at_backing_position(BackingPosition::new(position.x, position.y));
-        let viewport = PointCoordinate {
-            x: cell.col,
-            y: u32::from(cell.row),
-        };
-        let geometry = self.selection_geometry();
-        self.invalidate_selection_copy();
-        let selection = self
-            .selection_autoscroll_tick
-            .set_position(f64::from(position.x), f64::from(position.y))
-            .and_then(|event| event.set_rectangle(false))
-            .and_then(|event| {
-                event.apply(
-                    &mut self.selection_gesture,
-                    &self.terminal,
-                    viewport,
-                    geometry,
-                )
-            })
-            .map_err(|error| {
-                TerminalFailure::emulator_error("apply-selection-autoscroll-tick", error)
-            })?;
-        self.terminal
-            .set_selection(selection.as_ref())
-            .map_err(|error| {
-                TerminalFailure::emulator_error("install-autoscrolled-selection", error)
-            })?;
-        Ok(EmulatorAction::screen_changed())
-    }
-
-    fn selection_viewport_point(
-        &self,
-        position: SurfacePosition,
-    ) -> Result<PointCoordinate, TerminalFailure> {
-        let position = self
-            .geometry
-            .cell_at_backing_position(BackingPosition::new(position.x, position.y));
-        let mut point = PointCoordinate {
-            x: position.col,
-            y: u32::from(position.row),
-        };
-        let grid_ref = self
-            .terminal
-            .grid_ref(Point::Viewport(point))
-            .map_err(|error| {
-                TerminalFailure::emulator_error("resolve-terminal-selection-cell", error)
-            })?;
-        if grid_ref
-            .cell()
-            .and_then(|cell| cell.wide())
-            .map_err(|error| {
-                TerminalFailure::emulator_error("inspect-terminal-selection-cell", error)
-            })?
-            == CellWide::SpacerTail
-        {
-            point.x = point.x.saturating_sub(1);
-        }
-        Ok(point)
-    }
-
     fn cell_mouse_encoder_position(&self, position: SurfacePosition) -> SurfacePosition {
         let cell = self
             .geometry
@@ -2548,18 +2148,6 @@ impl TerminalEmulator {
             padding_left: 0,
         }
     }
-
-    fn selection_geometry(&self) -> SelectionGeometry {
-        let grid = self.geometry.grid();
-        let cell = self.geometry.backing_cell_size();
-        SelectionGeometry {
-            columns: u32::from(grid.cols),
-            cell_width: cell.width,
-            padding_left: 0,
-            screen_height: self.geometry.backing_grid_size().height,
-        }
-    }
-
     pub(super) fn accessibility_content_changed(&self) -> bool {
         self.accessibility_capture_needed
     }
@@ -2635,9 +2223,6 @@ impl TerminalEmulator {
 
         self.advance_graphics_animations(now)?;
 
-        self.find
-            .refresh(&self.terminal, self.geometry.grid().cols)?;
-        let find_changed = self.find.is_changed();
 
         let metadata = self.metadata.snapshot();
         let title = Arc::clone(&metadata.title.value);
@@ -2795,7 +2380,6 @@ impl TerminalEmulator {
                     || self.cached_alternate_scroll != Some(alternate_scroll),
                 selection_presence: self.cached_selection_present != Some(selection_present)
                     || self.cached_selection_revision != Some(self.selection_revision),
-                search: find_changed,
                 graphics_content: graphics_content_changed,
                 graphics_geometry: graphics_geometry_changed,
                 appearance: self.cached_appearance_generation
@@ -3013,10 +2597,6 @@ impl TerminalEmulator {
 
         self.presentation_generation = self.presentation_generation.next();
         let text_blinking = rows_have_visible_blinking_text(row_cache);
-        let find = self
-            .find
-            .snapshot(cols, scrollbar.offset_rows, scrollbar.visible_rows);
-        self.find.mark_published();
         let history = self.history.update(&mut self.terminal)?;
         let screen = Arc::new(ScreenSnapshot {
             generation: self.presentation_generation,
@@ -3044,7 +2624,7 @@ impl TerminalEmulator {
             selection_revision: self.selection_revision,
             title,
             metadata,
-            find,
+            find: None,
             graphics,
             damage,
             history,
@@ -3073,12 +2653,6 @@ impl TerminalEmulator {
 
     pub(crate) fn metadata(&self) -> Arc<TerminalMetadataSnapshot> {
         self.metadata.snapshot()
-    }
-}
-
-impl Drop for TerminalEmulator {
-    fn drop(&mut self) {
-        self.selection_gesture.reset(&self.terminal);
     }
 }
 

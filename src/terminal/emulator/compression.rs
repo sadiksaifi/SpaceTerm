@@ -19,7 +19,6 @@ impl TerminalEmulator {
 mod tests {
     use std::fmt::Write as _;
 
-    use crate::terminal::FindQueryGeneration;
     use crate::terminal::geometry::{
         BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
     };
@@ -27,7 +26,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compression_pass_preserves_find_and_selection() {
+    fn compression_pass_preserves_selection() {
         let geometry = TerminalGeometry::from_grid(
             CellGridSize::new(120, 40),
             LogicalCellSize::new(10.0, 20.0),
@@ -36,10 +35,9 @@ mod tests {
         let mut emulator = TerminalEmulator::new(geometry).unwrap();
         let mut output = String::new();
         for index in 0..1_000 {
-            let marker = if index == 600 { " NEEDLE" } else { "" };
             writeln!(
                 output,
-                "{index:05} Repeated terminal history with enough text to fill a native page{marker}.\r"
+                "{index:05} Repeated terminal history with enough text to fill a native page.\r"
             )
             .unwrap();
         }
@@ -49,16 +47,6 @@ mod tests {
         emulator.terminal.set_selection(Some(&selection)).unwrap();
         let selected_before = emulator.selection_text().unwrap().unwrap();
         assert!(selected_before.contains("00600"));
-        emulator.set_find_query(FindQueryGeneration::test(1), "NEEDLE".to_owned());
-        let found_before = emulator
-            .snapshot()
-            .unwrap()
-            .unwrap()
-            .find
-            .as_ref()
-            .unwrap()
-            .total_matches;
-        assert_eq!(found_before, 1);
 
         let compress = |emulator: &mut TerminalEmulator| {
             for _ in 0..128 {
@@ -70,18 +58,6 @@ mod tests {
             panic!("bounded native compression pass did not complete");
         };
         assert_eq!(compress(&mut emulator), CompressionResult::Complete);
-        // Search older retained history before selection copying.
-        emulator.set_find_query(FindQueryGeneration::test(2), "NEEDLE".to_owned());
-        let found_after = emulator
-            .snapshot()
-            .unwrap()
-            .unwrap()
-            .find
-            .as_ref()
-            .unwrap()
-            .total_matches;
-        assert_eq!(found_after, found_before);
-
         // Complete another compression pass before testing selection copying.
         assert_eq!(compress(&mut emulator), CompressionResult::Complete);
         assert_eq!(emulator.selection_text().unwrap().unwrap(), selected_before);

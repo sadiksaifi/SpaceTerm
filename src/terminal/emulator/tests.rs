@@ -57,17 +57,6 @@ fn emulator_with_terminal_name(
 }
 
 #[test]
-fn terminal_find_matches_across_soft_wraps() {
-    let mut emulator = emulator(3, 2);
-    emulator.feed(b"abcdef");
-    emulator.set_find_query(FindQueryGeneration::test(1), "cde".to_owned());
-
-    let snapshot = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
-}
-
-#[test]
 fn snapshot_preserves_full_graphemes_and_empty_cells() {
     let mut emulator = emulator(12, 2);
     let cluster = format!("e{}", "\u{301}".repeat(20));
@@ -345,250 +334,6 @@ fn accessibility_retains_edits_after_history_rows_become_active_on_resize() {
 }
 
 #[test]
-fn terminal_find_rejects_matches_across_hard_lines() {
-    let mut emulator = emulator(4, 2);
-    emulator.feed(b"abc\r\ndef");
-    emulator.set_find_query(FindQueryGeneration::test(1), "cde".to_owned());
-
-    let snapshot = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 0);
-}
-
-#[test]
-fn terminal_find_includes_primary_scrollback() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed(b"needle\r\nsecond\r\nthird");
-    emulator.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
-
-    let snapshot = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(snapshot.find.as_ref().unwrap().total_matches, 1);
-}
-
-#[test]
-fn terminal_find_highlights_the_complete_wide_grapheme() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed("🙂".as_bytes());
-    emulator.set_find_query(FindQueryGeneration::test(1), "🙂".to_owned());
-
-    let snapshot = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(
-        snapshot.find.as_ref().unwrap().visible_spans.as_ref(),
-        [crate::terminal::FindHighlightSpan {
-            row: 0,
-            start_column: 0,
-            end_column: 1,
-            current: false,
-        }]
-    );
-}
-
-#[test]
-fn terminal_find_maps_a_long_cluster_to_its_head_and_wide_match_end() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed(format!("Ae{}界", "\u{301}".repeat(20)).as_bytes());
-    emulator.set_find_query(FindQueryGeneration::test(1), "\u{301}\u{301}界".to_owned());
-
-    let snapshot = emulator.snapshot().unwrap().unwrap();
-    let found = snapshot.find.as_ref().unwrap();
-
-    assert_eq!(
-        (found.total_matches, found.visible_spans.as_ref()),
-        (
-            1,
-            &[crate::terminal::FindHighlightSpan {
-                row: 0,
-                start_column: 1,
-                end_column: 3,
-                current: false,
-            }][..]
-        )
-    );
-}
-
-#[test]
-fn terminal_find_query_only_snapshot_reuses_rows() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed(b"needle");
-    let first = emulator.snapshot().unwrap().unwrap();
-    emulator.set_find_query(FindQueryGeneration::test(1), "needle".to_owned());
-
-    let found = emulator.snapshot().unwrap().unwrap();
-
-    assert!(found.damage.search);
-    assert_eq!(found.damage.content, ContentDamageSnapshot::Clean);
-    assert!(
-        first
-            .rows
-            .iter()
-            .zip(found.rows.iter())
-            .all(|(first, second)| Arc::ptr_eq(first, second))
-    );
-}
-
-#[test]
-fn terminal_find_navigation_rejects_stale_query_generation() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed(b"needle");
-    emulator.set_find_query(FindQueryGeneration::test(2), "needle".to_owned());
-    let before = emulator.snapshot().unwrap().unwrap();
-
-    let action = emulator
-        .navigate_find(FindQueryGeneration::test(1), FindDirection::Next)
-        .unwrap();
-
-    assert!(!action.screen_changed);
-    if let Some(after) = emulator.snapshot().unwrap() {
-        assert_eq!(after.find, before.find);
-    }
-    assert!(
-        emulator
-            .navigate_find(FindQueryGeneration::test(2), FindDirection::Next)
-            .unwrap()
-            .screen_changed
-    );
-    let current = emulator.snapshot().unwrap().unwrap();
-    assert_eq!(current.find.as_ref().unwrap().current_match, Some(1));
-}
-
-#[test]
-fn terminal_find_navigation_wraps_and_marks_the_current_result() {
-    let mut emulator = emulator(12, 2);
-    emulator.feed(b"one one");
-    let generation = FindQueryGeneration::test(1);
-    emulator.set_find_query(generation, "one".to_owned());
-    let _ = emulator.snapshot().unwrap().unwrap();
-
-    let _ = emulator
-        .navigate_find(generation, FindDirection::Next)
-        .unwrap();
-    let first = emulator.snapshot().unwrap().unwrap();
-    let _ = emulator
-        .navigate_find(generation, FindDirection::Next)
-        .unwrap();
-    let second = emulator.snapshot().unwrap().unwrap();
-    let _ = emulator
-        .navigate_find(generation, FindDirection::Next)
-        .unwrap();
-    let wrapped = emulator.snapshot().unwrap().unwrap();
-
-    let previous = emulator
-        .navigate_find(generation, FindDirection::Previous)
-        .unwrap();
-    assert!(previous.screen_changed);
-    let backwards = emulator.snapshot().unwrap().unwrap();
-    for (snapshot, current, column) in [
-        (&first, 1, 0),
-        (&second, 2, 4),
-        (&wrapped, 1, 0),
-        (&backwards, 2, 4),
-    ] {
-        let find = snapshot.find.as_ref().unwrap();
-        let spans = find.visible_spans.iter();
-        let current_spans = spans
-            .filter(|span| span.current)
-            .map(|span| (span.row, span.start_column, span.end_column));
-        assert_eq!(find.current_match, Some(current));
-        assert_eq!(find.visible_spans.len(), 2);
-        assert_eq!(current_spans.collect::<Vec<_>>(), [(0, column, column + 2)]);
-    }
-}
-
-#[test]
-fn terminal_find_initial_navigation_starts_in_the_current_viewport() {
-    let mut emulator = emulator(16, 2);
-    emulator.feed(b"needle old\r\nmiddle\r\nneedle new");
-    let generation = FindQueryGeneration::test(1);
-    emulator.set_find_query(generation, "needle".to_owned());
-    let before = emulator.snapshot().unwrap().unwrap();
-    assert!(before.scrollbar.offset_rows > 0);
-
-    let _ = emulator
-        .navigate_find(generation, FindDirection::Next)
-        .unwrap();
-    let selected = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(selected.find.as_ref().unwrap().current_match, Some(2));
-    assert_eq!(selected.scrollbar.offset_rows, before.scrollbar.offset_rows);
-}
-
-#[test]
-fn terminal_find_navigation_scrolls_an_offscreen_match_completely_into_view() {
-    let mut emulator = emulator(16, 2);
-    emulator.feed(b"needle\r\nmiddle\r\nbottom");
-    let generation = FindQueryGeneration::test(1);
-    emulator.set_find_query(generation, "needle".to_owned());
-    let _ = emulator.snapshot().unwrap().unwrap();
-
-    let _ = emulator
-        .navigate_find(generation, FindDirection::Next)
-        .unwrap();
-    let selected = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(selected.scrollbar.offset_rows, 0);
-    assert_eq!(selected.find.as_ref().unwrap().current_match, Some(1));
-}
-
-#[test]
-fn terminal_find_preserves_current_result_across_output_and_reflow() {
-    let mut emulator = emulator(8, 2);
-    let generation = FindQueryGeneration::test(1);
-    emulator.feed(b"needle");
-    emulator.set_find_query(generation, "needle".to_owned());
-    let _ = emulator.snapshot().unwrap().unwrap();
-    let _ = emulator
-        .navigate_find(generation, FindDirection::Next)
-        .unwrap();
-    let _ = emulator.snapshot().unwrap().unwrap();
-
-    emulator.feed(b"\r\nmore");
-    let after_output = emulator.snapshot().unwrap().unwrap();
-    emulator.resize(geometry(4, 3, 10.0, 20.0)).unwrap();
-    let after_reflow = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(after_output.find.as_ref().unwrap().current_match, Some(1));
-    assert_eq!(after_reflow.find.as_ref().unwrap().current_match, Some(1));
-}
-
-#[test]
-fn terminal_find_drops_current_result_when_scrollback_prunes_it() {
-    let mut emulator = emulator(8, 2);
-    let generation = FindQueryGeneration::test(1);
-    emulator.feed(b"needle");
-    emulator.set_find_query(generation, "needle".to_owned());
-    let _ = emulator.snapshot().unwrap().unwrap();
-    let _ = emulator
-        .navigate_find(generation, FindDirection::Next)
-        .unwrap();
-    let _ = emulator.snapshot().unwrap().unwrap();
-
-    emulator.feed(format!("\r\n{}", "x\r\n".repeat(MAX_SCROLLBACK_ROWS * 2)).as_bytes());
-    let pruned = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(pruned.find.as_ref().unwrap().total_matches, 0);
-    assert_eq!(pruned.find.as_ref().unwrap().current_match, None);
-}
-
-#[test]
-fn terminal_find_active_screen_scope_restores_primary_results() {
-    let mut emulator = emulator(12, 2);
-    let generation = FindQueryGeneration::test(1);
-    emulator.feed(b"primary");
-    emulator.set_find_query(generation, "primary".to_owned());
-    let primary = emulator.snapshot().unwrap().unwrap();
-    emulator.feed(b"\x1b[?1049halternate");
-    let alternate = emulator.snapshot().unwrap().unwrap();
-    emulator.feed(b"\x1b[?1049l");
-    let restored = emulator.snapshot().unwrap().unwrap();
-
-    assert_eq!(primary.find.as_ref().unwrap().total_matches, 1);
-    assert_eq!(alternate.find.as_ref().unwrap().total_matches, 0);
-    assert_eq!(restored.find.as_ref().unwrap().total_matches, 1);
-}
-
-#[test]
 fn pixel_mouse_coordinates_should_share_fractional_backing_geometry() {
     let geometry = TerminalGeometry::from_grid(
         CellGridSize::new(10, 2),
@@ -859,12 +604,6 @@ fn current_pointer(emulator: &TerminalEmulator, mut input: PointerInput) -> Poin
     input.generation = emulator.presentation_generation;
     input
 }
-
-fn current_wheel(emulator: &TerminalEmulator, mut input: WheelInput) -> WheelInput {
-    input.generation = emulator.presentation_generation;
-    input
-}
-
 fn key(physical_key: PhysicalKey, modifiers: InputModifiers) -> KeyInput {
     KeyInput {
         action: KeyAction::Press,
@@ -899,28 +638,12 @@ fn text_key(
     }
 }
 
-fn select_first_five(emulator: &mut TerminalEmulator, shift: bool) {
-    emulator
-        .pointer(pointer(
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            2.0,
-            10.0,
-            shift,
-        ))
-        .unwrap();
-    emulator
-        .pointer(pointer(PointerPhase::Motion, None, 48.0, 10.0, false))
-        .unwrap();
-    emulator
-        .pointer(pointer(
-            PointerPhase::Release,
-            Some(PointerButton::Left),
-            48.0,
-            10.0,
-            false,
-        ))
-        .unwrap();
+fn select_cells(emulator: &mut TerminalEmulator, start: (usize, u16), end: (usize, u16)) {
+    assert!(emulator.select_visible(start, end));
+}
+
+fn select_first_five(emulator: &mut TerminalEmulator) {
+    select_cells(emulator, (0, 0), (0, 4));
     assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
 }
 
@@ -941,20 +664,24 @@ fn all_grid_rows(emulator: &mut TerminalEmulator) -> Vec<String> {
     while let Some(deadline) = emulator.synchronized_output_deadline() {
         emulator.expire_synchronized_output(deadline).unwrap();
     }
-    emulator.scroll_to(0);
-    let first = emulator.snapshot().unwrap().unwrap();
-    let visible = first.rows.len();
-    let last_offset = first.scrollbar.total_rows.saturating_sub(visible as u64);
-    let mut rows = (0..visible)
-        .map(|row| row_text(&first, row))
-        .collect::<Vec<_>>();
-
-    for offset in 1..=last_offset {
-        emulator.scroll_to(offset);
-        let snapshot = emulator.snapshot().unwrap().unwrap();
-        rows.push(row_text(&snapshot, visible - 1));
+    let screen = emulator.snapshot().unwrap().unwrap();
+    let history = screen.history;
+    let mut rows = Vec::new();
+    let mut start = history.oldest;
+    while start < history.total {
+        let count = u16::try_from(history.total - start).unwrap_or(u16::MAX);
+        let page = emulator
+            .scrollback_page(history.epoch, start, count)
+            .unwrap()
+            .unwrap();
+        rows.extend(page.rows.iter().map(|(row, _)| {
+            row.iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+        }));
+        start = page.start + page.rows.len() as u64;
     }
-
+    rows.extend((0..screen.rows.len()).map(|row| row_text(&screen, row)));
     rows
 }
 
@@ -2687,33 +2414,7 @@ fn grid_resize_preserves_selection_anchors_across_reflow() {
     let mut emulator = emulator(12, 3);
     emulator.feed(b"hello world");
     let _ = emulator.snapshot().unwrap().unwrap();
-    let press = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            2.0,
-            10.0,
-            false,
-        ),
-    );
-    emulator.pointer(press).unwrap();
-    let drag = current_pointer(
-        &emulator,
-        pointer(PointerPhase::Motion, None, 48.0, 10.0, false),
-    );
-    emulator.pointer(drag).unwrap();
-    let release = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Release,
-            Some(PointerButton::Left),
-            48.0,
-            10.0,
-            false,
-        ),
-    );
-    emulator.pointer(release).unwrap();
+    select_cells(&mut emulator, (0, 0), (0, 4));
     assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
 
     emulator.resize(geometry(6, 3, 8.0, 18.0)).unwrap();
@@ -2728,36 +2429,6 @@ fn grid_resize_preserves_selection_anchors_across_reflow() {
             .take(5)
             .all(|cell| cell.selected)
     );
-}
-
-#[test]
-fn selection_stays_anchored_when_output_moves_scrollback_pages() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
-    _ = emulator.snapshot().unwrap().unwrap();
-    emulator.scroll_to(0);
-    let top = emulator.snapshot().unwrap().unwrap();
-    let input = |phase, x| PointerInput {
-        generation: top.generation,
-        phase,
-        button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
-        position: SurfacePosition { x, y: 1.0 },
-        modifiers: InputModifiers::default(),
-        shift_selection: ShiftSelectionPolicy::default(),
-    };
-    _ = emulator.pointer(input(PointerPhase::Press, 1.0)).unwrap();
-    _ = emulator.pointer(input(PointerPhase::Motion, 28.0)).unwrap();
-    _ = emulator
-        .pointer(input(PointerPhase::Release, 28.0))
-        .unwrap();
-    assert_eq!(emulator.selection_text().unwrap().as_deref(), Some("one"));
-
-    emulator.feed(b"\r\nfive");
-    let moved = emulator.snapshot().unwrap().unwrap();
-
-    assert!(row_text(&moved, 0).starts_with("one"));
-    assert!(moved.rows[0][..3].iter().all(|cell| cell.selected));
-    assert_eq!(emulator.selection_text().unwrap().as_deref(), Some("one"));
 }
 
 #[test]
@@ -2832,11 +2503,8 @@ fn alternate_screen_transition_reports_only_affected_metadata_and_content() {
 fn alternate_screen_exit_restores_the_primary_viewport_and_cached_rows() {
     let mut emulator = emulator(10, 2);
     emulator.feed(b"one\r\ntwo\r\nthree");
-    let _ = emulator.snapshot().unwrap().unwrap();
-    let input = current_wheel(&emulator, wheel(1, false));
-    let _ = emulator.wheel(input).unwrap();
     let primary = emulator.snapshot().unwrap().unwrap();
-    assert!(row_text(&primary, 0).starts_with("one"));
+    assert!(row_text(&primary, 0).starts_with("two"));
 
     emulator.feed(b"\x1b[?1049halternate");
     let alternate = emulator.snapshot().unwrap().unwrap();
@@ -2850,7 +2518,7 @@ fn alternate_screen_exit_restores_the_primary_viewport_and_cached_rows() {
     let restored = emulator.snapshot().unwrap().unwrap();
     assert_eq!(restored.active_screen, ActiveScreenSnapshot::Primary);
     assert_eq!(restored.viewport, primary.viewport);
-    assert!(row_text(&restored, 0).starts_with("one"));
+    assert!(row_text(&restored, 0).starts_with("two"));
     assert!(
         primary
             .rows
@@ -3637,36 +3305,7 @@ fn selection_is_rendered_and_formats_as_plain_text() {
     _ = emulator.snapshot().unwrap();
     assert_eq!(emulator.selection_text().unwrap(), None);
 
-    emulator
-        .pointer(current_pointer(
-            &emulator,
-            pointer(
-                PointerPhase::Press,
-                Some(PointerButton::Left),
-                2.0,
-                10.0,
-                false,
-            ),
-        ))
-        .unwrap();
-    emulator
-        .pointer(current_pointer(
-            &emulator,
-            pointer(PointerPhase::Motion, None, 48.0, 10.0, false),
-        ))
-        .unwrap();
-    emulator
-        .pointer(current_pointer(
-            &emulator,
-            pointer(
-                PointerPhase::Release,
-                Some(PointerButton::Left),
-                48.0,
-                10.0,
-                false,
-            ),
-        ))
-        .unwrap();
+    select_cells(&mut emulator, (0, 0), (0, 4));
 
     let snapshot = emulator.snapshot().unwrap().unwrap();
     assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
@@ -3675,57 +3314,10 @@ fn selection_is_rendered_and_formats_as_plain_text() {
 }
 
 #[test]
-fn snapshot_preserves_selection_presence_when_selected_content_is_offscreen() {
-    let mut emulator = emulator(10, 2);
-    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
-    let presented = emulator.snapshot().unwrap().unwrap();
-
-    let mut pointer = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            2.0,
-            21.0,
-            false,
-        ),
-    );
-    emulator.pointer(pointer).unwrap();
-    pointer.phase = PointerPhase::Motion;
-    pointer.button = None;
-    pointer.position.x = 48.0;
-    emulator.pointer(pointer).unwrap();
-    pointer.phase = PointerPhase::Release;
-    pointer.button = Some(PointerButton::Left);
-    emulator.pointer(pointer).unwrap();
-    let selected = emulator.snapshot().unwrap().unwrap();
-    assert!(selected.selection_present);
-
-    let action = emulator.scroll_to_at(0, selected.generation);
-    assert!(action.screen_changed);
-    let scrolled = emulator.snapshot().unwrap().unwrap();
-
-    assert!(scrolled.selection_present);
-    assert!(
-        scrolled
-            .rows
-            .iter()
-            .flat_map(|row| row.iter())
-            .all(|cell| !cell.selected)
-    );
-    assert!(scrolled.generation > presented.generation);
-
-    emulator.clear_selection().unwrap();
-    let cleared = emulator.snapshot().unwrap().unwrap();
-    assert!(!cleared.selection_present);
-    assert!(cleared.damage.selection_presence);
-}
-
-#[test]
 fn snapshot_selection_presence_reflects_screen_switch_clearing() {
     let mut emulator = emulator(12, 2);
     emulator.feed(b"hello world");
-    select_first_five(&mut emulator, false);
+    select_first_five(&mut emulator);
 
     let primary = emulator.snapshot().unwrap().unwrap();
     assert_eq!(primary.active_screen, ActiveScreenSnapshot::Primary);
@@ -3802,83 +3394,10 @@ fn server_accessibility_selection_survives_pending_changes_to_other_rows() {
 }
 
 #[test]
-fn accessibility_selection_requires_the_current_semantic_snapshot() {
-    let mut emulator = emulator(12, 3);
-    emulator.feed(b"hello");
-    let (model, more) = emulator.accessibility_snapshot(true).unwrap();
-    assert!(more);
-    assert!(model.is_none());
-    let (model, more) = emulator.accessibility_snapshot(false).unwrap();
-    assert!(!more);
-    let model = model.unwrap();
-    _ = emulator.snapshot().unwrap();
-    let request = model.selection_request(1..4).unwrap();
-
-    emulator
-        .set_accessibility_selection(AccessibilitySelectionRequest {
-            generation: PresentationGeneration::default(),
-            ..request.clone()
-        })
-        .unwrap();
-    assert_eq!(emulator.selection_text().unwrap(), None);
-
-    emulator.set_accessibility_selection(request).unwrap();
-    assert_eq!(emulator.selection_text().unwrap(), Some("ell".to_owned()));
-}
-
-#[test]
-fn accessibility_selection_rejects_synchronized_output_and_resets_pointer_invalidation() {
-    let mut emulator = emulator(12, 3);
-    emulator.feed(b"hello");
-    let (model, more) = emulator.accessibility_snapshot(true).unwrap();
-    assert!(more);
-    assert!(model.is_none());
-    let (model, more) = emulator.accessibility_snapshot(false).unwrap();
-    assert!(!more);
-    let model = model.unwrap();
-    _ = emulator.snapshot().unwrap();
-    let request = model.selection_request(1..4).unwrap();
-
-    emulator.feed(b"\x1b[?2026hhidden");
-    let action = emulator
-        .set_accessibility_selection(request.clone())
-        .unwrap();
-    assert!(action.bytes.is_empty());
-    assert!(!action.screen_changed);
-    assert_eq!(emulator.selection_text().unwrap(), None);
-
-    emulator.feed(b"\x1b[?2026l");
-    let (model, more) = emulator.accessibility_snapshot(true).unwrap();
-    assert!(!more);
-    _ = model.unwrap();
-    _ = emulator.snapshot().unwrap();
-    let press = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            1.0,
-            1.0,
-            false,
-        ),
-    );
-    emulator.pointer(press).unwrap();
-    emulator.feed(b"!");
-    assert!(emulator.pointer_mapping_invalidated);
-    _ = emulator.snapshot().unwrap();
-    let model = drain_accessibility(&mut emulator);
-    let request = model.selection_request(1..4).unwrap();
-    emulator.set_accessibility_selection(request).unwrap();
-
-    assert!(!emulator.pointer_mapping_invalidated);
-    assert_eq!(emulator.selection_text().unwrap(), Some("ell".to_owned()));
-}
-
-#[test]
 fn modifier_key_transitions_should_preserve_selection_for_application_shortcuts() {
     let mut emulator = emulator(12, 3);
     emulator.feed(b"hello world");
-    select_first_five(&mut emulator, false);
+    select_first_five(&mut emulator);
     let mut meta = key(
         PhysicalKey::MetaLeft,
         InputModifiers {
@@ -3899,7 +3418,7 @@ fn modifier_key_transitions_should_preserve_selection_for_application_shortcuts(
 fn non_modifier_key_release_preserves_selection() {
     let mut emulator = emulator(12, 3);
     emulator.feed(b"hello world");
-    select_first_five(&mut emulator, false);
+    select_first_five(&mut emulator);
     let mut released = key(PhysicalKey::A, InputModifiers::default());
     released.action = KeyAction::Release;
 
@@ -3957,390 +3476,7 @@ fn selection_copy_wide_cells_and_trailing_space_policy_are_deterministic() {
 }
 
 #[test]
-fn repeat_clicks_select_cells_words_and_lines_with_injected_time() {
-    let mut emulator = emulator(12, 2);
-    emulator.feed(b"alpha beta");
-
-    for (time, expected) in [
-        (Duration::ZERO, None),
-        (Duration::from_millis(100), Some("beta")),
-        (Duration::from_millis(200), Some("alpha beta")),
-    ] {
-        emulator.gesture_clock = GestureClock::Manual(time);
-        _ = emulator
-            .pointer(pointer(
-                PointerPhase::Press,
-                Some(PointerButton::Left),
-                61.0,
-                1.0,
-                false,
-            ))
-            .unwrap();
-        _ = emulator
-            .pointer(pointer(
-                PointerPhase::Release,
-                Some(PointerButton::Left),
-                61.0,
-                1.0,
-                false,
-            ))
-            .unwrap();
-
-        assert_eq!(emulator.selection_text().unwrap().as_deref(), expected);
-    }
-}
-
-#[test]
-fn wide_tail_and_soft_wrapped_word_select_complete_graphemes() {
-    for x in [11.0, 21.0] {
-        let mut wide = emulator(8, 2);
-        wide.feed("A😀B".as_bytes());
-        for time in [Duration::ZERO, Duration::from_millis(100)] {
-            wide.gesture_clock = GestureClock::Manual(time);
-            _ = wide
-                .pointer(pointer(
-                    PointerPhase::Press,
-                    Some(PointerButton::Left),
-                    x,
-                    1.0,
-                    false,
-                ))
-                .unwrap();
-            _ = wide
-                .pointer(pointer(
-                    PointerPhase::Release,
-                    Some(PointerButton::Left),
-                    x,
-                    1.0,
-                    false,
-                ))
-                .unwrap();
-        }
-        assert_eq!(wide.selection_text().unwrap().as_deref(), Some("A😀"));
-    }
-
-    let mut wrapped = emulator(5, 2);
-    wrapped.feed(b"abcdefgh");
-    for time in [Duration::ZERO, Duration::from_millis(100)] {
-        wrapped.gesture_clock = GestureClock::Manual(time);
-        _ = wrapped
-            .pointer(pointer(
-                PointerPhase::Press,
-                Some(PointerButton::Left),
-                11.0,
-                21.0,
-                false,
-            ))
-            .unwrap();
-        _ = wrapped
-            .pointer(pointer(
-                PointerPhase::Release,
-                Some(PointerButton::Left),
-                11.0,
-                21.0,
-                false,
-            ))
-            .unwrap();
-    }
-    assert_eq!(
-        wrapped.selection_text().unwrap().as_deref(),
-        Some("abcdefgh")
-    );
-}
-
-#[test]
-fn selection_autoscroll_uses_a_steady_cadence_at_both_edges_and_outside() {
-    for y in [0.5, 39.5, -200.0, 240.0] {
-        let mut emulator = emulator(8, 2);
-        emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
-        _ = emulator.snapshot().unwrap().unwrap();
-        let press = current_pointer(
-            &emulator,
-            pointer(
-                PointerPhase::Press,
-                Some(PointerButton::Left),
-                1.0,
-                21.0,
-                false,
-            ),
-        );
-        _ = emulator.pointer(press).unwrap();
-        let drag = current_pointer(
-            &emulator,
-            pointer(PointerPhase::Motion, None, 21.0, y, false),
-        );
-        _ = emulator.pointer(drag).unwrap();
-        assert_eq!(
-            emulator.selection_autoscroll_interval().unwrap(),
-            Some(Duration::from_millis(15)),
-            "pointer y={y}"
-        );
-        let drag = current_pointer(
-            &emulator,
-            pointer(PointerPhase::Motion, None, 21.0, 20.0, false),
-        );
-        _ = emulator.pointer(drag).unwrap();
-        assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
-    }
-}
-
-#[test]
-fn fitted_surface_bottom_edge_keeps_selection_autoscroll_active() {
-    let geometry = TerminalGeometry::from_viewport(
-        LogicalSize::new(80.0, 45.0),
-        LogicalCellSize::new(10.0, 20.0),
-        BackingScale::ONE,
-        CellGridSize::new(2, 2),
-    );
-    let mut emulator = TerminalEmulator::new(geometry).unwrap();
-    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour");
-    _ = emulator.snapshot().unwrap().unwrap();
-    let press = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            1.0,
-            22.5,
-            false,
-        ),
-    );
-    _ = emulator.pointer(press).unwrap();
-    let drag = current_pointer(
-        &emulator,
-        pointer(PointerPhase::Motion, None, 1.0, 44.5, false),
-    );
-
-    _ = emulator.pointer(drag).unwrap();
-
-    assert_eq!(
-        emulator.selection_autoscroll_interval().unwrap(),
-        Some(SELECTION_AUTOSCROLL_INTERVAL)
-    );
-}
-
-#[test]
-fn autoscroll_ticks_move_one_row_across_presentations_until_release() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
-    _ = emulator.snapshot().unwrap().unwrap();
-    let press = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            1.0,
-            21.0,
-            false,
-        ),
-    );
-    assert!(emulator.pointer(press).unwrap().screen_changed);
-    let drag = current_pointer(
-        &emulator,
-        pointer(PointerPhase::Motion, None, 1.0, -41.0, false),
-    );
-    assert!(emulator.pointer(drag).unwrap().screen_changed);
-    let dragged = emulator.snapshot().unwrap().unwrap();
-    assert_eq!(
-        emulator.selection_autoscroll_interval().unwrap(),
-        Some(SELECTION_AUTOSCROLL_INTERVAL)
-    );
-
-    for rows in 1..=3 {
-        let action = emulator.selection_autoscroll_tick().unwrap();
-        assert!(action.screen_changed);
-        let scrolled = emulator.snapshot().unwrap().unwrap();
-        assert_eq!(
-            scrolled.scrollbar.offset_rows,
-            dragged.scrollbar.offset_rows - rows
-        );
-    }
-    let release = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Release,
-            Some(PointerButton::Left),
-            1.0,
-            -41.0,
-            false,
-        ),
-    );
-    assert!(emulator.pointer(release).unwrap().selection_completed);
-    assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
-    assert!(!emulator.selection_autoscroll_tick().unwrap().screen_changed);
-}
-
-#[test]
-fn autoscroll_resolves_the_selection_column_against_the_newly_visible_row() {
-    for (old_edge, new_edge) in [("界old", "abnew"), ("abold", "界new")] {
-        let mut ticked = emulator(10, 2);
-        let mut dragged = emulator(10, 2);
-        for emulator in [&mut ticked, &mut dragged] {
-            emulator.feed(format!("head\r\n{new_edge}\r\n{old_edge}\r\nanchor").as_bytes());
-            _ = emulator.snapshot().unwrap().unwrap();
-            let press = current_pointer(
-                emulator,
-                pointer(
-                    PointerPhase::Press,
-                    Some(PointerButton::Left),
-                    41.0,
-                    21.0,
-                    false,
-                ),
-            );
-            _ = emulator.pointer(press).unwrap();
-            let drag = current_pointer(
-                emulator,
-                pointer(PointerPhase::Motion, None, 11.0, -1.0, false),
-            );
-            _ = emulator.pointer(drag).unwrap();
-        }
-        let before = dragged.snapshot().unwrap().unwrap();
-        _ = dragged.scroll_to(before.scrollbar.offset_rows - 1);
-        let drag = current_pointer(
-            &dragged,
-            pointer(PointerPhase::Motion, None, 11.0, -1.0, false),
-        );
-        _ = dragged.pointer(drag).unwrap();
-        _ = ticked.selection_autoscroll_tick().unwrap();
-        assert_eq!(
-            ticked.selection_text().unwrap(),
-            dragged.selection_text().unwrap(),
-            "old edge={old_edge}, new edge={new_edge}"
-        );
-        assert_eq!(
-            ticked.snapshot().unwrap().unwrap().rows,
-            dragged.snapshot().unwrap().unwrap().rows,
-            "painted selection must match the copied range"
-        );
-    }
-}
-
-#[test]
-fn scrollback_wheel_changes_visible_rows() {
-    let mut emulator = emulator(10, 2);
-    let _ = emulator.snapshot().unwrap();
-    emulator.feed(b"one\r\ntwo\r\nthree");
-    let bottom = emulator.snapshot().unwrap().unwrap();
-    assert!(row_text(&bottom, 0).starts_with("two"));
-    assert!(row_text(&bottom, 1).starts_with("three"));
-    assert!(bottom.damage.scrollbar);
-    assert!(!bottom.damage.title);
-    assert!(!bottom.damage.active_screen);
-    assert!(!bottom.damage.resize);
-    assert_eq!(
-        bottom
-            .scrollbar
-            .offset_rows
-            .saturating_add(bottom.scrollbar.visible_rows),
-        bottom.scrollbar.total_rows
-    );
-
-    let input = current_wheel(&emulator, wheel(1, false));
-    let action = emulator.wheel(input).unwrap();
-    assert!(action.bytes.is_empty());
-    assert!(action.screen_changed);
-
-    let scrolled = emulator.snapshot().unwrap().unwrap();
-    assert!(row_text(&scrolled, 0).starts_with("one"));
-    assert!(row_text(&scrolled, 1).starts_with("two"));
-    assert!(
-        scrolled
-            .scrollbar
-            .offset_rows
-            .saturating_add(scrolled.scrollbar.visible_rows)
-            < scrolled.scrollbar.total_rows
-    );
-    assert!(scrolled.scrollbar.offset_rows < bottom.scrollbar.offset_rows);
-    assert!(scrolled.damage.viewport);
-    assert!(!scrolled.damage.scrollbar);
-    assert!(!scrolled.damage.title);
-    assert_eq!(scrolled.cursor.position, None);
-
-    let action = emulator.scroll_to(bottom.scrollbar.offset_rows);
-    assert!(action.bytes.is_empty());
-    assert!(action.screen_changed);
-    let restored = emulator.snapshot().unwrap().unwrap();
-    assert!(row_text(&restored, 0).starts_with("two"));
-    assert_eq!(restored.cursor.position.unwrap().row, 1);
-    assert!(row_text(&restored, 1).starts_with("three"));
-}
-
-#[test]
-fn scroll_commands_page_through_scrollback_without_writing_to_the_pty() {
-    let mut emulator = emulator(10, 3);
-    for line in 0..12 {
-        emulator.feed(format!("line {line}\r\n").as_bytes());
-    }
-    // A snapshot is published only when the screen changed, so an unmoved viewport keeps the last.
-    let mut latest = emulator.snapshot().unwrap().unwrap();
-    let mut offset = |emulator: &mut TerminalEmulator| {
-        if let Some(snapshot) = emulator.snapshot().unwrap() {
-            latest = snapshot;
-        }
-        latest.scrollbar.offset_rows
-    };
-    let bottom = offset(&mut emulator);
-    assert_eq!(bottom, 13 - 3);
-
-    let mut offsets = Vec::new();
-    for movement in [
-        ScrollbackMovement::PageUp,
-        ScrollbackMovement::PageUp,
-        ScrollbackMovement::Top,
-        ScrollbackMovement::PageUp,
-        ScrollbackMovement::PageDown,
-        ScrollbackMovement::Bottom,
-        ScrollbackMovement::PageDown,
-    ] {
-        let action = emulator.scroll_scrollback(movement);
-        assert!(action.bytes.is_empty(), "{movement:?}");
-        assert!(action.screen_changed, "{movement:?}");
-        offsets.push(offset(&mut emulator));
-    }
-
-    assert_eq!(
-        offsets,
-        [bottom - 3, bottom - 6, 0, 0, 3, bottom, bottom],
-        "a page is the visible rows, and neither end wraps"
-    );
-}
-
-#[test]
-fn scroll_commands_leave_the_alternate_screen_and_its_program_alone() {
-    // With alternate-scroll mode the wheel sends arrow keys here; a Scroll Command never writes
-    // to the PTY, and the alternate screen has no Scrollback to move through.
-    let mut emulator = emulator(10, 3);
-    for line in 0..12 {
-        emulator.feed(format!("line {line}\r\n").as_bytes());
-    }
-    emulator.feed(b"\x1b[?1049h\x1b[?1007h\x1b[Halt");
-    let before = emulator.snapshot().unwrap().unwrap();
-    assert!(row_text(&before, 0).starts_with("alt"));
-
-    for movement in [
-        ScrollbackMovement::PageUp,
-        ScrollbackMovement::Top,
-        ScrollbackMovement::PageDown,
-        ScrollbackMovement::Bottom,
-    ] {
-        let action = emulator.scroll_scrollback(movement);
-        assert!(action.bytes.is_empty(), "{movement:?}");
-        let after = emulator
-            .snapshot()
-            .unwrap()
-            .unwrap_or_else(|| Arc::clone(&before));
-        assert_eq!(after.scrollbar, before.scrollbar, "{movement:?}");
-        assert_eq!(after.rows, before.rows, "{movement:?}");
-        assert_eq!(
-            emulator.terminal.scrollbar().unwrap().offset,
-            before.scrollbar.offset_rows
-        );
-    }
-}
-
-#[test]
-fn new_output_follows_the_bottom_only_from_a_following_viewport() {
+fn new_output_follows_the_bottom() {
     let mut following = emulator(10, 2);
     following.feed(b"one\r\ntwo\r\nthree");
     let _ = following.snapshot().unwrap().unwrap();
@@ -4351,21 +3487,6 @@ fn new_output_follows_the_bottom_only_from_a_following_viewport() {
     assert_eq!(
         advanced.scrollbar.offset_rows + advanced.scrollbar.visible_rows,
         advanced.scrollbar.total_rows
-    );
-
-    let mut anchored = emulator(10, 2);
-    anchored.feed(b"one\r\ntwo\r\nthree");
-    let _ = anchored.snapshot().unwrap().unwrap();
-    let input = current_wheel(&anchored, wheel(1, false));
-    anchored.wheel(input).unwrap();
-    let before = anchored.snapshot().unwrap().unwrap();
-    assert!(row_text(&before, 0).starts_with("one"));
-    anchored.feed(b"\r\nfour");
-    let after = anchored.snapshot().unwrap().unwrap();
-    assert!(row_text(&after, 0).starts_with("one"));
-    assert!(row_text(&after, 1).starts_with("two"));
-    assert!(
-        after.scrollbar.offset_rows + after.scrollbar.visible_rows < after.scrollbar.total_rows
     );
 }
 
@@ -4459,20 +3580,6 @@ fn primary_scrollback_is_bounded_to_the_configured_history() {
 }
 
 #[test]
-fn scrollback_rejects_a_viewport_request_from_an_older_presentation() {
-    let mut emulator = emulator(10, 2);
-    emulator.feed(b"one\r\ntwo\r\nthree");
-    let stale = emulator.snapshot().unwrap().unwrap();
-    emulator.resize(geometry(8, 2, 8.0, 18.0)).unwrap();
-    let current = emulator.snapshot().unwrap().unwrap();
-    assert!(current.generation > stale.generation);
-
-    let action = emulator.scroll_to_at(0, stale.generation);
-    assert!(!action.screen_changed);
-    assert!(emulator.snapshot().unwrap().is_none());
-}
-
-#[test]
 fn selection_rejects_coordinates_from_an_older_presentation() {
     let mut emulator = emulator(10, 2);
     emulator.feed(b"hello world");
@@ -4493,73 +3600,6 @@ fn selection_rejects_coordinates_from_an_older_presentation() {
 
     assert!(!action.screen_changed);
     assert_eq!(emulator.selection_text().unwrap(), None);
-}
-
-#[test]
-fn selection_owned_presentations_do_not_stale_the_active_gesture() {
-    let mut emulator = emulator(12, 2);
-    emulator.feed(b"hello world");
-    let presented = emulator.snapshot().unwrap().unwrap();
-    let press = PointerInput {
-        generation: presented.generation,
-        phase: PointerPhase::Press,
-        button: Some(PointerButton::Left),
-        position: SurfacePosition { x: 1.0, y: 1.0 },
-        modifiers: InputModifiers::default(),
-        shift_selection: ShiftSelectionPolicy::default(),
-    };
-    _ = emulator.pointer(press).unwrap();
-    let mut drag = press;
-    drag.phase = PointerPhase::Motion;
-    drag.button = None;
-    drag.position.x = 41.0;
-    _ = emulator.pointer(drag).unwrap();
-    let selected = emulator.snapshot().unwrap().unwrap();
-    assert!(selected.generation > presented.generation);
-
-    drag.position.x = 108.0;
-    let extended = emulator.pointer(drag).unwrap();
-
-    assert!(extended.screen_changed);
-    assert_eq!(
-        emulator.selection_text().unwrap().as_deref(),
-        Some("hello world")
-    );
-}
-
-#[test]
-fn selection_accepts_an_intermediate_selection_owned_presentation() {
-    let mut emulator = emulator(12, 2);
-    emulator.feed(b"hello world");
-    let presented = emulator.snapshot().unwrap().unwrap();
-    let mut pointer = PointerInput {
-        generation: presented.generation,
-        phase: PointerPhase::Press,
-        button: Some(PointerButton::Left),
-        position: SurfacePosition { x: 1.0, y: 1.0 },
-        modifiers: InputModifiers::default(),
-        shift_selection: ShiftSelectionPolicy::default(),
-    };
-    _ = emulator.pointer(pointer).unwrap();
-
-    pointer.phase = PointerPhase::Motion;
-    pointer.button = None;
-    pointer.position.x = 25.0;
-    _ = emulator.pointer(pointer).unwrap();
-    let intermediate = emulator.snapshot().unwrap().unwrap();
-
-    pointer.position.x = 41.0;
-    _ = emulator.pointer(pointer).unwrap();
-    _ = emulator.snapshot().unwrap().unwrap();
-
-    pointer.generation = intermediate.generation;
-    pointer.position.x = 108.0;
-    _ = emulator.pointer(pointer).unwrap();
-
-    assert_eq!(
-        emulator.selection_text().unwrap().as_deref(),
-        Some("hello world")
-    );
 }
 
 #[test]
@@ -4587,34 +3627,6 @@ fn application_mouse_release_survives_output_generation_change() {
         .unwrap();
 
     assert_eq!(release.bytes, b"\x1b[<0;1;1m");
-}
-
-#[test]
-fn output_mapping_changes_reject_active_gesture_coordinates() {
-    let mut emulator = emulator(8, 2);
-    emulator.feed(b"one\r\ntwo\r\nthree");
-    let before = emulator.snapshot().unwrap().unwrap();
-    let input = |phase, x| PointerInput {
-        generation: before.generation,
-        phase,
-        button: (phase != PointerPhase::Motion).then_some(PointerButton::Left),
-        position: SurfacePosition { x, y: 21.0 },
-        modifiers: InputModifiers::default(),
-        shift_selection: ShiftSelectionPolicy::default(),
-    };
-    _ = emulator.pointer(input(PointerPhase::Press, 1.0)).unwrap();
-    _ = emulator.pointer(input(PointerPhase::Motion, 28.0)).unwrap();
-    emulator.feed(b"\r\nfour");
-    let after = emulator.snapshot().unwrap().unwrap();
-    assert!(after.generation > before.generation);
-
-    let selected_before = emulator.selection_text().unwrap();
-    for phase in [PointerPhase::Motion, PointerPhase::Release] {
-        let stale = emulator.pointer(input(phase, 68.0)).unwrap();
-        assert!(!stale.screen_changed);
-        assert_eq!(emulator.selection_text().unwrap(), selected_before);
-        assert_eq!(emulator.selection_autoscroll_interval().unwrap(), None);
-    }
 }
 
 #[test]
@@ -4857,7 +3869,7 @@ fn focus_encoding_obeys_dec_1004_mode() {
 }
 
 #[test]
-fn mouse_tracking_reports_bytes_but_shift_overrides_with_selection() {
+fn mouse_tracking_reports_bytes_but_shift_override_reaches_no_program() {
     let mut emulator = emulator(12, 3);
     emulator.feed(b"hello world\x1b[?1000h\x1b[?1006h");
     _ = emulator.snapshot().unwrap();
@@ -4886,7 +3898,6 @@ fn mouse_tracking_reports_bytes_but_shift_overrides_with_selection() {
     );
     let released = emulator.pointer(input).unwrap();
     assert_eq!(released.bytes, b"\x1b[<4;1;1m");
-    assert!(!released.selection_completed);
 
     let input = current_pointer(
         &emulator,
@@ -4898,32 +3909,9 @@ fn mouse_tracking_reports_bytes_but_shift_overrides_with_selection() {
             true,
         ),
     );
-    let selected_press = emulator.pointer(input).unwrap();
-    let input = current_pointer(
-        &emulator,
-        pointer(PointerPhase::Motion, None, 48.0, 10.0, false),
-    );
-    let selected_drag = emulator.pointer(input).unwrap();
-    assert!(selected_press.bytes.is_empty());
-    assert!(selected_drag.bytes.is_empty());
-    assert!(selected_drag.screen_changed);
-    let input = current_pointer(
-        &emulator,
-        pointer(
-            PointerPhase::Release,
-            Some(PointerButton::Left),
-            48.0,
-            10.0,
-            true,
-        ),
-    );
-    let selected_release = emulator.pointer(input).unwrap();
-    assert!(selected_release.selection_completed);
-
-    let snapshot = emulator.snapshot().unwrap().unwrap();
-    assert!(snapshot.rows[0][..5].iter().all(|cell| cell.selected));
-    assert!(!snapshot.rows[0][5].selected);
-    assert_eq!(emulator.selection_text().unwrap(), Some("hello".to_owned()));
+    let shifted_press = emulator.pointer(input).unwrap();
+    assert!(shifted_press.bytes.is_empty());
+    assert_eq!(emulator.selection_text().unwrap(), None);
 }
 
 #[test]
@@ -4983,7 +3971,7 @@ fn mouse_tracking_changes_publish_pointer_routing_metadata() {
 fn application_mouse_routes_clear_selection_but_hover_does_not() {
     let mut pressed = emulator(12, 3);
     pressed.feed(b"hello world");
-    select_first_five(&mut pressed, false);
+    select_first_five(&mut pressed);
     pressed.feed(b"\x1b[?1000h\x1b[?1006h");
     let action = pressed
         .pointer(pointer(
@@ -4999,21 +3987,21 @@ fn application_mouse_routes_clear_selection_but_hover_does_not() {
 
     let mut tracked_wheel = emulator(12, 3);
     tracked_wheel.feed(b"hello world\x1b[?1000h\x1b[?1006h");
-    select_first_five(&mut tracked_wheel, true);
+    select_first_five(&mut tracked_wheel);
     let action = tracked_wheel.wheel(wheel(1, false)).unwrap();
     assert!(action.screen_changed);
     assert_eq!(tracked_wheel.selection_text().unwrap(), None);
 
     let mut alternate_wheel = emulator(12, 3);
     alternate_wheel.feed(b"\x1b[?1049hhello world\x1b[?1007h");
-    select_first_five(&mut alternate_wheel, false);
+    select_first_five(&mut alternate_wheel);
     let action = alternate_wheel.wheel(wheel(1, false)).unwrap();
     assert!(action.screen_changed);
     assert_eq!(alternate_wheel.selection_text().unwrap(), None);
 
     let mut hover = emulator(12, 3);
     hover.feed(b"hello world");
-    select_first_five(&mut hover, false);
+    select_first_five(&mut hover);
     hover.feed(b"\x1b[?1003h\x1b[?1006h");
     let action = hover
         .pointer(pointer(PointerPhase::Motion, None, 11.0, 1.0, false))
@@ -5101,21 +4089,21 @@ fn auxiliary_buttons_and_hover_only_report_when_tracking_allows() {
             Some(PointerButton::Right),
             1.0,
             1.0,
-            true,
+            false,
         ))
         .unwrap();
-    assert_eq!(reported.bytes, b"\x1b[<6;1;1M");
+    assert_eq!(reported.bytes, b"\x1b[<2;1;1M");
     let released = emulator
         .pointer(pointer(
             PointerPhase::Release,
             Some(PointerButton::Right),
             1.0,
             1.0,
-            true,
+            false,
         ))
         .unwrap();
 
-    assert_eq!(released.bytes, b"\x1b[<6;1;1m");
+    assert_eq!(released.bytes, b"\x1b[<2;1;1m");
 
     let hover = emulator
         .pointer(pointer(PointerPhase::Motion, None, 11.0, 1.0, false))
@@ -5135,7 +4123,7 @@ fn screen_snapshots_are_send_and_sync() {
 }
 
 #[test]
-fn restricted_server_runtime_accepts_graphics_without_advertising_clipboard() {
+fn restricted_server_runtime_accepts_graphics_and_advertises_the_routed_clipboard() {
     let _guard = crate::terminal::graphics::test_lock();
     let mut emulator = emulator(8, 4);
     emulator.restrict_client_effects().unwrap();
@@ -5144,7 +4132,10 @@ fn restricted_server_runtime_accepts_graphics_without_advertising_clipboard() {
     emulator.feed(b"\x1b[c");
     assert_eq!(emulator.take_pty_responses(), b"\x1b[?62;22c");
     emulator.feed(b"\x1bP+q4d73\x1b\\");
-    assert_eq!(emulator.take_pty_responses(), b"\x1bP0+r4d73\x1b\\");
+    assert!(
+        emulator.take_pty_responses().starts_with(b"\x1bP1+r4d73="),
+        "server clipboard requests route to the controlling client"
+    );
 }
 
 #[test]
@@ -5636,74 +4627,11 @@ mod unix_adapter_tests {
 }
 
 #[test]
-fn accessibility_selection_rejects_a_model_from_before_the_latest_screen() {
-    let mut emulator = TerminalEmulator::new(geometry(80, 24, 8.0, 20.0)).unwrap();
-    emulator.feed(b"old text");
-    let _ = emulator.snapshot().unwrap();
-    let request = drain_accessibility(&mut emulator)
-        .selection_request(0..3)
-        .unwrap();
-
-    emulator.feed(b" changed");
-    let _ = emulator.snapshot().unwrap();
-    let action = emulator.set_accessibility_selection(request).unwrap();
-
-    assert!(!action.screen_changed);
-    assert!(
-        emulator
-            .selection_copy(SelectionCopyOptions::default())
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
-fn selection_copy_reuses_prepared_text_while_only_the_viewport_changes() {
-    let mut emulator = emulator(8, 3);
-    emulator.feed("界abcdefghi\r\nline 2\r\nline 3\r\nline 4".as_bytes());
-    _ = emulator.snapshot().unwrap();
-    for (phase, x) in [
-        (PointerPhase::Press, 1.0),
-        (PointerPhase::Motion, 45.0),
-        (PointerPhase::Release, 45.0),
-    ] {
-        let input = current_pointer(
-            &emulator,
-            pointer(phase, Some(PointerButton::Left), x, 1.0, false),
-        );
-        emulator.pointer(input).unwrap();
-    }
-    let options = SelectionCopyOptions::default();
-    let first = emulator.selection_copy(options).unwrap().unwrap();
-    emulator.scroll_scrollback(ScrollbackMovement::Top);
-    _ = emulator.snapshot().unwrap();
-    let second = emulator.selection_copy(options).unwrap().unwrap();
-    assert!(Arc::ptr_eq(&first.plain_text, &second.plain_text));
-    assert!(Arc::ptr_eq(
-        first.html.as_ref().unwrap(),
-        second.html.as_ref().unwrap()
-    ));
-    emulator.feed(b"\x1b[1;1Hchanged");
-    let changed = emulator.selection_copy(options).unwrap().unwrap();
-    assert_ne!(first.plain_text, changed.plain_text);
-}
-
-#[test]
 fn cached_selection_copy_preserves_wide_cells_and_soft_wrap_options() {
     let mut emulator = emulator(4, 3);
     emulator.feed("界abce".as_bytes());
     _ = emulator.snapshot().unwrap();
-    for (phase, x, y) in [
-        (PointerPhase::Press, 1.0, 1.0),
-        (PointerPhase::Motion, 35.0, 21.0),
-        (PointerPhase::Release, 35.0, 21.0),
-    ] {
-        let input = current_pointer(
-            &emulator,
-            pointer(phase, Some(PointerButton::Left), x, y, false),
-        );
-        emulator.pointer(input).unwrap();
-    }
+    select_cells(&mut emulator, (0, 0), (1, 1));
     let unwrapped = emulator
         .selection_copy(SelectionCopyOptions::default())
         .unwrap()

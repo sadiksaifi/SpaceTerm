@@ -9278,7 +9278,6 @@ mod permission_requests {
             );
             let authority =
                 Arc::new(crate::terminal::session::clipboard::ClipboardAuthority::default());
-            authority.route();
             authority.client_focus(Some(true));
             let request = crate::terminal::session::ClientEffectRequest::new(
                 spaceterm_server::pane::effects::Effect::PermissionSetup {

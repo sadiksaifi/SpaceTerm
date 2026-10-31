@@ -9,19 +9,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub(crate) struct ClipboardAuthority {
-    routed: AtomicBool,
     connected: AtomicBool,
     epoch: AtomicU64,
     subscription: Mutex<Option<async_channel::Sender<TerminalSessionEvent>>>,
 }
 
 impl ClipboardAuthority {
-    pub(crate) fn routed(&self) -> bool {
-        self.routed.load(Ordering::Acquire)
-    }
-    pub(crate) fn route(&self) {
-        self.routed.store(true, Ordering::Release);
-    }
     pub(crate) fn client_focus(&self, focused: Option<bool>) {
         self.connected.store(false, Ordering::Release);
         let _ = self
@@ -32,19 +25,15 @@ impl ClipboardAuthority {
         self.connected.store(focused.is_some(), Ordering::Release);
     }
     pub(crate) fn output_epoch(&self) -> Option<u64> {
-        if self.routed.load(Ordering::Acquire) {
-            self.connected
-                .load(Ordering::Acquire)
-                .then(|| self.epoch.load(Ordering::Acquire))
-        } else {
-            self.grant()
-        }
+        self.connected
+            .load(Ordering::Acquire)
+            .then(|| self.epoch.load(Ordering::Acquire))
     }
     pub(crate) fn native_permits(&self, epoch: u64) -> bool {
-        self.routed.load(Ordering::Acquire) && self.output_epoch() == Some(epoch)
+        self.output_epoch() == Some(epoch)
     }
     pub(crate) fn native_request(&self, epoch: Option<u64>) -> bool {
-        self.routed.load(Ordering::Acquire) && epoch.is_some_and(|epoch| self.native_permits(epoch))
+        epoch.is_some_and(|epoch| self.native_permits(epoch))
     }
 
     pub(super) fn focus(&self, focused: bool) {
@@ -73,7 +62,7 @@ impl ClipboardAuthority {
         {
             return None;
         }
-        if self.routed.load(Ordering::Acquire) && !self.connected.load(Ordering::Acquire) {
+        if !self.connected.load(Ordering::Acquire) {
             return None;
         }
         let epoch = self.epoch.load(Ordering::Acquire);
@@ -438,7 +427,7 @@ mod tests {
     ) {
         let (sender, commands) = mpsc::channel();
         let (worker, requests) = WorkerClipboard::connect(sender);
-        worker.authority.focus(true);
+        worker.authority.client_focus(Some(true));
         (worker, requests, commands)
     }
     fn complete(
@@ -675,8 +664,8 @@ mod tests {
             );
             let mut request = requests.try_recv().unwrap();
             if case == 0 {
-                worker.authority.focus(false);
-                worker.authority.focus(true);
+                worker.authority.client_focus(Some(false));
+                worker.authority.client_focus(Some(true));
             } else if case == 1 {
                 request.deadline = Instant::now();
             }
@@ -851,7 +840,7 @@ mod portable_tests {
         let (mut worker, requests) = WorkerClipboard::connect(sender);
         let (events, subscription) = async_channel::bounded(1);
         worker.authority.observe_subscription(events);
-        worker.authority.focus(true);
+        worker.authority.client_focus(Some(true));
         worker.begin(
             Osc52Operation::Read {
                 target: Osc52Target::Primary,
@@ -879,7 +868,7 @@ mod portable_tests {
     fn clipboard_timeout_and_dropped_requests_complete_once() {
         let (sender, commands) = mpsc::channel();
         let (mut worker, requests) = WorkerClipboard::connect(sender);
-        worker.authority.focus(true);
+        worker.authority.client_focus(Some(true));
         worker.begin(
             Osc52Operation::Read {
                 target: Osc52Target::Primary,

@@ -80,7 +80,6 @@ fn capability(name: &[u8], terminal_name: &'static str) -> Option<CapabilityValu
 pub(crate) struct XtGetTcapObserver {
     state: ObserverState,
     terminal_name: &'static str,
-    clipboard: bool,
 }
 
 #[derive(Debug, Default)]
@@ -100,16 +99,7 @@ impl XtGetTcapObserver {
         Self {
             state: ObserverState::Ground,
             terminal_name,
-            clipboard: true,
         }
-    }
-
-    pub(crate) fn enable_clipboard(&mut self) {
-        self.clipboard = true;
-    }
-
-    pub(crate) fn disable_clipboard(&mut self) {
-        self.clipboard = false;
     }
 
     pub(crate) fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>) {
@@ -145,12 +135,7 @@ impl XtGetTcapObserver {
                 } => {
                     if byte == 0x9c || (escaped && byte == b'\\') {
                         if !overflowed {
-                            append_xtgettcap_replies_with_clipboard(
-                                &bytes,
-                                self.terminal_name,
-                                self.clipboard,
-                                replies,
-                            );
+                            append_xtgettcap_replies(&bytes, self.terminal_name, replies);
                         }
                         ObserverState::Ground
                     } else {
@@ -185,12 +170,7 @@ impl XtGetTcapObserver {
     }
 }
 
-fn append_xtgettcap_replies_with_clipboard(
-    request: &[u8],
-    terminal_name: &'static str,
-    clipboard: bool,
-    replies: &mut Vec<u8>,
-) {
+fn append_xtgettcap_replies(request: &[u8], terminal_name: &'static str, replies: &mut Vec<u8>) {
     let Some(names) = request.strip_prefix(b"+q") else {
         return;
     };
@@ -199,8 +179,7 @@ fn append_xtgettcap_replies_with_clipboard(
             continue;
         };
         replies.extend_from_slice(b"\x1bP");
-        if let Some(value) = capability(&name, terminal_name).filter(|_| clipboard || name != b"Ms")
-        {
+        if let Some(value) = capability(&name, terminal_name) {
             replies.extend_from_slice(b"1+r");
             replies.extend_from_slice(encoded_name);
             if let CapabilityValue::Value(value) = value {

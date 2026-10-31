@@ -377,27 +377,14 @@ fn step(random: &mut Random, session: &mut Session) {
             random.below(3) + 1,
             ["L", "M", "@", "P", "S", "T"][random.below(6) as usize]
         ),
-        // A selection drag, which the server presents in the cells' style.
+        // An accessible Selection, which the server presents in the cells' style.
         18 => {
-            let point = |random: &mut Random| crate::terminal::SurfacePosition {
-                x: random.below(u64::from(columns) * 8) as f32,
-                y: random.below(u64::from(rows) * 16) as f32,
-            };
-            for phase in [
-                crate::terminal::PointerPhase::Press,
-                crate::terminal::PointerPhase::Motion,
-                crate::terminal::PointerPhase::Release,
-            ] {
-                let position = point(random);
-                let _ = session.emulator.pointer(crate::terminal::PointerInput {
-                    generation: session.emulator.presentation_generation(),
-                    phase,
-                    button: Some(crate::terminal::PointerButton::Left),
-                    position,
-                    modifiers: Default::default(),
-                    shift_selection: Default::default(),
-                });
-            }
+            let line = random.below(u64::from(rows)) as usize;
+            let start = random.below(u64::from(columns)) as u16;
+            let end = random.below(u64::from(columns)) as u16;
+            let _ = session
+                .emulator
+                .select_visible((line, start.min(end)), (line, start.max(end)));
             String::new()
         }
         // Clearing the Scrollback, which moves the history's oldest position.

@@ -115,7 +115,6 @@ impl DevelopmentPaneHost {
                 .as_ref()
                 .map(|notifier| notifier(lease.session)),
         );
-        runtime.route_client_effects();
         self.pane = Some(OwnedPane {
             device: Some(device),
             attachment_generation: None,

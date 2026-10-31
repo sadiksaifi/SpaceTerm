@@ -1235,8 +1235,9 @@ fn check_mouse_protocols() -> Result<(), String> {
             true,
         ))
         .map_err(|error| error.to_string())?;
+    // The client owns Shift selection, so the program receives no press.
     require(
-        selection.bytes.is_empty() && selection.screen_changed,
+        selection.bytes.is_empty() && !selection.screen_changed,
         "shift-selection-override",
         format!("observed {selection:?}"),
     )
@@ -1245,28 +1246,11 @@ fn check_mouse_protocols() -> Result<(), String> {
 fn select_hello(emulator: &mut TerminalEmulator) -> Result<(), String> {
     emulator.feed(b"hello world");
     _ = emulator.snapshot().map_err(|error| error.to_string())?;
-    for input in [
-        pointer_input(
-            emulator,
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            2.0,
-            10.0,
-            false,
-        ),
-        pointer_input(emulator, PointerPhase::Motion, None, 48.0, 10.0, false),
-        pointer_input(
-            emulator,
-            PointerPhase::Release,
-            Some(PointerButton::Left),
-            48.0,
-            10.0,
-            false,
-        ),
-    ] {
-        emulator.pointer(input).map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    require(
+        emulator.select_visible((0, 0), (0, 4)),
+        "select-hello",
+        "the accessible Selection was not applied".to_owned(),
+    )
 }
 
 fn check_selection_and_copy(copy_semantics: bool) -> Result<(), String> {

@@ -1328,6 +1328,7 @@ impl TerminalAccessibilityState {
         state.rows.contains_key(&id)
     }
 
+    #[cfg(feature = "desktop")]
     pub(crate) fn resolve_selection(
         &self,
         request: &AccessibilitySelectionRequest,
@@ -1938,6 +1939,7 @@ mod tests {
         assert_eq!(alternate.text(), "alternate");
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn stale_utf16_selection_requests_are_generation_and_revision_bound() {
         let id = row_id(AccessibilityScreen::Primary, 1, 10, 0);
@@ -2023,6 +2025,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn selection_is_rejected_while_a_new_semantic_target_is_incomplete() {
         let id = row_id(AccessibilityScreen::Primary, 1, 10, 0);
@@ -2068,6 +2071,7 @@ mod tests {
         assert_eq!(state.resolve_selection(&request), None);
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn selection_is_rejected_after_the_active_accessibility_screen_changes() {
         let primary_id = row_id(AccessibilityScreen::Primary, 1, 10, 0);

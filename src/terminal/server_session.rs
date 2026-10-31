@@ -131,11 +131,7 @@ impl DevelopmentPaneState {
             preparation: AtomicBool::new(false),
             wake: inbox::Wake::default(),
             changes: crate::terminal::changes::Changes::default(),
-            effect_authority: {
-                let authority = ClipboardAuthority::default();
-                authority.route();
-                Arc::new(authority)
-            },
+            effect_authority: Arc::new(ClipboardAuthority::default()),
         }
     }
 

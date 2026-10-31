@@ -79,7 +79,6 @@ impl<Activity: Eq> CompressionSchedule<Activity> {
 #[derive(Clone, Default)]
 pub(super) struct ScheduleInput {
     resizes: ResizeMailbox,
-    find_queries: FindQueryMailbox,
     accessibility_demand: AccessibilityDemandMailbox,
     terminal_appearance: TerminalAppearanceMailbox,
 }
@@ -87,19 +86,6 @@ pub(super) struct ScheduleInput {
 impl ScheduleInput {
     pub(super) fn enqueue_resize(&self, geometry: TerminalGeometry) -> bool {
         self.resizes.replace(geometry)
-    }
-
-    pub(super) fn enqueue_find_query(
-        &self,
-        generation: FindQueryGeneration,
-        query: String,
-    ) -> bool {
-        self.find_queries
-            .replace(FindQueryUpdate::Set(generation, query))
-    }
-
-    pub(super) fn enqueue_find_end(&self, generation: FindQueryGeneration) -> bool {
-        self.find_queries.replace(FindQueryUpdate::End(generation))
     }
 
     #[cfg_attr(
@@ -132,7 +118,6 @@ pub(super) struct WorkerSchedules {
     input: ScheduleInput,
     accessibility_continuation: AccessibilityContinuationSchedule,
     accessibility_presentation: AccessibilityPresentationSchedule,
-    selection_autoscroll: SelectionAutoscrollSchedule,
     paste_confirmations: PasteConfirmationSchedule,
     paste_confirmation_owner: Option<(PasteConfirmationId, PasteConfirmationOwner)>,
     line: LineSchedule,
@@ -220,10 +205,6 @@ impl WorkerSchedules {
         self.input.resizes.take()
     }
 
-    pub(super) fn take_find_query(&mut self) -> Option<FindQueryUpdate> {
-        self.input.find_queries.take()
-    }
-
     pub(super) fn update_accessibility(&mut self, more: bool) {
         self.accessibility_continuation.update(more);
     }
@@ -252,12 +233,8 @@ impl WorkerSchedules {
         let Some(requested_at) = self.input.accessibility_demand.latest_request() else {
             return;
         };
-        if !self
-            .accessibility_presentation
-            .activate_demand(requested_at, now)
-        {
-            self.input.accessibility_demand.clear();
-        }
+        self.accessibility_presentation
+            .activate_demand(requested_at, now);
     }
 
     #[cfg(test)]
@@ -269,12 +246,6 @@ impl WorkerSchedules {
         self.accessibility_presentation
             .mark_presented(now, complete);
     }
-
-    pub(super) fn update_selection_autoscroll(&mut self, now: Instant, interval: Option<Duration>) {
-        self.selection_autoscroll
-            .update(now, interval.filter(|_| self.presentation.is_presentable()));
-    }
-
     pub(super) fn update_line(
         &mut self,
         now: Instant,
@@ -357,30 +328,13 @@ impl WorkerSchedules {
         self.graphics_animation = deadline.filter(|_| self.presentation.is_presentable());
     }
 
+    /// Sets whether clients present this Terminal Session's screens. Accessibility stays
+    /// available while hidden, because a client may still read the Pane.
     pub(super) fn set_presentable(&mut self, presentable: bool, now: Instant) {
-        self.input.set_accessibility_demand_enabled(presentable);
-        self.accessibility_presentation
-            .set_presentable(presentable, now);
-        if !presentable {
-            self.accessibility_continuation.update(false);
-            self.input.accessibility_demand.clear();
-        }
-        self.set_visual_presentable(presentable, now);
-    }
-
-    pub(super) fn set_server_presentable(&mut self, presentable: bool, now: Instant) {
         self.input.set_accessibility_demand_enabled(true);
-        self.accessibility_presentation.set_presentable(true, now);
-        self.set_visual_presentable(presentable, now);
-    }
-
-    fn set_visual_presentable(&mut self, presentable: bool, now: Instant) {
         self.presentation.set_presentable(presentable, now);
-        if !presentable {
-            if self.graphics_animation.take().is_some() {
-                self.presentation.request();
-            }
-            self.selection_autoscroll.cancel();
+        if !presentable && self.graphics_animation.take().is_some() {
+            self.presentation.request();
         }
     }
 
@@ -454,7 +408,6 @@ impl WorkerSchedules {
             input,
             accessibility_continuation: AccessibilityContinuationSchedule::default(),
             accessibility_presentation: AccessibilityPresentationSchedule::new(now),
-            selection_autoscroll: SelectionAutoscrollSchedule::default(),
             paste_confirmations: PasteConfirmationSchedule::default(),
             paste_confirmation_owner: None,
             line: LineSchedule::new(now),
@@ -473,7 +426,6 @@ impl WorkerSchedules {
     pub(super) fn deadline(&self, synchronized_output: Option<Instant>) -> Option<Instant> {
         [
             synchronized_output,
-            self.selection_autoscroll.deadline(),
             self.paste_confirmations.deadline(),
             self.presentation
                 .deadline()
@@ -490,9 +442,6 @@ impl WorkerSchedules {
     }
 
     pub(super) fn take_due(&mut self, now: Instant) -> Option<Command> {
-        if self.selection_autoscroll.take_due(now) {
-            return Some(Command::SelectionAutoscrollTick);
-        }
         if self.paste_confirmations.expire(now) {
             self.paste_confirmation_owner = None;
             return Some(Command::PasteConfirmationExpired);
@@ -521,7 +470,6 @@ impl WorkerSchedules {
 }
 
 struct AccessibilityPresentationSchedule {
-    presentable: bool,
     pending: bool,
     seed_required: bool,
     not_before: Instant,
@@ -531,7 +479,6 @@ struct AccessibilityPresentationSchedule {
 impl AccessibilityPresentationSchedule {
     fn new(now: Instant) -> Self {
         Self {
-            presentable: true,
             pending: false,
             seed_required: true,
             not_before: now,
@@ -545,28 +492,13 @@ impl AccessibilityPresentationSchedule {
         }
     }
 
-    fn activate_demand(&mut self, requested_at: Instant, now: Instant) -> bool {
-        if !self.presentable {
-            return false;
-        }
+    fn activate_demand(&mut self, requested_at: Instant, now: Instant) {
         let was_inactive = self.demand_request.is_none();
         self.demand_request = Some(requested_at);
         if was_inactive {
             self.pending = true;
             self.not_before = now;
         }
-        true
-    }
-
-    fn set_presentable(&mut self, presentable: bool, now: Instant) {
-        if presentable && !self.presentable {
-            self.not_before = now;
-            self.pending = self.seed_required;
-        } else if !presentable {
-            self.pending = false;
-            self.demand_request = None;
-        }
-        self.presentable = presentable;
     }
 
     fn mark_presented(&mut self, now: Instant, complete: bool) {
@@ -589,14 +521,11 @@ impl AccessibilityPresentationSchedule {
     }
 
     fn deadline(&self) -> Option<Instant> {
-        if !self.presentable {
-            return None;
-        }
         self.pending.then_some(self.not_before)
     }
 
     fn take_due(&mut self, now: Instant) -> bool {
-        if self.presentable && self.pending && now >= self.not_before {
+        if self.pending && now >= self.not_before {
             self.pending = false;
             true
         } else {
@@ -686,39 +615,6 @@ impl LineSchedule {
     }
 }
 
-#[derive(Default)]
-struct SelectionAutoscrollSchedule {
-    deadline: Option<Instant>,
-}
-
-impl SelectionAutoscrollSchedule {
-    fn update(&mut self, now: Instant, interval: Option<Duration>) {
-        if let Some(interval) = interval {
-            // Pointer motion updates the drag position without delaying its clock.
-            self.deadline.get_or_insert(now + interval);
-        } else {
-            self.cancel();
-        }
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        self.deadline
-    }
-
-    fn cancel(&mut self) {
-        self.deadline = None;
-    }
-
-    fn take_due(&mut self, now: Instant) -> bool {
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            self.deadline = None;
-            true
-        } else {
-            false
-        }
-    }
-}
-
 #[derive(Clone, Default)]
 struct ResizeMailbox {
     pending: Arc<Mutex<Option<TerminalGeometry>>>,
@@ -744,17 +640,6 @@ impl ResizeMailbox {
     }
 }
 
-#[derive(Debug)]
-pub(super) enum FindQueryUpdate {
-    Set(FindQueryGeneration, String),
-    End(FindQueryGeneration),
-}
-
-#[derive(Clone, Default)]
-struct FindQueryMailbox {
-    pending: Arc<Mutex<Option<FindQueryUpdate>>>,
-}
-
 #[derive(Clone, Default)]
 struct TerminalAppearanceMailbox {
     pending: Arc<Mutex<Option<TerminalAppearanceUpdate>>>,
@@ -775,26 +660,6 @@ impl TerminalAppearanceMailbox {
     fn lock(&self) -> MutexGuard<'_, Option<TerminalAppearanceUpdate>> {
         self.pending.lock().unwrap_or_else(|poisoned| {
             eprintln!("terminal appearance mailbox recovered after a worker panic");
-            poisoned.into_inner()
-        })
-    }
-}
-
-impl FindQueryMailbox {
-    fn replace(&self, update: FindQueryUpdate) -> bool {
-        let mut pending = self.lock();
-        let should_notify = pending.is_none();
-        *pending = Some(update);
-        should_notify
-    }
-
-    fn take(&self) -> Option<FindQueryUpdate> {
-        self.lock().take()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<FindQueryUpdate>> {
-        self.pending.lock().unwrap_or_else(|poisoned| {
-            eprintln!("terminal Find mailbox recovered after a worker panic");
             poisoned.into_inner()
         })
     }
@@ -1094,38 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn selection_autoscroll_schedule_uses_an_injected_monotonic_now() {
-        let epoch = Instant::now();
-        let mut schedule = SelectionAutoscrollSchedule::default();
-
-        schedule.update(epoch, Some(Duration::from_millis(100)));
-
-        assert!(!schedule.take_due(epoch + Duration::from_millis(99)));
-        assert!(schedule.take_due(epoch + Duration::from_millis(100)));
-        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
-
-        schedule.update(epoch, Some(Duration::from_millis(25)));
-        schedule.update(epoch, None);
-        assert!(!schedule.take_due(epoch + Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn selection_autoscroll_motion_does_not_postpone_the_next_tick() {
-        let epoch = Instant::now();
-        let interval = Duration::from_millis(15);
-        let mut schedule = SelectionAutoscrollSchedule::default();
-        schedule.update(epoch, Some(interval));
-        for millis in 1..15 {
-            schedule.update(epoch + Duration::from_millis(millis), Some(interval));
-        }
-        assert!(schedule.take_due(epoch + interval));
-        assert!(!schedule.take_due(epoch + interval));
-        schedule.update(epoch + interval, Some(interval));
-        assert!(!schedule.take_due(epoch + Duration::from_millis(29)));
-        assert!(schedule.take_due(epoch + Duration::from_millis(30)));
-    }
-
-    #[test]
     fn worker_schedules_preserve_deadline_priority_and_expire_each_payload_once() {
         let now = Instant::now();
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
@@ -1133,15 +966,10 @@ mod tests {
         let due = now + Duration::from_secs(30);
         // Output just before `due` asks for a line mode read.
         schedules.line_transition(due);
-        schedules.update_selection_autoscroll(now, Some(Duration::from_secs(30)));
         schedules
             .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)
             .unwrap();
         assert_eq!(schedules.deadline(Some(now)), Some(now));
-        assert!(matches!(
-            schedules.take_due(due),
-            Some(Command::SelectionAutoscrollTick)
-        ));
         assert!(matches!(
             schedules.take_due(due),
             Some(Command::PasteConfirmationExpired)
@@ -1222,20 +1050,16 @@ mod tests {
     }
 
     #[test]
-    fn hidden_presentation_cancels_background_accessibility_and_autoscroll_work() {
+    fn hidden_presentation_keeps_accessibility_work() {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
         schedules.update_line(start, Ok(LineMode::UNKNOWN));
         schedules.update_accessibility(true);
-        schedules.update_selection_autoscroll(start, Some(Duration::from_millis(20)));
 
         schedules.set_presentable(false, start);
 
-        assert!(!schedules.accessibility_pending());
-        assert!(!matches!(
-            schedules.take_due(start + Duration::from_millis(20)),
-            Some(Command::SelectionAutoscrollTick)
-        ));
+        // A client may still read a hidden Pane, so its accessibility update continues.
+        assert!(schedules.accessibility_pending());
     }
 
     #[test]
@@ -1321,26 +1145,6 @@ mod tests {
         assert!(
             schedules.accessibility_presentation_due(start + ACCESSIBILITY_PRESENTATION_INTERVAL)
         );
-    }
-
-    #[test]
-    fn hiding_clears_accessibility_demand_and_pending_refreshes() {
-        let start = Instant::now();
-        let input = ScheduleInput::default();
-        let mut schedules = WorkerSchedules::new(start, input.clone());
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-
-        assert!(input.enqueue_accessibility_demand(start));
-        schedules.accessibility_demand_received(start);
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-        schedules.note_screen_published();
-
-        schedules.set_presentable(false, start + Duration::from_millis(50));
-        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
-        assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
     }
 
     #[test]

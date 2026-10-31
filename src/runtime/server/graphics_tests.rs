@@ -276,12 +276,10 @@ fn existing_visual_fixtures_keep_pixels_and_placements_through_the_server_adapte
             );
             drop(local_frame);
             drop(server_frame);
-            // Force independent scroll and measured cell-pixel resize snapshots.
+            // Force scrolled output and measured cell-pixel resize snapshots.
             if step == 0 {
                 local.feed(b"\r\nscroll\r\nscroll\r\nscroll\r\nscroll\r\nscroll\r\n");
                 server.feed(b"\r\nscroll\r\nscroll\r\nscroll\r\nscroll\r\nscroll\r\n");
-                local.scroll_scrollback(ScrollbackMovement::Top);
-                server.scroll_scrollback(ScrollbackMovement::Top);
             } else if step == 1 {
                 let resized = PaneSize {
                     columns: 90,
