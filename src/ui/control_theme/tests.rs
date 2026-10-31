@@ -4263,6 +4263,24 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
         assert_fill(view, "edge-segmented", segmented.element_background);
         assert!(colors.element_background.a > 0 && colors.element_background.a < 255);
 
+        if host == ControlHost::Floating {
+            assert!(colors.ghost_element_hover.a > 0);
+            assert_ne!(
+                colors.ghost_element_hover,
+                prepared.control_colors.ghost_element_hover
+            );
+            let menu = view
+                .debug_bounds("edge-menu")
+                .expect("Floating menu trigger");
+            view.simulate_mouse_move(menu.center(), None, gpui::Modifiers::none());
+            view.run_until_parked();
+            view.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            view.update(|window, cx| window.simulate_next_frame(cx));
+            view.run_until_parked();
+            assert_fill(view, "edge-menu", colors.ghost_element_hover);
+        }
+
         let field_colors = if host == ControlHost::Floating {
             &prepared.floating_field_colors
         } else {
