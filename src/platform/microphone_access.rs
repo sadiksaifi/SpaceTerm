@@ -1,6 +1,7 @@
-//! Portable microphone authorization seam for terminal-hosted voice tools.
+//! Portable microphone authorization seam for terminal-hosted voice tools, which inherit the grant
+//! of this machine's SpaceTerm Server.
 
-/// The application's current Operating-System microphone authorization.
+/// The server's current Operating-System microphone authorization.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -26,8 +27,6 @@ pub(crate) enum MicrophoneAuthorization {
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum MicrophoneAccessError {
-    #[error("microphone access is unavailable off the main thread")]
-    OffMainThread,
     #[error("microphone access is unavailable on this platform")]
     PlatformUnavailable,
     #[error("the platform rejected microphone permission recovery")]

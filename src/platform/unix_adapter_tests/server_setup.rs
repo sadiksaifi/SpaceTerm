@@ -1712,8 +1712,15 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
             header.set_size(helper.len() as u64);
             header.set_mode(0o755);
             header.set_cksum();
+            let executable = spaceterm_server::service::Layout::host(identity())
+                .unwrap()
+                .executable();
             archive
-                .append_data(&mut header, "server/bin/spaceterm", helper.as_bytes())
+                .append_data(
+                    &mut header,
+                    std::path::Path::new("server").join(executable),
+                    helper.as_bytes(),
+                )
                 .unwrap();
             archive.into_inner().unwrap().finish().unwrap();
         }

@@ -1,7 +1,9 @@
 """Independent server artifacts authenticated by identity-scoped Ed25519 trust.
 
-Supported layouts are server/bin/spaceterm and server/share/spaceterm on
-Apple Silicon macOS 26 and x86_64 glibc Linux (Ubuntu 22.04 or newer). Installation
+On x86_64 glibc Linux (Ubuntu 22.04 or newer) the layout is server/bin/spaceterm beside
+server/share/spaceterm. On Apple Silicon macOS 26 it is an app-like bundle named for the
+identity, server/<bundle>.app/Contents/{Info.plist,MacOS/spaceterm,Resources}, because macOS
+attributes System Permissions to a bundle's identifier and signature. Installation
 only retains an exact verified artifact. It never selects an active version or
 writes server identity, organization, credentials, stopped intent, or services.
 """
@@ -11,6 +13,7 @@ import fcntl
 import json
 import os
 import platform
+import plistlib
 import re
 import shutil
 import stat
@@ -37,6 +40,15 @@ from spaceterm_tasks.packaging import (
 
 TARGETS = {"darwin": "aarch64-apple-darwin", "linux": "x86_64-unknown-linux-gnu"}
 IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
+# The product name a person sees for each identity's server bundle. Privacy prompts and System
+# Settings show the bundle's Launch Services display name, which is its directory name.
+BUNDLES = {
+    "spaceterm": "SpaceTerm",
+    "spaceterm-preflight": "SpaceTerm Preflight",
+    "spaceterm-development": "SpaceTerm Development",
+}
+SERVER_INFO = ROOT / "packaging/macos/server/Info.plist"
+SHARED_RESOURCES = "share/spaceterm"
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
@@ -52,6 +64,53 @@ BUILD_KEYS = {
     "capabilities",
     "source_sha256",
 }
+
+
+def server_identifier(identity):
+    return f"io.github.sadiksaifi.{identity}.server"
+
+
+def bundle_directory(identity):
+    return f"{BUNDLES[identity]}.app"
+
+
+def executable_path(target, identity):
+    """The server executable, relative to the package tree."""
+    if target == TARGETS["darwin"]:
+        return f"{bundle_directory(identity)}/Contents/MacOS/spaceterm"
+    return "bin/spaceterm"
+
+
+def resource_directory(target, identity):
+    if target == TARGETS["darwin"]:
+        return f"{bundle_directory(identity)}/Contents/Resources"
+    return SHARED_RESOURCES
+
+
+def bundle_files(target, identity):
+    """The bundle's Info.plist and the seal codesign writes; none without a bundle."""
+    if target != TARGETS["darwin"]:
+        return set()
+    contents = f"{bundle_directory(identity)}/Contents"
+    return {f"{contents}/Info.plist", f"{contents}/_CodeSignature/CodeResources"}
+
+
+def signed_path(target, identity):
+    """What code signing covers: the bundle on macOS."""
+    return bundle_directory(identity) if target == TARGETS["darwin"] else "bin/spaceterm"
+
+
+def server_info(identity):
+    """The tracked server Info.plist with this identity's bundle identifier and name."""
+    info = plistlib.loads(SERVER_INFO.read_bytes())
+    if set(info) & {"CFBundleIdentifier", "CFBundleName", "CFBundleDisplayName"}:
+        raise TaskError("the server Info.plist template must not name an identity")
+    return {
+        **info,
+        "CFBundleIdentifier": server_identifier(identity),
+        "CFBundleName": BUNDLES[identity],
+        "CFBundleDisplayName": BUNDLES[identity],
+    }
 
 
 def artifact_public_key(identity):
@@ -154,6 +213,14 @@ def build_info(executable):
     return document(result.stdout)
 
 
+# Every executable a supported layout holds. The tree check then requires the declared target's.
+EXECUTABLES = {
+    f"server/{executable_path(target, identity)}"
+    for target in TARGETS.values()
+    for identity in IDENTITIES
+}
+
+
 def unpack_verified(
     archive, signature, destination, expected, *, identity=None, target=None, expected_sha256=None
 ):
@@ -190,7 +257,7 @@ def unpack_verified(
                     or member.name in names
                     or not (member.isfile() or member.isdir())
                     or member.mode
-                    != (0o755 if member.isdir() or member.name == "server/bin/spaceterm" else 0o644)
+                    != (0o755 if member.isdir() or member.name in EXECUTABLES else 0o644)
                 ):
                     raise TaskError("the server archive layout is invalid")
                 names.add(member.name)
@@ -342,7 +409,7 @@ def verify_macho_identity(output, identifier):
 
 def verify_cross_build(tree, expected):
     """Inspect a local cross-build; native execution checks belong to its target host."""
-    executable = tree / "bin/spaceterm"
+    executable = tree / executable_path(expected["target"], expected["identity"])
     library = checked(
         ["rustc", "--print", "target-libdir"], "Rust host tools are unavailable", text=True
     ).strip()
@@ -361,7 +428,7 @@ def verify_cross_build(tree, expected):
             "the macOS server code identity is unavailable",
             text=True,
         )
-        verify_macho_identity(identity, f"io.github.sadiksaifi.{expected['identity']}.server")
+        verify_macho_identity(identity, server_identifier(expected["identity"]))
     else:
         header = checked([str(objdump), "-f", str(executable)], "invalid server architecture")
         if b"elf64-x86-64" not in header:
@@ -397,22 +464,25 @@ def verify_cross_build(tree, expected):
 
 
 def verify_tree(tree, expected, *, native=True):
+    target, identity = expected["target"], expected["identity"]
     files = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_file()}
     shell = {
-        "share/spaceterm/shell-integration/" + str(path.relative_to(SHELL_INTEGRATION))
+        f"{SHARED_RESOURCES}/shell-integration/" + str(path.relative_to(SHELL_INTEGRATION))
         for path in SHELL_INTEGRATION.rglob("*")
         if path.is_file()
     }
+    listed = set(json.loads((ROOT / "packaging/server-resources.json").read_text()))
+    if listed != shell | {f"{SHARED_RESOURCES}/THIRD-PARTY-NOTICES.txt"}:
+        raise TaskError("the server resource policy differs from the tracked resources")
+    directory = resource_directory(target, identity)
+    resources = {directory + name.removeprefix(SHARED_RESOURCES) for name in listed}
     terminfo = {
         name
         for name in files
-        if re.fullmatch(r"share/spaceterm/terminfo/(?:78|x)/xterm-spaceterm", name)
+        if re.fullmatch(re.escape(directory) + r"/terminfo/(?:78|x)/xterm-spaceterm", name)
     }
-    resources = set(json.loads((ROOT / "packaging/server-resources.json").read_text()))
-    if resources != shell | {"share/spaceterm/THIRD-PARTY-NOTICES.txt"}:
-        raise TaskError("the server resource policy differs from the tracked resources")
-    if not terminfo or files != resources | terminfo | {
-        "bin/spaceterm",
+    if not terminfo or files != resources | terminfo | bundle_files(target, identity) | {
+        executable_path(target, identity),
         "build.json",
     }:
         raise TaskError("the server resources do not match the supported layout")
@@ -425,7 +495,7 @@ def verify_tree(tree, expected, *, native=True):
     }
     if directories != required_directories:
         raise TaskError("the server directories do not match the supported layout")
-    executable = tree / "bin/spaceterm"
+    executable = tree / executable_path(target, identity)
     if not native:
         # Catalogs authenticate foreign bytes without executing them. Local cross-builds
         # receive the additional static producer checks in verify_cross_build.
@@ -460,11 +530,15 @@ def verify_tree(tree, expected, *, native=True):
         )
         if "minos 26.0" not in " ".join(build.split()):
             raise TaskError("the server requires the macOS 26 deployment target")
-        identifier = f"io.github.sadiksaifi.{expected['identity']}.server"
-        if expected["identity"] == "spaceterm":
-            macos_signing.verify_release_signature(executable, signer(), identifier, "server")
+        identifier = server_identifier(identity)
+        bundle = tree / signed_path(target, identity)
+        info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+        if info != server_info(identity):
+            raise TaskError("the server Info.plist differs from its identity's")
+        if identity == "spaceterm":
+            macos_signing.verify_release_signature(bundle, signer(), identifier, "server")
         else:
-            macos_signing.verify_adhoc_signature(executable, identifier, "server")
+            macos_signing.verify_adhoc_signature(bundle, identifier, "server")
         dependencies = checked(
             ["otool", "-L", str(executable)], "server dependencies unavailable", text=True
         ).lower()
@@ -487,7 +561,7 @@ def verify_tree(tree, expected, *, native=True):
     checked(
         ["infocmp", "-x", "-1", "xterm-spaceterm"],
         "the server terminfo resource is invalid",
-        env={**os.environ, "TERMINFO": str(tree / "share/spaceterm/terminfo")},
+        env={**os.environ, "TERMINFO": str(tree / directory / "terminfo")},
     )
     try:
         result = subprocess.run(
@@ -661,17 +735,21 @@ def package(identity, release_tag=None, *, target=None):
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".server-package-") as temporary:
         directory = Path(temporary)
         tree = directory / "server"
-        (tree / "bin").mkdir(parents=True)
-        server = tree / "bin/spaceterm"
+        server = tree / executable_path(target, identity)
+        server.parent.mkdir(parents=True)
         shutil.copyfile(executable, server)
         server.chmod(0o755)
-        resources = tree / "share/spaceterm"
+        resources = tree / resource_directory(target, identity)
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
         shutil.copyfile(NOTICES, resources / NOTICES.name)
         compile_terminfo(resources / "terminfo", target)
         (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
         if target == TARGETS["darwin"]:
-            identifier = f"io.github.sadiksaifi.{identity}.server"
+            identifier = server_identifier(identity)
+            bundle = tree / signed_path(target, identity)
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(server_info(identity)))
+            (bundle / "Contents/Info.plist").chmod(0o644)
+            server = bundle
             if release_tag:
                 requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(signer())}'
                 with macos_signing.release_keychain(signer(), os.environ):
@@ -714,16 +792,15 @@ def package(identity, release_tag=None, *, target=None):
                         "-C",
                         "/dev/null",
                         "sign",
-                        "--binary-identifier",
-                        identifier,
                         str(server),
                         str(signed),
                     ],
                     "server code signing failed",
                     env=environment,
                 )
-                signed.replace(server)
-                server.chmod(0o755)
+                shutil.rmtree(server)
+                signed.rename(server)
+                (tree / executable_path(target, identity)).chmod(0o755)
         verify_tree(tree, expected, native=native)
         if not native:
             verify_cross_build(tree, expected)

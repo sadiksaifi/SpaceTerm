@@ -31,7 +31,7 @@ impl LaunchAgent {
         })
     }
     fn contents(&self, runtime: &Path) -> Result<Vec<u8>, ServerError> {
-        let executable = runtime.join("bin/spaceterm");
+        let executable = runtime.join(self.executable()?);
         let executable = executable.to_str().ok_or(ServerError::RuntimeUnavailable)?;
         let executable = executable
             .replace('&', "&amp;")
@@ -53,6 +53,12 @@ impl LaunchAgent {
 </dict></plist>
 "#, self.label, self.identity).into_bytes())
     }
+    /// The executable the agent runs, relative to its runtime.
+    fn executable(&self) -> Result<PathBuf, ServerError> {
+        super::runtime::Layout::host(&self.identity)
+            .map(super::runtime::Layout::executable)
+            .ok_or(ServerError::RuntimeUnavailable)
+    }
     fn registration(&self) -> registration::Registration {
         registration::Registration {
             directory: self.directory.clone(),
@@ -68,7 +74,7 @@ impl LaunchAgent {
         let expected = format!(
             "\"Program\" = \"{}\";",
             runtime
-                .join("bin/spaceterm")
+                .join(self.executable()?)
                 .to_str()
                 .ok_or(ServerError::UnsafeStorage)?
                 .replace('\\', "\\\\")
@@ -270,7 +276,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/bin/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Ok(true)
         );
@@ -278,7 +284,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/other-fixture/bin/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/other-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Err(ServerError::CleanupUnresolved)
         );
@@ -286,7 +292,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/bin/spaceterm\";\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n"
             ),
             Ok(false)
         );
@@ -329,11 +335,11 @@ mod tests {
             root,
         };
         let runtime = fixture.root.join("runtime");
-        std::fs::create_dir_all(runtime.join("bin")).unwrap();
-        let executable = runtime.join("bin/spaceterm");
+        let executable = runtime.join(fixture.agent.executable().unwrap());
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::write(
             &executable,
-            "#!/bin/sh\ncd -- \"$(dirname -- \"$0\")/../..\" || exit 1\n\
+            "#!/bin/sh\ncd -- \"$(dirname -- \"$0\")/../../../..\" || exit 1\n\
              trap '/bin/sleep 1; printf clean > cleaned; exit 0' TERM\n\
              printf ready > ready\nwhile :; do /bin/sleep 1; done\n",
         )

@@ -178,7 +178,11 @@ fn a_launcher_that_cannot_follow_an_update_never_blocks_it() {
         let bin = service.account_home().unwrap().join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let launcher = bin.join("spaceterm-development");
-        let earlier = previous.directory.join("bin/spaceterm");
+        let earlier = previous.directory.join(
+            crate::service::runtime::Layout::host("spaceterm-development")
+                .unwrap()
+                .executable(),
+        );
         std::os::unix::fs::symlink(&earlier, &launcher).unwrap();
         assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
         // Another account could write here, so SpaceTerm refuses to replace the launcher.
@@ -199,7 +203,11 @@ fn a_launcher_that_cannot_follow_an_update_never_blocks_it() {
         assert_eq!(service.link_cli(unused), Ok(CliLink::Linked));
         assert_eq!(
             std::fs::read_link(&launcher).unwrap(),
-            candidate.directory.join("bin/spaceterm")
+            candidate.directory.join(
+                crate::service::runtime::Layout::host("spaceterm-development")
+                    .unwrap()
+                    .executable()
+            )
         );
         assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
     });

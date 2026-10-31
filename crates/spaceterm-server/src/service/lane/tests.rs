@@ -120,6 +120,7 @@ pub(crate) fn serving_with_feed(
         host,
         feed,
         Box::new(|_| Ok(())),
+        Arc::new(crate::permissions::Unsupported),
     )
     .unwrap()
 }
@@ -171,6 +172,7 @@ impl Lane {
             self.host.clone(),
             Arc::new(NoFeed),
             Box::new(|_| Ok(())),
+            Arc::new(crate::permissions::Unsupported),
         )
         .unwrap()
     }
@@ -217,6 +219,7 @@ fn with_lane(run: impl FnOnce(Lane)) {
                     }
                     Ok(())
                 }),
+                Arc::new(crate::permissions::Unsupported),
             )
             .unwrap();
             // A second package of the same build: a different gzip timestamp, re-signed.
@@ -294,6 +297,295 @@ fn lane_messages_keep_their_frozen_json_shape() {
         })
         .unwrap(),
         serde_json::json!({ "reply": "error", "code": "unsupported" })
+    );
+}
+
+/// A lane whose System Permissions are `permissions`.
+fn serving_permissions(
+    paths: &crate::host::Paths,
+    permissions: Arc<dyn crate::permissions::SystemPermissions>,
+) -> Arc<LaneServer> {
+    LaneServer::new(
+        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
+        Arc::new(Host::default()),
+        Arc::new(NoFeed),
+        Box::new(|_| Ok(())),
+        permissions,
+    )
+    .unwrap()
+}
+
+const LOCAL_ACTOR: Actor = Actor {
+    pairing: None,
+    client: [8; 32],
+};
+
+const SETUP: &str = "0123456789abcdef0123456789abcdef";
+
+fn permission_requests() -> [LaneRequest; 5] {
+    use crate::permissions::SystemPermission;
+    [
+        LaneRequest::Permissions,
+        LaneRequest::RequestPermission {
+            permission: SystemPermission::Microphone,
+        },
+        LaneRequest::PreparePermissionSetup {
+            permission: SystemPermission::Accessibility,
+            setup: SETUP.into(),
+        },
+        LaneRequest::ResetPermission {
+            permission: SystemPermission::Accessibility,
+        },
+        LaneRequest::CancelPermissionSetup {
+            setup: SETUP.into(),
+        },
+    ]
+}
+
+#[test]
+fn a_paired_caller_reaches_no_system_permission() {
+    use crate::permissions::{PermissionState, testing::ScriptedPermissions};
+    let fixture = super::super::tests::Fixture::new();
+    let permissions = ScriptedPermissions::granting(PermissionState::Granted);
+    let lane = serving_permissions(&fixture.paths, permissions.clone());
+    for request in permission_requests() {
+        assert_eq!(
+            lane.answer(request, &ACTOR),
+            LaneReply::Error {
+                code: "local_only".into()
+            }
+        );
+    }
+    assert!(
+        permissions.calls.lock().unwrap().is_empty(),
+        "the system is asked nothing for a paired caller"
+    );
+}
+
+#[test]
+fn a_local_caller_reads_and_changes_the_servers_own_permissions() {
+    use crate::permissions::{
+        PermissionState, RequestOutcome, SetupReadiness, SystemPermission,
+        testing::ScriptedPermissions,
+    };
+    let fixture = super::super::tests::Fixture::new();
+    let permissions = ScriptedPermissions::granting(PermissionState::NotGranted);
+    let lane = serving_permissions(&fixture.paths, permissions.clone());
+    let [read, request, prepare, reset, _] = permission_requests();
+    let LaneReply::Permissions(report) = lane.answer(read, &LOCAL_ACTOR) else {
+        panic!("expected a report");
+    };
+    assert_eq!(
+        report.state(SystemPermission::Microphone),
+        Some(PermissionState::NotGranted)
+    );
+    assert_eq!(
+        lane.answer(request, &LOCAL_ACTOR),
+        LaneReply::PermissionRequested(RequestOutcome::Requested)
+    );
+    assert_eq!(
+        lane.answer(prepare, &LOCAL_ACTOR),
+        LaneReply::PermissionSetup(SetupReadiness::Ready { cleared: true })
+    );
+    assert_eq!(lane.answer(reset, &LOCAL_ACTOR), LaneReply::PermissionReset);
+    assert_eq!(
+        *permissions.calls.lock().unwrap(),
+        [
+            ("request", SystemPermission::Microphone),
+            ("prepare_setup", SystemPermission::Accessibility),
+            ("reset", SystemPermission::Accessibility),
+        ]
+    );
+}
+
+#[test]
+fn a_platform_without_system_permissions_answers_unsupported() {
+    let fixture = super::super::tests::Fixture::new();
+    let lane = serving_permissions(&fixture.paths, Arc::new(crate::permissions::Unsupported));
+    let [read, request, prepare, reset, _] = permission_requests();
+    for request in [read, request, prepare, reset] {
+        assert_eq!(
+            lane.answer(request, &LOCAL_ACTOR),
+            LaneReply::Error {
+                code: "unsupported".into()
+            }
+        );
+    }
+}
+
+/// A preparation that waits for its test to release it before it reads the cancellation, as one
+/// waiting for another setup's probe does.
+struct HeldPreparation {
+    started: std::sync::mpsc::SyncSender<()>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl crate::permissions::SystemPermissions for HeldPreparation {
+    fn read(
+        &self,
+    ) -> Result<crate::permissions::PermissionsReport, crate::permissions::PermissionError> {
+        Err(crate::permissions::PermissionError::Unsupported)
+    }
+    fn request(
+        &self,
+        _: crate::permissions::SystemPermission,
+    ) -> Result<crate::permissions::RequestOutcome, crate::permissions::PermissionError> {
+        Err(crate::permissions::PermissionError::Unsupported)
+    }
+    fn prepare_setup(
+        &self,
+        _: crate::permissions::SystemPermission,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::permissions::SetupReadiness, crate::permissions::PermissionError> {
+        self.started.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+        Ok(if cancelled() {
+            crate::permissions::SetupReadiness::Cancelled { cleared: false }
+        } else {
+            crate::permissions::SetupReadiness::Ready { cleared: false }
+        })
+    }
+    fn reset(
+        &self,
+        _: crate::permissions::SystemPermission,
+    ) -> Result<(), crate::permissions::PermissionError> {
+        Err(crate::permissions::PermissionError::Unsupported)
+    }
+}
+
+/// A cancellation sent over another connection while a preparation waits reaches that
+/// preparation, and the server then forgets it.
+#[test]
+fn a_cancellation_reaches_a_waiting_preparation() {
+    use crate::permissions::SetupReadiness;
+    let fixture = super::super::tests::Fixture::new();
+    let (started, waiting) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let lane = serving_permissions(
+        &fixture.paths,
+        Arc::new(HeldPreparation {
+            started,
+            release: Mutex::new(released),
+        }),
+    );
+    let [_, _, prepare, _, cancel] = permission_requests();
+    let preparing = std::thread::spawn({
+        let lane = Arc::clone(&lane);
+        let prepare = prepare.clone();
+        move || lane.answer(prepare, &LOCAL_ACTOR)
+    });
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        lane.answer(cancel, &LOCAL_ACTOR),
+        LaneReply::PermissionSetupCancelled
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        preparing.join().unwrap(),
+        LaneReply::PermissionSetup(SetupReadiness::Cancelled { cleared: false })
+    );
+
+    // The same name prepares again once its cancellation was spent.
+    let preparing = std::thread::spawn({
+        let lane = Arc::clone(&lane);
+        move || lane.answer(prepare, &LOCAL_ACTOR)
+    });
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        preparing.join().unwrap(),
+        LaneReply::PermissionSetup(SetupReadiness::Ready { cleared: false })
+    );
+}
+
+/// Setup A is cancelled while it waits for the probing lock, then more cancellations arrive than
+/// the lane once remembered. A still takes no effect once it runs.
+#[test]
+fn later_cancellations_never_revive_a_waiting_setup() {
+    use crate::permissions::SetupReadiness;
+    let fixture = super::super::tests::Fixture::new();
+    let (started, waiting) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let lane = serving_permissions(
+        &fixture.paths,
+        Arc::new(HeldPreparation {
+            started,
+            release: Mutex::new(released),
+        }),
+    );
+    let [_, _, prepare, _, cancel] = permission_requests();
+    let preparing = std::thread::spawn({
+        let lane = Arc::clone(&lane);
+        move || lane.answer(prepare, &LOCAL_ACTOR)
+    });
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        lane.answer(cancel, &LOCAL_ACTOR),
+        LaneReply::PermissionSetupCancelled
+    );
+    for index in 0..17 {
+        assert_eq!(
+            lane.answer(
+                LaneRequest::CancelPermissionSetup {
+                    setup: format!("{index:032x}"),
+                },
+                &LOCAL_ACTOR,
+            ),
+            LaneReply::PermissionSetupCancelled
+        );
+    }
+    release.send(()).unwrap();
+    assert_eq!(
+        preparing.join().unwrap(),
+        LaneReply::PermissionSetup(SetupReadiness::Cancelled { cleared: false })
+    );
+}
+
+#[test]
+fn a_malformed_setup_name_is_refused() {
+    use crate::permissions::{PermissionState, SystemPermission, testing::ScriptedPermissions};
+    let fixture = super::super::tests::Fixture::new();
+    let permissions = ScriptedPermissions::granting(PermissionState::NotGranted);
+    let lane = serving_permissions(&fixture.paths, permissions.clone());
+    for request in [
+        LaneRequest::PreparePermissionSetup {
+            permission: SystemPermission::Accessibility,
+            setup: "../setup".into(),
+        },
+        LaneRequest::CancelPermissionSetup {
+            setup: "A".repeat(32),
+        },
+    ] {
+        assert_eq!(
+            lane.answer(request, &LOCAL_ACTOR),
+            LaneReply::Error {
+                code: "protocol_error".into()
+            }
+        );
+    }
+    assert!(permissions.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn permission_messages_keep_their_json_shape() {
+    use crate::permissions::{RequestOutcome, SystemPermission};
+    assert_eq!(
+        serde_json::to_value(LaneRequest::RequestPermission {
+            permission: SystemPermission::ScreenRecording
+        })
+        .unwrap(),
+        serde_json::json!({ "request": "request_permission", "permission": "screen_recording" })
+    );
+    assert_eq!(
+        serde_json::to_value(LaneReply::PermissionRequested(RequestOutcome::Decided {
+            state: crate::permissions::PermissionState::NotRequested
+        }))
+        .unwrap(),
+        serde_json::json!({
+            "reply": "permission_requested",
+            "outcome": "decided",
+            "state": "not_requested",
+        })
     );
 }
 
@@ -931,9 +1223,14 @@ mod flow {
                     std::thread::sleep(Duration::from_millis(1500));
                     drop(helper);
                     // The helper ends before the new server starts, so start-up settles it.
-                    let new =
-                        LaneServer::new(service, host, Arc::new(NoFeed), Box::new(|_| Ok(())))
-                            .unwrap();
+                    let new = LaneServer::new(
+                        service,
+                        host,
+                        Arc::new(NoFeed),
+                        Box::new(|_| Ok(())),
+                        Arc::new(crate::permissions::Unsupported),
+                    )
+                    .unwrap();
                     *next.lock().unwrap() = Some(hex(&new.boot));
                     switch.up(new);
                 });
@@ -1349,6 +1646,7 @@ mod flow {
                 lane.host.clone(),
                 Arc::new(Release::of(&lane)),
                 Box::new(|_| Ok(())),
+                Arc::new(crate::permissions::Unsupported),
             )
             .unwrap();
             let switch = Arc::new(Switch::default());

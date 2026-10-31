@@ -25,8 +25,8 @@ pub struct LauncherState {
     pub installation: Option<PathBuf>,
 }
 
-/// Reads `~/.local/bin/<identity>` without following anything else. A link into
-/// `installations/<digest>/bin/` names that installation.
+/// Reads `~/.local/bin/<identity>` without following anything else. A link to the executable of
+/// `installations/<digest>` names that installation.
 pub fn launcher(home: &Path, installations: &Path, identity: &str) -> LauncherState {
     let link = home.join(".local/bin").join(identity);
     let Ok(target) = std::fs::read_link(&link) else {
@@ -44,18 +44,14 @@ pub fn launcher(home: &Path, installations: &Path, identity: &str) -> LauncherSt
     } else {
         link.parent().map(|v| v.join(&target)).unwrap_or(target)
     };
-    let installation = target
-        .parent()
-        .filter(|bin| bin.file_name().is_some_and(|v| v == "bin"))
-        .and_then(Path::parent)
+    let installation = installation_of(&target, identity)
         .filter(|installation| installation.parent() == Some(installations))
         .filter(|installation| {
             installation
                 .file_name()
                 .and_then(|v| v.to_str())
                 .is_some_and(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()))
-        })
-        .map(Path::to_owned);
+        });
     LauncherState {
         launcher: if installation.is_some() {
             Launcher::Linked
@@ -72,11 +68,20 @@ pub fn path_ok(home: &Path, path: Option<&std::ffi::OsStr>) -> bool {
     path.is_some_and(|path| std::env::split_paths(path).any(|entry| entry == bin))
 }
 
+/// The installation whose executable `executable` is, in this machine's package layout.
+fn installation_of(executable: &Path, identity: &str) -> Option<PathBuf> {
+    let layout = spaceterm_server::service::Layout::host(identity)?;
+    let mut installation = executable;
+    for _ in layout.executable().components() {
+        installation = installation.parent()?;
+    }
+    (installation.join(layout.executable()) == executable).then(|| installation.to_owned())
+}
+
 /// The installation this executable runs from, when it is one of this identity's.
-fn running_installation(installations: &Path) -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let installation = executable.parent()?.parent()?;
-    (installation.parent() == Some(installations)).then(|| installation.to_owned())
+fn running_installation(installations: &Path, identity: &str) -> Option<PathBuf> {
+    let installation = installation_of(&std::env::current_exe().ok()?, identity)?;
+    (installation.parent() == Some(installations)).then_some(installation)
 }
 
 /// A Mac server runs only in a logged-in GUI session, because its LaunchAgent loads there.
@@ -163,7 +168,7 @@ fn setup(
         let installation = launcher
             .installation
             .clone()
-            .or_else(|| running_installation(&installations))
+            .or_else(|| running_installation(&installations, context.identity))
             .ok_or(Failure::new(Code::NoCandidate))?;
         service
             .install(&installation)
@@ -326,14 +331,17 @@ mod tests {
         let home = root.join("home");
         let installations = root.join("data/installations");
         let digest = "ab".repeat(32);
-        std::fs::create_dir_all(installations.join(&digest).join("bin")).unwrap();
+        let executable = spaceterm_server::service::Layout::host("spaceterm")
+            .unwrap()
+            .executable();
+        std::fs::create_dir_all(installations.join(&digest)).unwrap();
         std::fs::create_dir_all(home.join(".local/bin")).unwrap();
         assert_eq!(
             launcher(&home, &installations, "spaceterm").launcher,
             Launcher::Missing
         );
         std::os::unix::fs::symlink(
-            installations.join(&digest).join("bin/spaceterm"),
+            installations.join(&digest).join(&executable),
             home.join(".local/bin/spaceterm"),
         )
         .unwrap();

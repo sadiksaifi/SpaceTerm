@@ -110,11 +110,28 @@ fn connection_usage_is_validated_before_input_or_native_credentials() {
 
 #[test]
 fn machine_only_commands_reject_remote_routes_before_contacting_a_server() {
-    let output = spaceterm(&["--server", "remote-fixture", "server", "start", "--json"]);
-    assert_eq!(output.status.code(), Some(5));
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "local_only");
-    assert_eq!(envelope["server"], serde_json::Value::Null);
+    for (args, command) in [
+        (&["server", "start"][..], "server.start"),
+        (&["server", "permissions"][..], "server.permissions"),
+        (
+            &["server", "permissions", "request", "microphone"][..],
+            "server.permissions.request",
+        ),
+        (
+            &["server", "permissions", "settings", "device-control"][..],
+            "server.permissions.settings",
+        ),
+    ] {
+        let mut argv = vec!["--server", "remote-fixture"];
+        argv.extend(args);
+        argv.push("--json");
+        let output = spaceterm(&argv);
+        assert_eq!(output.status.code(), Some(5), "{args:?}");
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["error"]["code"], "local_only");
+        assert_eq!(envelope["command"], command);
+        assert_eq!(envelope["server"], serde_json::Value::Null);
+    }
 }
 
 #[test]

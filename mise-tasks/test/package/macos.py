@@ -365,7 +365,12 @@ class CurrentServerPackageTests(unittest.TestCase):
             )
             launcher = Path(temporary) / "bin/spaceterm"
             launcher.parent.mkdir()
-            launcher.symlink_to(tree / "bin/spaceterm")
+            launcher.symlink_to(
+                tree
+                / server_package.executable_path(
+                    server_package.host_target(), "spaceterm-preflight"
+                )
+            )
             result = subprocess.run(
                 [launcher, "server", "provision", "check"],
                 env={},

@@ -263,11 +263,13 @@ _Avoid_: local echo, speculative echo
 
 **Clipboard Authority**: A Terminal Session's grant to complete OSC 52 clipboard requests.
 
-**System Permission**: An operating-system privacy grant that programs in a Terminal Session inherit.
+**System Permission**: An operating-system privacy grant that programs in a Terminal Session inherit from their SpaceTerm Server, set up only on that server's machine.
+
+**Permission Holder**: The System Settings entry whose System Permissions a server's Terminal Sessions receive: the server's own bundle, listed under the product's name, such as SpaceTerm Preflight, or the application that started the server.
 
 **Permission Request**: A terminal-output request offering Permission Setup for missing System Permissions.
 
-**Permission Setup**: A user-initiated guided pass through System Settings to grant a System Permission.
+**Permission Setup**: A user-initiated guided pass through System Settings to turn on a System Permission for its Permission Holder.
 
 **Setup Guide**: The panel accompanying Permission Setup.
 

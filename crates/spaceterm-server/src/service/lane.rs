@@ -19,6 +19,10 @@ use super::tokens::Tokens;
 use super::{RetainedInstallation, Service, runtime};
 use crate::ServerError;
 use crate::hierarchy::Id;
+use crate::permissions::{
+    PermissionError, PermissionsReport, RequestOutcome, SetupReadiness, SystemPermission,
+    SystemPermissions,
+};
 use crate::protocol::Preamble;
 use crate::storage::Directory;
 use base64::Engine;
@@ -34,6 +38,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+/// A Permission Setup name: 32 lowercase hexadecimal digits.
+fn setup_name_valid(setup: &str) -> bool {
+    setup.len() == 32
+        && setup
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The contract code for an action only the server's own machine takes.
+pub const LOCAL_ONLY: &str = "local_only";
 /// The largest lane frame, in bytes.
 pub const MAX_FRAME: usize = 128 * 1024;
 /// The largest decoded `UploadChunk::data`, in bytes.
@@ -76,6 +90,28 @@ pub enum LaneRequest {
     },
     Acknowledge {
         operation: String,
+    },
+    /// Reads the server's System Permissions. This and the requests below answer only a caller
+    /// on the server's own machine, and refuse a paired one with `local_only`.
+    Permissions,
+    /// Asks the system for one System Permission.
+    RequestPermission {
+        permission: SystemPermission,
+    },
+    /// Prepares a Permission Setup of one System Permission. `setup` is the client's random
+    /// name for it, which [`LaneRequest::CancelPermissionSetup`] names.
+    PreparePermissionSetup {
+        permission: SystemPermission,
+        setup: String,
+    },
+    /// Cancels a Permission Setup, over another connection while its preparation runs. The
+    /// preparation then takes no further effect.
+    CancelPermissionSetup {
+        setup: String,
+    },
+    /// Forgets the system's decision for one System Permission and this server alone.
+    ResetPermission {
+        permission: SystemPermission,
     },
 }
 
@@ -122,6 +158,11 @@ pub enum LaneReply {
     },
     Receipt(LaneReceipt),
     Acknowledged,
+    Permissions(PermissionsReport),
+    PermissionRequested(RequestOutcome),
+    PermissionSetup(SetupReadiness),
+    PermissionSetupCancelled,
+    PermissionReset,
     /// `code` is a code from the CLI output contract.
     Error {
         code: String,
@@ -299,6 +340,9 @@ pub struct LaneServer {
     tokens: Tokens,
     feed: Arc<dyn Source>,
     launch: Box<Launcher>,
+    permissions: Arc<dyn SystemPermissions>,
+    /// The Permission Setups whose preparations run, and their cancellations.
+    setups: Mutex<setups::Setups>,
     upload: Mutex<Option<Upload>>,
     /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
@@ -345,6 +389,7 @@ impl LaneServer {
             host,
             Arc::new(feed::Releases::new(&paths.identity)),
             Box::new(move |op| super::helper::launch(&owned, op)),
+            crate::permissions::native(&paths.identity),
         )
     }
 
@@ -353,6 +398,7 @@ impl LaneServer {
         host: Arc<dyn LaneHost>,
         feed: Arc<dyn Source>,
         launch: Box<Launcher>,
+        permissions: Arc<dyn SystemPermissions>,
     ) -> Result<Arc<Self>, ServerError> {
         let server = service.passive_server_id()?.ok_or(ServerError::NotSetUp)?;
         let lane = Self {
@@ -363,6 +409,8 @@ impl LaneServer {
             tokens: Tokens::default(),
             feed,
             launch,
+            permissions,
+            setups: Mutex::default(),
             upload: Mutex::new(None),
             executing: Mutex::new(()),
             watching: AtomicBool::new(false),
@@ -479,8 +527,72 @@ impl LaneServer {
             LaneRequest::Preview { action } => self.preview(&action, actor),
             LaneRequest::Resolve { operation } => self.resolve(&operation),
             LaneRequest::Acknowledge { operation } => self.acknowledge(&operation, actor),
+            LaneRequest::Permissions
+            | LaneRequest::RequestPermission { .. }
+            | LaneRequest::PreparePermissionSetup { .. }
+            | LaneRequest::CancelPermissionSetup { .. }
+            | LaneRequest::ResetPermission { .. } => {
+                return (self.permission(request, actor), None);
+            }
         };
         (result.unwrap_or_else(|failure| error(&failure)), None)
+    }
+
+    fn setups(&self) -> std::sync::MutexGuard<'_, setups::Setups> {
+        self.setups.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Answers a System Permission request. Only the server's own machine sets up or changes
+    /// these grants, so a paired caller is refused before the system is asked anything.
+    fn permission(&self, request: LaneRequest, actor: &Actor) -> LaneReply {
+        if actor.pairing.is_some() {
+            return LaneReply::Error {
+                code: LOCAL_ONLY.to_owned(),
+            };
+        }
+        let permissions = self.permissions.as_ref();
+        let reply = match request {
+            LaneRequest::Permissions => permissions.read().map(LaneReply::Permissions),
+            LaneRequest::RequestPermission { permission } => permissions
+                .request(permission)
+                .map(LaneReply::PermissionRequested),
+            LaneRequest::PreparePermissionSetup { permission, setup } => {
+                if !setup_name_valid(&setup) {
+                    return error(&ServerError::Protocol);
+                }
+                if let Err(failure) = self.setups().begin(&setup, Instant::now()) {
+                    return error(&failure);
+                }
+                // The admission ends however the preparation returns.
+                struct Finish<'a>(&'a LaneServer, &'a str);
+                impl Drop for Finish<'_> {
+                    fn drop(&mut self) {
+                        self.0.setups().finish(self.1);
+                    }
+                }
+                let _finish = Finish(self, &setup);
+                let cancelled = || self.setups().cancelled(&setup);
+                permissions
+                    .prepare_setup(permission, &cancelled)
+                    .map(LaneReply::PermissionSetup)
+            }
+            LaneRequest::CancelPermissionSetup { setup } => {
+                if !setup_name_valid(&setup) {
+                    return error(&ServerError::Protocol);
+                }
+                if let Err(failure) = self.setups().cancel(&setup, Instant::now()) {
+                    return error(&failure);
+                }
+                Ok(LaneReply::PermissionSetupCancelled)
+            }
+            LaneRequest::ResetPermission { permission } => permissions
+                .reset(permission)
+                .map(|()| LaneReply::PermissionReset),
+            _ => Err(PermissionError::Unsupported),
+        };
+        reply.unwrap_or_else(|failure| LaneReply::Error {
+            code: failure.code().to_owned(),
+        })
     }
 
     fn stage_upload(
@@ -1450,5 +1562,6 @@ pub mod admin;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod network;
+mod setups;
 #[cfg(test)]
 pub(crate) mod tests;

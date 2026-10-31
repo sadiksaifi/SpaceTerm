@@ -14,6 +14,7 @@ pub mod organization;
 #[cfg(feature = "client")]
 pub mod organize;
 pub mod pane;
+pub mod permissions;
 pub mod protocol;
 pub mod provisioning;
 pub mod repository;

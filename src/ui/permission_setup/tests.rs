@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyWindowHandle, Bounds, DisplayId, Entity, ExternalDragPayload, FileDragIcon, Modifiers,
-    MouseButton, Pixels, TestAppContext, VisualTestContext, WindowHandle, bounds, point, px, size,
+    AnyWindowHandle, Bounds, DisplayId, Entity, Modifiers, Pixels, TestAppContext,
+    VisualTestContext, WindowHandle, bounds, point, px, size,
 };
 
 use super::{
@@ -14,7 +14,6 @@ use super::{
     TRACKING_INTERVAL,
 };
 use crate::appearance::Appearance;
-use crate::application_identity::ApplicationIdentity;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::permission_access::testing::ScriptedPermissionAccess;
 use crate::platform::permission_access::{
@@ -170,7 +169,7 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
         .update(|cx| handle.update(cx, |_, window, _| window.bounds()))
         .expect("the guide is open");
     assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
-    assert_eq!(frame.size.height, super::guide::GUIDING_HEIGHT);
+    assert_eq!(frame.size.height, super::guide::HEIGHT);
     assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
     assert_eq!(fixture.host.glass_requests(), 1);
 }
@@ -235,7 +234,6 @@ fn polling_reports_grant_and_final_guide_close_releases_setup(cx: &mut TestAppCo
     );
     // Nothing waits, so the guide offers no Continue and closing it finishes the setup.
     let guide = guide_context(cx);
-    assert!(guide.debug_bounds("setup-guide-application").is_none());
     assert!(guide.debug_bounds("setup-guide-continue").is_none());
 
     click("setup-guide-close", guide);
@@ -286,9 +284,9 @@ fn a_granted_permission_continues_to_the_next_only_when_asked(cx: &mut TestAppCo
     fixture.start(&[Accessibility, ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
     {
-        // While guiding, the drag is the only action besides closing.
+        // While guiding, closing is the only action.
         let guide = guide_context(cx);
-        assert!(guide.debug_bounds("setup-guide-application").is_some());
+        assert!(guide.debug_bounds("setup-guide-detail").is_some());
         assert!(guide.debug_bounds("setup-guide-continue").is_none());
     }
 
@@ -469,62 +467,6 @@ fn cancelling_a_setup_cancels_its_preparation(cx: &mut TestAppContext) {
     assert!(guide(cx).is_none());
 }
 
-/// Dragging the application out of the guide hands its bundle to the system, which is what a
-/// System Settings list accepts, drawn as a copy of the row held where the pointer took it.
-#[gpui::test]
-fn dragging_the_application_out_of_the_guide_offers_its_bundle(cx: &mut TestAppContext) {
-    let fixture = install(NotGranted, NotGranted, cx);
-    fixture.start(&[ScreenRecording], cx);
-    fixture.show_settings(settings_frame(), cx);
-    let handle: AnyWindowHandle = guide(cx).expect("the guide is open").into();
-    let row = {
-        let guide = guide_context(cx);
-        let row = guide
-            .debug_bounds("setup-guide-application")
-            .expect("the application is offered");
-        let start = row.center();
-        guide.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-        guide.simulate_mouse_move(
-            start + point(px(10.0), px(0.0)),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        guide.simulate_mouse_move(
-            point(px(-1.0), start.y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        row
-    };
-
-    let drawn = fixture.host.drawn_rows();
-    assert_eq!(drawn.len(), 1);
-    assert_eq!(drawn[0].size, row.size);
-    assert_eq!(drawn[0].name, ApplicationIdentity::current().display_name());
-    let payloads = cx.external_drag_payloads(handle);
-    let [ExternalDragPayload::Files(files)] = payloads.as_slice() else {
-        panic!("one file drag");
-    };
-    assert_eq!(
-        files.entries(),
-        [("/Applications/SpaceTerm.app".into(), true)]
-    );
-    let FileDragIcon::Image {
-        size,
-        cursor_offset,
-        ..
-    } = files.icon()
-    else {
-        panic!("the drag shows the row");
-    };
-    assert_eq!(*size, row.size);
-    assert!(
-        Bounds::new(point(px(0.0), px(0.0)), row.size).contains(cursor_offset),
-        "the pointer holds the row"
-    );
-}
-
-/// A setup that ends while its guide handles an event still closes the guide once the event ends.
 #[gpui::test]
 fn a_guide_busy_with_an_event_closes_after_it(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
@@ -684,25 +626,24 @@ fn the_setup_names_accessibility_as_the_system_does(cx: &mut TestAppContext) {
     }
 }
 
-/// The guide never takes focus, so assistive technology reads its instruction, the application
-/// to drag, and its caption as published text, and closes it through the same button.
+/// The guide never takes focus, so assistive technology reads its instruction, which names the
+/// server's entry to turn on, and its detail as published text, and closes it through the same
+/// button.
 #[gpui::test]
-fn the_guide_publishes_its_instruction_and_the_application_row(cx: &mut TestAppContext) {
+fn the_guide_publishes_its_instruction_and_the_entry_to_turn_on(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
     let fixture = install(NotGranted, NotGranted, cx);
     fixture.start(&[ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
-    let application = ApplicationIdentity::current().display_name();
 
     let guide = guide_context(cx);
     let tree = A11yTree::read(guide);
-    tree.text(&format!("Drag {application} to allow Screen Recording."));
-    let row = tree.node(application);
-    assert_eq!(row["aria"]["role"], "Group");
-    assert_eq!(row["aria"]["description"], "Drag to the list");
-    tree.text("Use the + button below the list.");
+    tree.text("Turn on SpaceTerm Development to allow Screen Recording.");
+    tree.text(
+        "SpaceTerm removed an earlier entry for SpaceTerm Development and asked macOS to list it again.",
+    );
 
     perform(guide, tree.node("Close"), Action::Click);
     guide.run_until_parked();

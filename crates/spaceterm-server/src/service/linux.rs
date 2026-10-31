@@ -34,7 +34,11 @@ impl UserService {
         }
     }
     fn contents(&self, runtime: &Path) -> Result<Vec<u8>, ServerError> {
-        let executable = runtime.join("bin/spaceterm");
+        let executable = runtime.join(
+            super::runtime::Layout::host(&self.identity)
+                .ok_or(ServerError::RuntimeUnavailable)?
+                .executable(),
+        );
         let executable = executable.to_str().ok_or(ServerError::RuntimeUnavailable)?;
         // Unit strings have C escapes, percent specifiers, and (in ExecStart) dollar expansion.
         let mut quoted = String::new();
@@ -331,7 +335,11 @@ impl Supervisor for UserService {
             .get("data")
             .and_then(|v| v.as_array())
             .ok_or(ServerError::ServiceUnavailable)?;
-        let executable = runtime.join("bin/spaceterm");
+        let executable = runtime.join(
+            super::runtime::Layout::host(&self.identity)
+                .ok_or(ServerError::RuntimeUnavailable)?
+                .executable(),
+        );
         let expected = executable.to_str().ok_or(ServerError::RuntimeUnavailable)?;
         if entries.len() != 1
             || entries[0].get(0).and_then(|v| v.as_str()) != Some(expected)

@@ -6243,12 +6243,15 @@ name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "block2 0.6.2",
  "bytes",
  "flate2",
  "jiff",
  "libc",
  "noq-proto",
  "noq-udp",
+ "objc2 0.6.4",
+ "objc2-av-foundation",
  "postcard",
  "rcgen",
  "ring",

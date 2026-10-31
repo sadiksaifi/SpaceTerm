@@ -1,26 +1,15 @@
-use std::marker::PhantomData;
-use std::rc::Rc;
+//! Opens a System Settings list from the desktop, the active application when a person asks, so
+//! macOS brings System Settings forward.
 
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSWorkspace;
 use objc2_foundation::{NSString, NSURL};
 
-use super::permission_recovery::{UrlLaunchError, UrlLauncher};
-#[derive(Default)]
-pub(crate) struct NsWorkspaceUrlLauncher {
-    _not_send_or_sync: PhantomData<Rc<()>>,
-}
-
-impl UrlLauncher for NsWorkspaceUrlLauncher {
-    fn open_url(&self, uri: &'static str) -> Result<(), UrlLaunchError> {
-        if MainThreadMarker::new().is_none() {
-            return Err(UrlLaunchError::OffMainThread);
-        }
-        let url =
-            NSURL::URLWithString(&NSString::from_str(uri)).ok_or(UrlLaunchError::Unavailable)?;
-        NSWorkspace::sharedWorkspace()
-            .openURL(&url)
-            .then_some(())
-            .ok_or(UrlLaunchError::Rejected)
+/// Whether Launch Services accepted `uri`. It must run on the main thread.
+pub(crate) fn open(uri: &'static str) -> bool {
+    if MainThreadMarker::new().is_none() {
+        return false;
     }
+    NSURL::URLWithString(&NSString::from_str(uri))
+        .is_some_and(|url| NSWorkspace::sharedWorkspace().openURL(&url))
 }

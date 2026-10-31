@@ -31,3 +31,9 @@ noq-udp = { version = "=1.4.0", default-features = false }
 noq-proto = { version = "=1.4.0", default-features = false, features = ["rustls-ring"] }
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 jiff = { version = "=0.2.38", default-features = false, features = ["std"] }
+
+# The server reads and requests its own System Permissions.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+objc2 = "=0.6.4"
+objc2-av-foundation = { version = "=0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }

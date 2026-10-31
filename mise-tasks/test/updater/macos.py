@@ -62,7 +62,6 @@ def main():
             entitlements.write_bytes(
                 plistlib.dumps(
                     {
-                        "com.apple.security.device.audio-input": True,
                         "com.apple.security.cs.disable-library-validation": True,
                     }
                 )
