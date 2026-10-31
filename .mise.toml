@@ -275,7 +275,10 @@ run = [{ task = "test:native:{{ os() }}" }]
 
 [tasks."test:native:macos"]
 description = "Run native macOS and shared Unix Adapter tests"
-run = "cargo test --package spaceterm --all-targets --features native-tests --locked -- macos unix"
+run = [
+  "cargo test --package spaceterm --all-targets --features native-tests --locked -- macos unix",
+  "cargo test --package spaceterm-connections --all-targets --features native-tests --locked -- macos unix",
+]
 
 [tasks."test:native:linux"]
 description = "Run native Linux and shared Unix Adapter tests"

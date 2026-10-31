@@ -295,35 +295,28 @@ mod tests {
     }
 
     #[test]
-    fn a_network_execute_keeps_its_wire_form() {
-        let request = super::super::LaneRequest::Execute {
-            action: super::super::LaneAction::Network {
-                access: NetworkAccess::All,
-            },
-            token: "c1-00".into(),
-            operation: "op".into(),
-        };
-        assert_eq!(
-            serde_json::to_value(&request).unwrap(),
-            serde_json::json!({
-                "request": "execute",
-                "action": { "action": "network", "access": "all" },
-                "token": "c1-00",
-                "operation": "op",
-            })
-        );
-    }
-
-    #[test]
-    fn access_keeps_its_wire_form() {
-        assert_eq!(
-            serde_json::to_value(NetworkAccess::Off).unwrap(),
-            serde_json::json!("off")
-        );
-        assert_eq!(
-            serde_json::to_value(NetworkAccess::Address("192.0.2.4:9231".parse().unwrap()))
-                .unwrap(),
-            serde_json::json!({ "address": "192.0.2.4:9231" })
-        );
+    fn network_requests_keep_their_wire_form() {
+        for (access, value) in [
+            (NetworkAccess::Off, serde_json::json!("off")),
+            (NetworkAccess::All, serde_json::json!("all")),
+            (
+                NetworkAccess::Address("192.0.2.4:9231".parse().unwrap()),
+                serde_json::json!({ "address": "192.0.2.4:9231" }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(access).unwrap(), value);
+            let request = super::super::LaneRequest::Execute {
+                action: super::super::LaneAction::Network { access },
+                token: "c1-00".into(),
+                operation: "op".into(),
+            };
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                serde_json::json!({
+                    "request": "execute", "action": { "action": "network", "access": value },
+                    "token": "c1-00", "operation": "op",
+                })
+            );
+        }
     }
 }

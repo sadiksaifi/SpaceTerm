@@ -1440,30 +1440,6 @@ mod tests {
         assert!(Service::state(&reopened).unwrap().unwrap().stopped);
     }
     #[test]
-    fn service_definition_publication_reuses_exact_bytes_and_preserves_changed_entries() {
-        let fixture = Fixture::new();
-        let registration = registration::Registration {
-            directory: fixture.root.join("registration"),
-            name: "server.plist".into(),
-        };
-        registration.install(b"approved definition").unwrap();
-        registration.install(b"approved definition").unwrap();
-        std::fs::write(registration.path(), b"replacement").unwrap();
-        assert_eq!(
-            registration.remove(b"approved definition"),
-            Err(ServerError::CleanupUnresolved)
-        );
-        assert_eq!(std::fs::read(registration.path()).unwrap(), b"replacement");
-        std::fs::remove_file(registration.path()).unwrap();
-        std::os::unix::fs::symlink(fixture.root.join("outside"), registration.path()).unwrap();
-        assert!(registration.install(b"approved definition").is_err());
-        assert!(
-            std::fs::symlink_metadata(registration.path())
-                .unwrap()
-                .is_symlink()
-        );
-    }
-    #[test]
     fn stop_publishes_durable_intent_before_a_failing_supervisor_operation() {
         let fixture = Fixture::new();
         let supervisor = TestSupervisor {

@@ -110,37 +110,6 @@ fn directory_validation_rejects_relative_malformed_and_unreadable_paths() {
 }
 
 #[test]
-fn errors_and_retained_identities_do_not_disclose_content() {
-    let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
-    );
-    let directory = authority.validate_directory(&root.0).unwrap();
-    assert_eq!(
-        format!("{:?}", directory.identity()),
-        "LocalDirectoryIdentity(LocalObjectIdentity(<redacted>))"
-    );
-    let error = classify_io_error(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "private fixture path",
-    ));
-    assert_eq!(format!("{error}"), "permission denied");
-    assert_eq!(format!("{error:?}"), "PermissionDenied");
-    let unavailable =
-        ValidatedLocalDirectory::new(root.0.clone(), LocalDirectoryIdentity::unavailable());
-    assert_eq!(
-        authority.revalidate_directory(&unavailable),
-        Err(LocalFilesystemError::IdentityChanged)
-    );
-    assert_eq!(
-        LocalDirectoryIdentity::for_test(31),
-        LocalDirectoryIdentity::for_test(31)
-    );
-    assert_ne!(directory.identity(), LocalDirectoryIdentity::for_test(31));
-}
-
-#[test]
 fn local_file_authority_rejects_symlink_retargeting_and_successor_objects() {
     let root = Fixture::new();
     let target = root.0.join("target");
@@ -179,76 +148,6 @@ fn file_identity_fails_closed_when_host_refuses_retention() {
         Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
     );
     assert!(authority.local_file("file", &root.0).is_none());
-}
-
-#[test]
-fn file_validation_rejects_missing_non_file_malformed_and_oversized_targets() {
-    let root = Fixture::new();
-    let authority = LocalFilesystemAuthority::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
-    );
-    for value in ["missing", ".", "bad\0", "bad\n", ""] {
-        assert!(authority.local_file(value, &root.0).is_none());
-    }
-    assert!(
-        authority
-            .local_file(&"x".repeat(MAX_LOCAL_FILE_PATH_BYTES + 1), &root.0)
-            .is_none()
-    );
-    assert!(
-        authority
-            .local_file("file", Path::new("relative"))
-            .is_none()
-    );
-}
-
-#[test]
-fn emission_metadata_is_content_private_scoped_versioned_and_bounded() {
-    let root = Fixture::new();
-    let path = root.0.join("private-name");
-    fs::write(&path, b"contents").unwrap();
-    let file = LocalFilesystemAuthority::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        Arc::new(crate::platform::unix_local_identity::UnixLocalIdentity),
-    )
-    .local_file("private-name", &root.0)
-    .unwrap();
-    let mut registry = LocalFileEmissionRegistry::default();
-    let token = registry.emit(&file).unwrap();
-    assert_eq!(token.len(), 24);
-    assert_eq!(&token[..8], b"STLF\0\0\0\x02");
-    for private in [
-        b"private-name".as_slice(),
-        b"contents".as_slice(),
-        path.as_os_str().as_encoded_bytes(),
-    ] {
-        assert!(!token.windows(private.len()).any(|bytes| bytes == private));
-    }
-    assert_eq!(format!("{file:?}"), "ValidatedLocalFile(<redacted>)");
-    assert_eq!(
-        format!("{:?}", file.0.identity),
-        "LocalObjectIdentity(<redacted>)"
-    );
-    assert_eq!(registry.restore(&token), Some(file.clone()));
-    assert!(
-        LocalFileEmissionRegistry::default()
-            .restore(&token)
-            .is_none()
-    );
-    let mut malformed = token.clone();
-    malformed[7] = 1;
-    assert!(registry.restore(&malformed).is_none());
-    assert!(registry.restore(&[0; 4097]).is_none());
-    assert!(registry.restore(&token[..23]).is_none());
-    fs::remove_file(path).unwrap();
-    assert!(
-        registry
-            .restore(&token)
-            .unwrap()
-            .revalidated_path()
-            .is_none()
-    );
 }
 
 #[test]

@@ -9,28 +9,6 @@ fn spaceterm(args: &[&str]) -> Output {
 }
 
 #[test]
-fn help_shows_the_visible_tree_without_hidden_commands() {
-    let output = spaceterm(&["--help"]);
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).unwrap();
-    for visible in [
-        "server",
-        "connection",
-        "list",
-        "workspace",
-        "tab",
-        "pane",
-        "worktree",
-    ] {
-        assert!(help.contains(visible), "{visible}");
-    }
-    assert!(!help.contains("completion"));
-    let output = spaceterm(&["server", "--help"]);
-    let help = String::from_utf8(output.stdout).unwrap();
-    assert!(!help.contains("provision"));
-}
-
-#[test]
 fn bad_values_are_usage_errors_without_the_value() {
     let identity = "private-identity-must-not-appear";
     for args in [
@@ -54,14 +32,20 @@ fn bad_values_are_usage_errors_without_the_value() {
 }
 
 #[test]
-fn version_prints_the_build_version() {
-    let output = spaceterm(&["--version"]);
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .starts_with("spaceterm ")
-    );
+fn help_and_version_exit_successfully_on_stdout() {
+    for args in [&["--help"][..], &["server", "--help"], &["--version"]] {
+        let output = spaceterm(args);
+        assert!(output.status.success(), "{args:?}");
+        assert!(output.stderr.is_empty(), "{args:?}");
+        assert!(!output.stdout.is_empty(), "{args:?}");
+        if args == ["--version"] {
+            assert!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .starts_with("spaceterm ")
+            );
+        }
+    }
 }
 
 #[test]

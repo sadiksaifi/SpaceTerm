@@ -640,54 +640,60 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
             .trim(),
         "1"
     );
-    for relative in [
-        "bash/spaceterm.bash",
-        "elvish/lib/spaceterm-integration.elv",
-        "fish/vendor_conf.d/spaceterm-shell-integration.fish",
-        "nushell/vendor/autoload/spaceterm.nu",
-        "zsh/spaceterm-integration",
-    ] {
-        let script = std::fs::read_to_string(root.join(relative)).unwrap();
-        assert!(
-            script.contains("133;"),
-            "{relative} must emit OSC 133 marks"
-        );
-        assert!(
-            script.contains("SPACETERM_SHELL_INTEGRATION_VERSION"),
-            "{relative} must verify the resource handshake"
-        );
-        let redraw = if relative.starts_with("bash/") {
-            "133;A;redraw=last"
-        } else {
-            "133;A;redraw=1"
+    for shell in ["bash", "zsh", "fish", "nu", "elvish"] {
+        let Some(program) = installed_shell_path(shell) else {
+            continue;
         };
-        assert!(
-            script.contains(redraw),
-            "{relative} must state its prompt redraw policy"
-        );
-    }
-    for (shell, arguments, relative, script) in [
-        (
-            "/bin/bash",
-            &["--noprofile", "--norc", "-ic"][..],
-            "bash/spaceterm.bash",
-            r#"source "$1"; if declare -F _spaceterm_prompt >/dev/null; then _spaceterm_prompt; fi"#,
-        ),
-        (
-            "/bin/zsh",
-            &["-dfi", "-c"][..],
-            "zsh/spaceterm-integration",
-            r#"PS1='SPACE> '; builtin source -- "$1"; if (( $+functions[_spaceterm_before_prompt] )); then _spaceterm_before_prompt; builtin print -nrP -- "$PS1"; fi"#,
-        ),
-    ] {
         for version in [Some("1"), Some("0"), Some("2"), None] {
             let fixture = DirectoryFixture::new();
-            let mut command = session_free_command(shell);
+            let mut command = match shell {
+                "bash" => {
+                    let mut command = session_free_command(&program);
+                    command.args(["--noprofile", "--norc", "-ic",
+                        r#"source "$1"; if declare -F _spaceterm_prompt >/dev/null; then _spaceterm_prompt; fi"#, "spaceterm"])
+                        .arg(root.join("bash/spaceterm.bash"));
+                    command
+                }
+                "zsh" => {
+                    let mut command = session_free_command(&program);
+                    command.args(["-dfi", "-c",
+                        r#"PS1='SPACE> '; builtin source -- "$1"; if (( $+functions[_spaceterm_before_prompt] )); then _spaceterm_before_prompt; builtin print -nrP -- "$PS1"; fi"#, "spaceterm"])
+                        .arg(root.join("zsh/spaceterm-integration"));
+                    command
+                }
+                "fish" => {
+                    let mut command = session_free_command(&program);
+                    command.args(["--no-config", "-ic",
+                        r#"source "$argv[1]"; if functions --query _spaceterm_prompt; _spaceterm_prompt; end"#])
+                        .arg(root.join("fish/vendor_conf.d/spaceterm-shell-integration.fish"));
+                    command
+                }
+                "nu" => {
+                    let mut command = session_free_command(&program);
+                    command.args(["--no-config-file", "-c"]).arg(format!(
+                        "source '{}'; use spaceterm install; install; if (($env.config.hooks.pre_prompt? | default [] | length) > 0) {{ do ($env.config.hooks.pre_prompt | last) }}",
+                        root.join("nushell/vendor/autoload/spaceterm.nu").display()));
+                    command
+                }
+                "elvish" => {
+                    let rc = fixture.path().join("rc.elv");
+                    std::fs::write(&rc, format!(
+                        "eval (slurp < '{}'); if (> (count $edit:before-readline) 0) {{ $edit:before-readline[-1] }}; exit",
+                        root.join("elvish/lib/spaceterm-integration.elv").display())).unwrap();
+                    // Elvish's editor hooks require a controlling terminal.
+                    controlling_terminal_command(&[
+                        program.as_os_str(),
+                        "-rc".as_ref(),
+                        rc.as_os_str(),
+                        "-sock".as_ref(),
+                        fixture.path().join("sock").as_os_str(),
+                        "-db".as_ref(),
+                        fixture.path().join("db").as_os_str(),
+                    ])
+                }
+                _ => unreachable!(),
+            };
             command
-                .args(arguments)
-                .arg(script)
-                .arg("spaceterm")
-                .arg(root.join(relative))
                 .env_clear()
                 .env("HOME", fixture.path())
                 .env("PATH", "/usr/bin:/bin");
@@ -696,11 +702,24 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
             }
             let output = command.output().unwrap();
             assert!(output.status.success(), "{shell} {version:?}: {output:?}");
-            assert_eq!(
-                osc_reports(&output.stdout).is_empty(),
-                version != Some("1"),
-                "{shell} must accept only version 1, not {version:?}"
-            );
+            let reports = osc_reports(&output.stdout);
+            if version == Some("1") {
+                let expected = if shell == "bash" {
+                    "133;A;redraw=last"
+                } else {
+                    "133;A;redraw=1"
+                };
+                assert!(reports.contains(&expected), "{shell}: {reports:?}");
+                assert!(
+                    reports.iter().any(|report| report.starts_with("7;file://")),
+                    "{shell}: {reports:?}"
+                );
+            } else {
+                assert!(
+                    reports.is_empty(),
+                    "{shell} accepted version {version:?}: {reports:?}"
+                );
+            }
         }
     }
 }

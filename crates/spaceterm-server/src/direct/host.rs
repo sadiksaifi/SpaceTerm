@@ -14,6 +14,16 @@ enum Bind {
 /// How often a `Starting` listener tries its address again while it waits.
 const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 pub(crate) type Shared = Arc<Mutex<State>>;
+/// The host-local socket boundary. A binder retains ownership of every prepared listener.
+type ListenerBinder = Arc<
+    dyn Fn(
+            std::net::SocketAddr,
+            Arc<noq_proto::ServerConfig>,
+        ) -> Result<QuicListener, crate::connection::quic::QuicError>
+        + Send
+        + Sync,
+>;
+
 /// The listener a policy change moves to, readied before the change commits.
 enum Prepared {
     /// The current listener, widened if needed. Its connections and generation stay.
@@ -58,6 +68,7 @@ pub(crate) struct State {
     generation: [u8; 32],
     released: std::collections::BTreeSet<[u8; 32]>,
     network: Arc<dyn network::Adapter>,
+    bind_listener: ListenerBinder,
     /// Wakes the host's accept loop when the listener changes.
     wake: Option<Arc<dyn Wake>>,
     /// Runs after each revocation, whichever transport asked for it.
@@ -83,6 +94,13 @@ impl State {
         paths: &crate::host::Paths,
         network: Arc<dyn network::Adapter>,
     ) -> Result<Shared, DirectError> {
+        Self::open_with_adapters(paths, network, Arc::new(QuicListener::bind))
+    }
+    fn open_with_adapters(
+        paths: &crate::host::Paths,
+        network: Arc<dyn network::Adapter>,
+        bind_listener: ListenerBinder,
+    ) -> Result<Shared, DirectError> {
         let store = storage::Store::open(paths)?;
         let record = store.load()?;
         let pin = store.pin(&record)?;
@@ -101,6 +119,7 @@ impl State {
             generation: crypto::random()?,
             released: Default::default(),
             network,
+            bind_listener,
             wake: None,
             revoked: None,
             retiring: Default::default(),
@@ -294,7 +313,7 @@ impl State {
     fn bind(&self, address: std::net::SocketAddr) -> Result<QuicListener, Bind> {
         let config = super::quic::server_config(&self.record.certificate, &self.record.key)
             .map_err(|_| Bind::Other)?;
-        let listener = QuicListener::bind(address, config).map_err(|error| match error {
+        let listener = (self.bind_listener)(address, config).map_err(|error| match error {
             crate::connection::quic::QuicError::AddressInUse => Bind::InUse,
             _ => Bind::Other,
         })?;
@@ -1808,8 +1827,31 @@ mod lane_tests;
 mod agent_tests;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    pub(crate) fn reserve_policy(state: &Shared, ip: std::net::IpAddr) -> NetworkPolicy {
+        let mut state = state.lock().unwrap();
+        let listener = state
+            .bind(std::net::SocketAddr::new(ip, 0))
+            .unwrap_or_else(|_| panic!("fixture listener must bind"));
+        let policy = NetworkPolicy::new(listener.address()).unwrap();
+        let held = Mutex::new(Some(listener));
+        let previous = Arc::clone(&state.bind_listener);
+        state.bind_listener = Arc::new(move |address, config| {
+            let mut held = held.lock().unwrap();
+            if held
+                .as_ref()
+                .is_some_and(|listener| listener.address() == address)
+            {
+                Ok(held.take().unwrap())
+            } else {
+                previous(address, config)
+            }
+        });
+        policy
+    }
+
     #[test]
     fn simultaneous_invitations_with_the_same_expiry_keep_exact_claim_and_approval_bindings() {
         let fixture = super::super::tests::Fixture::new();
@@ -2010,6 +2052,13 @@ mod tests {
         fixture.enable();
         let mut invitation = fixture.invite();
         let credential = DeviceCredential::generate().unwrap();
+        for expires in [1, wire::now().unwrap() + 600] {
+            let mut payload = invitation.payload.clone();
+            payload.expires = expires;
+            let encoded = client::invitation(payload).unwrap();
+            let parsed = Invitation::parse(&encoded.display_text()).unwrap();
+            assert!(Enrollment::prepare(&parsed, "Clock skew".into(), &credential).is_ok());
+        }
         invitation.payload.expires = 0;
         assert!(
             Enrollment::prepare(&invitation, "Expired".into(), &credential).is_ok(),
