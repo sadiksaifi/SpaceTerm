@@ -3006,6 +3006,8 @@ impl WorkspaceManager {
         if key == ServerKey::LOCAL {
             return;
         }
+        // Withdrawing a route's Workspaces is the window's own change, never the person's.
+        self.observe_navigation(cx);
         self.save_shared_arrangements(cx);
         let presented: Vec<WorkspaceId> = self
             .workspaces
@@ -3030,6 +3032,7 @@ impl WorkspaceManager {
         if let Some(mut withdrawn) = self.shared.remove(key) {
             withdrawn.flush_client_views();
         }
+        self.record_navigation(cx);
         // A Workspace still waiting for this server says it couldn't open rather than vanishing.
         if self
             .pending_server_directory
@@ -3068,6 +3071,8 @@ impl WorkspaceManager {
         else {
             return;
         };
+        // Membership this reading presents is the window's own change, never the person's.
+        self.observe_navigation(cx);
         self.reconcile_parked_shared_workspaces(key, window, cx);
         // Approved closes already moved presentation. Published membership never replaces newer focus.
         let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
@@ -3084,6 +3089,8 @@ impl WorkspaceManager {
             self.apply_shared_inventory(key, &inventory, removal, window, cx);
             self.settle_remembered_view(key, window, cx);
         }
+        // What follows opens what a person asked for, which is their navigation.
+        self.record_navigation(cx);
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
         // Active Tab and its Focused Pane's shell. Later launches restore views passively, and
         // so does a window reopened with the view the last one left, which nobody chose here.

@@ -680,3 +680,70 @@ fn a_zoom_changed_before_the_server_publishes_stays(cx: &mut TestAppContext) {
     );
     assert!(zoomed(&manager, &mut window));
 }
+
+/// A Workspace the person selects after reopening replaces the remembered one in the view the
+/// window leaves, even when the window closes before anything else happens.
+#[gpui::test]
+fn closing_right_after_a_selection_keeps_that_selection(cx: &mut TestAppContext) {
+    let (_, offline) = closed_on_an_offline_servers_workspace(cx);
+    let local = Rc::new(ScriptedEdits::new(Some(server_inventory(
+        2,
+        &[("Here", 1), ("There", 2)],
+    ))));
+
+    let (manager, mut window) = open_window(cx);
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+    present_penguin(&manager, &offline, &[5], &mut window);
+    select(&manager, "There", &mut window);
+    close(&manager, &mut window);
+
+    let online = Rc::new(ScriptedEdits::new(Some(server_inventory(3, &[("Far", 5)]))));
+    let (manager, mut window) = open_window(cx);
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+    present_penguin(&manager, &online, &[5], &mut window);
+
+    assert_eq!(active_name(&manager, &mut window), "There");
+}
+
+/// The remembered Workspace's deletion can be confirmed before any other Workspace arrives. The
+/// first Workspace in display order is selected once Workspaces do arrive, by the saved order.
+#[gpui::test]
+fn a_fallback_confirmed_before_any_workspace_selects_the_first_to_arrive_in_order(
+    cx: &mut TestAppContext,
+) {
+    let far = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[("Far", 5)]))));
+    let (manager, mut window) = open_window(cx);
+    present_penguin(&manager, &far, &[5], &mut window);
+    close(&manager, &mut window);
+
+    let (manager, mut window) = open_window(cx);
+    let local_reference = |number: u8| spaceterm_server::workspace_order::WorkspaceReference {
+        owner: spaceterm_server::workspace_order::OwnerId::from_bytes(LOCAL_OWNER),
+        workspace: [number; 32],
+    };
+    let mut saved = spaceterm_server::workspace_order::WorkspaceOrder::default();
+    saved
+        .record(&[local_reference(2), local_reference(1)])
+        .expect("the order records");
+    window.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.read_display_order_later();
+            manager.display_order_read(Some(saved), window, cx);
+        });
+    });
+    // Penguin confirms Far is gone while this window presents nothing.
+    let killed = Rc::new(ScriptedEdits::new(Some(server_inventory(2, &[("Logs", 1)]))));
+    present_penguin(&manager, &killed, &[], &mut window);
+    assert_eq!(
+        manager.read_with(&window, |manager, _| manager.workspaces.len()),
+        0
+    );
+
+    let local = Rc::new(ScriptedEdits::new(Some(server_inventory(
+        1,
+        &[("A", 1), ("B", 2)],
+    ))));
+    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+
+    assert_eq!(active_name(&manager, &mut window), "B");
+}

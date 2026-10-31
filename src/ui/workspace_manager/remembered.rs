@@ -26,8 +26,11 @@ impl WorkspaceManager {
         window.remove_window();
     }
 
-    /// Leaves this window's view for the next Workspace Window, as the window closes.
+    /// Leaves this window's view for the next Workspace Window, as the window closes. A choice the
+    /// person made since the window last changed its own presentation settles what it restores
+    /// first, so the next window never brings back a selection the person replaced.
     pub(super) fn remember_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.observe_navigation(cx);
         let view = self.remembered_view(window, cx);
         crate::ui::remembered_view::remember_workspace_window(view, cx);
     }
@@ -223,9 +226,10 @@ impl WorkspaceManager {
 
     /// Selects the first Workspace in display order when the remembered Active Workspace is gone
     /// and the person has selected nothing since. A saved order still being read decides which
-    /// Workspace is first, so the selection waits for it.
+    /// Workspace is first, so the selection waits for it, and each later publication selects the
+    /// first Workspace again until the person navigates.
     pub(super) fn select_remembered_fallback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.display_order_ready() || !self.restoration.take_fallback() {
+        if !self.display_order_ready() || !self.restoration.falls_back() {
             return;
         }
         let Some(first) = self.workspaces.iter().next().map(|entry| entry.id()) else {

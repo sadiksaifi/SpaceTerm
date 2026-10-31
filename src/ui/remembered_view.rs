@@ -404,22 +404,19 @@ impl<M: Copy + Eq> Restoration<M> {
         };
     }
 
-    /// Whether the window selects its default Workspace now, because the remembered one is gone
-    /// and the person has selected nothing since. The window asks once its Workspace order is
-    /// ready, so the default is the first Workspace in the order the person keeps.
-    pub(crate) fn take_fallback(&mut self) -> bool {
-        if matches!(self.selection, Selection::Fallback) {
-            self.selection = Selection::Settled;
-            return true;
-        }
-        false
+    /// Whether the window selects its default Workspace, because the remembered one is gone and
+    /// the person has selected nothing since. The default is the first Workspace in the order the
+    /// person keeps, which each later publication or order reading can change, so this holds
+    /// until the person navigates.
+    pub(crate) fn falls_back(&self) -> bool {
+        matches!(self.selection, Selection::Fallback)
     }
 }
 
 enum Selection {
     /// The remembered Active Workspace returns when its server presents it.
     Waiting(WorkspaceReference),
-    /// The remembered Active Workspace is gone, so the window selects its default.
+    /// The remembered Active Workspace is gone, so the window keeps its default selected.
     Fallback,
     Settled,
 }
@@ -661,21 +658,25 @@ mod tests {
         assert!(!restoration.selects(&reference(1, 2)));
         assert!(restoration.selects(&reference(1, 1)));
         restoration.published(owner(1), |_| true);
-        assert!(!restoration.take_fallback());
+        assert!(!restoration.falls_back());
         // Once settled, a later presentation never moves the selection.
         assert!(!restoration.selects(&reference(1, 1)));
     }
 
     #[test]
-    fn a_killed_or_detached_active_workspace_falls_back_to_the_default_once() {
+    fn a_killed_or_detached_active_workspace_falls_back_until_the_person_navigates() {
         let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
         // Another server's inventory says nothing about it.
         restoration.published(owner(2), |_| false);
-        assert!(!restoration.take_fallback());
+        assert!(!restoration.falls_back());
         restoration.published(owner(1), |_| false);
         assert!(!restoration.selects(&reference(1, 1)));
-        assert!(restoration.take_fallback());
-        assert!(!restoration.take_fallback());
+        // Each later publication may put another Workspace first, so the default holds.
+        restoration.record(1);
+        restoration.observe(1);
+        assert!(restoration.falls_back());
+        restoration.observe(2);
+        assert!(!restoration.falls_back());
     }
 
     #[test]
@@ -685,12 +686,12 @@ mod tests {
         // The window's own presentation changes nothing while the order is read.
         restoration.record(1);
         restoration.observe(1);
-        assert!(restoration.take_fallback());
+        assert!(restoration.falls_back());
 
         let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
         restoration.published(owner(1), |_| false);
         restoration.observe(2);
-        assert!(!restoration.take_fallback());
+        assert!(!restoration.falls_back());
     }
 
     #[test]
@@ -701,7 +702,7 @@ mod tests {
         restoration.published(owner(1), |_| false);
         restoration.record(1);
         restoration.observe(1);
-        assert!(!restoration.take_fallback());
+        assert!(!restoration.falls_back());
         assert!(restoration.selects(&reference(2, 1)));
     }
 
@@ -713,7 +714,7 @@ mod tests {
         restoration.observe(2);
         assert!(!restoration.selects(&reference(2, 1)));
         restoration.published(owner(2), |_| false);
-        assert!(!restoration.take_fallback());
+        assert!(!restoration.falls_back());
         assert_eq!(restoration.take_held(owner(2)), Vec::new());
     }
 
@@ -757,7 +758,7 @@ mod tests {
         assert!(!restoration.remembered());
         assert!(!restoration.selects(&reference(1, 1)));
         restoration.published(owner(1), |_| false);
-        assert!(!restoration.take_fallback());
+        assert!(!restoration.falls_back());
         restoration.hold(reference(1, 1), RememberedWorkspace::default());
         assert_eq!(restoration.take_held(owner(1)), Vec::new());
         assert_eq!(restoration.take_workspace(&reference(1, 1)), None);
