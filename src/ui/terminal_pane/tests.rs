@@ -5442,33 +5442,6 @@ fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut Tes
 }
 
 #[gpui::test]
-fn raw_key_down_and_key_up_reach_the_terminal_session_as_distinct_actions(cx: &mut TestAppContext) {
-    let (_pane, cx, records) = connected_terminal_pane(cx);
-    let keystroke = Keystroke {
-        key: "a".to_owned(),
-        key_char: Some("a".to_owned()),
-        modifiers: Modifiers::default(),
-    };
-
-    cx.simulate_event(KeyDownEvent {
-        keystroke: keystroke.clone(),
-        prefer_character_input: false,
-        is_held: false,
-    });
-    cx.simulate_event(KeyUpEvent { keystroke });
-
-    let actions = records
-        .commands()
-        .into_iter()
-        .filter_map(|call| match call.command {
-            RecordedCommand::Key(input) => Some(input.action),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(actions, [KeyAction::Press, KeyAction::Release]);
-}
-
-#[gpui::test]
 fn kitty_event_reports_receive_only_releases_of_delivered_presses(cx: &mut TestAppContext) {
     use crate::terminal::ScrollbackMovement;
     use crate::terminal::geometry::{
@@ -5519,6 +5492,22 @@ fn kitty_event_reports_receive_only_releases_of_delivered_presses(cx: &mut TestA
     key(cx, "b", false);
 
     let commands = records.commands();
+    assert_eq!(
+        commands[before..]
+            .iter()
+            .filter_map(|call| match &call.command {
+                RecordedCommand::Key(input) => Some(input.action),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [
+            KeyAction::Press,
+            KeyAction::Release,
+            KeyAction::Press,
+            KeyAction::Release
+        ]
+    );
+
     assert!(
         commands[before..]
             .iter()
@@ -5583,6 +5572,30 @@ fn slow_escape_pair_does_not_request_fullscreen_exit() {
         !sequence
             .escape_pressed(start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW + Duration::from_millis(1))
     );
+}
+
+#[gpui::test]
+fn fullscreen_escape_pair_respects_the_500_ms_boundary(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = connected_terminal_pane(cx);
+    for (milliseconds, exits) in [(499, true), (500, true), (501, false)] {
+        cx.simulate_keystrokes("a");
+        if !cx.update(|window, _| window.is_fullscreen()) {
+            cx.update(|window, _| window.toggle_fullscreen());
+        }
+        let before = records.commands().len();
+        cx.simulate_keystrokes("escape");
+        assert!(cx.update(|window, _| window.is_fullscreen()));
+        cx.executor()
+            .advance_clock(Duration::from_millis(milliseconds));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, _| window.is_fullscreen()),
+            !exits,
+            "{milliseconds} ms"
+        );
+        assert_eq!(key_presses_since(&records, before).len(), 2);
+    }
 }
 
 #[test]
@@ -5676,7 +5689,11 @@ fn terminal_shortcut_between_escapes_should_keep_fullscreen(cx: &mut TestAppCont
     cx.update(|window, _| window.toggle_fullscreen());
     assert!(cx.update(|window, _| window.is_fullscreen()));
 
-    cx.simulate_keystrokes("escape cmd-c escape");
+    cx.simulate_keystrokes("escape");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.simulate_keystrokes("cmd-c");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
     assert!(cx.update(|window, _| window.is_fullscreen()));
@@ -5686,10 +5703,14 @@ fn terminal_shortcut_between_escapes_should_keep_fullscreen(cx: &mut TestAppCont
 fn find_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     cx.update(|window, _| window.toggle_fullscreen());
+    cx.executor().advance_clock(Duration::from_millis(100));
     cx.simulate_keystrokes("escape");
     cx.dispatch_action(OpenTerminalFind);
 
-    cx.simulate_keystrokes("escape escape");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.simulate_keystrokes("escape");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
     assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
@@ -5714,12 +5735,16 @@ fn paste_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext)
         Ok(PasteResolution::Cancelled),
     );
     cx.update(|window, _| window.toggle_fullscreen());
+    cx.executor().advance_clock(Duration::from_millis(100));
     cx.simulate_keystrokes("escape");
     cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("escape escape");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.simulate_keystrokes("escape");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
     assert!(cx.update(|window, _| window.is_fullscreen()));
@@ -5732,6 +5757,7 @@ fn paste_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext)
 fn ime_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     cx.update(|window, _| window.toggle_fullscreen());
+    cx.executor().advance_clock(Duration::from_millis(100));
     cx.simulate_keystrokes("escape");
     cx.update(|window, app| {
         pane.update(app, |pane, pane_cx| {
@@ -5739,10 +5765,12 @@ fn ime_owned_escape_should_break_fullscreen_exit_pair(cx: &mut TestAppContext) {
         });
     });
 
+    cx.executor().advance_clock(Duration::from_millis(100));
     cx.simulate_keystrokes("escape");
     cx.update(|window, app| {
         pane.update(app, |pane, pane_cx| pane.unmark_text(window, pane_cx));
     });
+    cx.executor().advance_clock(Duration::from_millis(100));
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
@@ -6193,10 +6221,13 @@ fn character_palette_compatibility_shortcut_runs_only_after_native_decline(
 
 #[test]
 fn reported_terminal_title_should_replace_the_shell_fallback() {
-    assert_eq!(
-        normalized_pane_title("  Claude Code  ", "zsh"),
-        "Claude Code"
-    );
+    for (reported, expected) in [
+        ("  Claude Code  ", "Claude Code"),
+        ("\n\t", "zsh"),
+        ("cargo\u{7} test", "cargo test"),
+    ] {
+        assert_eq!(normalized_pane_title(reported, "zsh"), expected);
+    }
 }
 
 #[gpui::test]
@@ -6535,36 +6566,51 @@ fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn input_method_text_is_dropped_without_pane_focus_while_the_window_is_not_key(
+fn input_method_text_is_dropped_without_pane_ownership_while_the_window_is_not_key(
     cx: &mut TestAppContext,
 ) {
     let (pane, cx, records) = connected_terminal_pane(cx);
-    cx.update(|_window, app| {
-        pane.update(app, |pane, app| {
-            pane.set_product_focus(
-                TerminalProductFocus {
-                    focused_pane: false,
-                    ..TerminalProductFocus::default()
-                },
-                app,
-            );
+    for (owner, focus) in [
+        (
+            "inactive Tab",
+            TerminalProductFocus {
+                active_tab: false,
+                ..Default::default()
+            },
+        ),
+        (
+            "inactive Workspace",
+            TerminalProductFocus {
+                active_workspace: false,
+                ..Default::default()
+            },
+        ),
+        (
+            "unfocused Pane",
+            TerminalProductFocus {
+                focused_pane: false,
+                ..Default::default()
+            },
+        ),
+    ] {
+        cx.update(|_, app| {
+            pane.update(app, |pane, app| pane.set_product_focus(focus, app));
         });
-    });
-    cx.deactivate_window();
-    cx.run_until_parked();
-
-    cx.update(|window, app| {
-        pane.update(app, |pane, pane_cx| {
-            pane.replace_text_in_range(None, "😂", window, pane_cx);
+        cx.deactivate_window();
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.replace_text_in_range(None, "😂", window, pane_cx);
+            });
         });
-    });
-
-    assert!(
-        records
-            .commands()
-            .iter()
-            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
-    );
+        assert!(
+            records
+                .commands()
+                .iter()
+                .all(|call| !matches!(call.command, RecordedCommand::Key(_))),
+            "{owner} must receive no input-method commit"
+        );
+    }
 }
 
 #[gpui::test]
@@ -6628,19 +6674,6 @@ fn raw_key_callbacks_are_suppressed_while_marked_text_is_active(cx: &mut TestApp
         .collect::<Vec<_>>();
     assert_eq!(keys.len(), 1);
     assert!(keys[0].is_input_method_commit());
-}
-
-#[test]
-fn empty_terminal_title_should_restore_the_shell_fallback() {
-    assert_eq!(normalized_pane_title("\n\t", "zsh"), "zsh");
-}
-
-#[test]
-fn pane_title_should_remove_control_characters() {
-    assert_eq!(
-        normalized_pane_title("cargo\u{7} test", "zsh"),
-        "cargo test"
-    );
 }
 
 #[test]
@@ -6809,6 +6842,18 @@ fn active_link_hover_requires_the_platform_modifier() {
         ),
         (None, Some(&hovered))
     );
+    let second = crate::terminal::PresentationGeneration::test(2);
+    assert_eq!(active_hovered_link(Some(&hovered), second, true), None);
+    assert!(hovered_link_for_generation(Some(&hovered), generation).is_some());
+    assert_eq!(hovered_link_for_generation(Some(&hovered), second), None);
+    assert_eq!(
+        NativeContextActions::from_presence(
+            TerminalLocalFileCapabilities::Enabled,
+            false,
+            hovered_link_for_generation(Some(&hovered), second).map(|hovered| &hovered.target),
+        ),
+        NativeContextActions::default()
+    );
 }
 
 #[gpui::test]
@@ -6873,29 +6918,6 @@ fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
     cx.update(|_, cx| crate::ui::developer_workbench::set_link_preview_fixture(false, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("terminal-link-preview").is_none());
-}
-
-#[test]
-fn hovered_link_is_inert_after_presentation_generation_advances() {
-    let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
-    let first = crate::terminal::PresentationGeneration::test(1);
-    let second = crate::terminal::PresentationGeneration::test(2);
-    let hovered = HoveredTerminalLink {
-        generation: first,
-        cell: CellGridPosition::new(0, 0),
-        target: link,
-    };
-
-    assert!(hovered_link_for_generation(Some(&hovered), first).is_some());
-    assert_eq!(hovered_link_for_generation(Some(&hovered), second), None);
-    assert_eq!(
-        NativeContextActions::from_presence(
-            TerminalLocalFileCapabilities::Enabled,
-            false,
-            hovered_link_for_generation(Some(&hovered), second).map(|hovered| &hovered.target),
-        ),
-        NativeContextActions::default()
-    );
 }
 
 #[test]

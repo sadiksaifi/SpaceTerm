@@ -299,45 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn input_method_text_ignores_host_activation_but_requires_pane_ownership() {
-        let focused = TerminalFocusFacts::focused();
-        assert!(TerminalFocusCoordinator::accepts_input_method_text(
-            TerminalFocusFacts {
-                operating_system_window_key: false,
-                application_active: false,
-                ..focused
-            }
-        ));
-
-        let cases = [
-            TerminalFocusFacts {
-                active_workspace: false,
-                ..focused
-            },
-            TerminalFocusFacts {
-                active_tab: false,
-                ..focused
-            },
-            TerminalFocusFacts {
-                focused_pane: false,
-                ..focused
-            },
-            TerminalFocusFacts {
-                responder: false,
-                ..focused
-            },
-            TerminalFocusFacts {
-                blocker: Some(TerminalFocusBlocker::Modal),
-                ..focused
-            },
-        ];
-
-        for facts in cases {
-            assert!(!TerminalFocusCoordinator::accepts_input_method_text(facts));
-        }
-    }
-
-    #[test]
     fn every_temporary_ui_owner_blocks_terminal_input_focus() {
         let blockers = [
             TerminalFocusBlocker::Sidebar,

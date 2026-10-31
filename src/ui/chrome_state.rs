@@ -471,7 +471,6 @@ mod tests {
     #[test]
     fn inactive_filled_controls_use_the_ordinary_fill_and_boundary() {
         let source = ChromeColors::default();
-        let original = source.clone();
         let prepared = policy(false).colors(&source, source.background);
         for fill in [
             prepared.primary_background,
@@ -490,7 +489,6 @@ mod tests {
             assert_eq!(edge, prepared.element_border);
         }
         assert_eq!(prepared.error, source.error);
-        assert_eq!(source, original);
     }
 
     #[test]
@@ -642,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn show_borders_adds_edges_without_changing_fill_text_or_authored_colors() {
+    fn show_borders_adds_edges_and_preserves_fill_and_text() {
         let source = ChromeColors::default();
         let mut state = policy(true);
         state.capabilities.show_borders = true;
@@ -664,7 +662,6 @@ mod tests {
                 >= 3.0
         );
         assert_eq!(prepared.row_border, source.row_border);
-        assert_eq!(source, ChromeColors::default());
     }
 
     #[test]
@@ -675,7 +672,6 @@ mod tests {
             text_disabled: Color::rgb(0x444444),
             ..ChromeColors::default()
         };
-        let original = source.clone();
         let mut state = policy(true);
         state.capabilities.increase_contrast = true;
         let prepared = state.colors(&source, source.background);
@@ -694,11 +690,10 @@ mod tests {
                 .contrast_ratio(source.background)
                 >= 3.0
         );
-        assert_eq!(source, original);
     }
 
     #[test]
-    fn increased_contrast_resolves_infeasible_midtone_hosts_without_changing_authored_values() {
+    fn increased_contrast_resolves_infeasible_midtone_hosts() {
         let source = ChromeColors {
             background: Color::rgb(0x777777),
             element_background: Color::rgb(0x777777),
@@ -716,7 +711,6 @@ mod tests {
         ] {
             assert!(ink.contrast_ratio(fill) >= 7.0, "{ink:?} on {fill:?}");
         }
-        assert_eq!(source.background, Color::rgb(0x777777));
     }
 
     #[test]

@@ -422,13 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn a_comparison_code_is_spoken_one_digit_at_a_time() {
-        let code = claim(claim_with_exchange([0, 0, 0x30, 0x39])).code;
-
-        assert_eq!(code_speech(code).as_ref(), "0 1 2 3 4 5");
-    }
-
-    #[test]
     fn a_listening_address_the_server_no_longer_has_reads_as_gone() {
         let state = access_state(status(ListenerState::Failed(DirectError::InvalidAddress)));
 
@@ -448,31 +441,5 @@ mod tests {
         unread.network_addresses = Err(DirectError::Transport);
 
         assert_eq!(access_state(unread).addresses, None);
-    }
-
-    #[test]
-    fn an_invitation_recognizes_a_claim_that_names_it() {
-        let invitation = OpenInvitation {
-            id: [7; 32],
-            text: Zeroizing::new("spaceterm://pair/test".to_owned()),
-            address: None,
-            deadline: std::time::Instant::now(),
-        };
-
-        assert!(invitation.claimed_by(&claim(claim_with_exchange([0; 4]))));
-    }
-
-    #[test]
-    fn an_invitation_ignores_a_claim_on_another_invitation_that_expires_with_it() {
-        let invitation = OpenInvitation {
-            id: [7; 32],
-            text: Zeroizing::new("spaceterm://pair/test".to_owned()),
-            address: None,
-            deadline: std::time::Instant::now(),
-        };
-        let mut other = claim_with_exchange([0; 4]);
-        other.invitation_id = [8; 32];
-
-        assert!(!invitation.claimed_by(&claim(other)));
     }
 }

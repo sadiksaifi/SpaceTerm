@@ -308,18 +308,36 @@ mod tests {
     use super::*;
     use crate::appearance::{Appearance, builtin_chrome_base};
 
-    #[test]
-    fn button_metrics_project_the_prepared_body_line_height() {
-        let typography = ChromeTypography::default();
-        let body = typography.style(TextRole::Body);
-        let line_height = f32::from(body.line_height) / f32::from(body.size);
-
-        assert_eq!(
-            body_metrics(ButtonMetrics::new(px(28.0)), body),
-            ButtonMetrics::new(px(28.0))
-                .font_size(body.size)
-                .line_heights(line_height, line_height)
-        );
+    #[gpui::test]
+    fn button_metrics_project_the_prepared_body_line_height(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        struct Fixture;
+        impl gpui::Render for Fixture {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                gpui::div().child(
+                    spaceterm_ui::Button::new("metrics-button", "Body label")
+                        .debug_selector("metrics-button")
+                        .on_activate(|_, _, _| {}),
+                )
+            }
+        }
+        cx.set_global(prepared(
+            &ChromeColors::default(),
+            &ChromeTypography::default(),
+            &ChromeIcons::default(),
+            false,
+        ));
+        let (_, cx) = cx.add_window_view(|_, _| Fixture);
+        cx.run_until_parked();
+        let button = cx.debug_bounds("metrics-button").expect("button");
+        let label = cx.debug_bounds("metrics-button-label").expect("label");
+        assert_eq!(button.size.height, px(24.0));
+        assert_eq!(label.size.height, px(16.0));
+        assert!(label.top() >= button.top() && label.bottom() <= button.bottom());
     }
 
     #[test]

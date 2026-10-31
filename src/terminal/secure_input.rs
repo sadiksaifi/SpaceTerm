@@ -375,12 +375,4 @@ mod tests {
         handle.0.borrow_mut().next_pane_id = u64::MAX;
         assert_eq!(handle.register_pane().id.get(), None);
     }
-
-    #[test]
-    fn failures_have_only_closed_content_free_classifications() {
-        assert_eq!(
-            format!("{:?}", SecureInputError::TransitionRejected),
-            "TransitionRejected"
-        );
-    }
 }

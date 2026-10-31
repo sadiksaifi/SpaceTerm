@@ -170,6 +170,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        {
+            let paths = [PathBuf::from("/a"), PathBuf::from("/b c")];
+            assert_eq!(
+                prepare_file_insertion(FileInsertionPolicy::fixture(), &paths)
+                    .unwrap()
+                    .text,
+                "'/a' '/b c'"
+            );
+        }
     }
 
     #[test]
@@ -220,17 +229,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(insertion.text, "'/tmp/a b'\"'\"'c\n😀'");
-    }
-
-    #[test]
-    fn multiple_items_preserve_order_with_one_space_separator() {
-        let paths = [PathBuf::from("/a"), PathBuf::from("/b c")];
-        assert_eq!(
-            prepare_file_insertion(FileInsertionPolicy::fixture(), &paths)
-                .unwrap()
-                .text,
-            "'/a' '/b c'"
-        );
     }
 
     #[test]

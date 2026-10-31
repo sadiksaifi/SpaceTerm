@@ -391,6 +391,16 @@ mod tests {
             NativeContextActions::from_presence(LOCAL_FILES, false, None),
             NativeContextActions::default()
         );
+        {
+            assert_eq!(
+                NativeContextActions::from_presence(LOCAL_FILES, true, None),
+                NativeContextActions {
+                    copy: true,
+                    open_link: false,
+                    file_preview: false,
+                }
+            );
+        }
     }
 
     #[test]
@@ -423,18 +433,6 @@ mod tests {
                 LOCAL_FILES
             ),
             Err("Couldn\u{2019}t drop these files.")
-        );
-    }
-
-    #[test]
-    fn context_enablement_can_be_derived_without_copying_selection_text() {
-        assert_eq!(
-            NativeContextActions::from_presence(LOCAL_FILES, true, None),
-            NativeContextActions {
-                copy: true,
-                open_link: false,
-                file_preview: false,
-            }
         );
     }
 

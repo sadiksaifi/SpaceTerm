@@ -1047,7 +1047,6 @@ mod tests {
             ),
             (1.75, "A row"),
         ] {
-            cx.simulate_scale_factor_change(scale);
             view.update(cx, |view, cx| {
                 view.label = label;
                 cx.notify();
@@ -1055,18 +1054,19 @@ mod tests {
             cx.run_until_parked();
             let measured =
                 cx.update(|window, _| appearance.typography.measure(TextRole::Body, label, window));
-            // Comfortable Body text rounds to 429 and 39 logical pixels; both snap down here.
-            let intrinsic = f32::from(measured.ceil());
-            assert_eq!(
-                intrinsic as u32 % 2,
-                1,
-                "{label:?}: {measured:?}, {:?}",
-                appearance.typography.style(TextRole::Body)
-            );
-            assert!((intrinsic * scale - 0.5).ceil() < intrinsic * scale);
+            // Put the intrinsic width a quarter device pixel past an integer. Rounding
+            // to the nearest device pixel would clip it with any host font.
+            let width = f32::from(measured);
+            let scale = ((width * scale).floor() + 0.25) / width;
+            cx.simulate_scale_factor_change(scale);
+            cx.run_until_parked();
             let bounds = cx
                 .debug_bounds("fractional-form-label")
                 .expect("form label");
+            assert!(
+                bounds.size.width >= measured,
+                "{label:?} must fit at {scale}: {bounds:?}, {measured:?}"
+            );
             let line_height = f32::from(label_line_height(&appearance)) * scale;
             let height = f32::from(bounds.size.height) * scale;
             if height < line_height.floor() || height > line_height.ceil() {

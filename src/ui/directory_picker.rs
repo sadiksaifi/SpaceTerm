@@ -2752,6 +2752,9 @@ mod tests {
         lose_create_reply: std::sync::atomic::AtomicBool,
         /// While set, opening a connection waits.
         hold_connect: Mutex<bool>,
+        connecting: AtomicUsize,
+        hold_creation: Mutex<bool>,
+        creating: AtomicUsize,
         released: std::sync::Condvar,
     }
 
@@ -2769,6 +2772,16 @@ mod tests {
         }
     }
 
+    /// Releases held workers even when a test assertion unwinds.
+    struct ReleaseRoute(Arc<RouteControls>);
+    impl Drop for ReleaseRoute {
+        fn drop(&mut self) {
+            self.0.hold_connect(false);
+            *self.0.hold_creation.lock().unwrap() = false;
+            self.0.released.notify_all();
+        }
+    }
+
     struct ControlledRoute {
         server: InProcessServer,
         controls: Arc<RouteControls>,
@@ -2783,11 +2796,18 @@ mod tests {
     impl DirectoryConnector for ControlledRoute {
         fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
             let held = self.controls.hold_connect.lock().unwrap();
-            let _released = self
+            self.controls
+                .connecting
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            let (held, timeout) = self
                 .controls
                 .released
                 .wait_timeout_while(held, Duration::from_secs(10), |held| *held)
                 .unwrap();
+            assert!(
+                !timeout.timed_out() && !*held,
+                "held connection was not released"
+            );
             let place = self.controls.opened.fetch_add(1, AtomicOrdering::SeqCst);
             Ok(Box::new(ControlledConnection {
                 inner: self.server.connect()?,
@@ -2812,8 +2832,21 @@ mod tests {
                 self.controls.creates.fetch_add(1, AtomicOrdering::SeqCst);
             }
             let begun = self.inner.begin(id, operation);
-            if creation && self.controls.lose_create_reply.load(AtomicOrdering::SeqCst) {
-                return Err(());
+            if creation {
+                self.controls.creating.fetch_add(1, AtomicOrdering::SeqCst);
+                let held = self.controls.hold_creation.lock().unwrap();
+                let (held, timeout) = self
+                    .controls
+                    .released
+                    .wait_timeout_while(held, Duration::from_secs(10), |held| *held)
+                    .unwrap();
+                assert!(
+                    !timeout.timed_out() && !*held,
+                    "held creation was not released"
+                );
+                if self.controls.lose_create_reply.load(AtomicOrdering::SeqCst) {
+                    return Err(());
+                }
             }
             begun
         }
@@ -2973,6 +3006,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A reply to a later read proves the channel finished the earlier creation/cancellation.
+    fn route_barrier(
+        picker: &gpui::Entity<DirectoryPicker>,
+        root: &std::path::Path,
+        cx: &mut VisualTestContext,
+    ) {
+        let completed = Rc::new(std::cell::Cell::new(false));
+        let completion = Rc::clone(&completed);
+        let task = picker.update(cx, |picker, cx| {
+            let read = picker
+                .source
+                .probe_exact_path(PickerPath::new(root.display().to_string()).unwrap());
+            cx.spawn(async move |_, _| {
+                // Either answer proves this same worker reached the later read. The original
+                // creation's outcome and send count are asserted by the caller.
+                let _ = read.await;
+                completion.set(true);
+            })
+        });
+        wait_for(|_| completed.get(), cx);
+        drop(task);
+    }
+
     /// A creation whose reply is lost may have taken effect, so it is reported as failed and
     /// never sent again.
     #[gpui::test]
@@ -2991,13 +3047,18 @@ mod tests {
         controls
             .lose_create_reply
             .store(true, AtomicOrdering::SeqCst);
+        let _release = ReleaseRoute(Arc::clone(&controls));
+        *controls.hold_creation.lock().unwrap() = true;
         click_create(cx);
+        wait_for(|_| controls.creating.load(AtomicOrdering::SeqCst) == 1, cx);
+        assert!(picker.read_with(cx, |picker, _| picker.busy.is_some()));
+        *controls.hold_creation.lock().unwrap() = false;
+        controls.released.notify_all();
         wait_for(
             |cx| picker.read_with(cx, |picker, _| picker.busy.is_none()),
             cx,
         );
-        std::thread::sleep(Duration::from_millis(200));
-        cx.run_until_parked();
+        route_barrier(&picker, &root, cx);
 
         assert!(
             !confirmed(&events),
@@ -3026,16 +3087,20 @@ mod tests {
             missing,
         } = alert;
 
+        let _release = ReleaseRoute(Arc::clone(&controls));
+        let connections = controls.connecting.load(AtomicOrdering::SeqCst);
         controls.hold_connect(true);
         click_create(cx);
-        cx.run_until_parked();
+        wait_for(
+            |_| controls.connecting.load(AtomicOrdering::SeqCst) > connections,
+            cx,
+        );
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| picker.cancel(window, cx));
         });
         cx.run_until_parked();
         controls.hold_connect(false);
-        std::thread::sleep(Duration::from_millis(300));
-        cx.run_until_parked();
+        route_barrier(&picker, &root, cx);
 
         assert_eq!(controls.creates.load(AtomicOrdering::SeqCst), 0);
         assert!(!missing.exists());
