@@ -60,11 +60,104 @@ fn row_trailing_padding(cx: &mut VisualTestContext) -> Pixels {
 /// without changing the Active Workspace.
 #[gpui::test]
 fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppContext) {
+    use crate::repository_status::testing::{FakeRunner, exit};
+    use crate::repository_status::{
+        RepositoryStatusPreferences, RepositoryToolDiscovery, ToolInventory,
+    };
+    use crate::ui::repository_status_store::{
+        InstalledRepositoryStatus, RepositoryStatusAdapters, RepositoryStatusStore,
+    };
+    use spaceterm_server::repository::{
+        ChangeSummary, DirectoryFacts, GitHubRepository, GitToolStatus, PullRequestQuery,
+        Repository, RepositoryHead, Snapshot, ToolVersion,
+    };
+
+    struct Tools;
+    impl RepositoryToolDiscovery for Tools {
+        fn discover(&self) -> ToolInventory {
+            ToolInventory {
+                git: None,
+                github_cli: Some("/usr/local/bin/gh".into()),
+            }
+        }
+    }
+
+    // Git facts come from the server; the client's GitHub CLI finds the draft Pull Request.
+    let runner = FakeRunner::new([
+        exit(
+            0,
+            r#"{"hosts":{"example.invalid":[{"state":"success","active":true}]}}"#,
+        ),
+        exit(0, ""),
+        exit(
+            0,
+            r#"[{"number":478,"title":"Sidebar Pull Request","isDraft":true,"url":"https://example.invalid/pull/478","headRefName":"feature","baseRefName":"main","headRepositoryOwner":{"login":"owner"},"isCrossRepository":false}]"#,
+        ),
+    ]);
+    let store = cx.new(|cx| {
+        RepositoryStatusStore::new(
+            RepositoryStatusPreferences::default(),
+            RepositoryStatusAdapters {
+                runner,
+                discovery: Arc::new(Tools),
+                physical_home: "/home/person".into(),
+                github_cli_environment: Vec::new(),
+            },
+            Arc::new(|work| {
+                work();
+                true
+            }),
+            cx,
+        )
+    });
+    cx.update(|cx| cx.set_global(InstalledRepositoryStatus(store)));
+    cx.run_until_parked();
+
     let (manager, _records, cx) = workspace_manager(cx);
-    // The Developer Workbench's repository has a draft Pull Request.
+    let server = local_server(cx);
+    let mut inventory = server.edits.applied_inventory();
+    let directory = inventory.workspaces[0].tabs[0].panes[0]
+        .starting_directory
+        .clone();
+    inventory.repositories = Some(Snapshot {
+        boot: [1; 32],
+        revision: 1,
+        git: GitToolStatus::Ready(ToolVersion {
+            major: 2,
+            minor: 47,
+            patch: 0,
+        }),
+        directories: vec![DirectoryFacts {
+            directory: directory.clone(),
+            repository: Some(Repository {
+                root: directory,
+                head: RepositoryHead::Branch("feature".into()),
+                commit: Some("a1b2c3d".into()),
+                upstream: None,
+                operation: None,
+                changes: Ok(ChangeSummary::default()),
+                counting: None,
+                pull_request: Some(PullRequestQuery {
+                    repository: GitHubRepository {
+                        host: "example.invalid".into(),
+                        owner: "owner".into(),
+                        name: "app".into(),
+                    },
+                    head_branch: "feature".into(),
+                    head_owner: None,
+                }),
+            }),
+            worktrees: None,
+            failure: None,
+        }],
+        pinned_worktrees: Vec::new(),
+        pin_check: Default::default(),
+    });
+    server.edits.set_inventory(inventory);
     cx.update(|window, cx| {
-        crate::ui::developer_workbench::set_repository_fixture(true, cx);
-        window.refresh();
+        manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+        });
     });
     cx.run_until_parked();
 
