@@ -2,39 +2,17 @@
 use crate::ssh::command::{OpenSshExecutable, OpenSshExecutableError};
 use std::{ffi::OsStr, path::PathBuf};
 
-const MAXIMUM_PATH_BYTES: usize = 16 * 1024;
-const MAXIMUM_PATH_ENTRIES: usize = 128;
+use super::bounded_path::{directories, is_executable_file};
 
 pub(super) fn capture(path: Option<&OsStr>) -> Result<OpenSshExecutable, OpenSshExecutableError> {
-    let selected = path
-        .filter(|path| {
-            let bytes = path.as_encoded_bytes();
-            bytes.len() <= MAXIMUM_PATH_BYTES && !bytes.iter().any(u8::is_ascii_control)
+    directories(path)
+        .find_map(|directory| {
+            let path = directory.join("ssh");
+            let executable = OpenSshExecutable::new(path.clone()).ok()?;
+            is_executable_file(&path).then_some(executable)
         })
-        .and_then(|path| {
-            std::env::split_paths(path)
-                .take(MAXIMUM_PATH_ENTRIES)
-                .filter(|directory| directory.is_absolute())
-                .find_map(|directory| {
-                    let path = directory.join("ssh");
-                    let executable = OpenSshExecutable::new(path.clone()).ok()?;
-                    is_executable_file(&path).then_some(executable)
-                })
-        });
-    selected
         .map(Ok)
         .unwrap_or_else(|| OpenSshExecutable::new(PathBuf::from("/usr/bin/ssh")))
-}
-
-fn is_executable_file(path: &std::path::Path) -> bool {
-    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return false;
-    }
-    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
-        return false;
-    };
-    // SAFETY: the NUL-terminated local path stays live during this non-mutating access check.
-    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 #[cfg(test)]
@@ -45,13 +23,11 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
                 "spaceterm-ssh-selection-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ));
             std::fs::create_dir(&root).unwrap();
             Self(root)
@@ -115,15 +91,22 @@ mod tests {
         let fixture = Fixture::new();
         let executable = fixture.directory("bounded", true);
         let too_many = std::env::join_paths(
-            std::iter::repeat_n(PathBuf::from("relative"), 128).chain(std::iter::once(executable)),
+            std::iter::repeat_n(PathBuf::from("relative"), 128)
+                .chain(std::iter::once(executable.clone())),
         )
         .unwrap();
-        let oversized = std::ffi::OsString::from("x".repeat(16 * 1024 + 1));
+        let oversized = std::ffi::OsString::from(format!(
+            "{}:{}",
+            "x".repeat(16 * 1024),
+            executable.display()
+        ));
+        let unsafe_value =
+            std::ffi::OsString::from(format!("{}:/unsafe\nvalue", executable.display()));
         for path in [
             None,
             Some(OsStr::new("")),
             Some(OsStr::new("relative::/missing-ssh-fixture")),
-            Some(OsStr::new("/unsafe\nvalue")),
+            Some(unsafe_value.as_os_str()),
             Some(oversized.as_os_str()),
             Some(too_many.as_os_str()),
         ] {
