@@ -5,16 +5,18 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, package_linux, sparkle
 from spaceterm_tasks.macos_bundle import identity
-from spaceterm_tasks.packaging import DIST, STABLE_TAG, release_version
+from spaceterm_tasks.packaging import DIST, release_version
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 RELEASES = "https://github.com/sadiksaifi/SpaceTerm/releases"
@@ -367,12 +369,17 @@ def create_server_assets(tag, archive, signature):
 
 
 def notes(root=ROOT):
-    """Markdown notes for the release tagged at HEAD, from its Conventional Commits."""
+    """Markdown notes for the release tagged at HEAD, from its Conventional Commits.
+
+    cliff.toml's tag_pattern decides which tags are releases.
+    """
+    with open(root / "cliff.toml", "rb") as config:
+        release_tag = re.compile(tomllib.load(config)["git"]["tag_pattern"])
     tags = subprocess.run(
         ["git", "tag", "--points-at", "HEAD"], cwd=root, capture_output=True, text=True
     ).stdout.split()
-    if not any(STABLE_TAG.fullmatch(tag) for tag in tags):
-        raise TaskError("release notes require a stable release tag at HEAD")
+    if not any(release_tag.match(tag) for tag in tags):
+        raise TaskError("release notes require a stable release tag from 1.0.0 at HEAD")
     result = subprocess.run(
         ["git-cliff", "--config", "cliff.toml", "--current", "--offline", "--strip", "all"],
         cwd=root,
