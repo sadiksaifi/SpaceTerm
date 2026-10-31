@@ -353,17 +353,6 @@ fn preview_deletion_returns_the_selected_slot_to_its_builtin_theme() {
     assert_eq!(storage.0.lock().unwrap().writes, 0);
 }
 
-/// Every selection names an installed theme, so a preview cannot select one that is missing.
-#[test]
-fn preview_rejects_a_missing_theme_selection() {
-    let (settings, _storage) = setup();
-    let token = settings.begin_preview(0).unwrap();
-    let mut candidate = (*settings.snapshot().candidate).clone();
-    candidate.appearance.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
-
-    assert!(settings.update_preview(&token, candidate).is_err());
-}
-
 #[test]
 fn deletion_rejects_builtin_and_unknown_ids_without_mutation() {
     let (settings, storage) = setup();
@@ -594,6 +583,10 @@ fn invalid_preview_candidate_preserves_the_previous_valid_preview() {
     let (settings, _) = setup();
     let previous = settings.snapshot().candidate;
     let token = settings.begin_preview(previous.revision).unwrap();
+    let mut invalid = (*previous).clone();
+    invalid.appearance.terminal.themes.dark = ThemeId::new("custom.missing").unwrap();
+    assert!(settings.update_preview(&token, invalid).is_err());
+    assert_eq!(settings.snapshot().candidate, previous);
     let mut invalid = (*previous).clone();
     invalid.revision += 1;
     assert_eq!(

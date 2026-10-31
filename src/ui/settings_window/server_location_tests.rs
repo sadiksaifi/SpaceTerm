@@ -70,26 +70,6 @@ fn an_unwritable_folder_appears_only_for_the_text_the_server_checked() {
 }
 
 #[test]
-fn a_draft_is_written_once_against_the_version_it_edits() {
-    let mut model = connected("~/.worktrees/{repository}/{branch}", 3);
-    model.edited("~/elsewhere/{repository}/{branch}");
-
-    assert_eq!(
-        model.commit(),
-        Some(settings("~/elsewhere/{repository}/{branch}", 3))
-    );
-    assert_eq!(model.commit(), None, "one write is in flight");
-
-    assert!(!model.committed(settings("~/elsewhere/{repository}/{branch}", 3), Ok(())));
-    assert_eq!(
-        model.commit(),
-        None,
-        "the saved text is the server's value now"
-    );
-    assert!(!model.has_draft());
-}
-
-#[test]
 fn a_concurrent_change_reloads_the_other_devices_value_and_says_so() {
     let mut model = connected("~/first/{branch}", 0);
     model.edited("~/mine/{branch}");
@@ -321,6 +301,20 @@ mod presented {
             1,
             "the draft is never written over the other device's change"
         );
+        let mut model = connected("~/.worktrees/{repository}/{branch}", 3);
+        model.edited("~/elsewhere/{repository}/{branch}");
+        assert_eq!(
+            model.commit(),
+            Some(settings("~/elsewhere/{repository}/{branch}", 3))
+        );
+        assert_eq!(model.commit(), None, "one write is in flight");
+        assert!(!model.committed(settings("~/elsewhere/{repository}/{branch}", 3), Ok(())));
+        assert_eq!(
+            model.commit(),
+            None,
+            "the saved text is the server's value now"
+        );
+        assert!(!model.has_draft());
     }
 
     /// Whether the detail pane shows all of `selector`.

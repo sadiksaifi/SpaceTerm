@@ -1,10 +1,11 @@
 //! The Add Server sheet, driven through a scripted SSH setup backend that records every setup it
 //! is asked for, and a real direct connections registry whose network is unavailable.
 
+use futures_lite::StreamExt as _;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::{A11yTree, node_id};
@@ -49,18 +50,57 @@ struct Asked {
 }
 
 /// The SSH computers the test reaches. Each setup takes the next scripted outcome.
-#[derive(Default)]
 struct Computers {
     outcomes: Mutex<VecDeque<Outcome>>,
     asked: Mutex<Vec<Asked>>,
+    waiting: Mutex<Option<(CancellationToken, std::sync::mpsc::SyncSender<()>)>>,
+    started: async_channel::Sender<()>,
+    starts: async_channel::Receiver<()>,
+}
+
+impl Default for Computers {
+    fn default() -> Self {
+        let (started, starts) = async_channel::unbounded();
+        Self {
+            outcomes: Mutex::default(),
+            asked: Mutex::default(),
+            waiting: Mutex::default(),
+            started,
+            starts,
+        }
+    }
 }
 
 impl Computers {
     fn scripted(outcomes: impl IntoIterator<Item = Outcome>) -> Arc<Self> {
         Arc::new(Self {
             outcomes: Mutex::new(outcomes.into_iter().collect()),
-            asked: Mutex::default(),
+            ..Default::default()
         })
+    }
+
+    fn wait_for_cancellation(&self, cancellation: &CancellationToken) {
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        *self.waiting.lock().unwrap() = Some((cancellation.clone(), release));
+        self.started.send_blocking(()).unwrap();
+        released
+            .recv_timeout(Duration::from_secs(10))
+            .expect("test releases a cancelled setup worker");
+        assert!(
+            cancellation.is_cancelled(),
+            "the UI cancelled the actual attempt"
+        );
+    }
+
+    fn release_cancelled(&self) {
+        let mut waiting = self.waiting.lock().unwrap();
+        if waiting
+            .as_ref()
+            .is_some_and(|(cancel, _)| cancel.is_cancelled())
+        {
+            let (_, release) = waiting.take().unwrap();
+            release.send(()).unwrap();
+        }
     }
 
     fn asked(&self) -> Vec<Asked> {
@@ -100,23 +140,14 @@ impl SshSetupBackend for Computers {
                 then
             }
             Some(Outcome::UntilCancelled) | None => {
-                wait_for(cancellation);
+                self.wait_for_cancellation(cancellation);
                 Err(SetupFailure::Cancelled)
             }
             Some(Outcome::UntilCancelledThen(failure)) => {
-                wait_for(cancellation);
+                self.wait_for_cancellation(cancellation);
                 Err(failure)
             }
         }
-    }
-}
-
-/// Waits on the setup's own thread until the sheet cancels it.
-fn wait_for(cancellation: &CancellationToken) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !cancellation.is_cancelled() {
-        assert!(Instant::now() < deadline, "the sheet cancels the setup");
-        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -135,22 +166,21 @@ struct Hosts {
     released: Mutex<bool>,
     release: Condvar,
     /// Whether a read has returned its hosts.
-    answered: std::sync::atomic::AtomicBool,
+    started: async_channel::Sender<()>,
+    starts: async_channel::Receiver<()>,
 }
 
 impl Hosts {
     /// A configuration naming no hosts, read at once.
     fn none() -> Arc<Self> {
-        Arc::new(Self {
-            listed: Vec::new(),
-            released: Mutex::new(true),
-            release: Condvar::new(),
-            answered: std::sync::atomic::AtomicBool::new(false),
-        })
+        let hosts = Self::held(&[]);
+        hosts.release();
+        hosts
     }
 
     /// A configuration naming `aliases`, whose read waits for [`Self::release`].
     fn held(aliases: &[&str]) -> Arc<Self> {
+        let (started, starts) = async_channel::unbounded();
         Arc::new(Self {
             listed: aliases
                 .iter()
@@ -158,7 +188,8 @@ impl Hosts {
                 .collect(),
             released: Mutex::new(false),
             release: Condvar::new(),
-            answered: std::sync::atomic::AtomicBool::new(false),
+            started,
+            starts,
         })
     }
 
@@ -167,24 +198,26 @@ impl Hosts {
         self.release.notify_all();
     }
 
-    fn answered(&self) -> bool {
-        self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    fn wait_until_started(&self, cx: &mut VisualTestContext) {
+        cx.foreground_executor()
+            .clone()
+            .block_test(self.starts.recv())
+            .expect("the host read starts");
     }
 }
 
 impl SshHostSource for Hosts {
     fn hosts(&self) -> Vec<SshDestination> {
+        self.started.send_blocking(()).unwrap();
         let released = self.released.lock().unwrap();
-        // A test that fails before releasing the read still ends its thread.
-        let (released, _) = self
+        // This timeout only diagnoses a test that failed before releasing its worker.
+        let (released, timeout) = self
             .release
             .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
             .unwrap();
+        assert!(!timeout.timed_out(), "test must release its held host read");
         drop(released);
-        let listed = self.listed.clone();
-        self.answered
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        listed
+        self.listed.clone()
     }
 }
 
@@ -204,6 +237,7 @@ impl SshSetupFactory for Setup {
 struct Sheet<'a> {
     window: Entity<SettingsWindow>,
     computers: Arc<Computers>,
+    hosts: Arc<Hosts>,
     direct: DirectConnections,
     cx: &'a mut VisualTestContext,
 }
@@ -241,7 +275,7 @@ fn open_settings_using(
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     let installed = direct.clone();
-    let factory = Rc::new(Setup(Arc::clone(&computers), hosts));
+    let factory = Rc::new(Setup(Arc::clone(&computers), Arc::clone(&hosts)));
     cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
@@ -270,8 +304,21 @@ fn open_settings_using(
     Sheet {
         window,
         computers,
+        hosts,
         direct,
         cx,
+    }
+}
+
+impl Drop for Sheet<'_> {
+    fn drop(&mut self) {
+        self.hosts.release();
+        self.cx.update(|window, cx| {
+            if let Some(sheet) = open_sheet(window, cx) {
+                sheet.update(cx, |sheet, cx| sheet.abandon(cx));
+            }
+        });
+        self.computers.release_cancelled();
     }
 }
 
@@ -605,34 +652,40 @@ impl Sheet<'_> {
     /// Repaints until `done` holds, while setup and the registry's workers run on their own
     /// threads.
     fn settle(&mut self, mut done: impl FnMut(&mut Self) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let sheet = self.cx.update(|window, cx| open_sheet(window, cx));
+        let mut notifications = sheet.as_ref().map(|sheet| self.cx.cx.notifications(sheet));
+        let connections = self.direct.subscribe();
         loop {
             self.cx.run_until_parked();
+            self.computers.release_cancelled();
             if done(self) {
-                return;
+                break;
             }
-            assert!(Instant::now() < deadline, "the sheet settles");
-            std::thread::sleep(Duration::from_millis(2));
+            self.cx.foreground_executor().clone().block_test(async {
+                let changed = async {
+                    match &mut notifications {
+                        Some(notifications) => {
+                            notifications.next().await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                };
+                let registry = async {
+                    let _ = connections.recv().await;
+                };
+                let started = async {
+                    let _ = self.computers.starts.recv().await;
+                };
+                futures_lite::future::race(changed, futures_lite::future::race(registry, started))
+                    .await;
+            });
         }
+        self.direct.close_subscription(&connections);
     }
 }
 
 fn address(text: &str) -> SetupAddress {
     SetupAddress::parse(text).unwrap()
-}
-
-#[gpui::test]
-fn a_host_alone_makes_set_up_available(cx: &mut TestAppContext) {
-    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-
-    assert!(sheet.disabled("Set Up"), "an empty sheet sets up nothing");
-    assert!(
-        sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_none(),
-        "the optional network address starts folded away"
-    );
-    sheet.fill("penguin");
-    assert!(!sheet.disabled("Set Up"), "a host alone is enough");
 }
 
 /// A network address that names no host is refused before SSH runs, and stays shown so the
@@ -674,37 +727,6 @@ fn correcting_a_refused_address_keeps_focus_in_it(cx: &mut TestAppContext) {
     assert_eq!(
         sheet.computers.asked()[0].address.as_deref(),
         Some("studio.local:9231")
-    );
-}
-
-/// Space opens the network address from the keyboard and leaves focus on the disclosure, as a
-/// macOS disclosure does. Space again folds it away.
-#[gpui::test]
-fn the_keyboard_opens_the_network_address_with_focus_on_its_disclosure(cx: &mut TestAppContext) {
-    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-    sheet.tab_to_disclosure();
-
-    sheet.press_space();
-
-    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_some());
-    assert_eq!(
-        sheet.focus(),
-        ("Button".to_owned(), "Network Address".to_owned())
-    );
-    sheet.cx.simulate_keystrokes("tab");
-    sheet.cx.run_until_parked();
-    assert!(
-        sheet.field(|sheet| &sheet.address).1,
-        "Tab moves into the shown address"
-    );
-
-    sheet.cx.simulate_keystrokes("shift-tab");
-    sheet.press_space();
-    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_none());
-    assert_eq!(
-        sheet.focus(),
-        ("Button".to_owned(), "Network Address".to_owned())
     );
 }
 
@@ -986,6 +1008,8 @@ fn escape_closes_a_filled_in_sheet_without_setting_up(cx: &mut TestAppContext) {
 fn typing_the_first_host_character_makes_set_up_available_in_place(cx: &mut TestAppContext) {
     let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
     sheet.begin(AddServerRequest::Ssh(None));
+    assert_eq!(sheet.title(), "Add Server");
+    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_none());
     let (before, _) = sheet.presented();
     let set_up = sheet.node("Set Up");
 
@@ -1023,10 +1047,38 @@ fn declining_a_sign_in_before_any_change_returns_to_the_form(cx: &mut TestAppCon
     sheet.begin(AddServerRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    // The backend has entered its cancellation wait, rather than merely being scheduled.
+    sheet
+        .cx
+        .foreground_executor()
+        .clone()
+        .block_test(sheet.computers.starts.recv())
+        .expect("the setup worker starts");
+    sheet.cx.run_until_parked();
+    assert!(sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    assert!(sheet.find("Set Up").is_none());
+    let completion = sheet.cx.update(|window, cx| {
+        open_sheet(window, cx)
+            .unwrap()
+            .update(cx, |sheet, _| sheet._setup.take().unwrap())
+    });
 
     sheet.decline_prompt();
-    sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Server");
+    assert!(
+        sheet.find("Set Up").is_none(),
+        "the held worker has not answered yet"
+    );
+    sheet.computers.release_cancelled();
+    // This task returns only after the backend returned and its answer reached the sheet.
+    sheet
+        .cx
+        .foreground_executor()
+        .clone()
+        .block_test(completion);
+    sheet.cx.run_until_parked();
+    assert!(sheet.open());
+    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.node("Set Up")["aria"]["role"], "Button");
 
     assert!(
         !sheet.disabled("Set Up"),
@@ -1040,50 +1092,36 @@ fn declining_a_sign_in_before_any_change_returns_to_the_form(cx: &mut TestAppCon
 /// than returning to the form as if nothing happened.
 #[gpui::test]
 fn declining_a_sign_in_after_a_start_reports_the_unconfirmed_start(cx: &mut TestAppContext) {
-    let (mut sheet, route) = open_settings(
-        |_| {
-            vec![Outcome::UntilCancelledThen(SetupFailure::Unconfirmed(
-                SetupOperation::Start,
-            ))]
-        },
-        cx,
-    );
-    sheet.begin(AddServerRequest::Ssh(None));
-    sheet.fill("penguin");
-    sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    for (operation, expected) in [
+        (
+            SetupOperation::Start,
+            "couldn\u{2019}t confirm that the server started",
+        ),
+        (
+            SetupOperation::Install,
+            "couldn\u{2019}t confirm the installation",
+        ),
+    ] {
+        let (mut sheet, route) = open_settings(
+            |_| {
+                vec![Outcome::UntilCancelledThen(SetupFailure::Unconfirmed(
+                    operation,
+                ))]
+            },
+            cx,
+        );
+        sheet.begin(AddServerRequest::Ssh(None));
+        sheet.fill("penguin");
+        sheet.choose(SheetAction::SetUp.selector());
+        sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
 
-    sheet.decline_prompt();
-    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+        sheet.decline_prompt();
+        sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
 
-    assert!(sheet.says("couldn\u{2019}t confirm that the server started"));
-    assert!(sheet.open());
-    assert_ne!(sheet.selected(), Some(ServerChoice::Direct(route)));
-}
-
-/// An installation that already ran stays reported when the person cancels the sign-in for the
-/// discovery that follows it.
-#[gpui::test]
-fn declining_a_sign_in_after_an_installation_reports_the_unconfirmed_installation(
-    cx: &mut TestAppContext,
-) {
-    let (mut sheet, _) = open_settings(
-        |_| {
-            vec![Outcome::UntilCancelledThen(SetupFailure::Unconfirmed(
-                SetupOperation::Install,
-            ))]
-        },
-        cx,
-    );
-    sheet.begin(AddServerRequest::Ssh(None));
-    sheet.fill("penguin");
-    sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
-
-    sheet.decline_prompt();
-    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
-
-    assert!(sheet.says("couldn\u{2019}t confirm the installation"));
+        assert!(sheet.says(expected));
+        assert!(sheet.open());
+        assert_ne!(sheet.selected(), Some(ServerChoice::Direct(route)));
+    }
 }
 
 /// Reading the SSH configuration can wait on a slow volume. The sheet opens and both methods work
@@ -1096,6 +1134,7 @@ fn add_server_stays_usable_while_ssh_hosts_are_read(cx: &mut TestAppContext) {
     let mut sheet = open_settings_using(Arc::default(), Arc::clone(&hosts), direct, cx);
     sheet.begin(AddServerRequest::Ssh(None));
 
+    hosts.wait_until_started(sheet.cx);
     assert_eq!(sheet.title(), "Add Server");
     assert!(
         sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_none(),
@@ -1154,6 +1193,11 @@ fn closing_add_server_while_ssh_hosts_are_read_takes_nothing_from_the_read(
     let mut sheet = open_settings_using(Arc::default(), Arc::clone(&hosts), direct, cx);
     sheet.begin(AddServerRequest::Ssh(None));
 
+    hosts.wait_until_started(sheet.cx);
+    let reading = sheet
+        .cx
+        .update(|window, cx| open_sheet(window, cx).unwrap());
+    let delivery = reading.update(sheet.cx, |sheet, _| sheet._discovery.take().unwrap());
     sheet.cx.simulate_keystrokes("escape");
     sheet.cx.run_until_parked();
     assert!(
@@ -1162,16 +1206,10 @@ fn closing_add_server_while_ssh_hosts_are_read_takes_nothing_from_the_read(
     );
 
     hosts.release();
-    // The read answers on its own thread, after the sheet closed.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !hosts.answered() {
-        assert!(
-            Instant::now() < deadline,
-            "the held read answers once released"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    // Await the real discovery task, including delivery to the closed sheet.
+    sheet.cx.foreground_executor().clone().block_test(delivery);
     sheet.cx.run_until_parked();
+    assert!(reading.read_with(sheet.cx, |sheet, _| sheet.hosts.is_empty()));
 
     assert!(!sheet.open(), "the answer reopens nothing");
     assert!(
@@ -1284,66 +1322,45 @@ fn correcting_a_refused_invitation_address_keeps_focus_in_it(cx: &mut TestAppCon
     assert_eq!(sheet.title(), "Join studio");
 }
 
-/// Space opens the invitation's network address from the keyboard and leaves focus on the
-/// disclosure, as a macOS disclosure does.
-#[gpui::test]
-fn the_keyboard_opens_the_invitation_address_with_focus_on_its_disclosure(cx: &mut TestAppContext) {
-    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
-    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
-    sheet.tab_to_disclosure();
-
-    sheet.press_space();
-
-    assert!(sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_some());
-    assert_eq!(
-        sheet.focus(),
-        ("Button".to_owned(), "Network Address".to_owned())
-    );
-    sheet.cx.simulate_keystrokes("tab");
-    sheet.cx.run_until_parked();
-    assert!(
-        sheet.field(|sheet| &sheet.endpoint).1,
-        "Tab moves into the shown address"
-    );
-}
-
 /// Both disclosures announce their new state in place while they keep keyboard focus.
 #[gpui::test]
 fn the_network_address_disclosures_announce_their_state_in_place(cx: &mut TestAppContext) {
     let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-    sheet.tab_to_disclosure();
-    sheet.toggle_disclosure_in_place(ADDRESS_DISCLOSURE_DESCRIPTION);
-
-    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
-    sheet.tab_to_disclosure();
-    sheet.toggle_disclosure_in_place(ENDPOINT_DISCLOSURE_DESCRIPTION);
-}
-
-/// Select All and a retyped address after a refused Join stay in the address, as the person
-/// corrects it from the keyboard.
-#[gpui::test]
-fn retyping_a_refused_invitation_address_after_select_all_keeps_focus_in_it(
-    cx: &mut TestAppContext,
-) {
-    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
-    let mut sheet = open_settings_with(direct, cx);
-    sheet.begin(AddServerRequest::Invitation(Some(link.clone())));
-    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
-    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
-    sheet.cx.simulate_keystrokes("enter");
-    sheet.cx.run_until_parked();
-    assert!(sheet.says("Enter a host name or IP address"));
-
-    sheet.cx.simulate_keystrokes("cmd-a");
-    for character in "public.example".chars() {
-        sheet.cx.simulate_input(&character.to_string());
+    for (request, selector, description, field) in [
+        (
+            AddServerRequest::Ssh(None),
+            ADDRESS_SELECTOR,
+            ADDRESS_DISCLOSURE_DESCRIPTION,
+            (|sheet: &AddServerSheet| &sheet.address) as fn(&AddServerSheet) -> &Entity<TextInput>,
+        ),
+        (
+            AddServerRequest::Invitation(Some(invitation("studio"))),
+            ENDPOINT_SELECTOR,
+            ENDPOINT_DISCLOSURE_DESCRIPTION,
+            (|sheet: &AddServerSheet| &sheet.endpoint) as fn(&AddServerSheet) -> &Entity<TextInput>,
+        ),
+    ] {
+        sheet.begin(request);
+        assert!(sheet.cx.debug_bounds(selector).is_none());
+        sheet.tab_to_disclosure();
+        sheet.toggle_disclosure_in_place(description);
+        sheet.press_space();
+        assert!(sheet.cx.debug_bounds(selector).is_some());
+        assert_eq!(
+            sheet.focus(),
+            ("Button".to_owned(), "Network Address".to_owned())
+        );
+        sheet.cx.simulate_keystrokes("tab");
         sheet.cx.run_until_parked();
-        assert!(sheet.field(|sheet| &sheet.endpoint).1);
+        assert!(sheet.field(field).1, "Tab enters the shown address");
+        sheet.cx.simulate_keystrokes("shift-tab");
+        sheet.press_space();
+        assert!(sheet.cx.debug_bounds(selector).is_none());
+        assert_eq!(
+            sheet.focus(),
+            ("Button".to_owned(), "Network Address".to_owned())
+        );
     }
-
-    assert_eq!(sheet.field(|sheet| &sheet.endpoint).0, "public.example");
-    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
 }
 
 /// A refused invitation address the person folded away and opened again stays shown while they
@@ -1354,12 +1371,20 @@ fn correcting_a_refused_invitation_address_after_folding_it_keeps_it_shown(
 ) {
     let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
     let mut sheet = open_settings_with(direct, cx);
-    sheet.begin(AddServerRequest::Invitation(Some(link)));
+    sheet.begin(AddServerRequest::Invitation(Some(link.clone())));
     sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
     sheet.type_into(ENDPOINT_SELECTOR, "not a host");
     sheet.choose(SheetAction::Join.selector());
     assert!(sheet.says("Enter a host name or IP address"));
 
+    sheet.cx.simulate_keystrokes("cmd-a");
+    for character in "public.example".chars() {
+        sheet.cx.simulate_input(&character.to_string());
+        sheet.cx.run_until_parked();
+        assert!(sheet.field(|sheet| &sheet.endpoint).1);
+    }
+    assert_eq!(sheet.field(|sheet| &sheet.endpoint).0, "public.example");
+    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
     sheet.retype_after_folding(
         ENDPOINT_DISCLOSURE_SELECTOR,
         ENDPOINT_SELECTOR,

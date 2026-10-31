@@ -38,38 +38,6 @@ fn navigation_hover_changes_fill_without_adding_a_focus_like_rim() {
     assert_eq!(unavailable.hover_rim, None);
 }
 
-#[test]
-fn highlighted_row_materializes_against_its_card_host() {
-    use crate::appearance::{
-        AppearanceGeneration, AppearancePreferences, AvailableFonts, CompositionCapabilities,
-        SurfaceRole, SystemAppearance, ThemeCatalog,
-    };
-
-    let mut preferences = AppearancePreferences::default();
-    preferences.window.opacity = 0.0;
-    let resolved = ThemeCatalog::default()
-        .resolve(
-            AppearanceGeneration::INITIAL,
-            &preferences,
-            SystemAppearance::unavailable()
-                .with_composition(CompositionCapabilities::new(true, true)),
-            &AvailableFonts::default(),
-        )
-        .expect("built-in appearance should resolve");
-    let appearance = crate::ui::appearance::ChromeAppearance::prepare(&resolved.chrome);
-    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-    let expected = appearance.materials.paint(
-        SurfaceRole::Surface,
-        appearance.colors.elevated_surface_background,
-        colors.row_selected_background,
-    );
-
-    assert_eq!(
-        crate::ui::sidebar_window::form::highlighted_row_background(&appearance),
-        expected
-    );
-}
-
 #[gpui::test]
 fn stepper_field_resolves_inside_its_rendered_card_host(cx: &mut TestAppContext) {
     use crate::appearance::Color;

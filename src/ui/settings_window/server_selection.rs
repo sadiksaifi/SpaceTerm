@@ -360,14 +360,24 @@ mod tests {
     ) {
         cx.update(|cx| {
             reconcile(vec![ServerKey::Local, studio()], cx);
-            remember(studio(), observed(20), cx);
+            let mut newer = observed(20);
+            newer.version = Some("2.1.0".into());
+            remember(studio(), newer, cx);
         });
         let (notified, _observer) = count_notifications(cx);
 
         cx.update(|cx| {
             // Older than what the selection holds, as after the clock moves back.
-            remember(studio(), observed(10), cx);
-            remember(studio(), observed(20), cx);
+            let mut older = observed(10);
+            older.version = Some("2.0.0".into());
+            remember(studio(), older, cx);
+            assert_eq!(
+                facts(&studio(), cx).and_then(|facts| facts.version),
+                Some("2.1.0".into())
+            );
+            let mut same = observed(20);
+            same.version = Some("2.1.0".into());
+            remember(studio(), same, cx);
             remember(ServerKey::Direct([8; 32]), observed(30), cx);
             reconcile(vec![ServerKey::Local, studio()], cx);
         });
@@ -574,25 +584,6 @@ mod tests {
             reconcile(vec![ServerKey::Local], cx);
 
             assert_eq!(selected(cx), ServerKey::Local);
-        });
-    }
-
-    #[gpui::test]
-    fn an_older_observation_never_replaces_a_newer_one(cx: &mut gpui::TestAppContext) {
-        let studio = ServerKey::Direct([7; 32]);
-        let observed = |observed_at, version: &str| LastKnownFacts {
-            observed_at,
-            version: Some(version.to_owned()),
-            ..LastKnownFacts::default()
-        };
-        cx.update(|cx| {
-            remember(studio.clone(), observed(20, "2.1.0"), cx);
-            remember(studio.clone(), observed(10, "2.0.0"), cx);
-
-            assert_eq!(
-                facts(&studio, cx).and_then(|facts| facts.version),
-                Some("2.1.0".to_owned())
-            );
         });
     }
 }

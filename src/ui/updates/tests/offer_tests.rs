@@ -24,35 +24,6 @@ fn paired_attention() -> ServerUpdateRow {
 }
 
 #[test]
-fn genuine_offers_raise_server_pills_without_changing_their_targets() {
-    assert_eq!(
-        pill(None, None, &[server("machine", ServerUpdateAction::Local)]),
-        Some((
-            "Update Server".into(),
-            PillTone::Primary,
-            None,
-            PillCommand::Server(ServerUpdateAction::Local)
-        ))
-    );
-    assert_eq!(
-        pill(
-            None,
-            None,
-            &[
-                server("local", ServerUpdateAction::Local),
-                paired_attention()
-            ]
-        ),
-        Some((
-            "Review 2 Servers".into(),
-            PillTone::Primary,
-            None,
-            PillCommand::Menu
-        ))
-    );
-}
-
-#[test]
 fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
     let offer = server("local", ServerUpdateAction::Local);
     let attention = paired_attention();
@@ -134,6 +105,32 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
             PillTone::Warning,
             Some(ControlGlyph::Warning),
             PillCommand::Client(Some(ControlCommand::RequestInstall))
+        ))
+    );
+
+    assert_eq!(
+        pill(None, None, &[server("machine", ServerUpdateAction::Local)]),
+        Some((
+            "Update Server".into(),
+            PillTone::Primary,
+            None,
+            PillCommand::Server(ServerUpdateAction::Local)
+        ))
+    );
+    assert_eq!(
+        pill(
+            None,
+            None,
+            &[
+                server("local", ServerUpdateAction::Local),
+                paired_attention()
+            ]
+        ),
+        Some((
+            "Review 2 Servers".into(),
+            PillTone::Primary,
+            None,
+            PillCommand::Menu
         ))
     );
 }
@@ -254,33 +251,19 @@ fn primary_fill(selector: &'static str, state: PointerState, cx: &mut VisualTest
 
 #[gpui::test]
 fn server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestAppContext) {
-    appearance(Appearance::Light, cx);
-    manual_updates(cx);
-    local_offer(cx);
-    let visual = open_control(cx);
-    for state in [
-        PointerState::Normal,
-        PointerState::Hovered,
-        PointerState::Pressed,
-    ] {
-        primary_fill("update-control", state, visual);
-        primary_fill("update-control-menu", state, visual);
-    }
-}
-
-#[gpui::test]
-fn dark_server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestAppContext) {
-    appearance(Appearance::Dark, cx);
-    manual_updates(cx);
-    local_offer(cx);
-    let visual = open_control(cx);
-    for state in [
-        PointerState::Normal,
-        PointerState::Hovered,
-        PointerState::Pressed,
-    ] {
-        primary_fill("update-control", state, visual);
-        primary_fill("update-control-menu", state, visual);
+    for mode in [Appearance::Light, Appearance::Dark] {
+        appearance(mode, cx);
+        manual_updates(cx);
+        local_offer(cx);
+        let visual = open_control(cx);
+        for state in [
+            PointerState::Normal,
+            PointerState::Hovered,
+            PointerState::Pressed,
+        ] {
+            primary_fill("update-control", state, visual);
+            primary_fill("update-control-menu", state, visual);
+        }
     }
 }
 

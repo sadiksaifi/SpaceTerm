@@ -1,9 +1,10 @@
 //! The server picker, All Servers and the selected server's card, driven through a scripted local
 //! server and a registry of saved paired servers that reaches no network.
 
+use futures_lite::StreamExt as _;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::{A11yTree, perform};
@@ -52,11 +53,14 @@ pub(in crate::ui::settings_window) fn connected_paired(
     // The registry connects each route on its own thread.
     cx.executor().allow_parking();
     let (direct, routes) = crate::direct_connections::tests::connected_routes(names);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let changes = direct.subscribe();
     while !routes.iter().all(|route| direct.server(route).is_some()) {
-        assert!(Instant::now() < deadline, "the paired servers connect");
-        std::thread::sleep(Duration::from_millis(2));
+        cx.foreground_executor()
+            .clone()
+            .block_test(changes.recv())
+            .expect("registry publishes connection completion");
     }
+    direct.close_subscription(&changes);
     (direct, routes)
 }
 
@@ -182,15 +186,31 @@ pub(in crate::ui::settings_window) fn settle(
     cx: &mut VisualTestContext,
     mut done: impl FnMut(&mut VisualTestContext) -> bool,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let direct = cx
+        .update(|_, cx| crate::ui::direct_servers::installed(cx))
+        .expect("installed registry");
+    let changes = direct.subscribe();
+    let settings = cx
+        .update(|window, _| window.root::<SettingsWindow>().flatten())
+        .expect("Settings root");
+    let mut notifications = cx.cx.notifications(&settings);
     loop {
         cx.run_until_parked();
         if done(cx) {
-            return;
+            break;
         }
-        assert!(Instant::now() < deadline, "the registry settles");
-        std::thread::sleep(Duration::from_millis(2));
+        cx.foreground_executor()
+            .clone()
+            .block_test(futures_lite::future::race(
+                async {
+                    let _ = changes.recv().await;
+                },
+                async {
+                    let _ = notifications.next().await;
+                },
+            ));
     }
+    direct.close_subscription(&changes);
 }
 
 /// The servers All Servers offers, in order, by the name assistive technology hears.
@@ -668,21 +688,15 @@ fn a_retained_choice_whose_route_is_gone_gives_way_once_loading_finishes(cx: &mu
 }
 
 #[gpui::test]
-fn rendering_the_servers_section_reaches_no_computer(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["build", "penguin"], cx);
+fn searching_for_a_server_by_name_reveals_and_selects_it(cx: &mut TestAppContext) {
+    let mut servers = open_servers(true, &["build", "penguin"], cx);
     select("penguin", servers.cx);
     select("build", servers.cx);
     for _ in 0..3 {
         servers.cx.update(|window, _| window.refresh());
         servers.cx.run_until_parked();
     }
-
     assert!(servers.all_disconnected());
-}
-
-#[gpui::test]
-fn searching_for_a_server_by_name_reveals_and_selects_it(cx: &mut TestAppContext) {
-    let mut servers = open_servers(true, &["build", "penguin"], cx);
     click("settings-navigation-settings-section-interface", servers.cx);
 
     search_for("PENG", &mut servers);

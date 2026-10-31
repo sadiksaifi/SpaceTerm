@@ -22,6 +22,9 @@ use crate::server_connection::{AuthenticatedStatus, ServerConnection, ServerErro
 use crate::ui::direct_access::DirectAccessControl;
 use crate::ui::sidebar_window::form::CaptionTone;
 
+pub(super) type ServerAnswer<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, ServerError>> + Send + 'a>>;
+
 /// The blocking local server check the section runs on the background executor. The Workspace
 /// Window sets up and starts the server; this row only reports how it answers.
 pub(super) trait LocalServerControl: Send + Sync {
@@ -33,7 +36,7 @@ pub(super) trait LocalServerControl: Send + Sync {
         None
     }
     /// Connects using owning-account authority. Never creates an identity or starts a server.
-    fn refresh(&self) -> Result<ConnectedServer, ServerError>;
+    fn refresh(&self) -> ServerAnswer<'_, ConnectedServer>;
     fn lifetime(&self) -> ServerLifetime {
         ServerLifetime::Independent
     }
@@ -60,7 +63,7 @@ impl LocalServerControl for DevelopmentRunServer {
     fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
         self.0.direct_access()
     }
-    fn refresh(&self) -> Result<ConnectedServer, ServerError> {
+    fn refresh(&self) -> ServerAnswer<'_, ConnectedServer> {
         self.0.refresh()
     }
     fn lifetime(&self) -> ServerLifetime {
@@ -80,8 +83,8 @@ impl LocalServerControl for ServerConnection {
     fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
         Some(Arc::new(self.clone()))
     }
-    fn refresh(&self) -> Result<ConnectedServer, ServerError> {
-        ServerConnection::refresh(self).map(ConnectedServer::from)
+    fn refresh(&self) -> ServerAnswer<'_, ConnectedServer> {
+        Box::pin(async move { ServerConnection::refresh(self).map(ConnectedServer::from) })
     }
 }
 
@@ -103,13 +106,13 @@ impl From<AuthenticatedStatus> for ConnectedServer {
 /// service's status after the operation, so the row never presents a state it assumed.
 pub(super) trait ServerServiceControl: Send + Sync {
     /// Reads the service. Never installs, starts, or stops anything.
-    fn status(&self) -> Result<ServiceStatus, ServerError>;
+    fn status(&self) -> ServerAnswer<'_, ServiceStatus>;
     /// Lists the verified server builds kept for this account. Never installs or starts anything.
     fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError>;
     /// Installs the service from a verified retained server installation, keeping an approved
     /// runtime the service already uses.
     fn install(&self, installation: &Path) -> Result<ServiceStatus, ServerError>;
-    fn start(&self) -> Result<ServiceStatus, ServerError>;
+    fn start(&self) -> ServerAnswer<'_, ServiceStatus>;
     /// Stops the server, ends its Terminal Sessions, and keeps it stopped until an explicit Start.
     fn stop(&self) -> Result<ServiceStatus, ServerError>;
     fn restart(&self) -> Result<ServiceStatus, ServerError>;
@@ -127,8 +130,8 @@ pub(super) trait ServerServiceControl: Send + Sync {
 }
 
 impl ServerServiceControl for Service {
-    fn status(&self) -> Result<ServiceStatus, ServerError> {
-        Service::status(self)
+    fn status(&self) -> ServerAnswer<'_, ServiceStatus> {
+        Box::pin(async move { Service::status(self) })
     }
 
     fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError> {
@@ -139,8 +142,8 @@ impl ServerServiceControl for Service {
         Service::install(self, installation)
     }
 
-    fn start(&self) -> Result<ServiceStatus, ServerError> {
-        Service::start(self)
+    fn start(&self) -> ServerAnswer<'_, ServiceStatus> {
+        Box::pin(async move { Service::start(self) })
     }
 
     fn stop(&self) -> Result<ServiceStatus, ServerError> {
@@ -1268,80 +1271,87 @@ fn perform_service_operation(
     action: ServiceAction,
     installation: Option<PathBuf>,
     startup: ServiceStartup,
-) -> ServiceState {
-    use ServiceAction as Action;
-    let authorizing = matches!(action, Action::AuthorizeInstall | Action::AuthorizeStart);
-    let retry = installation.clone();
-    let outcome = match (action, installation.as_deref()) {
-        (Action::Install, Some(installation)) => control.install(installation),
-        (Action::Install, None) => Err(ServerError::RuntimeUnavailable),
-        (Action::Check, _) => control.status(),
-        (Action::Start, _) => control.start(),
-        (Action::Stop, _) => control.stop(),
-        (Action::Restart, _) => control.restart(),
-        (Action::Uninstall, _) => control.uninstall(),
-        (Action::AuthorizeInstall | Action::AuthorizeStart, _) => {
-            control.authorize_startup().and_then(|()| control.status())
-        }
-    };
-    let authorized = authorizing && outcome.is_ok();
-    let (status, failure) = match outcome {
-        Ok(status) => (Some(status), None),
-        Err(error) if action == Action::Check => (None, Some(error)),
-        Err(error) => (control.status().ok(), Some(error)),
-    };
-    // Listing verifies each build and never installs or starts one. An installed service
-    // offers no Install, so it lists nothing.
-    let (installations, failure) = match status {
-        Some(status) if !status.installed => match control.retained_installations() {
-            Ok(installations) => (installations, failure),
-            Err(error) => (Vec::new(), failure.or(Some(error))),
-        },
-        _ => (Vec::new(), failure),
-    };
-    // A request that would start the server waits for authorization. A Restart refused
-    // after stopping continues as Start, which is what the person asked for.
-    let request = match (failure, action) {
-        (Some(ServerError::AuthorizationRequired), Action::Install | Action::AuthorizeInstall) => {
-            installation.map(AuthorizedRequest::Install)
-        }
-        (
-            Some(ServerError::AuthorizationRequired),
-            Action::Start | Action::Restart | Action::AuthorizeStart,
-        ) => Some(AuthorizedRequest::Start),
-        _ => None,
-    };
-    let state = ServiceState {
-        startup,
-        status,
-        failure,
-        installations,
-        working: None,
-        authorization: request.map(|request| PendingAuthorization {
-            request,
-            declined: authorizing,
-        }),
-    };
-    if authorized {
-        // Authorization continues only the request the person approved, including its exact build.
-        if let Some(installation) = retry {
-            if state
-                .installations
-                .iter()
-                .any(|listed| listed.directory == installation)
-            {
-                return perform_service_operation(
-                    control,
-                    Action::Install,
-                    Some(installation),
-                    startup,
-                );
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ServiceState> + Send + '_>> {
+    Box::pin(async move {
+        use ServiceAction as Action;
+        let authorizing = matches!(action, Action::AuthorizeInstall | Action::AuthorizeStart);
+        let retry = installation.clone();
+        let outcome = match (action, installation.as_deref()) {
+            (Action::Install, Some(installation)) => control.install(installation),
+            (Action::Install, None) => Err(ServerError::RuntimeUnavailable),
+            (Action::Check, _) => control.status().await,
+            (Action::Start, _) => control.start().await,
+            (Action::Stop, _) => control.stop(),
+            (Action::Restart, _) => control.restart(),
+            (Action::Uninstall, _) => control.uninstall(),
+            (Action::AuthorizeInstall | Action::AuthorizeStart, _) => {
+                match control.authorize_startup() {
+                    Ok(()) => control.status().await,
+                    Err(error) => Err(error),
+                }
             }
-        } else {
-            return perform_service_operation(control, Action::Start, None, startup);
+        };
+        let authorized = authorizing && outcome.is_ok();
+        let (status, failure) = match outcome {
+            Ok(status) => (Some(status), None),
+            Err(error) if action == Action::Check => (None, Some(error)),
+            Err(error) => (control.status().await.ok(), Some(error)),
+        };
+        // Listing verifies each build and never installs or starts one. An installed service
+        // offers no Install, so it lists nothing.
+        let (installations, failure) = match status {
+            Some(status) if !status.installed => match control.retained_installations() {
+                Ok(installations) => (installations, failure),
+                Err(error) => (Vec::new(), failure.or(Some(error))),
+            },
+            _ => (Vec::new(), failure),
+        };
+        // A request that would start the server waits for authorization. A Restart refused
+        // after stopping continues as Start, which is what the person asked for.
+        let request = match (failure, action) {
+            (
+                Some(ServerError::AuthorizationRequired),
+                Action::Install | Action::AuthorizeInstall,
+            ) => installation.map(AuthorizedRequest::Install),
+            (
+                Some(ServerError::AuthorizationRequired),
+                Action::Start | Action::Restart | Action::AuthorizeStart,
+            ) => Some(AuthorizedRequest::Start),
+            _ => None,
+        };
+        let state = ServiceState {
+            startup,
+            status,
+            failure,
+            installations,
+            working: None,
+            authorization: request.map(|request| PendingAuthorization {
+                request,
+                declined: authorizing,
+            }),
+        };
+        if authorized {
+            // Authorization continues only the request the person approved, including its exact build.
+            if let Some(installation) = retry {
+                if state
+                    .installations
+                    .iter()
+                    .any(|listed| listed.directory == installation)
+                {
+                    return perform_service_operation(
+                        control,
+                        Action::Install,
+                        Some(installation),
+                        startup,
+                    )
+                    .await;
+                }
+            } else {
+                return perform_service_operation(control, Action::Start, None, startup).await;
+            }
         }
-    }
-    state
+        state
+    })
 }
 
 impl SettingsWindow {
@@ -1366,7 +1376,7 @@ impl SettingsWindow {
         if matches!(row.status, LocalServerStatus::NotChecked) {
             row.status = LocalServerStatus::Checking;
         }
-        let result = cx.background_spawn(async move { control.refresh() });
+        let result = cx.background_spawn(async move { control.refresh().await });
         row._operation = Some(cx.spawn(async move |settings, cx| {
             let result = result.await;
             let _ = settings.update(cx, |settings, cx| {
@@ -1789,7 +1799,7 @@ impl SettingsWindow {
         let prior_failure = self.local_operations.read(cx).service_failure;
         let result = cx.background_spawn(async move {
             let mut state =
-                perform_service_operation(control.as_ref(), action, installation, startup);
+                perform_service_operation(control.as_ref(), action, installation, startup).await;
             if action == ServiceAction::Check {
                 state.failure = prior_failure.or(state.failure);
             }
@@ -1966,14 +1976,69 @@ pub(super) mod testing {
 
     use std::path::{Path, PathBuf};
 
-    use super::{ConnectedServer, LocalServerControl, ServerServiceControl, ServiceStartup};
+    use super::{
+        ConnectedServer, LocalServerControl, ServerAnswer, ServerServiceControl, ServiceStartup,
+    };
     use crate::server_connection::ServerError;
     use crate::server_connection::service::{RetainedInstallation, ServiceStatus};
+
+    /// A scripted boundary answer that stays pending until its owner releases it.
+    pub(in crate::ui::settings_window) struct HeldAnswer<T> {
+        started: async_channel::Receiver<()>,
+        released: async_channel::Sender<T>,
+    }
+
+    pub(in crate::ui::settings_window) struct PendingAnswer<T> {
+        started: async_channel::Sender<()>,
+        released: async_channel::Receiver<T>,
+    }
+
+    impl<T> HeldAnswer<T> {
+        pub(in crate::ui::settings_window) fn new() -> (Self, PendingAnswer<T>) {
+            let (start, started) = async_channel::bounded(1);
+            let (released, answer) = async_channel::bounded(1);
+            (
+                Self { started, released },
+                PendingAnswer {
+                    started: start,
+                    released: answer,
+                },
+            )
+        }
+
+        pub(in crate::ui::settings_window) fn wait_started(&self, cx: &gpui::TestAppContext) {
+            cx.foreground_executor()
+                .clone()
+                .block_test(self.started.recv())
+                .expect("the boundary read starts");
+        }
+
+        pub(in crate::ui::settings_window) fn release(self, answer: T) {
+            assert!(
+                self.released.try_send(answer).is_ok(),
+                "the operation is still waiting"
+            );
+        }
+    }
+
+    impl<T> PendingAnswer<T> {
+        pub(in crate::ui::settings_window) async fn receive(self) -> T {
+            self.started
+                .send(())
+                .await
+                .expect("test observes the start");
+            self.released
+                .recv()
+                .await
+                .expect("test releases the answer")
+        }
+    }
 
     /// A server whose answers the test sets and whose operations it counts.
     pub(in crate::ui::settings_window) struct ScriptedServer {
         refresh: Mutex<Result<ConnectedServer, ServerError>>,
         refreshes: AtomicUsize,
+        pending_refresh: Mutex<Option<PendingAnswer<Result<ConnectedServer, ServerError>>>>,
     }
 
     impl ScriptedServer {
@@ -1983,7 +2048,16 @@ pub(super) mod testing {
             Arc::new(Self {
                 refresh: Mutex::new(refresh),
                 refreshes: AtomicUsize::new(0),
+                pending_refresh: Mutex::default(),
             })
+        }
+
+        pub(in crate::ui::settings_window) fn hold_refresh(
+            &self,
+        ) -> HeldAnswer<Result<ConnectedServer, ServerError>> {
+            let (held, pending) = HeldAnswer::new();
+            *self.pending_refresh.lock().unwrap() = Some(pending);
+            held
         }
 
         pub(in crate::ui::settings_window) fn answer_refresh(
@@ -1999,9 +2073,15 @@ pub(super) mod testing {
     }
 
     impl LocalServerControl for ScriptedServer {
-        fn refresh(&self) -> Result<ConnectedServer, ServerError> {
-            self.refreshes.fetch_add(1, Ordering::SeqCst);
-            *self.refresh.lock().expect("refresh answer")
+        fn refresh(&self) -> ServerAnswer<'_, ConnectedServer> {
+            Box::pin(async move {
+                self.refreshes.fetch_add(1, Ordering::SeqCst);
+                let pending = self.pending_refresh.lock().unwrap().take();
+                if let Some(pending) = pending {
+                    return pending.receive().await;
+                }
+                *self.refresh.lock().expect("refresh answer")
+            })
         }
     }
 
@@ -2032,6 +2112,7 @@ pub(super) mod testing {
     /// and records every operation.
     pub(in crate::ui::settings_window) struct ScriptedService {
         status: Mutex<Result<ServiceStatus, ServerError>>,
+        pending_start: Mutex<Option<PendingAnswer<Result<ServiceStatus, ServerError>>>>,
         /// The verified builds the service lists, or why it cannot.
         installations: Mutex<Result<Vec<RetainedInstallation>, ServerError>>,
         /// The refusal the next changing operation returns, leaving the status unchanged.
@@ -2068,6 +2149,7 @@ pub(super) mod testing {
         ) -> Arc<Self> {
             Arc::new(Self {
                 status: Mutex::new(status),
+                pending_start: Mutex::default(),
                 installations: Mutex::new(Ok(vec![retained("1.4.0", 'a')])),
                 refusal: Mutex::new(None),
                 startup,
@@ -2077,6 +2159,14 @@ pub(super) mod testing {
                 calls: Mutex::new(Vec::new()),
                 earlier: Mutex::new(None),
             })
+        }
+
+        pub(in crate::ui::settings_window) fn hold_start(
+            &self,
+        ) -> HeldAnswer<Result<ServiceStatus, ServerError>> {
+            let (held, pending) = HeldAnswer::new();
+            *self.pending_start.lock().unwrap() = Some(pending);
+            held
         }
 
         /// Changes what the service reports, as the operating system would.
@@ -2148,12 +2238,14 @@ pub(super) mod testing {
     }
 
     impl ServerServiceControl for ScriptedService {
-        fn status(&self) -> Result<ServiceStatus, ServerError> {
-            self.calls.lock().expect("calls").push(ServiceCall::Status);
-            if let Some(earlier) = self.earlier.lock().expect("earlier").take() {
-                return earlier;
-            }
-            *self.status.lock().expect("status")
+        fn status(&self) -> ServerAnswer<'_, ServiceStatus> {
+            Box::pin(async move {
+                self.calls.lock().expect("calls").push(ServiceCall::Status);
+                if let Some(earlier) = self.earlier.lock().expect("earlier").take() {
+                    return earlier;
+                }
+                *self.status.lock().expect("status")
+            })
         }
 
         fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError> {
@@ -2178,8 +2270,17 @@ pub(super) mod testing {
             })
         }
 
-        fn start(&self) -> Result<ServiceStatus, ServerError> {
-            self.change(ServiceCall::Start, |_| running())
+        fn start(&self) -> ServerAnswer<'_, ServiceStatus> {
+            Box::pin(async move {
+                let pending = self.pending_start.lock().unwrap().take();
+                if let Some(pending) = pending {
+                    self.calls.lock().unwrap().push(ServiceCall::Start);
+                    let answer = pending.receive().await;
+                    self.report(answer);
+                    return answer;
+                }
+                self.change(ServiceCall::Start, |_| running())
+            })
         }
 
         fn stop(&self) -> Result<ServiceStatus, ServerError> {

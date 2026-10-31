@@ -185,12 +185,16 @@ impl RemoteFailure {
     }
 }
 
+type ReadAnswer<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Reading, RemoteFailure>> + Send + 'a>,
+>;
+
 /// The blocking service-lane steps for one paired server, which the card runs on the background
 /// executor. Each step opens its own lane connection and first settles what this desktop left
 /// pending on it.
 pub(crate) trait RemoteServerControl: Send + Sync {
     /// Reads the server's Status and its update check. Changes nothing.
-    fn read(&self) -> Result<Reading, RemoteFailure>;
+    fn read(&self) -> ReadAnswer<'_>;
     /// Asks the server to preview `change`. Update first has the server stage its newest signed
     /// release, unless it offers a return to its previous version instead.
     fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure>;
@@ -230,14 +234,16 @@ impl LaneControl {
 }
 
 impl RemoteServerControl for LaneControl {
-    fn read(&self) -> Result<Reading, RemoteFailure> {
-        let (_, _, mut session, settled) = self.open()?;
-        let status = admin::status(&mut session).map_err(RemoteFailure::of_lane)?;
-        let check = admin::check(&mut session).map_err(RemoteFailure::of_lane)?;
-        Ok(Reading {
-            status,
-            check,
-            settled,
+    fn read(&self) -> ReadAnswer<'_> {
+        Box::pin(async move {
+            let (_, _, mut session, settled) = self.open()?;
+            let status = admin::status(&mut session).map_err(RemoteFailure::of_lane)?;
+            let check = admin::check(&mut session).map_err(RemoteFailure::of_lane)?;
+            Ok(Reading {
+                status,
+                check,
+                settled,
+            })
         })
     }
 
@@ -839,7 +845,9 @@ impl SettingsWindow {
         // Taken before the read, so a link that changes while it runs leaves it stale.
         let read_over = (server.clone(), server.link_generation());
         let task = cx.spawn(async move |settings, cx| {
-            let read = cx.background_spawn(async move { control.read() }).await;
+            let read = cx
+                .background_spawn(async move { control.read().await })
+                .await;
             let _ = settings.update(cx, |settings, cx| {
                 let admin = settings.remote_mut(route);
                 admin.work = None;
@@ -1029,6 +1037,9 @@ pub(super) mod testing {
     /// Lane steps whose answers a test sets and whose requests it records.
     pub(in crate::ui::settings_window) struct ScriptedRemote {
         pub(in crate::ui::settings_window) read: Mutex<Result<Reading, RemoteFailure>>,
+        pending_read: Mutex<
+            Option<super::super::servers::testing::PendingAnswer<Result<Reading, RemoteFailure>>>,
+        >,
         pub(in crate::ui::settings_window) prepare: Mutex<Result<Prepared, RemoteFailure>>,
         pub(in crate::ui::settings_window) perform: Mutex<Result<Performed, RemoteFailure>>,
         pub(in crate::ui::settings_window) prepared: Mutex<Vec<Change>>,
@@ -1039,11 +1050,20 @@ pub(super) mod testing {
         pub(in crate::ui::settings_window) fn new() -> Arc<Self> {
             Arc::new(Self {
                 read: Mutex::new(Err(RemoteFailure::Unreachable)),
+                pending_read: Mutex::default(),
                 prepare: Mutex::new(Err(RemoteFailure::Unreachable)),
                 perform: Mutex::new(Err(RemoteFailure::Unreachable)),
                 prepared: Mutex::default(),
                 performed: Mutex::default(),
             })
+        }
+
+        pub(in crate::ui::settings_window) fn hold_read(
+            &self,
+        ) -> super::super::servers::testing::HeldAnswer<Result<Reading, RemoteFailure>> {
+            let (held, pending) = super::super::servers::testing::HeldAnswer::new();
+            *self.pending_read.lock().unwrap() = Some(pending);
+            held
         }
 
         /// Makes this the desktop's lane steps for every paired server.
@@ -1057,8 +1077,14 @@ pub(super) mod testing {
     }
 
     impl RemoteServerControl for ScriptedRemote {
-        fn read(&self) -> Result<Reading, RemoteFailure> {
-            self.read.lock().unwrap().clone()
+        fn read(&self) -> ReadAnswer<'_> {
+            Box::pin(async move {
+                let pending = self.pending_read.lock().unwrap().take();
+                if let Some(pending) = pending {
+                    return pending.receive().await;
+                }
+                self.read.lock().unwrap().clone()
+            })
         }
 
         fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure> {

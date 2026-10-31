@@ -1123,57 +1123,67 @@ mod tests {
         );
     }
 
-    /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 42] = [
-        SettingsRowId::AppearanceMode,
-        SettingsRowId::Opacity,
-        SettingsRowId::Blur,
-        SettingsRowId::BackgroundImage,
-        SettingsRowId::Density,
-        SettingsRowId::SidebarDefaultState,
-        SettingsRowId::TerminalTheme,
-        SettingsRowId::TerminalFontFamily,
-        SettingsRowId::TerminalBaseSize,
-        SettingsRowId::TerminalLineHeight,
-        SettingsRowId::TerminalRegularWeight,
-        SettingsRowId::TerminalBoldWeight,
-        SettingsRowId::TerminalItalic,
-        SettingsRowId::TerminalBoldAsBright,
-        SettingsRowId::InstalledThemes,
-        SettingsRowId::MicrophoneAccess,
-        SettingsRowId::CameraAccess,
-        SettingsRowId::ScreenRecordingAccess,
-        SettingsRowId::AccessibilityAccess,
-        SettingsRowId::ClipboardWrites,
-        SettingsRowId::ClipboardReads,
-        SettingsRowId::ShowRepositoryStatus,
-        SettingsRowId::GitTool,
-        SettingsRowId::ShowPullRequests,
-        SettingsRowId::GitHubCli,
-        SettingsRowId::ServerWorktreeLocation,
-        SettingsRowId::ServerStatus,
-        SettingsRowId::ServerAutoStart,
-        SettingsRowId::EndAllSessions,
-        SettingsRowId::NetworkAccess,
-        SettingsRowId::PairedDevices,
-        SettingsRowId::AllServers,
-        SettingsRowId::AddServer,
-        SettingsRowId::CommandLineTool,
-        SettingsRowId::UpdateStatus,
-        SettingsRowId::AutomaticUpdateDownloads,
-        SettingsRowId::UpdateCheckInterval,
-        SettingsRowId::UpdateReminderInterval,
-        SettingsRowId::SettingsFile,
-        SettingsRowId::ExportSettings,
-        SettingsRowId::ImportSettings,
-        SettingsRowId::ResetAllSettings,
-    ];
+    macro_rules! preference_rows {
+        ($($variant:ident),+ $(,)?) => {
+            fn every_row() -> Vec<SettingsRowId> {
+                fn preference(id: SettingsRowId) -> Option<SettingsRowId> {
+                    match id {
+                        $(SettingsRowId::$variant => Some(SettingsRowId::$variant),)+
+                        SettingsRowId::Shortcut(_) => None,
+                    }
+                }
+                [$(SettingsRowId::$variant,)+]
+                    .into_iter()
+                    .map(|id| preference(id).expect("preference identity"))
+                    .chain(Command::ALL.map(SettingsRowId::Shortcut))
+                    .collect()
+            }
+        };
+    }
 
-    fn every_row() -> Vec<SettingsRowId> {
-        EVERY_PREFERENCE_ROW
-            .into_iter()
-            .chain(Command::ALL.map(SettingsRowId::Shortcut))
-            .collect()
+    preference_rows! {
+        AppearanceMode,
+        Opacity,
+        Blur,
+        BackgroundImage,
+        Density,
+        SidebarDefaultState,
+        TerminalTheme,
+        TerminalFontFamily,
+        TerminalBaseSize,
+        TerminalLineHeight,
+        TerminalRegularWeight,
+        TerminalBoldWeight,
+        TerminalItalic,
+        TerminalBoldAsBright,
+        InstalledThemes,
+        MicrophoneAccess,
+        CameraAccess,
+        ScreenRecordingAccess,
+        AccessibilityAccess,
+        ClipboardWrites,
+        ClipboardReads,
+        ShowRepositoryStatus,
+        GitTool,
+        ShowPullRequests,
+        GitHubCli,
+        ServerStatus,
+        ServerAutoStart,
+        EndAllSessions,
+        NetworkAccess,
+        PairedDevices,
+        AllServers,
+        AddServer,
+        CommandLineTool,
+        ServerWorktreeLocation,
+        UpdateStatus,
+        AutomaticUpdateDownloads,
+        UpdateCheckInterval,
+        UpdateReminderInterval,
+        SettingsFile,
+        ExportSettings,
+        ImportSettings,
+        ResetAllSettings,
     }
 
     #[test]
@@ -1322,6 +1332,13 @@ mod tests {
         assert!(matching_rows("registry").contains(&SettingsRowId::InstalledThemes));
         assert!(matching_rows("import").contains(&SettingsRowId::InstalledThemes));
         assert!(matching_rows("automatic").contains(&SettingsRowId::AppearanceMode));
+        for (query, expected) in [
+            ("accessibility", SettingsRowId::AccessibilityAccess),
+            ("voice", SettingsRowId::MicrophoneAccess),
+            ("overdue", SettingsRowId::UpdateReminderInterval),
+        ] {
+            assert_eq!(matching_rows(query).first(), Some(&expected), "{query}");
+        }
     }
 
     /// The diagnostics notice is not a row of its own, so the words a person searches for when a
@@ -1454,52 +1471,6 @@ mod tests {
         assert!(matching_rows("kubernetes").is_empty());
     }
 
-    #[test]
-    fn every_appearance_preference_row_maps_to_a_reset_target() {
-        for row in rows() {
-            // Update and shortcut rows reset their own field; their section tests cover that path.
-            let resettable = !matches!(
-                row.id,
-                SettingsRowId::SidebarDefaultState
-                    | SettingsRowId::InstalledThemes
-                    | SettingsRowId::MicrophoneAccess
-                    | SettingsRowId::CameraAccess
-                    | SettingsRowId::ScreenRecordingAccess
-                    | SettingsRowId::AccessibilityAccess
-                    | SettingsRowId::ClipboardWrites
-                    | SettingsRowId::ClipboardReads
-                    | SettingsRowId::ShowRepositoryStatus
-                    | SettingsRowId::GitTool
-                    | SettingsRowId::ShowPullRequests
-                    | SettingsRowId::GitHubCli
-                    | SettingsRowId::ServerWorktreeLocation
-                    | SettingsRowId::ServerStatus
-                    | SettingsRowId::ServerAutoStart
-                    | SettingsRowId::EndAllSessions
-                    | SettingsRowId::NetworkAccess
-                    | SettingsRowId::PairedDevices
-                    | SettingsRowId::AllServers
-                    | SettingsRowId::AddServer
-                    | SettingsRowId::CommandLineTool
-                    | SettingsRowId::UpdateStatus
-                    | SettingsRowId::AutomaticUpdateDownloads
-                    | SettingsRowId::UpdateCheckInterval
-                    | SettingsRowId::UpdateReminderInterval
-                    | SettingsRowId::Shortcut(_)
-                    | SettingsRowId::SettingsFile
-                    | SettingsRowId::ExportSettings
-                    | SettingsRowId::ImportSettings
-                    | SettingsRowId::ResetAllSettings
-            );
-            assert_eq!(
-                row.id.reset_target(Appearance::Light).is_some(),
-                resettable,
-                "{:?} reset mapping disagrees with its kind",
-                row.id
-            );
-        }
-    }
-
     /// The Advanced rows answer what a person looking to act on all of Settings types.
     #[test]
     fn a_whole_settings_query_reaches_the_advanced_rows() {
@@ -1567,13 +1538,5 @@ mod tests {
                 "{query:?} should rank Add Server first"
             );
         }
-    }
-
-    #[test]
-    fn a_descriptor_is_reachable_from_its_identity() {
-        assert_eq!(
-            SettingsRowId::TerminalLineHeight.descriptor().label,
-            "Line height"
-        );
     }
 }

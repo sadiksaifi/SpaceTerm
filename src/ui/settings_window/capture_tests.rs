@@ -16,7 +16,7 @@ use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
 use super::super::capture::{CAMERA, CaptureAccessAction, CaptureAccessStatus, MICROPHONE};
-use super::super::{SettingsRowId, SettingsSectionId, SettingsWindow};
+use super::super::{SettingsSectionId, SettingsWindow};
 use crate::settings::storage::testing::MemoryStorage;
 
 const ROW_SELECTOR: &str = "settings-row-microphone-access";
@@ -29,6 +29,7 @@ const CHECK_AGAIN_SELECTOR: &str = MICROPHONE.check_again;
 /// answers every device the same way and records which device each action named.
 struct ScriptedCaptureAccess {
     authorization: Cell<Result<CaptureAuthorization, CaptureAccessError>>,
+    camera_authorization: Cell<Option<Result<CaptureAuthorization, CaptureAccessError>>>,
     request_failure: Cell<Option<CaptureAccessError>>,
     open_failure: Cell<Option<CaptureAccessError>>,
     pending: RefCell<Vec<CaptureAuthorizationCompletion>>,
@@ -41,6 +42,7 @@ impl ScriptedCaptureAccess {
     fn new(authorization: Result<CaptureAuthorization, CaptureAccessError>) -> Rc<Self> {
         Rc::new(Self {
             authorization: Cell::new(authorization),
+            camera_authorization: Cell::new(None),
             request_failure: Cell::new(None),
             open_failure: Cell::new(None),
             pending: RefCell::default(),
@@ -59,8 +61,17 @@ impl ScriptedCaptureAccess {
 }
 
 impl CaptureAccess for ScriptedCaptureAccess {
-    fn authorization(&self, _: CaptureDevice) -> Result<CaptureAuthorization, CaptureAccessError> {
-        self.authorization.get()
+    fn authorization(
+        &self,
+        device: CaptureDevice,
+    ) -> Result<CaptureAuthorization, CaptureAccessError> {
+        if device == CaptureDevice::Camera {
+            self.camera_authorization
+                .get()
+                .unwrap_or_else(|| self.authorization.get())
+        } else {
+            self.authorization.get()
+        }
     }
 
     fn request_authorization(
@@ -196,29 +207,6 @@ fn privacy_section_presents_microphone_access_as_a_row_in_its_group(cx: &mut Tes
     assert!(row.contains(&control.origin) && control.right() <= row.right());
     // Reading authorization is not a request: the system prompt waits for the explicit action.
     assert_eq!(access.requests.get(), 0);
-}
-
-#[gpui::test]
-fn settings_search_reveals_microphone_access_from_another_section(cx: &mut TestAppContext) {
-    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Denied));
-    let (window, cx) = open_settings(Some(access), cx);
-    assert_eq!(
-        window.read_with(cx, |window, _| window.active_section),
-        SettingsSectionId::Interface
-    );
-
-    cx.update(|_, cx| {
-        let search = window.read(cx).search.clone();
-        search.update(cx, |search, cx| search.set_value("voice".to_owned(), cx));
-    });
-    cx.run_until_parked();
-
-    window.read_with(cx, |settings, _| {
-        assert_eq!(settings.active_section, SettingsSectionId::Privacy);
-        assert_eq!(settings.revealed, Some(SettingsRowId::MicrophoneAccess));
-    });
-    assert!(cx.debug_bounds(ROW_SELECTOR).is_some());
-    assert!(cx.debug_bounds(OPEN_SETTINGS_SELECTOR).is_some());
 }
 
 #[gpui::test]
@@ -586,14 +574,52 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
 fn microphone_access_publishes_its_state(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
+    let assert_microphone = |expected: &str, cx: &mut VisualTestContext| {
+        let tree = A11yTree::read(cx);
+        let values = tree
+            .in_order()
+            .into_iter()
+            .filter(|node| {
+                node["aria"]["role"] == "Label"
+                    && node["element_id"]
+                        .as_str()
+                        .is_some_and(|id| id.contains("settings-microphone-access-state-"))
+            })
+            .map(|node| {
+                node["aria"]["value"]
+                    .as_str()
+                    .expect("the microphone badge publishes text")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, [expected], "the microphone's own published state");
+    };
     let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Authorized));
-    let (_window, cx) = open_privacy(&access, cx);
-    let tree = A11yTree::read(cx);
-    assert!(
-        tree.with_role("Label")
-            .iter()
-            .any(|label| label["aria"]["value"] == "Allowed")
-    );
+    let (window, cx) = open_privacy(&access, cx);
+    for (authorization, expected) in [
+        (Ok(CaptureAuthorization::Authorized), "Allowed"),
+        (Ok(CaptureAuthorization::Denied), "Denied"),
+        (Ok(CaptureAuthorization::NotDetermined), "Not requested"),
+        (Ok(CaptureAuthorization::Restricted), "Restricted"),
+        (Err(CaptureAccessError::PlatformRejected), "Unavailable"),
+    ] {
+        access.authorization.set(authorization);
+        let other = if expected == "Denied" {
+            CaptureAuthorization::Authorized
+        } else {
+            CaptureAuthorization::Denied
+        };
+        access.camera_authorization.set(Some(Ok(other)));
+        cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_capture_access(cx)));
+        cx.run_until_parked();
+        assert_microphone(expected, cx);
+        if authorization == Ok(CaptureAuthorization::NotDetermined) {
+            click(REQUEST_SELECTOR, cx);
+            assert_microphone("Requesting", cx);
+            access.take_completion()(CaptureAuthorization::Authorized);
+            cx.run_until_parked();
+            assert_microphone("Allowed", cx);
+        }
+    }
 }
 
 /// One server report holds every System Permission, so the server's change signal refreshes the

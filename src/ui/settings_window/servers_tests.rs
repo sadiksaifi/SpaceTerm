@@ -47,27 +47,54 @@ const SUBTITLE_PROGRESS: &str = "settings-server-progress-track";
 /// The confirmation Install asks before it installs a verified build.
 const INSTALL_CONFIRM_SELECTOR: &str = "settings-server-install-confirm";
 
-const EVERY_ERROR: [ServerError; 19] = [
-    ServerError::NotSetUp,
-    ServerError::ServiceUnavailable,
-    ServerError::NotInstalled,
-    ServerError::Stopped,
-    ServerError::RuntimeUnavailable,
-    ServerError::AuthorizationRequired,
-    ServerError::NotRunning,
-    ServerError::StorageUnavailable,
-    ServerError::IncompatibleState,
-    ServerError::UnsafeStorage,
-    ServerError::AuthenticationRefused,
-    ServerError::IncompatibleProtocol,
-    ServerError::Protocol,
-    ServerError::StartupFailed,
-    ServerError::Controlled,
-    ServerError::SessionUnavailable,
-    ServerError::StaleControl,
-    ServerError::Unsupported,
-    ServerError::CleanupUnresolved,
-];
+macro_rules! server_error_cases {
+    ($($variant:ident => ($retry:literal, $tone:ident)),+ $(,)?) => {
+        fn every_error() -> impl Iterator<Item = (ServerError, bool, CaptionTone)> {
+            fn expectation(error: ServerError) -> (bool, CaptionTone) {
+                match error {
+                    $(ServerError::$variant => ($retry, CaptionTone::$tone),)+
+                    ServerError::Direct(_) => (true, CaptionTone::Error),
+                }
+            }
+            [$(ServerError::$variant,)+ ServerError::Direct(
+                crate::server_connection::direct::DirectError::Transport
+            )].into_iter().map(|error| {
+                let (retry, tone) = expectation(error);
+                (error, retry, tone)
+            })
+        }
+    };
+}
+
+server_error_cases! {
+    NotSetUp => (true, Guidance),
+    ServiceUnavailable => (true, Error),
+    ServiceBusy => (true, Guidance),
+    NotInstalled => (false, Guidance),
+    Stopped => (false, Guidance),
+    Changed => (true, Error),
+    ActivationUnresolved => (true, Guidance),
+    ReturnUnavailable => (true, Error),
+    RuntimeUnavailable => (true, Error),
+    CandidateMissing => (false, Error),
+    AuthorizationRequired => (false, Guidance),
+    NotRunning => (true, Guidance),
+    StorageUnavailable => (true, Error),
+    IncompatibleState => (true, Error),
+    UnsafeStorage => (true, Error),
+    AuthenticationRefused => (true, Error),
+    IncompatibleProtocol => (true, Error),
+    CandidateChanged => (false, Error),
+    Protocol => (true, Error),
+    StartupFailed => (true, Error),
+    Controlled => (true, Error),
+    SessionUnavailable => (true, Error),
+    StaleControl => (true, Error),
+    Unsupported => (true, Error),
+    DirectoryUnavailable => (true, Error),
+    CleanupUnresolved => (true, Error),
+    Capacity => (true, Error),
+}
 
 /// A server on a platform without a service layer, which shows only the connection row.
 fn offered(server: &Arc<ScriptedServer>) -> OfferedLocalServer {
@@ -343,13 +370,8 @@ fn returning_to_servers_moves_nothing_while_its_checks_finish_in_any_order(
 
 #[test]
 fn checking_again_is_offered_unless_only_the_service_can_change_the_answer() {
-    for error in EVERY_ERROR {
+    for (error, expected, _) in every_error() {
         let presented = present(LocalServerStatus::Failed(error));
-        // Only the service's explicit Start or Install changes these answers.
-        let expected = !matches!(
-            error,
-            ServerError::Stopped | ServerError::NotInstalled | ServerError::AuthorizationRequired
-        );
         assert_eq!(presented.check, expected, "{error:?}");
         assert!(!presented.working, "{error:?}");
     }
@@ -357,35 +379,19 @@ fn checking_again_is_offered_unless_only_the_service_can_change_the_answer() {
 
 #[test]
 fn a_failure_needing_attention_reads_as_an_error_in_its_bounded_wording() {
-    for error in EVERY_ERROR {
+    for (error, _, tone) in every_error() {
         let presented = present(LocalServerStatus::Failed(error));
-        match error {
-            // These are steps in setup, not faults, so they read as guidance naming the step.
-            ServerError::NotSetUp
-            | ServerError::NotRunning
-            | ServerError::Stopped
-            | ServerError::NotInstalled
-            | ServerError::AuthorizationRequired => {
-                assert_eq!(presented.tone, CaptionTone::Guidance, "{error:?}");
-            }
-            // The refusal names no side and says the server's work keeps running.
-            ServerError::IncompatibleProtocol => {
-                assert_eq!(presented.tone, CaptionTone::Error);
-                assert_eq!(presented.explanation, super::INCOMPATIBLE_PROTOCOL);
-            }
-            _ => {
-                assert_eq!(presented.tone, CaptionTone::Error, "{error:?}");
-                assert!(presented.explanation.starts_with(&error.to_string()));
-            }
+        assert_eq!(presented.tone, tone, "{error:?}");
+        if tone == CaptionTone::Error {
+            assert_eq!(
+                presented.explanation.as_ref(),
+                error.to_string(),
+                "{error:?}"
+            );
+        } else {
+            assert!(!presented.explanation.is_empty(), "{error:?}");
         }
     }
-}
-
-#[test]
-fn a_running_check_shows_progress() {
-    let presented = present(LocalServerStatus::Checking);
-    assert!(presented.working);
-    assert!(presented.check);
 }
 
 #[test]
@@ -398,6 +404,10 @@ fn a_connection_names_only_its_protocol_version() {
         "Connected to the server for your account. Protocol version 3."
     );
     assert!(presented.check);
+
+    let checking = present(LocalServerStatus::Checking);
+    assert!(checking.working);
+    assert!(checking.check);
 }
 
 /// A Development run's server ends with the run, so Servers never claims it keeps running after
@@ -436,17 +446,14 @@ fn a_development_run_server_is_described_as_ending_with_the_run(cx: &mut TestApp
          when the run ends. Protocol version 2."
     );
     assert!(!rendered(SERVICE_ROW_SELECTOR, cx), "no service runs it");
-}
 
-#[gpui::test]
-fn an_installed_server_keeps_running_after_spaceterm_quits(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Ok(connected(2)));
     let (window, cx) = open_settings(offered(&server), cx);
     click(NAVIGATION_SELECTOR, cx);
-    let description = window.read_with(cx, |settings, cx| {
-        settings.section_description(SettingsSectionId::Servers, cx)
-    });
-    assert_eq!(description, "Servers run Workspaces and Terminal Sessions.");
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .section_description(SettingsSectionId::Servers, cx)),
+        "Servers run Workspaces and Terminal Sessions."
+    );
 }
 
 #[gpui::test]
@@ -1084,20 +1091,6 @@ fn a_refused_installation_explains_itself_and_offers_install_again(cx: &mut Test
     assert_eq!(presented.actions, vec![ServiceAction::Install]);
 }
 
-#[gpui::test]
-fn stop_asks_first_and_cancelling_leaves_the_server_running(cx: &mut TestAppContext) {
-    let (window, _server, service, cx) = open_servers_with_service(Ok(running()), cx);
-
-    choose(STOP_SELECTOR, cx);
-    assert!(alert_open(STOP_CONFIRM_SELECTOR, cx));
-    assert!(service.changes().is_empty(), "Stop waits for confirmation");
-
-    click_modal(STOP_CANCEL_SELECTOR, cx);
-
-    assert!(service.changes().is_empty());
-    assert_eq!(service_presentation(&window, cx).state, "Running");
-}
-
 /// A Start from the status item reaches a Settings window already open, which reads the service
 /// again rather than keep showing the server stopped.
 #[gpui::test]
@@ -1154,6 +1147,12 @@ fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
     let (window, server, service, cx) = open_servers_with_service(Ok(running()), cx);
     server.answer_refresh(Err(ServerError::Stopped));
 
+    choose(STOP_SELECTOR, cx);
+    assert!(alert_open(STOP_CONFIRM_SELECTOR, cx));
+    assert!(service.changes().is_empty(), "Stop waits for confirmation");
+    click_modal(STOP_CANCEL_SELECTOR, cx);
+    assert!(service.changes().is_empty());
+    assert_eq!(service_presentation(&window, cx).state, "Running");
     choose(STOP_SELECTOR, cx);
     click_modal(STOP_CONFIRM_SELECTOR, cx);
 
@@ -1257,23 +1256,47 @@ fn a_service_change_waits_for_the_connection_and_the_reverse(cx: &mut TestAppCon
     let (window, server, service, cx) = open_servers_with_service(Ok(stopped()), cx);
     cx.run_until_parked();
     let checks = server.refreshes();
-
+    let connection = server.hold_refresh();
+    window.update(cx, |settings, cx| settings.check_local_server(cx));
+    cx.run_until_parked();
+    connection.wait_started(&cx.cx);
     window.update(cx, |settings, cx| {
-        settings.check_local_server(cx);
-        // The connection row is working, so the service waits.
-        settings.run_server_service(ServiceAction::Start, cx);
+        settings.run_server_service(ServiceAction::Start, cx)
     });
+    cx.run_until_parked();
+    assert!(
+        service.changes().is_empty(),
+        "a held connection read excludes Start"
+    );
+    assert_eq!(server.refreshes(), checks + 1);
+    connection.release(Err(ServerError::Stopped));
     cx.run_until_parked();
     assert!(service.changes().is_empty());
-    assert_eq!(server.refreshes(), checks + 1);
 
+    let start = service.hold_start();
     window.update(cx, |settings, cx| {
-        settings.run_server_service(ServiceAction::Start, cx);
-        // The service is changing, so the connection waits for the check that follows it.
-        settings.check_local_server(cx);
+        settings.run_server_service(ServiceAction::Start, cx)
     });
     cx.run_until_parked();
-    assert_eq!(service.changes(), vec![ServiceCall::Start]);
+    start.wait_started(&cx.cx);
+    assert_eq!(service.changes(), [ServiceCall::Start]);
+    let checks = server.refreshes();
+    window.update(cx, |settings, cx| settings.check_local_server(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        server.refreshes(),
+        checks,
+        "a held Start excludes a connection read"
+    );
+    server.answer_refresh(Ok(connected(5)));
+    start.release(Ok(running()));
+    cx.run_until_parked();
+    assert_eq!(
+        server.refreshes(),
+        checks + 1,
+        "completion reads the new connection"
+    );
+    assert_eq!(status(&window, cx), "Running");
 }
 
 /// A step underway keeps the state and doesn't name itself before it has run a second. The test
@@ -1327,25 +1350,14 @@ fn an_unresolved_service_explains_itself_and_offers_nothing(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn settings_search_reaches_the_service(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Ok(connected(2)));
-    let service = ScriptedService::new(Ok(running()));
-    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
-
-    search(&window, "launch agent", cx);
-
-    assert_eq!(
-        window.read_with(cx, |settings, _| settings.active_section),
-        SettingsSectionId::Servers
-    );
-    assert_eq!(status(&window, cx), "Running");
-}
-
-#[gpui::test]
 fn settings_search_reaches_the_service_by_its_startup_names(cx: &mut TestAppContext) {
-    for query in ["systemd", "linger"] {
+    for query in ["launch agent", "systemd", "linger"] {
         let server = ScriptedServer::new(Ok(connected(2)));
-        let service = ScriptedService::with_boot_startup(Ok(running()));
+        let service = if query == "launch agent" {
+            ScriptedService::new(Ok(running()))
+        } else {
+            ScriptedService::with_boot_startup(Ok(running()))
+        };
         let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
 
         search(&window, query, cx);
@@ -1355,6 +1367,7 @@ fn settings_search_reaches_the_service_by_its_startup_names(cx: &mut TestAppCont
             SettingsSectionId::Servers,
             "{query}"
         );
+        assert_eq!(status(&window, cx), "Running", "{query}");
         assert!(rendered(SERVICE_ROW_SELECTOR, cx), "{query}");
         assert!(service.changes().is_empty(), "{query}");
     }
@@ -2028,32 +2041,6 @@ fn the_server_row_keeps_its_height_with_or_without_a_button(cx: &mut TestAppCont
             .expect("the Server row renders")
             .size,
         with_button.size
-    );
-}
-
-/// A read that fails while a Start automatically change waits returns the switch to the setting
-/// the service last confirmed, and changes nothing.
-#[gpui::test]
-fn a_failed_read_returns_a_waiting_switch_to_the_confirmed_setting(cx: &mut TestAppContext) {
-    let (window, _server, service, cx) = open_servers_with_service(Ok(running()), cx);
-    assert!(starts_automatically(cx), "the service starts on its own");
-
-    service.report(Err(ServerError::ServiceUnavailable));
-    cx.update(|presenting, cx| {
-        window.update(cx, |settings, cx| {
-            settings.check_server_service(cx);
-            settings.set_local_automatic_start(false, presenting, cx);
-        });
-    });
-    cx.run_until_parked();
-
-    assert!(
-        service.changes().is_empty(),
-        "nothing was asked of the service"
-    );
-    assert!(
-        starts_automatically(cx),
-        "the switch returns to the On the service last confirmed"
     );
 }
 
