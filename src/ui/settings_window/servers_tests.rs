@@ -108,7 +108,7 @@ fn open_settings(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             local_server,
             window,
             cx,

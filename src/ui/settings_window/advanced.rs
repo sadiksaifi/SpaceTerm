@@ -161,13 +161,7 @@ impl SettingsWindow {
 
     /// Asks for an exported Settings Document and offers to replace every setting with it.
     pub(super) fn begin_settings_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(opener) = cx
-            .try_global::<crate::app::SelectedFileAccess>()
-            .map(|access| Arc::clone(&access.0))
-        else {
-            present_import_failure("File import unavailable.", window, cx);
-            return;
-        };
+        let opener = Arc::clone(&cx.global::<crate::app::SelectedFileAccess>().0);
         let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,

@@ -137,14 +137,14 @@ pub(crate) struct PermissionCapabilities {
 struct SettingsWindowComposition {
     window_movement: Rc<dyn WindowMovementFactory>,
     permissions: PermissionCapabilities,
-    theme_registry: Option<ZedThemeRegistry>,
+    theme_registry: ZedThemeRegistry,
 }
 impl Global for SettingsWindowComposition {}
 
 pub(crate) fn configure_window_chrome(
     window_movement: Rc<dyn WindowMovementFactory>,
     permissions: PermissionCapabilities,
-    theme_registry: Option<ZedThemeRegistry>,
+    theme_registry: ZedThemeRegistry,
     cx: &mut App,
 ) {
     cx.set_global(SettingsWindowComposition {
@@ -226,36 +226,33 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
         cx,
     );
     let placement = remembered.map(|remembered| remembered.placement.apply(&mut options, cx));
-    let opened = cx.open_window(
-        options,
-        |window, cx| {
-            if let Some(placement) = placement {
-                placement.finish(window);
+    let opened = cx.open_window(options, |window, cx| {
+        if let Some(placement) = placement {
+            placement.finish(window);
+        }
+        let settings = cx.new(|cx| {
+            let mut settings = SettingsWindow::new_with_capabilities(
+                Rc::clone(&window_drag),
+                permissions.clone(),
+                theme_registry.clone(),
+                local_server.clone(),
+                window,
+                cx,
+            );
+            if let Some(section) = section {
+                settings.select_section(section, cx);
             }
-            let settings = cx.new(|cx| {
-                let mut settings = SettingsWindow::new_with_capabilities(
-                    Rc::clone(&window_drag),
-                    permissions.clone(),
-                    theme_registry.clone(),
-                    local_server.clone(),
-                    window,
-                    cx,
-                );
-                if let Some(section) = section {
-                    settings.select_section(section, cx);
-                }
-                settings
-            });
-            let closing = settings.downgrade();
-            window.on_window_should_close(cx, move |window, cx| {
-                let _ = closing.update(cx, |settings, cx| {
-                    settings.request_close(CloseIntent::Window(window.window_handle()), cx);
-                });
-                false
-            });
             settings
-        },
-    );
+        });
+        let closing = settings.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = closing.update(cx, |settings, cx| {
+                settings.request_close(CloseIntent::Window(window.window_handle()), cx);
+            });
+            false
+        });
+        settings
+    });
     match opened {
         Ok(handle) => {
             cx.set_global(OpenSettingsWindow(handle));
@@ -578,7 +575,7 @@ impl SettingsWindow {
         Self::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             PermissionCapabilities::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             None,
             window,
             cx,
@@ -588,7 +585,7 @@ impl SettingsWindow {
     fn new_with_capabilities(
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         permissions: PermissionCapabilities,
-        theme_registry: Option<ZedThemeRegistry>,
+        theme_registry: ZedThemeRegistry,
         local_server: servers::OfferedLocalServer,
         window: &mut Window,
         cx: &mut Context<Self>,

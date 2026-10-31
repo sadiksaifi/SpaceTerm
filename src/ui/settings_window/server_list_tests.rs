@@ -116,7 +116,7 @@ pub(in crate::ui::settings_window) fn open_with<'a>(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             offered,
             window,
             cx,
@@ -542,7 +542,7 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
         super::super::configure_window_chrome(
             Rc::new(RecordingMovement),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             cx,
         );
     });

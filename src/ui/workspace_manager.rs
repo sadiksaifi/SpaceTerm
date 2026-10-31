@@ -41,8 +41,8 @@ use crate::appearance::Color;
 use crate::close_confirmation::{CloseConfirmation, CloseTarget};
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    PaneId, RemoteConnectionPhase, TabId, ValidatedLocalDirectory,
-    WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
+    PaneId, RemoteConnectionPhase, TabId, ValidatedLocalDirectory, WorkspaceCollection,
+    WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::window_movement::{
@@ -941,12 +941,7 @@ impl WorkspaceManager {
         let Ok(directory) = self.local_filesystem.revalidate_directory(&directory) else {
             return false;
         };
-        self.apply_directory_pin(
-            workspace_id,
-            Some(directory),
-            window,
-            cx,
-        )
+        self.apply_directory_pin(workspace_id, Some(directory), window, cx)
     }
 
     fn apply_directory_pin(
@@ -1066,11 +1061,7 @@ impl WorkspaceManager {
                         // A local selection pins only a local target, and a server path pins
                         // only that server's Workspace.
                         let application = match (current, selection.clone(), target.clone()) {
-                            (
-                                true,
-                                DirectorySelection::Pin(directory),
-                                target,
-                            ) if !remote => {
+                            (true, DirectorySelection::Pin(directory), target) if !remote => {
                                 manager.apply_local_pin_target(target, directory, window, cx)
                             }
                             (
@@ -1622,11 +1613,8 @@ impl WorkspaceManager {
 
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         // A SpaceTerm Server owns every Workspace's Tabs, Panes, and Sessions, so closing one
-        // asks the server to end them for every client. Closing the window ends nothing: each
-        // shell keeps running on its server.
-        if !self.request_shared_close(target, window, cx) && target == CloseTarget::Window {
-            self.close_window(window, cx);
-        }
+        // asks the server to end them for every client.
+        self.request_shared_close(target, window, cx);
     }
 
     pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3418,13 +3406,7 @@ impl WorkspaceManager {
             SharedCloseIntent, SharedCloseReview, SharedCloseUnavailable,
         };
 
-        let workspace_id = match target {
-            CloseTarget::Workspace(workspace_id)
-            | CloseTarget::Tab { workspace_id, .. }
-            | CloseTarget::Pane { workspace_id, .. }
-            | CloseTarget::Worktree { workspace_id, .. } => workspace_id,
-            CloseTarget::Window => return false,
-        };
+        let workspace_id = close_target_workspace(target);
         if !self.is_shared_workspace(workspace_id) {
             return false;
         }
@@ -3601,9 +3583,7 @@ impl WorkspaceManager {
         held_keyboard: bool,
         cx: &mut App,
     ) {
-        if let Some(entry) =
-            close_target_workspace(target).and_then(|id| self.workspaces.workspace(id))
-        {
+        if let Some(entry) = self.workspaces.workspace(close_target_workspace(target)) {
             entry.payload().update(cx, |manager, cx| {
                 manager.prepare_shared_close_keyboard(held_keyboard, cx);
             });
@@ -3612,9 +3592,7 @@ impl WorkspaceManager {
 
     /// Later navigation wins over the keyboard intent of a deferred close.
     fn close_target_is_active(&self, target: CloseTarget, cx: &App) -> bool {
-        let Some(workspace_id) = close_target_workspace(target) else {
-            return false;
-        };
+        let workspace_id = close_target_workspace(target);
         if self.workspaces.active_workspace_id() != Some(workspace_id) {
             return false;
         }
@@ -3649,13 +3627,7 @@ impl WorkspaceManager {
     ) -> Option<spaceterm_server::hierarchy::CloseTarget> {
         use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
 
-        let workspace_id = match target {
-            CloseTarget::Workspace(workspace_id)
-            | CloseTarget::Tab { workspace_id, .. }
-            | CloseTarget::Pane { workspace_id, .. }
-            | CloseTarget::Worktree { workspace_id, .. } => workspace_id,
-            CloseTarget::Window => return None,
-        };
+        let workspace_id = close_target_workspace(target);
         let shared = self.shared.owning(workspace_id)?;
         let tab_manager = |workspace_id| {
             self.workspaces
@@ -3700,7 +3672,6 @@ impl WorkspaceManager {
                     tab: anchor.id,
                 })
             }
-            CloseTarget::Window => None,
         }
     }
 
@@ -3966,8 +3937,7 @@ impl WorkspaceManager {
             local.filter(|local| self.shared_close_target(*local, cx) == Some(server_target));
         // The refused close already moved the keyboard, so a Review keeps what holds it now.
         let held_keyboard = local
-            .and_then(close_target_workspace)
-            .and_then(|workspace_id| self.workspaces.workspace(workspace_id))
+            .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
             .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
         self.present_shared_close_changed(
             super::shared_workspaces::shared_close_changed_title(server_target),
@@ -5167,7 +5137,6 @@ fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// The compact directory a row shows and its full spelling for the tooltip.
 #[cfg(test)]
 impl WorkspaceManager {
     pub(crate) fn workspace_count(&self) -> usize {
@@ -5211,13 +5180,12 @@ impl SharedCloseKeyboard {
 }
 
 /// The Workspace a close target belongs to.
-const fn close_target_workspace(target: CloseTarget) -> Option<WorkspaceId> {
+const fn close_target_workspace(target: CloseTarget) -> WorkspaceId {
     match target {
         CloseTarget::Workspace(workspace_id)
         | CloseTarget::Tab { workspace_id, .. }
         | CloseTarget::Pane { workspace_id, .. }
-        | CloseTarget::Worktree { workspace_id, .. } => Some(workspace_id),
-        CloseTarget::Window => None,
+        | CloseTarget::Worktree { workspace_id, .. } => workspace_id,
     }
 }
 

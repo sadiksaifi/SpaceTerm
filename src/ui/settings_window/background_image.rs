@@ -85,14 +85,11 @@ impl SettingsWindow {
 
     /// Asks for an image, keeps a copy of it, and names that copy in the Settings.
     pub(super) fn choose_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(store), Some(opener)) = (
-            background_image_runtime::store(cx),
-            cx.try_global::<crate::app::SelectedFileAccess>()
-                .map(|access| Arc::clone(&access.0)),
-        ) else {
+        let Some(store) = background_image_runtime::store(cx) else {
             present_failure(ChooseError::Read(ImportError::Unreadable), window, cx);
             return;
         };
+        let opener = Arc::clone(&cx.global::<crate::app::SelectedFileAccess>().0);
         let choice = self.begin_background_image_choice();
         let app = cx.to_async();
         let selection = cx.prompt_for_paths(gpui::PathPromptOptions {

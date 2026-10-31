@@ -12,6 +12,11 @@ pub(crate) struct MemoryTransport {
     requests: Mutex<Vec<String>>,
 }
 
+/// A registry whose transport refuses every request.
+pub(crate) fn offline() -> super::ZedThemeRegistry {
+    super::ZedThemeRegistry::new(std::sync::Arc::new(MemoryTransport::default()))
+}
+
 impl MemoryTransport {
     pub(crate) fn route(mut self, url: &str, response: Result<Vec<u8>, TransportError>) -> Self {
         self.routes.insert(url.to_owned(), response);

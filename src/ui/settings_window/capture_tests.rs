@@ -104,7 +104,7 @@ fn open_settings(
                 capture: access,
                 ..super::super::PermissionCapabilities::default()
             },
-            None,
+            crate::theme_registry::testing::offline(),
             None,
             window,
             cx,
@@ -622,7 +622,7 @@ fn a_reported_permission_change_refreshes_the_microphone_row(cx: &mut TestAppCon
                 system_permissions: Some(system.clone()),
                 permission_setup: None,
             },
-            None,
+            crate::theme_registry::testing::offline(),
             None,
             window,
             cx,

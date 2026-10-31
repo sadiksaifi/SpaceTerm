@@ -655,21 +655,19 @@ run = "cargo build --package spaceterm-cli --example directory_recovery --bin sp
 [tasks."server:directory:smoke"]
 description = "Exercise directory recovery on an idle Development server without native credential adapters"
 usage = '''
-arg "[major]" default="4" help="Protocol major (4)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = [
   { task = "server:directory:build" },
-  "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
+  "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {% if usage.cleanup_exercise %}--cleanup{% endif %}",
 ]
 
 [tasks."server:directory:run"]
 description = "Run a built directory-recovery check without replacing its code signature"
 usage = '''
-arg "[major]" default="4" help="Protocol major (4)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
-run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
+run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {% if usage.cleanup_exercise %}--cleanup{% endif %}"
 
 [tasks."bench:latency:quic"]
 description = "Measure a paired QUIC request's round trip on loopback, in a release build"

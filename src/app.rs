@@ -345,7 +345,8 @@ pub(crate) fn init(
 /// The person chose a menu-bar command, which acts on the active window. A Workspace Window that
 /// still holds a remembered choice takes it as the person's input.
 pub(crate) fn menu_command_chosen(cx: &mut App) {
-    if let Some(window) = open_active_window(cx).and_then(|window| window.downcast::<WorkspaceManager>())
+    if let Some(window) =
+        open_active_window(cx).and_then(|window| window.downcast::<WorkspaceManager>())
     {
         let _ = window.update(cx, |manager, _, cx| manager.person_input(cx));
     }
@@ -602,7 +603,11 @@ impl ApplicationQuitCoordinator {
 
     fn observe(self: &Rc<Self>, authorization: Option<ApplicationQuitSnapshot>, cx: &mut App) {
         let Some(sessions) = self.sessions.clone() else {
-            self.review(authorization, ApplicationQuitSnapshot { sessions: None }, cx);
+            self.review(
+                authorization,
+                ApplicationQuitSnapshot { sessions: None },
+                cx,
+            );
             return;
         };
         *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Observing;
@@ -1581,7 +1586,9 @@ pub(crate) fn initialize_application(
     cx.set_global(host.window_chrome.clone());
     host.window_chrome.install_controls(cx);
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
-    cx.set_global(SelectedFileAccess(Arc::clone(&host.adapters.selected_files)));
+    cx.set_global(SelectedFileAccess(Arc::clone(
+        &host.adapters.selected_files,
+    )));
     // Native menu construction reads the keymap; install both before Settings I/O and fonts.
     let keymap = host.profile.install(cx);
     crate::keybindings::runtime::install(keymap, cx);
@@ -1622,9 +1629,7 @@ pub(crate) fn initialize_application(
             system_permissions: host.adapters.permission_access.clone(),
             permission_setup: host.permission_setup.get().cloned(),
         },
-        Some(crate::theme_registry::ZedThemeRegistry::new(Arc::clone(
-            &host.adapters.theme_registry,
-        ))),
+        crate::theme_registry::ZedThemeRegistry::new(Arc::clone(&host.adapters.theme_registry)),
         cx,
     );
     host.adapters.desktop_events.install(cx);
@@ -2602,7 +2607,9 @@ mod runtime_tests {
         let close = |window: gpui::WindowHandle<WorkspaceManager>,
                      cx: &mut gpui::TestAppContext| {
             window
-                .update(cx, |manager, window, cx| manager.request_window_close(window, cx))
+                .update(cx, |manager, window, cx| {
+                    manager.request_window_close(window, cx)
+                })
                 .unwrap();
             cx.run_until_parked();
             assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
@@ -2850,7 +2857,9 @@ mod runtime_tests {
         let close = |workspace: gpui::WindowHandle<WorkspaceManager>,
                      cx: &mut gpui::TestAppContext| {
             workspace
-                .update(cx, |manager, window, cx| manager.request_window_close(window, cx))
+                .update(cx, |manager, window, cx| {
+                    manager.request_window_close(window, cx)
+                })
                 .unwrap();
             cx.run_until_parked();
         };

@@ -56,7 +56,7 @@ fn open_with_viewer(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             Some(OfferedServer {
                 connection: Ok(server as Arc<dyn LocalServerControl>),
                 service: None,

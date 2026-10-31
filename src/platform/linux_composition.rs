@@ -611,7 +611,7 @@ mod tests {
             crate::ui::settings_window::configure_window_chrome(
                 Rc::new(RecordingMovement),
                 Default::default(),
-                None,
+                crate::theme_registry::testing::offline(),
                 cx,
             );
             crate::ui::settings_window::open_or_activate(None, cx);

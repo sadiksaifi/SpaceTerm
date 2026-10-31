@@ -340,7 +340,13 @@ fn open_settings_with_drag(
     storage: Arc<MemoryStorage>,
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
-    open_settings_with_capabilities(cx, storage, window_drag, None, None)
+    open_settings_with_capabilities(
+        cx,
+        storage,
+        window_drag,
+        crate::theme_registry::testing::offline(),
+        None,
+    )
 }
 
 pub(super) fn open_settings_with_registry(
@@ -351,7 +357,7 @@ pub(super) fn open_settings_with_registry(
         cx,
         MemoryStorage::with_document(&SettingsDocument::default()),
         Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-        Some(ZedThemeRegistry::new(transport)),
+        ZedThemeRegistry::new(transport),
         None,
     )
 }
@@ -360,7 +366,7 @@ fn open_settings_with_capabilities(
     cx: &mut TestAppContext,
     storage: Arc<MemoryStorage>,
     window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
-    registry: Option<ZedThemeRegistry>,
+    registry: ZedThemeRegistry,
     background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
     let settings = crate::settings::Settings::load(storage.clone());
@@ -4474,7 +4480,12 @@ fn opening_settings_from_its_own_window_keeps_one_window(cx: &mut TestAppContext
         )
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::configure_window_chrome(
+            Rc::new(RecordingMovement),
+            Default::default(),
+            crate::theme_registry::testing::offline(),
+            cx,
+        );
         super::open_or_activate(None, cx);
     });
     cx.run_until_parked();
@@ -4511,7 +4522,12 @@ fn keyboard_shortcuts_opens_settings_at_keybindings_and_moves_an_open_window_the
         )
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::configure_window_chrome(
+            Rc::new(RecordingMovement),
+            Default::default(),
+            crate::theme_registry::testing::offline(),
+            cx,
+        );
         super::init(cx);
     });
     let settings_window = |cx: &mut TestAppContext| {
@@ -4570,7 +4586,12 @@ fn settings_reopens_where_it_closed_on_the_section_it_showed(cx: &mut TestAppCon
         )
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::configure_window_chrome(
+            Rc::new(RecordingMovement),
+            Default::default(),
+            crate::theme_registry::testing::offline(),
+            cx,
+        );
         super::init(cx);
     });
     let settings_window = |cx: &mut TestAppContext| {
@@ -4604,7 +4625,10 @@ fn settings_reopens_where_it_closed_on_the_section_it_showed(cx: &mut TestAppCon
     let reopened = settings_window(cx).expect("Settings opens again");
     let (section, bounds) = reopened
         .update(cx, |settings, window, _| {
-            (settings.active_section(), window.window_bounds().get_bounds())
+            (
+                settings.active_section(),
+                window.window_bounds().get_bounds(),
+            )
         })
         .expect("Settings should stay open");
     assert_eq!(section, SettingsSectionId::Font);
@@ -4630,7 +4654,10 @@ fn settings_reopens_where_it_closed_on_the_section_it_showed(cx: &mut TestAppCon
     let relaunched = settings_window(cx).expect("Settings opens after a quit");
     let (section, bounds) = relaunched
         .update(cx, |settings, window, _| {
-            (settings.active_section(), window.window_bounds().get_bounds())
+            (
+                settings.active_section(),
+                window.window_bounds().get_bounds(),
+            )
         })
         .expect("Settings should stay open");
     assert_eq!(section, SettingsSectionId::Interface);
@@ -5007,7 +5034,7 @@ fn open_settings_presenting_background_images(
         cx,
         MemoryStorage::with_document(&SettingsDocument::default()),
         Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-        None,
+        crate::theme_registry::testing::offline(),
         Some(Arc::clone(&store)),
     );
     (window, harness, store, cx)
