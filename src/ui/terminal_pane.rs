@@ -86,8 +86,6 @@ use spaceterm_ui::{
     TextInputEvent, TextInputTabBehavior, TextInputVariant, Tooltip, window_modal_is_open,
 };
 
-#[cfg(test)]
-const DEFAULT_FONT_SIZE: f32 = 18.0;
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_SIZE_STEP: f32 = 1.0;
@@ -297,7 +295,7 @@ pub(super) struct OperationToken {
     recovery: Option<RecoveryToken>,
 }
 
-/// Owns a Pane's Terminal Session, launch authority and event task retirement.
+/// Owns a Pane's server presentation and event task retirement.
 struct PaneTerminalSessionLifecycle {
     session_factory: WorkspaceTerminalSessionFactory,
     current_directory: Option<crate::terminal::metadata::CurrentDirectory>,
@@ -306,10 +304,9 @@ struct PaneTerminalSessionLifecycle {
     session_start_attempted: bool,
     session_epoch: u64,
     accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
-    /// The newest Terminal Metadata. A server-backed Pane reads it from the server's inventory,
-    /// and any other Pane from Screens or the Terminal Session's retained snapshot.
+    /// The newest Terminal Metadata published in the server's inventory.
     metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
-    /// The server Session run whose published metadata a server-backed Pane presents.
+    /// The server Session run whose published metadata this Pane presents.
     server_run: Option<ServerSessionRun>,
     /// The Terminal Session takes no input because its server connection is interrupted.
     connection_interrupted: bool,
@@ -397,20 +394,11 @@ impl PaneTerminalSessionLifecycle {
                 }
                 if this
                     .update(cx, |this, cx| {
-                        // Capture retained metadata before a final event can retire this epoch.
-                        let mut presentation_changed = this.sync_metadata(session_epoch);
                         let mut changed = false;
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
                         changed |= this.sync_client_effects(cx);
-                        changed |= this.sync_permission_request(session_epoch, cx);
-                        presentation_changed |= this.sync_metadata(session_epoch);
-                        if presentation_changed {
-                            cx.emit(TerminalPaneEvent::CaptionChanged);
-                        }
-                        this.sync_repository_status(cx);
-                        changed |= presentation_changed;
                         if changed && this.render_lifecycle.can_present() {
                             cx.notify();
                         }
@@ -667,7 +655,6 @@ impl TerminalPane {
         let fallback_render_cache = cx.new(|_| TerminalGridCache::new());
         let graphics_cache = cx.new(|_| TerminalGraphicsCache::default());
         cx.on_release(|pane, cx| {
-            pane.release_repository_status(cx);
             pane.close();
             pane.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
         })
@@ -732,11 +719,6 @@ impl TerminalPane {
         .detach();
         cx.observe_window_activation(window, |pane, window, cx| {
             pane.refresh_surface(window, cx);
-            // The system reports no Screen Recording change, so a waiting Permission Request reads
-            // again when the person returns, for example from granting it in System Settings.
-            if window.is_window_active() {
-                pane.refresh_permission_offer(cx);
-            }
             cx.notify();
         })
         .detach();
@@ -966,7 +948,6 @@ impl TerminalPane {
         if native_service_blocked {
             self.apply_terminal_input_focus(false);
         }
-        self.sync_repository_status(cx);
         true
     }
 
@@ -995,11 +976,17 @@ impl TerminalPane {
     /// Opens Find searching for `query`, leaving the keyboard where it is.
     fn present_find(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| {
-            TextInput::new("terminal-find-input", "Terminal Find", query.clone(), window, cx)
-                .placeholder("Find")
-                .variant(TextInputVariant::Bare)
-                .tab_behavior(TextInputTabBehavior::Propagate)
-                .debug_selector("terminal-find-input")
+            TextInput::new(
+                "terminal-find-input",
+                "Terminal Find",
+                query.clone(),
+                window,
+                cx,
+            )
+            .placeholder("Find")
+            .variant(TextInputVariant::Bare)
+            .tab_behavior(TextInputTabBehavior::Propagate)
+            .debug_selector("terminal-find-input")
         });
         let input_id = input.entity_id();
         cx.subscribe_in(
@@ -1227,7 +1214,7 @@ impl TerminalPane {
     ) -> Option<TerminalFocusFacts> {
         if self.terminal_session.connection_interrupted
             || self.native_attention_pane.is_none()
-            || (self.server_backed() && !self.interactive_input_available())
+            || !self.interactive_input_available()
         {
             return None;
         }
@@ -1354,7 +1341,7 @@ impl TerminalPane {
                     && let Some(confirmation) = self.pending_paste
                 {
                     session.focus_paste_confirmation(confirmation.id);
-                } else if focus_changed || self.server_backed() {
+                } else {
                     session.interactive_focus(focused, input_method);
                 }
             }
@@ -1589,13 +1576,8 @@ impl TerminalPane {
         cx.notify();
     }
 
-    /// Whether the shell runs in a SpaceTerm Server.
-    fn server_backed(&self) -> bool {
-        self.terminal_session.session_factory.is_server_backed()
-    }
-
     fn pointer_selection_policy(&self) -> ShiftSelectionPolicy {
-        if self.server_backed() && !self.reading_available() {
+        if !self.reading_available() {
             ShiftSelectionPolicy::ReportToApplication
         } else {
             self.shift_selection
@@ -1627,13 +1609,12 @@ impl TerminalPane {
     /// issues a new authority, so a request queued before the change never applies after it.
     fn native_focus_authority(&mut self) -> Option<u64> {
         let current = (self.native_focus.presented
-            && (!self.server_backed()
-                || (!self.terminal_session.connection_interrupted
-                    && self
-                        .terminal_session
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.reading_available()))))
+            && !self.terminal_session.connection_interrupted
+            && self
+                .terminal_session
+                .session
+                .as_ref()
+                .is_some_and(|session| session.reading_available()))
         .then(|| {
             (
                 self.terminal_session.session_epoch,
@@ -1719,9 +1700,7 @@ impl TerminalPane {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.terminal_session.session_factory.is_server_backed()
-            || self.terminal_session.connection_interrupted == interrupted
-        {
+        if self.terminal_session.connection_interrupted == interrupted {
             return;
         }
         let was_available = self.terminal_session_available();
@@ -1747,9 +1726,6 @@ impl TerminalPane {
     /// cached frames are gone, and the next measurement supplies dimensions again. The server
     /// publishes Terminal Metadata to every client whatever control it holds, so that stays.
     pub(crate) fn clear_server_presentation(&mut self, cx: &mut Context<Self>) {
-        if !self.server_backed() {
-            return;
-        }
         let update = crate::terminal::TerminalAppearanceUpdate::new(
             self.appearance.generation,
             Arc::clone(&self.appearance.terminal),
@@ -2149,9 +2125,7 @@ impl TerminalPane {
             return;
         }
 
-        if (self.server_backed() || self.readiness_requested)
-            && self.readiness.registered(cx.entity_id())
-        {
+        if self.readiness.registered(cx.entity_id()) {
             self.readiness_requested = true;
             self.readiness.dirty(cx.entity_id());
         } else {
@@ -2406,23 +2380,6 @@ impl TerminalPane {
             .unwrap_or(&self.screen.metadata)
     }
 
-    fn sync_metadata(&mut self, session_epoch: u64) -> bool {
-        // A server-backed Pane presents only what the server's inventory publishes, whose
-        // revisions are ordered within one Session run.
-        if self.terminal_session.session_epoch != session_epoch || self.server_backed() {
-            return false;
-        }
-        let Some(snapshot) = self
-            .terminal_session
-            .session
-            .as_ref()
-            .and_then(|session| session.metadata_snapshot())
-        else {
-            return false;
-        };
-        self.accept_metadata(snapshot)
-    }
-
     fn sync_client_effects(&mut self, cx: &mut Context<Self>) -> bool {
         let requests = self
             .terminal_session
@@ -2435,21 +2392,6 @@ impl TerminalPane {
             changed |= self.handle_event(TerminalSessionEvent::ClientEffect(request), cx);
         }
         changed
-    }
-
-    /// Screen and lifecycle events can replace the request's wakeup before the Pane reads it.
-    fn sync_permission_request(&mut self, session_epoch: u64, cx: &mut Context<Self>) -> bool {
-        if self.terminal_session.session_epoch != session_epoch
-            || !self.terminal_session_available()
-        {
-            return false;
-        }
-        let request = self
-            .terminal_session
-            .session
-            .as_ref()
-            .and_then(|session| session.permission_request());
-        request.is_some_and(|request| self.offer_permission_setup(request.permissions(), cx))
     }
 
     /// Accepts metadata no older than what this Pane already presents. Returns whether any
@@ -2474,12 +2416,8 @@ impl TerminalPane {
     /// Whether the Terminal Session these facts describe is running. A server's Session runs
     /// whether or not this client ever presented it or controls it, as its inventory says.
     fn metadata_session_running(&self) -> bool {
-        if self.server_backed() {
-            self.terminal_session.server_run.is_some()
-                && !matches!(self.pane_state, PaneTerminalState::Exited(_))
-        } else {
-            self.terminal_session_available()
-        }
+        self.terminal_session.server_run.is_some()
+            && !matches!(self.pane_state, PaneTerminalState::Exited(_))
     }
 
     /// Whether this Pane already presents `revision` of the metadata `run` published.
@@ -2504,9 +2442,6 @@ impl TerminalPane {
         )>,
         cx: &mut Context<Self>,
     ) {
-        if !self.server_backed() {
-            return;
-        }
         let changed = match published {
             Some((run, snapshot)) => {
                 let new_run = self.terminal_session.server_run != Some(run);
@@ -2550,8 +2485,6 @@ impl TerminalPane {
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.terminal_session.accepted_screen_generation = Some(screen.generation);
-                let caption_changed =
-                    !self.server_backed() && self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
                 self.sync_surface_background(cx);
                 self.readiness.dirty(cx.entity_id());
@@ -2587,9 +2520,6 @@ impl TerminalPane {
                 }
 
                 self.sync_secure_input();
-                if caption_changed {
-                    cx.emit(TerminalPaneEvent::CaptionChanged);
-                }
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }
@@ -2686,9 +2616,6 @@ impl TerminalPane {
             TerminalSessionEvent::PasteUnconfirmed => {
                 self.sync_paste_unconfirmed();
             }
-            TerminalSessionEvent::PermissionRequested(request) => {
-                return self.offer_permission_setup(request.permissions(), cx);
-            }
             TerminalSessionEvent::Exited(status) => {
                 self.context_menu = None;
                 self.cancel_pending_paste();
@@ -2712,20 +2639,9 @@ impl TerminalPane {
                 self.pane_state = PaneTerminalState::exited(status);
                 cx.emit(TerminalPaneEvent::Exited);
             }
-            TerminalSessionEvent::Failed(failure) => {
-                let was_available = self.terminal_session_available();
-                self.context_menu = None;
-                self.file_preview.dismiss();
-                self.requested_permissions.clear();
-                self.permission_request.clear();
-                self.hidden_input = false;
-                self.sync_secure_input();
-                let failure = TerminalFailure::from_session(&failure);
-                if self.present_failure(failure, true, None)
-                    && was_available != self.terminal_session_available()
-                {
-                    cx.emit(TerminalPaneEvent::CaptionChanged);
-                }
+            // Only the runtime that owns a shell reports a failure. Server presentations never do.
+            TerminalSessionEvent::Failed(_) => {
+                return false;
             }
         }
         true
@@ -2842,7 +2758,6 @@ impl TerminalPane {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !window.is_offering_key_equivalent()
-            && self.server_backed()
             && self.terminal_session_available()
             && !self.interactive_input_available()
             && self.focus_handle.is_focused(window)
@@ -2953,7 +2868,7 @@ impl TerminalPane {
         translation: KeyTranslation,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.server_backed() && !self.interactive_input_available() {
+        if !self.interactive_input_available() {
             return true;
         }
         let input = match translation {
@@ -3174,7 +3089,7 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        if self.server_backed() && !self.interactive_input_available() {
+        if !self.interactive_input_available() {
             cx.stop_propagation();
             return;
         }
@@ -3287,7 +3202,7 @@ impl TerminalPane {
             return;
         }
         self.pointer_modifiers = input_modifiers(event.modifiers);
-        if self.server_backed() && !self.interactive_input_available() {
+        if !self.interactive_input_available() {
             return;
         }
         let dragging = self.pressed_button.is_some();
@@ -3313,8 +3228,7 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        if self.server_backed()
-            && self.pressed_button.is_none()
+        if self.pressed_button.is_none()
             && pointer_uses_text_cursor(
                 self.screen.mouse_tracking,
                 self.pointer_modifiers.shift,
@@ -3346,7 +3260,7 @@ impl TerminalPane {
             return;
         };
         if let Some((generation, pressed)) = self.pressed_link.take() {
-            if self.server_backed() && !self.interactive_input_available() {
+            if !self.interactive_input_available() {
                 return;
             }
             let current = self
@@ -3423,8 +3337,7 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        if self.server_backed()
-            && !self.reading_available()
+        if !self.reading_available()
             && (!self.interactive_input_available()
                 || (self.screen.mouse_tracking
                     && pointer_uses_text_cursor(
@@ -3706,7 +3619,7 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.server_backed() && !self.interactive_input_available() {
+        if !self.interactive_input_available() {
             return;
         }
         let insertion = match PastePayload::prepare_dropped_files(
@@ -3738,7 +3651,7 @@ impl TerminalPane {
         let Some((insertion, generation)) = self.pending_file_insertion.take() else {
             return;
         };
-        if self.server_backed() && generation != self.current_input_generation() {
+        if generation != self.current_input_generation() {
             return;
         }
         self.request_paste_text(insertion, cx);
@@ -3750,12 +3663,11 @@ impl TerminalPane {
             self.screen.selection_present,
             self.current_hovered_link(),
         );
-        actions.copy &= !self.server_backed()
-            || self
-                .terminal_session
-                .session
-                .as_ref()
-                .is_some_and(|session| session.selection_copy_ready());
+        actions.copy &= self
+            .terminal_session
+            .session
+            .as_ref()
+            .is_some_and(|session| session.selection_copy_ready());
         actions.file_preview &= self.file_preview_available;
         actions
     }
@@ -3826,7 +3738,7 @@ impl TerminalPane {
     }
 
     fn context_menu_available(&self) -> bool {
-        (!self.server_backed() || self.interactive_input_available())
+        self.interactive_input_available()
             && matches!(self.pane_state, PaneTerminalState::Running)
             && self.product_focus.active_workspace
             && self.product_focus.active_tab
@@ -3843,7 +3755,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
-        if self.server_backed() && !self.interactive_input_available() {
+        if !self.interactive_input_available() {
             return;
         }
         let current = menu.link.as_ref().and_then(|_| self.link_at(menu.position));
@@ -4572,8 +4484,7 @@ impl TerminalPane {
             .find
             .as_ref()
             .filter(|snapshot| snapshot.generation == self.find_generation);
-        let query_too_large = self.server_backed()
-            && input.read(cx).value().len() > crate::terminal::find::MAX_QUERY_BYTES;
+        let query_too_large = input.read(cx).value().len() > crate::terminal::find::MAX_QUERY_BYTES;
         let result_label = if query_too_large {
             "Query exceeds 4,096 bytes".to_owned()
         } else if input.read(cx).value().is_empty() {
@@ -4887,7 +4798,7 @@ impl EntityInputHandler for TerminalPane {
             self.invalidate_preedit_layout();
             return;
         }
-        if self.server_backed() && !text.is_empty() {
+        if !text.is_empty() {
             let submitted = self
                 .terminal_session
                 .session
@@ -5444,9 +5355,8 @@ impl Render for TerminalPane {
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle);
-        // A server-backed Pane registers no handler for an operation its Terminal Session lacks, so
-        // menus and shortcuts present that operation as unavailable.
-        let local_operations = !self.server_backed();
+        // A Pane registers no handler for an operation its Terminal Session lacks, so menus and
+        // shortcuts present that operation as unavailable.
         self.accessibility_element
             .decorate(pane_root)
             .on_action(cx.listener(Self::set_up_permission_request))
@@ -5461,10 +5371,9 @@ impl Render for TerminalPane {
             )
             .on_action(cx.listener(Self::show_repository_status))
             // The owning server clears its Terminal Session for the client whose input it takes.
-            .when(
-                local_operations || self.interactive_input_available(),
-                |root| root.on_action(cx.listener(Self::clear_screen_and_scrollback)),
-            )
+            .when(self.interactive_input_available(), |root| {
+                root.on_action(cx.listener(Self::clear_screen_and_scrollback))
+            })
             .when(self.reading_available(), |root| {
                 root.on_action(cx.listener(Self::copy_selection))
                     .on_action(cx.listener(Self::edit_copy))

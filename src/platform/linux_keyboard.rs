@@ -534,18 +534,14 @@ mod tests {
     fn native_window_facts_reach_the_pane_owned_terminal_session(cx: &mut gpui::TestAppContext) {
         use crate::terminal::testing::{
             RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
-            test_local_directory,
         };
         use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
-        use std::{path::PathBuf, rc::Rc};
+        use std::rc::Rc;
         cx.update(crate::ui::init).unwrap();
         let records = TestTerminalSessionRecords::default();
         let factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let factory = WorkspaceTerminalSessionFactory::new_local(
-            factory,
-            test_local_directory(PathBuf::from("/keyboard-test")),
-        );
+        let factory = WorkspaceTerminalSessionFactory::new_server(factory);
         let (pane, cx) = cx.add_window_view(|window, cx| {
             crate::ui::TerminalPane::with_adapters(
                 factory, LinuxTerminalKeyInputAdapterFactory::new().create(),
@@ -853,10 +849,9 @@ mod native_compose_tests {
     use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::testing::{
         RecordedCommand, TerminalEmulator, TestTerminalSessionFactory, TestTerminalSessionRecords,
-        test_local_directory,
     };
     use gpui::AppContext as _;
-    use std::{path::PathBuf, rc::Rc, time::Duration};
+    use std::{rc::Rc, time::Duration};
 
     enum DriverRequest {
         Begin,
@@ -974,10 +969,8 @@ mod native_compose_tests {
             let first_command = first_command.clone();
             move |cx| {
                 crate::ui::init(cx).unwrap();
-                let factory = WorkspaceTerminalSessionFactory::new_local(
-                    Rc::new(TestTerminalSessionFactory::new(records.clone())),
-                    test_local_directory(PathBuf::from("/compose-test")),
-                );
+                let factory = WorkspaceTerminalSessionFactory::new_server(
+                    Rc::new(TestTerminalSessionFactory::new(records.clone())));
                 let primary = cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let pane = cx.new(|cx| crate::ui::TerminalPane::with_adapters(
                         factory, LinuxTerminalKeyInputAdapterFactory::new().create(),

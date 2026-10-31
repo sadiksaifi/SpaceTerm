@@ -39,7 +39,7 @@ pub(crate) use repositories::{
 
 #[cfg(test)]
 #[path = "shared_workspaces/tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[path = "shared_workspaces/pending.rs"]
 mod pending;
@@ -67,7 +67,7 @@ mod development {
     use spaceterm_server::workspace_order::OwnerId;
 
     use crate::close_confirmation::CloseTarget;
-    use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
+    use crate::domain::{PaneId, TabId, WorkspaceId};
     use crate::server_connection::ServerConnection;
     use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
@@ -994,15 +994,12 @@ mod development {
     struct LocalServerPanes {
         server: ServerConnection,
         controls: Arc<PaneControls>,
-        /// Completes the launch plan the server factory ignores. It is client launch scaffolding
-        /// and never a directory the server's Terminal Session starts in.
-        client_home: ValidatedLocalDirectory,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
     }
 
     impl SharedPaneOpener for LocalServerPanes {
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
-            WorkspaceTerminalSessionFactory::pending(self.client_home.clone())
+            WorkspaceTerminalSessionFactory::pending()
         }
 
         fn local_filesystem(
@@ -1019,10 +1016,9 @@ mod development {
                 pane,
             );
             let permit = self.server.attachments().ok()?.permit(pane)?;
-            let session_factory = WorkspaceTerminalSessionFactory::new_server(
-                Rc::new(factory.with_attachment(permit)),
-                self.client_home.clone(),
-            );
+            let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                factory.with_attachment(permit),
+            ));
             Some((session_factory, state))
         }
     }
@@ -1033,13 +1029,11 @@ mod development {
         server: ServerConnection,
         controls: Arc<PaneControls>,
         direct: DirectServer,
-        /// Completes the launch plan the server factory ignores, as for the local server.
-        client_home: ValidatedLocalDirectory,
     }
 
     impl SharedPaneOpener for RemoteServerPanes {
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
-            WorkspaceTerminalSessionFactory::pending(self.client_home.clone())
+            WorkspaceTerminalSessionFactory::pending()
         }
 
         fn direct_route(&self) -> Option<&DirectServer> {
@@ -1054,10 +1048,9 @@ mod development {
                 pane,
             );
             let permit = self.server.attachments().ok()?.permit(pane)?;
-            let session_factory = WorkspaceTerminalSessionFactory::new_server(
-                Rc::new(factory.with_attachment(permit)),
-                self.client_home.clone(),
-            );
+            let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                factory.with_attachment(permit),
+            ));
             Some((session_factory, state))
         }
     }
@@ -1077,7 +1070,6 @@ mod development {
         pub(crate) fn new(
             server: ServerConnection,
             controls: Arc<PaneControls>,
-            client_home: ValidatedLocalDirectory,
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             panes: &PaneConstruction,
         ) -> Self {
@@ -1085,7 +1077,6 @@ mod development {
                 Rc::new(LocalServerPanes {
                     server,
                     controls,
-                    client_home,
                     local_files,
                 }),
                 panes,
@@ -1098,13 +1089,11 @@ mod development {
             server: ServerConnection,
             controls: Arc<PaneControls>,
             direct: DirectServer,
-            client_home: ValidatedLocalDirectory,
         ) -> Rc<dyn SharedPaneOpener> {
             Rc::new(RemoteServerPanes {
                 server,
                 controls,
                 direct,
-                client_home,
             })
         }
 
@@ -1853,7 +1842,8 @@ mod development {
         /// Attaches `attached`, as a window reads this client's attachments from its server.
         #[cfg(test)]
         pub(crate) fn attach_for_test(&mut self, attached: &[Id]) {
-            if let Ok(attachments) = spaceterm_server::attachments::Attachments::relaunched(attached)
+            if let Ok(attachments) =
+                spaceterm_server::attachments::Attachments::relaunched(attached)
             {
                 self.attachments = attachments;
             }
@@ -3554,11 +3544,7 @@ mod development {
 
         impl super::SharedPaneOpener for ScriptedPanes {
             fn placeholder(&self) -> super::WorkspaceTerminalSessionFactory {
-                super::WorkspaceTerminalSessionFactory::pending(
-                    crate::terminal::testing::test_local_directory(std::path::PathBuf::from(
-                        "/tmp/spaceterm-shared-test",
-                    )),
-                )
+                super::WorkspaceTerminalSessionFactory::pending()
             }
 
             fn local_filesystem(
@@ -3615,13 +3601,9 @@ mod development {
                 let sequence = self.state.next_sequence(APPLYING_DEVICE);
                 let outcome = self
                     .state
-                    .apply(
-                        APPLYING_DEVICE,
-                        sequence,
-                        mutation,
-                        &self.directory,
-                        |_| true,
-                    )
+                    .apply(APPLYING_DEVICE, sequence, mutation, &self.directory, |_| {
+                        true
+                    })
                     .unwrap_or(Outcome::Invalid);
                 self.state
                     .acknowledge(APPLYING_DEVICE, sequence)
@@ -3651,19 +3633,23 @@ mod development {
                     boot: APPLYING_BOOT,
                     controls: panes
                         .iter()
-                        .map(|&(pane, session)| spaceterm_server::hierarchy::ConfirmedControl {
-                            pane,
-                            session,
-                            owner: APPLYING_DEVICE,
-                            epoch: 1,
-                        })
+                        .map(
+                            |&(pane, session)| spaceterm_server::hierarchy::ConfirmedControl {
+                                pane,
+                                session,
+                                owner: APPLYING_DEVICE,
+                                epoch: 1,
+                            },
+                        )
                         .collect(),
                     sessions: panes
                         .iter()
-                        .map(|&(id, session)| spaceterm_server::hierarchy::ConfirmedPane {
-                            id,
-                            session,
-                        })
+                        .map(
+                            |&(id, session)| spaceterm_server::hierarchy::ConfirmedPane {
+                                id,
+                                session,
+                            },
+                        )
                         .collect(),
                 });
             }

@@ -26,9 +26,9 @@ use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::tab_manager::TabManager;
 
-const WORKSPACE: Id = [1; 32];
-const ROOT_TAB: Id = [2; 32];
-const ROOT_PANE: Id = [3; 32];
+pub(crate) const WORKSPACE: Id = [1; 32];
+pub(crate) const ROOT_TAB: Id = [2; 32];
+pub(crate) const ROOT_PANE: Id = [3; 32];
 const SECOND_TAB: Id = [4; 32];
 const SECOND_TAB_PANE: Id = [5; 32];
 const SPLIT_PANE: Id = [6; 32];
@@ -43,7 +43,7 @@ fn first_workspace_id() -> crate::domain::WorkspaceId {
         .expect("an empty collection presents its first Workspace")
 }
 
-fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
+pub(crate) fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
     Pane {
         id,
         source,
@@ -58,7 +58,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
     }
 }
 
-fn tab(id: Id, panes: Vec<Pane>) -> Tab {
+pub(crate) fn tab(id: Id, panes: Vec<Pane>) -> Tab {
     Tab {
         worktree: None,
         worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
@@ -73,7 +73,7 @@ fn tab(id: Id, panes: Vec<Pane>) -> Tab {
 const BOOT: Id = [9; 32];
 
 /// One server Workspace with `tabs`, whose Panes have no running shell yet.
-fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
+pub(crate) fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
     let sessions = tabs
         .iter()
         .flat_map(|tab| &tab.panes)
@@ -119,14 +119,13 @@ struct SharedHarness {
 fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+        crate::terminal::testing::TestTerminalSessionFactory::new(
             crate::terminal::testing::TestTerminalSessionRecords::default(),
-        ).server_backed().with_reading_available(true));
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared-test")),
+        )
+        .with_reading_available(true),
     );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
     let panes = ScriptedPanes::new(session_factory.clone());
     let sessions = SharedPaneSessions::with_opener(
         Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
@@ -1392,14 +1391,13 @@ mod edits {
 
     /// A Workspace Window's reading of `source`, which every window of one process shares.
     fn window(source: SharedEditSource) -> SharedWorkspaces {
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
-            ).server_backed().with_reading_available(true));
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(
-            session_factory,
-            crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
+            )
+            .with_reading_available(true),
         );
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
         let sessions = SharedPaneSessions::with_opener(
             ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
             &PaneConstruction::testing(),
@@ -2251,12 +2249,12 @@ mod close {
     fn shared(inventory: Inventory) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
         let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(
-            Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+            crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
-            ).server_backed().with_reading_available(true)),
-            crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
-        );
+            )
+            .with_reading_available(true),
+        ));
         let sessions = SharedPaneSessions::with_opener(
             ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
             &PaneConstruction::testing(),
@@ -2796,7 +2794,6 @@ mod draft {
             "a draft started on the published name is fenced to that name"
         );
     }
-
 }
 
 #[path = "retention_tests.rs"]

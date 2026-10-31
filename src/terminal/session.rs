@@ -105,8 +105,6 @@ pub enum TerminalSessionEvent {
     Line(spaceterm_server::pane::LineState),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
-    /// A program asked for a Permission Setup.
-    PermissionRequested(PermissionRequest),
     Exited(TerminalSessionExit),
     Failed(TerminalSessionFailure),
 }
@@ -483,16 +481,6 @@ pub trait TerminalSessionHandle {
         None
     }
 
-    /// The newest Terminal Metadata the Terminal Session retained, presentable or not.
-    fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
-        None
-    }
-
-    /// The permissions requested by this Terminal Session, retained across event replacement.
-    fn permission_request(&self) -> Option<PermissionRequest> {
-        None
-    }
-
     fn key(&self, input: KeyInput);
 
     /// Accepts the entire commit as one ordered unit, or refuses before consuming its text.
@@ -600,12 +588,9 @@ pub trait TerminalSessionHandle {
 
 /// Starts a server-owned Terminal Session or its client presentation.
 pub trait TerminalSessionFactory {
-    /// Native runtimes consume the local launch authority. Server presentations use their
-    /// server-owned Pane and grant no client-local directory authority from this plan.
     fn start(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError>;
 
@@ -623,11 +608,6 @@ pub trait TerminalSessionFactory {
     /// Received paths cannot supply or replace this adapter.
     fn local_file_authority(&self) -> Option<&LocalFilesystemAuthority> {
         None
-    }
-
-    /// Whether the shell runs in a SpaceTerm Server rather than this application.
-    fn is_server_backed(&self) -> bool {
-        false
     }
 }
 

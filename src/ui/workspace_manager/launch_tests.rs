@@ -65,7 +65,6 @@ struct ScriptedConnector {
 impl SharedServerConnector for ScriptedConnector {
     fn connect(
         &self,
-        _: crate::domain::ValidatedLocalDirectory,
         _: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         _: &mut App,
@@ -181,12 +180,9 @@ fn launch_harness_restoring(
     for answer in answers {
         launch.answer(answer);
     }
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(
-        Rc::new(
-            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()).server_backed(),
-        ),
-        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-    );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+        TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
+    ));
     let panes = ScriptedPanes::new(session_factory);
     let edits = Rc::new(edits);
     let connector = Rc::new(ScriptedConnector {
@@ -815,9 +811,7 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
     sync(&harness, cx);
     assert_eq!(harness.launch.steps(), ["run"]);
 
-    harness
-        .edits
-        .set_error(ServerError::IncompatibleProtocol);
+    harness.edits.set_error(ServerError::IncompatibleProtocol);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());

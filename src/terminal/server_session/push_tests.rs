@@ -123,83 +123,114 @@ fn ticking(
     })
 }
 
-/// Once a visible Pane shows its shell, an idle second sends nothing on the connection: no
-/// polls, no effect checks, no view repeats. Pushed frames and pings are the server's.
+/// A real server and loopback connection shared by Pane presentation tests.
+pub(crate) struct ConnectedPane {
+    pub(crate) factory: DevelopmentServerSessionFactory,
+    traffic: Arc<Traffic>,
+    stop: Option<Box<dyn FnOnce()>>,
+}
+
+impl ConnectedPane {
+    pub(crate) fn new() -> Self {
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        host.prepare_initial_organization().unwrap();
+        let Reply::Inventory { inventory, .. } = host.request([1; 32], [1; 32], Request::Inventory)
+        else {
+            panic!("fixture inventory unavailable");
+        };
+        let workspace = inventory.workspaces[0].id;
+        let pane_id = inventory.workspaces[0].tabs[0].root_pane;
+        let traffic = Arc::new(Traffic::default());
+        let service: SharedPaneService = Arc::new(Mutex::new(Box::new(Served::new(host))));
+        let running = Arc::new(AtomicBool::new(true));
+        let bell = Bell::default();
+        let ticks = ticking(
+            Arc::clone(&service),
+            Arc::clone(&running),
+            Arc::clone(&bell),
+        );
+
+        let (client, server) = Loopback::pair(1 << 20).unwrap();
+        let server = Counting {
+            inner: server,
+            traffic: Arc::clone(&traffic),
+        };
+        let (waker, wake) = io::Waker::new().unwrap();
+        let outbox = Outbox::new(Arc::clone(&wake));
+        let peer = Peer {
+            client: [1; 32],
+            connection: [1; 32],
+            pairing: None,
+        };
+        service
+            .lock()
+            .unwrap()
+            .admitted(&peer, "Test".into(), outbox.clone());
+        let (sync, _sync_thread) = SyncWorker::spawn().unwrap();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let serving = {
+            let (service, stopping) = (Arc::clone(&service), Arc::clone(&stopping));
+            std::thread::spawn(move || {
+                let connection = AdmittedConnection::new(peer, outbox, sync, None, Instant::now());
+                io::serve(Box::new(server), connection, &waker, &service, &stopping);
+            })
+        };
+        let link = io::spawn_link(Box::new(client), Arc::new(Ignore)).unwrap();
+        let connection = ServerConnection::for_identity("spaceterm-development").unwrap();
+        connection.adopt(link.clone());
+
+        let attachments = spaceterm_server::attachments::Attachments::memory();
+        attachments.initialize(&inventory, Some(workspace)).unwrap();
+        let permit = attachments
+            .permit(pane_id)
+            .expect("an attached Pane has a permit");
+        let controls = PaneControls::default();
+        let (factory, state) = DevelopmentServerSessionFactory::for_pane(
+            connection,
+            &controls,
+            crate::platform::runtime_local_filesystem(),
+            pane_id,
+        );
+        state.start_created();
+        let factory = factory.with_attachment(permit);
+        Self {
+            factory,
+            traffic,
+            stop: Some(Box::new(move || {
+                running.store(false, Ordering::Release);
+                ring(&bell);
+                stopping.store(true, Ordering::Release);
+                wake.wake();
+                link.close();
+                let _ = serving.join();
+                let _ = ticks.join();
+                service.lock().unwrap().shutdown().unwrap();
+            })),
+        }
+    }
+}
+
+impl Drop for ConnectedPane {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop();
+        }
+    }
+}
+
+/// A visible idle Pane sends no periodic client requests after its shell appears.
 #[test]
 fn a_visible_idle_pane_sends_no_periodic_requests() {
-    let mut host = crate::runtime::directory_testing::terminal_host();
-    host.prepare_initial_organization().unwrap();
-    let Reply::Inventory { inventory, .. } = host.request([1; 32], [1; 32], Request::Inventory)
-    else {
-        panic!("fixture inventory unavailable");
-    };
-    let workspace = inventory.workspaces[0].id;
-    let pane_id = inventory.workspaces[0].tabs[0].root_pane;
-    let traffic = Arc::new(Traffic::default());
-    let service: SharedPaneService = Arc::new(Mutex::new(Box::new(Served::new(host))));
-    let running = Arc::new(AtomicBool::new(true));
-    let bell = Bell::default();
-    let ticks = ticking(
-        Arc::clone(&service),
-        Arc::clone(&running),
-        Arc::clone(&bell),
-    );
-
-    let (client, server) = Loopback::pair(1 << 20).unwrap();
-    let server = Counting {
-        inner: server,
-        traffic: Arc::clone(&traffic),
-    };
-    let (waker, wake) = io::Waker::new().unwrap();
-    let outbox = Outbox::new(Arc::clone(&wake));
-    let peer = Peer {
-        client: [1; 32],
-        connection: [1; 32],
-        pairing: None,
-    };
-    service
-        .lock()
-        .unwrap()
-        .admitted(&peer, "Test".into(), outbox.clone());
-    let (sync, _sync_thread) = SyncWorker::spawn().unwrap();
-    let stopping = Arc::new(AtomicBool::new(false));
-    let serving = {
-        let (service, stopping) = (Arc::clone(&service), Arc::clone(&stopping));
-        std::thread::spawn(move || {
-            let connection = AdmittedConnection::new(peer, outbox, sync, None, Instant::now());
-            io::serve(Box::new(server), connection, &waker, &service, &stopping);
-        })
-    };
-    let link = io::spawn_link(Box::new(client), Arc::new(Ignore)).unwrap();
-    let connection = ServerConnection::for_identity("spaceterm-development").unwrap();
-    connection.adopt(link.clone());
-
-    let attachments = spaceterm_server::attachments::Attachments::memory();
-    attachments.initialize(&inventory, Some(workspace)).unwrap();
-    let permit = attachments
-        .permit(pane_id)
-        .expect("an attached Pane has a permit");
-    let controls = PaneControls::default();
-    let (factory, state) = DevelopmentServerSessionFactory::for_pane(
-        connection,
-        &controls,
-        crate::platform::runtime_local_filesystem(),
-        pane_id,
-    );
-    state.start_created();
-    let started = factory
-        .with_attachment(permit)
+    let server = ConnectedPane::new();
+    let traffic = &server.traffic;
+    let started = server
+        .factory
         .start(
             TerminalGeometry::from_viewport(
                 LogicalSize::new(640.0, 432.0),
                 LogicalCellSize::new(8.0, 18.0),
                 BackingScale::ONE,
                 CellGridSize::new(2, 2),
-            ),
-            LocalTerminalLaunchPlan::new(
-                crate::platform::runtime_local_filesystem()
-                    .validate_directory(&std::env::temp_dir())
-                    .unwrap(),
             ),
             TerminalAppearanceUpdate::builtin().unwrap(),
         )
@@ -250,14 +281,6 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
     let idle = traffic.totals();
 
     drop(started);
-    running.store(false, Ordering::Release);
-    ring(&bell);
-    stopping.store(true, Ordering::Release);
-    wake.wake();
-    link.close();
-    let _ = serving.join();
-    let _ = ticks.join();
-    service.lock().unwrap().shutdown().unwrap();
     let [frames, bytes, ..] = settled;
     assert!(frames > 0 && bytes > 0, "the claim itself is counted");
     assert_eq!(

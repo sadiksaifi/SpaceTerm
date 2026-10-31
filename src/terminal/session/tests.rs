@@ -15,11 +15,6 @@ const PASSWORD: LineMode = LineMode {
     shell_foreground: false,
 };
 
-#[cfg(feature = "desktop")]
-pub(in crate::terminal) fn metadata_changed() -> TerminalSessionEvent {
-    TerminalSessionEvent::MetadataChanged(MetadataWakeup::new(Arc::new(AtomicBool::new(true))))
-}
-
 fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
     NativeTerminalSessionFactory::new(
         Arc::new(RecordingSessionAdapterFactory {

@@ -1534,11 +1534,6 @@ impl WorkspaceManager {
         }
     }
 
-    fn local_home_directory(&self) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
-        self.local_filesystem
-            .validate_directory(&self.local_home_directory_path)
-    }
-
     fn activate_workspace(
         &mut self,
         workspace_id: WorkspaceId,

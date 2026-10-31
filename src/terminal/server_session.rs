@@ -5,7 +5,7 @@ mod control;
 mod effects;
 mod inbox;
 #[cfg(test)]
-mod push_tests;
+pub(crate) mod push_tests;
 use super::server_graphics as graphics;
 mod link;
 mod prediction;

@@ -435,7 +435,12 @@ impl<T> Tab<T> {
     /// Pane, and whether that Pane was zoomed. Panes it names that are gone are skipped, and
     /// Panes it never knew keep their place before the ones it names. A Focused Pane that is gone
     /// leaves the Root Pane focused and the Tab unzoomed.
-    pub(crate) fn restore_focus(&mut self, history: &[PaneId], focused: Option<PaneId>, zoomed: bool) {
+    pub(crate) fn restore_focus(
+        &mut self,
+        history: &[PaneId],
+        focused: Option<PaneId>,
+        zoomed: bool,
+    ) {
         let mut restored: Vec<PaneId> = self
             .focus_history
             .iter()
@@ -473,6 +478,7 @@ impl<T> Tab<T> {
         Some(self.zoom_state)
     }
 
+    #[cfg(test)]
     pub(crate) fn split_pane(
         &mut self,
         target_pane_id: PaneId,
@@ -752,6 +758,7 @@ impl<T> Tab<T> {
         ))
     }
 
+    #[cfg(test)]
     fn commit_split(&mut self, root: PaneNode, pane_id: PaneId, pane: T) {
         self.root = root;
         self.panes.insert(pane_id, pane);
@@ -1508,7 +1515,12 @@ mod tests {
         );
         assert_eq!(
             tab.focus_history(),
-            [PaneId::new(4), PaneId::new(3), PaneId::new(1), PaneId::new(2)]
+            [
+                PaneId::new(4),
+                PaneId::new(3),
+                PaneId::new(1),
+                PaneId::new(2)
+            ]
         );
         assert_eq!(tab.focused_pane_id(), PaneId::new(1));
         assert_eq!(tab.zoom_state(), ZoomState::Zoomed(PaneId::new(1)));

@@ -63,8 +63,8 @@ pub(crate) mod macos_updates;
     )
 )]
 pub(crate) mod permission_access;
-/// `notify` serves the desktop, and a Linux server's Git facts watch.
-#[cfg(any(target_os = "linux", feature = "desktop"))]
+/// A Linux server's Git facts watch, through `notify`.
+#[cfg(target_os = "linux")]
 pub(crate) mod repository_watch;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod unix_desktop_channel;

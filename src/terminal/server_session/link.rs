@@ -1196,9 +1196,6 @@ fn mutation_reply(body: ReplyBody) -> Result<Reply, ServerError> {
 }
 
 impl TerminalSessionFactory for DevelopmentServerSessionFactory {
-    fn is_server_backed(&self) -> bool {
-        true
-    }
     fn allows_local_file_insertion(&self) -> bool {
         self.local_files.is_some()
     }
@@ -1213,7 +1210,6 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        _: LocalTerminalLaunchPlan,
         appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let (input, receiver) = mpsc::sync_channel(512);
@@ -2096,8 +2092,7 @@ mod tests {
             });
             assert_eq!(result, Err(ServerError::NotRunning));
             assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Interrupted);
-            let _ =
-                adapter.drain_rounds(2, |_| panic!("an uncertain commit must never replay"));
+            let _ = adapter.drain_rounds(2, |_| panic!("an uncertain commit must never replay"));
             assert_eq!(chunks.len(), lost_chunk);
         }
     }

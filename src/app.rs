@@ -2338,12 +2338,7 @@ mod tests {
                 }),
             )),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(PathBuf::from(
-                "/tmp/spaceterm-native-copy-command-test",
-            )),
-        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
         cx.update(|window, cx| {

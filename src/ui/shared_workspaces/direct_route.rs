@@ -14,7 +14,6 @@ use spaceterm_server::hierarchy::{Id, Mutation};
 
 use super::{DirectServer, SharedPaneOpener, SharedPaneSubscription, SharedWorkspaceEdits};
 use crate::direct_connections::DirectRouteId;
-use crate::domain::ValidatedLocalDirectory;
 use crate::server_connection::ServerError;
 use crate::terminal::WorkspaceTerminalSessionFactory;
 use crate::terminal::server_session::DevelopmentPaneStatus;
@@ -24,8 +23,6 @@ use crate::ui::server_pane::ServerPaneConnection;
 /// Opens one paired route's Panes through its current connection, or as unavailable without one.
 pub(crate) struct DirectRoutePanes {
     direct: DirectServer,
-    /// Completes the launch plan a Pane's factory ignores. It is never a server directory.
-    client_home: ValidatedLocalDirectory,
     connected: RefCell<Option<Rc<dyn SharedPaneOpener>>>,
     /// The title each of the route's Panes presents without a connection.
     titles: RefCell<BTreeMap<Id, String>>,
@@ -33,10 +30,9 @@ pub(crate) struct DirectRoutePanes {
 }
 
 impl DirectRoutePanes {
-    pub(crate) fn new(direct: DirectServer, client_home: ValidatedLocalDirectory) -> Self {
+    pub(crate) fn new(direct: DirectServer) -> Self {
         Self {
             direct,
-            client_home,
             connected: RefCell::new(None),
             titles: RefCell::default(),
             generation: Cell::new(0),
@@ -63,13 +59,13 @@ impl SharedPaneOpener for DirectRoutePanes {
         }
         let title = self.titles.borrow().get(&pane).cloned();
         Some((
-            WorkspaceTerminalSessionFactory::unavailable(self.client_home.clone(), title),
+            WorkspaceTerminalSessionFactory::unavailable(title),
             Arc::new(UnavailablePane),
         ))
     }
 
     fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::pending(self.client_home.clone())
+        WorkspaceTerminalSessionFactory::pending()
     }
 
     fn direct_route(&self) -> Option<&DirectServer> {

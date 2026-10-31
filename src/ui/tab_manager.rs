@@ -454,19 +454,24 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) -> Self {
         let pane_construction = shared.sessions().panes().clone();
-        let tabs = TabCollection::new(|tab_id| {
-            Self::create_tab_view(tab_id, session_factory, pane_construction, window, cx)
-        });
-        shared.register(tabs.root_tab_id(), root.tab);
         let panes = super::shared_workspaces::SharedPanes::new(
             shared.edits(),
             shared.sessions().clone(),
             shared.workspace(),
             root.tab,
         );
-        tabs.root_tab().clone().update(cx, |view, cx| {
-            view.adopt_shared(panes, root.pane, root.state, window, cx);
+        let tabs = TabCollection::new(|tab_id| {
+            Self::create_tab_view(
+                tab_id,
+                session_factory,
+                pane_construction,
+                panes,
+                (root.pane, root.state),
+                window,
+                cx,
+            )
         });
+        shared.register(tabs.root_tab_id(), root.tab);
         Self {
             tabs,
             tab_epoch: 0,
@@ -505,11 +510,24 @@ impl TabManager {
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         pane_construction: PaneConstruction,
+        shared: super::shared_workspaces::SharedPanes,
+        root: (
+            spaceterm_server::hierarchy::Id,
+            std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+        ),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TabView> {
         let view = cx.new(|cx| {
-            TabView::with_pane_construction(tab_id, session_factory, pane_construction, window, cx)
+            TabView::with_pane_construction(
+                tab_id,
+                session_factory,
+                pane_construction,
+                shared,
+                root,
+                window,
+                cx,
+            )
         });
         debug_assert_eq!(view.read(cx).tab_id(), tab_id);
         cx.subscribe_in(
@@ -725,8 +743,7 @@ impl TabManager {
         cx: &App,
     ) -> bool {
         let tab_id = match tab {
-            Some(tab) => match self.shared.local_tab(tab)
-            {
+            Some(tab) => match self.shared.local_tab(tab) {
                 Some(tab_id) => Some(tab_id),
                 None => return false,
             },
@@ -2696,8 +2713,7 @@ impl TabManager {
     ) {
         let saved = saved.reconcile(workspace);
         for (position, tab) in saved.tabs.iter().enumerate() {
-            let Some(id) = self.shared.local_tab(tab.tab)
-            else {
+            let Some(id) = self.shared.local_tab(tab.tab) else {
                 continue;
             };
             let _ = self.tabs.move_tab(id, position);
@@ -2758,12 +2774,17 @@ impl TabManager {
     fn remembered_tabs<'a>(
         &self,
         remembered: &'a crate::ui::remembered_view::RememberedWorkspace,
-    ) -> Vec<(Entity<TabView>, &'a crate::ui::remembered_view::RememberedTab)> {
+    ) -> Vec<(
+        Entity<TabView>,
+        &'a crate::ui::remembered_view::RememberedTab,
+    )> {
         let shared = &self.shared;
         remembered
             .tabs
             .iter()
-            .filter_map(|(server, tab)| Some((self.tabs.tab(shared.local_tab(*server)?)?.clone(), tab)))
+            .filter_map(|(server, tab)| {
+                Some((self.tabs.tab(shared.local_tab(*server)?)?.clone(), tab))
+            })
             .collect()
     }
 
@@ -2806,7 +2827,8 @@ impl TabManager {
             .keys()
             .copied()
             .filter(|id| {
-                self.shared.server_tab(*id)
+                self.shared
+                    .server_tab(*id)
                     .is_some_and(|server| workspace.tabs.iter().any(|tab| tab.id == server))
             })
             .collect::<Vec<_>>();
@@ -2817,8 +2839,7 @@ impl TabManager {
             }
         }
         for tab in &workspace.tabs {
-            let tab_id = match self.shared.local_tab(tab.id)
-            {
+            let tab_id = match self.shared.local_tab(tab.id) {
                 Some(tab_id) => tab_id,
                 None => match self.create_shared_tab(&workspace.tabs, tab, window, cx) {
                     Some(tab_id) => {
@@ -2838,9 +2859,7 @@ impl TabManager {
             .parked_shared_tabs
             .keys()
             .copied()
-            .filter(|id| {
-                !self.shared.optimistically_closing(*id)
-            })
+            .filter(|id| !self.shared.optimistically_closing(*id))
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_shared_tabs.remove(&id) {
@@ -3006,8 +3025,17 @@ impl TabManager {
         let pane_construction = sessions.panes().clone();
         let active_tab_id = self.tabs.active_tab_id();
         let scope = self.presented_worktree(workspace_tabs, tab);
+        let panes = super::shared_workspaces::SharedPanes::new(edits, sessions, workspace, tab.id);
         let created = self.tabs.create_tab_in(scope, |tab_id| {
-            Self::create_tab_view(tab_id, session_factory, pane_construction, window, cx)
+            Self::create_tab_view(
+                tab_id,
+                session_factory,
+                pane_construction,
+                panes,
+                (tab.root_pane, state),
+                window,
+                cx,
+            )
         });
         let tab_id = match created {
             Ok(tab_id) => tab_id,
@@ -3023,10 +3051,8 @@ impl TabManager {
             Self::report_tab_error("restore the Active", error);
         }
         let view = self.tabs.tab(tab_id)?.clone();
-        let panes = super::shared_workspaces::SharedPanes::new(edits, sessions, workspace, tab.id);
         view.update(cx, |view, cx| {
             view.deactivate(cx);
-            view.adopt_shared(panes, tab.root_pane, state, window, cx);
         });
         self.shared.register(tab_id, tab.id);
         self.sync_terminal_focus_blocker(cx);
@@ -4027,10 +4053,8 @@ mod tests {
     }
     use crate::domain::PaneId;
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-    use crate::terminal::testing::{
-        RecordedCall, RecordedCommand, TestTerminalSessionRecords,
-    };
     use crate::terminal::TerminalSessionFactory;
+    use crate::terminal::testing::{RecordedCall, RecordedCommand, TestTerminalSessionRecords};
 
     fn tab_manager(
         cx: &mut TestAppContext,
@@ -4058,7 +4082,9 @@ mod tests {
 
     /// A Tab strip outside any Workspace Window, presenting the scripted account-local server's
     /// Workspace, so a test sets its sidebar layout itself.
-    fn standalone_tab_manager(cx: &mut TestAppContext) -> (Entity<TabManager>, &mut VisualTestContext) {
+    fn standalone_tab_manager(
+        cx: &mut TestAppContext,
+    ) -> (Entity<TabManager>, &mut VisualTestContext) {
         use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions, SharedTabs};
 
@@ -4067,20 +4093,24 @@ mod tests {
         let inventory = edits.applied_inventory();
         let workspace = &inventory.workspaces[0];
         let root = &workspace.tabs[0];
-        let factory = WorkspaceTerminalSessionFactory::new_server(
-            Rc::new(crate::ui::workspace_manager::tests::server_sessions(
+        let factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+            crate::ui::workspace_manager::tests::server_sessions(
                 TestTerminalSessionRecords::default(),
-            )),
-            crate::terminal::testing::test_local_directory(directory),
-        );
+            ),
+        ));
         let panes = ScriptedPanes::connected(factory.clone());
         let sessions = SharedPaneSessions::with_opener(
             Rc::clone(&panes) as Rc<_>,
             &crate::ui::pane_lifecycle::PaneConstruction::testing(),
         );
-        let (_, state) = crate::ui::shared_workspaces::SharedPaneOpener::open(&*panes, root.root_pane)
-            .expect("the Root Pane opens");
-        let shared = SharedTabs::new(SharedEditSource::new(edits as Rc<_>), sessions, workspace.id);
+        let (_, state) =
+            crate::ui::shared_workspaces::SharedPaneOpener::open(&*panes, root.root_pane)
+                .expect("the Root Pane opens");
+        let shared = SharedTabs::new(
+            SharedEditSource::new(edits as Rc<_>),
+            sessions,
+            workspace.id,
+        );
         let root = SharedRoot {
             tab: root.id,
             pane: root.root_pane,
@@ -4130,8 +4160,9 @@ mod tests {
         adapters: crate::ui::WorkspaceManagerAdapters,
         cx: &mut TestAppContext,
     ) -> (Entity<TabManager>, &mut VisualTestContext) {
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(crate::ui::workspace_manager::tests::server_sessions(records));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            crate::ui::workspace_manager::tests::server_sessions(records),
+        );
         let (window_manager, cx) = cx.add_window_view(|window, cx| {
             crate::ui::workspace_manager::tests::local_server_manager(
                 session_factory,
@@ -4234,7 +4265,10 @@ mod tests {
             .skip(commands_before)
             .filter(|call| !matches!(call.command, RecordedCommand::SetPreparationDemand(_)))
             .collect::<Vec<_>>();
-        assert!(commands.iter().all(|call| call.session_id == 2), "{commands:?}");
+        assert!(
+            commands.iter().all(|call| call.session_id == 2),
+            "{commands:?}"
+        );
         assert_eq!(
             commands.last(),
             Some(&RecordedCall {
@@ -7311,4 +7345,5 @@ mod tests {
         server
             .edits
             .present_metadata(server.panes.opened_at(session - 1), snapshot);
-    }}
+    }
+}

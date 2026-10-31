@@ -6,8 +6,7 @@ use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::repository_status::{
-    ChangedPaths, RepositoryWatch, RepositoryWatchError, RepositoryWatcher, WatchDirectory,
-    WatchSet, WatchSets,
+    ChangedPaths, RepositoryWatchError, WatchDirectory, WatchSet, WatchSets,
 };
 
 /// Reports changes below git directories through `notify`.
@@ -17,20 +16,6 @@ pub(crate) struct NotifyRepositoryWatcher;
 impl NotifyRepositoryWatcher {
     pub(crate) const fn new() -> Self {
         Self
-    }
-}
-
-impl RepositoryWatcher for NotifyRepositoryWatcher {
-    fn watch(
-        &self,
-        directories: Vec<WatchDirectory>,
-        changed: Box<dyn Fn() + Send + Sync>,
-    ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
-        let mut set = notify_set(Box::new(move |_: &[PathBuf]| changed()))?;
-        for directory in directories {
-            set.watch(&directory)?;
-        }
-        Ok(Box::new(NotifyRepositoryWatch(set.0)))
     }
 }
 
@@ -83,11 +68,6 @@ fn is_change(kind: EventKind) -> bool {
         _ => true,
     }
 }
-
-/// Dropping the watcher stops its event stream.
-struct NotifyRepositoryWatch(#[allow(dead_code, reason = "held for its drop")] RecommendedWatcher);
-
-impl RepositoryWatch for NotifyRepositoryWatch {}
 
 #[cfg(test)]
 mod change_tests {
@@ -165,17 +145,17 @@ mod tests {
         }
     }
 
-    fn watch(directories: Vec<WatchDirectory>) -> (Box<dyn RepositoryWatch>, mpsc::Receiver<()>) {
+    fn watch(directories: Vec<WatchDirectory>) -> (Box<dyn WatchSet>, mpsc::Receiver<()>) {
         let (sender, receiver) = mpsc::channel();
         let sender = std::sync::Mutex::new(sender);
-        let watch = NotifyRepositoryWatcher::new()
-            .watch(
-                directories,
-                Box::new(move || {
-                    let _ = sender.lock().unwrap().send(());
-                }),
-            )
+        let mut watch = NotifyRepositoryWatcher::new()
+            .start(Box::new(move |_: &[PathBuf]| {
+                let _ = sender.lock().unwrap().send(());
+            }))
             .unwrap();
+        for directory in &directories {
+            watch.watch(directory).unwrap();
+        }
         // Some hosts deliver events from just before the watch began; they are not under test.
         std::thread::sleep(Duration::from_millis(200));
         while receiver.try_recv().is_ok() {}
@@ -249,13 +229,13 @@ mod tests {
     fn unix_repository_watch_fails_for_a_missing_directory() {
         let fixture = Fixture::new();
 
-        let result = NotifyRepositoryWatcher::new().watch(
-            vec![WatchDirectory {
-                path: fixture.0.join("missing"),
-                recursive: false,
-            }],
-            Box::new(|| {}),
-        );
+        let mut watch = NotifyRepositoryWatcher::new()
+            .start(Box::new(|_: &[PathBuf]| {}))
+            .unwrap();
+        let result = watch.watch(&WatchDirectory {
+            path: fixture.0.join("missing"),
+            recursive: false,
+        });
 
         assert!(matches!(result, Err(RepositoryWatchError)));
     }

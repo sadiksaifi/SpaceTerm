@@ -1,8 +1,8 @@
 //! App-scoped Repository Status state shared by every window.
 //!
-//! The store owns the one [`RepositoryScheduler`], runs its effects on dedicated threads, and tells
-//! Panes and sidebar rows when their view changed. Programs run only through the injected
-//! adapters.
+//! The store checks the programs Repository Status runs, and looks up the Pull Requests for the
+//! branches SpaceTerm Servers read with this client's GitHub CLI. Programs run only through the
+//! injected adapters, on dedicated threads.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -10,22 +10,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 
 use crate::cancellation::CancellationToken;
-use crate::repository_status::local_read::LocalRepositoryReader;
-use crate::repository_status::pull_request::{PullRequestQuery, pull_request_query};
+use crate::repository_status::pull_request::PullRequestQuery;
 use crate::repository_status::pull_request_lookup::{GitHubCliLookup, GitHubHosts};
-use crate::repository_status::scheduler::{
-    CountTicket, Interest, InterestId, ProbeTicket, RepositoryEffect, RepositoryScheduler,
-    SchedulerUpdate, SourceDirectory,
-};
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{
-    ChangeSummary, GitHubCliStatus, GitToolStatus, PullRequest, PullRequestError, RepositoryKey,
-    RepositoryMachine, RepositoryMarkerReader, RepositoryProgramRunner, RepositoryReadError,
-    RepositoryRoot, RepositoryStatusPreferences, RepositoryToolDiscovery, RepositoryView,
-    RepositoryWatch, RepositoryWatcher,
+    GitHubCliStatus, GitToolStatus, PullRequest, PullRequestError, RepositoryProgramRunner,
+    RepositoryStatusPreferences, RepositoryToolDiscovery,
 };
 use crate::settings::Settings;
 
@@ -38,14 +31,12 @@ pub(crate) struct RepositoryTools {
 
 impl Global for RepositoryTools {}
 
-/// The native capabilities Repository Status reads local repositories with, chosen by host
-/// composition.
+/// The native capabilities Repository Status checks its programs and looks up Pull Requests with,
+/// chosen by host composition.
 #[derive(Clone)]
 pub(crate) struct RepositoryStatusAdapters {
     pub(crate) runner: Arc<dyn RepositoryProgramRunner>,
     pub(crate) discovery: Arc<dyn RepositoryToolDiscovery>,
-    pub(crate) markers: Arc<dyn RepositoryMarkerReader>,
-    pub(crate) watcher: Arc<dyn RepositoryWatcher>,
     /// The account's home with symbolic links resolved.
     pub(crate) physical_home: PathBuf,
     /// Launch environment entries the GitHub CLI may need, such as proxy settings.
@@ -62,16 +53,6 @@ pub(crate) fn thread_spawner() -> ReadSpawner {
             .spawn(work)
             .is_ok()
     })
-}
-
-/// The Panes and sidebar rows whose [`RepositoryStatusStore::view`] changed.
-#[derive(Clone, Debug)]
-pub(crate) struct RepositoryViewsChanged(pub(crate) Arc<[InterestId]>);
-
-impl RepositoryViewsChanged {
-    pub(crate) fn contains(&self, id: InterestId) -> bool {
-        self.0.binary_search(&id).is_ok()
-    }
 }
 
 /// The Pull Requests a SpaceTerm Server's repositories have whose value changed.
@@ -146,36 +127,23 @@ pub(crate) fn install(settings: &Settings, adapters: RepositoryStatusAdapters, c
 struct ToolState {
     checking: bool,
     checked: bool,
-    local: Option<Arc<LocalRepositoryReader>>,
     github_cli: Option<Arc<GitHubCliLookup>>,
-    /// Local reads that arrived before the first tool check finished.
-    waiting: Vec<RepositoryEffect>,
 }
 
 pub(crate) struct RepositoryStatusStore {
-    scheduler: RepositoryScheduler,
     preferences: RepositoryStatusPreferences,
     adapters: RepositoryStatusAdapters,
     spawn: ReadSpawner,
     tools: ToolState,
-    watches: HashMap<RepositoryKey, Box<dyn RepositoryWatch>>,
-    watch_events: async_channel::Sender<RepositoryKey>,
-    /// Each count in flight and the token that stops it once nothing presents its repository.
-    counts: HashMap<RepositoryKey, (CountTicket, CancellationToken)>,
-    probes: HashMap<ProbeTicket, CancellationToken>,
     github_hosts: Arc<GitHubHosts>,
     /// Pull Requests for branches SpaceTerm Servers read. Only the parsed query comes from the
     /// server; the GitHub CLI, its login, and these answers stay on this client.
     server_pull_requests: HashMap<ServerPullRequestKey, ServerPullRequest>,
     /// The GitHub CLI status the last tool check found, which server lookups follow.
     server_github_cli: GitHubCliStatus,
-    wake: Option<(Instant, Task<()>)>,
-    next_interest: u64,
     cancellation: CancellationToken,
-    _watch_task: Task<()>,
 }
 
-impl EventEmitter<RepositoryViewsChanged> for RepositoryStatusStore {}
 impl EventEmitter<ServerPullRequestsChanged> for RepositoryStatusStore {}
 
 impl Drop for RepositoryStatusStore {
@@ -191,37 +159,15 @@ impl RepositoryStatusStore {
         spawn: ReadSpawner,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (watch_events, watch_receiver) = async_channel::unbounded::<RepositoryKey>();
-        let watch_task = cx.spawn(async move |store, cx| {
-            while let Ok(key) = watch_receiver.recv().await {
-                if store
-                    .update(cx, |store, cx| {
-                        let update = store.scheduler.repository_changed(&key, Instant::now());
-                        store.apply(update, cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
         let mut store = Self {
-            scheduler: RepositoryScheduler::new(preferences, GitHubCliStatus::Unknown),
             preferences,
             adapters,
             spawn,
             tools: ToolState::default(),
-            watches: HashMap::new(),
-            watch_events,
-            counts: HashMap::new(),
-            probes: HashMap::new(),
             github_hosts: Arc::default(),
             server_pull_requests: HashMap::new(),
             server_github_cli: GitHubCliStatus::Unknown,
-            wake: None,
-            next_interest: 0,
             cancellation: CancellationToken::default(),
-            _watch_task: watch_task,
         };
         if preferences.show_repository_status {
             store.check_tools(cx);
@@ -229,67 +175,7 @@ impl RepositoryStatusStore {
         store
     }
 
-    /// What `id` presents now.
-    pub(crate) fn view(&self, id: InterestId) -> RepositoryView {
-        self.scheduler.view(id)
-    }
-
-    pub(crate) fn register(&mut self, interest: Interest, cx: &mut Context<Self>) -> InterestId {
-        self.next_interest += 1;
-        let id = InterestId::new(self.next_interest);
-        let update = self.scheduler.register(id, interest, Instant::now());
-        self.apply(update, cx);
-        id
-    }
-
-    pub(crate) fn unregister(&mut self, id: InterestId, cx: &mut Context<Self>) {
-        let update = self.scheduler.unregister(id);
-        self.apply(update, cx);
-    }
-
-    pub(crate) fn set_source(
-        &mut self,
-        id: InterestId,
-        directory: SourceDirectory,
-        cx: &mut Context<Self>,
-    ) {
-        let update = self.scheduler.set_source(id, directory, Instant::now());
-        self.apply(update, cx);
-    }
-
-    pub(crate) fn set_visible(&mut self, id: InterestId, visible: bool, cx: &mut Context<Self>) {
-        let update = self.scheduler.set_visible(id, visible, Instant::now());
-        self.apply(update, cx);
-    }
-
-    pub(crate) fn set_available(
-        &mut self,
-        id: InterestId,
-        available: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let update = self.scheduler.set_available(id, available, Instant::now());
-        self.apply(update, cx);
-    }
-
-    pub(crate) fn set_stopped(&mut self, id: InterestId, stopped: bool, cx: &mut Context<Self>) {
-        let update = self.scheduler.set_stopped(id, stopped, Instant::now());
-        self.apply(update, cx);
-    }
-
-    pub(crate) fn command_finished(
-        &mut self,
-        id: InterestId,
-        finished_commands: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let update = self
-            .scheduler
-            .command_finished(id, finished_commands, Instant::now());
-        self.apply(update, cx);
-    }
-
-    /// A window became active: read visible repositories again, and look for tools that were
+    /// A window became active: look up server Pull Requests again, and look for tools that were
     /// missing or unanswered.
     pub(crate) fn window_activated(&mut self, cx: &mut Context<Self>) {
         if !self.preferences.show_repository_status {
@@ -305,8 +191,6 @@ impl RepositoryStatusStore {
         if self.tools.checked && (git_missing || github_cli_missing) {
             self.check_tools(cx);
         }
-        let update = self.scheduler.window_activated(Instant::now());
-        self.apply(update, cx);
         self.lookup_server_pull_requests(cx);
     }
 
@@ -452,8 +336,6 @@ impl RepositoryStatusStore {
         if preferences.show_repository_status && (!self.tools.checked || pull_requests_turned_on) {
             self.check_tools(cx);
         }
-        let update = self.scheduler.set_toggles(preferences, Instant::now());
-        self.apply(update, cx);
         if pull_requests_turned_on {
             self.lookup_server_pull_requests(cx);
         } else if !preferences.pull_requests_enabled() {
@@ -463,236 +345,6 @@ impl RepositoryStatusStore {
         }
         // Server Workspaces present the toggles too, so their views follow every change.
         cx.emit(ServerPullRequestsChanged);
-    }
-
-    fn apply(&mut self, update: SchedulerUpdate, cx: &mut Context<Self>) {
-        for effect in update.effects {
-            self.run(effect, cx);
-        }
-        if !update.changed.is_empty() {
-            cx.emit(RepositoryViewsChanged(update.changed.into()));
-        }
-    }
-
-    fn run(&mut self, effect: RepositoryEffect, cx: &mut Context<Self>) {
-        match effect {
-            RepositoryEffect::Probe {
-                ticket,
-                machine,
-                directory,
-            } => match (machine, directory) {
-                (RepositoryMachine::Local, SourceDirectory::Local(directory)) => {
-                    let Some(reader) = self.local_reader(
-                        RepositoryEffect::Probe {
-                            ticket: ticket.clone(),
-                            machine: RepositoryMachine::Local,
-                            directory: SourceDirectory::Local(directory.clone()),
-                        },
-                        cx,
-                    ) else {
-                        return;
-                    };
-                    let cancellation = self.probe_cancellation(&ticket);
-                    self.read(
-                        move || reader.probe(&directory, &cancellation),
-                        move |store, result, cx| {
-                            store.probes.remove(&ticket);
-                            let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
-                            let update =
-                                store
-                                    .scheduler
-                                    .probe_finished(ticket, result, Instant::now());
-                            store.apply(update, cx);
-                        },
-                        cx,
-                    );
-                }
-                _ => {
-                    let update = self.scheduler.probe_finished(
-                        ticket,
-                        Err(RepositoryReadError::InvalidResponse),
-                        Instant::now(),
-                    );
-                    self.apply(update, cx);
-                }
-            },
-            RepositoryEffect::Count {
-                ticket,
-                key,
-                fsmonitor,
-            } => {
-                let cancellation =
-                    CancellationToken::linked(&self.cancellation, &CancellationToken::default());
-                let work: Box<dyn FnOnce() -> Result<ChangeSummary, RepositoryReadError> + Send> =
-                    match (&key.machine, &key.root) {
-                        (RepositoryMachine::Local, RepositoryRoot::Local(root)) => {
-                            let Some(reader) = self.local_reader(
-                                RepositoryEffect::Count {
-                                    ticket: ticket.clone(),
-                                    key: key.clone(),
-                                    fsmonitor,
-                                },
-                                cx,
-                            ) else {
-                                return;
-                            };
-                            let root = root.clone();
-                            let cancellation = cancellation.clone();
-                            Box::new(move || {
-                                reader
-                                    .count(&root, fsmonitor, &cancellation)
-                                    .map(|summary| summary.changes)
-                            })
-                        }
-                        _ => Box::new(|| Err(RepositoryReadError::InvalidResponse)),
-                    };
-                self.counts
-                    .insert(key.clone(), (ticket.clone(), cancellation));
-                self.read(
-                    work,
-                    move |store, result, cx| {
-                        if store
-                            .counts
-                            .get(&key)
-                            .is_some_and(|(current, _)| *current == ticket)
-                        {
-                            store.counts.remove(&key);
-                        }
-                        let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
-                        let update = store
-                            .scheduler
-                            .count_finished(ticket, result, Instant::now());
-                        store.apply(update, cx);
-                    },
-                    cx,
-                );
-            }
-            RepositoryEffect::LookupPullRequest {
-                ticket,
-                key: _,
-                branch,
-                config,
-            } => {
-                let lookup = self.tools.github_cli.clone();
-                let hosts = Arc::clone(&self.github_hosts);
-                let cancellation = self.cancellation.clone();
-                self.read(
-                    move || {
-                        let lookup = lookup.ok_or(PullRequestError::ToolMissing)?;
-                        let head = crate::repository_status::RepositoryHead::Branch(branch);
-                        let Some(query) = pull_request_query(&config, &head) else {
-                            return Ok(None);
-                        };
-                        if !hosts.is_github_host(&lookup, &query.repository.host, &cancellation)? {
-                            return Ok(None);
-                        }
-                        lookup.find_pull_request(&query, Instant::now(), &cancellation)
-                    },
-                    move |store, result, cx| {
-                        let result = result.unwrap_or(Err(PullRequestError::Unavailable));
-                        store.pull_request_finished(ticket, result, cx);
-                    },
-                    cx,
-                );
-            }
-            RepositoryEffect::StartWatch { key, directories } => {
-                let events = self.watch_events.clone();
-                let changed_key = key.clone();
-                let watch = self.adapters.watcher.watch(
-                    directories,
-                    Box::new(move || {
-                        let _ = events.try_send(changed_key.clone());
-                    }),
-                );
-                // A repository that cannot be watched still refreshes on the other triggers.
-                if let Ok(watch) = watch {
-                    self.watches.insert(key, watch);
-                }
-            }
-            RepositoryEffect::StopWatch { key } => {
-                self.watches.remove(&key);
-            }
-            RepositoryEffect::CancelCount { key } => {
-                if let Some((_, cancellation)) = self.counts.remove(&key) {
-                    cancellation.cancel();
-                }
-            }
-            RepositoryEffect::CancelProbe { ticket } => {
-                if let Some(cancellation) = self.probes.remove(&ticket) {
-                    cancellation.cancel();
-                }
-                self.tools.waiting.retain(|effect| {
-                    !matches!(effect, RepositoryEffect::Probe { ticket: waiting, .. } if *waiting == ticket)
-                });
-            }
-            RepositoryEffect::WakeAt(due) => self.wake_at(due, cx),
-        }
-    }
-
-    fn pull_request_finished(
-        &mut self,
-        ticket: crate::repository_status::scheduler::PullRequestTicket,
-        result: Result<Option<PullRequest>, PullRequestError>,
-        cx: &mut Context<Self>,
-    ) {
-        // A lookup's host may be the only one signed out, so check every host again.
-        if matches!(result, Err(PullRequestError::NotLoggedIn)) {
-            self.check_tools(cx);
-        }
-        let github_cli = match result {
-            Err(PullRequestError::ToolMissing) => Some(GitHubCliStatus::NotFound),
-            _ => None,
-        };
-        if let Some(github_cli) = github_cli {
-            let mut tools = cx
-                .try_global::<RepositoryTools>()
-                .copied()
-                .unwrap_or_default();
-            tools.github_cli = github_cli;
-            cx.set_global(tools);
-        }
-        let update = self
-            .scheduler
-            .pull_request_finished(ticket, result, Instant::now());
-        self.apply(update, cx);
-    }
-
-    /// A cancellation for one probe, also cancelled with the store.
-    fn probe_cancellation(&mut self, ticket: &ProbeTicket) -> CancellationToken {
-        let cancellation =
-            CancellationToken::linked(&self.cancellation, &CancellationToken::default());
-        self.probes.insert(ticket.clone(), cancellation.clone());
-        cancellation
-    }
-
-    /// The local reader, or `None` after queueing or failing `effect` when git is not ready.
-    fn local_reader(
-        &mut self,
-        effect: RepositoryEffect,
-        cx: &mut Context<Self>,
-    ) -> Option<Arc<LocalRepositoryReader>> {
-        if let Some(reader) = &self.tools.local {
-            return Some(Arc::clone(reader));
-        }
-        if !self.tools.checked {
-            self.tools.waiting.push(effect);
-            self.check_tools(cx);
-            return None;
-        }
-        let now = Instant::now();
-        let update = match effect {
-            RepositoryEffect::Probe { ticket, .. } => {
-                self.scheduler
-                    .probe_finished(ticket, Err(RepositoryReadError::ToolMissing), now)
-            }
-            RepositoryEffect::Count { ticket, .. } => {
-                self.scheduler
-                    .count_finished(ticket, Err(RepositoryReadError::ToolMissing), now)
-            }
-            _ => SchedulerUpdate::default(),
-        };
-        self.apply(update, cx);
-        None
     }
 
     fn check_tools(&mut self, cx: &mut Context<Self>) {
@@ -732,18 +384,6 @@ impl RepositoryStatusStore {
     ) {
         self.tools.checking = false;
         self.tools.checked = true;
-        self.tools.local = match (git, inventory.git) {
-            (GitToolStatus::Ready(version), Some(executable)) => {
-                Some(Arc::new(LocalRepositoryReader::new(
-                    Arc::clone(&self.adapters.runner),
-                    Arc::clone(&self.adapters.markers),
-                    executable,
-                    self.adapters.physical_home.clone(),
-                    version,
-                )))
-            }
-            _ => None,
-        };
         self.tools.github_cli = inventory.github_cli.map(|executable| {
             Arc::new(GitHubCliLookup::new(
                 Arc::clone(&self.adapters.runner),
@@ -753,8 +393,6 @@ impl RepositoryStatusStore {
             ))
         });
         cx.set_global(RepositoryTools { git, github_cli });
-        let update = self.scheduler.set_github_cli(github_cli, Instant::now());
-        self.apply(update, cx);
         // Server branches waiting for the first check, or for a login, are looked up now. A
         // check that changes nothing looks nothing up again.
         let was_enabled = self.server_pull_requests_enabled(self.server_github_cli);
@@ -764,30 +402,6 @@ impl RepositoryStatusStore {
             (true, false) => cx.emit(ServerPullRequestsChanged),
             _ => {}
         }
-        for effect in std::mem::take(&mut self.tools.waiting) {
-            self.run(effect, cx);
-        }
-    }
-
-    fn wake_at(&mut self, due: Instant, cx: &mut Context<Self>) {
-        if self
-            .wake
-            .as_ref()
-            .is_some_and(|(pending, _)| *pending <= due)
-        {
-            return;
-        }
-        let delay = due.saturating_duration_since(Instant::now());
-        let task = cx.spawn(async move |store, cx| {
-            cx.background_executor().timer(delay).await;
-            let _ = store.update(cx, |store, cx| {
-                store.wake = None;
-                // The test clock advances timers without moving `Instant`, so never tick early.
-                let update = store.scheduler.tick(Instant::now().max(due));
-                store.apply(update, cx);
-            });
-        });
-        self.wake = Some((due, task));
     }
 
     /// Runs `work` on its own thread and hands its result to `finish` on the UI thread. `finish`
@@ -821,8 +435,7 @@ mod server_pull_request_tests {
 
     use super::*;
     use crate::repository_status::{
-        GitHubRepository, OperationMarkers, ProgramError, ProgramExit, ProgramRequest,
-        RepositoryWatchError, ToolInventory, WatchDirectory,
+        GitHubRepository, ProgramError, ProgramExit, ProgramRequest, ToolInventory,
     };
 
     /// A local GitHub CLI that is signed in and lists one Pull Request for any branch. Git is
@@ -886,22 +499,6 @@ mod server_pull_request_tests {
         }
     }
 
-    impl RepositoryMarkerReader for Tools {
-        fn read(&self, _: &std::path::Path) -> OperationMarkers {
-            OperationMarkers::default()
-        }
-    }
-
-    impl RepositoryWatcher for Tools {
-        fn watch(
-            &self,
-            _: Vec<WatchDirectory>,
-            _: Box<dyn Fn() + Send + Sync>,
-        ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError> {
-            Err(RepositoryWatchError)
-        }
-    }
-
     fn key(branch: &str) -> ServerPullRequestKey {
         ServerPullRequestKey {
             query: PullRequestQuery {
@@ -925,8 +522,6 @@ mod server_pull_request_tests {
                 RepositoryStatusAdapters {
                     runner,
                     discovery: Arc::new(Tools),
-                    markers: Arc::new(Tools),
-                    watcher: Arc::new(Tools),
                     physical_home: "/home/person".into(),
                     github_cli_environment: Vec::new(),
                 },

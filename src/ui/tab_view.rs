@@ -66,9 +66,6 @@ fn pane_gap(cx: &App) -> f32 {
             .pane_gap(),
     )
 }
-/// The Pane Caption's outer height, including its symmetric vertical padding.
-#[cfg(test)]
-const PANE_CAPTION_HEIGHT: f32 = 32.0;
 const PANE_CAPTION_VERTICAL_PADDING: f32 = 4.0;
 const PANE_CAPTION_LEFT_PADDING: f32 = 10.0;
 const PANE_CAPTION_RIGHT_PADDING: f32 = 5.0;
@@ -477,8 +474,6 @@ pub(crate) struct TabView {
     /// Counts explicit changes of the Focused Pane, so a deferred completion can tell that the
     /// person moved between Panes since it began.
     focus_epoch: u64,
-    session_factory: WorkspaceTerminalSessionFactory,
-    pane_construction: PaneConstruction,
     /// Each Pane's laid-out place.
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     /// Where each Pane's surface was drawn, which differs from its place while Panes move.
@@ -523,35 +518,24 @@ pub(crate) struct TabView {
     close_tab_requested: bool,
     /// The Tab's own focus in the Tab bar, where assistive technology can rest on it.
     tab_focus: FocusHandle,
-    /// The server Tab this Tab presents, when a SpaceTerm Server owns it.
-    shared: Option<SharedPaneBinding>,
+    /// The server Tab this Tab presents.
+    shared: SharedPaneBinding,
     parked_shared_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
     directory_recovery: Option<Entity<super::server_pane::DirectoryRecovery>>,
     /// Reads every shared Pane's connection status while the Tab lives.
-    _shared_status: Option<gpui::Task<()>>,
+    _shared_status: gpui::Task<()>,
 }
 
 impl TabView {
-    #[cfg(test)]
-    pub(crate) fn new(
-        tab_id: TabId,
-        session_factory: WorkspaceTerminalSessionFactory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::with_pane_construction(
-            tab_id,
-            session_factory,
-            PaneConstruction::testing(),
-            window,
-            cx,
-        )
-    }
-
     pub(crate) fn with_pane_construction(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
         pane_construction: PaneConstruction,
+        mut shared: SharedPaneBinding,
+        root: (
+            spaceterm_server::hierarchy::Id,
+            std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+        ),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -583,11 +567,11 @@ impl TabView {
         let initial_title = initial_terminal.read(cx).title();
         let initial_caption = PaneCaptionText::from_terminal(initial_terminal.read(cx));
 
-        Self {
+        shared.register(initial_pane_id, root.0, root.1, cx.focus_handle());
+        let changes = shared.changes();
+        let mut view = Self {
             tab,
             focus_epoch: 0,
-            session_factory,
-            pane_construction,
             pane_bounds: BTreeMap::new(),
             pane_surfaces: BTreeMap::new(),
             pane_unselecting_controls: BTreeMap::new(),
@@ -616,11 +600,22 @@ impl TabView {
             revealed_layout_revision: 0,
             close_tab_requested: false,
             tab_focus: cx.focus_handle(),
-            shared: None,
+            shared,
             parked_shared_panes: BTreeMap::new(),
             directory_recovery: None,
-            _shared_status: None,
-        }
+            _shared_status: cx.spawn_in(window, async move |view, cx| {
+                while changes.recv().await.is_ok() {
+                    if view
+                        .update_in(cx, |view, window, cx| view.sync_shared_panes(window, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
+        };
+        view.sync_shared_panes(window, cx);
+        view
     }
 
     fn create_terminal(
@@ -667,14 +662,8 @@ impl TabView {
                     });
                     cx.notify();
                 }
-                // A Pane whose Terminal Session the server owns keeps its place: the published
-                // inventory owns shared membership, and an exit this client hears first could
-                // otherwise close a Tab the server has already refilled. A Pane of this client's
-                // own closes with its shell, as it always has.
-                TerminalPaneEvent::Exited if view.holds_shared_pane_locally(pane_id) => {
-                    view.release_shared_pane(pane_id, window, cx);
-                }
-                TerminalPaneEvent::Exited => view.close_pane(pane_id, window, cx),
+                // Server inventory owns membership even when the shell exits first.
+                TerminalPaneEvent::Exited => view.release_shared_pane(pane_id, window, cx),
                 // Only the Focused Pane may move the view; a Reveal from any other is dropped.
                 TerminalPaneEvent::Reveal(target) if pane_id == view.tab.focused_pane_id() => {
                     cx.emit(TabViewEvent::RevealRequested {
@@ -704,12 +693,12 @@ impl TabView {
     /// shell reaches nothing. Focusing selects nothing.
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         let pane_id = self.tab.focused_pane_id();
-        if let Some(focus) = self.shared.as_ref().and_then(|shared| {
-            shared
-                .view(pane_id)
-                .and_then(crate::ui::server_pane::ServerPaneView::screen)
-                .and_then(|_| shared.screen_focus(pane_id))
-        }) {
+        if let Some(focus) = self
+            .shared
+            .view(pane_id)
+            .and_then(crate::ui::server_pane::ServerPaneView::screen)
+            .and_then(|_| self.shared.screen_focus(pane_id))
+        {
             focus.focus(window, cx);
             return;
         }
@@ -913,7 +902,7 @@ impl TabView {
     /// focus and each Pane's own view by server identity, and each Pane's connection keeps its
     /// reading for that window.
     pub(crate) fn remember(&self, cx: &App) -> Option<crate::ui::remembered_view::RememberedTab> {
-        let shared = self.shared.as_ref()?;
+        let shared = &self.shared;
         shared.retain_views();
         Some(crate::ui::remembered_view::RememberedTab {
             history: self
@@ -928,7 +917,10 @@ impl TabView {
                 .tab
                 .panes_with_ids()
                 .filter_map(|(pane_id, terminal)| {
-                    Some((shared.server_pane(pane_id)?, terminal.read(cx).remembered(cx)))
+                    Some((
+                        shared.server_pane(pane_id)?,
+                        terminal.read(cx).remembered(cx),
+                    ))
                 })
                 .collect(),
         })
@@ -943,9 +935,7 @@ impl TabView {
         cx: &mut Context<Self>,
     ) {
         self.restore_focus(remembered, cx);
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         let panes: Vec<_> = remembered
             .panes
             .iter()
@@ -967,9 +957,7 @@ impl TabView {
         remembered: &crate::ui::remembered_view::RememberedTab,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         let history: Vec<PaneId> = remembered
             .history
             .iter()
@@ -1104,23 +1092,19 @@ impl TabView {
             eprintln!("cannot split Pane {target_pane_id} without valid measured bounds");
             return;
         };
-        if self.shared.is_some() {
-            // This client owns its layout. Validate the restored allocation before asking the
-            // server for membership; another client's published membership has no such limit.
-            if self
-                .tab
-                .validate_split(target_pane_id, axis, target_size, pane_gap(cx))
-                .is_err()
-            {
-                return;
-            }
-            if matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)) {
-                self.toggle_zoom(window, cx);
-            }
-            self.split_shared(target_pane_id, axis, window, cx);
+        // This client owns its layout. Validate the restored allocation before asking the
+        // server for membership; another client's published membership has no such limit.
+        if self
+            .tab
+            .validate_split(target_pane_id, axis, target_size, pane_gap(cx))
+            .is_err()
+        {
             return;
         }
-        self.split_pane_measured(target_pane_id, axis, target_size, window, cx);
+        if matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)) {
+            self.toggle_zoom(window, cx);
+        }
+        self.split_shared(target_pane_id, axis, window, cx);
     }
 
     fn split_target_size(&self, pane_id: PaneId, gap: f32) -> Option<PaneSize> {
@@ -1346,48 +1330,6 @@ impl TabView {
             .then_some((target_pane_id, edge))
     }
 
-    fn split_pane_measured(
-        &mut self,
-        target_pane_id: PaneId,
-        axis: SplitAxis,
-        target_size: PaneSize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let session_factory = self.session_factory.clone();
-        let pane_construction = self.pane_construction.clone();
-        let gap = pane_gap(cx);
-        let result = self
-            .tab
-            .split_pane(target_pane_id, axis, target_size, gap, |new_pane_id| {
-                Self::create_terminal(new_pane_id, session_factory, pane_construction, window, cx)
-            });
-
-        match result {
-            Ok(pane_id) => {
-                self.advance_native_service_hierarchy_generation(cx);
-                self.pane_layout_revision += 1;
-                self.pane_motion.expect_change();
-                if let Some(terminal) = self.tab.pane(pane_id) {
-                    self.pane_titles.insert(pane_id, terminal.read(cx).title());
-                    self.pane_captions
-                        .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
-                }
-                self.pane_attention.insert(pane_id, 0);
-                self.split_bounds.clear();
-                self.sync_terminal_focus(cx);
-                cx.emit(TabViewEvent::PresentationChanged {
-                    tab_id: self.tab.id(),
-                });
-                cx.notify();
-                if let Some(terminal) = self.tab.pane(pane_id) {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-                }
-            }
-            Err(error) => eprintln!("failed to split Pane: {error}"),
-        }
-    }
-
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         // A shared Pane's close goes up to the Workspace Window, which asks the server after Close
         // Confirmation. Nothing here closes it locally.
@@ -1400,6 +1342,7 @@ impl TabView {
         });
     }
 
+    #[cfg(test)]
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         self.close_pane_focusing(pane_id, true, window, cx);
     }
@@ -1586,11 +1529,7 @@ impl TabView {
         size: gpui::Size<Pixels>,
         cx: &App,
     ) -> Option<Bounds<Pixels>> {
-        if self
-            .shared
-            .as_ref()
-            .is_some_and(|shared| shared.closing(pane_id))
-        {
+        if self.shared.closing(pane_id) {
             return None;
         }
         let appearance = super::appearance::chrome(cx);
@@ -1627,8 +1566,7 @@ impl TabView {
 
     pub(crate) fn readiness_starting(&self, pane_id: PaneId) -> bool {
         self.shared
-            .as_ref()
-            .and_then(|shared| shared.view(pane_id))
+            .view(pane_id)
             .is_some_and(|view| view.connection().startup_pending())
     }
 
@@ -2288,9 +2226,7 @@ impl TabView {
 /// refuses the operations the server path does not support yet.
 impl TabView {
     pub(crate) fn canonicalize_shared_ids(&mut self) {
-        if let Some(shared) = self.shared.as_mut() {
-            shared.canonicalize();
-        }
+        self.shared.canonicalize();
     }
 
     pub(crate) fn shared_layout(&self) -> Option<spaceterm_server::client_view::Layout> {
@@ -2324,7 +2260,7 @@ impl TabView {
             Some(index)
         }
         let mut nodes = Vec::new();
-        collect(self.tab.root(), self.shared.as_ref()?, &mut nodes)?;
+        collect(self.tab.root(), &self.shared, &mut nodes)?;
         Some(Layout { nodes })
     }
 
@@ -2362,11 +2298,7 @@ impl TabView {
         if layout.validate().is_err() {
             return;
         }
-        let Some(arrangement) = self
-            .shared
-            .as_ref()
-            .and_then(|shared| convert(layout, 0, shared))
-        else {
+        let Some(arrangement) = convert(layout, 0, &self.shared) else {
             return;
         };
         if self.tab.restore_arrangement(arrangement).is_err() {
@@ -2382,38 +2314,6 @@ impl TabView {
         cx.notify();
     }
 
-    /// Presents one server Tab in this Tab. The Pane this Tab already owns becomes the server's
-    /// Root Pane, and every later Pane arrives with the server's published membership.
-    pub(crate) fn adopt_shared(
-        &mut self,
-        mut shared: super::shared_workspaces::SharedPanes,
-        root_pane: spaceterm_server::hierarchy::Id,
-        root_state: std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        shared.register(
-            self.tab.root_pane_id(),
-            root_pane,
-            root_state,
-            cx.focus_handle(),
-        );
-        let changes = shared.changes();
-        self.shared = Some(shared);
-        // Each Pane's connection hints after it changes, so the Tab reads its Panes only then.
-        self._shared_status = Some(cx.spawn_in(window, async move |view, cx| {
-            while changes.recv().await.is_ok() {
-                if view
-                    .update_in(cx, |view, window, cx| view.sync_shared_panes(window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }));
-        self.sync_shared_panes(window, cx);
-    }
-
     /// Adds the Panes the server published that this Tab does not present yet.
     ///
     /// Each Pane takes its place beside the Pane it was split from, in this client's own layout.
@@ -2427,18 +2327,14 @@ impl TabView {
     ) -> bool {
         use spaceterm_server::hierarchy::Axis;
 
-        let Some(shared) = self.shared.as_mut() else {
-            return false;
-        };
+        let shared = &mut self.shared;
         shared.canonicalize();
         // Every Pane the server published joins before any Pane it removed leaves. One poll can
         // carry both a creation and the removal of what it was created beside, and a Tab that
         // lost its last known Pane first would lose the Panes that replaced it.
         let mut changed = false;
         for pane in &server_tab.panes {
-            let Some(shared) = self.shared.as_ref() else {
-                break;
-            };
+            let shared = &self.shared;
             if let Some(pane_id) = shared.local_pane(pane.id) {
                 if self.tab.pane(pane_id).is_none()
                     && let Some(parked) = self.parked_shared_panes.remove(&pane_id)
@@ -2457,9 +2353,7 @@ impl TabView {
                         changed = true;
                     }
                 }
-                let Some(shared) = self.shared.as_ref() else {
-                    continue;
-                };
+                let shared = &self.shared;
                 if shared.needs_binding(pane_id, pane.id) {
                     let reopened = shared.reopened(pane_id);
                     let Some((factory, state)) = shared.sessions().open(pane.id) else {
@@ -2477,7 +2371,8 @@ impl TabView {
                             }
                         });
                     }
-                    if let Some(shared) = self.shared.as_mut() {
+                    {
+                        let shared = &mut self.shared;
                         let focus = shared
                             .screen_focus(pane_id)
                             .cloned()
@@ -2513,7 +2408,8 @@ impl TabView {
             });
             match inserted {
                 Ok(pane_id) => {
-                    if let Some(shared) = self.shared.as_mut() {
+                    {
+                        let shared = &mut self.shared;
                         shared.register(pane_id, pane.id, state, cx.focus_handle());
                     }
                     self.finish_shared_insertion(pane_id, cx);
@@ -2526,7 +2422,7 @@ impl TabView {
             .panes
             .iter()
             .filter_map(|pane| {
-                let pane_id = self.shared.as_ref()?.local_pane(pane.id)?;
+                let pane_id = self.shared.local_pane(pane.id)?;
                 let first = pane.observers.names.first()?;
                 let others = pane.observers.others as u64 + pane.observers.names.len() as u64 - 1;
                 let label = if others == 0 {
@@ -2547,11 +2443,7 @@ impl TabView {
             .parked_shared_panes
             .keys()
             .copied()
-            .filter(|id| {
-                self.shared
-                    .as_ref()
-                    .is_none_or(|shared| !shared.closing(*id))
-            })
+            .filter(|id| !self.shared.closing(*id))
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_shared_panes.remove(&id) {
@@ -2576,9 +2468,7 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(shared) = self.shared.as_ref() else {
-            return false;
-        };
+        let shared = &self.shared;
         let absent: Vec<PaneId> = shared
             .pane_ids()
             .into_iter()
@@ -2597,11 +2487,7 @@ impl TabView {
             let held_keyboard = self.tab.pane(pane_id).is_some_and(|terminal| {
                 self.shared_pane_holds_focus(pane_id, terminal, window, cx)
             });
-            if self
-                .shared
-                .as_ref()
-                .is_some_and(|shared| shared.closing(pane_id))
-            {
+            if self.shared.closing(pane_id) {
                 if let Ok(Some(parked)) = self.tab.park_pane(pane_id) {
                     parked.payload().update(cx, |terminal, cx| {
                         terminal.set_product_focus(
@@ -2648,14 +2534,6 @@ impl TabView {
         }
     }
 
-    /// Whether a SpaceTerm Server owns the Pane's Terminal Session, so the published inventory
-    /// owns whether the Pane keeps its place.
-    fn holds_shared_pane_locally(&self, pane_id: PaneId) -> bool {
-        self.shared
-            .as_ref()
-            .is_some_and(|shared| shared.server_pane(pane_id).is_some())
-    }
-
     /// The server ended a shared Pane's Terminal Session.
     ///
     /// The Pane keeps its place until the server publishes an inventory without it, so a Tab this
@@ -2686,7 +2564,7 @@ impl TabView {
         &self,
         pane_id: PaneId,
     ) -> Option<spaceterm_server::hierarchy::Id> {
-        self.shared.as_ref()?.server_pane(pane_id)
+        self.shared.server_pane(pane_id)
     }
 
     /// Presents the Repository Status the server read for each shared Pane's directory.
@@ -2723,9 +2601,7 @@ impl TabView {
         )>,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         let panes: Vec<_> = self
             .tab
             .panes_with_ids()
@@ -2758,18 +2634,14 @@ impl TabView {
 
     /// Whether this client's own pending close ends every Pane this Tab presents.
     pub(crate) fn shared_closing(&self) -> bool {
-        self.shared.as_ref().is_some_and(|shared| {
-            self.tab
-                .panes_with_ids()
-                .all(|(pane_id, _)| shared.closing(pane_id))
-        })
+        self.tab
+            .panes_with_ids()
+            .all(|(pane_id, _)| self.shared.closing(pane_id))
     }
 
     /// Whether this Tab presents the server Pane.
     pub(crate) fn holds_shared_pane(&self, server: spaceterm_server::hierarchy::Id) -> bool {
-        self.shared
-            .as_ref()
-            .is_some_and(|shared| shared.holds(server))
+        self.shared.holds(server)
     }
 
     pub(crate) fn shared_pane_closes_directly(
@@ -2779,7 +2651,7 @@ impl TabView {
         cx: &App,
     ) -> Option<bool> {
         use crate::terminal::server_session::DevelopmentPaneStatus;
-        let shared = self.shared.as_ref()?;
+        let shared = &self.shared;
         let pane = shared.local_pane(server)?;
         let status = shared.view(pane)?.connection().status();
         if matches!(
@@ -2830,8 +2702,7 @@ impl TabView {
     ) -> bool {
         let Some(terminal) = self
             .shared
-            .as_ref()
-            .and_then(|shared| shared.local_pane(server))
+            .local_pane(server)
             .and_then(|pane_id| self.tab.pane(pane_id))
             .cloned()
         else {
@@ -2850,11 +2721,7 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self
-            .shared
-            .as_ref()
-            .and_then(|shared| shared.local_pane(server))
-        else {
+        let Some(pane_id) = self.shared.local_pane(server) else {
             return;
         };
         self.select_shared_pane(pane_id);
@@ -2893,9 +2760,7 @@ impl TabView {
         use super::shared_workspaces::SharedSubmission;
         use spaceterm_server::hierarchy::Axis;
 
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         let axis = match axis {
             SplitAxis::Horizontal => Axis::Right,
             SplitAxis::Vertical => Axis::Down,
@@ -2905,10 +2770,7 @@ impl TabView {
             self.report_shared_refusal(reason, window, cx);
         } else {
             let presentation = edits.take_presentation();
-            let tab = self
-                .shared
-                .as_ref()
-                .and_then(|shared| shared.presentation_tab());
+            let tab = self.shared.presentation_tab();
             let target = presentation.map(|event| edits.canonical(event.target));
             if let Some(tab) = tab {
                 self.reconcile_shared(&tab, window, cx);
@@ -2955,26 +2817,15 @@ impl TabView {
 
     /// Reads every shared Pane's connection and presents what changed.
     fn sync_shared_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pane_ids) = self
-            .shared
-            .as_ref()
-            .map(super::shared_workspaces::SharedPanes::pane_ids)
-        else {
-            return;
-        };
+        let pane_ids = self.shared.pane_ids();
         let mut changed = false;
         for pane_id in pane_ids {
-            if self
-                .shared
-                .as_ref()
-                .is_some_and(|shared| shared.closing(pane_id))
-            {
+            if self.shared.closing(pane_id) {
                 continue;
             }
             let Some(sync) = self
                 .shared
-                .as_mut()
-                .and_then(|shared| shared.view_mut(pane_id))
+                .view_mut(pane_id)
                 .map(crate::ui::server_pane::ServerPaneView::sync)
             else {
                 continue;
@@ -3015,18 +2866,13 @@ impl TabView {
         }
         let screen = self
             .shared
-            .as_ref()
-            .and_then(|shared| shared.view(pane_id))
+            .view(pane_id)
             .and_then(crate::ui::server_pane::ServerPaneView::screen);
         match screen {
             // Focus rests on the screen, so typing meant for a former shell reaches nothing and
             // never takes control back by accident. Tab from here reaches the screen's action.
             Some(_) if sync.entering_screen => {
-                if let Some(focus) = self
-                    .shared
-                    .as_ref()
-                    .and_then(|shared| shared.screen_focus(pane_id))
-                {
+                if let Some(focus) = self.shared.screen_focus(pane_id) {
                     focus.focus(window, cx);
                 }
             }
@@ -3045,20 +2891,17 @@ impl TabView {
     /// own, window restoration, and membership publication never do, so none of them starts a
     /// retained shell. An unreachable server is asked for nothing at all.
     fn select_shared_pane(&self, pane_id: PaneId) {
-        let Some(shared) = self.shared.as_ref().filter(|shared| shared.reachable()) else {
-            return;
-        };
-        shared.select(pane_id);
-    }
-
-    fn forget_shared_pane(&mut self, pane_id: PaneId) {
-        if let Some(shared) = self.shared.as_mut() {
-            shared.forget(pane_id);
+        if self.shared.reachable() {
+            self.shared.select(pane_id);
         }
     }
 
+    fn forget_shared_pane(&mut self, pane_id: PaneId) {
+        self.shared.forget(pane_id);
+    }
+
     fn shared_caption_controls(&self, pane_id: PaneId) -> Option<SharedCaptionControls> {
-        let shared = self.shared.as_ref()?;
+        let shared = &self.shared;
         shared.server_pane(pane_id)?;
         let editability = shared.editability();
         Some(SharedCaptionControls {
@@ -3078,17 +2921,13 @@ impl TabView {
         use crate::ui::server_pane::{self, ServerPaneScreen};
         use spaceterm_ui::Button;
 
-        let Some(pane) = self.shared.as_ref().and_then(|shared| shared.view(pane_id)) else {
+        let Some(pane) = self.shared.view(pane_id) else {
             return SharedPaneSurface::default();
         };
         let selector = |suffix: &str| {
             gpui::SharedString::from(format!("shared-pane-{suffix}-{}", pane_id.get()))
         };
-        let screen_focus = self
-            .shared
-            .as_ref()
-            .and_then(|shared| shared.screen_focus(pane_id))
-            .cloned();
+        let screen_focus = self.shared.screen_focus(pane_id).cloned();
         let screen = pane.screen().map(|screen| match screen {
             ServerPaneScreen::Takeover {
                 taking_over,
@@ -3224,10 +3063,10 @@ impl TabView {
                 // Another computer's server restarts on that computer.
                 let restart_target = self
                     .shared
-                    .as_ref()
-                    .map(|shared| shared.sessions())
-                    .filter(|sessions| sessions.remote_name().is_none())
-                    .map(|_| crate::ui::ServerTarget::Local);
+                    .sessions()
+                    .remote_name()
+                    .is_none()
+                    .then_some(crate::ui::ServerTarget::Local);
                 let owner = view.clone();
                 server_pane::StartUnknownScreen {
                     screen: selector("start-unknown"),
@@ -3254,18 +3093,17 @@ impl TabView {
             }
             ServerPaneScreen::DirectoryUnavailable { starting, offered } => {
                 let target = pane.connection().recovery_target();
-                let editability = self.shared.as_ref().map(|shared| shared.editability());
+                let editability = self.shared.editability();
                 let retry_owner = view.clone();
                 let choose_owner = view.clone();
                 let actions = server_pane::DirectoryActions {
                     retry: selector("directory-retry"),
                     choose: selector("choose-directory"),
                     enabled: offered && !starting && !self.directory_recovery_is_open(cx),
-                    offer: match editability {
-                        Some(editability) if !editability.available() => {
-                            server_pane::ChooseDirectory::Withheld(editability.explanation())
-                        }
-                        _ => server_pane::ChooseDirectory::Offered,
+                    offer: if editability.available() {
+                        server_pane::ChooseDirectory::Offered
+                    } else {
+                        server_pane::ChooseDirectory::Withheld(editability.explanation())
                     },
                     on_retry: move |window: &mut Window, cx: &mut App| {
                         let _ = retry_owner
@@ -3285,9 +3123,7 @@ impl TabView {
                     cx,
                 );
                 let missing_worktree = target.as_ref().is_some_and(|target| {
-                    self.shared.as_ref().is_some_and(|shared| {
-                        shared.missing_worktree_for_directory(&target.original)
-                    })
+                    self.shared.missing_worktree_for_directory(&target.original)
                 });
                 server_pane::render_directory_screen(
                     selector("directory-unavailable"),
@@ -3308,10 +3144,7 @@ impl TabView {
         let has_screen = screen.is_some();
         // Start Server reaches only this computer's server. Another computer's stopped server
         // is started there, so its Pane explains that and offers nothing.
-        let remote = self
-            .shared
-            .as_ref()
-            .and_then(|shared| shared.sessions().remote_name());
+        let remote = self.shared.sessions().remote_name();
         let notice = pane.notice().map(|(title, detail, intent)| {
             let detail = match &remote {
                 Some(name) if pane.server_stopped() => gpui::SharedString::from(format!(
@@ -3372,8 +3205,7 @@ impl TabView {
     ) {
         let Some(sync) = self
             .shared
-            .as_mut()
-            .and_then(|shared| shared.view_mut(pane_id))
+            .view_mut(pane_id)
             .map(crate::ui::server_pane::ServerPaneView::take_over)
         else {
             return;
@@ -3388,8 +3220,7 @@ impl TabView {
     fn start_shared_shell(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sync) = self
             .shared
-            .as_mut()
-            .and_then(|shared| shared.view_mut(pane_id))
+            .view_mut(pane_id)
             .map(crate::ui::server_pane::ServerPaneView::start_shell)
         else {
             return;
@@ -3411,7 +3242,7 @@ impl TabView {
         if self.directory_recovery_is_open(cx) {
             return;
         }
-        let Some(shared) = &self.shared else { return };
+        let shared = &self.shared;
         if !shared.editability().available() {
             return;
         }
@@ -3499,8 +3330,7 @@ impl TabView {
         let focused = self.tab.focused_pane_id();
         if self
             .shared
-            .as_ref()
-            .and_then(|shared| shared.view(focused))
+            .view(focused)
             .and_then(|view| view.screen())
             .is_some()
         {
@@ -3511,9 +3341,7 @@ impl TabView {
     }
     /// Reconnects each shared Pane the person's stop interrupted, once they started the server.
     pub(crate) fn server_started(&mut self, cx: &mut Context<Self>) {
-        let Some(shared) = self.shared.as_mut() else {
-            return;
-        };
+        let shared = &mut self.shared;
         for pane_id in shared.pane_ids() {
             if let Some(view) = shared.view_mut(pane_id) {
                 view.server_started();
@@ -3528,8 +3356,8 @@ impl TabView {
         // does.
         if let Some(route) = self
             .shared
-            .as_ref()
-            .and_then(|shared| shared.sessions().direct_route())
+            .sessions()
+            .direct_route()
             .map(|direct| direct.route)
             && let Some(connections) = crate::ui::direct_servers::installed(cx)
             && connections.status(&route)
@@ -3539,8 +3367,7 @@ impl TabView {
         }
         if self
             .shared
-            .as_mut()
-            .and_then(|shared| shared.view_mut(pane_id))
+            .view_mut(pane_id)
             .map(crate::ui::server_pane::ServerPaneView::retry)
             .is_some()
         {
@@ -3548,8 +3375,7 @@ impl TabView {
             // focus. The screen keeps it, so the keyboard stays where the action was.
             if matches!(
                 self.shared
-                    .as_ref()
-                    .and_then(|shared| shared.view(pane_id))
+                    .view(pane_id)
                     .and_then(crate::ui::server_pane::ServerPaneView::screen),
                 Some(crate::ui::server_pane::ServerPaneScreen::StartUnknown { checking: true, .. })
             ) {
@@ -3574,17 +3400,12 @@ impl TabView {
         terminal.read(cx).is_focused(window)
             || self
                 .shared
-                .as_ref()
-                .and_then(|shared| shared.screen_focus(pane_id))
+                .screen_focus(pane_id)
                 .is_some_and(|focus| focus.contains_focused(window, cx))
     }
 
     fn focus_shared_screen(&self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(focus) = self
-            .shared
-            .as_ref()
-            .and_then(|shared| shared.screen_focus(pane_id))
-        {
+        if let Some(focus) = self.shared.screen_focus(pane_id) {
             focus.focus(window, cx);
         }
     }
@@ -5057,8 +4878,7 @@ mod tests {
         RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        ScreenSnapshot, ScrollbarSnapshot, TerminalSessionEvent, TerminalSessionExit,
-        TerminalSessionFactory,
+        ScreenSnapshot, ScrollbarSnapshot, TerminalSessionEvent, TerminalSessionFactory,
     };
 
     struct CaptionSegmentFixture {
@@ -5170,25 +4990,261 @@ mod tests {
         }
     }
 
-    /// A desktop-owned Tab's Panes over a scripted terminal.
-    fn test_session_factory() -> WorkspaceTerminalSessionFactory {
-        desktop_session_factory(Rc::new(
-            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                .with_selection_copy_response(Ok(None)),
-        ))
-    }
-
-    /// Desktop-owned Panes over `terminal`.
-    fn desktop_session_factory(
+    /// Server-backed Panes over `terminal`.
+    fn server_session_factory(
         terminal: Rc<dyn TerminalSessionFactory>,
     ) -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new_local(
-            terminal,
-            crate::domain::ValidatedLocalDirectory::new(
-                PathBuf::from("/missing/local/home-is-not-a-workspace"),
-                crate::domain::LocalDirectoryIdentity::for_test(71074),
-            ),
+        WorkspaceTerminalSessionFactory::new_server(terminal)
+    }
+
+    /// Terminal Sessions of a server whose connection presents what it reads.
+    fn server_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
+        TestTerminalSessionFactory::new(records).with_reading_available(true)
+    }
+
+    /// One server Tab's membership as a scripted server owns it. It accepts every split.
+    struct ScriptedServer {
+        edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+        panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+        factory: WorkspaceTerminalSessionFactory,
+        source: crate::ui::shared_workspaces::SharedEditSource,
+        layout: RefCell<spaceterm_server::hierarchy::Tab>,
+        revision: Cell<u64>,
+        answered: Cell<usize>,
+    }
+
+    impl ScriptedServer {
+        /// A server whose Tab holds the Root Pane and then `layout`, over Terminal Sessions from
+        /// `terminal`.
+        fn new(
+            layout: Vec<spaceterm_server::hierarchy::Pane>,
+            terminal: TestTerminalSessionFactory,
+        ) -> Rc<Self> {
+            use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+            use crate::ui::shared_workspaces::tests as server;
+            let factory = server_session_factory(Rc::new(terminal));
+            let mut members = vec![server::pane(
+                server::ROOT_PANE,
+                None,
+                spaceterm_server::hierarchy::Axis::Right,
+            )];
+            members.extend(layout);
+            let layout = server::tab(server::ROOT_TAB, members);
+            let edits = Rc::new(ScriptedEdits::new(Some(server::inventory(
+                1,
+                vec![layout.clone()],
+            ))));
+            let source = crate::ui::shared_workspaces::SharedEditSource::new(edits.clone());
+            Rc::new(Self {
+                edits,
+                source,
+                panes: ScriptedPanes::connected(factory.clone()),
+                factory,
+                layout: RefCell::new(layout),
+                revision: Cell::new(1),
+                answered: Cell::new(0),
+            })
+        }
+
+        /// Accepts every split asked for since the last answer, and reports whether membership
+        /// changed.
+        fn accept_splits(&self) -> bool {
+            use crate::ui::shared_workspaces::tests as server;
+            use spaceterm_server::hierarchy::{Mutation, Outcome};
+            let mut changed = false;
+            while let Some(mutation) = self.edits.submitted().get(self.answered.get()).cloned() {
+                self.answered.set(self.answered.get() + 1);
+                let Mutation::SplitPane { source, axis, .. } = mutation else {
+                    panic!("a Tab asks its server only for splits, not {mutation:?}");
+                };
+                let id = [0x80 + self.layout.borrow().panes.len() as u8; 32];
+                self.layout
+                    .borrow_mut()
+                    .panes
+                    .push(server::pane(id, Some(source), axis));
+                self.publish();
+                self.edits.answer(Outcome::Accepted { target: id });
+                changed = true;
+            }
+            changed
+        }
+
+        fn publish(&self) {
+            use crate::ui::shared_workspaces::tests as server;
+            self.revision.set(self.revision.get() + 1);
+            self.edits.set_inventory(server::inventory(
+                self.revision.get(),
+                vec![self.layout.borrow().clone()],
+            ));
+        }
+
+        /// A new Tab presenting this server's Tab, as the Workspace Window creates one.
+        fn tab_view(
+            &self,
+            construction: PaneConstruction,
+            window: &mut Window,
+            cx: &mut Context<TabView>,
+        ) -> TabView {
+            use crate::ui::shared_workspaces::tests as server;
+            use crate::ui::shared_workspaces::{SharedPaneOpener, SharedPaneSessions, SharedPanes};
+            let sessions = SharedPaneSessions::with_opener(
+                Rc::clone(&self.panes) as Rc<dyn SharedPaneOpener>,
+                &construction,
+            );
+            let source = self.source.clone();
+            let (_, state) = self
+                .panes
+                .open(server::ROOT_PANE)
+                .expect("the Root Pane subscription must open");
+            TabView::with_pane_construction(
+                TabId::new(1),
+                self.factory.clone(),
+                construction,
+                SharedPanes::new(source, sessions, server::WORKSPACE, server::ROOT_TAB),
+                (server::ROOT_PANE, state),
+                window,
+                cx,
+            )
+        }
+
+        /// A window whose root presents a new Tab of this server's Tab on a measured stage.
+        fn window<'a>(
+            &self,
+            construction: PaneConstruction,
+            cx: &'a mut TestAppContext,
+        ) -> (Entity<TabView>, &'a mut VisualTestContext) {
+            let (root, cx) = cx.add_window_view(|window, cx| {
+                StagedTab(cx.new(|cx| self.tab_view(construction, window, cx)))
+            });
+            let view = root.read_with(cx, |root, _| root.0.clone());
+            (view, cx)
+        }
+
+        /// Binds `view` to this server's Tab. Every split it asks for afterwards joins as soon as
+        /// the test runs until parked.
+        fn bind(self: &Rc<Self>, view: &Entity<TabView>, cx: &mut VisualTestContext) {
+            use crate::ui::shared_workspaces::SharedWorkspaceEdits as _;
+            use crate::ui::shared_workspaces::tests as server;
+            let source = self.source.clone();
+            let changes = self.edits.subscribe();
+            let layout = self.layout.borrow().clone();
+            cx.update(|window, cx| {
+                window.activate_window();
+                view.update(cx, |view, cx| {
+                    view.reconcile_shared(&layout, window, cx);
+                    view.focus(window, cx);
+                });
+                let server = Rc::clone(self);
+                let bound = view.downgrade();
+                window
+                    .spawn(cx, async move |cx| {
+                        while changes.recv().await.is_ok() {
+                            if !server.accept_splits() {
+                                continue;
+                            }
+                            // The Workspace Window reads the answer, then presents the
+                            // membership with every split still waiting for its answer.
+                            let Some(layout) =
+                                source.presentation_inventory().and_then(|mut inventory| {
+                                    inventory
+                                        .workspaces
+                                        .pop()?
+                                        .tabs
+                                        .into_iter()
+                                        .find(|tab| tab.id == server::ROOT_TAB)
+                                })
+                            else {
+                                continue;
+                            };
+                            let reconciled = bound.update_in(cx, |view, window, cx| {
+                                view.reconcile_shared(&layout, window, cx);
+                            });
+                            if reconciled.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+            });
+            settle_terminal_readiness(cx);
+        }
+    }
+
+    /// The stage a Tab draws on, which readiness measures before it starts any Terminal
+    /// Session, as the Tab strip's stage is.
+    fn measured_stage(view: &Entity<TabView>, window: &mut Window, cx: &mut App) -> gpui::Div {
+        let readiness = crate::ui::terminal_readiness::Readiness::for_window(window, cx);
+        div()
+            .size_full()
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(stage) = children.last() {
+                    readiness.measured(stage.size);
+                }
+            })
+            .child(view.clone())
+    }
+
+    /// A window root presenting one Tab on its whole measured stage.
+    struct StagedTab(Entity<TabView>);
+
+    impl Render for StagedTab {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            measured_stage(&self.0, window, cx)
+        }
+    }
+
+    /// The server Pane `index` of a layout, split from Pane `source`, where the Root Pane is 0.
+    fn layout_pane(
+        index: u8,
+        source: u8,
+        axis: spaceterm_server::hierarchy::Axis,
+    ) -> spaceterm_server::hierarchy::Pane {
+        use crate::ui::shared_workspaces::tests as server;
+        let id = |index| {
+            if index == 0 {
+                server::ROOT_PANE
+            } else {
+                [0x40 + index; 32]
+            }
+        };
+        server::pane(id(index), Some(id(source)), axis)
+    }
+
+    /// Presents one server Tab whose Panes are the Root Pane and then `layout`, as the
+    /// Workspace Window binds it, over Terminal Sessions from `terminal`.
+    fn shared_tab_view_over(
+        layout: Vec<spaceterm_server::hierarchy::Pane>,
+        terminal: TestTerminalSessionFactory,
+        cx: &mut TestAppContext,
+    ) -> (Entity<TabView>, &mut VisualTestContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let server = ScriptedServer::new(layout, terminal);
+        let (view, cx) = server.window(PaneConstruction::testing(), cx);
+        server.bind(&view, cx);
+        (view, cx)
+    }
+
+    /// Presents one server Tab whose Panes are the Root Pane and then `layout`.
+    fn shared_tab_view(
+        layout: Vec<spaceterm_server::hierarchy::Pane>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<TabView>, &mut VisualTestContext) {
+        shared_tab_view_over(
+            layout,
+            server_sessions(TestTerminalSessionRecords::default())
+                .with_selection_copy_response(Ok(None)),
+            cx,
         )
+    }
+
+    fn settle_terminal_readiness(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        for _ in 0..4 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.run_until_parked();
+        }
     }
 
     fn split_test_pane(
@@ -5202,21 +5258,24 @@ mod tests {
                 view.split_pane(pane_id, axis, window, cx);
             });
         });
-        cx.run_until_parked();
+        settle_terminal_readiness(cx);
     }
     fn four_pane_view(cx: &mut TestAppContext) -> (Entity<TabView>, &mut VisualTestContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
-        split_test_pane(&view, PaneId::new(2), SplitAxis::Vertical, cx);
+        use spaceterm_server::hierarchy::Axis;
+        let (view, cx) = shared_tab_view(
+            vec![
+                layout_pane(2, 0, Axis::Right),
+                layout_pane(3, 0, Axis::Down),
+                layout_pane(4, 2, Axis::Down),
+            ],
+            cx,
+        );
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.focus_pane(PaneId::new(1), cx);
+                // Each Pane was focused once, in the order it joined.
+                for pane in [2, 3, 4, 1] {
+                    view.focus_pane(PaneId::new(pane), cx);
+                }
                 view.focus(window, cx);
             });
         });
@@ -5246,18 +5305,12 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(records.clone())
-                    .with_selection_copy_response(Ok(None)),
-            ),
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+        let (view, cx) = shared_tab_view_over(
+            Vec::new(),
+            server_sessions(records.clone()).with_selection_copy_response(Ok(None)),
+            cx,
         );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.run_until_parked();
         let whole = cx.debug_bounds("pane-surface-1").unwrap();
         let before = records.commands().len();
@@ -5313,11 +5366,7 @@ mod tests {
     fn a_closed_pane_should_close_its_place_as_its_neighbor_takes_it(cx: &mut TestAppContext) {
         use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         let whole = cx.debug_bounds("pane-surface-1").unwrap();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -5361,18 +5410,12 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(records.clone())
-                    .with_selection_copy_response(Ok(None)),
-            ),
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+        let (view, cx) = shared_tab_view_over(
+            Vec::new(),
+            server_sessions(records.clone()).with_selection_copy_response(Ok(None)),
+            cx,
         );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
         cx.run_until_parked();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -5416,11 +5459,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
         cx.run_until_parked();
@@ -5446,11 +5485,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
 
         cx.update(|_, cx| cx.set_global(AnimatePresence));
@@ -5485,11 +5520,7 @@ mod tests {
         Bounds<Pixels>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         let whole = cx.debug_bounds("pane-surface-1").unwrap();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -5617,11 +5648,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         for _ in 0..4 {
             split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -5665,11 +5692,7 @@ mod tests {
     fn a_pane_dropped_where_moving_panes_overlap_should_land_on_the_one_drawn_on_top(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         split_test_pane(&view, PaneId::new(2), SplitAxis::Horizontal, cx);
@@ -5693,11 +5716,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
 
         cx.update(|_, cx| cx.set_global(AnimatePresence));
@@ -5742,18 +5761,12 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(records.clone())
-                    .with_selection_copy_response(Ok(None)),
-            ),
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+        let (view, cx) = shared_tab_view_over(
+            Vec::new(),
+            server_sessions(records.clone()).with_selection_copy_response(Ok(None)),
+            cx,
         );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.run_until_parked();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         cx.update(|_, cx| {
@@ -5844,11 +5857,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         cx.update(|_, cx| cx.set_global(AnimatePresence));
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -6085,29 +6094,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn pane_attention_count_should_decorate_its_tab_title(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            TabView::new(TabId::new(1), test_session_factory(), window, cx)
-        });
-
-        view.update(cx, |view, _| {
-            view.pane_attention.insert(PaneId::new(1), 2);
-        });
-
-        assert_eq!(view.read_with(cx, |view, _| view.tab_title()), "• Terminal");
-        assert_eq!(
-            view.read_with(cx, |view, _| view.pane_attention.clone()),
-            BTreeMap::from([(PaneId::new(1), 2)])
-        );
-    }
-
-    fn test_home_directory() -> PathBuf {
-        PathBuf::from("/tmp/spaceterm-test-workspace")
-    }
-
     fn caption_text(origin: PaneOrigin, directory: &str, label: &str) -> PaneCaptionText {
         PaneCaptionText::from_facts(super::super::terminal_pane::PaneCaptionFacts {
             origin,
@@ -6198,9 +6184,13 @@ mod tests {
     }
 
     impl Render for CaptionTestView {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            self.activity
-                .mount(div().w(self.width).h(px(600.0)).child(self.view.clone()))
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.activity.mount(
+                div()
+                    .w(self.width)
+                    .h(px(600.0))
+                    .child(measured_stage(&self.view, window, cx)),
+            )
         }
     }
 
@@ -6245,24 +6235,52 @@ mod tests {
             });
         });
         let records = TestTerminalSessionRecords::default();
-        let factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let factory = WorkspaceTerminalSessionFactory::new_local(
-            factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+        let server = ScriptedServer::new(
+            Vec::new(),
+            server_sessions(records.clone()).with_fallback_title("zsh"),
         );
         let (root, cx) = cx.add_window_view(|window, cx| CaptionTestView {
-            view: cx.new(|cx| TabView::new(TabId::new(1), factory, window, cx)),
+            view: cx.new(|cx| server.tab_view(PaneConstruction::testing(), window, cx)),
             width: px(1000.0),
             activity,
         });
         let view = root.read_with(cx, |root, _| root.view.clone());
+        server.bind(&view, cx);
         cx.update(|window, cx| {
-            window.activate_window();
             view.update(cx, |view, cx| view.activate(window, cx));
         });
         cx.run_until_parked();
         (root, view, records, cx)
+    }
+
+    /// Publishes `screen` to Terminal Session `session`, which presents Pane `session`, with the
+    /// Terminal Metadata the server publishes for that Pane.
+    fn publish_screen(
+        view: &Entity<TabView>,
+        records: &TestTerminalSessionRecords,
+        session: usize,
+        screen: Arc<ScreenSnapshot>,
+        cx: &mut VisualTestContext,
+    ) {
+        const RUN: crate::ui::terminal_pane::ServerSessionRun =
+            crate::ui::terminal_pane::ServerSessionRun {
+                boot: [9; 32],
+                session: [10; 32],
+            };
+        records
+            .event_sender(session)
+            .unwrap()
+            .try_send(TerminalSessionEvent::Screen(Arc::clone(&screen)))
+            .unwrap();
+        let terminal = view
+            .read_with(cx, |view, _| {
+                view.tab.pane(PaneId::new(session as u64)).cloned()
+            })
+            .expect("the Pane must exist");
+        terminal.update(cx, |terminal, cx| {
+            terminal.present_server_metadata(Some((RUN, Arc::clone(&screen.metadata))), cx);
+        });
+        cx.run_until_parked();
     }
 
     fn click_caption_control(selector: &'static str, cx: &mut VisualTestContext) {
@@ -6272,7 +6290,7 @@ mod tests {
             .center();
         cx.simulate_mouse_move(control, None, Modifiers::none());
         cx.simulate_click(control, Modifiers::none());
-        cx.run_until_parked();
+        settle_terminal_readiness(cx);
     }
 
     #[gpui::test]
@@ -6380,18 +6398,20 @@ mod tests {
         use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
 
         cx.update(crate::ui::init).unwrap();
-        let factory = test_session_factory();
+        let server = ScriptedServer::new(
+            Vec::new(),
+            server_sessions(TestTerminalSessionRecords::default())
+                .with_selection_copy_response(Ok(None)),
+        );
         let construction = PaneConstruction::new(
             Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
             Rc::new(crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory),
             crate::terminal::native_services::testing::adapters(),
             crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
         );
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            TabView::with_pane_construction(TabId::new(1), factory, construction, window, cx)
-        });
+        let (view, cx) = server.window(construction, cx);
+        server.bind(&view, cx);
         cx.update(|window, cx| {
-            window.activate_window();
             view.update(cx, |view, cx| view.activate(window, cx));
         });
         cx.run_until_parked();
@@ -6524,6 +6544,10 @@ mod tests {
             (3, PaneId::new(3))
         );
         assert_eq!(records.pointer_count(), 0);
+        // Readiness starts the Terminal Session of a Pane the server added on its next turn.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
         assert!(
             cx.update(|window, cx| { view.read(cx).focused_terminal_has_input_focus(window, cx) })
         );
@@ -6687,11 +6711,7 @@ mod tests {
         // The client factory's placeholder says zsh; the Pane host actually launched fish.
         metadata.shell_name = Arc::from("fish");
         metadata.directory.path = Arc::from("/srv/new-place");
-        records
-            .event_sender(1)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Screen(screen.clone()))
-            .unwrap();
+        publish_screen(&view, &records, 1, screen.clone(), cx);
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert_eq!(view.pane_captions[&PaneId::new(1)].label, "fish");
@@ -6705,11 +6725,7 @@ mod tests {
             line: Arc::from("π build"),
             state: CommandState::Running,
         });
-        records
-            .event_sender(1)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Screen(screen.clone()))
-            .unwrap();
+        publish_screen(&view, &records, 1, screen.clone(), cx);
         cx.run_until_parked();
         let caption = view.read_with(cx, |view, _| {
             let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
@@ -6735,11 +6751,7 @@ mod tests {
             exit_status: Some(0),
             duration: std::time::Duration::ZERO,
         };
-        records
-            .event_sender(1)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Screen(screen))
-            .unwrap();
+        publish_screen(&view, &records, 1, screen, cx);
         cx.run_until_parked();
         let caption = view.read_with(cx, |view, _| {
             let caption = view.pane_captions.get(&PaneId::new(1)).unwrap();
@@ -6818,11 +6830,7 @@ mod tests {
             let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
             metadata.context = context;
             metadata.directory.path = Arc::from("/Users/tester/Projects/app");
-            records
-                .event_sender(1)
-                .unwrap()
-                .try_send(TerminalSessionEvent::Screen(screen))
-                .unwrap();
+            publish_screen(&view, &records, 1, screen, cx);
             cx.run_until_parked();
 
             let caption = view.read_with(cx, |view, _| {
@@ -6859,7 +6867,7 @@ mod tests {
 
     #[gpui::test]
     fn caption_should_present_origin_directory_status_then_activity(cx: &mut TestAppContext) {
-        let (_, _, records, cx) = caption_view(cx);
+        let (_, view, records, cx) = caption_view(cx);
         let mut screen =
             ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
         let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
@@ -6876,11 +6884,7 @@ mod tests {
         metadata.title.value = Arc::from("build");
         metadata.title.provenance = crate::terminal::metadata::TitleProvenance::TerminalControl;
         metadata.progress = crate::terminal::metadata::ProgressMetadata::Normal(40);
-        records
-            .event_sender(1)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Screen(screen))
-            .unwrap();
+        publish_screen(&view, &records, 1, screen, cx);
         cx.run_until_parked();
 
         let centers = [
@@ -6923,11 +6927,7 @@ mod tests {
             ),
         );
         metadata.directory.path = Arc::from("/Users/tester");
-        records
-            .event_sender(1)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Screen(screen))
-            .unwrap();
+        publish_screen(&view, &records, 1, screen, cx);
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             view.pane_captions
@@ -7231,11 +7231,7 @@ mod tests {
     fn single_pane_should_float_as_one_rounded_surface_holding_its_caption(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.run_until_parked();
 
         let root = gpui::Bounds::new(
@@ -7285,44 +7281,6 @@ mod tests {
         assert!(
             cx.debug_bounds(mask).is_some(),
             "the Pane corners should be masked at the frame radius with the base surface"
-        );
-    }
-
-    #[gpui::test]
-    fn initial_and_unknown_source_panes_should_start_in_home_directory(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let home_directory = PathBuf::from("/tmp/spaceterm-home-directory");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(home_directory.clone()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        assert_eq!(
-            records
-                .starts()
-                .into_iter()
-                .map(|start| {
-                    start
-                        .local_working_directory()
-                        .expect("Pane starts must remain local")
-                        .path()
-                        .to_path_buf()
-                })
-                .collect::<Vec<_>>(),
-            vec![home_directory.clone(), home_directory]
         );
     }
 
@@ -7993,25 +7951,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn every_split_pane_caption_should_render_its_own_name_segment(cx: &mut TestAppContext) {
-        let (_, view, _, cx) = caption_view(cx);
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("pane-caption-name-1").is_some());
-        assert!(cx.debug_bounds("pane-caption-name-2").is_some());
-    }
-
-    #[gpui::test]
     fn a_split_after_layout_should_skip_a_pane_closed_before_the_layout(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
@@ -8034,70 +7975,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn split_panes_should_render_compact_focused_and_unfocused_captions(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let unfocused_height = cx
-            .debug_bounds("pane-caption-1-unfocused")
-            .map(|bounds| bounds.size.height);
-        let focused_height = cx
-            .debug_bounds("pane-caption-2-focused")
-            .map(|bounds| bounds.size.height);
-
-        assert_eq!(
-            (unfocused_height, focused_height),
-            (Some(px(PANE_CAPTION_HEIGHT)), Some(px(PANE_CAPTION_HEIGHT)))
-        );
-    }
-
-    #[gpui::test]
-    fn focusing_another_pane_should_move_the_focused_caption_state(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
-        cx.run_until_parked();
-
-        let caption_state = (
-            cx.debug_bounds("pane-caption-1-focused").is_some(),
-            cx.debug_bounds("pane-caption-2-unfocused").is_some(),
-        );
-        assert_eq!(caption_state, (true, true));
-    }
-
-    #[gpui::test]
     fn native_service_return_is_rejected_after_pane_changes_away_and_back(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8145,17 +8025,8 @@ mod tests {
 
     #[gpui::test]
     fn closing_a_nonfocused_pane_invalidates_the_service_hierarchy(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8201,20 +8072,14 @@ mod tests {
 
     #[gpui::test]
     fn file_drop_should_focus_the_target_pane_before_requesting_its_paste(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-            TestTerminalSessionFactory::new(records.clone()).with_client_filesystem(
+        let (view, cx) = shared_tab_view_over(
+            Vec::new(),
+            server_sessions(records.clone()).with_client_filesystem(
                 crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
             ),
+            cx,
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8265,17 +8130,12 @@ mod tests {
 
     #[gpui::test]
     fn terminal_scrollbar_interaction_should_focus_its_owning_pane(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+        let (view, cx) = shared_tab_view_over(
+            Vec::new(),
+            server_sessions(records.clone()).with_fallback_title("zsh"),
+            cx,
         );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
@@ -8331,27 +8191,6 @@ mod tests {
             })
         });
         assert_eq!(state, (PaneId::new(1), true));
-    }
-
-    #[gpui::test]
-    fn command_shift_vim_shortcuts_should_not_move_pane_focus(cx: &mut TestAppContext) {
-        let (view, cx) = four_pane_view(cx);
-
-        let focused_panes = focused_panes_after_shortcuts(
-            &view,
-            cx,
-            ["cmd-shift-l", "cmd-shift-j", "cmd-shift-h", "cmd-shift-k"],
-        );
-
-        assert_eq!(
-            focused_panes,
-            [
-                PaneId::new(1),
-                PaneId::new(1),
-                PaneId::new(1),
-                PaneId::new(1),
-            ]
-        );
     }
 
     #[gpui::test]
@@ -8411,24 +8250,19 @@ mod tests {
 
     #[gpui::test]
     fn terminal_title_event_should_update_the_tab_title_snapshot(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+        let (view, cx) = shared_tab_view_over(
+            Vec::new(),
+            server_sessions(records.clone()).with_fallback_title("zsh"),
+            cx,
         );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
             });
         });
-        cx.run_until_parked();
+        settle_terminal_readiness(cx);
 
         let sender = records
             .last_event_sender()
@@ -8448,104 +8282,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn exited_terminal_session_should_close_its_pane_and_focus_the_neighbor(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-        let sender = records
-            .event_sender(2)
-            .expect("the split Pane's Terminal Session was not started");
-        sender
-            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-            .unwrap();
-        cx.run_until_parked();
-
-        let state = view.read_with(cx, |view, _| {
-            (
-                view.tab.pane_count(),
-                view.tab.focused_pane_id(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (1, PaneId::new(1), vec![2]));
-    }
-
-    #[gpui::test]
-    fn exited_last_terminal_session_should_request_tab_close(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let close_requests = Rc::new(RefCell::new(Vec::new()));
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-        let close_requests_for_subscription = Rc::clone(&close_requests);
-        view.update(cx, |_, cx| {
-            cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
-                close_requests_for_subscription
-                    .borrow_mut()
-                    .push(event.clone());
-            })
-            .detach();
-        });
-
-        let sender = records
-            .event_sender(1)
-            .expect("the initial Pane's Terminal Session was not started");
-        sender
-            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-            .unwrap();
-        sender
-            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::ExitCode(
-                1,
-            )))
-            .unwrap();
-        cx.run_until_parked();
-
-        assert_eq!(
-            (
-                close_requests.borrow().clone(),
-                records.dropped_session_ids()
-            ),
-            (
-                vec![TabViewEvent::CloseTabRequested {
-                    tab_id: TabId::new(1)
-                }],
-                Vec::new()
-            )
-        );
-    }
-
-    #[gpui::test]
     fn single_pane_toggle_zoom_should_not_emit_presentation_changed(cx: &mut TestAppContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
         view.update(cx, |_, cx| {
             cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
@@ -8569,9 +8310,7 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
         view.update(cx, |_, cx| {
@@ -8595,17 +8334,8 @@ mod tests {
     fn zoom_restore_button_should_restore_panes_without_sending_terminal_pointer_input(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -8630,71 +8360,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shared_resize_handle_should_resize_split_without_leaking_terminal_input(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-        cx.update(|window, cx| {
-            window.activate_window();
-            view.update(cx, |view, cx| {
-                view.split_focused(SplitAxis::Horizontal, window, cx);
-                view.focus(window, cx);
-            });
-        });
-        cx.run_until_parked();
-        let handle = cx
-            .debug_bounds("split-resize-1-hitbox")
-            .expect("the shared split ResizeHandle was rendered");
-        let start = handle.center();
-        let destination = point(start.x + px(60.0), start.y + px(40.0));
-
-        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_move(destination, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-
-        let state = cx.update(|window, cx| {
-            let view = view.read(cx);
-            let ratio = match view.tab.root().node() {
-                PaneNodeRef::Split { ratio, .. } => ratio,
-                PaneNodeRef::Leaf { .. } => 0.0,
-            };
-            (
-                ratio,
-                view.resizing_split_id,
-                view.focused_terminal_has_input_focus(window, cx),
-            )
-        });
-        assert!(
-            state.0 > 0.5,
-            "the shared handle did not grow the first Pane"
-        );
-        assert_eq!((state.1, state.2, records.pointer_count()), (None, true, 0));
-    }
-
-    #[gpui::test]
     fn pane_split_resize_states_should_keep_the_handle_inside_its_gap(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view_over(Vec::new(), server_sessions(records), cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
@@ -8739,17 +8407,8 @@ mod tests {
     fn pane_split_resize_should_reveal_its_paintless_handle_to_keyboard_focus(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view_over(Vec::new(), server_sessions(records), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8784,17 +8443,8 @@ mod tests {
 
     #[gpui::test]
     fn integrated_split_resize_handle_should_own_both_outer_hitbox_edges(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8865,11 +8515,7 @@ mod tests {
     }
 
     fn split_gap_view(cx: &mut TestAppContext) -> (Entity<TabView>, &mut VisualTestContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let session_factory = test_session_factory();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view(Vec::new(), cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (view, cx)
@@ -9207,15 +8853,8 @@ mod tests {
 
     #[gpui::test]
     fn unpainted_split_gap_should_resize_and_reset_without_terminal_input(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(TestTerminalSessionFactory::new(records.clone())),
-            crate::terminal::testing::test_local_directory(test_home_directory()),
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
+        let (view, cx) = shared_tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.update(|window, cx| {

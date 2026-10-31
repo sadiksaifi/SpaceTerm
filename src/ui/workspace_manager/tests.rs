@@ -212,9 +212,8 @@ fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppCont
         created: Rc::clone(&created),
         delegate: Rc::clone(&native_services.file_preview),
     });
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(server_sessions(
-        TestTerminalSessionRecords::default(),
-    ));
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(server_sessions(TestTerminalSessionRecords::default()));
     let (manager, cx) = cx.add_window_view(|window, cx| {
         local_server_manager(
             session_factory,
@@ -258,9 +257,8 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     let factory = Rc::new(
         crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
     );
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(server_sessions(
-        TestTerminalSessionRecords::default(),
-    ));
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(server_sessions(TestTerminalSessionRecords::default()));
     let (manager, cx) = cx.add_window_view(|window, cx| {
         local_server_manager(
             session_factory,
@@ -351,10 +349,7 @@ impl LocalServer {
         home_directory: PathBuf,
     ) -> Self {
         let panes = crate::ui::shared_workspaces::testing::ScriptedPanes::connected(
-            WorkspaceTerminalSessionFactory::new_server(
-                session_factory,
-                crate::terminal::testing::test_local_directory(home_directory.clone()),
-            ),
+            WorkspaceTerminalSessionFactory::new_server(session_factory),
         );
         Self {
             edits: Rc::new(
@@ -423,23 +418,25 @@ fn server_closes(cx: &mut VisualTestContext) -> usize {
         .edits
         .submitted()
         .iter()
-        .filter(|mutation| matches!(mutation, spaceterm_server::hierarchy::Mutation::Close { .. }))
+        .filter(|mutation| {
+            matches!(
+                mutation,
+                spaceterm_server::hierarchy::Mutation::Close { .. }
+            )
+        })
         .count()
 }
 
 /// Terminal Sessions that run in the account-local server, recorded in `records`.
 pub(crate) fn server_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
-    TestTerminalSessionFactory::new(records)
-        .server_backed()
-        .with_reading_available(true)
+    TestTerminalSessionFactory::new(records).with_reading_available(true)
 }
 
 /// Presentations of Terminal Sessions that run in a server, recorded nowhere.
 fn server_session_factory() -> WorkspaceTerminalSessionFactory {
-    WorkspaceTerminalSessionFactory::new_server(
-        Rc::new(server_sessions(TestTerminalSessionRecords::default())),
-        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-    )
+    WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(
+        TestTerminalSessionRecords::default(),
+    )))
 }
 
 /// A Workspace Window presenting the account-local server's one Workspace at `home_directory`,
@@ -454,13 +451,8 @@ pub(crate) fn local_server_manager(
 ) -> WorkspaceManager {
     // Every Workspace Window's update control reads this computer's server update state.
     crate::ui::updates::server_rows::testing::install_up_to_date(cx);
-    let mut manager = WorkspaceManager::new_with_adapters(
-        home_directory.clone(),
-        adapters,
-        sidebar,
-        window,
-        cx,
-    );
+    let mut manager =
+        WorkspaceManager::new_with_adapters(home_directory.clone(), adapters, sidebar, window, cx);
     LocalServer::new(session_factory, home_directory).present(&mut manager, window, cx);
     manager
 }
@@ -1292,7 +1284,11 @@ fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
     let pinned = local_server(cx).edits.applied_inventory().workspaces[0]
         .pinned_directory
         .clone();
-    assert_eq!(pinned, Some(project.clone()), "the server pins the directory");
+    assert_eq!(
+        pinned,
+        Some(project.clone()),
+        "the server pins the directory"
+    );
     assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
     fs::remove_dir_all(project).unwrap();
 }
@@ -4062,12 +4058,7 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
                 .local_filesystem
                 .validate_directory(&directory)
                 .unwrap();
-            manager.apply_directory_pin(
-                WorkspaceId::new(1),
-                Some(directory),
-                window,
-                cx,
-            );
+            manager.apply_directory_pin(WorkspaceId::new(1), Some(directory), window, cx);
         })
     });
     cx.run_until_parked();
@@ -7229,7 +7220,11 @@ fn closing_an_inactive_tab_from_its_close_button_by_assistive_technology_keeps_f
     assert!(manager.read_with(cx, |manager, _| {
         manager.close_confirmation.pending().is_none()
     }));
-    assert_eq!(server_closes(cx), 1, "the idle Tab closes without confirmation");
+    assert_eq!(
+        server_closes(cx),
+        1,
+        "the idle Tab closes without confirmation"
+    );
     assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
 }
 
@@ -7256,7 +7251,11 @@ fn closing_the_active_tab_from_its_close_button_by_assistive_technology_keeps_fo
     assert!(manager.read_with(cx, |manager, _| {
         manager.close_confirmation.pending().is_none()
     }));
-    assert_eq!(server_closes(cx), 1, "the idle Tab closes without confirmation");
+    assert_eq!(
+        server_closes(cx),
+        1,
+        "the idle Tab closes without confirmation"
+    );
     assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
 }
 
@@ -7486,10 +7485,9 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
     let edits = Rc::new(ScriptedEdits::new(Some(published(1, 0, None))));
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let session_factory = WorkspaceTerminalSessionFactory::new_server(
-                Rc::new(server_sessions(TestTerminalSessionRecords::default())),
-                crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-            );
+            let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                server_sessions(TestTerminalSessionRecords::default()),
+            ));
             manager.present_shared_workspaces(
                 SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
                 SharedPaneSessions::with_opener(
@@ -7608,10 +7606,9 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
         manager.update(cx, |manager, cx| {
             let sessions = || {
                 SharedPaneSessions::with_opener(
-                    ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_server(
-                        Rc::new(server_sessions(TestTerminalSessionRecords::default())),
-                        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-                    )) as Rc<_>,
+                    ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                        server_sessions(TestTerminalSessionRecords::default()),
+                    ))) as Rc<_>,
                     &PaneConstruction::testing(),
                 )
             };
@@ -8512,33 +8509,36 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
         repositories: None,
         revision: 1,
         close: None,
-        workspaces: vec![Workspace {
-            id: SHARED_FOCUS_WORKSPACE,
-            name: "Build".to_owned(),
-            name_version: 0,
-            pin_version: 0,
-            pinned_directory: None,
-            root_tab: SHARED_FOCUS_TAB,
-            tabs: vec![Tab {
-                worktree: None,
-                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
-                worktree_repository: None,
-                id: SHARED_FOCUS_TAB,
-                root_pane: SHARED_FOCUS_PANE,
-                panes: vec![Pane {
-                    id: SHARED_FOCUS_PANE,
-                    source: None,
-                    axis: Axis::Right,
-                    starting_directory: PathBuf::from("/server/work"),
-                    current_directory: None,
-                    repository_directory: None,
-                    presentation: None,
-                    observers: Default::default(),
-                    confirmed_directory: None,
-                    creator: None,
+        workspaces: vec![
+            Workspace {
+                id: SHARED_FOCUS_WORKSPACE,
+                name: "Build".to_owned(),
+                name_version: 0,
+                pin_version: 0,
+                pinned_directory: None,
+                root_tab: SHARED_FOCUS_TAB,
+                tabs: vec![Tab {
+                    worktree: None,
+                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_repository: None,
+                    id: SHARED_FOCUS_TAB,
+                    root_pane: SHARED_FOCUS_PANE,
+                    panes: vec![Pane {
+                        id: SHARED_FOCUS_PANE,
+                        source: None,
+                        axis: Axis::Right,
+                        starting_directory: PathBuf::from("/server/work"),
+                        current_directory: None,
+                        repository_directory: None,
+                        presentation: None,
+                        observers: Default::default(),
+                        confirmed_directory: None,
+                        creator: None,
+                    }],
                 }],
-            }],
-        }, shared_close_other()],
+            },
+            shared_close_other(),
+        ],
     };
     let edits = Rc::new(ScriptedEdits::new(Some(published)));
     let session_factory = server_session_factory();
@@ -9124,10 +9124,7 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_WORKSPACE,
     });
-    harness.publish(
-        shared_close_remaining(2),
-        cx,
-    );
+    harness.publish(shared_close_remaining(2), cx);
     assert_eq!(harness.shared_rows(cx), 0);
     assert!(
         harness
@@ -9652,10 +9649,7 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_SECOND_TAB,
     });
-    harness.publish(
-        shared_close_remaining(3),
-        cx,
-    );
+    harness.publish(shared_close_remaining(3), cx);
     assert_eq!(harness.shared_rows(cx), 0);
 }
 
@@ -9713,10 +9707,7 @@ fn another_clients_removals_should_leave_the_keyboard_where_a_person_is_typing(
         "another client's Tab close must not pull the keyboard into the Tab that remains"
     );
 
-    harness.publish(
-        shared_close_remaining(4),
-        cx,
-    );
+    harness.publish(shared_close_remaining(4), cx);
     assert_eq!(harness.shared_rows(cx), 0);
     assert!(
         shared_close_rename_is_focused(&harness, cx),
@@ -9783,10 +9774,7 @@ fn another_clients_removal_of_where_the_keyboard_rests_should_hand_it_to_what_re
     );
 
     // Another client kills the Workspace the keyboard is in.
-    harness.publish(
-        shared_close_remaining(4),
-        cx,
-    );
+    harness.publish(shared_close_remaining(4), cx);
     assert_eq!(harness.shared_rows(cx), 0);
     assert!(
         shared_close_terminal_is_focused(&harness, cx),
@@ -11239,8 +11227,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 LocalFilesystemAuthority::testing_with_failure(
                     crate::platform::local_filesystem::LocalFilesystemError::PermissionDenied,
                 ),
@@ -11276,8 +11263,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 filesystem,
             );
             let context = context();
@@ -11317,8 +11303,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 filesystem,
             );
             let blocked = submit(
@@ -11350,8 +11335,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 filesystem,
             );
             let context = context();
@@ -11446,7 +11430,6 @@ mod shared_repositories {
                 live(),
                 &construction,
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed()
                     .with_client_filesystem(crate::runtime::local_filesystem()),
                 crate::runtime::local_filesystem(),
             );
@@ -11484,7 +11467,6 @@ mod shared_repositories {
                 live(),
                 &construction,
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed()
                     .with_client_filesystem(crate::runtime::local_filesystem()),
                 LocalFilesystemAuthority::testing_observed(
                     &crate::runtime::local_filesystem(),
@@ -11541,7 +11523,6 @@ mod shared_repositories {
                 live(),
                 &PaneConstruction::testing(),
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed()
                     .with_client_filesystem(crate::runtime::local_filesystem()),
                 crate::runtime::local_filesystem(),
             );
@@ -11575,13 +11556,9 @@ mod shared_repositories {
                     let penguin = super::super::named_route("penguin");
                     let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
                     source.replace_transport(Rc::clone(&edits) as Rc<_>);
-                    let session_factory = WorkspaceTerminalSessionFactory::new_server(
-                        Rc::new(
-                            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                                .server_backed(),
-                        ),
-                        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-                    );
+                    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                        TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
+                    ));
                     let key = manager.present_server_workspaces(
                         ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
                             route: penguin,
@@ -11637,8 +11614,7 @@ mod shared_repositories {
                 root_tab: OTHER_TAB,
                 tabs: vec![Tab {
                     worktree: None,
-                    worktree_membership:
-                        spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                     worktree_repository: None,
                     id: OTHER_TAB,
                     root_pane: OTHER_PANE,
@@ -11647,10 +11623,12 @@ mod shared_repositories {
             },
         );
         if let Some(close) = inventory.close.as_mut() {
-            close.sessions.push(spaceterm_server::hierarchy::ConfirmedPane {
-                id: OTHER_PANE,
-                session: None,
-            });
+            close
+                .sessions
+                .push(spaceterm_server::hierarchy::ConfirmedPane {
+                    id: OTHER_PANE,
+                    session: None,
+                });
         }
         inventory
     }
@@ -11701,7 +11679,7 @@ mod shared_repositories {
             cx,
             initial,
             &PaneConstruction::testing(),
-            TestTerminalSessionFactory::new(records.clone()).server_backed(),
+            TestTerminalSessionFactory::new(records.clone()),
             records,
             crate::runtime::local_filesystem(),
         )
@@ -11737,10 +11715,7 @@ mod shared_repositories {
     ) -> (Harness, &'a mut VisualTestContext) {
         let (manager, _, cx) = serverless_workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(with_other(initial))));
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(
-            Rc::new(sessions),
-            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(sessions));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.present_shared_workspaces(
@@ -11762,7 +11737,10 @@ mod shared_repositories {
         cx.run_until_parked();
         let shared = manager
             .read_with(cx, |manager, _| {
-                manager.shared.local().and_then(|shared| shared.local(WORKSPACE))
+                manager
+                    .shared
+                    .local()
+                    .and_then(|shared| shared.local(WORKSPACE))
             })
             .expect("the published Workspace joins the sidebar");
         (
@@ -11835,13 +11813,9 @@ mod shared_repositories {
         cx: &mut Context<WorkspaceManager>,
     ) {
         let penguin = super::named_route("penguin");
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(
-            Rc::new(
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
-            ),
-            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
+        ));
         // As launch does, the window presents the route through its one source.
         let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
         source.replace_transport(Rc::clone(edits) as Rc<_>);
@@ -11872,8 +11846,7 @@ mod shared_repositories {
     fn reopened_window(edits: &Rc<ScriptedEdits>, cx: &VisualTestContext) -> VisualTestContext {
         let mut app = cx.cx.clone();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-            server_sessions(TestTerminalSessionRecords::default())
-                .with_fallback_title("zsh"),
+            server_sessions(TestTerminalSessionRecords::default()).with_fallback_title("zsh"),
         );
         let handle = app.add_window(|window, cx| {
             local_server_manager(

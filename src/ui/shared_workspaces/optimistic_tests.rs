@@ -222,12 +222,10 @@ fn sessions() -> (
 ) {
     let records = crate::terminal::testing::TestTerminalSessionRecords::default();
     let factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-        crate::terminal::testing::TestTerminalSessionFactory::new(records.clone()).server_backed().with_reading_available(true),
+        crate::terminal::testing::TestTerminalSessionFactory::new(records.clone())
+            .with_reading_available(true),
     );
-    let factory = WorkspaceTerminalSessionFactory::new_server(
-        factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-optimistic")),
-    );
+    let factory = WorkspaceTerminalSessionFactory::new_server(factory);
     let panes = ScriptedPanes::new(factory.clone());
     let sessions = SharedPaneSessions::with_opener(
         Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,

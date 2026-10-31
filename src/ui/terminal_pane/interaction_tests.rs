@@ -5,8 +5,7 @@ fn accepted_pending_pane_starts_its_presentation_at_unchanged_bounds(cx: &mut Te
     use spaceterm_ui::a11y_testing::A11yTree;
 
     cx.update(crate::ui::init).unwrap();
-    let pending =
-        WorkspaceTerminalSessionFactory::pending(test_local_directory(std::env::temp_dir()));
+    let pending = WorkspaceTerminalSessionFactory::pending();
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::with_adapters(
             pending,
@@ -35,14 +34,9 @@ fn accepted_pending_pane_starts_its_presentation_at_unchanged_bounds(cx: &mut Te
     });
     let focus = cx.update(|window, cx| window.focused(cx));
     let records = TestTerminalSessionRecords::default();
-    let accepted = WorkspaceTerminalSessionFactory::new_server(
-        Rc::new(
-            TestTerminalSessionFactory::new(records.clone())
-                .server_backed()
-                .with_reading_available(true),
-        ),
-        test_local_directory(std::env::temp_dir()),
-    );
+    let accepted = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+        TestTerminalSessionFactory::new(records.clone()).with_reading_available(true),
+    ));
     pane.update(cx, |pane, cx| {
         pane.bind_pending_server(accepted.clone(), cx)
     });

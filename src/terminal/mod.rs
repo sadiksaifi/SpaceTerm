@@ -131,8 +131,7 @@ pub(crate) use session::{
 };
 #[cfg(test)]
 pub(crate) use session::{
-    LocalTerminalLaunchPlan, TerminalSessionError, TerminalSessionExit,
-    test_terminal_appearance_update,
+    TerminalSessionError, TerminalSessionExit, test_terminal_appearance_update,
 };
 #[cfg(test)]
 pub(crate) use session::{TerminalSessionFactory, TerminalSessionFailure};
