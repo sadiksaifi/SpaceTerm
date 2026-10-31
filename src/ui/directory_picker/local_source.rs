@@ -213,8 +213,7 @@ mod tests {
             .create_directory_recursively(path("~/New/Nested/"))
             .await
             .unwrap();
-        let Ok(DirectorySelection::Pin(directory)) =
-            source.select(path("~/New/Nested/")).await
+        let Ok(DirectorySelection::Pin(directory)) = source.select(path("~/New/Nested/")).await
         else {
             panic!("the created directory was not pinned as a local directory");
         };

@@ -102,12 +102,7 @@ impl Driven for DevelopmentPaneHost {
     }
 }
 
-pub(super) fn native_command(
-    host: &mut impl Driven,
-    lease: Lease,
-    generation: u64,
-    text: &str,
-) {
+pub(super) fn native_command(host: &mut impl Driven, lease: Lease, generation: u64, text: &str) {
     assert!(matches!(
         input(host, lease, generation, text_key(text, false)),
         Reply::Unchanged
@@ -125,12 +120,7 @@ pub(super) fn native_command(
     ));
 }
 
-pub(super) fn focus(
-    host: &mut impl Driven,
-    lease: Lease,
-    generation: u64,
-    target: FocusTarget,
-) {
+pub(super) fn focus(host: &mut impl Driven, lease: Lease, generation: u64, target: FocusTarget) {
     assert!(matches!(
         host.send(
             [1; 32],
@@ -765,8 +755,7 @@ pub(super) fn attach_sized(
 ) -> Lease {
     host.identity
         .get_or_insert_with(|| identity(host.directory.clone()));
-    let Ok(Reply::Attached { lease }) =
-        host.select([1; 32], [connection; 32], create, size, None)
+    let Ok(Reply::Attached { lease }) = host.select([1; 32], [connection; 32], create, size, None)
     else {
         panic!("expected attachment")
     };

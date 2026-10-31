@@ -1540,7 +1540,9 @@ mod tests {
         }
 
         fn discover_home(&self) -> SourceFuture<PickerPath> {
-            Box::pin(async { PickerPath::new(remote_account()).map_err(|_| DirectorySourceError::Other) })
+            Box::pin(async {
+                PickerPath::new(remote_account()).map_err(|_| DirectorySourceError::Other)
+            })
         }
 
         fn list_directories(&self, directory: PickerPath) -> SourceFuture<DirectoryListing> {
@@ -1771,12 +1773,7 @@ mod tests {
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let picker = cx.new(|cx| {
-                let picker = DirectoryPicker::new(
-                    Rc::new(source),
-                    "Pin to Directory",
-                    window,
-                    cx,
-                );
+                let picker = DirectoryPicker::new(Rc::new(source), "Pin to Directory", window, cx);
                 match system_selection {
                     Some(label) => picker.with_system_selection(label.into()),
                     None => picker,
@@ -2178,14 +2175,8 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| {
-                DirectoryPicker::new(
-                    Rc::new(source),
-                    "Pin to Directory",
-                    window,
-                    cx,
-                )
-            });
+            let picker =
+                cx.new(|cx| DirectoryPicker::new(Rc::new(source), "Pin to Directory", window, cx));
             DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
@@ -2217,14 +2208,8 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| {
-                DirectoryPicker::new(
-                    Rc::new(source),
-                    "Pin to Directory",
-                    window,
-                    cx,
-                )
-            });
+            let picker =
+                cx.new(|cx| DirectoryPicker::new(Rc::new(source), "Pin to Directory", window, cx));
             DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());

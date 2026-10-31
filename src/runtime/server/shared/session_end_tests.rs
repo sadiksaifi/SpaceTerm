@@ -631,10 +631,8 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
             ));
             mutate(&mut host, 2, old, originals[old as usize - 1].clone());
         }
-        let record: Organization = serde_json::from_slice(
-            &serde_json::to_vec(&host.state.envelope()).unwrap(),
-        )
-        .unwrap();
+        let record: Organization =
+            serde_json::from_slice(&serde_json::to_vec(&host.state.envelope()).unwrap()).unwrap();
         host.restore_organization(Some(&record));
         assert_eq!(
             shared_inventory(&mut host).close.unwrap().sessions[0].session,

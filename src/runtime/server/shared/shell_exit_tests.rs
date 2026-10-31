@@ -285,10 +285,8 @@ fn a_server_restart_keeps_the_exited_pane_but_not_its_exit() {
     let lease = start(&mut host, 1, pane);
     exit_with(&mut host, 1, lease, "exit 4");
     host.tick(Instant::now());
-    let record: Organization = serde_json::from_slice(
-        &serde_json::to_vec(&host.state.envelope()).unwrap(),
-    )
-    .unwrap();
+    let record: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&host.state.envelope()).unwrap()).unwrap();
     host.shutdown().unwrap();
 
     let mut restarted = SharedWorkspaceHost::new(super::super::tests::host());

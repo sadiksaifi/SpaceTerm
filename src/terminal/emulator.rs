@@ -38,10 +38,11 @@ use crate::appearance::{
     Appearance, AppearanceGeneration, Color, ResolvedTerminalAppearance, TerminalColors,
 };
 use crate::terminal::TerminalAppearanceUpdate;
+use crate::terminal::TerminalFindSnapshot;
 use crate::terminal::accessibility::{
     AccessibilityCell, AccessibilityCellRef, AccessibilityRowId, AccessibilityRowUpdate,
-    AccessibilityScreen, AccessibilitySelectionRefs,
-    AccessibilityUpdate, TerminalAccessibilityModel, TerminalAccessibilityState,
+    AccessibilityScreen, AccessibilitySelectionRefs, AccessibilityUpdate,
+    TerminalAccessibilityModel, TerminalAccessibilityState,
 };
 use crate::terminal::attention::AttentionEvent;
 use crate::terminal::geometry::{BackingPosition, TerminalGeometry};
@@ -62,7 +63,6 @@ use crate::terminal::pointer_input::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
 };
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions, TrailingSpacePolicy};
-use crate::terminal::TerminalFindSnapshot;
 const MAX_WHEEL_STEPS: i32 = 100;
 const MAX_SCROLLBACK_ROWS: usize = 10_000;
 // Match Ghostty's application default in third_party/ghostty/src/config/Config.zig.
@@ -1776,20 +1776,20 @@ impl TerminalEmulator {
     #[cfg(test)]
     pub(crate) fn select_visible(&mut self, start: (usize, u16), end: (usize, u16)) -> bool {
         let model = (0..128)
-            .find_map(|_| match self.accessibility_snapshot_for_current_presentation() {
-                Ok((model, false)) => Some(model),
-                _ => None,
-            })
+            .find_map(
+                |_| match self.accessibility_snapshot_for_current_presentation() {
+                    Ok((model, false)) => Some(model),
+                    _ => None,
+                },
+            )
             .flatten()
             .expect("bounded accessibility publication produces the current model");
         let reference = |(line, column): (usize, u16)| {
-            model
-                .row(line)
-                .map(|row| AccessibilityCellRef {
-                    row: row.id,
-                    row_revision: row.revision,
-                    column,
-                })
+            model.row(line).map(|row| AccessibilityCellRef {
+                row: row.id,
+                row_revision: row.revision,
+                column,
+            })
         };
         let (Some(start), Some(end)) = (reference(start), reference(end)) else {
             return false;
@@ -2222,7 +2222,6 @@ impl TerminalEmulator {
         }
 
         self.advance_graphics_animations(now)?;
-
 
         let metadata = self.metadata.snapshot();
         let title = Arc::clone(&metadata.title.value);

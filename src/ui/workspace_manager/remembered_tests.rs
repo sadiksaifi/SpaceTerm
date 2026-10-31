@@ -148,12 +148,18 @@ fn present_penguin(
 
 fn sync(manager: &Entity<WorkspaceManager>, key: ServerKey, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.sync_shared_workspaces(key, window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(key, window, cx)
+        });
     });
     cx.run_until_parked();
 }
 
-fn named(manager: &Entity<WorkspaceManager>, name: &str, cx: &mut VisualTestContext) -> crate::domain::WorkspaceId {
+fn named(
+    manager: &Entity<WorkspaceManager>,
+    name: &str,
+    cx: &mut VisualTestContext,
+) -> crate::domain::WorkspaceId {
     let name = name.to_owned();
     manager.read_with(cx, move |manager, _| {
         manager
@@ -219,7 +225,9 @@ fn open_tab(manager: &Entity<WorkspaceManager>, tab: Id, cx: &mut VisualTestCont
 }
 
 fn active_name(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> String {
-    manager.read_with(cx, |manager, _| manager.workspaces.active().name().to_owned())
+    manager.read_with(cx, |manager, _| {
+        manager.workspaces.active().name().to_owned()
+    })
 }
 
 /// The server Pane the Active Tab focuses.
@@ -256,9 +264,7 @@ fn closed_on_builds_second_tab(cx: &mut TestAppContext) -> Rc<ScriptedEdits> {
 }
 
 #[gpui::test]
-fn a_reopened_window_presents_the_workspace_and_tab_the_closed_one_left(
-    cx: &mut TestAppContext,
-) {
+fn a_reopened_window_presents_the_workspace_and_tab_the_closed_one_left(cx: &mut TestAppContext) {
     let edits = closed_on_builds_second_tab(cx);
 
     let (manager, mut window) = open_window(cx);
@@ -290,9 +296,7 @@ fn a_workspace_killed_while_the_window_was_closed_selects_the_first_in_display_o
 }
 
 #[gpui::test]
-fn a_tab_closed_while_the_window_was_closed_leaves_the_root_tab_selected(
-    cx: &mut TestAppContext,
-) {
+fn a_tab_closed_while_the_window_was_closed_leaves_the_root_tab_selected(cx: &mut TestAppContext) {
     let edits = closed_on_builds_second_tab(cx);
     edits.set_inventory(server_inventory(2, &[("Logs", 1), ("Build", 2)]));
 
@@ -308,10 +312,20 @@ fn a_tab_closed_while_the_window_was_closed_leaves_the_root_tab_selected(
 fn closed_on_an_offline_servers_workspace(
     cx: &mut TestAppContext,
 ) -> (Rc<ScriptedEdits>, Rc<ScriptedEdits>) {
-    let local = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[("Here", 1)]))));
+    let local = Rc::new(ScriptedEdits::new(Some(server_inventory(
+        1,
+        &[("Here", 1)],
+    ))));
     let edits = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[("Far", 5)]))));
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     present_penguin(&manager, &edits, &[5], &mut window);
     select(&manager, "Far", &mut window);
     close(&manager, &mut window);
@@ -325,7 +339,14 @@ fn an_offline_servers_workspace_is_selected_when_its_server_returns(cx: &mut Tes
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
 
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     assert_eq!(active_name(&manager, &mut window), "Here");
 
@@ -345,7 +366,14 @@ fn a_selection_after_reopening_stays_when_the_offline_server_returns(cx: &mut Te
     let _ = local;
 
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &more, &[1, 2], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &more,
+        &[1, 2],
+        &mut window,
+    );
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     click_row(&manager, "There", &mut window);
 
@@ -407,7 +435,10 @@ fn a_reopened_window_never_opens_a_new_clients_first_view(cx: &mut TestAppContex
     let (_, offline) = closed_on_an_offline_servers_workspace(cx);
     offline.set_inventory(server_inventory(2, &[("Far", 5)]));
     offline.set_connected(true);
-    let first_view = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[("Here", 1)]))));
+    let first_view = Rc::new(ScriptedEdits::new(Some(server_inventory(
+        1,
+        &[("Here", 1)],
+    ))));
     let local_panes = ScriptedPanes::new(MultiServerHarness::session_factory());
 
     let (manager, mut window) = open_window(cx);
@@ -476,7 +507,11 @@ fn present_retained_penguin(
 }
 
 /// Connects penguin's route over `edits`.
-fn connect_penguin(manager: &Entity<WorkspaceManager>, edits: &Rc<ScriptedEdits>, cx: &mut VisualTestContext) {
+fn connect_penguin(
+    manager: &Entity<WorkspaceManager>,
+    edits: &Rc<ScriptedEdits>,
+    cx: &mut VisualTestContext,
+) {
     let route = named_route("penguin");
     let panes = ScriptedPanes::new(MultiServerHarness::session_factory());
     cx.update(|window, cx| {
@@ -560,7 +595,14 @@ fn selecting_the_focused_pane_after_reopening_keeps_it_when_the_server_returns(
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
 
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     assert_eq!(focused_pane(&manager, &mut window), Some(root_pane(1)));
     click_focused_pane(&manager, &mut window);
@@ -716,14 +758,28 @@ fn closing_right_after_a_selection_keeps_that_selection(cx: &mut TestAppContext)
     ))));
 
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1, 2],
+        &mut window,
+    );
     present_penguin(&manager, &offline, &[5], &mut window);
     click_row(&manager, "There", &mut window);
     close(&manager, &mut window);
 
     let online = Rc::new(ScriptedEdits::new(Some(server_inventory(3, &[("Far", 5)]))));
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1, 2],
+        &mut window,
+    );
     present_penguin(&manager, &online, &[5], &mut window);
 
     assert_eq!(active_name(&manager, &mut window), "There");
@@ -756,7 +812,10 @@ fn a_fallback_confirmed_before_any_workspace_selects_the_first_to_arrive_in_orde
         });
     });
     // Penguin confirms Far is gone while this window presents nothing.
-    let killed = Rc::new(ScriptedEdits::new(Some(server_inventory(2, &[("Logs", 1)]))));
+    let killed = Rc::new(ScriptedEdits::new(Some(server_inventory(
+        2,
+        &[("Logs", 1)],
+    ))));
     present_penguin(&manager, &killed, &[], &mut window);
     assert_eq!(
         manager.read_with(&window, |manager, _| manager.workspaces.len()),
@@ -767,7 +826,14 @@ fn a_fallback_confirmed_before_any_workspace_selects_the_first_to_arrive_in_orde
         1,
         &[("A", 1), ("B", 2)],
     ))));
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1, 2],
+        &mut window,
+    );
 
     assert_eq!(active_name(&manager, &mut window), "B");
 }
@@ -821,7 +887,14 @@ fn a_parked_workspace_presented_again_never_cancels_the_restore(cx: &mut TestApp
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
 
     let (manager, mut window) = open_window(cx);
-    let local_key = present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    let local_key = present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     let here = named(&manager, "Here", &mut window);
     // The close parks Here while the server answers, which leaves the window empty.
@@ -832,7 +905,9 @@ fn a_parked_workspace_presented_again_never_cancels_the_restore(cx: &mut TestApp
             .expect("Here is presented");
     });
     assert_eq!(
-        manager.read_with(&window, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(&window, |manager, _| manager
+            .workspaces
+            .active_workspace_id()),
         None
     );
     // The server still has Here and closes nothing, so reconciliation presents it again.
@@ -856,7 +931,14 @@ fn another_clients_change_never_cancels_the_restore(cx: &mut TestAppContext) {
     ))));
 
     let (manager, mut window) = open_window(cx);
-    let local_key = present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+    let local_key = present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1, 2],
+        &mut window,
+    );
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     assert_eq!(active_name(&manager, &mut window), "Here");
     local.set_inventory(server_inventory(3, &[("There", 2)]));
@@ -892,7 +974,14 @@ fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
 
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     window.update(|window, _| window.activate_window());
     window.run_until_parked();
@@ -909,13 +998,18 @@ fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
 /// An input method can consume a key going down, as composing Japanese or Chinese does, but the
 /// key still comes up through the window. That is the person's input too.
 #[gpui::test]
-fn a_key_an_input_method_composes_keeps_the_view_when_the_server_returns(
-    cx: &mut TestAppContext,
-) {
+fn a_key_an_input_method_composes_keeps_the_view_when_the_server_returns(cx: &mut TestAppContext) {
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
 
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     focus_content(&manager, &mut window);
     // Only the key's release reaches the window; the input method took its press.
@@ -935,22 +1029,42 @@ fn a_key_an_input_method_composes_keeps_the_view_when_the_server_returns(
 #[gpui::test]
 fn the_window_listens_for_input_only_while_a_choice_is_held(cx: &mut TestAppContext) {
     let (manager, mut window) = open_window(cx);
-    assert!(!listens(&manager, &mut window), "a first launch holds nothing");
+    assert!(
+        !listens(&manager, &mut window),
+        "a first launch holds nothing"
+    );
     close(&manager, &mut window);
 
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     present_penguin(&manager, &offline, &[5], &mut window);
     assert!(listens(&manager, &mut window), "Far is awaited");
     click_focused_pane(&manager, &mut window);
-    assert!(!listens(&manager, &mut window), "the person's click settles it");
+    assert!(
+        !listens(&manager, &mut window),
+        "the person's click settles it"
+    );
     close(&manager, &mut window);
 
     // The person's choice became the view this window left, so the next one awaits nothing
     // once this computer's server presents it.
     let (manager, mut window) = open_window(cx);
-    present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
     assert!(
         !listens(&manager, &mut window),
         "the server presented the remembered Workspace"

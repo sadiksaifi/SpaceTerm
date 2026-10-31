@@ -490,10 +490,10 @@ mod tests {
     fn hidden_text_preparation_retains_only_six_panes_under_the_window_budget(
         cx: &mut gpui::TestAppContext,
     ) {
+        use crate::terminal::TerminalSessionEvent;
         use crate::terminal::geometry::{
             BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
         };
-        use crate::terminal::TerminalSessionEvent;
         use crate::terminal::testing::TestTerminalSessionRecords;
         use crate::ui::workspace_manager::tests::{
             local_server_manager, server_sessions, workspace_adapters,

@@ -1,10 +1,10 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
-use spaceterm_server::organization::Organization;
 use spaceterm_server::hierarchy::{
     CloseInventory, ConfirmedControl, ConfirmedPane, CreateControl, Id, Inventory, Mutation,
     Outcome, RetainedOutcome, State,
 };
+use spaceterm_server::organization::Organization;
 use spaceterm_server::protocol::PaneEvent;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -1474,10 +1474,7 @@ mod tests {
     use spaceterm_server::attachments::Attachment;
 
     fn retained(host: &SharedWorkspaceHost) -> Organization {
-        serde_json::from_slice(
-            &serde_json::to_vec(&host.state.envelope()).unwrap(),
-        )
-        .unwrap()
+        serde_json::from_slice(&serde_json::to_vec(&host.state.envelope()).unwrap()).unwrap()
     }
 
     fn journaled() -> (SharedWorkspaceHost, Arc<journal::memory::Memory>) {

@@ -506,9 +506,10 @@ fn a_deleted_sole_worktree_rediscovers_its_repository_after_restart() {
     let bytes = serde_json::to_vec(&state.envelope()).unwrap();
     host.shutdown().unwrap();
     std::fs::remove_dir_all(&tree).unwrap();
-    let mut restored = *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
-        .unwrap()
-        .shared;
+    let mut restored =
+        *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+            .unwrap()
+            .shared;
     restored.begin_boot([9; 32]);
     assert!(restored.inventory.repositories.is_none());
     let mut repositories = super::repositories::ServerRepositories::new([9; 32]);
@@ -975,9 +976,10 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     state.inventory = left;
     let bytes = serde_json::to_vec(&state.envelope()).unwrap();
     host.shutdown().unwrap();
-    let mut restored = *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
-        .unwrap()
-        .shared;
+    let mut restored =
+        *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+            .unwrap()
+            .shared;
     restored.begin_boot([9; 32]);
     let mut reads = super::repositories::ServerRepositories::new([9; 32]);
     reads.subscribe([1; 32]);
@@ -1195,9 +1197,10 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     state.inventory = after;
     let bytes = serde_json::to_vec(&state.envelope()).unwrap();
     host.shutdown().unwrap();
-    let mut restored = *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
-        .unwrap()
-        .shared;
+    let mut restored =
+        *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+            .unwrap()
+            .shared;
     restored.begin_boot([9; 32]);
     let mut reads = super::repositories::ServerRepositories::new([9; 32]);
     reads.subscribe([1; 32]);

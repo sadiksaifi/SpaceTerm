@@ -270,8 +270,7 @@ impl ClaimWorker<'_> {
                     state.start_restored.store(false, Ordering::Release);
                     discard_presentation();
                 }
-                *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) =
-                    recovery.clone();
+                *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) = recovery.clone();
                 unavailable |= directory_unavailable;
                 state.set_session_end(session_ended);
                 state.admission(Admission::Waiting);
@@ -628,7 +627,11 @@ mod tests {
             },
         ] {
             assert!(matches!(
-                crate::runtime::directory_testing::type_keys(&mut host, lease, vec![encode_key(key)]),
+                crate::runtime::directory_testing::type_keys(
+                    &mut host,
+                    lease,
+                    vec![encode_key(key)]
+                ),
                 Reply::Unchanged
             ));
         }

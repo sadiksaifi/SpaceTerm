@@ -20,8 +20,8 @@ use super::appearance::{ChromeAppearance, gpui_color};
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::worktrees::git::{BranchList, BranchName, WorktreeBranch, WorktreeCreateError};
-use spaceterm_server::worktree::path_template::expand;
 use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
+use spaceterm_server::worktree::path_template::expand;
 
 const FORM_MODAL_ID: &str = "new-worktree-form";
 const CREATE_ACTION_SELECTOR: &str = "new-worktree-create";
@@ -503,9 +503,7 @@ impl WorktreeForm {
     ) -> DialogCloseDecision {
         self.answered();
         match action {
-            FormAction::Cancel
-                if self.pending && !self.backend.connected() =>
-            {
+            FormAction::Cancel if self.pending && !self.backend.connected() => {
                 DialogCloseDecision::Allow
             }
             FormAction::Cancel if self.pending => {
@@ -1295,7 +1293,8 @@ mod tests {
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let context = WorktreeFormContext {
                 repository_name: "app".into(),
-                template: spaceterm_server::worktree::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE.into(),
+                template: spaceterm_server::worktree::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+                    .into(),
                 home: HOME.into(),
                 checked_out: vec![
                     ("main".into(), "app".into()),

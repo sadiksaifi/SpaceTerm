@@ -647,12 +647,14 @@ pub(crate) mod testing {
             fn begin(&mut self, id: u64, operation: Operation) -> Result<(), ()> {
                 use spaceterm_server::pane::directories::Operation as Read;
                 let answer = match operation {
-                    Operation::DirectoryRead(Read::Match { path, candidates }) => Ok(Value::Match {
-                        index: candidates
-                            .iter()
-                            .position(|candidate| *candidate == path)
-                            .and_then(|index| u16::try_from(index).ok()),
-                    }),
+                    Operation::DirectoryRead(Read::Match { path, candidates }) => {
+                        Ok(Value::Match {
+                            index: candidates
+                                .iter()
+                                .position(|candidate| *candidate == path)
+                                .and_then(|index| u16::try_from(index).ok()),
+                        })
+                    }
                     _ => Err(Error::Unavailable),
                 };
                 self.0.insert(id, answer);

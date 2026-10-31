@@ -1274,9 +1274,10 @@ mod tests {
         let mut prototype = host();
         prototype.directory = git.0.clone();
         let mut restored = SharedWorkspaceHost::new(prototype);
-        restored.state = *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
-        .unwrap()
-        .shared;
+        restored.state =
+            *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+                .unwrap()
+                .shared;
         restored.state.begin_boot(restored.prototype.boot);
         assert!(matches!(
             restored.request([1; 32], [1; 32], Request::Inventory),

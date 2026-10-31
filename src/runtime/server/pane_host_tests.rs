@@ -1,6 +1,6 @@
 use super::tests::{
-    Driven, attach, await_screen, await_text, command, create_shared, effects, focus, host, identity,
-    input, lines, native_command, screen, shared_inventory, size, text_key,
+    Driven, attach, await_screen, await_text, command, create_shared, effects, focus, host,
+    identity, input, lines, native_command, screen, shared_inventory, size, text_key,
 };
 use super::*;
 use spaceterm_server::protocol::{PaneEvent, screen::ScreenUpdate};
@@ -1065,7 +1065,11 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
     await_text(&mut host, lease, "CONFIRMED");
     host.retain_directory();
     assert_eq!(
-        host.identity.as_ref().unwrap().confirmed_directory.as_deref(),
+        host.identity
+            .as_ref()
+            .unwrap()
+            .confirmed_directory
+            .as_deref(),
         Some(std::path::Path::new("/"))
     );
     command(
@@ -1077,7 +1081,11 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
     await_text(&mut host, lease, "NESTED");
     host.retain_directory();
     assert_eq!(
-        host.identity.as_ref().unwrap().confirmed_directory.as_deref(),
+        host.identity
+            .as_ref()
+            .unwrap()
+            .confirmed_directory
+            .as_deref(),
         Some(std::path::Path::new("/"))
     );
     host.shutdown().unwrap();
@@ -1377,13 +1385,17 @@ fn reconnect_keeps_running_work_and_fences_the_old_connection() {
 fn reconnect_and_stale_generations_cannot_start_or_mutate_a_replacement() {
     let mut host = host();
     host.identity = Some(identity(host.directory.clone()));
-    let passive = |host: &mut DevelopmentPaneHost| host.select([1; 32], [2; 32], false, size(), None);
+    let passive =
+        |host: &mut DevelopmentPaneHost| host.select([1; 32], [2; 32], false, size(), None);
     assert!(matches!(passive(&mut host), Ok(Reply::Restored { .. })));
     assert!(host.pane.is_none(), "a passive selection starts no Session");
     let old = attach(&mut host, 2, true);
     host.shutdown().unwrap();
     assert!(matches!(passive(&mut host), Ok(Reply::Restored { .. })));
-    assert!(host.pane.is_none(), "a reconnect never starts a replacement");
+    assert!(
+        host.pane.is_none(),
+        "a reconnect never starts a replacement"
+    );
     let live = attach(&mut host, 2, true);
     for stale in [
         Lease {
