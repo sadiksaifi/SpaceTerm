@@ -85,6 +85,8 @@ impl WorkspaceManager {
         if Instant::now() >= act_by {
             return Task::ready(None);
         }
+        // The person asked this desktop to show work, as their own input in the window would.
+        self.person_input(cx);
         match request {
             Request::Show {
                 server,

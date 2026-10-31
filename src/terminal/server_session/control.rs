@@ -98,6 +98,8 @@ pub(super) struct PaneControl {
     refusal: Option<ServerError>,
     /// An interrupted start belongs to the retained Pane, including across window replacement.
     pub(super) recovery: Arc<Mutex<super::recovery::Recovery>>,
+    /// The view a closed window left of this Pane, which the next presentation reads from.
+    pub(super) view: Arc<Mutex<Option<super::reading::Reading>>>,
     /// Held across each request, so a successor's claim waits for an in-flight request.
     /// Guards the highest focus generation sent for this Pane.
     turn: Mutex<u64>,

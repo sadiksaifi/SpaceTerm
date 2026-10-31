@@ -1,6 +1,6 @@
 # Keep each client's view independent
 
-Beyond the independent Active Tab in [ADR 0024](0024-keep-tab-selection-independent-per-client.md), each SpaceTerm Client owns its Active Workspace, Focused Pane and focus history, Zoomed Pane, Selection, Terminal Find state, and scroll position. Operating-System Window geometry and sidebar presentation also remain client-local, so one client inspecting or zooming terminal work does not move another client's view.
+Beyond the independent Active Tab in [ADR 0024](0024-keep-tab-selection-independent-per-client.md), each SpaceTerm Client owns its Active Workspace, Focused Pane and focus history, Zoomed Pane, Selection, Terminal Find state, and scroll position. Operating-System Window geometry and sidebar presentation also remain client-local, so one client inspecting or zooming terminal work does not move another client's view. This view state survives closing the Workspace Window while the client keeps running, so reopening the window presents the same view.
 
 [ADR 0021](0021-present-workspaces-from-several-servers-together.md) defines each client's Workspace display order. [ADR 0042](0042-keep-tab-order-and-pane-layouts-specific-to-each-client.md) defines its persistent Tab display order and Pane Layouts.
 

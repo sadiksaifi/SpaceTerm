@@ -76,6 +76,8 @@ pub(crate) struct DevelopmentPaneState {
     take_over: AtomicBool,
     start_restored: AtomicBool,
     connection_recovery: Arc<Mutex<recovery::Recovery>>,
+    /// Where this presentation leaves its view for the next one when its window closes.
+    retained_view: Arc<Mutex<Option<reading::Reading>>>,
     recovery: Mutex<Option<pane::directories::Target>>,
     repair: Mutex<Option<(pane::directories::Target, std::path::PathBuf)>>,
     directory_server: Mutex<Option<ServerConnection>>,
@@ -110,6 +112,7 @@ impl DevelopmentPaneState {
             take_over: AtomicBool::new(false),
             start_restored: AtomicBool::new(false),
             connection_recovery: Arc::default(),
+            retained_view: Arc::default(),
             recovery: Mutex::default(),
             repair: Mutex::default(),
             directory_server: Mutex::default(),
@@ -138,6 +141,16 @@ impl DevelopmentPaneState {
 
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Leaves this client's view of the Pane, its Scrollback position and Selection, for the
+    /// next window that presents it. This presentation keeps an empty view.
+    pub(crate) fn retain_view(&self) {
+        let view = self
+            .reading
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain();
+        *self.retained_view.lock().unwrap_or_else(|e| e.into_inner()) = Some(view);
     }
     /// Sends `hint` a data-free signal whenever the status, connection generation, directory
     /// progress, controller, dormancy or start confirmation may have changed, so a view reads
@@ -540,8 +553,16 @@ impl DevelopmentServerSessionFactory {
         pane_id: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
         let control = controls.pane(pane_id);
+        // A view a closed window left of this Pane returns with the next window.
+        let retained = control
+            .view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         let state = Arc::new(DevelopmentPaneState {
             connection_recovery: Arc::clone(&control.recovery),
+            retained_view: Arc::clone(&control.view),
+            reading: Mutex::new(retained.unwrap_or_default()),
             ..DevelopmentPaneState::new()
         });
         *state
@@ -1009,7 +1030,9 @@ impl TerminalSessionHandle for PresentationHandle {
     }
     fn set_find_query(&self, generation: super::FindQueryGeneration, text: String) {
         if text.len() <= super::find::MAX_QUERY_BYTES {
-            self.read(|scrollback| scrollback.set_find_query(generation, text));
+            // The query outlives a connection, so a Pane that opens with Find open finds once
+            // its screen arrives.
+            self.local(|reading| ((), reading.scrollback.set_find_query(generation, text)));
         } else {
             // Retire the previous search while the field presents this generation's limit.
             self.end_find(generation);
@@ -1023,7 +1046,7 @@ impl TerminalSessionHandle for PresentationHandle {
         self.read(|scrollback| scrollback.navigate_find(generation, direction));
     }
     fn end_find(&self, generation: super::FindQueryGeneration) {
-        self.read(|scrollback| scrollback.end_find(generation));
+        self.local(|reading| ((), reading.scrollback.end_find(generation)));
     }
     fn request_paste(
         &self,

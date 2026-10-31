@@ -82,27 +82,50 @@ impl WorkspaceManager {
                     .as_ref()
                     .and_then(RetainedWorkspaceOrder::loaded)
                     .and_then(Result::ok);
-                let previous = saved
-                    .clone()
-                    .unwrap_or_else(|| manager.display_order.order.clone());
-                let presented: Vec<_> = manager
-                    .presented_references()
-                    .into_iter()
-                    .map(|(_, reference)| reference)
-                    .collect();
-                let restores = manager.display_order.adopt_saved(saved, &presented);
-                // Inventories that arrived while reading are complete, so they prune now.
-                for key in manager.shared.keys() {
-                    manager.prune_display_order(key);
-                }
-                if restores {
-                    manager.restore_display_order();
-                }
-                manager.save_display_order(&previous);
-                manager.report_client_view_error(window, cx);
-                cx.notify();
+                manager.display_order_read(saved, window, cx);
             });
         }));
+    }
+
+    /// Arranges the presented Workspaces by the order reading found, `saved`.
+    pub(super) fn display_order_read(
+        &mut self,
+        saved: Option<WorkspaceOrder>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = saved
+            .clone()
+            .unwrap_or_else(|| self.display_order.order.clone());
+        let presented: Vec<_> = self
+            .presented_references()
+            .into_iter()
+            .map(|(_, reference)| reference)
+            .collect();
+        let restores = self.display_order.adopt_saved(saved, &presented);
+        // Inventories that arrived while reading are complete, so they prune now.
+        for key in self.shared.keys() {
+            self.prune_display_order(key);
+        }
+        if restores {
+            self.restore_display_order();
+        }
+        self.save_display_order(&previous);
+        // A remembered Active Workspace that is gone waited for this order to choose the first.
+        self.select_remembered_fallback(window, cx);
+        self.report_client_view_error(window, cx);
+        cx.notify();
+    }
+
+    /// Whether the saved order was read, or reading ended without one.
+    pub(super) const fn display_order_ready(&self) -> bool {
+        self.display_order.ready
+    }
+
+    /// Holds the order as unread, as a window does while reading its saved order.
+    #[cfg(test)]
+    pub(super) fn read_display_order_later(&mut self) {
+        self.display_order.ready = false;
     }
 
     /// Writes the latest order before SpaceTerm quits.

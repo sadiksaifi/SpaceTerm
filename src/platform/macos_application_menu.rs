@@ -12,6 +12,8 @@ use gpui::{App, Keymap, Menu, MenuItem, Modifiers, SharedString};
 
 pub(crate) struct MacosApplicationMenuAdapter {
     identity: ApplicationIdentity,
+    /// Follows the commands the person chooses from the menu bar, while the adapter lives.
+    chosen: std::cell::RefCell<Option<native::ChosenCommands>>,
 }
 
 impl MacosApplicationMenuAdapter {
@@ -19,7 +21,10 @@ impl MacosApplicationMenuAdapter {
     /// defaults this registers once, when it first customizes a main menu.
     pub(crate) fn new(identity: ApplicationIdentity) -> Self {
         native::register_edit_menu_defaults();
-        Self { identity }
+        Self {
+            identity,
+            chosen: std::cell::RefCell::default(),
+        }
     }
 }
 
@@ -376,6 +381,10 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     ) -> Result<(), ApplicationMenuError> {
         native::perform(command, self.identity.display_name())
     }
+
+    fn follow_chosen_commands(&self, chosen: std::rc::Rc<dyn Fn(&mut App)>, cx: &mut App) {
+        *self.chosen.borrow_mut() = native::follow_chosen_commands(chosen, cx);
+    }
 }
 
 fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 8] {
@@ -467,6 +476,78 @@ mod native {
     };
 
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
+
+    /// AppKit's notice that a menu item sent its action. Only the menu bar's commands count:
+    /// the status item's commands open or raise windows and control servers, and choose nothing
+    /// a window shows.
+    pub(crate) struct ChosenCommands {
+        center: objc2::rc::Retained<objc2_foundation::NSNotificationCenter>,
+        observer: objc2::rc::Retained<
+            objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>,
+        >,
+    }
+
+    impl Drop for ChosenCommands {
+        fn drop(&mut self) {
+            // SAFETY: This is the observer token returned by this center during registration.
+            unsafe { self.center.removeObserver((*self.observer).as_ref()) };
+        }
+    }
+
+    pub(super) fn follow_chosen_commands(
+        chosen: std::rc::Rc<dyn Fn(&mut gpui::App)>,
+        cx: &mut gpui::App,
+    ) -> Option<ChosenCommands> {
+        let executor = cx.foreground_executor().clone();
+        let app = cx.to_async();
+        let block = block2::RcBlock::new(
+            move |notification: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                // SAFETY: AppKit passes a live notification for the duration of this call.
+                let notification = unsafe { notification.as_ref() };
+                if !sent_from_menu_bar(notification) {
+                    return;
+                }
+                // AppKit posts this as the menu returns, which may be while GPUI still runs.
+                let (app, chosen) = (app.clone(), std::rc::Rc::clone(&chosen));
+                executor.spawn(async move { app.update(|cx| chosen(cx)) }).detach();
+            },
+        );
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        let name = NSString::from_str("NSMenuDidSendActionNotification");
+        // SAFETY: AppKit posts menu notifications on the main thread, where the callback runs.
+        // The adapter removes the observer before dropping its main-thread-only callback.
+        let observer = unsafe {
+            center.addObserverForName_object_queue_usingBlock(Some(&name), None, None, &block)
+        };
+        Some(ChosenCommands { center, observer })
+    }
+
+    /// Whether the notice's menu is the menu bar or one of its submenus.
+    fn sent_from_menu_bar(notification: &objc2_foundation::NSNotification) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let Some(menu_bar) = NSApplication::sharedApplication(mtm).mainMenu() else {
+            return false;
+        };
+        let Some(Ok(mut menu)) = notification
+            .object()
+            .map(|object| object.downcast::<NSMenu>())
+        else {
+            return false;
+        };
+        loop {
+            if objc2::rc::Retained::as_ptr(&menu) == objc2::rc::Retained::as_ptr(&menu_bar) {
+                return true;
+            }
+            // SAFETY: A menu AppKit names in a notification is live on the main thread, and its
+            // parent, when it has one, is the menu that holds it.
+            let Some(parent) = (unsafe { menu.supermenu() }) else {
+                return false;
+            };
+            menu = parent;
+        }
+    }
 
     /// AppKit appends AutoFill, Start Dictation, and Emoji & Symbols to the menu titled "Edit".
     /// SpaceTerm has no field that AutoFill can fill, so this undocumented AppKit default omits
@@ -681,6 +762,15 @@ mod native {
 
     pub(super) fn perform(_: ApplicationMenuCommand, _: &str) -> Result<(), ApplicationMenuError> {
         Ok(())
+    }
+
+    pub(crate) struct ChosenCommands;
+
+    pub(super) fn follow_chosen_commands(
+        _: std::rc::Rc<dyn Fn(&mut gpui::App)>,
+        _: &mut gpui::App,
+    ) -> Option<ChosenCommands> {
+        None
     }
 }
 

@@ -4559,6 +4559,85 @@ fn keyboard_shortcuts_opens_settings_at_keybindings_and_moves_an_open_window_the
 }
 
 #[gpui::test]
+fn settings_reopens_where_it_closed_on_the_section_it_showed(cx: &mut TestAppContext) {
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
+    cx.update(|cx| {
+        appearance_runtime::install(
+            settings,
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        super::configure_window_chrome(Rc::new(RecordingMovement), Default::default(), None, cx);
+        super::init(cx);
+    });
+    let settings_window = |cx: &mut TestAppContext| {
+        cx.windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<SettingsWindow>())
+    };
+    let moved = gpui::Bounds {
+        origin: gpui::point(px(40.0), px(60.0)),
+        size: gpui::size(px(super::WINDOW_WIDTH), px(super::WINDOW_HEIGHT)),
+    };
+    let close = |window: gpui::WindowHandle<SettingsWindow>, cx: &mut TestAppContext| {
+        cx.update(|cx| assert!(super::request_window_close(window.into(), cx)));
+        cx.run_until_parked();
+        assert_eq!(settings_window(cx), None);
+    };
+
+    cx.update(|cx| cx.dispatch_action(&super::OpenSettings));
+    cx.run_until_parked();
+    let opened = settings_window(cx).expect("Settings opens");
+    opened
+        .update(cx, |settings, window, cx| {
+            settings.select_section(SettingsSectionId::Font, cx);
+            window.set_bounds(moved, None);
+        })
+        .expect("Settings should stay open");
+    close(opened, cx);
+
+    cx.update(|cx| cx.dispatch_action(&super::OpenSettings));
+    cx.run_until_parked();
+    let reopened = settings_window(cx).expect("Settings opens again");
+    let (section, bounds) = reopened
+        .update(cx, |settings, window, _| {
+            (settings.active_section(), window.window_bounds().get_bounds())
+        })
+        .expect("Settings should stay open");
+    assert_eq!(section, SettingsSectionId::Font);
+    assert_eq!(bounds, moved);
+    close(reopened, cx);
+
+    // A request that names a section shows it.
+    cx.update(|cx| cx.dispatch_action(&super::OpenKeyboardShortcuts));
+    cx.run_until_parked();
+    let shortcuts = settings_window(cx).expect("Settings opens at Keybindings");
+    assert_eq!(
+        shortcuts
+            .read_with(cx, |settings, _| settings.active_section())
+            .expect("Settings should stay open"),
+        SettingsSectionId::Keybindings
+    );
+    close(shortcuts, cx);
+
+    // A real quit forgets it, so the next launch opens Settings at its default.
+    cx.update(crate::ui::remembered_view::forget);
+    cx.update(|cx| cx.dispatch_action(&super::OpenSettings));
+    cx.run_until_parked();
+    let relaunched = settings_window(cx).expect("Settings opens after a quit");
+    let (section, bounds) = relaunched
+        .update(cx, |settings, window, _| {
+            (settings.active_section(), window.window_bounds().get_bounds())
+        })
+        .expect("Settings should stay open");
+    assert_eq!(section, SettingsSectionId::Interface);
+    assert_ne!(bounds, moved);
+}
+
+#[gpui::test]
 fn client_window_controls_share_the_search_row_and_its_edge_inset(cx: &mut TestAppContext) {
     let (_window, _harness, cx) = open_settings(cx);
     cx.simulate_decorations(gpui::Decorations::Client {

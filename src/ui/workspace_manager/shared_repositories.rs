@@ -517,6 +517,30 @@ mod development {
             })
         }
 
+        /// The person's choice for a shared Workspace's Worktree group, or `None` for the default.
+        pub(in crate::ui::workspace_manager) fn shared_worktrees_expanded(
+            &self,
+            workspace_id: WorkspaceId,
+        ) -> Option<bool> {
+            self.shared_repositories
+                .worktrees
+                .get(&workspace_id)
+                .and_then(|worktrees| worktrees.expanded)
+        }
+
+        /// Restores a choice another window left, before the server's Git facts arrive.
+        pub(in crate::ui::workspace_manager) fn restore_shared_worktrees_expanded(
+            &mut self,
+            workspace_id: WorkspaceId,
+            expanded: bool,
+        ) {
+            self.shared_repositories
+                .worktrees
+                .entry(workspace_id)
+                .or_default()
+                .expanded = Some(expanded);
+        }
+
         pub(in crate::ui::workspace_manager) fn set_shared_worktrees_expanded(
             &mut self,
             workspace_id: WorkspaceId,

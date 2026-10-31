@@ -24,6 +24,7 @@ pub(crate) mod empty_state;
 pub(crate) mod pane_lifecycle;
 mod pane_motion;
 pub(crate) mod permission_setup;
+pub(crate) mod remembered_view;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;

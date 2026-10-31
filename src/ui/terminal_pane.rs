@@ -986,65 +986,106 @@ impl TerminalPane {
         if let Some(input) = &self.find_input {
             input.update(cx, |input, cx| input.select_all(cx));
         } else {
-            let input = cx.new(|cx| {
-                TextInput::new("terminal-find-input", "Terminal Find", "", window, cx)
-                    .placeholder("Find")
-                    .variant(TextInputVariant::Bare)
-                    .tab_behavior(TextInputTabBehavior::Propagate)
-                    .debug_selector("terminal-find-input")
-            });
-            let input_id = input.entity_id();
-            cx.subscribe_in(
-                &input,
-                window,
-                move |pane, input, event: &TextInputEvent, window, cx| {
-                    let is_current = input.entity_id() == input_id
-                        && pane
-                            .find_input
-                            .as_ref()
-                            .is_some_and(|current| current.entity_id() == input_id);
-                    if !is_current {
-                        return;
-                    }
-                    match event {
-                        TextInputEvent::ValueChanged(_) => {
-                            pane.find_query_changed(input.read(cx).value().to_owned());
-                        }
-                        TextInputEvent::Submitted => {
-                            pane.find_next(&FindNext, window, cx);
-                        }
-                        TextInputEvent::Cancelled | TextInputEvent::CompositionCancelled => {
-                            cx.defer_in(window, move |pane, window, cx| {
-                                if pane
-                                    .find_input
-                                    .as_ref()
-                                    .is_some_and(|current| current.entity_id() == input_id)
-                                {
-                                    pane.close_find(&CloseTerminalFind, window, cx);
-                                }
-                            });
-                        }
-                        TextInputEvent::FocusGained => {
-                            pane.advance_native_service_focus_epoch();
-                            let _ = pane.sync_terminal_input_focus(window, cx);
-                            cx.notify();
-                        }
-                        TextInputEvent::TabForwardRequested => window.focus_next(cx),
-                        TextInputEvent::TabBackwardRequested => window.focus_prev(cx),
-                        TextInputEvent::FocusLost
-                        | TextInputEvent::CompositionStarted
-                        | TextInputEvent::CompositionCommitted
-                        | TextInputEvent::ContextMenuOpened
-                        | TextInputEvent::ContextMenuClosed => {}
-                    }
-                },
-            )
-            .detach();
-            self.find_input = Some(input);
-            self.find_query_changed(String::new());
+            self.present_find(String::new(), window, cx);
         }
         self.focus_find(window, cx);
         cx.notify();
+    }
+
+    /// Opens Find searching for `query`, leaving the keyboard where it is.
+    fn present_find(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            TextInput::new("terminal-find-input", "Terminal Find", query.clone(), window, cx)
+                .placeholder("Find")
+                .variant(TextInputVariant::Bare)
+                .tab_behavior(TextInputTabBehavior::Propagate)
+                .debug_selector("terminal-find-input")
+        });
+        let input_id = input.entity_id();
+        cx.subscribe_in(
+            &input,
+            window,
+            move |pane, input, event: &TextInputEvent, window, cx| {
+                let is_current = input.entity_id() == input_id
+                    && pane
+                        .find_input
+                        .as_ref()
+                        .is_some_and(|current| current.entity_id() == input_id);
+                if !is_current {
+                    return;
+                }
+                match event {
+                    TextInputEvent::ValueChanged(_) => {
+                        pane.find_query_changed(input.read(cx).value().to_owned());
+                    }
+                    TextInputEvent::Submitted => {
+                        pane.find_next(&FindNext, window, cx);
+                    }
+                    TextInputEvent::Cancelled | TextInputEvent::CompositionCancelled => {
+                        cx.defer_in(window, move |pane, window, cx| {
+                            if pane
+                                .find_input
+                                .as_ref()
+                                .is_some_and(|current| current.entity_id() == input_id)
+                            {
+                                pane.close_find(&CloseTerminalFind, window, cx);
+                            }
+                        });
+                    }
+                    TextInputEvent::FocusGained => {
+                        pane.advance_native_service_focus_epoch();
+                        let _ = pane.sync_terminal_input_focus(window, cx);
+                        cx.notify();
+                    }
+                    TextInputEvent::TabForwardRequested => window.focus_next(cx),
+                    TextInputEvent::TabBackwardRequested => window.focus_prev(cx),
+                    TextInputEvent::FocusLost
+                    | TextInputEvent::CompositionStarted
+                    | TextInputEvent::CompositionCommitted
+                    | TextInputEvent::ContextMenuOpened
+                    | TextInputEvent::ContextMenuClosed => {}
+                }
+            },
+        )
+        .detach();
+        self.find_input = Some(input);
+        self.find_query_changed(query);
+    }
+
+    /// This Pane's own part of this client's view, for the next window: its font-size zoom and
+    /// its Find text while Find is open. Its server-owned reading stays with the Pane's
+    /// connection.
+    pub(crate) fn remembered(&self, cx: &App) -> crate::ui::remembered_view::RememberedPane {
+        crate::ui::remembered_view::RememberedPane {
+            font_zoom: self.zoom_delta,
+            find: self
+                .find_input
+                .as_ref()
+                .map(|input| input.read(cx).value().to_owned()),
+        }
+    }
+
+    /// Presents the font-size zoom and Find another window left of this Pane. Find opens without
+    /// taking the keyboard.
+    pub(crate) fn restore_remembered(
+        &mut self,
+        remembered: &crate::ui::remembered_view::RememberedPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if remembered.font_zoom != 0.0 {
+            self.set_font_size(
+                self.appearance.terminal.typography.cell_size + remembered.font_zoom,
+                window,
+                cx,
+            );
+        }
+        if let Some(query) = &remembered.find
+            && self.find_input.is_none()
+        {
+            self.present_find(query.clone(), window, cx);
+            cx.notify();
+        }
     }
 
     fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {

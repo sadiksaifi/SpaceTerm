@@ -316,6 +316,11 @@ pub(crate) struct WorkspaceManager {
     launch: launch::LocalLaunchState,
     /// This client's one Workspace order across every server, kept across launches.
     display_order: display_order::DisplayOrder,
+    /// The view the last closed Workspace Window left, which this window presents as its
+    /// Workspaces arrive.
+    restoration: crate::ui::remembered_view::Restoration,
+    /// This window's keystrokes, followed only while a remembered choice is held.
+    person_keys: Option<gpui::Subscription>,
 }
 
 impl WorkspaceManager {
@@ -443,6 +448,8 @@ impl WorkspaceManager {
             empty_band: std::cell::RefCell::default(),
             launch: launch::LocalLaunchState::new(local_server),
             display_order: display_order::DisplayOrder::default(),
+            restoration: crate::ui::remembered_view::Restoration::none(),
+            person_keys: None,
         };
         manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
@@ -1610,10 +1617,14 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let open_pane = !self.sidebar.read(cx).is_focused(window)
-            && !self.sidebar.read(cx).rename_is_focused(window)
-            && !self.sidebar.read(cx).menu_open();
+        let open_pane = !self.sidebar_holds_keyboard(window, cx);
         self.activate_workspace_focusing(workspace_id, open_pane, window, cx)
+    }
+
+    /// Whether the sidebar, its rename field or its menu holds the keyboard.
+    fn sidebar_holds_keyboard(&self, window: &Window, cx: &App) -> bool {
+        let sidebar = self.sidebar.read(cx);
+        sidebar.is_focused(window) || sidebar.rename_is_focused(window) || sidebar.menu_open()
     }
 
     fn activate_workspace_focusing(
@@ -1859,7 +1870,7 @@ impl WorkspaceManager {
                     self.close_workspace(workspace_id, window, cx);
                 }
             }
-            CloseTarget::Window => window.remove_window(),
+            CloseTarget::Window => self.close_window(window, cx),
         }
     }
 
@@ -1881,6 +1892,7 @@ impl WorkspaceManager {
             .close_target_requires_confirmation(CloseTarget::Window, cx)
             .is_some_and(|requires| !requires)
         {
+            self.remember_view(window, cx);
             return true;
         }
         self.present_close_confirmation(CloseTarget::Window, window, cx);
@@ -3073,11 +3085,14 @@ impl WorkspaceManager {
         };
         if let Some(inventory) = poll.inventory {
             self.apply_shared_inventory(key, &inventory, removal, window, cx);
+            self.settle_remembered_view(key, window, cx);
         }
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
-        // Active Tab and its Focused Pane's shell. Later launches restore views passively.
+        // Active Tab and its Focused Pane's shell. Later launches restore views passively, and
+        // so does a window reopened with the view the last one left, which nobody chose here.
         if let Some(workspace_id) = poll
             .initial
+            .filter(|_| !self.restores_remembered_view())
             .and_then(|server| self.shared.get(key)?.local(server))
             && self.activate_workspace(workspace_id, window, cx)
         {
@@ -3188,7 +3203,7 @@ impl WorkspaceManager {
             if cx.windows().len() == 1 {
                 crate::status_menu::show_in_dock(cx, false);
             }
-            window.remove_window();
+            self.close_window(window, cx);
             return;
         }
         self.reread_after_modal(window, cx);
@@ -3500,6 +3515,7 @@ impl WorkspaceManager {
                 manager.restore_shared_arrangement(&saved, workspace, cx)
             });
         }
+        self.restore_remembered_workspace(key, workspace_id, workspace.id, window, cx);
     }
 
     /// Asks the server for a Workspace it owns and every connected client presents.
@@ -5278,7 +5294,10 @@ impl WorkspaceManager {
             .children(self.pin_picker.iter().cloned())
             .children(self.active_directory_recovery(cx))
             .children(super::application_commands::overlay(window, cx));
-        ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
+        let presentation = ModalLayer::new(super::window_shell::render(content, window, cx))
+            .transient(transients)
+            .into_any_element();
+        self.person_input_scope(presentation, cx)
     }
 }
 
@@ -5580,6 +5599,7 @@ mod desktop_requests;
 pub(crate) use desktop_requests::serve as serve_desktop_requests;
 mod direct_servers;
 mod display_order;
+mod remembered;
 mod shared_repositories;
 mod worktrees;
 

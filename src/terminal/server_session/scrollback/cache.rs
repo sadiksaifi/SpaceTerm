@@ -136,6 +136,11 @@ impl ScrollbackCache {
 
     /// Forgets requests that were never sent, so they neither count toward the in-flight limit
     /// nor block asking for their rows again.
+    /// Forgets every request still in flight, whose replies reach a connection that ended.
+    pub(super) fn forget_in_flight(&mut self) {
+        self.in_flight.clear();
+    }
+
     pub(super) fn unsent(&mut self, requests: &[PageRequest]) {
         for request in requests {
             if let Some(index) = self.in_flight.iter().position(|sent| sent == request) {

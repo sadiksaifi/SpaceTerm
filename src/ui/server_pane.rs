@@ -866,6 +866,9 @@ mod connection {
         /// Asks the server for this Pane, which starts or acquires only this Pane.
         fn select(&self);
 
+        /// Leaves this client's view of the Pane for the next window that presents it.
+        fn retain_view(&self) {}
+
         /// Starts this client's exact new Pane after membership binds, without acquiring control
         /// or authorizing a retained shell after a server restart.
         fn start_created(&self) {}
@@ -928,6 +931,10 @@ mod connection {
 
         fn select(&self) {
             Self::select(self);
+        }
+
+        fn retain_view(&self) {
+            Self::retain_view(self);
         }
 
         fn start_created(&self) {
@@ -1065,6 +1072,11 @@ mod connection {
         /// explicit Pane selection or Tab opening calls it; rendering and reconciliation never do.
         pub(crate) fn select(&self) {
             self.connection.select();
+        }
+
+        /// Leaves this client's view of the Pane for the next window that presents it.
+        pub(crate) fn retain_view(&self) {
+            self.connection.retain_view();
         }
 
         /// Reads the connection and reports what changed.

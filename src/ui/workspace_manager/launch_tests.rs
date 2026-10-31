@@ -161,6 +161,20 @@ fn launch_harness_with(
     >,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
+    launch_harness_restoring(answers, edits, selections, None, cx)
+}
+
+/// A launch harness whose window presents `remembered` as it opens, as reopening SpaceTerm does
+/// before launch answers.
+fn launch_harness_restoring(
+    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    edits: ScriptedEdits,
+    selections: impl IntoIterator<
+        Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
+    >,
+    remembered: Option<crate::ui::remembered_view::WindowView>,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let launch = Arc::new(ScriptedLaunch::default());
@@ -185,7 +199,7 @@ fn launch_harness_with(
     };
     let (manager, cx) = cx.add_window_view(|window, cx| {
         crate::ui::updates::server_rows::testing::install_up_to_date(cx);
-        WorkspaceManager::new_with_adapters(
+        let mut manager = WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 local_server: adapters,
@@ -196,12 +210,15 @@ fn launch_harness_with(
             SidebarState::Expanded,
             window,
             cx,
-        )
+        );
+        // Opening focuses the window's content, then presents what the last window left.
+        manager.focus(window, cx);
+        if let Some(view) = remembered {
+            manager.restore_remembered(view, window, cx);
+        }
+        manager
     });
-    cx.update(|window, cx| {
-        window.activate_window();
-        manager.update(cx, |manager, cx| manager.focus(window, cx));
-    });
+    cx.update(|window, _| window.activate_window());
     (
         LaunchHarness {
             manager,
@@ -2097,4 +2114,43 @@ fn observer_caption_renders_names_and_clears_without_a_control_change(cx: &mut T
             .find("Observed by Build CLI and 3 others")
             .is_none()
     );
+}
+
+/// A window reopened with the keyboard in its sidebar keeps it there while launch connects to
+/// this computer's server and its Workspaces arrive. Neither the launch screen nor the first
+/// Workspace takes the keyboard, and no Pane is opened for the person.
+#[gpui::test]
+fn a_reopened_window_keeps_the_keyboard_in_its_sidebar_through_launch(cx: &mut TestAppContext) {
+    use crate::ui::remembered_view::{SidebarView, WindowView};
+
+    let remembered = WindowView {
+        placement: None,
+        sidebar: SidebarView {
+            visible: true,
+            width: gpui::px(240.0),
+            focused: true,
+            focus_visible: true,
+        },
+        active_workspace: None,
+        workspaces: std::collections::BTreeMap::new(),
+    };
+    let (harness, cx) = launch_harness_restoring(
+        vec![ready()],
+        ScriptedEdits::new(Some(inventory())),
+        [],
+        Some(remembered),
+        cx,
+    );
+    cx.run_until_parked();
+
+    assert_eq!(harness.shared_rows(cx), 1);
+    assert!(cx.update(|window, cx| {
+        harness
+            .manager
+            .read(cx)
+            .sidebar
+            .read(cx)
+            .has_visible_focus(window)
+    }));
+    assert_eq!(harness.panes.pane(PANE).selections(), 0);
 }
