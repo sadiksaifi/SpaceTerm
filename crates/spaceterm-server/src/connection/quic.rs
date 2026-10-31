@@ -2249,6 +2249,37 @@ impl QuicCarrier {
 /// Stream bytes read at once.
 const READ_CHUNK: usize = 64 * 1024;
 
+impl QuicCarrier {
+    /// For the #682 switch probe in `examples/switch_probe.rs` only: path 0's round-trip estimate,
+    /// window and counters, the client's local address and the peer's address. The text carries
+    /// addresses, so it never reaches diagnostics.
+    pub fn probe_stats(&mut self) -> String {
+        let local = self.driver.local_address();
+        let remote = self
+            .driver
+            .connection
+            .network_path(noq_proto::PathId::ZERO)
+            .ok()
+            .map(|p| p.remote());
+        let s = self.driver.connection.path_stats(noq_proto::PathId::ZERO);
+        let c = self.driver.connection.stats();
+        match s {
+            Some(s) => format!(
+                "rtt={:.1}ms cwnd={} lost={} congestion={} tx={} rx={} local={:?} remote={:?}",
+                s.rtt.as_secs_f64() * 1000.0,
+                s.cwnd,
+                s.lost_packets,
+                s.congestion_events,
+                c.udp_tx.datagrams,
+                c.udp_rx.datagrams,
+                local,
+                remote
+            ),
+            None => "no path".into(),
+        }
+    }
+}
+
 impl Carrier for QuicCarrier {
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
         if self.closing {
