@@ -68,6 +68,11 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
                 .write_all(report.as_bytes())
                 .map_err(Error::Output)?;
         }
+        ProvisionCommand::PermissionRequest { permission } => {
+            spaceterm_server::permissions::request_in_process(permission.permission())
+                .ok_or(Error::Failure(Failure::new(Code::Unsupported)))?
+                .map_err(|failure| Error::Failure(contract::from_lane_code(failure.code())))?;
+        }
         ProvisionCommand::Check => {
             crate::check::run()?;
             std::io::stdout()

@@ -642,7 +642,7 @@ fn the_guide_publishes_its_instruction_and_the_entry_to_turn_on(cx: &mut TestApp
     let tree = A11yTree::read(guide);
     tree.text("Turn on SpaceTerm Development to allow Screen Recording.");
     tree.text(
-        "SpaceTerm removed an earlier entry for SpaceTerm Development, then listed it again.",
+        "SpaceTerm removed an earlier entry for SpaceTerm Development and asked macOS to list it again.",
     );
 
     perform(guide, tree.node("Close"), Action::Click);

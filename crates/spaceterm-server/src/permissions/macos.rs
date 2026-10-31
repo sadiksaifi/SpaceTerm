@@ -302,16 +302,21 @@ impl Native for System {
         probe::run()
     }
 
+    /// Screen Recording and Accessibility list the requesting process only once per process, so
+    /// each request runs in a fresh child, which inherits the server's responsibility as a
+    /// Terminal Session's programs do.
     fn request(&self, permission: SystemPermission) -> Result<(), PermissionError> {
         match permission {
             SystemPermission::Microphone => request_capture(),
-            SystemPermission::ScreenRecording => {
-                // SAFETY: The function takes no input. The system lists this process in System
-                // Settings and may show its prompt; the return value only repeats the grant.
-                let _ = unsafe { CGRequestScreenCaptureAccess() };
-                Ok(())
+            SystemPermission::ScreenRecording | SystemPermission::Accessibility => {
+                let executable =
+                    std::env::current_exe().map_err(|_| PermissionError::Unavailable)?;
+                run_tool(
+                    Command::new(executable)
+                        .args(request_arguments(permission))
+                        .env_clear(),
+                )
             }
-            SystemPermission::Accessibility => request_accessibility(),
         }
     }
 
@@ -347,6 +352,30 @@ impl Native for System {
             .next()?
             .parse()
             .ok()
+    }
+}
+
+/// The hidden command that runs one request in a child of the server.
+fn request_arguments(permission: SystemPermission) -> [&'static str; 4] {
+    let name = match permission {
+        SystemPermission::Microphone => "microphone",
+        SystemPermission::ScreenRecording => "screen-recording",
+        SystemPermission::Accessibility => "accessibility",
+    };
+    ["server", "provision", "permission-request", name]
+}
+
+/// The request role: asks the system for `permission` from this process, which lists this
+/// process's responsible bundle in System Settings and may show the system's prompt.
+pub(super) fn request_in_process(permission: SystemPermission) -> Result<(), PermissionError> {
+    match permission {
+        SystemPermission::Microphone => request_capture(),
+        SystemPermission::ScreenRecording => {
+            // SAFETY: The function takes no input. The return value only repeats the grant.
+            let _ = unsafe { CGRequestScreenCaptureAccess() };
+            Ok(())
+        }
+        SystemPermission::Accessibility => request_accessibility(),
     }
 }
 
@@ -725,6 +754,46 @@ mod tests {
                 REGISTER.to_owned(),
             ],
             "the request never follows a registration the person cancelled during"
+        );
+    }
+
+    /// A setup after a reset requests again, so each repeated setup lists the server anew.
+    #[test]
+    fn a_repeated_setup_requests_each_time() {
+        let (permissions, scripted) = permissions(
+            true,
+            &[(
+                SystemPermission::ScreenRecording,
+                PermissionState::NotGranted,
+            )],
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                permissions.prepare_setup(SystemPermission::ScreenRecording, &|| false),
+                Ok(SetupReadiness::Ready { cleared: true })
+            );
+        }
+        let requests = effects(&scripted)
+            .into_iter()
+            .filter(|effect| effect == "request screen_recording")
+            .count();
+        assert_eq!(requests, 2);
+    }
+
+    #[test]
+    fn screen_recording_and_accessibility_requests_run_in_a_child() {
+        assert_eq!(
+            request_arguments(SystemPermission::ScreenRecording),
+            [
+                "server",
+                "provision",
+                "permission-request",
+                "screen-recording"
+            ]
+        );
+        assert_eq!(
+            request_arguments(SystemPermission::Accessibility),
+            ["server", "provision", "permission-request", "accessibility"]
         );
     }
 

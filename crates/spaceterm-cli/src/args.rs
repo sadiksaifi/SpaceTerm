@@ -251,6 +251,10 @@ pub enum ProvisionCommand {
     Check,
     /// Report this process's own System Permissions, as the server's probe child.
     PermissionReport,
+    /// Ask the system for one System Permission, as the server's request child.
+    PermissionRequest {
+        permission: PermissionName,
+    },
     ServiceRun {
         #[arg(long)]
         operation: String,

@@ -252,6 +252,20 @@ pub fn probe_report() -> Option<String> {
     }
 }
 
+/// The request role: asks the system for `permission` from this process, a child of the server
+/// whose responsibility it inherits. `None` on a platform without System Permissions.
+pub fn request_in_process(permission: SystemPermission) -> Option<Result<(), PermissionError>> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::request_in_process(permission))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
+        None
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
