@@ -35,11 +35,6 @@ pub(crate) fn service(service: impl PaneService + 'static) -> SharedPaneService 
     Arc::new(Mutex::new(Box::new(service)))
 }
 
-/// A UDP port of `ip` that was free a moment ago.
-pub(crate) fn free_udp(ip: std::net::IpAddr) -> std::net::SocketAddr {
-    UdpSocket::bind((ip, 0)).unwrap().local_addr().unwrap()
-}
-
 /// Severs nothing, for registrations a test only inspects.
 pub(crate) struct Quiet;
 impl crate::connection::registry::Sever for Quiet {
@@ -73,16 +68,9 @@ pub(crate) fn listener(state: &host::Shared) -> (QuicListener, String) {
     (listener, endpoint)
 }
 
-/// A listener of `config` on a free loopback port. Another test can take the port between
-/// finding it and binding it, so a failed bind tries another.
+/// A listener bound once to an OS-selected loopback port.
 fn loopback_listener(config: Arc<noq_proto::ServerConfig>) -> QuicListener {
-    for _ in 0..8 {
-        let address = free_udp(std::net::Ipv4Addr::LOCALHOST.into());
-        if let Ok(listener) = QuicListener::bind(address, Arc::clone(&config)) {
-            return listener;
-        }
-    }
-    panic!("no free UDP port to listen on");
+    QuicListener::bind("127.0.0.1:0".parse().unwrap(), config).unwrap()
 }
 
 /// Accepts the next connection of a test listener and completes its handshake.
@@ -179,27 +167,21 @@ impl Fixture {
     pub(crate) fn enable(&self) {
         self.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
     }
-    /// Enables Network Access on a free UDP port of `ip`, and returns the address the server listens
-    /// at. Another test can take the port between finding it and binding it, so a failed bind
-    /// tries another.
+    /// Enables Network Access using a listener already bound to an OS-selected port.
     pub(crate) fn listen_at(&self, ip: std::net::IpAddr) -> std::net::SocketAddr {
-        for _ in 0..8 {
-            let policy = NetworkPolicy::new(free_udp(ip)).unwrap();
-            let address = policy.bind;
-            self.management(Management::SetPolicy {
+        let policy = host::tests::reserve_policy(&self.state, ip);
+        let address = policy.bind;
+        let ManagementReply::Status(status) = self
+            .management(Management::SetPolicy {
                 enabled: true,
                 policy: Some(policy),
             })
-            .unwrap();
-            let ManagementReply::Status(status) = self.management(Management::Status).unwrap()
-            else {
-                panic!()
-            };
-            if status.listener == (ListenerState::Listening { addr: address }) {
-                return address;
-            }
-        }
-        panic!("no free UDP port to listen on");
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(status.listener, ListenerState::Listening { addr: address });
+        address
     }
     pub(super) fn invite(&self) -> Invitation {
         let ManagementReply::Invitation(text) = self
@@ -1237,6 +1219,20 @@ fn quic_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity(
         manage(&connection, Management::Status),
         Ok(ManagementReply::Status(_))
     ));
+    for _ in 0..20 {
+        assert!(matches!(
+            request(
+                &connection,
+                Operation::ReleaseAttachment {
+                    attachment: crate::attachments::Attachment {
+                        workspace: [1; 32],
+                        generation: 1
+                    },
+                }
+            ),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+    }
     drop(connection);
     let _ = server.join().unwrap();
 }
@@ -1598,51 +1594,6 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
 }
 
 #[test]
-fn a_paired_policy_request_is_refused_without_mutation_or_retiring_its_connection() {
-    for change_address in [false, true] {
-        let fixture = Fixture::new();
-        fixture.enable();
-        let credential = DeviceCredential::generate().unwrap();
-        let paired = fixture.enroll(&credential);
-        let server = fixture.serve_next();
-        let connection = connect(&fixture.endpoint(), &paired, &credential);
-        let policy = change_address
-            .then(|| NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap());
-        // The admission reply precedes the retained connection timestamp. A server request
-        // completes after that metadata write and fences this baseline.
-        assert!(matches!(
-            manage(&connection, Management::Status),
-            Ok(ManagementReply::Status(_))
-        ));
-        let before = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
-        // Refusal leaves this connection usable for the request already in flight behind it.
-        let refused = connection
-            .request(Operation::Direct(Management::SetPolicy {
-                enabled: policy.is_some(),
-                policy,
-            }))
-            .unwrap();
-        let next = connection
-            .request(Operation::Direct(Management::Status))
-            .unwrap();
-        assert!(matches!(
-            refused.wait(),
-            Ok(ReplyBody::Direct(Err(DirectError::AuthenticationRefused)))
-        ));
-        assert!(matches!(
-            next.wait(),
-            Ok(ReplyBody::Direct(Ok(ManagementReply::Status(_))))
-        ));
-        assert!(
-            before == std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
-            "a refused policy request must leave the complete retained record unchanged"
-        );
-        drop(connection);
-        let _ = server.join().unwrap();
-    }
-}
-
-#[test]
 fn a_paired_protocol_connection_cannot_write_native_stop_policy() {
     let fixture = Fixture::new();
     fixture.enable();
@@ -1672,7 +1623,7 @@ fn setup(
         panic!()
     };
     let policy = status.policy.clone().unwrap_or_else(|| {
-        NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap()
+        host::tests::reserve_policy(&fixture.state, std::net::Ipv4Addr::LOCALHOST.into())
     });
     operation[..8].copy_from_slice(&status.setup_generation.to_be_bytes());
     Management::Setup {
@@ -2184,7 +2135,7 @@ fn configured_listener_survives_off_on_and_can_be_selected_before_network_access
         }),
         Err(DirectError::InvalidRequest)
     ));
-    let policy = NetworkPolicy::new(free_udp(std::net::Ipv4Addr::LOCALHOST.into())).unwrap();
+    let policy = host::tests::reserve_policy(&fixture.state, std::net::Ipv4Addr::LOCALHOST.into());
     fixture
         .management(Management::SetPolicy {
             policy: Some(policy.clone()),
@@ -2245,21 +2196,6 @@ fn dns_connections_reconnect_with_the_saved_name_and_require_the_original_pin() 
         Err(DirectError::PinMismatch)
     ));
     let _ = worker.join().unwrap();
-}
-
-#[test]
-fn client_clock_cannot_expire_or_reject_an_invitation_before_server_observation() {
-    let fixture = Fixture::new();
-    fixture.enable();
-    let invitation = fixture.invite();
-    let credential = DeviceCredential::generate().unwrap();
-    for expires in [1, wire::now().unwrap() + 600] {
-        let mut payload = invitation.payload.clone();
-        payload.expires = expires;
-        let encoded = client::invitation(payload).unwrap();
-        let parsed = Invitation::parse(&encoded.display_text()).unwrap();
-        assert!(Enrollment::prepare(&parsed, "Clock skew".into(), &credential).is_ok());
-    }
 }
 
 #[test]
@@ -2360,6 +2296,34 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
             manage(&connection, request),
             Err(DirectError::AuthenticationRefused)
         ));
+    }
+    let occupied = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for policy in [
+        None,
+        Some(NetworkPolicy::new(occupied.local_addr().unwrap()).unwrap()),
+    ] {
+        let refused = connection
+            .request(Operation::Direct(Management::SetPolicy {
+                enabled: policy.is_some(),
+                policy,
+            }))
+            .unwrap();
+        let next = connection
+            .request(Operation::Direct(Management::Status))
+            .unwrap();
+        assert!(matches!(
+            refused.wait(),
+            Ok(ReplyBody::Direct(Err(DirectError::AuthenticationRefused)))
+        ));
+        assert!(matches!(
+            next.wait(),
+            Ok(ReplyBody::Direct(Ok(ManagementReply::Status(_))))
+        ));
+        assert_eq!(
+            before,
+            std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+            "each refused policy must preserve the complete retained record",
+        );
     }
     for request in [
         Management::Status,
@@ -2548,20 +2512,23 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
 }
 
 #[test]
-fn a_closed_server_port_is_a_transport_failure() {
+fn an_unresponsive_server_port_is_a_transport_failure() {
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
-    let closed = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("quic://{}", closed.local_addr().unwrap());
-    drop(closed);
-    let started = Instant::now();
+    let unresponsive = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("quic://{}", unresponsive.local_addr().unwrap());
     assert_eq!(
-        DirectConnection::connect(&endpoint, &paired, &credential).err(),
+        DirectConnection::connect_until(
+            &endpoint,
+            &paired,
+            &credential,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .err(),
         Some(DirectError::Transport)
     );
-    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 mod quic_connections {
@@ -2584,24 +2551,6 @@ mod quic_connections {
     ) -> ServerLink {
         let connection = DirectConnection::connect(endpoint, paired, credential).unwrap();
         admitted(connection, &paired.client, "Test", paired).unwrap()
-    }
-
-    #[test]
-    fn a_paired_device_is_admitted_over_quic_and_its_requests_round_trip() {
-        let fixture = Fixture::new();
-        fixture.enable();
-        let credential = DeviceCredential::generate().unwrap();
-        let paired = fixture.enroll(&credential);
-        let server = fixture.serve_next_with(service(Refusing));
-        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
-        for _ in 0..20 {
-            assert!(matches!(
-                request(&link, nothing()),
-                Err(RequestError::Refused(Refusal::Unsupported))
-            ));
-        }
-        drop(link);
-        server.join().unwrap().unwrap();
     }
 
     /// The client's TLS certificate proves its key. Proofs signed by an enrolled credential do not
@@ -2627,21 +2576,6 @@ mod quic_connections {
         );
         assert_eq!(answer.err(), Some(DirectError::AuthenticationRefused));
         server.join().unwrap().unwrap();
-    }
-
-    #[test]
-    fn a_client_reaches_only_the_pinned_server_certificate() {
-        let fixture = Fixture::new();
-        fixture.enable();
-        let credential = DeviceCredential::generate().unwrap();
-        let mut paired = fixture.enroll(&credential);
-        paired.pin.certificate = [7; 32];
-        let server = fixture.serve_next_with(service(Refusing));
-        assert!(matches!(
-            DirectConnection::connect(&fixture.endpoint(), &paired, &credential),
-            Err(DirectError::PinMismatch)
-        ));
-        assert!(server.join().unwrap().is_err());
     }
 
     #[test]

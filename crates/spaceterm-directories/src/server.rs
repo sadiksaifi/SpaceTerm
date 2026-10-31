@@ -101,8 +101,21 @@ mod tests {
         let release =
             ServerDirectories::for_account(Path::new("/home/owner"), 501, "spaceterm").unwrap();
         let other =
-            ServerDirectories::for_account(Path::new("/home/owner"), 502, "spaceterm-development")
+            ServerDirectories::for_account(Path::new("/home/other"), 502, "spaceterm-development")
                 .unwrap();
+        assert_eq!(
+            development.data,
+            Path::new("/home/owner/.local/share/spaceterm-development/server")
+        );
+        assert_eq!(
+            release.data,
+            Path::new("/home/owner/.local/share/spaceterm/server")
+        );
+        assert_eq!(
+            other.data,
+            Path::new("/home/other/.local/share/spaceterm-development/server")
+        );
+        assert_ne!(development.data, other.data);
         assert_ne!(development.data, release.data);
         assert_ne!(development.runtime, release.runtime);
         assert_ne!(development.runtime, other.runtime);

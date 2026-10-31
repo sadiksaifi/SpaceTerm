@@ -220,7 +220,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replacement_accepts_only_original_or_exact_completed_bytes_and_preserves_foreign_entries() {
+    fn publication_and_replacement_reuse_exact_bytes_and_preserve_foreign_entries() {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "sts-registration-{:x}",
             u128::from_be_bytes(crate::protocol::random().unwrap()[..16].try_into().unwrap())
@@ -231,10 +231,15 @@ mod tests {
             name: "service".into(),
         };
         registration.install(b"original").unwrap();
+        registration.install(b"original").unwrap();
         registration.replace(b"original", b"candidate").unwrap();
         registration.replace(b"original", b"candidate").unwrap();
         assert_eq!(std::fs::read(registration.path()).unwrap(), b"candidate");
         std::fs::write(registration.path(), b"foreign").unwrap();
+        assert_eq!(
+            registration.remove(b"original"),
+            Err(ServerError::CleanupUnresolved)
+        );
         assert_eq!(
             registration.replace(b"original", b"candidate"),
             Err(ServerError::CleanupUnresolved)
@@ -243,6 +248,12 @@ mod tests {
         std::fs::remove_file(registration.path()).unwrap();
         std::os::unix::fs::symlink("unchanged-foreign-target", registration.path()).unwrap();
         assert!(registration.replace(b"original", b"candidate").is_err());
+        assert!(registration.install(b"original").is_err());
+        assert!(
+            std::fs::symlink_metadata(registration.path())
+                .unwrap()
+                .is_symlink()
+        );
         assert_eq!(
             std::fs::read_link(registration.path()).unwrap(),
             Path::new("unchanged-foreign-target")
