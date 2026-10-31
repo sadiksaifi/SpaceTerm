@@ -31,46 +31,6 @@ impl WorkspaceManager {
         }
     }
 
-    /// Closes every Tab of a Worktree and keeps its row. A Workspace keeps a Tab outside the
-    /// Worktree, so when the Worktree holds them all, no Tab closes.
-    pub(in crate::ui::workspace_manager) fn close_worktree_tabs(
-        &mut self,
-        workspace_id: WorkspaceId,
-        worktree_id: WorktreeId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(manager) = self
-            .workspaces
-            .workspace(workspace_id)
-            .map(|workspace| workspace.payload().clone())
-        else {
-            return false;
-        };
-        let (tab_ids, outside) = {
-            let manager = manager.read(cx);
-            let tab_ids = manager.worktree_tab_ids(worktree_id);
-            let outside = manager.has_tabs_besides(&tab_ids);
-            (tab_ids, outside)
-        };
-        if tab_ids.is_empty() {
-            return true;
-        }
-        if !outside {
-            return false;
-        }
-        manager.update(cx, |manager, cx| {
-            for tab_id in tab_ids {
-                manager.close_tab_authorized(tab_id, window, cx);
-            }
-        });
-        if self.workspaces.active_workspace_id() == Some(workspace_id) {
-            self.focus(window, cx);
-        }
-        cx.notify();
-        true
-    }
-
     /// Asks the owning server to remove a Worktree, after it checks for changes removing it would
     /// discard.
     pub(in crate::ui::workspace_manager) fn request_worktree_removal(

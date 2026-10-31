@@ -3309,6 +3309,8 @@ mod development {
             retries: std::sync::atomic::AtomicUsize,
             /// Hints the Tab after each change, as a real connection does.
             changes: crate::terminal::changes::Changes,
+            /// Whether the connection reaches its Terminal Session once its Pane observes it.
+            connect_when_observed: std::sync::atomic::AtomicBool,
         }
 
         impl ScriptedPane {
@@ -3327,6 +3329,7 @@ mod development {
                     restored_starts: std::sync::atomic::AtomicUsize::new(0),
                     retries: std::sync::atomic::AtomicUsize::new(0),
                     changes: crate::terminal::changes::Changes::default(),
+                    connect_when_observed: std::sync::atomic::AtomicBool::new(false),
                 })
             }
 
@@ -3435,6 +3438,12 @@ mod development {
 
             fn observe(&self, hint: async_channel::Sender<()>) {
                 self.changes.observe(hint);
+                if self
+                    .connect_when_observed
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.reconnect();
+                }
             }
 
             fn start_created(&self) {
@@ -3475,6 +3484,10 @@ mod development {
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             panes: Mutex<std::collections::BTreeMap<super::Id, std::sync::Arc<ScriptedPane>>>,
+            /// Whether each Pane's connection reaches its Terminal Session as it opens.
+            connected: bool,
+            /// Every server Pane opened so far, in the order it was opened.
+            order: Mutex<Vec<super::Id>>,
         }
 
         impl ScriptedPanes {
@@ -3493,6 +3506,22 @@ mod development {
                     local_files,
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
+                    connected: false,
+                    order: Mutex::default(),
+                })
+            }
+
+            /// Panes whose connection reaches its Terminal Session as each one opens, as a
+            /// running account-local server's do.
+            pub(crate) fn connected(
+                session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
+            ) -> std::rc::Rc<Self> {
+                std::rc::Rc::new(Self {
+                    local_files: crate::runtime::local_filesystem(),
+                    session_factory,
+                    panes: Mutex::new(std::collections::BTreeMap::new()),
+                    connected: true,
+                    order: Mutex::default(),
                 })
             }
 
@@ -3504,6 +3533,11 @@ mod development {
                     .values()
                     .cloned()
                     .collect()
+            }
+
+            /// The server Pane opened `index`th, counting from 0.
+            pub(crate) fn opened_at(&self, index: usize) -> super::Id {
+                self.order.lock().expect("order")[index]
             }
 
             /// The scripted connection behind one server Pane, once it has been opened.
@@ -3535,6 +3569,10 @@ mod development {
 
             fn open(&self, pane: super::Id) -> Option<super::SharedPaneSubscription> {
                 let connection = ScriptedPane::new();
+                connection
+                    .connect_when_observed
+                    .store(self.connected, std::sync::atomic::Ordering::SeqCst);
+                self.order.lock().expect("order").push(pane);
                 self.panes
                     .lock()
                     .expect("panes")
@@ -3553,9 +3591,207 @@ mod development {
             retries: std::sync::atomic::AtomicUsize,
             /// Hints readers after each change, as the real client does.
             changes: crate::terminal::changes::Changes,
+            /// The server's own hierarchy, when this server applies each edit it receives.
+            applying: Option<Mutex<AppliedHierarchy>>,
+        }
+
+        /// The device every edit an applying server receives comes from.
+        const APPLYING_DEVICE: spaceterm_server::hierarchy::Id = [0xAD; 32];
+
+        /// The server boot an applying server's Sessions belong to.
+        const APPLYING_BOOT: spaceterm_server::hierarchy::Id = [0xB0; 32];
+
+        /// The hierarchy an applying server keeps, and the directory its new Panes start in.
+        struct AppliedHierarchy {
+            state: spaceterm_server::hierarchy::State,
+            directory: std::path::PathBuf,
+            /// Whether a shell runs in every Pane.
+            shells: bool,
+        }
+
+        impl AppliedHierarchy {
+            /// Applies one edit as the server does. A refused edit is invalid.
+            fn apply(&mut self, mutation: Mutation) -> Outcome {
+                let sequence = self.state.next_sequence(APPLYING_DEVICE);
+                let outcome = self
+                    .state
+                    .apply(
+                        APPLYING_DEVICE,
+                        sequence,
+                        mutation,
+                        &self.directory,
+                        |_| true,
+                    )
+                    .unwrap_or(Outcome::Invalid);
+                self.state
+                    .acknowledge(APPLYING_DEVICE, sequence)
+                    .expect("an applied edit is acknowledged");
+                self.report_sessions();
+                outcome
+            }
+
+            /// The inventory the server publishes.
+            fn published(&self) -> Inventory {
+                self.state.inventory.clone()
+            }
+
+            /// Records each Pane's Session and control, as the server reports them with its
+            /// inventory and checks a close against them. This client controls every Pane, and
+            /// each Pane's Session is named by the Pane's own identity.
+            fn report_sessions(&mut self) {
+                let inventory = &mut self.state.inventory;
+                let panes: Vec<_> = inventory
+                    .workspaces
+                    .iter()
+                    .flat_map(|workspace| &workspace.tabs)
+                    .flat_map(|tab| &tab.panes)
+                    .map(|pane| (pane.id, self.shells.then_some(pane.id)))
+                    .collect();
+                inventory.close = Some(spaceterm_server::hierarchy::CloseInventory {
+                    boot: APPLYING_BOOT,
+                    controls: panes
+                        .iter()
+                        .map(|&(pane, session)| spaceterm_server::hierarchy::ConfirmedControl {
+                            pane,
+                            session,
+                            owner: APPLYING_DEVICE,
+                            epoch: 1,
+                        })
+                        .collect(),
+                    sessions: panes
+                        .iter()
+                        .map(|&(id, session)| spaceterm_server::hierarchy::ConfirmedPane {
+                            id,
+                            session,
+                        })
+                        .collect(),
+                });
+            }
         }
 
         impl ScriptedEdits {
+            /// A connected server that applies each edit it receives through the server's own
+            /// hierarchy and publishes the result, as the account-local server does. It starts
+            /// with one Workspace, and every new Pane starts in `directory`.
+            pub(crate) fn applying(directory: std::path::PathBuf) -> Self {
+                let mut hierarchy = AppliedHierarchy {
+                    state: spaceterm_server::hierarchy::State::empty(),
+                    directory,
+                    shells: false,
+                };
+                let created = hierarchy.apply(Mutation::CreateWorkspace {
+                    name: String::new(),
+                    directory: None,
+                    control: spaceterm_server::hierarchy::CreateControl::Creator,
+                });
+                assert!(
+                    matches!(created, Outcome::Accepted { .. }),
+                    "the first Workspace is created"
+                );
+                Self {
+                    applying: Some(Mutex::new(hierarchy)),
+                    ..Self::new(None)
+                }
+                .with_published_hierarchy()
+            }
+
+            fn with_published_hierarchy(self) -> Self {
+                if let Some(hierarchy) = &self.applying {
+                    let inventory = hierarchy.lock().expect("hierarchy").published();
+                    self.snapshot.lock().expect("snapshot").inventory = Some(inventory);
+                }
+                self
+            }
+
+            /// Applies and answers the edit waiting for an applying server, as the server answers
+            /// it before this client reads again.
+            fn settle(&self) {
+                let Some(hierarchy) = &self.applying else {
+                    return;
+                };
+                let pending = {
+                    let snapshot = self.snapshot.lock().expect("snapshot");
+                    snapshot
+                        .pending
+                        .then(|| snapshot.pending_operation.clone())
+                        .flatten()
+                };
+                let Some(mutation) = pending else {
+                    return;
+                };
+                let (outcome, inventory) = {
+                    let mut hierarchy = hierarchy.lock().expect("hierarchy");
+                    let outcome = hierarchy.apply(mutation);
+                    (outcome, hierarchy.published())
+                };
+                self.answer_publishing(outcome, Some(inventory));
+            }
+
+            /// The applying server ends the Terminal Session of `pane`, whose shell exited, and
+            /// removes the Pane as ordinary shell exit does.
+            pub(crate) fn exit_pane(&self, pane: spaceterm_server::hierarchy::Id) {
+                let inventory = {
+                    let mut hierarchy = self
+                        .applying
+                        .as_ref()
+                        .expect("only an applying server ends Panes")
+                        .lock()
+                        .expect("hierarchy");
+                    hierarchy.state.remove_pane(pane);
+                    hierarchy.report_sessions();
+                    hierarchy.published()
+                };
+                self.set_inventory(inventory);
+            }
+
+            /// A shell starts in every Pane of the applying server, so closing one ends its Session.
+            pub(crate) fn run_shells(&self) {
+                let inventory = {
+                    let mut hierarchy = self
+                        .applying
+                        .as_ref()
+                        .expect("only an applying server runs shells")
+                        .lock()
+                        .expect("hierarchy");
+                    hierarchy.shells = true;
+                    hierarchy.report_sessions();
+                    hierarchy.published()
+                };
+                self.set_inventory(inventory);
+            }
+
+            /// The applying server publishes `snapshot` as the Terminal Metadata of `pane`.
+            pub(crate) fn present_metadata(
+                &self,
+                pane: spaceterm_server::hierarchy::Id,
+                snapshot: spaceterm_server::pane::metadata::Snapshot,
+            ) {
+                let inventory = {
+                    let mut hierarchy = self
+                        .applying
+                        .as_ref()
+                        .expect("only an applying server publishes metadata")
+                        .lock()
+                        .expect("hierarchy");
+                    hierarchy
+                        .state
+                        .present_presentation(pane, Some(Box::new(snapshot)));
+                    hierarchy.state.inventory.revision += 1;
+                    hierarchy.published()
+                };
+                self.set_inventory(inventory);
+            }
+
+            /// The applying server's current inventory.
+            pub(crate) fn applied_inventory(&self) -> Inventory {
+                self.applying
+                    .as_ref()
+                    .expect("only an applying server keeps a hierarchy")
+                    .lock()
+                    .expect("hierarchy")
+                    .published()
+            }
+
             pub(crate) fn new(inventory: Option<Inventory>) -> Self {
                 Self {
                     snapshot: Mutex::new(SharedWorkspaceSnapshot {
@@ -3576,6 +3812,7 @@ mod development {
                     sequence: Mutex::new(1),
                     retries: std::sync::atomic::AtomicUsize::new(0),
                     changes: crate::terminal::changes::Changes::default(),
+                    applying: None,
                 }
             }
 
@@ -3612,6 +3849,11 @@ mod development {
 
             /// Answers the last submitted edit with `outcome`.
             pub(crate) fn answer(&self, outcome: Outcome) {
+                self.answer_publishing(outcome, None);
+            }
+
+            /// Answers the last submitted edit with `outcome`, publishing `inventory` with it.
+            fn answer_publishing(&self, outcome: Outcome, inventory: Option<Inventory>) {
                 let mutation = self
                     .submitted
                     .lock()
@@ -3626,6 +3868,9 @@ mod development {
                     outcome,
                 };
                 self.publish(|snapshot| {
+                    if let Some(inventory) = inventory {
+                        snapshot.inventory = Some(inventory);
+                    }
                     snapshot.pending = false;
                     snapshot.pending_operation = None;
                     if answer.outcome.needs_presentation() {
@@ -3688,10 +3933,12 @@ mod development {
 
         impl SharedWorkspaceEdits for ScriptedEdits {
             fn snapshot(&self) -> SharedWorkspaceSnapshot {
+                self.settle();
                 self.snapshot.lock().expect("snapshot").clone()
             }
 
             fn availability(&self) -> (bool, bool) {
+                self.settle();
                 let snapshot = self.snapshot.lock().expect("snapshot");
                 (snapshot.connected, snapshot.pending)
             }

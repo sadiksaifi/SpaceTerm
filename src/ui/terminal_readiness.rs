@@ -493,20 +493,30 @@ mod tests {
         use crate::terminal::geometry::{
             BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
         };
-        use crate::terminal::testing::{
-            TestTerminalSessionFactory, TestTerminalSessionRecords, test_local_directory,
+        use crate::terminal::TerminalSessionEvent;
+        use crate::terminal::testing::TestTerminalSessionRecords;
+        use crate::ui::workspace_manager::tests::{
+            local_server_manager, server_sessions, workspace_adapters,
         };
-        use crate::terminal::{TerminalSessionEvent, WorkspaceTerminalSessionFactory};
         cx.update(crate::ui::init).unwrap();
         let records = TestTerminalSessionRecords::default();
-        let factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(TestTerminalSessionFactory::new(records.clone())),
-            test_local_directory(std::path::PathBuf::from("/tmp/spaceterm-readiness-test")),
-        );
-        let (manager, cx) = cx.add_window_view(|window, cx| {
-            super::super::tab_manager::TabManager::new(factory, window, cx)
+        let factory = Rc::new(server_sessions(records.clone()));
+        let (window_manager, cx) = cx.add_window_view(|window, cx| {
+            local_server_manager(
+                factory,
+                std::path::PathBuf::from("/tmp/spaceterm-readiness-test"),
+                workspace_adapters(),
+                crate::settings::sidebar::SidebarState::Expanded,
+                window,
+                cx,
+            )
         });
         cx.run_until_parked();
+        let manager = window_manager.read_with(cx, |manager, _| {
+            manager
+                .active_tab_manager()
+                .expect("the window presents its server's Workspace")
+        });
         for _ in 0..7 {
             cx.update(|window, cx| {
                 manager.update(cx, |manager, cx| manager.create_tab(window, cx))

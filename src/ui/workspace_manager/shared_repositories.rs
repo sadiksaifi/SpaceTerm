@@ -127,6 +127,10 @@ mod development {
             directory: &Path,
             cx: &App,
         ) -> RepositoryView {
+            #[cfg(feature = "developer-tools")]
+            if let Some(view) = crate::ui::developer_workbench::repository_view_fixture(cx) {
+                return view;
+            }
             let Some(shared) = self.shared.owning(workspace_id) else {
                 return RepositoryView::Hidden;
             };

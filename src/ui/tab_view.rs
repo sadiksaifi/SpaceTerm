@@ -12,7 +12,6 @@ use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
 };
 use crate::repository_status::presentation::{HeadGlyph, RepositoryCaption, RepositoryMark};
-use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
@@ -781,40 +780,24 @@ impl TabView {
         self.tab.pane_count()
     }
 
-    /// The Root Pane's machine and Repository Source Directory.
-    pub(crate) fn repository_source(
-        &self,
-        cx: &App,
-    ) -> Option<(
-        crate::repository_status::RepositoryMachine,
-        crate::repository_status::scheduler::SourceDirectory,
-    )> {
-        self.pane_repository_source(self.tab.root_pane_id(), cx)
+    /// Splits the Focused Pane after this Tab next measures its Panes, unless that Pane closes first.
+    #[cfg(test)]
+    pub(crate) fn split_focused_after_layout(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
+        self.pending_split = Some((self.tab.focused_pane_id(), axis));
+        cx.notify();
     }
 
-    pub(crate) fn pane_repository_source(
-        &self,
+    #[cfg(test)]
+    pub(crate) fn close_pane_authorized(
+        &mut self,
         pane_id: PaneId,
-        cx: &App,
-    ) -> Option<(
-        crate::repository_status::RepositoryMachine,
-        crate::repository_status::scheduler::SourceDirectory,
-    )> {
-        self.tab
-            .pane(pane_id)
-            .and_then(|terminal| terminal.read(cx).repository_source())
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_pane(pane_id, window, cx);
     }
 
-    pub(crate) fn automatic_directory(&self, cx: &App) -> Option<CurrentDirectory> {
-        self.current_directory(self.tab.root_pane_id(), cx)
-    }
-
-    pub(crate) fn current_directory(&self, pane_id: PaneId, cx: &App) -> Option<CurrentDirectory> {
-        self.tab
-            .pane(pane_id)
-            .and_then(|terminal| terminal.read(cx).current_directory())
-    }
-
+    #[cfg(test)]
     pub(crate) fn terminal_panes<'a>(
         &'a self,
         cx: &'a App,
@@ -846,13 +829,6 @@ impl TabView {
             title,
             self.pane_attention.values().copied().sum::<u32>() > 0,
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_focused_progress(&self) -> TerminalProgress {
-        self.pane_captions
-            .get(&self.tab.focused_pane_id())
-            .map_or(TerminalProgress::None, |caption| caption.progress)
     }
 
     /// Records unread attention for one Pane as its Terminal Session would report it.
@@ -1061,11 +1037,6 @@ impl TabView {
             .is_some_and(|terminal| terminal.read(cx).terminal_input_focused(window, cx))
     }
 
-    #[cfg(test)]
-    pub(crate) const fn is_active(&self) -> bool {
-        self.active
-    }
-
     fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self.tab.focused_pane_id() == pane_id {
             return;
@@ -1120,12 +1091,6 @@ impl TabView {
     ) {
         let focused_pane_id = self.tab.focused_pane_id();
         self.split_pane(focused_pane_id, axis, window, cx);
-    }
-
-    /// Splits the Focused Pane after this Tab next measures its Panes, unless that Pane closes first.
-    pub(crate) fn split_focused_after_layout(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
-        self.pending_split = Some((self.tab.focused_pane_id(), axis));
-        cx.notify();
     }
 
     fn split_pane(
@@ -1433,15 +1398,6 @@ impl TabView {
             tab_id: self.tab.id(),
             pane_id,
         });
-    }
-
-    pub(crate) fn close_pane_authorized(
-        &mut self,
-        pane_id: PaneId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_pane(pane_id, window, cx);
     }
 
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {

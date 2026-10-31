@@ -5,38 +5,6 @@ use crate::terminal::metadata::TerminalMetadataSnapshot;
 use crate::terminal::metadata::{CommandState, MetadataFreshness, PromptZone};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CloseScope {
-    Pane,
-    Tab,
-    /// Every Tab of one Worktree.
-    Worktree,
-    Workspace,
-    Window,
-}
-
-impl CloseScope {
-    pub(crate) const fn title(self) -> &'static str {
-        match self {
-            Self::Pane => "Close Pane?",
-            Self::Tab => "Close Tab?",
-            Self::Worktree => "Close Tabs?",
-            Self::Workspace => "Kill Workspace?",
-            Self::Window => "Close Window?",
-        }
-    }
-
-    pub(crate) const fn destructive_label(self) -> &'static str {
-        match self {
-            Self::Pane => "Close Pane",
-            Self::Tab => "Close Tab",
-            Self::Worktree => "Close Tabs",
-            Self::Workspace => "Kill Workspace",
-            Self::Window => "Close Window",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CloseTarget {
     Pane {
         workspace_id: WorkspaceId,
@@ -56,15 +24,6 @@ pub(crate) enum CloseTarget {
 }
 
 impl CloseTarget {
-    pub(crate) const fn scope(self) -> CloseScope {
-        match self {
-            Self::Pane { .. } => CloseScope::Pane,
-            Self::Tab { .. } => CloseScope::Tab,
-            Self::Worktree { .. } => CloseScope::Worktree,
-            Self::Workspace(_) => CloseScope::Workspace,
-            Self::Window => CloseScope::Window,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,14 +38,6 @@ pub(crate) struct PaneCloseFacts<'a> {
     pub(crate) state: &'a PaneTerminalState,
     pub(crate) disconnected: bool,
     pub(crate) metadata: &'a TerminalMetadataSnapshot,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ApplicationPaneFacts {
-    pub(crate) workspace_id: WorkspaceId,
-    pub(crate) tab_id: TabId,
-    pub(crate) pane_id: PaneId,
-    pub(crate) has_running_work: bool,
 }
 
 impl PaneCloseFacts<'_> {
@@ -117,84 +68,6 @@ impl PaneCloseFacts<'_> {
     }
 }
 
-/// An immutable inventory is the single scope-resolution surface for every close request.
-#[derive(Default)]
-pub(crate) struct CloseHierarchy {
-    panes: Vec<HierarchyPane>,
-}
-
-/// One Pane, where it sits, and whether closing it stops running work.
-#[derive(Clone, Copy)]
-struct HierarchyPane {
-    workspace: WorkspaceId,
-    worktree: Option<WorktreeId>,
-    tab: TabId,
-    pane: PaneId,
-    running: bool,
-}
-
-impl CloseHierarchy {
-    pub(crate) fn insert(
-        &mut self,
-        workspace: WorkspaceId,
-        worktree: Option<WorktreeId>,
-        tab: TabId,
-        pane: PaneId,
-        facts: PaneCloseFacts<'_>,
-    ) {
-        self.panes.push(HierarchyPane {
-            workspace,
-            worktree,
-            tab,
-            pane,
-            running: facts.requires_confirmation(),
-        });
-    }
-
-    pub(crate) fn affected_pane_count(&self, target: CloseTarget) -> usize {
-        self.matching_panes(target).count()
-    }
-
-    pub(crate) fn application_pane_facts(&self) -> impl Iterator<Item = ApplicationPaneFacts> + '_ {
-        self.panes.iter().map(|pane| ApplicationPaneFacts {
-            workspace_id: pane.workspace,
-            tab_id: pane.tab,
-            pane_id: pane.pane,
-            has_running_work: pane.running,
-        })
-    }
-
-    fn matching_panes(&self, target: CloseTarget) -> impl Iterator<Item = &HierarchyPane> {
-        self.panes.iter().filter(move |pane| match target {
-            CloseTarget::Pane {
-                workspace_id,
-                tab_id,
-                pane_id,
-            } => (pane.workspace, pane.tab, pane.pane) == (workspace_id, tab_id, pane_id),
-            CloseTarget::Tab {
-                workspace_id,
-                tab_id,
-            } => (pane.workspace, pane.tab) == (workspace_id, tab_id),
-            CloseTarget::Worktree {
-                workspace_id,
-                worktree_id,
-            } => pane.workspace == workspace_id && pane.worktree == Some(worktree_id),
-            CloseTarget::Workspace(id) => pane.workspace == id,
-            CloseTarget::Window => true,
-        })
-    }
-
-    pub(crate) fn requires_confirmation(&self, target: CloseTarget) -> Option<bool> {
-        let mut found = matches!(target, CloseTarget::Window);
-        let mut requires = false;
-        for pane in self.matching_panes(target) {
-            found = true;
-            requires |= pane.running;
-        }
-        found.then_some(requires)
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct CloseConfirmation {
     generation: u64,
@@ -214,18 +87,6 @@ impl CloseConfirmation {
         self.generation = generation;
         self.pending = Some(PendingCloseConfirmation { generation, target });
         Some(generation)
-    }
-
-    pub(crate) fn settle(
-        &mut self,
-        generation: u64,
-        target: CloseTarget,
-        confirmed: bool,
-        hierarchy: &CloseHierarchy,
-    ) -> Option<CloseTarget> {
-        (self.settle_approval(generation, target, confirmed)
-            && hierarchy.requires_confirmation(target).is_some())
-        .then_some(target)
     }
 
     /// Ends the pending confirmation for `target`, returning whether a person approved it. A
@@ -397,20 +258,13 @@ mod tests {
             let mut metadata = (*screen.metadata).clone();
             metadata.freshness = freshness;
             metadata.prompt_zone = zone;
-            let mut hierarchy = CloseHierarchy::default();
-            hierarchy.insert(
-                WorkspaceId::new(1),
-                None,
-                TabId::new(1),
-                PaneId::new(1),
-                PaneCloseFacts {
-                    live_session: live,
-                    state,
-                    disconnected,
-                    metadata: &metadata,
-                },
-            );
-            assert_eq!(hierarchy.requires_confirmation(target(1)), Some(expected));
+            let facts = PaneCloseFacts {
+                live_session: live,
+                state,
+                disconnected,
+                metadata: &metadata,
+            };
+            assert_eq!(facts.requires_confirmation(), expected);
         }
     }
 
@@ -432,90 +286,30 @@ mod tests {
             (MetadataFreshness::Stale, true),
         ] {
             metadata.freshness = freshness;
-            let mut hierarchy = CloseHierarchy::default();
-            hierarchy.insert(
-                WorkspaceId::new(1),
-                None,
-                TabId::new(1),
-                PaneId::new(1),
-                PaneCloseFacts {
-                    live_session: true,
-                    state: &PaneTerminalState::Running,
-                    disconnected: false,
-                    metadata: &metadata,
-                },
-            );
-            assert_eq!(hierarchy.requires_confirmation(target(1)), Some(expected));
-            assert_eq!(
-                hierarchy.requires_confirmation(CloseTarget::Window),
-                Some(expected)
-            );
+            let facts = PaneCloseFacts {
+                live_session: true,
+                state: &PaneTerminalState::Running,
+                disconnected: false,
+                metadata: &metadata,
+            };
+            assert_eq!(facts.requires_confirmation(), expected);
         }
     }
 
     #[test]
-    fn close_confirmation_aggregates_exact_scopes_and_rejects_stale_settlement() {
-        let pane = |id, running| HierarchyPane {
-            workspace: WorkspaceId::new(1),
-            worktree: Some(WorktreeId::new(1)),
-            tab: TabId::new(1),
-            pane: PaneId::new(id),
-            running,
-        };
-        let mut hierarchy = CloseHierarchy {
-            panes: vec![pane(1, true), pane(2, false)],
-        };
-        for scope in [
-            target(1),
-            CloseTarget::Tab {
-                workspace_id: WorkspaceId::new(1),
-                tab_id: TabId::new(1),
-            },
-            CloseTarget::Worktree {
-                workspace_id: WorkspaceId::new(1),
-                worktree_id: WorktreeId::new(1),
-            },
-            CloseTarget::Workspace(WorkspaceId::new(1)),
-            CloseTarget::Window,
-        ] {
-            assert_eq!(hierarchy.requires_confirmation(scope), Some(true));
-        }
-        assert_eq!(hierarchy.requires_confirmation(target(2)), Some(false));
-        assert_eq!(hierarchy.requires_confirmation(target(3)), None);
+    fn close_confirmation_settles_only_its_own_pending_target_once() {
         let mut confirmation = CloseConfirmation::default();
         let first = confirmation.begin(target(1)).unwrap();
         assert!(confirmation.begin(target(2)).is_none());
-        assert!(
-            confirmation
-                .settle(first, target(2), true, &hierarchy)
-                .is_none()
-        );
+        assert!(!confirmation.settle_approval(first, target(2), true));
         assert!(confirmation.pending().is_some());
-        assert!(
-            confirmation
-                .settle(first, target(1), false, &hierarchy)
-                .is_none()
-        );
+        assert!(!confirmation.settle_approval(first, target(1), false));
+        assert!(confirmation.pending().is_none());
         let second = confirmation.begin(target(1)).unwrap();
         confirmation.presentation_failed(first);
         assert!(confirmation.pending().is_some());
-        hierarchy.panes.remove(0);
-        assert!(
-            confirmation
-                .settle(second, target(1), true, &hierarchy)
-                .is_none()
-        );
-        assert!(confirmation.pending().is_none());
-        let third = confirmation.begin(target(2)).unwrap();
-        assert_eq!(
-            confirmation.settle(third, target(2), true, &hierarchy),
-            Some(target(2))
-        );
-        assert!(
-            confirmation
-                .settle(third, target(2), true, &hierarchy)
-                .is_none()
-        );
+        assert!(confirmation.settle_approval(second, target(1), true));
+        assert!(!confirmation.settle_approval(second, target(1), true));
     }
 
     #[test]

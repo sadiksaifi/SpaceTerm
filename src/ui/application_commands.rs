@@ -221,7 +221,6 @@ mod tests {
 
     use super::*;
     use crate::settings::sidebar::SidebarState;
-    use crate::ui::workspace_manager::WorkspaceManagerAdapters;
 
     /// A Workspace Window presenting one Workspace, with the application's actions and Shortcuts
     /// installed as at launch.
@@ -243,32 +242,16 @@ mod tests {
             .expect("application initialization should succeed");
         });
         let (manager, cx) = cx.add_window_view(|window, cx| {
-            crate::ui::updates::server_rows::testing::install_up_to_date(cx);
-            let mut manager = WorkspaceManager::new_with_adapters(
+            crate::ui::workspace_manager::tests::local_server_manager(
+                Rc::new(crate::ui::workspace_manager::tests::server_sessions(
+                    crate::terminal::testing::TestTerminalSessionRecords::default(),
+                )),
                 std::env::temp_dir(),
-                WorkspaceManagerAdapters {
-                    local_filesystem:
-                        crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
-                    key_input: Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
-                    accessibility: Rc::new(
-                        crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
-                    ),
-                    native_services: crate::terminal::native_services::testing::adapters(),
-                    lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
-                    directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
-                    window_drag: Rc::new(
-                        crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform::default(),
-                    ),
-                    local_server: crate::ui::launch_testing::unanswered(),
-                    server_directories:
-                        crate::ui::directory_picker::server_directory_testing::matching(),
-                },
+                crate::ui::workspace_manager::tests::workspace_adapters(),
                 SidebarState::Expanded,
                 window,
                 cx,
-            );
-            manager.present_desktop_workspace(window, cx);
-            manager
+            )
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -288,11 +271,22 @@ mod tests {
     fn choosing_new_tab_in_the_palette_opens_a_tab_in_the_workspace_window(
         cx: &mut TestAppContext,
     ) {
-        let (manager, cx) = workspace_window(cx);
-        let panes = |cx: &mut VisualTestContext| {
-            manager.read_with(cx, |manager, cx| manager.application_pane_facts(cx).len())
+        let (_manager, cx) = workspace_window(cx);
+        let created_tabs = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                cx.global::<crate::ui::workspace_manager::tests::LocalServer>()
+                    .edits
+                    .submitted()
+                    .into_iter()
+                    .filter(|mutation| {
+                        matches!(
+                            mutation,
+                            spaceterm_server::hierarchy::Mutation::CreateTab { .. }
+                        )
+                    })
+                    .count()
+            })
         };
-        let before = panes(cx);
 
         cx.dispatch_action(OpenCommandPalette);
         cx.run_until_parked();
@@ -308,9 +302,9 @@ mod tests {
 
         assert!(!palette_open(cx), "choosing an entry closes the palette");
         assert_eq!(
-            panes(cx),
-            before + 1,
-            "New Tab runs where focus returned, adding one Tab and its Pane"
+            created_tabs(cx),
+            1,
+            "New Tab runs where focus returned, asking the server for one Tab"
         );
     }
 }

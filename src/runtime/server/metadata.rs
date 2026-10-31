@@ -1,7 +1,7 @@
 use crate::terminal::{metadata as local, title::TitleGlyph};
 use spaceterm_server::pane::metadata as wire;
 
-pub(super) fn encode(snapshot: &local::TerminalMetadataSnapshot) -> wire::Snapshot {
+pub(crate) fn encode(snapshot: &local::TerminalMetadataSnapshot) -> wire::Snapshot {
     let (user, host) = match snapshot.context.origin() {
         local::TerminalOrigin::Local { user, host } => (user, host),
         local::TerminalOrigin::Remote { user, host } => (user, Some(host)),

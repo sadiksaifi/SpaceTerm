@@ -179,7 +179,7 @@ mod graphics;
 mod graphics_tests;
 #[cfg(test)]
 mod input_tests;
-mod metadata;
+pub(super) mod metadata;
 #[cfg(test)]
 mod metadata_tests;
 mod observe;

@@ -224,38 +224,6 @@ impl TestTerminalSessionRecords {
             .insert(session_id, request);
     }
 
-    pub(crate) fn report_directory(
-        &self,
-        session_id: usize,
-        current: Option<crate::domain::CurrentDirectory>,
-    ) {
-        use crate::terminal::metadata::{
-            MetadataFreshness, RemoteTerminalMetadataContext, TerminalMetadataContext,
-        };
-        self.report_metadata(session_id, |metadata| match current {
-            Some(crate::domain::CurrentDirectory::Local(path)) => {
-                let path = path.to_string_lossy();
-                metadata.context = TerminalMetadataContext::local(
-                    crate::local_path::LocalPathSemantics::Posix,
-                    &path,
-                    Default::default(),
-                );
-                metadata.directory.path = Arc::from(path.as_ref());
-                metadata.freshness = MetadataFreshness::Live;
-            }
-            Some(crate::domain::CurrentDirectory::Remote(directory)) => {
-                metadata.context =
-                    TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
-                        "tester@remote".to_owned(),
-                        directory.clone(),
-                    ));
-                metadata.directory.path = Arc::from(directory.as_str());
-                metadata.freshness = MetadataFreshness::Live;
-            }
-            None => metadata.freshness = MetadataFreshness::Stale,
-        });
-    }
-
     /// Retains the next Terminal Metadata revision for one Terminal Session, as a hidden one would.
     pub(crate) fn report_metadata(
         &self,

@@ -82,6 +82,8 @@ pub fn local_filesystem() -> LocalFilesystemAuthority {
 
 mod server;
 #[cfg(all(test, feature = "desktop"))]
+pub(crate) use server::metadata::encode as encode_server_metadata;
+#[cfg(all(test, feature = "desktop"))]
 pub(crate) use server::screen_encoder;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) use server::testing as directory_testing;

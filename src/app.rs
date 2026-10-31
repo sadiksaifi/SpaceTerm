@@ -536,21 +536,16 @@ impl QuitSessions for DevelopmentQuitSessions {
     }
 }
 
+/// The Terminal Sessions a quit would end, as the server reported them.
 #[derive(Clone)]
 struct ApplicationQuitSnapshot {
-    panes: Vec<ApplicationQuitPane>,
     sessions: Option<spaceterm_server::hierarchy::CloseInventory>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct ApplicationQuitPane {
-    window: gpui::WindowHandle<WorkspaceManager>,
-    facts: crate::close_confirmation::ApplicationPaneFacts,
-}
-
 impl ApplicationQuitSnapshot {
+    /// Whether the person's approval of `self` still covers `current`: no Session started since.
     fn authorizes(&self, current: &Self) -> bool {
-        let sessions_authorized = match (&self.sessions, &current.sessions) {
+        match (&self.sessions, &current.sessions) {
             (None, None) => true,
             (Some(authorized), Some(current)) => {
                 authorized.boot == current.boot
@@ -561,17 +556,7 @@ impl ApplicationQuitSnapshot {
                         .all(|pane| authorized.sessions.contains(pane))
             }
             _ => false,
-        };
-        sessions_authorized
-            && current.panes.iter().all(|current| {
-                self.panes.iter().any(|authorized| {
-                    authorized.window == current.window
-                        && authorized.facts.workspace_id == current.facts.workspace_id
-                        && authorized.facts.tab_id == current.facts.tab_id
-                        && authorized.facts.pane_id == current.facts.pane_id
-                        && (!current.facts.has_running_work || authorized.facts.has_running_work)
-                })
-            })
+        }
     }
 }
 
@@ -617,7 +602,7 @@ impl ApplicationQuitCoordinator {
 
     fn observe(self: &Rc<Self>, authorization: Option<ApplicationQuitSnapshot>, cx: &mut App) {
         let Some(sessions) = self.sessions.clone() else {
-            self.review(authorization, application_quit_snapshot(cx), cx);
+            self.review(authorization, ApplicationQuitSnapshot { sessions: None }, cx);
             return;
         };
         *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Observing;
@@ -634,8 +619,9 @@ impl ApplicationQuitCoordinator {
                 *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
                 match result {
                     Ok(sessions) => {
-                        let mut snapshot = application_quit_snapshot(cx);
-                        snapshot.sessions = Some(sessions);
+                        let snapshot = ApplicationQuitSnapshot {
+                            sessions: Some(sessions),
+                        };
                         coordinator.review(authorization, snapshot, cx);
                     }
                     Err(_) => coordinator.observation_failed(cx),
@@ -993,24 +979,6 @@ fn application_has_pending_close_confirmation(cx: &App) -> bool {
             .read(cx)
             .is_ok_and(WorkspaceManager::has_pending_close_confirmation)
     })
-}
-
-fn application_quit_snapshot(cx: &App) -> ApplicationQuitSnapshot {
-    let mut panes = Vec::new();
-    for window in workspace_windows(cx) {
-        if let Ok(manager) = window.read(cx) {
-            panes.extend(
-                manager
-                    .application_pane_facts(cx)
-                    .into_iter()
-                    .map(|facts| ApplicationQuitPane { window, facts }),
-            );
-        }
-    }
-    ApplicationQuitSnapshot {
-        panes,
-        sessions: None,
-    }
 }
 
 pub(crate) fn open(
@@ -2749,22 +2717,6 @@ mod runtime_tests {
         );
     }
 
-    /// Presents one desktop-owned Workspace, whose running work quitting would end, as an SSH
-    /// Workspace's is.
-    fn present_desktop_work(
-        workspace: gpui::WindowHandle<WorkspaceManager>,
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            workspace
-                .update(cx, |manager, window, cx| {
-                    manager.present_desktop_workspace(window, cx);
-                })
-                .unwrap();
-        });
-        cx.run_until_parked();
-    }
-
     fn host_with_settings() -> Rc<HostComposition> {
         Rc::new(
             HostComposition::new(parts(Rc::default(), Rc::default()))
@@ -3515,7 +3467,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn window_dispatched_quit_includes_the_dispatching_workspace(cx: &mut gpui::TestAppContext) {
+    fn window_dispatched_quit_asks_before_quitting(cx: &mut gpui::TestAppContext) {
         let quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
@@ -3524,8 +3476,6 @@ mod runtime_tests {
         Rc::get_mut(&mut host).unwrap().adapters.local_server =
             crate::ui::launch_testing::unanswered();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
-        present_desktop_work(workspace, cx);
-        assert!(cx.update(|cx| !application_quit_snapshot(cx).panes.is_empty()));
 
         cx.update(|cx| {
             workspace
@@ -3537,7 +3487,7 @@ mod runtime_tests {
         cx.run_until_parked();
         assert!(
             cx.has_pending_prompt(),
-            "the dispatching Workspace must be included in quit policy"
+            "a quit the Workspace Window dispatches asks first"
         );
         assert_eq!(quit.confirmations(), 0);
         cx.simulate_prompt_answer("Cancel");
@@ -3556,7 +3506,6 @@ mod runtime_tests {
         Rc::get_mut(&mut host).unwrap().adapters.local_server =
             crate::ui::launch_testing::unanswered();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
-        present_desktop_work(workspace, cx);
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&QuitApplication));
@@ -3597,8 +3546,7 @@ mod runtime_tests {
         Rc::get_mut(&mut host).unwrap().adapters.updates = adapter.clone();
         Rc::get_mut(&mut host).unwrap().adapters.local_server =
             crate::ui::launch_testing::unanswered();
-        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
-        present_desktop_work(workspace, cx);
+        let _workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         let service = cx.update(|cx| cx.global::<crate::updates::UpdateService>().0.clone());
         service.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(crate::updates::UpdateEvent::Available("0.1.1".into()));
@@ -3657,190 +3605,6 @@ mod runtime_tests {
             *coordinator.state.borrow(),
             ApplicationQuitCoordinatorState::Idle
         );
-    }
-
-    #[gpui::test]
-    fn application_quit_does_not_move_running_work_between_authorized_panes(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let host = host_with_settings();
-        let window = cx.update(|cx| start_application(cx, &host).unwrap());
-        let pane = |pane_id, has_running_work| ApplicationQuitPane {
-            window,
-            facts: crate::close_confirmation::ApplicationPaneFacts {
-                workspace_id: crate::domain::WorkspaceId::new(1),
-                tab_id: crate::domain::TabId::new(1),
-                pane_id: crate::domain::PaneId::new(pane_id),
-                has_running_work,
-            },
-        };
-        let authorized = ApplicationQuitSnapshot {
-            sessions: None,
-            panes: vec![pane(1, true), pane(2, false)],
-        };
-        let current = ApplicationQuitSnapshot {
-            sessions: None,
-            panes: vec![pane(1, false), pane(2, true)],
-        };
-
-        assert!(!authorized.authorizes(&current));
-    }
-
-    #[gpui::test]
-    fn application_quit_counts_inactive_windows_and_discards_removed_roots(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-        let records = TestTerminalSessionRecords::default();
-        let mut wiring = parts(Rc::default(), Rc::default());
-        wiring.adapters.local_server = crate::ui::launch_testing::presenting(Rc::new(
-            TestTerminalSessionFactory::new(records.clone()),
-        ));
-        let application_quit = Rc::new(
-            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
-        );
-        wiring.adapters.application_quit = application_quit.clone();
-        // Desktop-owned work alone decides whether quitting ends anything.
-        wiring.adapters.local_server = crate::ui::launch_testing::unanswered();
-        cx.update(|cx| {
-            crate::ui::use_desktop_sessions(
-                Rc::new(TestTerminalSessionFactory::new(records.clone())),
-                cx,
-            )
-        });
-        let host = HostComposition::new(wiring).unwrap();
-        let (running, idle) = cx.update(|cx| {
-            let running = start_application(cx, &host).unwrap();
-            let idle = open(cx, &host).unwrap();
-            (running, idle)
-        });
-        present_desktop_work(running, cx);
-        present_desktop_work(idle, cx);
-        cx.update(|cx| {
-            idle.update(cx, |_, window, _| window.activate_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-        let now = std::time::Instant::now();
-        let mut metadata = crate::terminal::metadata::MetadataTracker::new(
-            crate::local_path::LocalPathSemantics::Posix,
-            "/tmp",
-            "zsh",
-            Default::default(),
-            now,
-        );
-        assert!(metadata.apply_semantic_prompt("A", now));
-        let mut screen =
-            (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
-                .clone();
-        screen.metadata = metadata.snapshot();
-        let screen = Arc::new(screen);
-        for session_id in [1, 2] {
-            records
-                .event_sender(session_id)
-                .unwrap()
-                .try_send(crate::terminal::TerminalSessionEvent::Screen(Arc::clone(
-                    &screen,
-                )))
-                .unwrap();
-        }
-        cx.run_until_parked();
-
-        cx.update(|cx| {
-            assert!(cx.active_window() == Some(idle.into()));
-            cx.dispatch_action(&QuitApplication);
-        });
-        cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
-        assert!(cx.update(|cx| cx.active_window() == Some(idle.into())));
-        cx.simulate_prompt_answer("Cancel");
-        cx.run_until_parked();
-        assert!(records.dropped_session_ids().is_empty());
-        cx.update(|cx| {
-            running
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            assert!(running.read(cx).is_err());
-            assert_eq!(cx.windows().len(), 1);
-        });
-        assert_eq!(
-            application_quit.simulate_native_request(ApplicationQuitRequest::Exit),
-            ApplicationQuitDecision::Cancel
-        );
-        cx.run_until_parked();
-        assert!(cx.has_pending_prompt(), "idle clients still confirm exit");
-        cx.simulate_prompt_answer("Quit");
-        cx.run_until_parked();
-        assert_eq!(application_quit.confirmations(), 1);
-        assert!(!cx.has_pending_prompt());
-    }
-
-    #[gpui::test]
-    fn application_quit_revalidates_equal_count_window_replacement_after_settings_save(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use crate::settings::storage::testing::MemoryStorage;
-
-        let storage = MemoryStorage::with_document(&crate::settings::SettingsDocument::default());
-        let application_quit = Rc::new(
-            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
-        );
-        let mut wiring = parts(Rc::default(), Rc::default());
-        wiring.adapters.application_quit = application_quit.clone();
-        wiring.adapters.local_server = crate::ui::launch_testing::unanswered();
-        let host = HostComposition::new(wiring).unwrap().with_appearance(
-            storage.clone(),
-            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
-        );
-        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
-        present_desktop_work(workspace, cx);
-        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
-        cx.run_until_parked();
-        let settings_window = cx.update(|cx| {
-            cx.windows()
-                .into_iter()
-                .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
-                .expect("Settings window")
-        });
-        let mut settings_cx = gpui::VisualTestContext::from_window(settings_window.into(), cx);
-        let edit = settings_cx
-            .debug_bounds("settings-density-comfortable")
-            .expect("Settings control")
-            .center();
-        settings_cx.simulate_mouse_move(edit, None, gpui::Modifiers::none());
-        settings_cx.simulate_click(edit, gpui::Modifiers::none());
-        settings_cx.run_until_parked();
-        let blocked = storage.block_next_write();
-
-        settings_cx
-            .cx
-            .update(|cx| cx.dispatch_action(&QuitApplication));
-        settings_cx.run_until_parked();
-        assert!(settings_cx.has_pending_prompt());
-        settings_cx.simulate_prompt_answer("Quit");
-        settings_cx.cx.update(|cx| {
-            open(cx, &host)
-                .unwrap()
-                .update(cx, |manager, window, cx| {
-                    manager.present_desktop_workspace(window, cx);
-                })
-                .unwrap();
-            workspace
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
-        let release = std::thread::spawn(move || {
-            blocked.wait_until_started();
-            blocked.release();
-        });
-        settings_cx.run_until_parked();
-        release.join().unwrap();
-
-        assert!(settings_cx.has_pending_prompt());
-        assert_eq!(application_quit.confirmations(), 0);
     }
 
     #[cfg(all(test, target_os = "macos", feature = "native-tests"))]

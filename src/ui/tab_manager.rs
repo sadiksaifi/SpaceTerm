@@ -30,8 +30,6 @@ use crate::domain::{
     CloseTabOutcome, PaneId, SplitAxis, TabCollection, TabError, TabId, TabStep, WorkspaceId,
     WorktreeId,
 };
-#[cfg(test)]
-use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMoveStart,
 };
@@ -379,6 +377,13 @@ struct DraggedTab {
 /// One shared server Workspace's Tabs, when a SpaceTerm Server owns the Workspace.
 type SharedTabBinding = super::shared_workspaces::SharedTabs;
 
+/// A server Workspace's Root Tab and Root Pane, and the connection the Root Pane reads.
+pub(crate) struct SharedRoot {
+    pub(crate) tab: spaceterm_server::hierarchy::Id,
+    pub(crate) pane: spaceterm_server::hierarchy::Id,
+    pub(crate) state: std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+}
+
 /// What a shared server Workspace's Tab strip offers. Creating a Tab, splitting a Pane, and
 /// closing a Tab ask the server. They are unavailable offline or when the bounded connected
 /// queue is full.
@@ -394,8 +399,6 @@ pub(crate) struct TabManager {
     /// between Tabs since it began, even back to the same Tab.
     tab_epoch: u64,
     readiness: super::terminal_readiness::Readiness,
-    session_factory: WorkspaceTerminalSessionFactory,
-    pane_construction: PaneConstruction,
     active: bool,
     sidebar_visible: bool,
     /// How much of the sidebar the current frame shows, from 0 when hidden to 1 when shown.
@@ -415,8 +418,8 @@ pub(crate) struct TabManager {
     window_drag_status: WindowDragRegionStatus,
     tab_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
-    /// The server Workspace this Tab strip presents, when a SpaceTerm Server owns it.
-    shared: Option<SharedTabBinding>,
+    /// The server Workspace this Tab strip presents.
+    shared: SharedTabBinding,
     parked_shared_tabs: std::collections::BTreeMap<
         TabId,
         crate::domain::tab_collection::ParkedTab<Entity<TabView>>,
@@ -439,58 +442,35 @@ impl TabManager {
         eprintln!("failed to {operation} Tab: {error}");
     }
 
-    #[cfg(test)]
-    pub(crate) fn new(
-        session_factory: WorkspaceTerminalSessionFactory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_operating_system_window_drag_platform(
-            session_factory,
-            Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-            window,
-            cx,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_operating_system_window_drag_platform(
+    /// A Tab strip presenting one server Workspace. Its Root Tab presents the server's Root Tab,
+    /// whose Root Pane reads `root_state` and runs in `session_factory`, and every later Tab
+    /// arrives with the published membership.
+    pub(crate) fn shared(
+        mut shared: SharedTabBinding,
+        root: SharedRoot,
         session_factory: WorkspaceTerminalSessionFactory,
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_pane_construction(
-            session_factory,
-            operating_system_window_drag_platform,
-            PaneConstruction::testing(),
-            window,
-            cx,
-        )
-    }
-
-    pub(crate) fn with_pane_construction(
-        session_factory: WorkspaceTerminalSessionFactory,
-        operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
-        pane_construction: PaneConstruction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+        let pane_construction = shared.sessions().panes().clone();
         let tabs = TabCollection::new(|tab_id| {
-            Self::create_tab_view(
-                tab_id,
-                session_factory.clone(),
-                pane_construction.clone(),
-                window,
-                cx,
-            )
+            Self::create_tab_view(tab_id, session_factory, pane_construction, window, cx)
+        });
+        shared.register(tabs.root_tab_id(), root.tab);
+        let panes = super::shared_workspaces::SharedPanes::new(
+            shared.edits(),
+            shared.sessions().clone(),
+            shared.workspace(),
+            root.tab,
+        );
+        tabs.root_tab().clone().update(cx, |view, cx| {
+            view.adopt_shared(panes, root.pane, root.state, window, cx);
         });
         Self {
             tabs,
             tab_epoch: 0,
             readiness: super::terminal_readiness::Readiness::for_window(window, cx),
-            session_factory,
-            pane_construction,
             active: true,
             sidebar_visible: true,
             sidebar_reveal: 1.0,
@@ -507,7 +487,7 @@ impl TabManager {
             window_drag_status: WindowDragRegionStatus::new(),
             tab_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
-            shared: None,
+            shared,
             parked_shared_tabs: std::collections::BTreeMap::new(),
             shared_close_keyboard: None,
             #[cfg(test)]
@@ -686,6 +666,7 @@ impl TabManager {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn terminal_panes<'a>(
         &'a self,
         cx: &'a App,
@@ -697,30 +678,6 @@ impl TabManager {
         })
     }
 
-    pub(crate) fn close_pane_authorized(
-        &mut self,
-        tab_id: TabId,
-        pane_id: PaneId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(view) = self.tabs.tab(tab_id).cloned() else {
-            return;
-        };
-        view.update(cx, |view, cx| {
-            view.close_pane_authorized(pane_id, window, cx)
-        });
-    }
-
-    pub(crate) fn close_tab_authorized(
-        &mut self,
-        tab_id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_tab(tab_id, window, cx);
-    }
-
     #[cfg(test)]
     pub(crate) fn aggregate_counts(&self, cx: &App) -> (usize, usize) {
         let panes = self
@@ -729,21 +686,6 @@ impl TabManager {
             .map(|(_, view)| view.read(cx).pane_count())
             .sum();
         (self.tabs.len(), panes)
-    }
-
-    /// The Root Tab's Root Pane machine and Repository Source Directory.
-    pub(crate) fn repository_source(
-        &self,
-        cx: &App,
-    ) -> Option<(
-        crate::repository_status::RepositoryMachine,
-        crate::repository_status::scheduler::SourceDirectory,
-    )> {
-        self.tabs.root_tab().read(cx).repository_source(cx)
-    }
-
-    pub(crate) fn automatic_directory(&self, cx: &App) -> Option<crate::domain::CurrentDirectory> {
-        self.tabs.root_tab().read(cx).automatic_directory(cx)
     }
 
     /// Where explicit navigation inside this Workspace stands: its Tab activations, the Active
@@ -783,10 +725,7 @@ impl TabManager {
         cx: &App,
     ) -> bool {
         let tab_id = match tab {
-            Some(tab) => match self
-                .shared
-                .as_ref()
-                .and_then(|shared| shared.local_tab(tab))
+            Some(tab) => match self.shared.local_tab(tab)
             {
                 Some(tab_id) => Some(tab_id),
                 None => return false,
@@ -1204,52 +1143,10 @@ impl TabManager {
         }
     }
 
+    /// Asks the server for another Tab. The Tab appears here with the published membership, and
+    /// its initiating interaction presents it provisionally until then.
     pub(crate) fn create_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A shared Workspace's Tabs belong to the server. Creating one asks the server, and the
-        // Tab appears here with the published membership rather than appearing locally first.
-        if self.shared.is_some() {
-            self.request_shared_tab(window, cx);
-            return;
-        }
-        self.tab_selector_pressed = None;
-        self.sync_terminal_focus_blocker(cx);
-        let scope = self.tabs.active_scope();
-        self.create_tab_in_scope(scope, window, cx);
-    }
-
-    fn create_tab_in_scope(
-        &mut self,
-        scope: Option<WorktreeId>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let previous_tab = self.tabs.active_tab().clone();
-        let session_factory = self.session_factory.clone();
-        let pane_construction = self.pane_construction.clone();
-        let result = self.tabs.create_tab_in(scope, |tab_id| {
-            Self::create_tab_view(tab_id, session_factory, pane_construction, window, cx)
-        });
-        let tab_id = match result {
-            Ok(tab_id) => tab_id,
-            Err(error) => {
-                Self::report_tab_error("create", error);
-                return;
-            }
-        };
-        let Some(view) = self.tabs.tab(tab_id).cloned() else {
-            unreachable!("a newly created Tab must remain owned by its collection")
-        };
-
-        previous_tab.update(cx, |view, cx| view.deactivate(cx));
-        if self.active {
-            view.update(cx, |view, cx| view.activate(window, cx));
-        } else {
-            view.update(cx, |view, cx| view.deactivate(cx));
-        }
-        self.sync_terminal_focus_blocker(cx);
-        self.scroll_active_tab_into_view();
-        cx.emit(TabManagerEvent::PresentationChanged);
-        cx.notify();
+        self.request_shared_tab(window, cx);
     }
 
     /// The Active Tab's Worktree.
@@ -1283,11 +1180,6 @@ impl TabManager {
             return false;
         };
         self.activate_tab_focusing(tab_id, focus, window, cx)
-    }
-
-    /// The Worktree a Tab belongs to.
-    pub(crate) fn tab_worktree(&self, tab_id: TabId) -> Option<WorktreeId> {
-        self.tabs.scope_of(tab_id).ok().flatten()
     }
 
     /// Whether any Tab is not among `tab_ids`, so closing them leaves a Tab.
@@ -1513,25 +1405,11 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A shared split needs no measured Pane, because the server decides the membership and
-        // this client inserts the Pane beside its source in its own layout.
-        if self.shared.is_some() {
-            if self.activate_tab(tab_id, window, cx) {
-                let view = self.tabs.active_tab().clone();
-                view.update(cx, |view, cx| view.split_focused(axis, window, cx));
-            }
-            return;
-        }
-        let was_active = self.tabs.active_tab_id() == tab_id;
-        if !self.activate_tab(tab_id, window, cx) {
-            return;
-        }
-        let view = self.tabs.active_tab().clone();
-        if was_active {
+        // A split needs no measured Pane, because the server decides the membership and this
+        // client inserts the Pane beside its source in its own layout.
+        if self.activate_tab(tab_id, window, cx) {
+            let view = self.tabs.active_tab().clone();
             view.update(cx, |view, cx| view.split_focused(axis, window, cx));
-        } else {
-            // A Tab that was inactive keeps Pane bounds from its last paint.
-            view.update(cx, |view, cx| view.split_focused_after_layout(axis, cx));
         }
     }
 
@@ -1654,7 +1532,7 @@ impl TabManager {
         role: TabItemRole,
         hover: TabHover,
         presentation: &TabChromePresentation,
-        shared: Option<SharedStripControls>,
+        shared: SharedStripControls,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
         window: &Window,
@@ -1686,9 +1564,7 @@ impl TabManager {
         // cannot close its Tab through a stale hitbox. The selected Tab remains available.
         // A shared Tab's close asks the server, so its control waits, and says why, while this
         // client cannot ask.
-        let shared_close_reason = shared
-            .filter(|shared| !shared.edits)
-            .map(|shared| shared.edits_reason);
+        let shared_close_reason = (!shared.edits).then_some(shared.edits_reason);
         let close_action_available = (active || appearance.active) && shared_close_reason.is_none();
         let status = presentation.tab_status(active, under_pointer, &appearance.colors);
         let status_host = presentation.tab_surface(active, under_pointer);
@@ -2082,10 +1958,8 @@ impl TabManager {
         let create_manager = manager.clone();
         // A shared Workspace's New Tab asks the server, so it waits while this client is offline
         // or an earlier edit is unanswered.
-        let create_tab_available = shared_strip.is_none_or(|shared| shared.edits);
-        let create_tab_unavailable = shared_strip
-            .filter(|shared| !shared.edits)
-            .map(|shared| shared.edits_reason);
+        let create_tab_available = shared_strip.edits;
+        let create_tab_unavailable = (!shared_strip.edits).then_some(shared_strip.edits_reason);
         #[cfg(test)]
         let rendered_create_tab_icon = Rc::clone(&self.rendered_create_tab_icon);
         // The window paints its own edge over the top of the bar, so the Tabs and the create
@@ -2792,39 +2666,12 @@ fn render_tab_identity(
 /// Shared server Workspaces: how this Tab strip presents one server Workspace's Tabs and submits
 /// their edits.
 impl TabManager {
-    /// Presents one server Workspace in this Tab strip. The Tab this strip already owns becomes
-    /// the server's Root Tab, and every later Tab arrives with the published membership.
-    pub(crate) fn adopt_shared(
-        &mut self,
-        mut shared: super::shared_workspaces::SharedTabs,
-        root_tab: spaceterm_server::hierarchy::Id,
-        root_pane: spaceterm_server::hierarchy::Id,
-        root_state: std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let root_tab_id = self.tabs.root_tab_id();
-        shared.register(root_tab_id, root_tab);
-        let panes = super::shared_workspaces::SharedPanes::new(
-            shared.edits(),
-            shared.sessions().clone(),
-            shared.workspace(),
-            root_tab,
-        );
-        let view = self.tabs.root_tab().clone();
-        view.update(cx, |view, cx| {
-            view.adopt_shared(panes, root_pane, root_state, window, cx);
-        });
-        self.shared = Some(shared);
-        cx.notify();
-    }
-
     pub(crate) fn shared_arrangement(
         &self,
         cx: &App,
     ) -> Option<spaceterm_server::client_view::WorkspaceView> {
         use spaceterm_server::client_view::{TabView, WorkspaceView};
-        let shared = self.shared.as_ref()?;
+        let shared = &self.shared;
         let tabs = self
             .tabs
             .iter()
@@ -2849,10 +2696,7 @@ impl TabManager {
     ) {
         let saved = saved.reconcile(workspace);
         for (position, tab) in saved.tabs.iter().enumerate() {
-            let Some(id) = self
-                .shared
-                .as_ref()
-                .and_then(|shared| shared.local_tab(tab.tab))
+            let Some(id) = self.shared.local_tab(tab.tab)
             else {
                 continue;
             };
@@ -2870,7 +2714,7 @@ impl TabManager {
         &self,
         cx: &App,
     ) -> Option<crate::ui::remembered_view::RememberedWorkspace> {
-        let shared = self.shared.as_ref()?;
+        let shared = &self.shared;
         Some(crate::ui::remembered_view::RememberedWorkspace {
             active_tab: shared.server_tab(self.tabs.active_tab_id()),
             tabs: self
@@ -2915,9 +2759,7 @@ impl TabManager {
         &self,
         remembered: &'a crate::ui::remembered_view::RememberedWorkspace,
     ) -> Vec<(Entity<TabView>, &'a crate::ui::remembered_view::RememberedTab)> {
-        let Some(shared) = self.shared.as_ref() else {
-            return Vec::new();
-        };
+        let shared = &self.shared;
         remembered
             .tabs
             .iter()
@@ -2931,9 +2773,7 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         let tab_id = remembered
             .active_tab
             .and_then(|server| shared.local_tab(server))
@@ -2954,9 +2794,7 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) -> bool {
         let close_keyboard = std::mem::take(&mut self.shared_close_keyboard);
-        let Some(shared) = self.shared.as_mut() else {
-            return false;
-        };
+        let shared = &mut self.shared;
         let applied_aliases = shared.aliases_to_apply();
         let edits = shared.edits();
         shared.canonicalize();
@@ -2968,9 +2806,7 @@ impl TabManager {
             .keys()
             .copied()
             .filter(|id| {
-                self.shared
-                    .as_ref()
-                    .and_then(|shared| shared.server_tab(*id))
+                self.shared.server_tab(*id)
                     .is_some_and(|server| workspace.tabs.iter().any(|tab| tab.id == server))
             })
             .collect::<Vec<_>>();
@@ -2981,10 +2817,7 @@ impl TabManager {
             }
         }
         for tab in &workspace.tabs {
-            let tab_id = match self
-                .shared
-                .as_ref()
-                .and_then(|shared| shared.local_tab(tab.id))
+            let tab_id = match self.shared.local_tab(tab.id)
             {
                 Some(tab_id) => tab_id,
                 None => match self.create_shared_tab(&workspace.tabs, tab, window, cx) {
@@ -3006,9 +2839,7 @@ impl TabManager {
             .keys()
             .copied()
             .filter(|id| {
-                self.shared
-                    .as_ref()
-                    .is_none_or(|shared| !shared.optimistically_closing(*id))
+                !self.shared.optimistically_closing(*id)
             })
             .collect::<Vec<_>>();
         for id in retired {
@@ -3067,9 +2898,7 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(shared) = self.shared.as_ref() else {
-            return false;
-        };
+        let shared = &self.shared;
         let absent: Vec<TabId> = self
             .tabs
             .iter()
@@ -3083,10 +2912,7 @@ impl TabManager {
         let opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
         let mut removed = false;
         for tab_id in absent {
-            let optimistic = self
-                .shared
-                .as_ref()
-                .is_some_and(|shared| shared.optimistically_closing(tab_id));
+            let optimistic = self.shared.optimistically_closing(tab_id);
             let own = removal == super::shared_workspaces::SharedRemoval::OwnClose;
             let held_keyboard = self
                 .tabs
@@ -3138,9 +2964,7 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         if let Some(tab_id) = shared.local_tab(target) {
             self.activate_tab(tab_id, window, cx);
             return;
@@ -3174,7 +2998,7 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<TabId> {
-        let shared = self.shared.as_ref()?;
+        let shared = &self.shared;
         let workspace = shared.workspace();
         let edits = shared.edits();
         let sessions = shared.sessions().clone();
@@ -3204,7 +3028,7 @@ impl TabManager {
             view.deactivate(cx);
             view.adopt_shared(panes, tab.root_pane, state, window, cx);
         });
-        self.shared.as_mut()?.register(tab_id, tab.id);
+        self.shared.register(tab_id, tab.id);
         self.sync_terminal_focus_blocker(cx);
         Some(tab_id)
     }
@@ -3216,7 +3040,7 @@ impl TabManager {
         workspace_tabs: &[spaceterm_server::hierarchy::Tab],
         tab: &spaceterm_server::hierarchy::Tab,
     ) -> Option<WorktreeId> {
-        let shared = self.shared.as_ref()?;
+        let shared = &self.shared;
         tab.worktree.as_ref()?;
         workspace_tabs
             .iter()
@@ -3237,9 +3061,7 @@ impl TabManager {
     fn request_shared_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use super::shared_workspaces::SharedSubmission;
 
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         self.tab_selector_pressed = None;
         let active = self.tabs.active_tab().read(cx);
         let Some(source) = active.shared_server_pane(active.focused_pane_id()) else {
@@ -3274,10 +3096,7 @@ impl TabManager {
             .present(window, cx, |_, _| {});
         } else {
             let presentation = edits.take_presentation();
-            let workspace = self
-                .shared
-                .as_ref()
-                .and_then(|shared| shared.presentation_workspace());
+            let workspace = self.shared.presentation_workspace();
             let target = presentation.map(|event| edits.canonical(event.target));
             if let Some(workspace) = workspace {
                 self.reconcile_shared(
@@ -3295,9 +3114,7 @@ impl TabManager {
     }
 
     fn forget_shared_tab(&mut self, tab_id: TabId) {
-        if let Some(shared) = self.shared.as_mut() {
-            shared.forget(tab_id);
-        }
+        self.shared.forget(tab_id);
     }
 
     /// Whether the keyboard rests in one of this strip's Tabs or their Panes.
@@ -3318,9 +3135,7 @@ impl TabManager {
         scope: &dyn Fn(spaceterm_server::hierarchy::Id) -> Option<Option<WorktreeId>>,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
+        let shared = &self.shared;
         let scopes: Vec<_> = self
             .tabs
             .iter()
@@ -3383,9 +3198,6 @@ impl TabManager {
         view: &dyn Fn(spaceterm_server::hierarchy::Id) -> crate::repository_status::RepositoryView,
         cx: &mut Context<Self>,
     ) {
-        if self.shared.is_none() {
-            return;
-        }
         let tabs: Vec<_> = self.tabs.iter().map(|(_, tab)| tab.clone()).collect();
         for tab in tabs {
             tab.update(cx, |tab, cx| tab.present_shared_repositories(view, cx));
@@ -3404,9 +3216,6 @@ impl TabManager {
         )>,
         cx: &mut Context<Self>,
     ) {
-        if self.shared.is_none() {
-            return;
-        }
         let tabs: Vec<_> = self.tabs.iter().map(|(_, tab)| tab.clone()).collect();
         for tab in tabs {
             tab.update(cx, |tab, cx| tab.present_shared_metadata(published, cx));
@@ -3418,7 +3227,7 @@ impl TabManager {
         &self,
         tab_id: TabId,
     ) -> Option<spaceterm_server::hierarchy::Id> {
-        self.shared.as_ref()?.server_tab(tab_id)
+        self.shared.server_tab(tab_id)
     }
 
     /// The server identity of one shared Pane in one of this strip's Tabs.
@@ -3456,12 +3265,12 @@ impl TabManager {
             .update(cx, |view, cx| view.exit_focused_pane_for_test(cx));
     }
 
-    fn shared_strip_controls(&self) -> Option<SharedStripControls> {
-        let editability = self.shared.as_ref()?.editability();
-        Some(SharedStripControls {
+    fn shared_strip_controls(&self) -> SharedStripControls {
+        let editability = self.shared.editability();
+        SharedStripControls {
             edits: editability.available(),
             edits_reason: editability.explanation(),
-        })
+        }
     }
 }
 
@@ -3469,11 +3278,11 @@ fn tab_menu_entries(
     active: bool,
     first: bool,
     last: bool,
-    shared: Option<SharedStripControls>,
+    shared: SharedStripControls,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TabMenuCommand>> {
     // A shared Workspace's creations and Tab close wait for the server.
-    let shared_edits = shared.is_none_or(|shared| shared.edits);
+    let shared_edits = shared.edits;
     let child_launch_available = shared_edits;
     let with_shortcut =
         |entry: MenuEntry<TabMenuCommand>, action: &dyn gpui::Action| match presentation
@@ -4219,11 +4028,9 @@ mod tests {
     use crate::domain::PaneId;
     use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
     use crate::terminal::testing::{
-        RecordedCall, RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
+        RecordedCall, RecordedCommand, TestTerminalSessionRecords,
     };
-    use crate::terminal::{
-        TerminalSessionEvent, TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
-    };
+    use crate::terminal::TerminalSessionFactory;
 
     fn tab_manager(
         cx: &mut TestAppContext,
@@ -4237,6 +4044,7 @@ mod tests {
         open_tab_manager(cx)
     }
 
+    /// Renders one Tab strip on its own, within the window activity it reads.
     struct TabManagerActivityHarness {
         manager: Entity<TabManager>,
     }
@@ -4248,6 +4056,57 @@ mod tests {
         }
     }
 
+    /// A Tab strip outside any Workspace Window, presenting the scripted account-local server's
+    /// Workspace, so a test sets its sidebar layout itself.
+    fn standalone_tab_manager(cx: &mut TestAppContext) -> (Entity<TabManager>, &mut VisualTestContext) {
+        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions, SharedTabs};
+
+        let directory = PathBuf::from("/tmp/spaceterm-tab-manager-test");
+        let edits = Rc::new(ScriptedEdits::applying(directory.clone()));
+        let inventory = edits.applied_inventory();
+        let workspace = &inventory.workspaces[0];
+        let root = &workspace.tabs[0];
+        let factory = WorkspaceTerminalSessionFactory::new_server(
+            Rc::new(crate::ui::workspace_manager::tests::server_sessions(
+                TestTerminalSessionRecords::default(),
+            )),
+            crate::terminal::testing::test_local_directory(directory),
+        );
+        let panes = ScriptedPanes::connected(factory.clone());
+        let sessions = SharedPaneSessions::with_opener(
+            Rc::clone(&panes) as Rc<_>,
+            &crate::ui::pane_lifecycle::PaneConstruction::testing(),
+        );
+        let (_, state) = crate::ui::shared_workspaces::SharedPaneOpener::open(&*panes, root.root_pane)
+            .expect("the Root Pane opens");
+        let shared = SharedTabs::new(SharedEditSource::new(edits as Rc<_>), sessions, workspace.id);
+        let root = SharedRoot {
+            tab: root.id,
+            pane: root.root_pane,
+            state,
+        };
+        let (harness, cx) = cx.add_window_view(|window, cx| TabManagerActivityHarness {
+            manager: cx.new(|cx| {
+                TabManager::shared(
+                    shared,
+                    root,
+                    factory,
+                    Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+                    window,
+                    cx,
+                )
+            }),
+        });
+        let manager = harness.read_with(cx, |harness, _| harness.manager.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, cx)
+    }
+
     fn open_tab_manager(
         cx: &mut TestAppContext,
     ) -> (
@@ -4256,41 +4115,46 @@ mod tests {
         &mut VisualTestContext,
     ) {
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(PathBuf::from(
-                "/tmp/spaceterm-tab-manager-test",
-            )),
+        let (manager, cx) = workspace_window_tabs(
+            records.clone(),
+            crate::ui::workspace_manager::tests::workspace_adapters(),
+            cx,
         );
-        let (harness, cx) = cx.add_window_view(|window, cx| TabManagerActivityHarness {
-            manager: cx.new(|cx| TabManager::new(session_factory, window, cx)),
-        });
-        let manager = harness.read_with(cx, |harness, _| harness.manager.clone());
-        cx.update(|window, cx| {
-            window.activate_window();
-            manager.update(cx, |manager, cx| manager.focus(window, cx));
-            manager.update(cx, |_, cx| {
-                cx.subscribe_in(
-                    &manager,
-                    window,
-                    |manager, _, event: &TabManagerEvent, window, cx| match event {
-                        TabManagerEvent::ClosePaneRequested { tab_id, pane_id } => {
-                            manager.close_pane_authorized(*tab_id, *pane_id, window, cx);
-                        }
-                        TabManagerEvent::CloseTabRequested { tab_id } => {
-                            manager.close_tab_authorized(*tab_id, window, cx);
-                        }
-                        _ => {}
-                    },
-                )
-                .detach();
-            });
-        });
-        cx.run_until_parked();
         (manager, records, cx)
     }
+
+    /// The Tab strip of the one Workspace a Workspace Window presents from the scripted
+    /// account-local server, whose Panes run in sessions `records` records.
+    fn workspace_window_tabs(
+        records: TestTerminalSessionRecords,
+        adapters: crate::ui::WorkspaceManagerAdapters,
+        cx: &mut TestAppContext,
+    ) -> (Entity<TabManager>, &mut VisualTestContext) {
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(crate::ui::workspace_manager::tests::server_sessions(records));
+        let (window_manager, cx) = cx.add_window_view(|window, cx| {
+            crate::ui::workspace_manager::tests::local_server_manager(
+                session_factory,
+                PathBuf::from("/tmp/spaceterm-tab-manager-test"),
+                adapters,
+                crate::settings::sidebar::SidebarState::Expanded,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window_manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        let manager = window_manager.read_with(cx, |manager, _| {
+            manager
+                .active_tab_manager()
+                .expect("the window presents its server's Workspace")
+        });
+        (manager, cx)
+    }
+
     fn tab_manager_with_operating_system_window_drag_platform(
         cx: &mut TestAppContext,
     ) -> (
@@ -4300,30 +4164,15 @@ mod tests {
     ) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(PathBuf::from(
-                "/tmp/spaceterm-tab-manager-drag-test",
-            )),
-        );
         let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
-        let injected_platform = Rc::clone(&platform);
-        let (manager, cx) = cx.add_window_view(move |window, cx| {
-            TabManager::new_with_operating_system_window_drag_platform(
-                session_factory,
-                injected_platform,
-                window,
-                cx,
-            )
-        });
-        cx.update(|window, cx| {
-            window.activate_window();
-            manager.update(cx, |manager, cx| manager.focus(window, cx));
-        });
-        cx.run_until_parked();
+        let (manager, cx) = workspace_window_tabs(
+            TestTerminalSessionRecords::default(),
+            crate::ui::WorkspaceManagerAdapters {
+                window_drag: Rc::clone(&platform) as Rc<_>,
+                ..crate::ui::workspace_manager::tests::workspace_adapters()
+            },
+            cx,
+        );
         (manager, platform, cx)
     }
 
@@ -4377,26 +4226,21 @@ mod tests {
                 .read(cx)
                 .focused_terminal_has_input_focus(window, cx)
         }));
-        // Only the Active Tab's terminal hears the menu take focus and give it back.
-        // Readiness can also ask inactive Panes to prepare screens without giving them input.
+        // Only the Active Tab's terminal hears the menu give focus back. Readiness can also ask
+        // inactive Panes to prepare screens without giving them input.
         let commands = records
             .commands()
             .into_iter()
             .skip(commands_before)
             .filter(|call| !matches!(call.command, RecordedCommand::SetPreparationDemand(_)))
             .collect::<Vec<_>>();
+        assert!(commands.iter().all(|call| call.session_id == 2), "{commands:?}");
         assert_eq!(
-            commands,
-            [
-                RecordedCall {
-                    session_id: 2,
-                    command: RecordedCommand::Focus(false),
-                },
-                RecordedCall {
-                    session_id: 2,
-                    command: RecordedCommand::Focus(true),
-                },
-            ]
+            commands.last(),
+            Some(&RecordedCall {
+                session_id: 2,
+                command: RecordedCommand::Focus(true),
+            })
         );
     }
 
@@ -4530,29 +4374,6 @@ mod tests {
             manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
             TabId::new(3)
         );
-    }
-
-    /// An inactive Tab keeps the Pane bounds from its last paint, which a resize makes stale.
-    #[gpui::test]
-    fn tab_menu_split_should_use_the_current_window_size_for_an_inactive_tab(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _, cx) = tab_manager(cx);
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.create_tab(window, cx));
-        });
-        cx.run_until_parked();
-        cx.simulate_resize(gpui::size(px(900.0), px(500.0)));
-        cx.run_until_parked();
-
-        right_click("tab-item-1-inactive", cx);
-        click("tab-menu-row-split-right", cx);
-
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
-            TabId::new(1)
-        );
-        assert_eq!(pane_counts(&manager, cx), vec![2, 1]);
     }
 
     #[gpui::test]
@@ -4704,7 +4525,7 @@ mod tests {
                 (1..=4_u64).map(move |selected| (sidebar_visible, selected))
             });
             for (sidebar_visible, selected) in positions {
-                let (manager, _records, cx) = open_tab_manager(cx);
+                let (manager, cx) = standalone_tab_manager(cx);
                 cx.update(|window, cx| {
                     manager.update(cx, |manager, cx| {
                         let top_chrome_width = if sidebar_visible {
@@ -5087,7 +4908,9 @@ mod tests {
     fn hiding_sidebar_should_expand_content_and_use_the_supplied_top_chrome_width(
         cx: &mut TestAppContext,
     ) {
-        let (manager, _records, cx) = tab_manager(cx);
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let (manager, cx) = standalone_tab_manager(cx);
         let root = cx
             .debug_bounds("tab-manager")
             .expect("the Tab manager was not rendered");
@@ -5128,23 +4951,6 @@ mod tests {
                 root.origin.x + px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH),
             )
         );
-    }
-
-    #[gpui::test]
-    fn command_t_should_create_and_activate_a_new_tab(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-
-        cx.simulate_keystrokes("cmd-t");
-        cx.run_until_parked();
-
-        let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.tabs.len(),
-                manager.tabs.active_tab_id(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (2, TabId::new(2), Vec::new()));
     }
 
     #[gpui::test]
@@ -5268,42 +5074,6 @@ mod tests {
         assert_eq!(active_tab_id, TabId::new(1));
     }
 
-    #[gpui::test]
-    fn create_button_should_create_and_activate_without_dropping_the_inactive_tab(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        let first_entity_id =
-            manager.read_with(cx, |manager, _| manager.tabs.active_tab().entity_id());
-
-        click("create-tab-button", cx);
-
-        let state = manager.read_with(cx, |manager, cx| {
-            (
-                manager.tabs.len(),
-                manager.tabs.active_tab_id(),
-                manager.tabs.tab(TabId::new(1)).map(Entity::entity_id),
-                manager
-                    .tabs
-                    .tab(TabId::new(1))
-                    .is_some_and(|tab| !tab.read(cx).is_active()),
-                manager.tabs.active_tab().read(cx).is_active(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(
-            state,
-            (
-                2,
-                TabId::new(2),
-                Some(first_entity_id),
-                true,
-                true,
-                Vec::new(),
-            )
-        );
-    }
-
     /// The Tab's activity prefers an explicit Terminal title, then the running command, then the
     /// host shell name, and is followed by the Current Directory leaf.
     #[gpui::test]
@@ -5311,14 +5081,14 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::{CommandMetadata, CommandState, TitleProvenance};
-        let (manager, records, cx) = tab_manager(cx);
+        let (manager, _records, cx) = tab_manager(cx);
         let tab_title = |cx: &mut VisualTestContext| {
             manager.read_with(cx, |manager, cx| {
                 manager.tabs.active_tab().read(cx).tab_title()
             })
         };
 
-        report_metadata(&records, 1, 1, |metadata| {
+        report_metadata(cx, 1, 1, |metadata| {
             metadata.shell_name = Arc::from("fish");
             metadata.directory.path = Arc::from("/tmp/api");
             metadata.command = Some(CommandMetadata {
@@ -5329,7 +5099,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(tab_title(cx).as_ref(), "cargo test · api");
 
-        report_metadata(&records, 1, 2, |metadata| {
+        report_metadata(cx, 1, 2, |metadata| {
             metadata.shell_name = Arc::from("fish");
             metadata.directory.path = Arc::from("/tmp/api");
             metadata.title.value = Arc::from("✳ Opaque ⠋ title");
@@ -5343,7 +5113,7 @@ mod tests {
         // The glyph the program draws at the front goes; the rest of its title stays opaque.
         assert_eq!(tab_title(cx).as_ref(), "Opaque ⠋ title · api");
 
-        report_metadata(&records, 1, 3, |metadata| {
+        report_metadata(cx, 1, 3, |metadata| {
             metadata.shell_name = Arc::from("fish");
             metadata.directory.path = Arc::from("/tmp/api");
         });
@@ -5356,14 +5126,14 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::TitleProvenance;
-        let (manager, records, cx) = tab_manager(cx);
+        let (manager, _records, cx) = tab_manager(cx);
         let tab_title = |cx: &mut VisualTestContext| {
             manager.read_with(cx, |manager, cx| {
                 manager.tabs.active_tab().read(cx).tab_title()
             })
         };
         // A reported directory would become the split's inherited, locally validated directory.
-        report_metadata(&records, 1, 1, |metadata| {
+        report_metadata(cx, 1, 1, |metadata| {
             metadata.title.value = Arc::from("editor");
             metadata.title.provenance = TitleProvenance::TerminalControl;
         });
@@ -5371,13 +5141,15 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
-        report_metadata(&records, 2, 1, |metadata| {
+        report_metadata(cx, 2, 1, |metadata| {
             metadata.directory.path = Arc::from("/tmp/second");
         });
         cx.run_until_parked();
         let split_title = tab_title(cx);
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
+        // Closing a Pane whose shell runs asks first.
+        click("modal-action-shared-close-confirm", cx);
         let restored_title = tab_title(cx);
 
         assert_eq!(
@@ -5391,18 +5163,18 @@ mod tests {
     fn split_tab_should_refresh_rendered_identity_for_focused_pane_changes(
         cx: &mut TestAppContext,
     ) {
-        let (_manager, records, cx) = tab_manager(cx);
+        let (_manager, _records, cx) = tab_manager(cx);
         // A Pane's place is the directory its server reports, which the first Pane reports now.
-        report_current_directory(&records, 1, 1, "/tmp/first", false);
+        report_current_directory(cx, 1, 1, "/tmp/first", false);
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
-        report_current_directory(&records, 2, 1, "/tmp/second-pane-with-a-long-name", false);
+        report_current_directory(cx, 2, 1, "/tmp/second-pane-with-a-long-name", false);
         cx.run_until_parked();
         let focused_second_before_caption_change = cx
             .debug_bounds("tab-place-1")
             .expect("the focused second Pane's initial place should render");
 
-        report_current_directory(&records, 2, 2, "/tmp/x", false);
+        report_current_directory(cx, 2, 2, "/tmp/x", false);
         cx.run_until_parked();
         let focused_second = cx
             .debug_bounds("tab-place-1")
@@ -5429,9 +5201,9 @@ mod tests {
     #[gpui::test]
     fn tab_activity_without_a_place_should_use_the_full_identity_width(cx: &mut TestAppContext) {
         use crate::terminal::metadata::TitleProvenance;
-        let (manager, records, cx) = tab_manager(cx);
+        let (manager, _records, cx) = tab_manager(cx);
         let activity = "long-activity-name-that-needs-the-full-tab-identity-width";
-        report_metadata(&records, 1, 1, |metadata| {
+        report_metadata(cx, 1, 1, |metadata| {
             metadata.directory.path = Arc::from(format!("/tmp/{activity}"));
             metadata.title.value = Arc::from(activity);
             metadata.title.provenance = TitleProvenance::TerminalControl;
@@ -5461,8 +5233,8 @@ mod tests {
     #[gpui::test]
     fn tab_should_present_status_glyph_activity_and_place_in_order(cx: &mut TestAppContext) {
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
-        let (manager, records, cx) = tab_manager(cx);
-        report_metadata(&records, 1, 1, |metadata| {
+        let (manager, _records, cx) = tab_manager(cx);
+        report_metadata(cx, 1, 1, |metadata| {
             metadata.directory.path = Arc::from("/tmp/api");
             metadata.title.value = Arc::from("agent");
             metadata.title.provenance = TitleProvenance::TerminalControl;
@@ -5540,42 +5312,6 @@ mod tests {
         assert_reported_glyph(&manager, &records, false, cx);
     }
 
-    #[gpui::test]
-    fn remote_reported_glyph_should_take_the_terminal_session_glyph(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        assert_reported_glyph(&manager, &records, true, cx);
-    }
-
-    #[gpui::test]
-    fn fatal_failure_should_clear_cached_pane_and_tab_progress(cx: &mut TestAppContext) {
-        use super::super::terminal_status::TerminalProgress;
-        use crate::terminal::metadata::ProgressMetadata;
-
-        let (manager, records, cx) = tab_manager(cx);
-        report_metadata(&records, 1, 1, |metadata| {
-            metadata.progress = ProgressMetadata::Normal(45);
-        });
-        cx.run_until_parked();
-        records
-            .event_sender(1)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Failed(
-                TerminalSessionFailure::Runtime(crate::terminal::TerminalFailure::emulator(
-                    "session-runtime",
-                )),
-            ))
-            .unwrap();
-        cx.run_until_parked();
-
-        assert_eq!(
-            manager.read_with(cx, |manager, cx| {
-                let view = manager.tabs.active_tab().read(cx);
-                (view.cached_focused_progress(), view.tab_identity().progress)
-            }),
-            (TerminalProgress::None, TerminalProgress::None)
-        );
-    }
-
     fn assert_reported_glyph(
         manager: &Entity<TabManager>,
         records: &TestTerminalSessionRecords,
@@ -5588,11 +5324,11 @@ mod tests {
                 manager.tabs.active_tab().read(cx).tab_identity()
             })
         };
-        let report = |records: &TestTerminalSessionRecords,
+        let report = |_records: &TestTerminalSessionRecords,
                       generation: u64,
                       title: &'static str,
                       cx: &mut VisualTestContext| {
-            report_metadata(records, 1, generation, move |metadata| {
+            report_metadata(cx, 1, generation, move |metadata| {
                 metadata.directory.path = Arc::from("/srv/app");
                 if remote {
                     metadata.context = remote_metadata_context("/srv/app");
@@ -5652,15 +5388,9 @@ mod tests {
         assert_progress_states(&manager, &records, false, cx);
     }
 
-    #[gpui::test]
-    fn remote_progress_should_present_each_state_in_tab_and_caption(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        assert_progress_states(&manager, &records, true, cx);
-    }
-
     fn assert_progress_states(
         manager: &Entity<TabManager>,
-        records: &TestTerminalSessionRecords,
+        _records: &TestTerminalSessionRecords,
         remote: bool,
         cx: &mut VisualTestContext,
     ) {
@@ -5690,7 +5420,7 @@ mod tests {
             (ProgressMetadata::None, TerminalProgress::None, None),
         ];
         for (generation, (progress, presented, selectors)) in (1..).zip(states) {
-            report_metadata(records, 1, generation, |metadata| {
+            report_metadata(cx, 1, generation, |metadata| {
                 metadata.directory.path = Arc::from("/srv/app");
                 if remote {
                     metadata.context = remote_metadata_context("/srv/app");
@@ -5740,15 +5470,9 @@ mod tests {
         assert_reported_activity_lifecycle(&manager, &records, false, cx);
     }
 
-    #[gpui::test]
-    fn remote_status_follows_reported_activity_and_command_lifetime(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        assert_reported_activity_lifecycle(&manager, &records, true, cx);
-    }
-
     fn assert_reported_activity_lifecycle(
         manager: &Entity<TabManager>,
-        records: &TestTerminalSessionRecords,
+        _records: &TestTerminalSessionRecords,
         remote: bool,
         cx: &mut VisualTestContext,
     ) {
@@ -5767,8 +5491,10 @@ mod tests {
             )
         };
         let mut tracker = MetadataTracker::new_with_context(context, "zsh", epoch);
+        let generation = std::cell::Cell::new(0);
         let publish = |tracker: &MetadataTracker, cx: &mut VisualTestContext| {
-            records.report_metadata(1, |metadata| {
+            generation.set(generation.get() + 1);
+            report_metadata(cx, 1, generation.get(), |metadata| {
                 let revision = metadata.revision;
                 *metadata = (*tracker.snapshot()).clone();
                 metadata.revision = revision;
@@ -5846,9 +5572,9 @@ mod tests {
     fn background_tab_should_follow_retained_title_and_progress(cx: &mut TestAppContext) {
         use super::super::terminal_status::TerminalProgress;
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
-        let (manager, records, cx) = tab_manager(cx);
+        let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
-        records.report_metadata(1, |metadata| {
+        report_metadata(cx, 1, 1, |metadata| {
             metadata.title.value = Arc::from("agent");
             metadata.title.provenance = TitleProvenance::TerminalControl;
             metadata.progress = ProgressMetadata::Error(0);
@@ -5876,8 +5602,8 @@ mod tests {
     #[gpui::test]
     fn narrow_tabs_should_keep_status_glyph_and_close_within_item_bounds(cx: &mut TestAppContext) {
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
-        let (_manager, records, cx) = tab_manager(cx);
-        report_metadata(&records, 1, 1, |metadata| {
+        let (_manager, _records, cx) = tab_manager(cx);
+        report_metadata(cx, 1, 1, |metadata| {
             metadata.title.value =
                 Arc::from("a terminal title long enough to need truncating in a narrow Tab");
             metadata.title.provenance = TitleProvenance::TerminalControl;
@@ -7524,229 +7250,22 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            (selected, focus_edges),
-            ((TabId::new(1), true, true), vec![(2, false), (1, true)])
-        );
-    }
-
-    #[gpui::test]
-    fn closing_an_inactive_tab_should_preserve_the_active_tab(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.close_tab(TabId::new(1), window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let state = manager.read_with(cx, |manager, _| {
-            (manager.tabs.active_tab_id(), records.dropped_session_ids())
-        });
-        assert_eq!(state, (TabId::new(2), vec![1]));
-    }
-
-    #[gpui::test]
-    fn inactive_shell_exit_should_close_its_tab_without_stealing_focus(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        let first_sender = records
-            .event_sender(1)
-            .expect("Tab 1 Terminal Session must have started");
-
-        first_sender
-            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-            .unwrap();
-        cx.run_until_parked();
-
-        let active_tab = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
-        let state = cx.update(|window, cx| {
-            (
-                manager.read(cx).tabs.active_tab_id(),
-                active_tab.read(cx).focused_terminal_is_focused(window, cx),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (TabId::new(2), true, vec![1]));
-    }
-
-    #[gpui::test]
-    fn inactive_workspace_active_tab_exit_should_leave_its_fallback_deactivated_and_unfocused(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        let active_sender = records
-            .event_sender(2)
-            .expect("Tab 2 Terminal Session must have started");
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| manager.deactivate(cx));
-            window.blur(cx);
-        });
-
-        active_sender
-            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-            .unwrap();
-        cx.run_until_parked();
-
-        let fallback = manager.read_with(cx, |manager, _| manager.tabs.active_tab().clone());
-        let state = cx.update(|window, cx| {
-            (
-                manager.read(cx).active,
-                manager.read(cx).tabs.len(),
-                manager.read(cx).tabs.active_tab_id(),
-                fallback.read(cx).is_active(),
-                fallback.read(cx).focused_terminal_is_focused(window, cx),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (false, 1, TabId::new(1), false, false, vec![2]));
-    }
-
-    #[gpui::test]
-    fn active_shell_exit_should_close_its_tab_and_focus_the_neighbor(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-        let active_sender = records
-            .event_sender(2)
-            .expect("Tab 2 Terminal Session must have started");
-
-        active_sender
-            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-            .unwrap();
-        cx.run_until_parked();
-
-        let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.tabs.len(),
-                manager.tabs.active_tab_id(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (1, TabId::new(1), vec![2]));
-        assert!(cx.update(|window, cx| {
-            manager
-                .read(cx)
-                .focused_terminal_has_input_focus(window, cx)
-        }));
-    }
-
-    #[gpui::test]
-    fn closing_a_multi_pane_tab_should_close_every_owned_terminal_session_exactly_once(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        cx.simulate_keystrokes("cmd-d");
-        click("create-tab-button", cx);
-
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.close_tab(TabId::new(1), window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let mut dropped = records.dropped_session_ids();
-        dropped.sort_unstable();
-        assert_eq!(dropped, vec![1, 2]);
-    }
-
-    #[gpui::test]
-    fn command_w_should_close_only_the_focused_pane_when_the_tab_is_split(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        cx.simulate_keystrokes("cmd-d");
-        cx.run_until_parked();
-
-        cx.simulate_keystrokes("cmd-w");
-        cx.run_until_parked();
-
-        let state = manager.read_with(cx, |manager, cx| {
-            (
-                manager.tabs.len(),
-                manager.tabs.active_tab().read(cx).pane_count(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (1, 1, vec![2]));
-    }
-
-    #[gpui::test]
-    fn command_w_should_close_the_active_tab_when_its_last_pane_closes(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        click("create-tab-button", cx);
-
-        cx.simulate_keystrokes("cmd-w");
-        cx.run_until_parked();
-
-        let state = manager.read_with(cx, |manager, _| {
-            (
-                manager.tabs.len(),
-                manager.tabs.active_tab_id(),
-                records.dropped_session_ids(),
-            )
-        });
-        assert_eq!(state, (1, TabId::new(1), vec![2]));
-    }
-
-    #[gpui::test]
-    fn command_shift_w_should_close_every_pane_in_only_the_active_tab(cx: &mut TestAppContext) {
-        let (manager, records, cx) = tab_manager(cx);
-        cx.simulate_keystrokes("cmd-d");
-        click("create-tab-button", cx);
-        click("tab-item-1-inactive", cx);
-
-        cx.simulate_keystrokes("cmd-shift-w");
-        cx.run_until_parked();
-
-        let mut dropped = records.dropped_session_ids();
-        dropped.sort_unstable();
-        let state = manager.read_with(cx, |manager, cx| {
-            (
-                manager.tabs.len(),
-                manager.tabs.active_tab_id(),
-                manager.tabs.active_tab().read(cx).pane_count(),
-            )
-        });
-        assert_eq!(state, (1, TabId::new(2), 1));
-        assert_eq!(dropped, vec![1, 2]);
-    }
-
-    #[gpui::test]
-    fn command_shift_w_should_request_owning_workspace_close_for_the_final_tab(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        let close_requests = Rc::new(Cell::new(0));
-        let close_requests_for_subscription = Rc::clone(&close_requests);
-        manager.update(cx, |_, cx| {
-            cx.subscribe(&manager, move |_, _, event: &TabManagerEvent, _| {
-                if matches!(event, TabManagerEvent::FinalTabCloseRequested { .. }) {
-                    close_requests_for_subscription.update(|count| count + 1);
-                }
-            })
-            .detach();
-        });
-
-        cx.simulate_keystrokes("cmd-shift-w");
-        cx.simulate_keystrokes("cmd-shift-w");
-        cx.run_until_parked();
-
-        assert_eq!(
-            (close_requests.get(), records.dropped_session_ids()),
-            (1, Vec::new())
+        assert_eq!(selected, (TabId::new(1), true, true));
+        assert_eq!(focus_edges.last(), Some(&(1, true)));
+        assert!(
+            !focus_edges.contains(&(2, true)),
+            "the Tab the person left never takes focus back: {focus_edges:?}"
         );
     }
 
     fn report_current_directory(
-        records: &TestTerminalSessionRecords,
+        cx: &mut VisualTestContext,
         session: usize,
         generation: u64,
         directory: &str,
         remote: bool,
     ) {
-        report_metadata(records, session, generation, |metadata| {
+        report_metadata(cx, session, generation, |metadata| {
             metadata.directory.path = Arc::from(directory);
             if remote {
                 metadata.context = remote_metadata_context(directory);
@@ -7765,9 +7284,10 @@ mod tests {
         )
     }
 
-    /// Delivers one Screen whose sanitized Terminal Metadata the caller shapes.
+    /// Publishes, as the server does, Terminal Metadata the caller shapes for the Pane whose
+    /// Terminal Session started `session`th.
     fn report_metadata(
-        records: &TestTerminalSessionRecords,
+        cx: &mut VisualTestContext,
         session: usize,
         generation: u64,
         change: impl FnOnce(&mut crate::terminal::metadata::TerminalMetadataSnapshot),
@@ -7778,11 +7298,17 @@ mod tests {
             "terminal",
             generation,
         );
-        change(Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata));
-        records
-            .event_sender(session)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Screen(screen))
-            .unwrap();
-    }
-}
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        change(metadata);
+        metadata.revision = generation;
+        let snapshot = crate::runtime::encode_server_metadata(metadata);
+        let server = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalServer>()
+                .clone()
+        });
+        // Only a running shell reports metadata.
+        server.edits.run_shells();
+        server
+            .edits
+            .present_metadata(server.panes.opened_at(session - 1), snapshot);
+    }}

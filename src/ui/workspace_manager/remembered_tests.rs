@@ -80,7 +80,7 @@ fn present(
     attached: &[u8],
     cx: &mut VisualTestContext,
 ) -> ServerKey {
-    let panes = ScriptedPanes::new(MultiServerHarness::session_factory());
+    let panes = ScriptedPanes::connected(MultiServerHarness::session_factory());
     present_with(manager, origin, owner, edits, Some(attached), &panes, cx)
 }
 
