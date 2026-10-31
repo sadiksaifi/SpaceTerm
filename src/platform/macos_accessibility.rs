@@ -1090,7 +1090,7 @@ pub(crate) mod tests {
                 crate::terminal::testing::TestTerminalSessionFactory::new(
                     crate::terminal::testing::TestTerminalSessionRecords::default(),
                 )
-                .with_start_failure("terminal session unavailable in accessibility test"),
+                .with_reading_available(true),
             ));
         crate::ui::TerminalPane::with_adapters(
             session_factory.clone(),
