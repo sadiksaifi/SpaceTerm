@@ -35,12 +35,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .map_err(Into::into);
     }
-    let major = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
-        .parse()?;
+    let major = spaceterm_server::protocol::MAJOR;
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
-    let client = ServerConnection::for_development_client(&name, major)?;
+    let client = ServerConnection::for_development_client(&name)?;
     require_idle(&client)?;
     client.setup()?;
     let mut host = Server::start()?;

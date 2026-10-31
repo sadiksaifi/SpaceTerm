@@ -33,8 +33,6 @@ impl DelayedServer {
             RefCell::new(Delivery {
                 server,
                 snapshot: SharedWorkspaceSnapshot {
-                    end_all_sessions: true,
-                    worktree_writes: false,
                     inventory: Some(inventory),
                     connected: true,
                     pending: false,
@@ -224,12 +222,10 @@ fn sessions() -> (
 ) {
     let records = crate::terminal::testing::TestTerminalSessionRecords::default();
     let factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-        crate::terminal::testing::TestTerminalSessionFactory::new(records.clone()),
+        crate::terminal::testing::TestTerminalSessionFactory::new(records.clone())
+            .with_reading_available(true),
     );
-    let factory = WorkspaceTerminalSessionFactory::new_local(
-        factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-optimistic")),
-    );
+    let factory = WorkspaceTerminalSessionFactory::new_server(factory);
     let panes = ScriptedPanes::new(factory.clone());
     let sessions = SharedPaneSessions::with_opener(
         Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
@@ -926,20 +922,25 @@ fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestCon
         first_workspace_id(),
         SharedWorkspaceFacts::from_server(workspace),
     );
-    let (manager, cx) = cx.add_window_view(|window, cx| TabManager::new(factory, window, cx));
+    let (manager, cx) = cx.add_window_view(|window, cx| {
+        TabManager::shared(
+            SharedTabs::new(source.clone(), sessions, workspace.id),
+            crate::ui::tab_manager::SharedRoot {
+                tab: root.id,
+                pane: root.root_pane,
+                state,
+            },
+            factory,
+            Rc::new(
+                crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform::default(),
+            ),
+            window,
+            cx,
+        )
+    });
     cx.update(|window, cx| {
         window.activate_window();
-        manager.update(cx, |manager, cx| {
-            manager.adopt_shared(
-                SharedTabs::new(source.clone(), sessions, workspace.id),
-                root.id,
-                root.root_pane,
-                state,
-                window,
-                cx,
-            );
-            manager.focus(window, cx);
-        });
+        manager.update(cx, |manager, cx| manager.focus(window, cx));
     });
     cx.run_until_parked();
     (
@@ -1150,6 +1151,10 @@ fn readiness_reserves_foreground_start_capacity_during_a_hidden_creation_burst(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = window_harness(cx);
+    // The Root Pane's connection is admitted, so it holds no start slot.
+    for pane in harness.panes.opened() {
+        pane.admitted();
+    }
     for _ in 0..15 {
         cx.dispatch_action(crate::ui::CreateTab);
     }

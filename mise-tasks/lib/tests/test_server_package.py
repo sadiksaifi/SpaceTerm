@@ -51,7 +51,6 @@ class ServerArchiveTests(unittest.TestCase):
             "schema": 1,
             "source_sha256": None,
             "protocol_major": 4,
-            "capabilities": ["workspace_policy"],
             "identity": "spaceterm-preflight",
             "target": "x86_64-unknown-linux-gnu",
             "commit": self.commit,
@@ -314,21 +313,16 @@ class ServerArchiveTests(unittest.TestCase):
                 server_package.stage_desktop_artifact(archive, signature, destination, expected)
         self.assertFalse(destination.exists())
 
-    def test_candidate_compatibility_requires_major_and_required_capability_only(self):
+    def test_candidate_compatibility_requires_the_protocol_major(self):
         with patch.object(server_package, "host_target", return_value=self.info["target"]):
             server_package.compatible_candidate(self.info, self.info["identity"])
-        for changed, reason in [
-            ({"protocol_major": 1}, "protocol major"),
-            ({"capabilities": ["future_optional"]}, "required capability"),
-        ]:
-            with self.subTest(changed=changed):
-                with (
-                    patch.object(server_package, "host_target", return_value=self.info["target"]),
-                    self.assertRaisesRegex(TaskError, reason),
-                ):
-                    server_package.compatible_candidate(
-                        {**self.info, **changed}, self.info["identity"]
-                    )
+        with (
+            patch.object(server_package, "host_target", return_value=self.info["target"]),
+            self.assertRaisesRegex(TaskError, "protocol major"),
+        ):
+            server_package.compatible_candidate(
+                {**self.info, "protocol_major": 1}, self.info["identity"]
+            )
 
     def test_desktop_candidate_requires_both_explicit_artifact_inputs(self):
         with patch.dict(os.environ, {"SPACETERM_SERVER_ARCHIVE": str(self.archive)}, clear=True):

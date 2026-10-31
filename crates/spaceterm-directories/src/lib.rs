@@ -78,7 +78,6 @@ pub struct AppDirectories {
     pub state: PathBuf,
     pub cache: PathBuf,
     pub runtime: Option<PathBuf>,
-    temporary: Option<PathBuf>,
     runtime_in_shared_temporary: bool,
 }
 
@@ -174,7 +173,6 @@ impl AppDirectories {
             state,
             cache,
             runtime,
-            temporary,
             runtime_in_shared_temporary,
         })
     }
@@ -185,15 +183,6 @@ impl AppDirectories {
 
     pub fn settings_backup_file(&self) -> PathBuf {
         self.config.join(SETTINGS_BACKUP_NAME)
-    }
-
-    pub fn with_config_directory(mut self, config: PathBuf) -> Self {
-        self.config = config;
-        self
-    }
-
-    pub fn temporary_directory(&self) -> Option<&Path> {
-        self.temporary.as_deref()
     }
 
     /// Whether `runtime` is the predictable name in a shared temporary root because
@@ -463,10 +452,6 @@ mod tests {
             directories.runtime.as_deref(),
             Some(Path::new("/temporary/spaceterm"))
         );
-        assert_eq!(
-            directories.temporary_directory(),
-            Some(Path::new("/temporary"))
-        );
         assert!(directories.runtime_in_shared_temporary());
     }
 
@@ -546,7 +531,6 @@ mod tests {
         let expected = std::fs::canonicalize("/tmp").unwrap();
         let expected_runtime = expected.join(runtime_name);
         assert!(!fallback_consulted.get());
-        assert_eq!(directories.temporary_directory(), Some(expected.as_path()));
         assert_eq!(
             directories.runtime.as_deref(),
             Some(expected_runtime.as_path())
@@ -567,12 +551,11 @@ mod tests {
             APP_DIR_NAME,
         )
         .unwrap();
-        assert_eq!(directories.temporary_directory(), Some(expected.as_path()));
+        assert_eq!(directories.runtime, Some(expected.join(APP_DIR_NAME)));
 
         let directories =
             AppDirectories::resolve_xdg_for_host(APP_DIR_NAME, &environment, || None, APP_DIR_NAME)
                 .unwrap();
-        assert_eq!(directories.temporary_directory(), None);
         assert_eq!(directories.runtime, None);
     }
 
@@ -611,23 +594,6 @@ mod tests {
         assert_eq!(
             directories.settings_backup_file(),
             Path::new("/home/test/.config/spaceterm/settings.json.bak")
-        );
-    }
-
-    #[test]
-    fn config_rebinding_should_keep_every_config_semantic_path_together() {
-        let directories =
-            AppDirectories::resolve_xdg(APP_DIR_NAME, &environment(), Some("/temporary".into()))
-                .unwrap()
-                .with_config_directory("/isolated/spaceterm".into());
-
-        assert_eq!(
-            directories.settings_file(),
-            Path::new("/isolated/spaceterm/settings.json")
-        );
-        assert_eq!(
-            directories.settings_backup_file(),
-            Path::new("/isolated/spaceterm/settings.json.bak")
         );
     }
 

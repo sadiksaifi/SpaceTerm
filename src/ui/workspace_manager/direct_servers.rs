@@ -214,11 +214,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<ServerKey> {
-        // The client home only completes the launch plan a server-backed Terminal Session
-        // ignores. It is never a directory on the other computer.
-        let client_home = self.local_home_directory().ok()?;
         let route = direct.route;
-        let panes = Rc::new(DirectRoutePanes::new(direct.clone(), client_home));
+        let panes = Rc::new(DirectRoutePanes::new(direct.clone()));
         let sessions = SharedPaneSessions::with_opener(
             Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
             &self.pane_construction,
@@ -264,7 +261,6 @@ impl WorkspaceManager {
         server: Option<spaceterm_server::ServerConnection>,
         cx: &mut Context<Self>,
     ) {
-        let client_home = self.local_home_directory();
         let Some(followed) = self.direct_routes.0.get_mut(route) else {
             return;
         };
@@ -278,16 +274,12 @@ impl WorkspaceManager {
         }
         followed.server.clone_from(&server);
         let direct = followed.panes.direct_route().cloned();
-        let connection = match (server, direct, client_home) {
-            (Some(server), Some(direct), Ok(client_home)) => {
+        let connection = match (server, direct) {
+            (Some(server), Some(direct)) => {
                 let client =
                     crate::ui::server_worktrees::Client::for_direct(*route, server.clone(), cx);
-                let opener = SharedPaneSessions::remote_opener(
-                    server,
-                    client.controls.clone(),
-                    direct,
-                    client_home,
-                );
+                let opener =
+                    SharedPaneSessions::remote_opener(server, client.controls.clone(), direct);
                 Some((client.transport(), opener))
             }
             _ => {

@@ -509,7 +509,9 @@ mod native {
                 }
                 // AppKit posts this as the menu returns, which may be while GPUI still runs.
                 let (app, chosen) = (app.clone(), std::rc::Rc::clone(&chosen));
-                executor.spawn(async move { app.update(|cx| chosen(cx)) }).detach();
+                executor
+                    .spawn(async move { app.update(|cx| chosen(cx)) })
+                    .detach();
             },
         );
         let center = objc2_foundation::NSNotificationCenter::defaultCenter();

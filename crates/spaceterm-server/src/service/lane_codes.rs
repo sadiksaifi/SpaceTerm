@@ -28,7 +28,6 @@ pub fn code(error: &ServerError) -> &'static str {
         ServerError::UnsafeStorage => "unsafe_storage",
         ServerError::AuthenticationRefused => "authentication_refused",
         ServerError::IncompatibleProtocol => "incompatible_protocol",
-        ServerError::MissingRequiredCapability => "missing_capability",
         ServerError::CandidateChanged => "candidate_changed",
         ServerError::Protocol => "protocol_error",
         ServerError::StartupFailed => "startup_failed",

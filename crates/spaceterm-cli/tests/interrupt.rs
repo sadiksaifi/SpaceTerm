@@ -606,9 +606,7 @@ fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {
     )
     .unwrap();
     let client_name = format!("cli-startup-interrupt-{}", std::process::id());
-    let client =
-        ServerConnection::for_development_client(&client_name, spaceterm_server::protocol::MAJOR)
-            .unwrap();
+    let client = ServerConnection::for_development_client(&client_name).unwrap();
     lifecycle::require_idle(&client).unwrap();
     client.setup().unwrap();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_spaceterm"));
@@ -689,9 +687,7 @@ fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {
 #[ignore = "owns a foreground Development server; run mise run cli:io:test"]
 fn ctrl_c_before_dispatch_exits_130_and_after_dispatch_resolves_first() {
     let client_name = format!("cli-interrupt-{}", std::process::id());
-    let client =
-        ServerConnection::for_development_client(&client_name, spaceterm_server::protocol::MAJOR)
-            .unwrap();
+    let client = ServerConnection::for_development_client(&client_name).unwrap();
     lifecycle::require_idle(&client).unwrap();
     client.setup().unwrap();
     let server = lifecycle::Server::start().unwrap();

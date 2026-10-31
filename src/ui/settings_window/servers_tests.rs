@@ -108,7 +108,7 @@ fn open_settings(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             local_server,
             window,
             cx,
@@ -464,7 +464,7 @@ fn opening_settings_asks_the_local_server_nothing(cx: &mut TestAppContext) {
         window.read_with(cx, |settings, _| settings
             .local_server
             .as_ref()
-            .map(|row| row.status())),
+            .map(|row| row.current_status())),
         Some(LocalServerStatus::NotChecked)
     ));
 }
@@ -1170,7 +1170,7 @@ fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
         window.read_with(cx, |settings, _| settings
             .local_server
             .as_ref()
-            .map(|row| row.status())),
+            .map(|row| row.current_status())),
         Some(LocalServerStatus::Failed(ServerError::Stopped))
     ));
     assert!(!presentation(&window, cx).check);
@@ -1826,7 +1826,7 @@ fn an_admitted_start_notifies_a_waiting_workspace_after_settings_closes(cx: &mut
                 directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 local_server,
-                server_directories: crate::ui::directory_picker::server_directory_testing::older(),
+                server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
             },
             crate::settings::sidebar::SidebarState::Expanded,
             window,

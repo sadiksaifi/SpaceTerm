@@ -90,8 +90,7 @@ pub(crate) use emulator::ScrollbarSnapshot;
 pub(crate) use emulator::{
     ActiveScreenSnapshot, CellSemanticSnapshot, CellSnapshot, CursorPositionSnapshot,
     CursorShapeSnapshot, CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot,
-    ScrollbackMovement, TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource,
-    TerminalUnderlineSnapshot,
+    TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
 };
 #[cfg(test)]
 pub(crate) use failure::FailureClass;
@@ -99,9 +98,7 @@ pub(crate) use failure::{
     DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
     UnhandledKeyDiagnostic,
 };
-pub(crate) use find::{
-    FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
-};
+pub(crate) use find::{FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot};
 pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
@@ -124,18 +121,18 @@ pub(crate) use paste::{
 #[cfg(test)]
 pub(crate) use paste::{PasteConfirmationId, PasteRisk};
 pub(crate) use selection::SelectionCopy;
-pub(crate) use session::{AccessibilityDemandSender, AccessibilitySelectionSender};
-pub(crate) use session::{
-    InteractiveInput, SelectionCopyError, StartedTerminalSession, TerminalAppearanceUpdate,
-    TerminalSessionEvent, TerminalSessionHandle,
-};
+pub(crate) use session::AccessibilityDemandSender;
+#[cfg(feature = "desktop")]
+pub(crate) use session::AccessibilitySelectionSender;
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) use session::TerminalSessionFactory;
+#[cfg(test)]
+pub(crate) use session::TerminalSessionFailure;
+pub(crate) use session::{SelectionCopyError, TerminalAppearanceUpdate, TerminalSessionEvent};
 #[cfg(test)]
 pub(crate) use session::{
-    LocalTerminalLaunchPlan, TerminalSessionError, TerminalSessionExit,
-    test_terminal_appearance_update,
+    TerminalSessionError, TerminalSessionExit, test_terminal_appearance_update,
 };
-#[cfg(test)]
-pub(crate) use session::{TerminalSessionFactory, TerminalSessionFailure};
 #[cfg(feature = "desktop")]
 pub(crate) use workspace_terminal_session_factory::WorkspaceTerminalSessionFactory;
 
@@ -152,3 +149,10 @@ pub(crate) mod server_graphics;
 pub(crate) mod server_session;
 #[cfg(feature = "desktop")]
 pub(crate) mod shared_workspace;
+
+#[cfg(feature = "desktop")]
+pub(crate) use emulator::ScrollbackMovement;
+#[cfg(feature = "desktop")]
+pub(crate) use find::FindDirection;
+#[cfg(feature = "desktop")]
+pub(crate) use session::{InteractiveInput, StartedTerminalSession, TerminalSessionHandle};

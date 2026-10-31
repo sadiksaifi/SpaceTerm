@@ -15,7 +15,6 @@ pub(super) struct Device {
     pub info: DeviceInfo,
     pub revoked: bool,
     /// The agents admitted under this pairing, so its revocation also retires their grants.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<crate::protocol::AgentName>,
 }
 impl Device {
@@ -60,36 +59,10 @@ pub(super) struct Record {
     pub setups: Vec<SetupReservation>,
     pub devices: Vec<Device>,
     pub revocations: Vec<Revocation>,
-    /// Setup reservations dropped because they named a WSS endpoint and no device had enrolled
-    /// through them yet. Their setups can no longer finish and must start again.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub abandoned_setups: Vec<OperationId>,
 }
 impl Drop for Record {
     fn drop(&mut self) {
         zeroize::Zeroize::zeroize(&mut self.key);
-    }
-}
-
-/// Drops setup reservations that name a WSS endpoint, as the client drops its WSS routes, and
-/// keeps everything else. Devices, revocations and the policy never carry an endpoint. A
-/// reservation no device enrolled through yet leaves its operation in `abandoned_setups`.
-pub(super) fn discard_obsolete(record: &mut Record) {
-    let mut abandoned = Vec::new();
-    let devices = &record.devices;
-    record.setups.retain(|setup| {
-        if setup.endpoint.starts_with("quic://") {
-            return true;
-        }
-        if !devices.iter().any(|device| device.claim == setup.operation) {
-            abandoned.push(setup.operation);
-        }
-        false
-    });
-    for operation in abandoned {
-        if !record.abandoned_setups.contains(&operation) {
-            record.abandoned_setups.push(operation);
-        }
     }
 }
 
@@ -132,21 +105,15 @@ impl Store {
                     setups: Vec::new(),
                     devices: Vec::new(),
                     revocations: Vec::new(),
-                    abandoned_setups: Vec::new(),
                 };
                 self.directory.write_json(c"direct.json", &record)?;
                 record
             }
         };
-        let mut record = record;
-        discard_obsolete(&mut record);
         self.validate(&record)?;
         Ok(record)
     }
     fn validate(&self, record: &Record) -> Result<(), DirectError> {
-        if record.abandoned_setups.len() > MAX_DEVICES {
-            return Err(DirectError::StorageUnavailable);
-        }
         if record.schema != 1
             || record.server != self.server
             || record.setups.len() > MAX_DEVICES

@@ -357,7 +357,7 @@ fn open_servers_with<'a>(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             local,
             window,
             cx,

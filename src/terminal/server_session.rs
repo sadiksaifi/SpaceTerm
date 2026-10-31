@@ -5,7 +5,7 @@ mod control;
 mod effects;
 mod inbox;
 #[cfg(test)]
-mod push_tests;
+pub(crate) mod push_tests;
 use super::server_graphics as graphics;
 mod link;
 mod prediction;
@@ -131,11 +131,7 @@ impl DevelopmentPaneState {
             preparation: AtomicBool::new(false),
             wake: inbox::Wake::default(),
             changes: crate::terminal::changes::Changes::default(),
-            effect_authority: {
-                let authority = ClipboardAuthority::default();
-                authority.route();
-                Arc::new(authority)
-            },
+            effect_authority: Arc::new(ClipboardAuthority::default()),
         }
     }
 
@@ -182,28 +178,25 @@ impl DevelopmentPaneState {
     fn set_session_end(&self, end: Option<pane::SessionEnd>) {
         *self.session_end.lock().unwrap_or_else(|e| e.into_inner()) = end;
     }
-    /// What the current connection answered about interactive terminal input.
+    /// Whether the current connection takes interactive terminal input yet.
     ///
-    /// Only a Connected status carries an answer: attachment records the negotiated capability
-    /// before the status becomes Connected, and a focus barrier the server does not support
-    /// withdraws it while Connected. The status lock is held while the capability is read,
-    /// because an invalidation leaves Connected and clears the capability under that lock, so
-    /// an interrupted connection reads as Pending and never as a refusal.
+    /// Only a Connected status accepts input: attachment marks the connection interactive before
+    /// the status becomes Connected. The status lock is held while the flag is read, because an
+    /// invalidation leaves Connected and clears the flag under that lock, so an interrupted
+    /// connection reads as Pending.
     pub(crate) fn interactive_input(&self) -> super::InteractiveInput {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        if *status != DevelopmentPaneStatus::Connected {
-            return super::InteractiveInput::Pending;
-        }
-        let interactive = self
-            .interaction
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .interactive;
+        let interactive = *status == DevelopmentPaneStatus::Connected
+            && self
+                .interaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .interactive;
         drop(status);
         if interactive {
             super::InteractiveInput::Accepted
         } else {
-            super::InteractiveInput::Refused
+            super::InteractiveInput::Pending
         }
     }
     pub(crate) fn connection_generation(&self) -> u64 {

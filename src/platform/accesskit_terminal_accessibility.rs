@@ -1766,9 +1766,7 @@ mod tests {
             match random % 8 {
                 0 => emulator.feed("界A\u{301}😀\r\n".as_bytes()),
                 1 => emulator.feed(b"\x1b[2;3Hcursor\x1b[K"),
-                2 => {
-                    emulator.scroll_to(random % 20);
-                }
+                2 => emulator.feed("scrolled\r\n".repeat((random % 20) as usize).as_bytes()),
                 3 => {
                     emulator
                         .resize(geometry(10 + (random % 20) as u16, 3 + (random % 4) as u16))
@@ -1796,21 +1794,6 @@ mod tests {
             full_consumer
                 .update_and_process_changes(update_with(&mut full, true), &mut IgnoreChanges);
             assert_equivalent(&incremental_consumer, &full_consumer);
-            if let Some(request) = incremental
-                .model
-                .range_for_index(0)
-                .and_then(|range| incremental.model.selection_request(range))
-            {
-                emulator.set_accessibility_selection(request).unwrap();
-                let model = capture(&mut emulator, Some(incremental.model.clone()));
-                incremental.model = model.clone();
-                full.model = model;
-                incremental_consumer
-                    .update_and_process_changes(update(&mut incremental), &mut IgnoreChanges);
-                full_consumer
-                    .update_and_process_changes(update_with(&mut full, true), &mut IgnoreChanges);
-                assert_equivalent(&incremental_consumer, &full_consumer);
-            }
         }
     }
 

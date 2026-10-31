@@ -129,9 +129,7 @@ impl Drop for Fixture {
 #[ignore = "owns a foreground Development server; run mise run cli:io:test"]
 fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
     let client_name = format!("cli-concurrency-{}", std::process::id());
-    let client =
-        ServerConnection::for_development_client(&client_name, spaceterm_server::protocol::MAJOR)
-            .unwrap();
+    let client = ServerConnection::for_development_client(&client_name).unwrap();
     lifecycle::require_idle(&client).unwrap();
     client.setup().unwrap();
     let server = lifecycle::Server::start().unwrap();

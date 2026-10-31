@@ -51,8 +51,6 @@ pub const MAX_INVENTORY_BYTES: usize =
 pub const MAX_REQUESTS_IN_FLIGHT: usize = 64;
 /// Channels open at once on one connection.
 pub const MAX_CHANNELS: usize = 128;
-/// Native effect requests a server queues per channel.
-pub const MAX_EFFECTS_PER_CHANNEL: usize = 8;
 /// Style definitions one channel keeps.
 pub const MAX_STYLES: usize = 4096;
 /// Hyperlink definitions one channel keeps.

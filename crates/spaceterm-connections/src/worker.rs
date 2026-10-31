@@ -571,14 +571,11 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
                         pending.target,
                     )?)
                 }
-                Authority::Account { route, pin } => {
-                    let resolver = owner
-                        .resolver
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                Authority::Account { pin } => {
+                    let server = owner
+                        .local
                         .clone()
                         .ok_or(DirectError::InteractionRequired)?;
-                    let server = resolver.resolve(route, interaction)?;
                     if server.direct_status()?.pin != *pin {
                         return Err(DirectError::WrongServer);
                     }
@@ -1082,6 +1079,7 @@ pub(super) mod enrollment_tests {
                 Arc::new(MemoryRecords::default()),
                 credentials.clone(),
                 network.clone(),
+                None,
             );
             owner.resume_retained();
             let payload = Zeroizing::new(
@@ -1410,6 +1408,7 @@ pub(super) mod enrollment_tests {
                 Arc::new(PrivateRecords::new(filesystem.clone())),
                 credentials.clone(),
                 network.clone(),
+                None,
             );
             {
                 let mut state = owner.0.state.lock().unwrap();
@@ -1451,6 +1450,7 @@ pub(super) mod enrollment_tests {
                 Arc::new(PrivateRecords::new(Arc::new(self.filesystem.reopen()))),
                 self.credentials.clone(),
                 self.network.clone(),
+                None,
             );
             owner.resume_retained();
             owner

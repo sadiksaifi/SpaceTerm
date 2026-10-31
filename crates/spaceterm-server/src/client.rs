@@ -505,10 +505,7 @@ impl ServerConnection {
         self.direct.is_none()
     }
     /// An independent named desktop with a retained nonsecret identity.
-    pub fn for_development_client(name: &str, protocol_major: u16) -> Result<Self, ServerError> {
-        if protocol_major != protocol::MAJOR {
-            return Err(ServerError::IncompatibleProtocol);
-        }
+    pub fn for_development_client(name: &str) -> Result<Self, ServerError> {
         let mut server = Self::for_identity("spaceterm-development")?;
         server.account = development_account(name)?;
         server.development = Some(name.to_owned());
@@ -553,7 +550,6 @@ impl ServerConnection {
             },
             &server,
             &self.identity,
-            &[protocol::MAJOR],
         )?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| ServerError::Protocol)?;
@@ -672,7 +668,6 @@ impl ServerConnection {
         self.link_with(cancelled)?;
         Ok(AuthenticatedStatus {
             protocol_major: protocol::MAJOR,
-            development_pane: true,
         })
     }
     /// Explicit first setup retains a nonsecret server identity. It never changes Stop intent.
@@ -1009,7 +1004,6 @@ mod tests {
             server.refresh(),
             Ok(AuthenticatedStatus {
                 protocol_major: protocol::MAJOR,
-                development_pane: true,
             })
         );
         assert_eq!(
@@ -1253,7 +1247,7 @@ mod tests {
         root: &std::path::Path,
         paired: crate::direct::PairedDevice,
     ) -> ServerConnection {
-        let mut local = ServerConnection::for_development_client("first", protocol::MAJOR).unwrap();
+        let mut local = ServerConnection::for_development_client("first").unwrap();
         local.paths = Paths {
             identity: "spaceterm-development".into(),
             data: root.join("data"),
@@ -1322,7 +1316,7 @@ mod tests {
     #[test]
     fn local_and_direct_workspace_owners_stay_distinct_when_server_and_client_ids_collide() {
         let paired = paired_identity();
-        let local = ServerConnection::for_development_client("first", protocol::MAJOR).unwrap();
+        let local = ServerConnection::for_development_client("first").unwrap();
         // Supply the admitted identity at the transport boundary without starting a server.
         local
             .bind_scope(local.scope_for(paired.client, paired.pin.server))
@@ -1338,8 +1332,7 @@ mod tests {
     fn workspace_owners_ignore_storage_paths_and_development_client_environment_names() {
         let paired = paired_identity();
         let original = direct_fixture(std::path::Path::new("/first"), paired.clone());
-        let mut relaunched =
-            ServerConnection::for_development_client("second", protocol::MAJOR).unwrap();
+        let mut relaunched = ServerConnection::for_development_client("second").unwrap();
         relaunched.paths.data = std::path::PathBuf::from("/second");
         let relaunched = relaunched
             .with_direct([3; 32], paired, Arc::new(NoConnect))
@@ -1375,8 +1368,7 @@ mod tests {
             u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
         ));
         let local = |name| {
-            let mut connection =
-                ServerConnection::for_development_client(name, protocol::MAJOR).unwrap();
+            let mut connection = ServerConnection::for_development_client(name).unwrap();
             connection.paths = Paths {
                 identity: "spaceterm-development".into(),
                 data: root.join("data"),
@@ -1629,7 +1621,14 @@ mod tests {
             client_cache: std::sync::Arc::default(),
         };
         let data = Directory::open(&server.paths.data, true).unwrap();
-        let stopped = serde_json::json!({"installation": "a".repeat(64), "stopped": true, "installed": true, "run": null});
+        let stopped = serde_json::json!({
+            "installation": "a".repeat(64),
+            "stopped": true,
+            "automatic_start": true,
+            "installed": true,
+            "removing": false,
+            "run": null,
+        });
         data.write_json(c"service.json", &stopped).unwrap();
         assert_eq!(server.refresh(), Err(ServerError::Stopped));
         server.setup().unwrap();

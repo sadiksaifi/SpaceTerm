@@ -136,8 +136,6 @@ impl LinkSink for Wakes {
 
 #[derive(Clone)]
 pub(crate) struct SharedWorkspaceSnapshot {
-    pub end_all_sessions: bool,
-    pub worktree_writes: bool,
     pub inventory: Option<Inventory>,
     pub connected: bool,
     pub pending: bool,
@@ -228,8 +226,6 @@ impl SharedWorkspaceClient {
     }
     fn start(server: impl EditServer, controls: Arc<PaneControls>) -> Self {
         let snapshot = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
-            end_all_sessions: false,
-            worktree_writes: false,
             inventory: None,
             connected: false,
             pending: false,
@@ -272,13 +268,6 @@ impl SharedWorkspaceClient {
             commands,
             alive,
         }
-    }
-    pub(crate) fn supports_worktree_writes(&self) -> bool {
-        self.snapshot
-            .value
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .worktree_writes
     }
     pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
         self.snapshot
@@ -470,9 +459,6 @@ fn run(
                 .forgotten_presented;
             journal.forgotten_presented(forgotten_presented)?;
             state.publish(|s| {
-                // Protocol major 3 servers write Worktrees and end all Sessions.
-                s.worktree_writes = true;
-                s.end_all_sessions = true;
                 s.inventory = Some(initial.inventory.clone());
                 s.pending = journal.pending().is_some();
                 s.pending_operation = journal.pending().map(|p| p.mutation.clone());
@@ -603,8 +589,6 @@ mod tests {
     fn each_subscriber_wakes_after_a_coalesced_publication_without_holding_state() {
         let (commands, _receiver) = mpsc::channel();
         let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
-            end_all_sessions: true,
-            worktree_writes: true,
             inventory: None,
             connected: true,
             pending: false,
@@ -648,8 +632,6 @@ mod tests {
     fn disconnect_rejects_an_enqueued_edit_without_carrying_it_across_reconnect() {
         let (commands, receiver) = mpsc::channel();
         let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
-            end_all_sessions: true,
-            worktree_writes: true,
             inventory: None,
             connected: true,
             pending: false,

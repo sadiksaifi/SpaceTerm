@@ -1,27 +1,21 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::domain::{LocalDirectoryIdentity, ValidatedLocalDirectory};
 use crate::terminal::geometry::TerminalGeometry;
 use crate::terminal::{
-    FindDirection, FindQueryGeneration, KeyInput, LocalTerminalLaunchPlan, PasteConfirmationId,
-    PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration,
-    ScrollbackMovement, SelectionCopy, SelectionCopyError, StartedTerminalSession,
-    TerminalAccessibilityModel, TerminalAppearanceUpdate, TerminalSessionError,
-    TerminalSessionEvent, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    FindDirection, FindQueryGeneration, KeyInput, PasteConfirmationId, PasteDecision,
+    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, ScrollbackMovement,
+    SelectionCopy, SelectionCopyError, StartedTerminalSession, TerminalAccessibilityModel,
+    TerminalAppearanceUpdate, TerminalSessionError, TerminalSessionEvent, TerminalSessionFactory,
+    TerminalSessionHandle, WheelInput,
 };
 
 #[cfg(feature = "desktop")]
 pub(crate) use crate::terminal::emulator::TerminalEmulator;
 #[cfg(feature = "desktop")]
 pub(crate) use crate::terminal::graphics::test_lock as graphics_test_lock;
-
-pub(crate) fn test_local_directory(path: PathBuf) -> ValidatedLocalDirectory {
-    ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::for_test(0))
-}
 
 pub(crate) fn test_accessibility_viewport_models(
     generation: PresentationGeneration,
@@ -109,21 +103,7 @@ pub(crate) fn test_terminal_key_input_adapter() -> Box<dyn crate::terminal::Term
 pub(crate) struct RecordedStart {
     pub(crate) session_id: usize,
     pub(crate) geometry: TerminalGeometry,
-    launch_plan: LocalTerminalLaunchPlan,
     pub(crate) initial_appearance: TerminalAppearanceUpdate,
-}
-
-impl RecordedStart {
-    pub(crate) const fn local_launch_plan(
-        &self,
-    ) -> Option<&crate::terminal::LocalTerminalLaunchPlan> {
-        Some(&self.launch_plan)
-    }
-
-    pub(crate) fn local_working_directory(&self) -> Option<&ValidatedLocalDirectory> {
-        self.local_launch_plan()
-            .map(crate::terminal::LocalTerminalLaunchPlan::working_directory)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,10 +144,6 @@ pub(crate) struct TestTerminalSessionRecords {
         RefCell<BTreeMap<usize, crate::terminal::session::RecordingAccessibilitySelectionReceiver>>,
     >,
     event_senders: Rc<RefCell<BTreeMap<usize, async_channel::Sender<TerminalSessionEvent>>>>,
-    metadata_snapshots:
-        Rc<RefCell<BTreeMap<usize, Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>>>,
-    permission_requests:
-        Rc<RefCell<BTreeMap<usize, crate::terminal::permission_request::PermissionRequest>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
     interactive_availability: Rc<RefCell<BTreeMap<usize, crate::terminal::InteractiveInput>>>,
@@ -192,14 +168,14 @@ impl TestTerminalSessionRecords {
             .or_default() += 1;
     }
 
-    /// The connection answers that it accepts, or refuses, interactive terminal input.
+    /// The connection accepts interactive terminal input, or has not yet.
     pub(crate) fn set_interactive_input_available(&self, session_id: usize, available: bool) {
         self.set_interactive_input(
             session_id,
             if available {
                 crate::terminal::InteractiveInput::Accepted
             } else {
-                crate::terminal::InteractiveInput::Refused
+                crate::terminal::InteractiveInput::Pending
             },
         );
     }
@@ -212,79 +188,6 @@ impl TestTerminalSessionRecords {
         self.interactive_availability
             .borrow_mut()
             .insert(session_id, input);
-    }
-
-    pub(crate) fn retain_permission_request(
-        &self,
-        session_id: usize,
-        request: crate::terminal::permission_request::PermissionRequest,
-    ) {
-        self.permission_requests
-            .borrow_mut()
-            .insert(session_id, request);
-    }
-
-    pub(crate) fn report_directory(
-        &self,
-        session_id: usize,
-        current: Option<crate::domain::CurrentDirectory>,
-    ) {
-        use crate::terminal::metadata::{
-            MetadataFreshness, RemoteTerminalMetadataContext, TerminalMetadataContext,
-        };
-        self.report_metadata(session_id, |metadata| match current {
-            Some(crate::domain::CurrentDirectory::Local(path)) => {
-                let path = path.to_string_lossy();
-                metadata.context = TerminalMetadataContext::local(
-                    crate::local_path::LocalPathSemantics::Posix,
-                    &path,
-                    Default::default(),
-                );
-                metadata.directory.path = Arc::from(path.as_ref());
-                metadata.freshness = MetadataFreshness::Live;
-            }
-            Some(crate::domain::CurrentDirectory::Remote(directory)) => {
-                metadata.context =
-                    TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
-                        "tester@remote".to_owned(),
-                        directory.clone(),
-                    ));
-                metadata.directory.path = Arc::from(directory.as_str());
-                metadata.freshness = MetadataFreshness::Live;
-            }
-            None => metadata.freshness = MetadataFreshness::Stale,
-        });
-    }
-
-    /// Retains the next Terminal Metadata revision for one Terminal Session, as a hidden one would.
-    pub(crate) fn report_metadata(
-        &self,
-        session_id: usize,
-        change: impl FnOnce(&mut crate::terminal::metadata::TerminalMetadataSnapshot),
-    ) {
-        let mut snapshots = self.metadata_snapshots.borrow_mut();
-        let mut metadata = snapshots.get(&session_id).map_or_else(
-            || {
-                Arc::unwrap_or_clone(
-                    crate::terminal::metadata::MetadataTracker::new(
-                        crate::local_path::LocalPathSemantics::Posix,
-                        "",
-                        "",
-                        Default::default(),
-                        std::time::Instant::now(),
-                    )
-                    .snapshot(),
-                )
-            },
-            |snapshot| (**snapshot).clone(),
-        );
-        metadata.revision += 1;
-        change(&mut metadata);
-        snapshots.insert(session_id, Arc::new(metadata));
-        self.event_sender(session_id)
-            .expect("session must be live")
-            .try_send(crate::terminal::session::tests::metadata_changed())
-            .expect("metadata event must fit");
     }
 
     pub(crate) fn queue_selection_copy(&self, copy: Option<SelectionCopy>) {
@@ -354,7 +257,6 @@ pub(crate) struct TestTerminalSessionFactory {
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
     pending_paste_resolution: Option<async_channel::Receiver<Result<PasteResolution, String>>>,
-    server_backed: bool,
     client_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
     interactive_input: crate::terminal::InteractiveInput,
     reading_available: bool,
@@ -372,18 +274,10 @@ impl TestTerminalSessionFactory {
             pending_paste_response: None,
             paste_resolution: Ok(PasteResolution::Written),
             pending_paste_resolution: None,
-            server_backed: false,
             client_files: None,
             interactive_input: crate::terminal::InteractiveInput::Accepted,
             reading_available: true,
         }
-    }
-
-    /// Starts Terminal Sessions that report themselves as running in a SpaceTerm Server.
-    pub(crate) fn server_backed(mut self) -> Self {
-        self.server_backed = true;
-        self.reading_available = false;
-        self
     }
 
     pub(crate) fn with_client_filesystem(
@@ -405,12 +299,12 @@ impl TestTerminalSessionFactory {
         self
     }
 
-    /// Starts Terminal Sessions whose connection accepts, or refuses, interactive input.
+    /// Starts Terminal Sessions whose connection accepts interactive input, or has not yet.
     pub(crate) fn with_interactive_input_available(self, available: bool) -> Self {
         self.with_interactive_input(if available {
             crate::terminal::InteractiveInput::Accepted
         } else {
-            crate::terminal::InteractiveInput::Refused
+            crate::terminal::InteractiveInput::Pending
         })
     }
 
@@ -477,7 +371,6 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let session_id = self.next_session_id.get();
@@ -485,7 +378,6 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
         self.records.starts.borrow_mut().push(RecordedStart {
             session_id,
             geometry,
-            launch_plan,
             initial_appearance,
         });
 
@@ -535,11 +427,8 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
         self.fallback_title.clone()
     }
 
-    fn is_server_backed(&self) -> bool {
-        self.server_backed
-    }
     fn allows_local_file_insertion(&self) -> bool {
-        self.server_backed
+        true
     }
     fn local_file_authority(
         &self,
@@ -612,23 +501,6 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
             .unwrap_or(crate::terminal::InteractiveInput::Accepted)
     }
 
-    fn permission_request(&self) -> Option<crate::terminal::permission_request::PermissionRequest> {
-        self.records
-            .permission_requests
-            .borrow()
-            .get(&self.session_id)
-            .cloned()
-    }
-
-    fn metadata_snapshot(
-        &self,
-    ) -> Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>> {
-        self.records
-            .metadata_snapshots
-            .borrow()
-            .get(&self.session_id)
-            .cloned()
-    }
     fn accessibility_selection_sender(
         &self,
     ) -> Option<crate::terminal::AccessibilitySelectionSender> {

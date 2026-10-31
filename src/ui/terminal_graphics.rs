@@ -54,8 +54,6 @@ pub(crate) struct TerminalGraphicsCache {
     next_attempt: u64,
     #[cfg(test)]
     fail_next_sync: bool,
-    #[cfg(test)]
-    fail_after_staging: bool,
 }
 
 struct StagedGraphics {
@@ -100,11 +98,6 @@ impl TerminalGraphicsCache {
                 prepared: self.presented.clone(),
                 retain: None,
             });
-            #[cfg(test)]
-            if std::mem::take(&mut self.fail_after_staging) {
-                self.rollback(token, Some(current_window), cx);
-                return Err(GraphicsResourceError::InjectedAfterStaging);
-            }
             return Ok(GraphicsPreparation {
                 token,
                 graphics: self.presented.clone(),
@@ -174,11 +167,6 @@ impl TerminalGraphicsCache {
             prepared: prepared.clone(),
             retain: Some(retain),
         });
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_after_staging) {
-            self.rollback(token, Some(current_window), cx);
-            return Err(GraphicsResourceError::InjectedAfterStaging);
-        }
         Ok(GraphicsPreparation {
             token,
             graphics: prepared,
@@ -275,11 +263,6 @@ impl TerminalGraphicsCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_after_staging(&mut self) {
-        self.fail_after_staging = true;
-    }
-
-    #[cfg(test)]
     pub(crate) fn cached_image_keys(&self) -> Vec<ImageKey> {
         let mut keys = self.images.keys().copied().collect::<Vec<_>>();
         keys.sort_unstable();
@@ -341,8 +324,6 @@ pub(crate) enum GraphicsResourceError {
     Paint,
     #[cfg(test)]
     Injected,
-    #[cfg(test)]
-    InjectedAfterStaging,
 }
 
 /// Uploads the image with its edge texels repeated once on every side.

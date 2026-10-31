@@ -102,7 +102,6 @@ pub(crate) enum SetupOperation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IncompatibilityKind {
     Protocol,
-    Capability,
     Platform,
     Installation,
 }
@@ -925,9 +924,6 @@ fn map_server_error(error: ServerError) -> SetupFailure {
         ServerError::IncompatibleProtocol => {
             SetupFailure::Incompatible(IncompatibilityKind::Protocol)
         }
-        ServerError::MissingRequiredCapability => {
-            SetupFailure::Incompatible(IncompatibilityKind::Capability)
-        }
         ServerError::AuthorizationRequired => {
             SetupFailure::Refused(RefusalKind::AuthorizationRefused)
         }
@@ -999,7 +995,6 @@ impl ServerArtifactCatalog {
             &digest,
             target,
             spaceterm_server::protocol::MAJOR,
-            &["workspace_policy"],
         )
         .map_err(map_server_error)?;
         Ok(VerifiedArtifact {
@@ -1110,13 +1105,6 @@ fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> 
         .contains(&spaceterm_server::protocol::MAJOR)
     {
         return Err(SetupFailure::Incompatible(IncompatibilityKind::Protocol));
-    }
-    if !discovery
-        .capabilities
-        .iter()
-        .any(|capability| capability == "workspace_policy")
-    {
-        return Err(SetupFailure::Incompatible(IncompatibilityKind::Capability));
     }
     Ok(())
 }

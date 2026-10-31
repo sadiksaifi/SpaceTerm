@@ -27,11 +27,9 @@ use super::{
     ShowRepositoryStatus, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
-use crate::domain::PinnedDirectory;
+use crate::domain::ValidatedLocalDirectory;
 
 mod local_source;
-#[cfg(test)]
-mod scripted_source;
 mod server_source;
 #[cfg(test)]
 pub(crate) use server_source::testing as server_directory_testing;
@@ -98,7 +96,7 @@ pub(crate) type SourceFuture<T> = Pin<Box<dyn Future<Output = Result<T, Director
 /// A server path grants no authority to the client's filesystem or Workspace pin.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum DirectorySelection {
-    Pin(PinnedDirectory),
+    Pin(ValidatedLocalDirectory),
     Server(std::path::PathBuf),
 }
 impl fmt::Debug for DirectorySelection {
@@ -617,21 +615,6 @@ impl DirectoryPicker {
             self.palette
                 .update(cx, |palette, cx| palette.focus_editor(window, cx));
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.blocks_terminal_input() || self.busy.is_some() {
-            return false;
-        }
-        let pending_open = self.opening && !self.open;
-        let dismissed = self
-            .palette
-            .update(cx, |palette, cx| palette.dismiss(window, cx));
-        if dismissed && pending_open {
-            self.finish_close(CommandPaletteCloseReason::Programmatic, cx);
-        }
-        dismissed
     }
 
     /// Cancels this picker and its exact pending requests, including a busy selection.
@@ -1494,12 +1477,8 @@ mod tests {
         BackgroundExecutor, Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div,
     };
 
-    use super::scripted_source::{
-        RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
-    };
     use super::server_source::{DirectoryConnection, DirectoryConnector};
     use super::*;
-    use crate::domain::RemoteDirectory;
 
     #[test]
     fn remote_picker_wrapper_debug_should_redact_account_paths_and_rows() {
@@ -1524,79 +1503,81 @@ mod tests {
         }
     }
 
+    /// What the scripted machine answers next, and what the picker asked of it. Every path is
+    /// that machine's string.
     #[derive(Default)]
-    struct ScriptedRemoteDirectoryProviderState {
-        accounts: VecDeque<Task<Result<String, RemoteDirectoryProviderError>>>,
-        listings: VecDeque<Task<Result<DirectoryListing, RemoteDirectoryProviderError>>>,
-        probes: VecDeque<Task<Result<ExactPathState, RemoteDirectoryProviderError>>>,
-        creations: VecDeque<Task<Result<(), RemoteDirectoryProviderError>>>,
-        validations: VecDeque<Task<Result<String, RemoteDirectoryProviderError>>>,
-        listed_directories: Vec<RemoteDirectory>,
-        created_directories: Vec<RemoteDirectory>,
-        validated_directories: Vec<RemoteDirectory>,
+    struct ScriptedState {
+        listings: VecDeque<Task<Result<DirectoryListing, DirectorySourceError>>>,
+        probes: VecDeque<Task<Result<ExactPathState, DirectorySourceError>>>,
+        creations: VecDeque<Task<Result<(), DirectorySourceError>>>,
+        validations: VecDeque<Task<Result<String, DirectorySourceError>>>,
+        listed_directories: Vec<String>,
+        created_directories: Vec<String>,
+        validated_directories: Vec<String>,
     }
 
+    /// Another computer's directories, answered from a script. A selection is that machine's
+    /// validated path, as a server's is.
     #[derive(Clone, Default)]
-    struct ScriptedRemoteDirectoryProvider {
-        state: Arc<Mutex<ScriptedRemoteDirectoryProviderState>>,
+    struct ScriptedSource {
+        state: Arc<Mutex<ScriptedState>>,
     }
 
-    impl RemoteDirectoryProvider for ScriptedRemoteDirectoryProvider {
-        fn discover_account(&self) -> Task<Result<String, RemoteDirectoryProviderError>> {
-            self.state
-                .lock()
-                .unwrap()
-                .accounts
-                .pop_front()
-                .unwrap_or_else(|| Task::ready(Err(RemoteDirectoryProviderError::Other)))
+    impl ScriptedSource {
+        fn next<T: 'static>(
+            queue: impl FnOnce(&mut ScriptedState) -> Option<Task<Result<T, DirectorySourceError>>>,
+            state: &Mutex<ScriptedState>,
+        ) -> SourceFuture<T> {
+            let task = queue(&mut state.lock().unwrap())
+                .unwrap_or_else(|| Task::ready(Err(DirectorySourceError::Other)));
+            Box::pin(task)
+        }
+    }
+
+    impl DirectorySource for ScriptedSource {
+        fn machine_name(&self) -> Option<&str> {
+            Some("orb")
         }
 
-        fn list_directories(
-            &self,
-            directory: RemoteDirectory,
-        ) -> Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
-            let mut state = self.state.lock().unwrap();
-            state.listed_directories.push(directory);
-            state
-                .listings
-                .pop_front()
-                .unwrap_or_else(|| Task::ready(Err(RemoteDirectoryProviderError::Other)))
+        fn discover_home(&self) -> SourceFuture<PickerPath> {
+            Box::pin(async {
+                PickerPath::new(remote_account()).map_err(|_| DirectorySourceError::Other)
+            })
         }
 
-        fn probe_exact_path(
-            &self,
-            _directory: RemoteDirectory,
-        ) -> Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
-            self.state
-                .lock()
-                .unwrap()
-                .probes
-                .pop_front()
-                .unwrap_or_else(|| Task::ready(Err(RemoteDirectoryProviderError::Other)))
+        fn list_directories(&self, directory: PickerPath) -> SourceFuture<DirectoryListing> {
+            Self::next(
+                |state| {
+                    state.listed_directories.push(directory.into_string());
+                    state.listings.pop_front()
+                },
+                &self.state,
+            )
         }
 
-        fn create_directory_recursively(
-            &self,
-            directory: RemoteDirectory,
-        ) -> Task<Result<(), RemoteDirectoryProviderError>> {
-            let mut state = self.state.lock().unwrap();
-            state.created_directories.push(directory);
-            state
-                .creations
-                .pop_front()
-                .unwrap_or_else(|| Task::ready(Err(RemoteDirectoryProviderError::Other)))
+        fn probe_exact_path(&self, _: PickerPath) -> SourceFuture<ExactPathState> {
+            Self::next(|state| state.probes.pop_front(), &self.state)
         }
 
-        fn validate_physical_identity(
-            &self,
-            directory: RemoteDirectory,
-        ) -> Task<Result<String, RemoteDirectoryProviderError>> {
-            let mut state = self.state.lock().unwrap();
-            state.validated_directories.push(directory);
-            state
-                .validations
-                .pop_front()
-                .unwrap_or_else(|| Task::ready(Err(RemoteDirectoryProviderError::Other)))
+        fn create_directory_recursively(&self, directory: PickerPath) -> SourceFuture<()> {
+            Self::next(
+                |state| {
+                    state.created_directories.push(directory.into_string());
+                    state.creations.pop_front()
+                },
+                &self.state,
+            )
+        }
+
+        fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
+            let identity = Self::next(
+                |state| {
+                    state.validated_directories.push(directory.into_string());
+                    state.validations.pop_front()
+                },
+                &self.state,
+            );
+            Box::pin(async move { Ok(DirectorySelection::Server(identity.await?.into())) })
         }
     }
 
@@ -1608,53 +1589,34 @@ mod tests {
         }
     }
 
-    struct CancellationTrackingRemoteDirectoryProvider {
-        executor: BackgroundExecutor,
-        dropped_operations: Arc<AtomicUsize>,
+    /// An answer that never arrives. Dropping it counts in `dropped`.
+    fn pending_answer<T: Send + 'static>(
+        executor: &BackgroundExecutor,
+        dropped: &Arc<AtomicUsize>,
+    ) -> Task<Result<T, DirectorySourceError>> {
+        let dropped = Arc::clone(dropped);
+        executor.spawn(async move {
+            let _drop = PendingOperationDrop(dropped);
+            pending().await
+        })
     }
 
-    impl CancellationTrackingRemoteDirectoryProvider {
-        fn pending<T: Send + 'static>(&self) -> Task<Result<T, RemoteDirectoryProviderError>> {
-            let dropped_operations = Arc::clone(&self.dropped_operations);
-            self.executor.spawn(async move {
-                let _drop = PendingOperationDrop(dropped_operations);
-                pending().await
-            })
+    /// A scripted machine whose listings and probes never answer, counting the ones the picker
+    /// abandons in `dropped`.
+    fn unanswering_source(
+        reads: usize,
+        executor: &BackgroundExecutor,
+        dropped: &Arc<AtomicUsize>,
+    ) -> ScriptedSource {
+        let source = ScriptedSource::default();
+        {
+            let mut state = source.state.lock().unwrap();
+            for _ in 0..reads {
+                state.listings.push_back(pending_answer(executor, dropped));
+                state.probes.push_back(pending_answer(executor, dropped));
+            }
         }
-    }
-
-    impl RemoteDirectoryProvider for CancellationTrackingRemoteDirectoryProvider {
-        fn discover_account(&self) -> Task<Result<String, RemoteDirectoryProviderError>> {
-            Task::ready(Ok(remote_account()))
-        }
-
-        fn list_directories(
-            &self,
-            _: RemoteDirectory,
-        ) -> Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
-            self.pending()
-        }
-
-        fn probe_exact_path(
-            &self,
-            _: RemoteDirectory,
-        ) -> Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
-            self.pending()
-        }
-
-        fn create_directory_recursively(
-            &self,
-            _: RemoteDirectory,
-        ) -> Task<Result<(), RemoteDirectoryProviderError>> {
-            self.pending()
-        }
-
-        fn validate_physical_identity(
-            &self,
-            _: RemoteDirectory,
-        ) -> Task<Result<String, RemoteDirectoryProviderError>> {
-            self.pending()
-        }
+        source
     }
 
     struct DirectoryPickerHarness {
@@ -1765,14 +1727,13 @@ mod tests {
     }
 
     fn scripted_provider(
-        listings: impl IntoIterator<Item = Result<Vec<DirectoryRow>, RemoteDirectoryProviderError>>,
-        probes: impl IntoIterator<Item = Result<ExactPathState, RemoteDirectoryProviderError>>,
-        creations: impl IntoIterator<Item = Result<(), RemoteDirectoryProviderError>>,
-        validations: impl IntoIterator<Item = Result<String, RemoteDirectoryProviderError>>,
-    ) -> Arc<ScriptedRemoteDirectoryProvider> {
-        Arc::new(ScriptedRemoteDirectoryProvider {
-            state: Arc::new(Mutex::new(ScriptedRemoteDirectoryProviderState {
-                accounts: [Task::ready(Ok(remote_account()))].into(),
+        listings: impl IntoIterator<Item = Result<Vec<DirectoryRow>, DirectorySourceError>>,
+        probes: impl IntoIterator<Item = Result<ExactPathState, DirectorySourceError>>,
+        creations: impl IntoIterator<Item = Result<(), DirectorySourceError>>,
+        validations: impl IntoIterator<Item = Result<String, DirectorySourceError>>,
+    ) -> ScriptedSource {
+        ScriptedSource {
+            state: Arc::new(Mutex::new(ScriptedState {
                 listings: listings
                     .into_iter()
                     .map(|result| result.map(DirectoryListing::new))
@@ -1781,24 +1742,24 @@ mod tests {
                 probes: probes.into_iter().map(Task::ready).collect(),
                 creations: creations.into_iter().map(Task::ready).collect(),
                 validations: validations.into_iter().map(Task::ready).collect(),
-                ..ScriptedRemoteDirectoryProviderState::default()
+                ..ScriptedState::default()
             })),
-        })
+        }
     }
 
     fn directory_picker(
-        provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
+        source: ScriptedSource,
         cx: &mut TestAppContext,
     ) -> (
         gpui::Entity<DirectoryPicker>,
         Rc<RefCell<Vec<DirectoryPickerEvent>>>,
         &mut VisualTestContext,
     ) {
-        directory_picker_offering(provider, None, cx)
+        directory_picker_offering(source, None, cx)
     }
 
     fn directory_picker_offering<'a>(
-        injected: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
+        source: ScriptedSource,
         system_selection: Option<&'static str>,
         cx: &'a mut TestAppContext,
     ) -> (
@@ -1812,12 +1773,7 @@ mod tests {
         let recorded_events = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let picker = cx.new(|cx| {
-                let picker = DirectoryPicker::new(
-                    Rc::new(RemoteDirectorySource::new(injected, "orb")),
-                    "Pin to Directory",
-                    window,
-                    cx,
-                );
+                let picker = DirectoryPicker::new(Rc::new(source), "Pin to Directory", window, cx);
                 match system_selection {
                     Some(label) => picker.with_system_selection(label.into()),
                     None => picker,
@@ -1970,7 +1926,7 @@ mod tests {
 
         assert_eq!(
             provider.state.lock().unwrap().validated_directories,
-            vec![remote_directory(HOME_DISPLAY)]
+            vec![HOME_DISPLAY.to_owned()]
         );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
@@ -2008,7 +1964,7 @@ mod tests {
 
         assert_eq!(
             provider.state.lock().unwrap().validated_directories,
-            vec![remote_directory(HOME_DISPLAY)]
+            vec![HOME_DISPLAY.to_owned()]
         );
         assert!(
             events
@@ -2024,7 +1980,7 @@ mod tests {
     ) {
         let provider = scripted_provider(
             [Ok(remote_rows(["Projects"]))],
-            [Err(RemoteDirectoryProviderError::PermissionDenied)],
+            [Err(DirectorySourceError::PermissionDenied)],
             [],
             [],
         );
@@ -2049,47 +2005,6 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
         );
-    }
-
-    #[gpui::test]
-    fn create_confirmation_uses_alert_then_emits_validated_remote_selection(
-        cx: &mut TestAppContext,
-    ) {
-        let identity = "/home/tester/Projects/new".to_owned();
-        let provider = scripted_provider(
-            [Ok(Vec::new()), Ok(Vec::new())],
-            [
-                Ok(ExactPathState::ReadableDirectory),
-                Ok(ExactPathState::Missing),
-            ],
-            [Ok(())],
-            [Ok(identity.clone())],
-        );
-        let (picker, events, cx) = directory_picker(provider.clone(), cx);
-        set_remote_input(&picker, "~/Projects/new", cx);
-
-        cx.update(|window, cx| {
-            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
-        });
-        cx.run_until_parked();
-        let create = cx
-            .debug_bounds("modal-action-directory-picker-create")
-            .expect("creation Alert should expose its typed affirmative action");
-        cx.simulate_click(create.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let expected = remote_directory("~/Projects/new");
-        let records = provider.state.lock().unwrap();
-        assert_eq!(records.created_directories, vec![expected.clone()]);
-        assert_eq!(records.validated_directories, vec![expected.clone()]);
-        drop(records);
-        let chosen = events.borrow().iter().find_map(|event| match event {
-            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(chosen)) => {
-                Some(chosen.clone())
-            }
-            _ => None,
-        });
-        assert_eq!(chosen, Some(identity.as_str().into()));
     }
 
     #[gpui::test]
@@ -2167,59 +2082,19 @@ mod tests {
         assert_eq!(enclosing("/usr/"), Some("/".to_owned()));
         assert_eq!(enclosing("/usr"), None);
         assert_eq!(enclosing("/"), None);
-    }
 
-    #[test]
-    fn a_root_home_should_have_no_enclosing_directory() {
-        let home = PickerPath::new("/".to_owned()).unwrap();
-
+        let root = PickerPath::new("/".to_owned()).unwrap();
         assert_eq!(
-            enclosing_directory_query(&parse_picker_path("~/").unwrap(), &home),
-            None
-        );
-    }
-
-    #[gpui::test]
-    fn stale_remote_refresh_cannot_replace_the_current_readable_state(cx: &mut TestAppContext) {
-        let provider = scripted_provider(
-            [Ok(Vec::new())],
-            [Ok(ExactPathState::ReadableDirectory)],
-            [],
-            [],
-        );
-        let (picker, _, cx) = directory_picker(provider, cx);
-        let (lifecycle_generation, operation_generation, parsed) =
-            picker.read_with(cx, |picker, _| {
-                (
-                    picker.lifecycle_generation,
-                    picker.operation_generation,
-                    picker.parsed.clone().unwrap(),
-                )
-            });
-
-        picker.update(cx, |picker, cx| {
-            picker.finish_refresh(
-                RefreshCompletion {
-                    lifecycle_generation,
-                    operation_generation: operation_generation.wrapping_sub(1),
-                    parsed,
-                    listing: Some(Err(DirectorySourceError::PermissionDenied)),
-                    probe: Err(DirectorySourceError::ConnectionLost),
-                },
-                cx,
-            );
-        });
-
-        assert_eq!(
-            picker.read_with(cx, |picker, _| picker.status),
-            DirectoryPickerStatus::Readable
+            enclosing_directory_query(&parse_picker_path("~/").unwrap(), &root),
+            None,
+            "a root home has no enclosing directory"
         );
     }
 
     #[gpui::test]
     fn remote_listing_errors_are_specific_and_never_keep_unread_rows(cx: &mut TestAppContext) {
         let provider = scripted_provider(
-            [Err(RemoteDirectoryProviderError::PermissionDenied)],
+            [Err(DirectorySourceError::PermissionDenied)],
             [Ok(ExactPathState::ReadableDirectory)],
             [],
             [],
@@ -2296,22 +2171,12 @@ mod tests {
     #[gpui::test]
     fn superseded_remote_refresh_should_cancel_listing_and_probe_tasks(cx: &mut TestAppContext) {
         let dropped_operations = Arc::new(AtomicUsize::new(0));
-        let provider = Arc::new(CancellationTrackingRemoteDirectoryProvider {
-            executor: cx.executor(),
-            dropped_operations: Arc::clone(&dropped_operations),
-        });
+        let source = unanswering_source(2, &cx.executor(), &dropped_operations);
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| {
-                DirectoryPicker::new(
-                    Rc::new(RemoteDirectorySource::new(injected, "orb")),
-                    "Pin to Directory",
-                    window,
-                    cx,
-                )
-            });
+            let picker =
+                cx.new(|cx| DirectoryPicker::new(Rc::new(source), "Pin to Directory", window, cx));
             DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
@@ -2339,22 +2204,12 @@ mod tests {
     fn a_pending_listing_should_present_loading_instead_of_an_empty_directory(
         cx: &mut TestAppContext,
     ) {
-        let provider = Arc::new(CancellationTrackingRemoteDirectoryProvider {
-            executor: cx.executor(),
-            dropped_operations: Arc::new(AtomicUsize::new(0)),
-        });
+        let source = unanswering_source(1, &cx.executor(), &Arc::new(AtomicUsize::new(0)));
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let injected: Arc<dyn RemoteDirectoryProvider + Send + Sync> = provider;
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let picker = cx.new(|cx| {
-                DirectoryPicker::new(
-                    Rc::new(RemoteDirectorySource::new(injected, "orb")),
-                    "Pin to Directory",
-                    window,
-                    cx,
-                )
-            });
+            let picker =
+                cx.new(|cx| DirectoryPicker::new(Rc::new(source), "Pin to Directory", window, cx));
             DirectoryPickerHarness { picker }
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
@@ -2422,9 +2277,7 @@ mod tests {
             [],
         );
         let (picker, events, cx) = directory_picker(provider, cx);
-        assert!(
-            cx.update(|window, cx| { picker.update(cx, |picker, cx| picker.dismiss(window, cx)) })
-        );
+        cx.update(|window, cx| picker.update(cx, |picker, cx| picker.cancel(window, cx)));
         cx.run_until_parked();
         events.borrow_mut().clear();
         let modal = cx.update(|window, cx| {
@@ -2450,9 +2303,7 @@ mod tests {
         });
         assert!(picker.read_with(cx, |picker, _| picker.blocks_terminal_input()));
 
-        assert!(
-            cx.update(|window, cx| { picker.update(cx, |picker, cx| picker.dismiss(window, cx)) })
-        );
+        cx.update(|window, cx| picker.update(cx, |picker, cx| picker.cancel(window, cx)));
         cx.run_until_parked();
         cx.update(|window, cx| modal.dismiss(window, cx).unwrap());
         cx.run_until_parked();
@@ -2558,24 +2409,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn programmatic_dismissal_emits_dismissed(cx: &mut TestAppContext) {
-        let provider = scripted_provider(
-            [Ok(Vec::new())],
-            [Ok(ExactPathState::ReadableDirectory)],
-            [],
-            [],
-        );
-        let (picker, events, cx) = directory_picker(provider, cx);
-
-        assert!(
-            cx.update(|window, cx| { picker.update(cx, |picker, cx| picker.dismiss(window, cx)) })
-        );
-        cx.run_until_parked();
-
-        assert!(events.borrow().contains(&DirectoryPickerEvent::Dismissed));
-    }
-
-    #[gpui::test]
     fn validation_makes_the_path_read_only_until_the_parent_advances(cx: &mut TestAppContext) {
         let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
@@ -2593,12 +2426,9 @@ mod tests {
             }
         });
         let query = picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned());
-        let dismissed =
-            cx.update(|window, cx| picker.update(cx, |picker, cx| picker.dismiss(window, cx)));
         cx.run_until_parked();
 
         assert_eq!(query, HOME_DISPLAY);
-        assert!(!dismissed);
         assert!(
             events
                 .borrow()
@@ -2968,12 +2798,6 @@ mod tests {
     }
 
     impl DirectoryConnection for ControlledConnection {
-        fn reads_directories(&self) -> bool {
-            self.inner.reads_directories()
-        }
-        fn creates_directories(&self) -> bool {
-            self.inner.creates_directories()
-        }
         fn begin(
             &mut self,
             id: u64,
@@ -3232,10 +3056,6 @@ mod tests {
             });
         });
         cx.run_until_parked();
-    }
-
-    fn remote_directory(value: &str) -> RemoteDirectory {
-        RemoteDirectory::new(value.to_owned()).unwrap()
     }
 
     #[test]

@@ -34,8 +34,6 @@ pub(super) enum Availability {
     Unknown,
     /// The server is not connected, so nothing can be asked of it.
     Offline,
-    /// The server is connected but doesn't offer End All Sessions.
-    Unsupported,
     /// Another shared edit awaits its answer, and one edit is asked at a time.
     Pending,
     /// The server's current run and its Panes' Sessions, as the server last published them.
@@ -46,9 +44,6 @@ impl Availability {
     fn of(snapshot: &crate::terminal::shared_workspace::SharedWorkspaceSnapshot) -> Self {
         if !snapshot.connected {
             return Self::Offline;
-        }
-        if !snapshot.end_all_sessions {
-            return Self::Unsupported;
         }
         if snapshot.pending {
             return Self::Pending;
@@ -201,10 +196,6 @@ pub(super) fn caption(
         Availability::Unknown | Availability::Offline => {
             guidance(format!("Connect to {server} to end its Terminal Sessions."))
         }
-        Availability::Unsupported => guidance(format!(
-            "{server} doesn\u{2019}t support ending all its Terminal Sessions. Update the server \
-             to use End All Sessions."
-        )),
         Availability::Pending => guidance(format!(
             "End All Sessions is available once {server} answers an earlier change."
         )),
@@ -404,11 +395,6 @@ impl SettingsWindow {
             }
             Availability::Pending => {
                 state.ended = Some(Ended::Refused(SharedRefusalReason::Pending));
-                cx.notify();
-                return;
-            }
-            Availability::Unsupported => {
-                state.ended = Some(Ended::Failed);
                 cx.notify();
                 return;
             }

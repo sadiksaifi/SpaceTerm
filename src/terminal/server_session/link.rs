@@ -146,28 +146,20 @@ impl ActiveInput {
                 target: focus.1,
             }) {
                 Ok(Reply::Unchanged) => self.focus_sent = Some(focus),
-                Err(ServerError::Unsupported) => self.disable(state),
                 Err(error) => return Err(error),
                 _ => return Err(ServerError::Protocol),
             }
         }
         Ok(())
     }
-    fn disable(&self, state: &DevelopmentPaneState) {
-        let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
-        interaction.interactive = false;
-        interaction.pending = None;
-        interaction.resolving = None;
-    }
     /// Sends up to [`INPUT_DRAIN`] queued commands in order before the worker next checks the
-    /// screen. Where the server takes key batches, adjacent queued keys travel in one exchange,
-    /// and any other command first sends the keys queued before it. It never waits for more.
+    /// screen. Adjacent queued keys travel in one exchange, and any other command first sends
+    /// the keys queued before it. It never waits for more.
     /// Returns whether it stopped at the bound, so more input may wait for the next turn.
     pub(super) fn drain(
         &mut self,
         state: &DevelopmentPaneState,
         input: &mpsc::Receiver<SubmittedInput>,
-        batches: bool,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
         paste_unconfirmed: &mut bool,
     ) -> Result<bool, ServerError> {
@@ -181,7 +173,7 @@ impl ActiveInput {
             if state.epoch.load(Ordering::Acquire) != self.epoch {
                 return Err(ServerError::Protocol);
             }
-            if batches && matches!(submitted.command, Input::Key(_)) {
+            if matches!(submitted.command, Input::Key(_)) {
                 keys.push(submitted);
                 continue;
             }
@@ -238,10 +230,8 @@ impl ActiveInput {
         }) {
             Ok(Reply::Unchanged) => Ok(()),
             Ok(_) => Err(ServerError::Protocol),
-            Err(ServerError::Unsupported) => {
-                self.disable(state);
-                Ok(())
-            }
+            // The server refused only this batch, such as a key it can't type.
+            Err(ServerError::Unsupported) => Ok(()),
             Err(error) => {
                 state.invalidate();
                 Err(error)
@@ -446,8 +436,8 @@ impl ActiveInput {
             }
         );
         let result = match result {
+            // The server refused only this message, such as a pointer press with no button.
             Err(ServerError::Unsupported) if matches!(request, Request::Input { .. }) => {
-                self.disable(state);
                 self.finish_paste_request(state, generation);
                 if let Some(reply) = paste_reply {
                     reply.stale();
@@ -735,10 +725,9 @@ impl PaneLink {
                         } else if let InputOutcome::Discarded(refusal) = outcome
                             && refusal != pane::Refusal::Unsupported
                         {
-                            // Every major 3 server takes interactive input, so `Unsupported`
-                            // refuses only that message, such as text no key types. Any other
-                            // discard means the lease or focus moved on, as a refused exchange
-                            // did.
+                            // `Unsupported` refuses only that message, such as text no key
+                            // types. Any other discard means the lease or focus moved on, as a
+                            // refused exchange did.
                             received.discarded.get_or_insert(refusal);
                         }
                     }
@@ -1154,16 +1143,12 @@ impl PaneLink {
                 .request(Operation::ReleaseAttachment { attachment })
                 .map(|_| Reply::Unchanged),
             Request::Shutdown => self.request(Operation::Shutdown).map(|_| Reply::Closed),
-            // Claims need this Pane's attachment permit. The single-key form predates focus
-            // generations.
+            // Claims need this Pane's attachment permit.
             Request::SelectPane { .. }
             | Request::StartRestored { .. }
             | Request::TakeOver { .. }
             | Request::RepairDirectory { .. }
-            | Request::ClaimPane { .. }
-            | Request::Attach { .. }
-            | Request::Select { .. }
-            | Request::Key { .. } => Err(ServerError::Unsupported),
+            | Request::ClaimPane { .. } => Err(ServerError::Unsupported),
         }
     }
 }
@@ -1211,9 +1196,6 @@ fn mutation_reply(body: ReplyBody) -> Result<Reply, ServerError> {
 }
 
 impl TerminalSessionFactory for DevelopmentServerSessionFactory {
-    fn is_server_backed(&self) -> bool {
-        true
-    }
     fn allows_local_file_insertion(&self) -> bool {
         self.local_files.is_some()
     }
@@ -1228,7 +1210,6 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        _: LocalTerminalLaunchPlan,
         appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let (input, receiver) = mpsc::sync_channel(512);
@@ -1356,7 +1337,6 @@ pub(super) fn present(
                 attachment: &attachment,
                 size: &size,
                 appearance: &appearance,
-                directory_recovery: true,
                 attached_session: &mut attached_session,
                 takeover: &mut takeover,
                 paste_unconfirmed: &mut paste_unconfirmed,
@@ -1430,7 +1410,6 @@ pub(super) fn present(
                 let more_input = active_input.drain(
                     &state,
                     &input,
-                    true,
                     &mut |request| {
                         // A send can wait for a reply, such as a settled paste, so the round trip
                         // starts before it. Only input that took a new serial is timed.
@@ -1914,7 +1893,6 @@ mod tests {
                 .drain(
                     &handle.state,
                     &input,
-                    true,
                     &mut |request| record(&mut sent, request),
                     &mut unconfirmed,
                 )
@@ -1936,51 +1914,43 @@ mod tests {
         assert_eq!(keys, 80);
     }
 
-    /// Typing 53 characters queues 106 key events. A server that takes key batches gets them
-    /// in at most four exchanges, every press and release in order; one that doesn't gets the
-    /// same events one exchange each, releases included.
+    /// Typing 53 characters queues 106 key events. They reach the server in at most four
+    /// exchanges, every press and release in order.
     #[test]
-    fn queued_keys_travel_in_bounded_batches_only_to_a_server_that_takes_them() {
-        for batches in [true, false] {
-            let mut adapter = Adapter::new();
-            let typed_text: Vec<String> = (0..53).map(|index| format!("{}", index % 10)).collect();
-            for text in &typed_text {
-                for key in typed(text) {
-                    adapter.handle.key(key);
-                }
-            }
-            let mut sent = Vec::new();
-            adapter
-                .drain_rounds(8, batches, |request| record(&mut sent, request))
-                .unwrap();
-
-            let flat: Vec<(u8, Option<String>)> = sent
-                .iter()
-                .flat_map(|sent| match sent {
-                    Sent::Batch(keys) => keys
-                        .iter()
-                        .map(|(action, text, _)| (*action, text.clone()))
-                        .collect(),
-                    Sent::Key(action, text) => vec![(*action, text.clone())],
-                    Sent::Resize => Vec::new(),
-                })
-                .collect();
-            let expected: Vec<(u8, Option<String>)> = typed_text
-                .iter()
-                .flat_map(|text| [(0, Some(text.clone())), (2, None)])
-                .collect();
-            assert_eq!(flat, expected, "every press and release, in order");
-            if batches {
-                assert_eq!(sent.len(), 4, "106 events in at most four exchanges");
-                assert!(sent.iter().all(|sent| matches!(
-                    sent,
-                    Sent::Batch(keys) if (1..=pane::MAX_KEY_BATCH).contains(&keys.len())
-                )));
-            } else {
-                assert_eq!(sent.len(), 106, "one exchange per event without batches");
-                assert!(sent.iter().all(|sent| matches!(sent, Sent::Key(..))));
+    fn queued_keys_travel_in_bounded_batches() {
+        let mut adapter = Adapter::new();
+        let typed_text: Vec<String> = (0..53).map(|index| format!("{}", index % 10)).collect();
+        for text in &typed_text {
+            for key in typed(text) {
+                adapter.handle.key(key);
             }
         }
+        let mut sent = Vec::new();
+        adapter
+            .drain_rounds(8, |request| record(&mut sent, request))
+            .unwrap();
+
+        let flat: Vec<(u8, Option<String>)> = sent
+            .iter()
+            .flat_map(|sent| match sent {
+                Sent::Batch(keys) => keys
+                    .iter()
+                    .map(|(action, text, _)| (*action, text.clone()))
+                    .collect(),
+                Sent::Key(action, text) => vec![(*action, text.clone())],
+                Sent::Resize => Vec::new(),
+            })
+            .collect();
+        let expected: Vec<(u8, Option<String>)> = typed_text
+            .iter()
+            .flat_map(|text| [(0, Some(text.clone())), (2, None)])
+            .collect();
+        assert_eq!(flat, expected, "every press and release, in order");
+        assert_eq!(sent.len(), 4, "106 events in at most four exchanges");
+        assert!(sent.iter().all(|sent| matches!(
+            sent,
+            Sent::Batch(keys) if (1..=pane::MAX_KEY_BATCH).contains(&keys.len())
+        )));
     }
 
     /// A batch holds only keys queued next to each other: any other command first sends the
@@ -2001,7 +1971,7 @@ mod tests {
         adapter.handle.key(typed("b")[0].clone());
         let mut sent = Vec::new();
         adapter
-            .drain_rounds(1, true, |request| record(&mut sent, request))
+            .drain_rounds(1, |request| record(&mut sent, request))
             .unwrap();
         assert_eq!(
             sent,
@@ -2028,18 +1998,7 @@ mod tests {
             cell_width: 8,
             cell_height: 16,
         };
-        let Reply::Attached { lease } = host.request(
-            [1; 32],
-            [1; 32],
-            Request::Attach {
-                create: true,
-                size,
-                resume: None,
-                style: None,
-            },
-        ) else {
-            panic!("fixture Pane did not start")
-        };
+        let lease = crate::runtime::directory_testing::started_pane(&mut host, size);
         let text = "界🙂".repeat(2200) + "尾";
         let expected = text.clone() + "!";
         let command = format!(
@@ -2047,14 +2006,7 @@ mod tests {
             expected.len()
         );
         let send = |host: &mut crate::runtime::SharedWorkspaceHost, key| {
-            host.request(
-                [1; 32],
-                [1; 32],
-                Request::Key {
-                    lease,
-                    key: encode_key(key),
-                },
-            )
+            crate::runtime::directory_testing::type_keys(host, lease, vec![encode_key(key)])
         };
         let wait = |host: &mut crate::runtime::SharedWorkspaceHost, marker: Option<&str>| {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -2092,7 +2044,7 @@ mod tests {
         adapter.handle.key(KeyInput::text_input("!"));
         let mut chunks = 0;
         adapter
-            .drain_rounds(2, true, |request| {
+            .drain_rounds(2, |request| {
                 if let Request::Input {
                     input: pane::InteractiveInput::Key(key),
                     ..
@@ -2124,7 +2076,7 @@ mod tests {
                 .unwrap();
             adapter.handle.key(KeyInput::text_input("later"));
             let mut chunks = Vec::new();
-            let result = adapter.drain_rounds(1, true, |request| {
+            let result = adapter.drain_rounds(1, |request| {
                 if let Request::Input {
                     input: pane::InteractiveInput::Key(key),
                     ..
@@ -2140,8 +2092,7 @@ mod tests {
             });
             assert_eq!(result, Err(ServerError::NotRunning));
             assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Interrupted);
-            let _ =
-                adapter.drain_rounds(2, true, |_| panic!("an uncertain commit must never replay"));
+            let _ = adapter.drain_rounds(2, |_| panic!("an uncertain commit must never replay"));
             assert_eq!(chunks.len(), lost_chunk);
         }
     }
@@ -2157,7 +2108,7 @@ mod tests {
         let state = Arc::clone(&adapter.handle.state);
         let mut chunks = 0;
         adapter
-            .drain_rounds(1, true, |request| {
+            .drain_rounds(1, |request| {
                 if matches!(
                     request,
                     Request::Input {
@@ -2218,7 +2169,7 @@ mod tests {
         adapter.handle.key(typed("current")[0].clone());
         let mut sent = Vec::new();
         adapter
-            .drain_rounds(1, true, |request| record(&mut sent, request))
+            .drain_rounds(1, |request| record(&mut sent, request))
             .unwrap();
         assert_eq!(
             sent,
@@ -2238,7 +2189,7 @@ mod tests {
         }
         let epoch = adapter.active.epoch;
         let mut batches = 0;
-        let failed = adapter.drain_rounds(1, true, |request| {
+        let failed = adapter.drain_rounds(1, |request| {
             if matches!(request, Request::Keys { .. }) {
                 batches += 1;
                 return Err(ServerError::NotRunning);
@@ -2254,7 +2205,7 @@ mod tests {
         for key in typed("c") {
             adapter.handle.key(key);
         }
-        let _ = adapter.drain_rounds(2, true, |request| {
+        let _ = adapter.drain_rounds(2, |request| {
             if matches!(request, Request::Keys { .. }) {
                 batches += 1;
             }

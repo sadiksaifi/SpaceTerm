@@ -23,7 +23,7 @@ fn noncurrent_settings_versions_are_unsupported() {
 #[test]
 fn current_settings_reject_unsupported_window_fields() {
     let mut value = serde_json::to_value(SettingsDocument::default()).unwrap();
-    value["appearance"]["window"]["transparency"] = serde_json::json!(0.35);
+    value["appearance"]["window"]["unknown"] = serde_json::json!(true);
     assert_eq!(
         parse_settings(&serde_json::to_vec(&value).unwrap()),
         Err(SettingsDocumentError::InvalidJson)

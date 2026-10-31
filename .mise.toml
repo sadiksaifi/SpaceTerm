@@ -482,7 +482,7 @@ run = "cargo run --package spaceterm-cli --no-default-features --locked -- serve
 
 [tasks."server:status"]
 description = "Connect to the existing Development server"
-run = "cargo run --package spaceterm-cli --features client --locked -- server status"
+run = "cargo run --package spaceterm-cli --locked -- server status"
 
 [tasks."server:dependencies"]
 description = "Show the isolated headless server's production dependencies"
@@ -498,11 +498,11 @@ run = "cargo test --package spaceterm --no-default-features --locked --lib runti
 
 [tasks."server:pane:smoke"]
 description = "Disconnect, resume, and close a Pane on the approved Development service"
-run = "cargo run --package spaceterm-cli --features client --example persistent_pane --locked"
+run = "cargo run --package spaceterm-cli --example persistent_pane --locked"
 
 [tasks."server:pane:build"]
 description = "Build the account-local Pane check before native code signing"
-run = "cargo build --package spaceterm-cli --features client --example persistent_pane --locked"
+run = "cargo build --package spaceterm-cli --example persistent_pane --locked"
 
 [tasks."server:pane:run"]
 description = "Run the built account-local Pane check without replacing its code signature"
@@ -510,13 +510,13 @@ run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/persistent_pane\""
 
 [tasks."server:pane:shutdown:smoke"]
 description = "Verify authenticated approved Development service shutdown terminates its running Pane"
-run = "cargo run --package spaceterm-cli --features client --example persistent_pane --locked -- --shutdown"
+run = "cargo run --package spaceterm-cli --example persistent_pane --locked -- --shutdown"
 
 [tasks."server:pane:takeover:smoke"]
 description = "Verify two account-local clients transfer control on a disposable Development server"
 run = [
-  "cargo build --package spaceterm-cli --features client --bin spaceterm --locked",
-  "cargo run --package spaceterm-cli --features client --example pane_takeover --locked -- 4",
+  "cargo build --package spaceterm-cli --bin spaceterm --locked",
+  "cargo run --package spaceterm-cli --example pane_takeover --locked",
 ]
 
 [tasks."server:sessions:smoke"]
@@ -524,13 +524,13 @@ description = "Prepare disposable Preflight Sessions and verify End All Sessions
 usage = '''
 flag "--confirm-disposable-preflight" help="Authorize only disposable Preflight test work; refuse unrelated live Sessions and pending originals"
 '''
-run = "cargo run --package spaceterm-cli --features client --example end_all_sessions --locked -- spaceterm-preflight {% if usage.confirm_disposable_preflight %}--confirm-disposable-preflight{% endif %}"
+run = "cargo run --package spaceterm-cli --example end_all_sessions --locked -- spaceterm-preflight {% if usage.confirm_disposable_preflight %}--confirm-disposable-preflight{% endif %}"
 
 [tasks."server:input:smoke"]
-description = "Verify account-local terminal input and native effects with protocol major 4 on an idle server"
+description = "Verify account-local terminal input and native effects on an idle server"
 run = [
-  "cargo build --package spaceterm-cli --features client --examples --bins --locked",
-  "cargo run --package spaceterm-cli --features client --example terminal_input --locked -- 4",
+  "cargo build --package spaceterm-cli --examples --bins --locked",
+  "cargo run --package spaceterm-cli --example terminal_input --locked",
 ]
 
 [tasks."server:admin:native"]
@@ -538,17 +538,17 @@ description = "Verify Preflight administration from Mac to Penguin and from Peng
 run = 'cargo run -p spaceterm-cli --example server_admin_native --locked -- "$@"'
 
 [tasks."server:workspace:smoke"]
-description = "Exercise retained Development work through server kill and shutdown with protocol major 4"
+description = "Exercise retained Development work through server kill and shutdown"
 run = [
-  "cargo build --package spaceterm-cli --features client --examples --bins --locked",
-  "cargo run --package spaceterm-cli --features client --example restored_workspace --locked -- 4",
+  "cargo build --package spaceterm-cli --examples --bins --locked",
+  "cargo run --package spaceterm-cli --example restored_workspace --locked",
 ]
 
 [tasks."server:shared:smoke"]
-description = "Exercise shared edits, independent Pane control, lost outcomes and restart with protocol major 4"
+description = "Exercise shared edits, independent Pane control, lost outcomes and restart"
 run = [
-  "cargo build --package spaceterm-cli --features client --examples --bins --locked",
-  "cargo run --package spaceterm-cli --features client --example shared_workspaces --locked -- 4",
+  "cargo build --package spaceterm-cli --examples --bins --locked",
+  "cargo run --package spaceterm-cli --example shared_workspaces --locked",
 ]
 
 [tasks."server:shared:desktop:test"]
@@ -566,17 +566,17 @@ usage = 'arg "[test]" default="native_server_setup_acceptance" help="Exact funct
 run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::provisioning::unix_adapter_tests::{{usage.test | quote}} --ignored --exact --nocapture"
 
 [tasks."server:worktree:smoke"]
-description = "Exercise owning-server Worktree writes and interrupted originals with protocol major 4"
+description = "Exercise owning-server Worktree writes and interrupted originals"
 run = [
-  "cargo build --package spaceterm-cli --features client --example worktree_writes --bins --locked",
-  "cargo run --package spaceterm-cli --features client --example worktree_writes --locked -- 4",
+  "cargo build --package spaceterm-cli --example worktree_writes --bins --locked",
+  "cargo run --package spaceterm-cli --example worktree_writes --locked",
 ]
 
 [tasks."server:repository:smoke"]
-description = "Read owning-server Git facts and external Worktrees through two clients with protocol major 4"
+description = "Read owning-server Git facts and external Worktrees through two clients"
 run = [
-  "cargo build --package spaceterm-cli --features client --example repository_reads --bins --locked",
-  "cargo run --package spaceterm-cli --features client --example repository_reads --locked -- 4",
+  "cargo build --package spaceterm-cli --example repository_reads --bins --locked",
+  "cargo run --package spaceterm-cli --example repository_reads --locked",
 ]
 
 [tasks."server:repository:desktop:test"]
@@ -592,7 +592,7 @@ run = "cargo test --package spaceterm-cli --no-default-features --locked"
 
 [tasks."server:update:build"]
 description = "Build the signed native update check before code signing"
-run = "cargo build --package spaceterm-cli --features client --example server_update --locked"
+run = "cargo build --package spaceterm-cli --example server_update --locked"
 
 [tasks."server:update:smoke"]
 description = "Exercise exact signed updates against disposable Development service state"
@@ -631,7 +631,7 @@ usage = '''
 arg "<identity>" help="Installed application identity"
 arg "[installation]" help="Verified retained installation to install explicitly before the check"
 '''
-run = "cargo run --package spaceterm-cli --features client --example service_session --locked -- {{usage.identity | quote}} {% if usage.installation %}{{usage.installation | quote}}{% endif %}"
+run = "cargo run --package spaceterm-cli --example service_session --locked -- {{usage.identity | quote}} {% if usage.installation %}{{usage.installation | quote}}{% endif %}"
 
 [tasks."server:service:test:macos"]
 description = "Verify launchd unload permits graceful cleanup in the current GUI login domain"
@@ -650,26 +650,24 @@ run = "cargo test --package spaceterm-server --lib --features client --locked"
 
 [tasks."server:directory:build"]
 description = "Build the server directory-recovery check before native code signing"
-run = "cargo build --package spaceterm-cli --features client --example directory_recovery --bin spaceterm --locked"
+run = "cargo build --package spaceterm-cli --example directory_recovery --bin spaceterm --locked"
 
 [tasks."server:directory:smoke"]
 description = "Exercise directory recovery on an idle Development server without native credential adapters"
 usage = '''
-arg "[major]" default="4" help="Protocol major (4)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = [
   { task = "server:directory:build" },
-  "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
+  "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {% if usage.cleanup_exercise %}--cleanup{% endif %}",
 ]
 
 [tasks."server:directory:run"]
 description = "Run a built directory-recovery check without replacing its code signature"
 usage = '''
-arg "[major]" default="4" help="Protocol major (4)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
-run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
+run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {% if usage.cleanup_exercise %}--cleanup{% endif %}"
 
 [tasks."bench:latency:quic"]
 description = "Measure a paired QUIC request's round trip on loopback, in a release build"
@@ -685,7 +683,7 @@ run = "cargo test --package spaceterm --lib --no-default-features --features des
 
 [tasks."server:direct:build"]
 description = "Build the two-host direct-device verification helper before native signing"
-run = "cargo build --package spaceterm-cli --features client --example direct_devices --locked"
+run = "cargo build --package spaceterm-cli --example direct_devices --locked"
 
 [tasks."server:direct:smoke"]
 description = "Verify QUIC against Penguin using only explicitly confirmed idle Development work"
@@ -711,15 +709,15 @@ run = "cargo test --package spaceterm --no-default-features --locked --lib runti
 
 [tasks."server:presentation:test"]
 description = "Test presentation fixture scope guards and QUIC driver framing without native access"
-run = "cargo test --package spaceterm-cli --features client --locked --example terminal_presentation --example direct_devices"
+run = "cargo test --package spaceterm-cli --locked --example terminal_presentation --example direct_devices"
 
 [tasks."server:presentation:check"]
 description = "Check the real-transport presentation fixtures without building native applications"
-run = "cargo check --package spaceterm-cli --features client --locked --example terminal_presentation --example direct_devices"
+run = "cargo check --package spaceterm-cli --locked --example terminal_presentation --example direct_devices"
 
 [tasks."server:presentation:build"]
 description = "Build presentation fixtures before parent-owned native signing"
-run = "cargo build --package spaceterm-cli --features client --locked --example terminal_presentation --example direct_devices"
+run = "cargo build --package spaceterm-cli --locked --example terminal_presentation --example direct_devices"
 
 [tasks."server:presentation:run"]
 description = "Verify presentation on an explicitly selected existing foreground Development server"

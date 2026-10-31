@@ -239,18 +239,6 @@ fn is_git_true(value: &[u8]) -> bool {
         .any(|truth| value.eq_ignore_ascii_case(truth))
 }
 
-/// Parses one complete configuration output held in memory.
-#[cfg(test)]
-pub(crate) fn parse_config(
-    output: &[u8],
-    branch: Option<&str>,
-    git_version: ToolVersion,
-) -> Result<RepositoryConfig, RepositoryReadError> {
-    let mut parser = ConfigParser::new(branch, git_version);
-    parser.push(output);
-    parser.finish()
-}
-
 /// What `HEAD` names, from the status headers. Branch names come only from `branch.head`.
 pub(crate) fn repository_head(
     headers: &StatusHeaders,
@@ -283,6 +271,17 @@ pub(crate) fn upstream(headers: &StatusHeaders) -> Option<Upstream> {
 mod tests {
     use super::*;
     use crate::repository_status::Divergence;
+
+    /// Parses one complete configuration output held in memory.
+    fn parse_config(
+        output: &[u8],
+        branch: Option<&str>,
+        git_version: ToolVersion,
+    ) -> Result<RepositoryConfig, RepositoryReadError> {
+        let mut parser = ConfigParser::new(branch, git_version);
+        parser.push(output);
+        parser.finish()
+    }
 
     const HOME: &str = "/Users/person";
     const VERSION: ToolVersion = ToolVersion {

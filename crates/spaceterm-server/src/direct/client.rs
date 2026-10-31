@@ -321,7 +321,6 @@ impl DirectConnection {
             client,
             &self.paired.pin.server,
             &self.paired.pin.build,
-            &[crate::protocol::MAJOR],
         )?;
         Ok(Box::new(stream.into_carrier()))
     }

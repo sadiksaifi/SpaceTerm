@@ -127,6 +127,10 @@ mod development {
             directory: &Path,
             cx: &App,
         ) -> RepositoryView {
+            #[cfg(feature = "developer-tools")]
+            if let Some(view) = crate::ui::developer_workbench::repository_view_fixture(cx) {
+                return view;
+            }
             let Some(shared) = self.shared.owning(workspace_id) else {
                 return RepositoryView::Hidden;
             };
@@ -389,9 +393,7 @@ mod development {
                     })
                 {
                     WorktreeRemoval::HoldsPinnedDirectory
-                } else if !worktree_writes {
-                    WorktreeRemoval::Server
-                } else if !owning.is_some_and(|s| s.editability().available()) {
+                } else if !worktree_writes || !owning.is_some_and(|s| s.editability().available()) {
                     WorktreeRemoval::NeedsServer
                 } else if matches!(pin_check, Some(PinCheckState::Checking)) {
                     WorktreeRemoval::CheckingPinnedDirectories

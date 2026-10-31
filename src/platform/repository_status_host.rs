@@ -37,8 +37,6 @@ pub(crate) fn repository_status_adapters(
     RepositoryStatusAdapters {
         runner: Arc::new(super::unix_repository_program::UnixRepositoryProgramRunner::new()),
         discovery,
-        markers: Arc::new(super::repository_marker_reader::UnixRepositoryMarkerReader::new()),
-        watcher: Arc::new(super::repository_watch::NotifyRepositoryWatcher::new()),
         // git prints resolved paths, so the home rule compares against the resolved home.
         physical_home: std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()),
         github_cli_environment: github_cli_environment(|key| std::env::var_os(key)),

@@ -1,15 +1,13 @@
 //! Native evidence for the actual Settings action, on an explicitly disposable Preflight server.
-//! Run with `--features client -- spaceterm-preflight --confirm-disposable-preflight`.
+//! Run with `-- spaceterm-preflight --confirm-disposable-preflight`.
 //! The helper prepares real PTYs, waits five minutes for the UI, then verifies and cleans up.
 
-#[cfg(feature = "client")]
 #[expect(
     dead_code,
     reason = "This check claims named Panes and never uses `support::attach`."
 )]
 mod support;
 
-#[cfg(feature = "client")]
 mod exercise {
     use super::support::{self, Claimed, Ending, Pane};
     use spaceterm_server::{
@@ -400,13 +398,6 @@ mod exercise {
     }
 }
 
-#[cfg(feature = "client")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     exercise::run()
-}
-
-#[cfg(not(feature = "client"))]
-fn main() {
-    eprintln!("end_all_sessions requires --features client");
-    std::process::exit(2);
 }

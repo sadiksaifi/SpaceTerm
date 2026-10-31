@@ -16,58 +16,25 @@ impl DevelopmentPaneHost {
             controller: names.controller(controlling, asking),
         }
     }
-    pub(super) fn retain(&mut self, organization: Option<Organization>) -> Result<(), Refusal> {
-        if self.organization == organization && !self.uncertain {
-            return Ok(());
-        }
-        if let Some(store) = &self.store
-            && store.write(organization.as_ref()).is_err()
-        {
-            self.uncertain = true;
-            return Err(Refusal::StorageUnavailable);
-        }
-        self.organization = organization;
-        Ok(())
-    }
-    pub(super) fn recover(&mut self) -> Result<(), Refusal> {
-        if self.uncertain {
-            let recovered = self
-                .store
-                .as_ref()
-                .ok_or(Refusal::StorageUnavailable)?
-                .read()
-                .map_err(|_| Refusal::StorageUnavailable)?;
-            if recovered.is_none() && self.pane.is_some() {
-                if let Some(pane) = &mut self.pane {
-                    pane.runtime
-                        .shutdown_and_wait(Duration::from_secs(5))
-                        .map_err(|_| Refusal::CleanupUnresolved)?;
-                }
-                self.pane = None;
-            }
-            self.organization = recovered;
-            self.uncertain = false;
-        }
-        Ok(())
-    }
     fn restored(&self) -> Result<Reply, Refusal> {
-        let organization = self.organization.as_ref().ok_or(Refusal::Missing)?;
+        let identity = self.identity.as_ref().ok_or(Refusal::Missing)?;
         Ok(Reply::Restored {
             fresh: false,
             session_ended: self.dormant.map(|dormant| dormant.end),
             recovery: Some(pane::directories::Target {
                 boot: self.boot,
-                pane: organization.pane,
-                original: organization.startup_directory().to_owned(),
+                pane: identity.pane,
+                original: identity.startup_directory().to_owned(),
             }),
             directory_unavailable: self.directory_unavailable,
             server: self.boot,
-            workspace: organization.workspace,
-            tab: organization.tab,
-            pane: organization.pane,
+            workspace: identity.workspace,
+            tab: identity.tab,
+            pane: identity.pane,
         })
     }
-    pub(super) fn retain_directory(&mut self) -> Result<(), Refusal> {
+    /// Keeps the directory the owning shell confirmed, so the Pane's next Session starts there.
+    pub(super) fn retain_directory(&mut self) {
         let confirmed = self
             .pane
             .as_ref()
@@ -78,19 +45,15 @@ impl DevelopmentPaneHost {
                     .as_ref()
                     .map(|path| std::path::PathBuf::from(path.as_ref()))
             });
-        if let (Some(directory), Some(organization)) = (confirmed, &self.organization)
-            && organization.confirmed_directory.as_ref() != Some(&directory)
+        if let (Some(directory), Some(identity)) = (confirmed, &mut self.identity)
+            && identity.confirmed_directory.as_ref() != Some(&directory)
         {
             // Only owning-shell markers supply this candidate. Validate on the owning host
             // before retaining it, and again when a later runtime starts.
-            let Ok(directory) = local_filesystem().validate_directory(&directory) else {
-                return Ok(());
-            };
-            let mut updated = organization.clone();
-            updated.confirmed_directory = Some(directory.path().to_owned());
-            self.retain(Some(updated))?;
+            if let Ok(directory) = local_filesystem().validate_directory(&directory) {
+                identity.confirmed_directory = Some(directory.path().to_owned());
+            }
         }
-        Ok(())
     }
     pub(super) fn start(
         &mut self,
@@ -100,14 +63,9 @@ impl DevelopmentPaneHost {
         style: Option<PresentationStyle>,
     ) -> Result<Lease, Refusal> {
         size.validate().map_err(|_| Refusal::Unsupported)?;
-        if self.organization.is_none() {
-            self.retain(Some(
-                Organization::first(self.directory.clone()).map_err(|_| Refusal::Failed)?,
-            ))?;
-        }
         let directory = local_filesystem()
             .validate_directory(
-                self.organization
+                self.identity
                     .as_ref()
                     .ok_or(Refusal::Missing)?
                     .startup_directory(),
@@ -135,11 +93,11 @@ impl DevelopmentPaneHost {
             connection,
         };
         let mut plan = LocalTerminalLaunchPlan::new(directory).without_client_effects();
-        if let (Some(context), Some(organization)) = (&self.session_context, &self.organization) {
+        if let (Some(context), Some(identity)) = (&self.session_context, &self.identity) {
             plan = plan.in_session(crate::platform::shell_launch::SessionEnvironment {
                 identity: context.identity.clone(),
                 server: context.server,
-                pane: organization.pane,
+                pane: identity.pane,
                 session: lease.session,
                 cli: context.cli.clone(),
             });
@@ -157,7 +115,6 @@ impl DevelopmentPaneHost {
                 .as_ref()
                 .map(|notifier| notifier(lease.session)),
         );
-        runtime.route_client_effects();
         self.pane = Some(OwnedPane {
             device: Some(device),
             attachment_generation: None,
@@ -188,13 +145,14 @@ impl DevelopmentPaneHost {
         self.dormant = None;
         Ok(lease)
     }
+    /// Selects this Pane for `device`. A selection acquires the Pane only when nobody controls
+    /// it, and only an explicit one starts its first Session.
     pub(super) fn select(
         &mut self,
         device: [u8; 32],
         connection: [u8; 32],
-        create: bool,
+        explicit: bool,
         size: PaneSize,
-        resume: Option<PaneTarget>,
         style: Option<PresentationStyle>,
     ) -> Result<Reply, Refusal> {
         size.validate().map_err(|_| Refusal::Unsupported)?;
@@ -205,72 +163,28 @@ impl DevelopmentPaneHost {
             return Ok(self.takeover(
                 PaneTarget {
                     server: self.boot,
-                    session: self.organization.as_ref().ok_or(Refusal::Missing)?.pane,
+                    session: self.identity.as_ref().ok_or(Refusal::Missing)?.pane,
                 },
                 dormant.device,
                 device,
             ));
         }
-        if let Some(pane) = &self.pane {
-            let target = PaneTarget::from(pane.lease);
-            if resume.is_some_and(|old| old != target) {
-                return Err(Refusal::Stale);
-            }
-            if pane.device.is_some_and(|owner| owner != device)
-                || (pane.device.is_none() && resume.is_some())
-            {
-                return Ok(self.takeover(target, pane.device, device));
-            }
+        if let Some(pane) = &self.pane
+            && pane.device.is_some_and(|owner| owner != device)
+        {
+            return Ok(self.takeover(PaneTarget::from(pane.lease), pane.device, device));
         }
         if let Some(pane) = &mut self.pane {
             return pane.claim(device, connection, size, style, pane.device.is_none());
         }
-        if self.organization.is_some() {
-            // Observing a restarted server never grants first-use intent.
-            if !create || resume.is_some() {
-                return self.restored();
-            }
-            return self
-                .start(device, connection, size, style)
-                .map(|lease| Reply::Attached { lease });
-        }
-        // A reconnect must never create a replacement Session after a lost launch reply.
-        if !create || resume.is_some() {
+        if self.identity.is_none() {
             return Err(Refusal::Missing);
         }
+        // Observing a restarted server never grants first-use intent.
+        if !explicit {
+            return self.restored();
+        }
         self.start(device, connection, size, style)
-            .map(|lease| Reply::Attached { lease })
-    }
-    pub(super) fn repair_directory(
-        &mut self,
-        device: [u8; 32],
-        connection: [u8; 32],
-        target: pane::directories::Target,
-        replacement: Option<std::path::PathBuf>,
-        size: PaneSize,
-        style: Option<PresentationStyle>,
-    ) -> Result<Reply, Refusal> {
-        size.validate().map_err(|_| Refusal::Unsupported)?;
-        let org = self.organization.as_ref().ok_or(Refusal::Missing)?;
-        if target.boot != self.boot || target.pane != org.pane {
-            return Err(Refusal::Stale);
-        }
-        // A concurrent first use already won. Repair can observe it, never replace it.
-        if self.pane.is_some() {
-            return self.select(device, connection, false, size, None, style);
-        }
-        if target.original != org.startup_directory() {
-            return Err(Refusal::Stale);
-        }
-        let directory = local_filesystem()
-            .validate_directory(replacement.as_deref().unwrap_or(&target.original))
-            .map_err(|_| Refusal::DirectoryUnavailable)?;
-        if replacement.is_some() {
-            let mut updated = org.clone();
-            updated.confirmed_directory = Some(directory.path().to_owned());
-            self.retain(Some(updated))?;
-        }
-        self.start_directory(device, connection, size, style, directory)
             .map(|lease| Reply::Attached { lease })
     }
 
@@ -316,7 +230,7 @@ impl DevelopmentPaneHost {
             }
             // A zero exit closes the Pane even without a subscribed client. Keep its final
             // screen until its channel receives it, but never retain it across a restart.
-            self.retain(None)?;
+            self.identity = None;
         }
         Ok(())
     }
@@ -332,7 +246,7 @@ impl DevelopmentPaneHost {
             session: Some(pane.lease.into()),
         });
         // Use ordinary shutdown to invalidate input/effects and wait for native cleanup, but
-        // retain organization and its control grant rather than retiring an ordinary exit.
+        // keep the Pane and its control grant rather than retiring an ordinary exit.
         self.shutdown().map_err(|_| Refusal::CleanupUnresolved)
     }
     /// Take Over of an ended Pane is its Start Session: every client sees the same ended Pane,
@@ -512,14 +426,26 @@ impl OwnedPane {
                     PointerInput {
                         generation,
                         phase: match input.phase {
-                            pane::PointerPhase::Press => super::super::PointerPhase::Press,
-                            pane::PointerPhase::Motion => super::super::PointerPhase::Motion,
-                            pane::PointerPhase::Release => super::super::PointerPhase::Release,
+                            pane::PointerPhase::Press => {
+                                crate::terminal::pointer_input::PointerPhase::Press
+                            }
+                            pane::PointerPhase::Motion => {
+                                crate::terminal::pointer_input::PointerPhase::Motion
+                            }
+                            pane::PointerPhase::Release => {
+                                crate::terminal::pointer_input::PointerPhase::Release
+                            }
                         },
                         button: input.button.map(|button| match button {
-                            pane::PointerButton::Left => super::super::PointerButton::Left,
-                            pane::PointerButton::Middle => super::super::PointerButton::Middle,
-                            pane::PointerButton::Right => super::super::PointerButton::Right,
+                            pane::PointerButton::Left => {
+                                crate::terminal::pointer_input::PointerButton::Left
+                            }
+                            pane::PointerButton::Middle => {
+                                crate::terminal::pointer_input::PointerButton::Middle
+                            }
+                            pane::PointerButton::Right => {
+                                crate::terminal::pointer_input::PointerButton::Right
+                            }
                         }),
                         position: SurfacePosition {
                             x: input.x,
@@ -557,24 +483,28 @@ impl OwnedPane {
                     vertical_steps: input.vertical_steps,
                     phase: match input.phase {
                         pane::WheelPhase::GestureStarted => {
-                            super::super::WheelPhase::GestureStarted
+                            crate::terminal::pointer_input::WheelPhase::GestureStarted
                         }
                         pane::WheelPhase::GestureChanged => {
-                            super::super::WheelPhase::GestureChanged
+                            crate::terminal::pointer_input::WheelPhase::GestureChanged
                         }
-                        pane::WheelPhase::GestureEnded => super::super::WheelPhase::GestureEnded,
+                        pane::WheelPhase::GestureEnded => {
+                            crate::terminal::pointer_input::WheelPhase::GestureEnded
+                        }
                         pane::WheelPhase::GestureCancelled => {
-                            super::super::WheelPhase::GestureCancelled
+                            crate::terminal::pointer_input::WheelPhase::GestureCancelled
                         }
                         pane::WheelPhase::MomentumStarted => {
-                            super::super::WheelPhase::MomentumStarted
+                            crate::terminal::pointer_input::WheelPhase::MomentumStarted
                         }
                         pane::WheelPhase::MomentumChanged => {
-                            super::super::WheelPhase::MomentumChanged
+                            crate::terminal::pointer_input::WheelPhase::MomentumChanged
                         }
-                        pane::WheelPhase::MomentumEnded => super::super::WheelPhase::MomentumEnded,
+                        pane::WheelPhase::MomentumEnded => {
+                            crate::terminal::pointer_input::WheelPhase::MomentumEnded
+                        }
                         pane::WheelPhase::MomentumCancelled => {
-                            super::super::WheelPhase::MomentumCancelled
+                            crate::terminal::pointer_input::WheelPhase::MomentumCancelled
                         }
                     },
                     position: SurfacePosition {
@@ -608,16 +538,16 @@ impl OwnedPane {
                         })
                     }
                     PasteRequestOutcome::Rejected(reason) => PasteOutcome::Rejected(match reason {
-                        super::super::PasteRejection::Empty => pane::PasteRejection::Empty,
-                        super::super::PasteRejection::TooLarge { limit } => {
+                        crate::terminal::native_services::paste::PasteRejection::Empty => pane::PasteRejection::Empty,
+                        crate::terminal::native_services::paste::PasteRejection::TooLarge { limit } => {
                             pane::PasteRejection::TooLarge {
                                 limit: limit as u32,
                             }
                         }
-                        super::super::PasteRejection::ConfirmationPending => {
+                        crate::terminal::native_services::paste::PasteRejection::ConfirmationPending => {
                             pane::PasteRejection::ConfirmationPending
                         }
-                        super::super::PasteRejection::TerminalUnfocused => {
+                        crate::terminal::native_services::paste::PasteRejection::TerminalUnfocused => {
                             pane::PasteRejection::TerminalUnfocused
                         }
                     }),
@@ -836,7 +766,7 @@ pub(super) fn decode_modifiers(bits: u16) -> InputModifiers {
         platform_right: bits & 512 != 0,
     }
 }
-pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
+pub(super) fn decode_key(key: Key) -> Option<KeyInput> {
     if key.logical.len() > 128
         || key
             .text

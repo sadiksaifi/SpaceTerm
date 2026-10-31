@@ -56,135 +56,112 @@ fn row_trailing_padding(cx: &mut VisualTestContext) -> Pixels {
     })
 }
 
+/// A row's Pull Request ends its second line, after the directory, and opens in the browser
+/// without changing the Active Workspace.
 #[gpui::test]
-fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
-    cx: &mut TestAppContext,
-) {
-    use crate::domain::CurrentDirectory;
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-d");
-    cx.run_until_parked();
-    assert_eq!(records.starts().len(), 2);
-    records.report_directory(
-        2,
-        Some(CurrentDirectory::Local(PathBuf::from("/other/child"))),
-    );
-    records.report_directory(
-        1,
-        Some(CurrentDirectory::Local(PathBuf::from("/projects/api"))),
-    );
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "api"
-    );
+fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppContext) {
+    use crate::repository_status::testing::{FakeRunner, exit};
+    use crate::repository_status::{
+        RepositoryStatusPreferences, RepositoryToolDiscovery, ToolInventory,
+    };
+    use crate::ui::repository_status_store::{
+        InstalledRepositoryStatus, RepositoryStatusAdapters, RepositoryStatusStore,
+    };
+    use spaceterm_server::repository::{
+        ChangeSummary, DirectoryFacts, GitHubRepository, GitToolStatus, PullRequestQuery,
+        Repository, RepositoryHead, Snapshot, ToolVersion,
+    };
 
-    new_desktop_workspace(cx);
-    cx.run_until_parked();
-    records.report_directory(
-        1,
-        Some(CurrentDirectory::Local(PathBuf::from("/projects/server"))),
-    );
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(WorkspaceId::new(1))
-            .unwrap()
-            .name()
-            .to_owned()),
-        "server"
-    );
-    records.report_directory(1, None);
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(WorkspaceId::new(1))
-            .unwrap()
-            .name()
-            .to_owned()),
-        "server"
-    );
+    struct Tools;
+    impl RepositoryToolDiscovery for Tools {
+        fn discover(&self) -> ToolInventory {
+            ToolInventory {
+                git: None,
+                github_cli: Some("/usr/local/bin/gh".into()),
+            }
+        }
+    }
 
-    records
-        .event_sender(1)
-        .unwrap()
-        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-        .unwrap();
-    cx.run_until_parked();
-    let identity = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.workspace(WorkspaceId::new(1)).unwrap();
-        (
-            workspace.name().to_owned(),
-            workspace.local_display_directory().unwrap().to_path_buf(),
+    // Git facts come from the server; the client's GitHub CLI finds the draft Pull Request.
+    let runner = FakeRunner::new([
+        exit(
+            0,
+            r#"{"hosts":{"example.invalid":[{"state":"success","active":true}]}}"#,
+        ),
+        exit(0, ""),
+        exit(
+            0,
+            r#"[{"number":478,"title":"Sidebar Pull Request","isDraft":true,"url":"https://example.invalid/pull/478","headRefName":"feature","baseRefName":"main","headRepositoryOwner":{"login":"owner"},"isCrossRepository":false}]"#,
+        ),
+    ]);
+    let store = cx.new(|cx| {
+        RepositoryStatusStore::new(
+            RepositoryStatusPreferences::default(),
+            RepositoryStatusAdapters {
+                runner,
+                discovery: Arc::new(Tools),
+                physical_home: "/home/person".into(),
+                github_cli_environment: Vec::new(),
+            },
+            Arc::new(|work| {
+                work();
+                true
+            }),
+            cx,
         )
     });
-    assert_eq!(
-        identity,
-        ("child".to_owned(), PathBuf::from("/other/child"))
-    );
-}
-
-#[gpui::test]
-fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
-    cx: &mut TestAppContext,
-) {
-    use crate::repository_status::{
-        ChangeState, Freshness, PullRequest, RepositoryHead, RepositoryKey, RepositoryMachine,
-        RepositoryRoot, RepositoryStatus, RepositoryView,
-    };
+    cx.update(|cx| cx.set_global(InstalledRepositoryStatus(store)));
+    cx.run_until_parked();
 
     let (manager, _records, cx) = workspace_manager(cx);
-    let status = |pull_request: Option<PullRequest>| {
-        RepositoryView::Repository(Arc::new(RepositoryStatus {
-            key: RepositoryKey {
-                machine: RepositoryMachine::Local,
-                root: RepositoryRoot::Local(PathBuf::from("/projects/api")),
-            },
-            head: RepositoryHead::Branch("main".into()),
-            commit: Some("a1b2c3d".into()),
-            upstream: None,
-            operation: None,
-            changes: ChangeState::NotCounted,
-            freshness: Freshness::Current,
-            read_at: Instant::now(),
-            pull_request,
-            read_failure: None,
-        }))
-    };
-    manager.update(cx, |manager, cx| {
-        manager.present_sidebar_repository(WorkspaceId::new(1), status(None), cx);
+    let server = local_server(cx);
+    let mut inventory = server.edits.applied_inventory();
+    let directory = inventory.workspaces[0].tabs[0].panes[0]
+        .starting_directory
+        .clone();
+    inventory.repositories = Some(Snapshot {
+        boot: [1; 32],
+        revision: 1,
+        git: GitToolStatus::Ready(ToolVersion {
+            major: 2,
+            minor: 47,
+            patch: 0,
+        }),
+        directories: vec![DirectoryFacts {
+            directory: directory.clone(),
+            repository: Some(Repository {
+                root: directory,
+                head: RepositoryHead::Branch("feature".into()),
+                commit: Some("a1b2c3d".into()),
+                upstream: None,
+                operation: None,
+                changes: Ok(ChangeSummary::default()),
+                counting: None,
+                pull_request: Some(PullRequestQuery {
+                    repository: GitHubRepository {
+                        host: "example.invalid".into(),
+                        owner: "owner".into(),
+                        name: "app".into(),
+                    },
+                    head_branch: "feature".into(),
+                    head_owner: None,
+                }),
+            }),
+            worktrees: None,
+            failure: None,
+        }],
+        pinned_worktrees: Vec::new(),
+        pin_check: Default::default(),
+    });
+    server.edits.set_inventory(inventory);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+        });
     });
     cx.run_until_parked();
-    let branch = cx.debug_bounds("workspace-row-branch-1").unwrap();
-    let path = cx.debug_bounds("workspace-row-path-1").unwrap();
-    let row = cx.debug_bounds("workspace-row-1-active").unwrap();
-    // The directory leads line 2 and the branch ends it.
-    assert!(path.left() < branch.left());
-    assert!(path.right() <= branch.left());
-    assert_eq!(branch.right(), row.right() - row_trailing_padding(cx));
-    assert!(cx.debug_bounds("workspace-counts-1").is_none());
 
-    manager.update(cx, |manager, cx| {
-        manager.present_sidebar_repository(
-            WorkspaceId::new(1),
-            status(Some(PullRequest {
-                number: 478,
-                title: "Add Repository Status".into(),
-                draft: true,
-                url: "https://github.com/acme/api/pull/478".into(),
-                head: "main".into(),
-                base: "release".into(),
-            })),
-            cx,
-        );
-    });
-    cx.run_until_parked();
+    let row = cx.debug_bounds("workspace-row-1-active").unwrap();
     let number = cx
         .debug_bounds("workspace-row-pull-request-1")
         .expect("the Pull Request number replaces the branch");
@@ -196,7 +173,7 @@ fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
     cx.run_until_parked();
     assert_eq!(
         cx.opened_url().as_deref(),
-        Some("https://github.com/acme/api/pull/478")
+        Some("https://example.invalid/pull/478")
     );
     assert_eq!(
         manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
@@ -207,7 +184,7 @@ fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
 #[gpui::test]
 fn sidebar_rows_contain_semantic_text_in_both_densities(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
 
     for density in [
         crate::appearance::ChromeDensity::Compact,
@@ -304,7 +281,6 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::terminal::testing::{
     RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
-use crate::terminal::{TerminalSessionEvent, TerminalSessionExit};
 
 #[gpui::test]
 fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppContext) {
@@ -329,11 +305,10 @@ fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppCont
         created: Rc::clone(&created),
         delegate: Rc::clone(&native_services.file_preview),
     });
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(TestTerminalSessionFactory::new(
-        TestTerminalSessionRecords::default(),
-    ));
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(server_sessions(TestTerminalSessionRecords::default()));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -353,14 +328,14 @@ fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppCont
         cx.run_until_parked();
         assert_eq!(created.get(), expected, "{shortcut}");
     }
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     assert_eq!(created.get(), 4, "new Workspace");
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let workspace_id = manager.workspaces.active_id();
-            manager.close_workspace(workspace_id, window, cx);
+            manager.close_workspace_activating(workspace_id, true, window, cx);
             let final_workspace_id = manager.workspaces.active_id();
-            manager.close_workspace(final_workspace_id, window, cx);
+            manager.close_workspace_activating(final_workspace_id, true, window, cx);
         });
     });
     cx.run_until_parked();
@@ -375,11 +350,10 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     let factory = Rc::new(
         crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
     );
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(TestTerminalSessionFactory::new(
-        TestTerminalSessionRecords::default(),
-    ));
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(server_sessions(TestTerminalSessionRecords::default()));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -399,7 +373,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
         cx.run_until_parked();
         assert_eq!(factory.records.borrow().len(), expected, "{shortcut}");
     }
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     assert_eq!(factory.records.borrow().len(), 4, "new Workspace");
     let records = factory.records.borrow();
     assert!(
@@ -418,7 +392,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     );
 }
 
-fn workspace_adapters() -> WorkspaceManagerAdapters {
+pub(crate) fn workspace_adapters() -> WorkspaceManagerAdapters {
     WorkspaceManagerAdapters {
         local_filesystem: LocalFilesystemAuthority::testing(),
         key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
@@ -430,41 +404,137 @@ fn workspace_adapters() -> WorkspaceManagerAdapters {
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
         local_server: crate::ui::launch_testing::unanswered(),
-        // A presented server here predates comparing directories, unless a test says otherwise.
-        server_directories: crate::ui::directory_picker::server_directory_testing::older(),
+        // A presented server here matches only directories spelled the same, unless a test says
+        // otherwise.
+        server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
     }
 }
 
-/// Adds and activates one more desktop-owned Workspace in the window under test, as a person
-/// opening another Workspace does.
-fn new_desktop_workspace(cx: &mut VisualTestContext) {
+/// Asks this window's server for one more Workspace and opens it, as a person creating another
+/// Workspace does.
+fn publish_workspace(cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         let manager = window
             .root::<WorkspaceManager>()
             .flatten()
             .expect("the window presents a Workspace manager");
         manager.update(cx, |manager, cx| {
-            manager.present_desktop_workspace(window, cx);
+            manager.create_shared_workspace(String::new(), None, window, cx);
         });
     });
     cx.run_until_parked();
 }
 
-/// The Terminal Sessions desktop-owned test Workspaces present.
-struct DesktopSessions(Rc<dyn TerminalSessionFactory>);
-
-impl gpui::Global for DesktopSessions {}
-
-/// Makes `session_factory` run the Panes of every desktop-owned test Workspace presented later.
-pub(crate) fn use_desktop_sessions(session_factory: Rc<dyn TerminalSessionFactory>, cx: &mut App) {
-    cx.set_global(DesktopSessions(session_factory));
+/// The scripted account-local server the Workspace Window under test presents. It applies each
+/// edit as the server does, and its Panes run their Terminal Sessions in a test factory.
+#[derive(Clone)]
+pub(crate) struct LocalServer {
+    pub(crate) edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    pub(crate) panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
 }
 
-/// A Workspace Window presenting one desktop-owned Workspace at `home_directory`.
-///
-/// Production Workspaces all belong to a SpaceTerm Server; these tests exercise the window's own
-/// behavior around a Workspace whose Panes run in `session_factory`, without a server.
-fn new_desktop_manager(
+impl gpui::Global for LocalServer {}
+
+impl LocalServer {
+    /// A server with one Workspace in `home_directory`, whose Panes run in `session_factory`.
+    pub(crate) fn new(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        home_directory: PathBuf,
+    ) -> Self {
+        let panes = crate::ui::shared_workspaces::testing::ScriptedPanes::connected(
+            WorkspaceTerminalSessionFactory::new_server(session_factory),
+        );
+        Self {
+            edits: Rc::new(
+                crate::ui::shared_workspaces::testing::ScriptedEdits::applying(home_directory),
+            ),
+            panes,
+        }
+    }
+
+    /// Presents this server in `manager`'s window, and reads its first inventory.
+    pub(crate) fn present(
+        &self,
+        manager: &mut WorkspaceManager,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceManager>,
+    ) {
+        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+        cx.set_global(self.clone());
+        let sessions = SharedPaneSessions::with_opener(
+            Rc::clone(&self.panes) as Rc<_>,
+            &manager.pane_construction,
+        );
+        manager.present_shared_workspaces(
+            SharedEditSource::new(Rc::clone(&self.edits) as Rc<_>),
+            sessions,
+            window,
+            cx,
+        );
+        manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+    }
+}
+
+/// The scripted account-local server of the window under test.
+fn local_server(cx: &mut VisualTestContext) -> LocalServer {
+    cx.update(|_, cx| cx.global::<LocalServer>().clone())
+}
+
+/// Asks the server to pin `workspace` at `directory`, which it accepts, and reads its answer.
+fn pin_on_the_server(
+    manager: &Entity<WorkspaceManager>,
+    workspace: u64,
+    directory: &str,
+    cx: &mut VisualTestContext,
+) {
+    let directory = ValidatedLocalDirectory::new(
+        PathBuf::from(directory),
+        crate::domain::LocalDirectoryIdentity::for_test(0),
+    );
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            assert!(manager.apply_directory_pin(
+                WorkspaceId::new(workspace),
+                Some(directory),
+                window,
+                cx
+            ));
+        })
+    });
+    cx.run_until_parked();
+}
+
+/// How many closes this window asked its account-local server for.
+fn server_closes(cx: &mut VisualTestContext) -> usize {
+    local_server(cx)
+        .edits
+        .submitted()
+        .iter()
+        .filter(|mutation| {
+            matches!(
+                mutation,
+                spaceterm_server::hierarchy::Mutation::Close { .. }
+            )
+        })
+        .count()
+}
+
+/// Terminal Sessions that run in the account-local server, recorded in `records`.
+pub(crate) fn server_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
+    TestTerminalSessionFactory::new(records).with_reading_available(true)
+}
+
+/// Presentations of Terminal Sessions that run in a server, recorded nowhere.
+fn server_session_factory() -> WorkspaceTerminalSessionFactory {
+    WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(
+        TestTerminalSessionRecords::default(),
+    )))
+}
+
+/// A Workspace Window presenting the account-local server's one Workspace at `home_directory`,
+/// whose Panes run in `session_factory`.
+pub(crate) fn local_server_manager(
     session_factory: Rc<dyn TerminalSessionFactory>,
     home_directory: PathBuf,
     adapters: WorkspaceManagerAdapters,
@@ -472,68 +542,12 @@ fn new_desktop_manager(
     window: &mut Window,
     cx: &mut Context<WorkspaceManager>,
 ) -> WorkspaceManager {
-    use_desktop_sessions(session_factory, cx);
     // Every Workspace Window's update control reads this computer's server update state.
     crate::ui::updates::server_rows::testing::install_up_to_date(cx);
     let mut manager =
-        WorkspaceManager::new_with_adapters(home_directory, adapters, sidebar, window, cx);
-    manager.present_desktop_workspace(window, cx);
+        WorkspaceManager::new_with_adapters(home_directory.clone(), adapters, sidebar, window, cx);
+    LocalServer::new(session_factory, home_directory).present(&mut manager, window, cx);
     manager
-}
-
-impl WorkspaceManager {
-    /// Presents and activates one desktop-owned Workspace at this window's home directory.
-    pub(crate) fn present_desktop_workspace(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> WorkspaceId {
-        let directory = ValidatedLocalDirectory::new(
-            self.local_home_directory_path.clone(),
-            crate::domain::LocalDirectoryIdentity::for_test(0),
-        );
-        let sessions = cx.try_global::<DesktopSessions>().map_or_else(
-            || {
-                Rc::new(TestTerminalSessionFactory::new(
-                    TestTerminalSessionRecords::default(),
-                )) as Rc<dyn TerminalSessionFactory>
-            },
-            |sessions| Rc::clone(&sessions.0),
-        );
-        let session_factory =
-            WorkspaceTerminalSessionFactory::new_local(sessions, directory.clone());
-        let sidebar_visible = self.sidebar.read(cx).layout().visible;
-        let sidebar_width = self.sidebar.read(cx).layout().width;
-        let window_drag = Rc::clone(&self.operating_system_window_drag_platform);
-        let pane_construction = self.pane_construction.clone();
-        let previous = self.workspaces.active_workspace_id();
-        let workspace_id = self
-            .workspaces
-            .create_local_workspace(directory, |workspace_id, _| {
-                Self::create_tab_manager(
-                    session_factory,
-                    TabManagerCreation {
-                        workspace_id,
-                        sidebar_visible,
-                        sidebar_width,
-                        operating_system_window_drag_platform: window_drag,
-                        pane_construction,
-                    },
-                    window,
-                    cx,
-                )
-            })
-            .expect("the test Workspace is created");
-        // Creation activates the Workspace in the collection; the window then opens it as a
-        // person's activation does, from the Workspace that was active.
-        if let Some(previous) = previous {
-            self.workspaces
-                .activate_workspace(previous)
-                .expect("the previous Workspace remains");
-        }
-        self.activate_workspace(workspace_id, window, cx);
-        workspace_id
-    }
 }
 
 fn workspace_manager(
@@ -555,14 +569,47 @@ fn workspace_manager_using(
     TestTerminalSessionRecords,
     &mut VisualTestContext,
 ) {
+    open_workspace_window(adapters, true, cx)
+}
+
+/// A Workspace Window that presents no server yet, for a test that presents its own.
+fn serverless_workspace_manager(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceManager>,
+    TestTerminalSessionRecords,
+    &mut VisualTestContext,
+) {
+    open_workspace_window(workspace_adapters(), false, cx)
+}
+
+fn open_workspace_window(
+    adapters: WorkspaceManagerAdapters,
+    present_server: bool,
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceManager>,
+    TestTerminalSessionRecords,
+    &mut VisualTestContext,
+) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
-            session_factory,
+        if present_server {
+            return local_server_manager(
+                session_factory,
+                std::env::temp_dir(),
+                adapters,
+                SidebarState::Expanded,
+                window,
+                cx,
+            );
+        }
+        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+        WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             adapters,
             SidebarState::Expanded,
@@ -608,9 +655,9 @@ fn workspace_manager_with_application_actions(
     });
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(),
@@ -633,30 +680,14 @@ fn workspace_manager_with_operating_system_window_drag_platform(
     Rc<RecordingOperatingSystemWindowDragPlatform>,
     &mut VisualTestContext,
 ) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
     let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
-    let injected_platform = Rc::clone(&platform);
-    let (manager, cx) = cx.add_window_view(move |window, cx| {
-        new_desktop_manager(
-            session_factory,
-            std::env::temp_dir(),
-            WorkspaceManagerAdapters {
-                window_drag: injected_platform,
-                ..workspace_adapters()
-            },
-            SidebarState::Expanded,
-            window,
-            cx,
-        )
-    });
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.focus(window, cx));
-    });
-    cx.run_until_parked();
+    let (manager, _records, cx) = workspace_manager_using(
+        WorkspaceManagerAdapters {
+            window_drag: Rc::clone(&platform) as Rc<_>,
+            ..workspace_adapters()
+        },
+        cx,
+    );
     (manager, platform, cx)
 }
 
@@ -670,31 +701,19 @@ fn workspace_manager_with_directory_selection(
     TestTerminalSessionRecords,
     &mut VisualTestContext,
 ) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-    let directory_selection: Rc<dyn SystemDirectorySelection> =
-        Rc::new(ScriptedDirectorySelection::new(selections));
-    let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
-            session_factory,
-            std::env::temp_dir(),
-            WorkspaceManagerAdapters {
-                directory_selection,
-                ..workspace_adapters()
-            },
-            SidebarState::Expanded,
-            window,
-            cx,
-        )
-    });
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.focus(window, cx));
-    });
-    cx.run_until_parked();
-    (manager, records, cx)
+    workspace_manager_using(directory_selection_adapters(selections), cx)
+}
+
+/// Adapters whose System Directory Selection answers `selections` in order.
+fn directory_selection_adapters(
+    selections: impl IntoIterator<
+        Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
+    >,
+) -> WorkspaceManagerAdapters {
+    WorkspaceManagerAdapters {
+        directory_selection: Rc::new(ScriptedDirectorySelection::new(selections)),
+        ..workspace_adapters()
+    }
 }
 
 fn temporary_directory(name: &str) -> PathBuf {
@@ -769,9 +788,9 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
+        Rc::new(server_sessions(records).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(),
@@ -1011,11 +1030,11 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     let first_records = TestTerminalSessionRecords::default();
     let second_records = TestTerminalSessionRecords::default();
     let first_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(first_records.clone()).with_fallback_title("zsh"));
+        Rc::new(server_sessions(first_records.clone()).with_fallback_title("zsh"));
     let second_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(second_records.clone()).with_fallback_title("zsh"));
+        Rc::new(server_sessions(second_records.clone()).with_fallback_title("zsh"));
     let first = cx.add_window(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             first_factory,
             PathBuf::from("/Users/first"),
             workspace_adapters(),
@@ -1025,7 +1044,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         )
     });
     let second = cx.add_window(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             second_factory,
             PathBuf::from("/Users/second"),
             workspace_adapters(),
@@ -1313,9 +1332,11 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
     cx.run_until_parked();
 
     assert_eq!(records.starts().len(), 1);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.workspaces.active().pinned_directory().is_none()
-    }));
+    assert_eq!(
+        local_server(cx).edits.applied_inventory().workspaces[0].pinned_directory,
+        None,
+        "the server pins nothing"
+    );
     assert!(
         cx.debug_bounds("modal-action-workspace-pin-error-ok")
             .is_some()
@@ -1353,13 +1374,14 @@ fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
-    let pinned = manager.read_with(cx, |manager, _| {
-        match manager.workspaces.active().pinned_directory() {
-            Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
-            _ => None,
-        }
-    });
-    assert_eq!(pinned, Some(project.clone()));
+    let pinned = local_server(cx).edits.applied_inventory().workspaces[0]
+        .pinned_directory
+        .clone();
+    assert_eq!(
+        pinned,
+        Some(project.clone()),
+        "the server pins the directory"
+    );
     assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
     fs::remove_dir_all(project).unwrap();
 }
@@ -1385,9 +1407,11 @@ fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppCon
         1
     );
     assert_eq!(records.starts().len(), 1);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.workspaces.active().pinned_directory().is_none()
-    }));
+    assert_eq!(
+        local_server(cx).edits.applied_inventory().workspaces[0].pinned_directory,
+        None,
+        "the server pins nothing"
+    );
     assert!(
         cx.debug_bounds("modal-action-workspace-pin-error-ok")
             .is_some()
@@ -1523,11 +1547,10 @@ fn workspace_switcher_escape_should_restore_terminal_focus(cx: &mut TestAppConte
 fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_session_exits(
     cx: &mut TestAppContext,
 ) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let inactive_sender = records
-        .event_sender(1)
-        .expect("the initial Workspace Terminal Session must have started");
-    new_desktop_workspace(cx);
+    let (manager, _records, cx) = workspace_manager(cx);
+    let server = local_server(cx);
+    let inactive_pane = server.edits.applied_inventory().workspaces[0].tabs[0].root_pane;
+    publish_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -1542,9 +1565,7 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
     cx.run_until_parked();
     assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
 
-    inactive_sender
-        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-        .expect("the inactive shell exit must be delivered");
+    server.edits.exit_pane(inactive_pane);
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -1563,7 +1584,7 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
 #[gpui::test]
 fn workspace_switcher_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -1724,567 +1745,31 @@ fn active_tab_manager(
 }
 
 #[gpui::test]
-fn caption_close_should_confirm_its_owning_pane_and_restore_focus_after_cancel(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.update(|window, _| window.activate_window());
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-d");
-    redraw(cx);
-    let (workspace_id, tab_manager) = active_tab_manager(&manager, cx);
-    // The unfocused Pane reveals its controls under the pointer before they take a click.
-    let pane = cx.debug_bounds("pane-surface-1").unwrap();
-    cx.simulate_mouse_move(pane.center(), None, Modifiers::none());
-    crate::ui::settle_hover(cx);
-    click("pane-close-1", cx);
-    redraw(cx);
-    let pending = manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().unwrap()
-    });
-    assert_eq!(
-        pending.target,
-        CloseTarget::Pane {
-            workspace_id,
-            tab_id: TabId::new(1),
-            pane_id: PaneId::new(1)
-        }
-    );
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 2)
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    assert!(
-        cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
-            .is_some()
-    );
-    press_return(cx);
-    redraw(cx);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_none()
-    }));
-    cx.simulate_keystrokes("a");
-    assert!(
-        records
-            .commands()
-            .iter()
-            .any(|call| call.session_id == 1 && matches!(call.command, RecordedCommand::Key(_)))
-    );
-    click("pane-close-1", cx);
-    redraw(cx);
-    click("modal-action-close-confirmation-confirm", cx);
-    redraw(cx);
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 1)
-    );
-    assert_eq!(records.dropped_session_ids(), vec![1]);
-}
-
-#[gpui::test]
-fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-d");
-    redraw(cx);
-    let (_, tab_manager) = active_tab_manager(&manager, cx);
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 2)
-    );
-
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-    let first_pending = manager.read_with(cx, |manager, _| {
-        manager
-            .close_confirmation
-            .pending()
-            .expect("risky close should present one confirmation")
-    });
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .expect("duplicate request must keep the original confirmation")
-            .generation),
-        first_pending.generation
-    );
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 2)
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    assert!(
-        cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
-            .is_some()
-    );
-
-    press_return(cx);
-    redraw(cx);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_none()
-    }));
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 2)
-    );
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.request_close(first_pending.target, window, cx)
-        });
-    });
-    redraw(cx);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_some()
-    }));
-    assert!(
-        cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
-            .is_some()
-    );
-    cx.simulate_keystrokes("tab");
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("modal-action-close-confirmation-confirm-keyboard-focus")
-            .is_some()
-    );
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 2)
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    press_return(cx);
-
-    assert_eq!(
-        (
-            manager.read_with(cx, |manager, _| manager.close_confirmation.pending()),
-            tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-            records.dropped_session_ids(),
-        ),
-        (None, (1, 1), vec![2])
-    );
-}
-
-#[gpui::test]
-fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-d");
-    redraw(cx);
-    let (_, tab_manager) = active_tab_manager(&manager, cx);
-    let mut metadata = crate::terminal::metadata::MetadataTracker::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        "/Users/test",
-        "zsh",
-        Default::default(),
-        Instant::now(),
-    );
-    assert!(metadata.apply_semantic_prompt("A", Instant::now()));
-    let mut screen =
-        (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
-            .clone();
-    screen.metadata = metadata.snapshot();
-    records
-        .event_sender(2)
-        .expect("the focused split Pane's Terminal Session was not started")
-        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
-        .unwrap();
-    cx.run_until_parked();
-
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_none()
-    }));
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 1)
-    );
-    assert_eq!(records.dropped_session_ids(), vec![2]);
-}
-
-/// Control-Command-W asks to Kill Workspace, which confirms even when no Pane is running work.
-#[gpui::test]
-fn control_command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-    let mut metadata = crate::terminal::metadata::MetadataTracker::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        "/Users/test",
-        "zsh",
-        Default::default(),
-        Instant::now(),
-    );
-    assert!(metadata.apply_semantic_prompt("A", Instant::now()));
-    let mut screen =
-        (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
-            .clone();
-    screen.metadata = metadata.snapshot();
-    records
-        .event_sender(1)
-        .expect("the Workspace's Terminal Session was not started")
-        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
-        .unwrap();
-    cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-
-    cx.simulate_keystrokes("ctrl-cmd-w");
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Workspace(workspace_id))
-    );
-    assert!(
-        cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
-            .is_some()
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    click("modal-action-close-confirmation-confirm", cx);
-    redraw(cx);
-    assert_eq!(records.dropped_session_ids(), vec![1]);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        0,
-        "nothing replaces the final Workspace"
-    );
-}
-
-#[gpui::test]
-fn automatic_terminal_exit_should_bypass_close_confirmation(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-d");
-    redraw(cx);
-    let (_, tab_manager) = active_tab_manager(&manager, cx);
-
-    records
-        .event_sender(2)
-        .expect("the focused split Pane's Terminal Session was not started")
-        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-        .unwrap();
-    cx.run_until_parked();
-
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_none()
-    }));
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 1)
-    );
-    assert_eq!(records.dropped_session_ids(), vec![2]);
-}
-
-#[gpui::test]
-fn confirmed_stale_pane_identity_should_not_close_its_successor(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-d");
-    redraw(cx);
-    let (workspace_id, tab_manager) = active_tab_manager(&manager, cx);
-    let (tab_id, pane_id) =
-        tab_manager.read_with(cx, |manager, cx| manager.active_terminal_identity(cx));
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.request_close(
-                CloseTarget::Pane {
-                    workspace_id,
-                    tab_id,
-                    pane_id,
-                },
-                window,
-                cx,
-            );
-        });
-        tab_manager.update(cx, |manager, cx| {
-            manager.close_pane_authorized(tab_id, pane_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    click("modal-action-close-confirmation-confirm", cx);
-
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 1)
-    );
-    assert_eq!(records.dropped_session_ids(), vec![2]);
-}
-
-#[gpui::test]
 fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
+    let pending = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, _| {
+            manager
+                .close_confirmation
+                .pending()
+                .map(|pending| pending.target)
+        })
+    };
 
-    assert!(!cx.update(|window, cx| manager.update(cx, |manager, cx| {
-        manager.should_close_window(window, cx)
-    })));
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Window)
-    );
+    cx.simulate_keystrokes("ctrl-cmd-w");
+    cx.run_until_parked();
+    let workspace = Some(CloseTarget::Workspace(WorkspaceId::new(1)));
+    assert_eq!(pending(cx), workspace);
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Window)
-    );
+    assert_eq!(pending(cx), workspace);
     assert!(!cx.has_pending_prompt());
     // Command-Q leaves the window's own confirmation to answer first.
     assert_eq!(application_quit.requests(), 0);
-    click("modal-action-close-confirmation-cancel", cx);
-}
-
-#[gpui::test]
-fn direct_multi_pane_tab_close_should_use_one_aggregate_confirmation(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-d");
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-t");
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-1");
-    redraw(cx);
-    let (workspace_id, tab_manager) = active_tab_manager(&manager, cx);
-
-    cx.simulate_keystrokes("cmd-shift-w");
-    cx.run_until_parked();
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Tab {
-            workspace_id,
-            tab_id: TabId::new(1),
-        })
-    );
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (2, 3)
-    );
-    assert!(records.dropped_session_ids().is_empty());
-
-    click("modal-action-close-confirmation-confirm", cx);
-
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 1)
-    );
-    assert_eq!(records.dropped_session_ids(), vec![1, 2]);
-}
-
-#[gpui::test]
-fn direct_multi_tab_workspace_close_should_use_one_aggregate_confirmation(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-t");
-    redraw(cx);
-
-    cx.dispatch_action(CloseWorkspace);
-    cx.run_until_parked();
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Workspace(WorkspaceId::new(1)))
-    );
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-    assert!(records.dropped_session_ids().is_empty());
-
-    click("modal-action-close-confirmation-confirm", cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        0
-    );
-    assert_eq!(records.dropped_session_ids(), vec![1, 2]);
-    assert_eq!(records.session_count(), 2);
-    // The empty stage remains, with nothing desktop-owned in it.
-    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
-}
-
-#[gpui::test]
-fn native_window_close_should_cancel_then_remove_only_after_confirmation(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    redraw(cx);
-
-    assert!(!cx.simulate_close());
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Window)
-    );
-    click("modal-action-close-confirmation-cancel", cx);
-    assert_eq!(cx.windows().len(), 1);
-    assert!(records.dropped_session_ids().is_empty());
-
-    assert!(!cx.simulate_close());
-    click("modal-action-close-confirmation-confirm", cx);
-
-    assert!(cx.windows().is_empty());
-}
-
-#[gpui::test]
-fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut TestAppContext) {
-    for layout in [
-        gpui::WindowButtonLayout {
-            left: [None; 3],
-            right: [
-                Some(gpui::WindowButton::Close),
-                Some(gpui::WindowButton::Minimize),
-                Some(gpui::WindowButton::Maximize),
-            ],
-        },
-        gpui::WindowButtonLayout {
-            left: [
-                Some(gpui::WindowButton::Close),
-                Some(gpui::WindowButton::Minimize),
-                Some(gpui::WindowButton::Maximize),
-            ],
-            right: [None; 3],
-        },
-    ] {
-        let (manager, records, cx) = workspace_manager(cx);
-        cx.simulate_button_layout(Some(layout));
-        cx.simulate_decorations(gpui::Decorations::Client {
-            tiling: gpui::Tiling::default(),
-        });
-        let alert = present_test_alert(&manager, "window-close-under-alert", cx);
-        redraw(cx);
-        let alert_focus = cx.update(|window, cx| window.focused(cx).unwrap());
-        click("window-close", cx);
-        assert!(cx.update(|window, _| alert_focus.is_focused(window)));
-        assert!(cx.debug_bounds("modal-action-acknowledge").is_some());
-        assert!(
-            cx.debug_bounds("modal-action-close-confirmation-cancel")
-                .is_none()
-        );
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager
-                .close_confirmation
-                .pending()
-                .map(|pending| pending.target)),
-            Some(CloseTarget::Window)
-        );
-        cx.update(|window, cx| alert.dismiss(window, cx).unwrap());
-        redraw(cx);
-        cx.simulate_keystrokes("tab");
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("modal-action-close-confirmation-confirm-keyboard-focus")
-                .is_some()
-        );
-        let pending = manager.read_with(cx, |manager, _| manager.close_confirmation.pending());
-        let focused = cx.update(|window, cx| window.focused(cx).unwrap());
-        click("window-minimize", cx);
-        click("window-maximize", cx);
-        assert_eq!(
-            cx.window_requests(),
-            [
-                gpui::TestWindowRequest::Minimize,
-                gpui::TestWindowRequest::Zoom
-            ]
-        );
-        assert!(cx.update(|window, _| focused.is_focused(window)));
-        click("toggle-sidebar-button", cx);
-        assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
-        click("window-close", cx);
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager.close_confirmation.pending()),
-            pending
-        );
-        assert!(cx.update(|window, _| focused.is_focused(window)));
-        assert_eq!(cx.windows().len(), 1);
-        assert!(records.dropped_session_ids().is_empty());
-        click("modal-action-close-confirmation-cancel", cx);
-        assert_eq!(cx.windows().len(), 1);
-        assert!(records.dropped_session_ids().is_empty());
-        click("window-close", cx);
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager
-                .close_confirmation
-                .pending()
-                .map(|pending| pending.target)),
-            Some(CloseTarget::Window),
-            "the second native close activation must reopen confirmation after cancellation"
-        );
-        click("modal-action-close-confirmation-confirm", cx);
-        assert!(
-            manager.read_with(cx, |manager, _| manager
-                .close_confirmation
-                .pending()
-                .is_none()),
-            "confirmation must consume the pending close request"
-        );
-        assert!(cx.windows().is_empty());
-    }
-}
-
-#[gpui::test]
-fn command_q_preserves_busy_desktop_close_confirmation(cx: &mut TestAppContext) {
-    let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
-    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
-    redraw(cx);
-    // Desktop-owned busy work still asks its existing Close Window question.
-    cx.simulate_keystrokes("cmd-q");
-    cx.run_until_parked();
-    assert!(
-        !cx.has_pending_prompt(),
-        "dismissal must not ask a quit question"
-    );
-    assert!(
-        cx.debug_bounds("modal-action-close-confirmation-cancel")
-            .is_some()
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(application_quit.confirmations(), 0);
-}
-
-#[gpui::test]
-fn native_dismissal_preserves_busy_desktop_close_confirmation(cx: &mut TestAppContext) {
-    use crate::platform::application_quit::{ApplicationQuitDecision, ApplicationQuitRequest};
-    let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
-    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
-    redraw(cx);
-    assert_eq!(
-        application_quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
-        ApplicationQuitDecision::Cancel
-    );
-    cx.run_until_parked();
-    assert!(!cx.has_pending_prompt());
-    assert!(
-        cx.debug_bounds("modal-action-close-confirmation-cancel")
-            .is_some()
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(application_quit.confirmations(), 0);
+    click("modal-action-shared-close-cancel", cx);
 }
 
 #[gpui::test]
@@ -2313,40 +1798,6 @@ fn command_q_without_a_status_area_confirms_actual_exit(cx: &mut TestAppContext)
     cx.simulate_prompt_answer("Quit");
     cx.run_until_parked();
     assert_eq!(application_quit.confirmations(), 1);
-}
-
-/// A Quit confirmed while a status-menu Stop or Restart runs waits for it, then checks the
-/// client's work again: a Pane opened during the wait was never covered by that confirmation.
-#[gpui::test]
-fn quit_waiting_for_a_server_operation_asks_again_about_new_work(cx: &mut TestAppContext) {
-    let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
-    redraw(cx);
-    cx.cx.update(crate::status_menu::begin_operation);
-    cx.dispatch_action(crate::app::QuitApplication);
-    cx.run_until_parked();
-    cx.simulate_prompt_answer("Quit");
-    cx.run_until_parked();
-    assert_eq!(
-        application_quit.confirmations(),
-        0,
-        "the Stop is still running"
-    );
-
-    cx.simulate_keystrokes("cmd-d");
-    redraw(cx);
-    // The operation ends from the application's event loop, outside any window.
-    cx.cx.update(crate::status_menu::end_operation);
-    cx.run_until_parked();
-
-    assert!(
-        cx.has_pending_prompt(),
-        "the new Pane needs its own confirmation"
-    );
-    assert_eq!(application_quit.confirmations(), 0);
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(application_quit.confirmations(), 0);
 }
 
 #[gpui::test]
@@ -2944,7 +2395,7 @@ fn workspace_popup_name_should_fit_at_fractional_scales(cx: &mut TestAppContext)
         RecordingRenderedText::context_with_measurement(cx, name, px(266.9));
     let (manager, _records, cx) = workspace_manager(&mut text_context);
     for _ in 0..9 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -4026,8 +3477,8 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 #[gpui::test]
 fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
 
     let first_row = cx
@@ -4303,7 +3754,7 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -4465,13 +3916,12 @@ fn collapsed_top_chrome_should_fit_a_short_name_with_its_pin_indicator(cx: &mut 
     let (manager, _, cx) =
         workspace_manager_with_directory_selection([Ok(Some(directory.clone()))], cx);
     choose_pin_directory(&manager, cx);
-    manager.update(cx, |manager, cx| {
-        manager
-            .workspaces
-            .rename_workspace(WorkspaceId::new(1), "A".into())
-            .unwrap();
-        cx.notify();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            assert!(manager.rename_shared_workspace(WorkspaceId::new(1), "A", None, window, cx));
+        })
     });
+    cx.run_until_parked();
     click("toggle-sidebar-button", cx);
     let pinned_chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
     let label = cx.debug_bounds("workspace-chip-label").unwrap();
@@ -4672,7 +4122,7 @@ fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
     let (_, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
 
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
 
     let chrome = cx
@@ -4701,12 +4151,7 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
                 .local_filesystem
                 .validate_directory(&directory)
                 .unwrap();
-            manager.apply_directory_pin(
-                WorkspaceId::new(1),
-                Some(PinnedDirectory::Local(directory)),
-                window,
-                cx,
-            );
+            manager.apply_directory_pin(WorkspaceId::new(1), Some(directory), window, cx);
         })
     });
     cx.run_until_parked();
@@ -4728,24 +4173,20 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
 fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut TestAppContext) {
     let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
-    let (manager, records, cx) = workspace_manager(cx);
-    let inactive_sender = records
-        .event_sender(1)
-        .expect("the initial Workspace Terminal Session must have started");
-    new_desktop_workspace(cx);
-    manager.update(cx, |manager, cx| {
-        manager
-            .workspaces
-            .rename_workspace(WorkspaceId::new(2), "Surviving Active Workspace".into())
-            .unwrap();
-        cx.notify();
+    let (manager, _records, cx) = workspace_manager(cx);
+    let server = local_server(cx);
+    let inactive_pane = server.edits.applied_inventory().workspaces[0].tabs[0].root_pane;
+    publish_workspace(cx);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            let name = "Surviving Active Workspace";
+            assert!(manager.rename_shared_workspace(WorkspaceId::new(2), name, None, window, cx));
+        })
     });
     cx.run_until_parked();
     click("toggle-sidebar-button", cx);
 
-    inactive_sender
-        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-        .expect("the inactive shell exit must be delivered");
+    server.edits.exit_pane(inactive_pane);
     cx.run_until_parked();
 
     let chrome = cx
@@ -4770,30 +4211,10 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
 }
 
 #[gpui::test]
-fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppContext) {
-    let (manager, _records, cx) = workspace_manager(cx);
-
-    new_desktop_workspace(cx);
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.workspaces.len(),
-                manager.workspaces.active_id(),
-                window_combo_box_is_open(window, cx),
-            )
-        }),
-        (2, WorkspaceId::new(2), false)
-    );
-}
-
-#[gpui::test]
 fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
 
     manager.read_with(cx, |manager, cx| {
@@ -4829,7 +4250,7 @@ fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestApp
 fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
     manager.read_with(cx, |manager, cx| {
         manager
@@ -4869,7 +4290,7 @@ fn workspace_list_publishes_a_named_scroll_bar_before_it_is_revealed(cx: &mut Te
 
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
     let tree = A11yTree::read(cx);
     assert_eq!(tree.node("Workspace list")["aria"]["role"], "ScrollBar");
@@ -4889,8 +4310,8 @@ fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContex
 #[gpui::test]
 fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let release =
@@ -4909,8 +4330,8 @@ fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppC
 #[gpui::test]
 fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let list = cx.debug_bounds("workspace-list").unwrap();
@@ -4938,8 +4359,8 @@ fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut 
 #[gpui::test]
 fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let second = cx.debug_bounds("workspace-row-2-inactive").unwrap();
@@ -5032,7 +4453,7 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
 #[gpui::test]
 fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
@@ -5040,7 +4461,7 @@ fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext
 
     right_click("workspace-row-1-inactive", cx);
     click("workspace-menu-row-close", cx);
-    click("modal-action-close-confirmation-confirm", cx);
+    click("modal-action-shared-close-confirm", cx);
     let closing = cx
         .debug_bounds("workspace-row-2-active")
         .map(|row| row.origin);
@@ -5059,7 +4480,7 @@ fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext
 #[gpui::test]
 fn selecting_another_workspace_should_move_the_selection_from_the_old_row(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
@@ -5089,7 +4510,7 @@ fn switching_to_a_workspace_with_fewer_tabs_should_start_its_tab_strip_from_the_
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-t cmd-t");
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     finish_slides(cx);
     click("workspace-row-1-inactive", cx);
     finish_slides(cx);
@@ -5131,7 +4552,7 @@ fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_i
     for _ in 0..13 {
         cx.simulate_keystrokes("cmd-t");
     }
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     finish_slides(cx);
     click("workspace-row-1-inactive", cx);
     finish_slides(cx);
@@ -5175,7 +4596,7 @@ fn a_new_workspace_should_start_its_tab_strip_from_a_scrolled_old_one(cx: &mut T
     let selection = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
     let create = cx.debug_bounds("create-tab-button").unwrap().origin;
 
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let leaving = (
         cx.debug_bounds("tab-item-1-chip")
@@ -5216,7 +4637,7 @@ fn switching_workspaces_while_a_dropped_tab_settles_should_move_the_selection_fr
     cx.run_until_parked();
     let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
 
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let leaving = cx
         .debug_bounds("tab-item-1-chip")
@@ -5244,7 +4665,7 @@ fn a_new_workspace_should_start_its_tab_strip_from_the_old_one(cx: &mut TestAppC
             .origin
     };
 
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let leaving = chip(cx);
     finish_slides(cx);
@@ -5263,7 +4684,7 @@ fn switching_to_a_workspace_with_more_tabs_should_grow_the_tabs_the_old_strip_la
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-t cmd-t");
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
@@ -5293,7 +4714,7 @@ fn switching_back_and_forth_quickly_should_start_each_tab_strip_from_the_old_end
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-t cmd-t");
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin.x;
@@ -5323,8 +4744,8 @@ fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
@@ -5364,8 +4785,8 @@ fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
 #[gpui::test]
 fn a_single_motion_should_move_a_workspace_row_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
@@ -5384,7 +4805,7 @@ fn a_single_motion_should_move_a_workspace_row_on_release(cx: &mut TestAppContex
 fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-t");
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.simulate_keystrokes("cmd-t");
     cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
@@ -5440,7 +4861,7 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
 fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -5491,7 +4912,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
     finish_slides(cx);
     manager.update(cx, |manager, cx| {
@@ -5506,12 +4927,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 
     right_click("workspace-row-2-inactive", cx);
     click("workspace-menu-row-close", cx);
-    if cx
-        .debug_bounds("modal-action-close-confirmation-confirm")
-        .is_some()
-    {
-        click("modal-action-close-confirmation-confirm", cx);
-    }
+    click("modal-action-shared-close-confirm", cx);
     finish_slides(cx);
 
     let state = manager.read_with(cx, |manager, cx| {
@@ -5531,7 +4947,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
 
     let state = manager.read_with(cx, |manager, cx| {
@@ -5558,7 +4974,7 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
 fn overflowing_workspace_list_should_not_cover_the_creation_footer(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
 
     let sidebar = cx
@@ -5717,53 +5133,10 @@ fn a_secondary_click_should_leave_focus_in_the_pane(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-
-    new_desktop_workspace(cx);
-    cx.run_until_parked();
-
-    let state = manager.read_with(cx, |manager, _| {
-        (
-            manager.workspaces.len(),
-            manager.workspaces.active_id(),
-            manager
-                .workspaces
-                .active()
-                .local_home_directory()
-                .unwrap()
-                .to_path_buf(),
-            records.dropped_session_ids(),
-            records
-                .starts()
-                .into_iter()
-                .map(|start| {
-                    start
-                        .local_working_directory()
-                        .expect("Local Workspace starts must remain local")
-                        .path()
-                        .to_path_buf()
-                })
-                .collect::<Vec<_>>(),
-        )
-    });
-    assert_eq!(
-        state,
-        (
-            2,
-            WorkspaceId::new(2),
-            std::env::temp_dir(),
-            Vec::new(),
-            vec![std::env::temp_dir(), std::env::temp_dir()],
-        )
-    );
-}
-
-#[gpui::test]
 fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
 
     cx.simulate_keystrokes("ctrl-1");
@@ -5810,7 +5183,7 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
 fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-d");
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
 
     click("workspace-row-1-inactive", cx);
@@ -5861,7 +5234,7 @@ fn right_clicking_an_inactive_workspace_should_open_its_menu_without_activating_
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -5953,56 +5326,6 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
     assert_eq!((created_state.0, created_state.1), (false, (2, 2)));
     assert!(cx.debug_bounds("tab-item-1-active").is_some());
     assert!(cx.debug_bounds("tab-item-2-inactive").is_some());
-}
-
-#[gpui::test]
-fn close_pane_shortcut_from_sidebar_should_leave_the_empty_view_after_the_final_pane(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-
-    cx.simulate_keystrokes("cmd-shift-e");
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-    click("modal-action-close-confirmation-confirm", cx);
-
-    let state = manager.read_with(cx, |manager, _| {
-        (
-            manager.workspaces.len(),
-            records.dropped_session_ids(),
-            records.session_count(),
-        )
-    });
-    assert_eq!(state, (0, vec![1], 1));
-    assert_eq!(cx.windows().len(), 1, "the window stays open");
-    // The empty stage remains, with nothing desktop-owned in it.
-    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
-}
-
-#[gpui::test]
-fn duplicate_final_tab_close_requests_should_close_the_workspace_once(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let tab_manager = manager.read_with(cx, |manager, _| {
-        manager.workspaces.active().payload().clone()
-    });
-
-    tab_manager.update(cx, |_, cx| {
-        cx.emit(TabManagerEvent::FinalTabCloseRequested {
-            final_tab_id: crate::domain::TabId::new(1),
-        });
-        cx.emit(TabManagerEvent::FinalTabCloseRequested {
-            final_tab_id: crate::domain::TabId::new(1),
-        });
-    });
-    cx.run_until_parked();
-
-    assert_eq!(records.dropped_session_ids(), vec![1]);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        0
-    );
-    assert_eq!(cx.windows().len(), 1);
 }
 
 #[gpui::test]
@@ -6450,7 +5773,7 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
 #[gpui::test]
 fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     click("workspace-row-1-inactive", cx);
     right_click("workspace-row-1-active", cx);
@@ -6494,65 +5817,6 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
     );
 }
 
-#[gpui::test]
-fn explicitly_closing_the_final_workspace_should_leave_the_empty_view(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-
-    right_click("workspace-row-1-active", cx);
-    click("workspace-menu-row-close", cx);
-    click("modal-action-close-confirmation-confirm", cx);
-
-    let state = manager.read_with(cx, |manager, _| {
-        (
-            manager.workspaces.len(),
-            records.dropped_session_ids(),
-            records.session_count(),
-        )
-    });
-    assert_eq!(
-        state,
-        (0, vec![1], 1),
-        "nothing replaces the final Workspace"
-    );
-    assert_eq!(cx.windows().len(), 1);
-    // The empty stage remains, with nothing desktop-owned in it.
-    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
-}
-
-#[gpui::test]
-fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.update(|window, _| window.activate_window());
-    let inactive_sender = records
-        .event_sender(1)
-        .expect("the initial Workspace Terminal Session must have started");
-    new_desktop_workspace(cx);
-    cx.run_until_parked();
-
-    assert!(active_terminal_has_input_focus(&manager, cx));
-    inactive_sender
-        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-        .expect("the inactive shell exit must be delivered");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
-        WorkspaceId::new(2)
-    );
-    assert!(active_terminal_has_input_focus(&manager, cx));
-    new_desktop_workspace(cx);
-    cx.run_until_parked();
-
-    let state = manager.read_with(cx, |manager, _| {
-        (
-            manager.workspaces.len(),
-            manager.workspaces.active_id(),
-            records.dropped_session_ids(),
-        )
-    });
-    assert_eq!(state, (2, WorkspaceId::new(3), vec![1]));
-}
 #[cfg(all(
     test,
     any(target_os = "macos", target_os = "linux"),
@@ -6563,46 +5827,15 @@ mod unix_adapter_tests {
 }
 
 #[gpui::test]
-fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    cx.run_until_parked();
-    let missing_home = temporary_directory("missing-home");
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.local_home_directory_path = missing_home;
-            manager.close_workspace(WorkspaceId::new(2), window, cx);
-        });
-    });
-    cx.run_until_parked();
-
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
-    });
-    assert_eq!(records.session_count(), 2);
-    assert_eq!(records.dropped_session_ids(), vec![2]);
-}
-
-#[gpui::test]
 fn workspace_switcher_should_not_expose_the_workspace_path_as_a_description(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
+    pin_on_the_server(&manager, 1, "/project/Ångström", cx);
     manager.update(cx, |manager, _| {
         manager
             .workspaces
             .rename_workspace(WorkspaceId::new(1), "Alpha".to_owned())
-            .unwrap();
-        manager
-            .workspaces
-            .update_automatic_directory(
-                WorkspaceId::new(1),
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/Ångström",
-                )),
-            )
             .unwrap();
     });
 
@@ -6617,8 +5850,9 @@ fn workspace_switcher_should_not_expose_the_workspace_path_as_a_description(
 #[gpui::test]
 fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
+    pin_on_the_server(&manager, 1, "/project/Ångström", cx);
     manager.update(cx, |manager, _| {
         manager
             .workspaces
@@ -6627,15 +5861,6 @@ fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) 
         manager
             .workspaces
             .rename_workspace(WorkspaceId::new(2), "Beta".to_owned())
-            .unwrap();
-        manager
-            .workspaces
-            .update_automatic_directory(
-                WorkspaceId::new(1),
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/Ångström",
-                )),
-            )
             .unwrap();
     });
     open_workspace_switcher(cx);
@@ -6650,7 +5875,7 @@ fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) 
 #[gpui::test]
 fn workspace_switcher_should_preserve_empty_order_and_show_fuzzy_ranking(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, _| {
         manager
@@ -6724,7 +5949,7 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
     open_workspace_switcher(cx);
@@ -6777,7 +6002,7 @@ fn workspace_switcher_creation_rows_should_start_in_the_checkmark_column(cx: &mu
 fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     for _ in 0..9 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
     cx.run_until_parked();
     let hints = cx.update(|_, cx| {
@@ -6792,7 +6017,7 @@ fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut
     cx.run_until_parked();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.close_workspace(WorkspaceId::new(1), window, cx)
+            manager.close_workspace_activating(WorkspaceId::new(1), true, window, cx)
         })
     });
     cx.simulate_keystrokes("ctrl-1");
@@ -6933,7 +6158,7 @@ fn sidebar_resize_cancel_should_respect_the_current_window_width(cx: &mut TestAp
 fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
     }
     cx.simulate_keystrokes("cmd-shift-e home up");
     cx.run_until_parked();
@@ -7452,13 +6677,8 @@ fn workspace_rows_publish_a_tree_that_selects_on_press(cx: &mut TestAppContext) 
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-    let (manager, _records, cx) = workspace_manager(cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.present_desktop_workspace(window, cx);
-        });
-    });
-    cx.run_until_parked();
+    let (_manager, _records, cx) = workspace_manager(cx);
+    publish_workspace(cx);
 
     let tree = A11yTree::read(cx);
     let list = tree.node("Workspaces");
@@ -7807,9 +7027,9 @@ fn workspace_manager_with_terminal_nodes(
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -8032,32 +7252,6 @@ fn pane_split_accessibility_keeps_nested_splitters_between_their_own_sides(
     }
 }
 
-/// Reports a shell prompt for one Terminal Session, so closing its Pane needs no confirmation.
-fn report_idle_prompt(
-    records: &TestTerminalSessionRecords,
-    session_id: usize,
-    cx: &mut VisualTestContext,
-) {
-    let mut metadata = crate::terminal::metadata::MetadataTracker::new(
-        crate::local_path::LocalPathSemantics::Posix,
-        "/Users/test",
-        "zsh",
-        Default::default(),
-        Instant::now(),
-    );
-    assert!(metadata.apply_semantic_prompt("A", Instant::now()));
-    let mut screen =
-        (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
-            .clone();
-    screen.metadata = metadata.snapshot();
-    records
-        .event_sender(session_id)
-        .expect("the Terminal Session was not started")
-        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
-        .unwrap();
-    cx.run_until_parked();
-}
-
 /// Returns the "Close Tab" button inside the Tab at this Tab bar position.
 fn tab_close_button(
     tree: &spaceterm_ui::a11y_testing::A11yTree,
@@ -8102,9 +7296,9 @@ fn closing_an_inactive_tab_from_its_close_button_by_assistive_technology_keeps_f
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
 
-    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    let (manager, _records, cx) = workspace_manager_with_terminal_nodes(cx);
     cx.simulate_keystrokes("cmd-t");
-    report_idle_prompt(&records, 1, cx);
+    cx.run_until_parked();
     // VoiceOver moves keyboard focus with its cursor onto the button it then presses.
     let tree = A11yTree::read(cx);
     let closed = [
@@ -8119,7 +7313,11 @@ fn closing_an_inactive_tab_from_its_close_button_by_assistive_technology_keeps_f
     assert!(manager.read_with(cx, |manager, _| {
         manager.close_confirmation.pending().is_none()
     }));
-    assert_eq!(records.dropped_session_ids(), vec![1]);
+    assert_eq!(
+        server_closes(cx),
+        1,
+        "the idle Tab closes without confirmation"
+    );
     assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
 }
 
@@ -8130,9 +7328,9 @@ fn closing_the_active_tab_from_its_close_button_by_assistive_technology_keeps_fo
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
 
-    let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    let (manager, _records, cx) = workspace_manager_with_terminal_nodes(cx);
     cx.simulate_keystrokes("cmd-t");
-    report_idle_prompt(&records, 2, cx);
+    cx.run_until_parked();
     let tree = A11yTree::read(cx);
     let closed = [
         node_id(tree.with_role("Tab")[1]),
@@ -8146,7 +7344,11 @@ fn closing_the_active_tab_from_its_close_button_by_assistive_technology_keeps_fo
     assert!(manager.read_with(cx, |manager, _| {
         manager.close_confirmation.pending().is_none()
     }));
-    assert_eq!(records.dropped_session_ids(), vec![2]);
+    assert_eq!(
+        server_closes(cx),
+        1,
+        "the idle Tab closes without confirmation"
+    );
     assert_closed_tab_left_focus_on_the_active_terminal(&manager, &closed, cx);
 }
 
@@ -8158,7 +7360,9 @@ fn cancelling_a_tab_close_pressed_by_assistive_technology_returns_focus_to_its_b
     use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
 
     let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
+    local_server(cx).edits.run_shells();
     cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
     let tree = A11yTree::read(cx);
     let button = node_id(tab_close_button(&tree, 0));
     perform(cx, tab_close_button(&tree, 0), Action::Focus);
@@ -8188,6 +7392,9 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
 
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
+    local_server(cx).edits.run_shells();
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
     A11yTree::read(cx);
     click("tab-close-button-1", cx);
     let tree = A11yTree::read(cx);
@@ -8195,7 +7402,10 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
     assert_eq!(dialog["aria"]["role"], "AlertDialog");
     assert_eq!(dialog["aria"]["modal"], true);
     let title = tree.text("Close Tab?");
-    let message = tree.text("Running commands in 1 Pane stop.");
+    let message = tree.text(
+        "The Tab and its Pane close for every client. This ends 1 Terminal Session and stops \
+         its running commands.",
+    );
     let content = tree.descendants(dialog);
     let position = |node: &serde_json::Value| {
         content
@@ -8258,7 +7468,7 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
-    new_desktop_workspace(cx);
+    publish_workspace(cx);
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -8360,17 +7570,17 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
 
     let chosen = temporary_directory("shared-pin-draft");
     fs::create_dir_all(&chosen).unwrap();
-    let (manager, _records, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(chosen.clone()))], cx);
+    let (manager, _records, cx) = open_workspace_window(
+        directory_selection_adapters([Ok(Some(chosen.clone()))]),
+        false,
+        cx,
+    );
     let edits = Rc::new(ScriptedEdits::new(Some(published(1, 0, None))));
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let session_factory = WorkspaceTerminalSessionFactory::new_local(
-                Rc::new(TestTerminalSessionFactory::new(
-                    TestTerminalSessionRecords::default(),
-                )),
-                crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-            );
+            let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                server_sessions(TestTerminalSessionRecords::default()),
+            ));
             manager.present_shared_workspaces(
                 SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
                 SharedPaneSessions::with_opener(
@@ -8482,19 +7692,16 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
     let chosen = temporary_directory("remote-server-local-pin");
     fs::create_dir_all(&chosen).unwrap();
     let (manager, _records, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(chosen))], cx);
+        open_workspace_window(directory_selection_adapters([Ok(Some(chosen))]), false, cx);
     let local = Rc::new(ScriptedEdits::new(Some(published("Here"))));
     let remote = Rc::new(ScriptedEdits::new(Some(published("There"))));
     let remote_key = cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let sessions = || {
                 SharedPaneSessions::with_opener(
-                    ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_local(
-                        Rc::new(TestTerminalSessionFactory::new(
-                            TestTerminalSessionRecords::default(),
-                        )),
-                        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-                    )) as Rc<_>,
+                    ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                        server_sessions(TestTerminalSessionRecords::default()),
+                    ))) as Rc<_>,
                     &PaneConstruction::testing(),
                 )
             };
@@ -8656,14 +7863,14 @@ impl MultiServerHarness {
         use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
         // A test installs the paired registry its machines need.
-        let (manager, _records, cx) = workspace_manager_using(adapters, cx);
+        let (manager, _records, cx) = open_workspace_window(adapters, false, cx);
         let local = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[]))));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.present_shared_workspaces(
                     SharedEditSource::new(Rc::clone(&local) as Rc<_>),
                     SharedPaneSessions::with_opener(
-                        ScriptedPanes::new(Self::session_factory()) as Rc<_>,
+                        ScriptedPanes::connected(Self::session_factory()) as Rc<_>,
                         &PaneConstruction::testing(),
                     ),
                     window,
@@ -8687,12 +7894,7 @@ impl MultiServerHarness {
     }
 
     fn session_factory() -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(TestTerminalSessionFactory::new(
-                TestTerminalSessionRecords::default(),
-            )),
-            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-        )
+        server_session_factory()
     }
 
     /// Presents the paired server `name` at `route`, publishing `workspaces`, and attaches each
@@ -8925,7 +8127,7 @@ fn workspaces_from_several_servers_should_keep_the_order_they_arrived_in(cx: &mu
 
     assert_eq!(
         harness.names(cx),
-        ["Default", "Here", "Far", "Also Here", "Near", "Farther"]
+        ["Here", "Far", "Also Here", "Near", "Farther"]
     );
 }
 
@@ -8943,23 +8145,13 @@ fn moving_a_workspace_should_interleave_it_with_other_servers_workspaces(cx: &mu
 
     harness.move_workspace("Farther", 0, cx);
     let toward_start = harness.names(cx);
-    harness.move_workspace("Default", 3, cx);
+    harness.move_workspace("Here", 2, cx);
 
     assert_eq!(
         (toward_start, harness.names(cx)),
         (
-            vec![
-                "Farther".to_owned(),
-                "Default".to_owned(),
-                "Here".to_owned(),
-                "Far".to_owned(),
-            ],
-            vec![
-                "Farther".to_owned(),
-                "Here".to_owned(),
-                "Far".to_owned(),
-                "Default".to_owned(),
-            ]
+            vec!["Farther".to_owned(), "Here".to_owned(), "Far".to_owned()],
+            vec!["Farther".to_owned(), "Far".to_owned(), "Here".to_owned()]
         )
     );
 }
@@ -8977,7 +8169,7 @@ fn the_switcher_and_shortcuts_should_follow_the_interleaved_order(cx: &mut TestA
         &[("Here", 1), ("Also Here", 2)],
         cx,
     );
-    harness.move_workspace("Far", 1, cx);
+    harness.move_workspace("Far", 0, cx);
 
     let switcher: Vec<String> = harness.manager.read_with(cx, |manager, cx| {
         manager
@@ -8989,13 +8181,13 @@ fn the_switcher_and_shortcuts_should_follow_the_interleaved_order(cx: &mut TestA
     cx.simulate_keystrokes("ctrl-2");
     cx.run_until_parked();
     let second = harness.active_name(cx);
-    cx.simulate_keystrokes("ctrl-4");
+    cx.simulate_keystrokes("ctrl-3");
     cx.run_until_parked();
 
-    assert_eq!(switcher, ["Default", "Far", "Here", "Also Here"]);
+    assert_eq!(switcher, ["Far", "Here", "Also Here"]);
     assert_eq!(
         (second, harness.active_name(cx)),
-        ("Far".to_owned(), "Also Here".to_owned())
+        ("Here".to_owned(), "Also Here".to_owned())
     );
 }
 
@@ -9013,7 +8205,7 @@ fn withdrawing_one_server_should_keep_the_other_servers_workspaces_and_active_wo
         cx,
     );
     let (penguin, _) = harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
-    harness.move_workspace("Here", 3, cx);
+    harness.move_workspace("Here", 2, cx);
     let here = harness.named("Here", cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
@@ -9031,11 +8223,7 @@ fn withdrawing_one_server_should_keep_the_other_servers_workspaces_and_active_wo
     assert_eq!(
         (harness.names(cx), harness.active_name(cx)),
         (
-            vec![
-                "Default".to_owned(),
-                "Also Here".to_owned(),
-                "Here".to_owned(),
-            ],
+            vec!["Also Here".to_owned(), "Here".to_owned()],
             "Here".to_owned()
         )
     );
@@ -9054,7 +8242,7 @@ fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut Te
     );
     let route = named_route("penguin");
     let (penguin, _) = harness.present_direct("penguin", route, &[("Far", 1)], cx);
-    harness.move_workspace("Far", 2, cx);
+    harness.move_workspace("Far", 1, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.withdraw_server_workspaces(penguin, window, cx);
@@ -9065,8 +8253,8 @@ fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut Te
 
     harness.present_direct("penguin", route, &[("Far", 1)], cx);
 
-    assert_eq!(absent, ["Default", "Here", "Also Here"]);
-    assert_eq!(harness.names(cx), ["Default", "Here", "Far", "Also Here"]);
+    assert_eq!(absent, ["Here", "Also Here"]);
+    assert_eq!(harness.names(cx), ["Here", "Far", "Also Here"]);
 }
 
 /// Two saved routes may reach one server, each through its own pairing with its own client
@@ -9166,15 +8354,14 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
         });
     });
 
-    assert_eq!(presented, [None, Some(earlier), Some(newer)]);
+    assert_eq!(presented, [Some(earlier), Some(newer)]);
     assert!(
         earlier_offline,
         "the earlier route is offline when the newer one creates"
     );
-    // The window's own Workspace isn't a server's, so it keeps its place.
     assert_eq!(
         owners(cx),
-        [None, Some(returned), Some(earlier)],
+        [Some(returned), Some(earlier)],
         "the newer route's Workspace returns before the earlier route's, where the person put it"
     );
     assert_eq!(
@@ -9209,7 +8396,7 @@ fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppCont
     });
     cx.run_until_parked();
     let pending = harness.names(cx);
-    harness.move_workspace("C", 1, cx);
+    harness.move_workspace("C", 0, cx);
 
     harness.local.answer(Outcome::Accepted { target: [3; 32] });
     harness.publish(
@@ -9219,8 +8406,8 @@ fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppCont
         cx,
     );
 
-    assert_eq!(pending, ["Default", "A", "B", "C"]);
-    assert_eq!(harness.names(cx), ["Default", "C", "A", "B"]);
+    assert_eq!(pending, ["A", "B", "C"]);
+    assert_eq!(harness.names(cx), ["C", "A", "B"]);
 }
 
 /// The sidebar lists every server's Workspaces together in Workspace order, with no machine
@@ -9232,7 +8419,7 @@ fn the_sidebar_should_list_every_servers_workspaces_together(cx: &mut TestAppCon
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
     harness.present_direct("studio", named_route("studio"), &[], cx);
-    harness.move_workspace("Far", 1, cx);
+    harness.move_workspace("Far", 0, cx);
     redraw(cx);
     let here = harness.named("Here", cx).get();
     let far = harness.named("Far", cx).get();
@@ -9241,7 +8428,7 @@ fn the_sidebar_should_list_every_servers_workspaces_together(cx: &mut TestAppCon
             .expect("the sidebar should present it")
     };
     let list = bounds("workspace-list".to_owned(), cx);
-    let groups = [1, far, here].map(|id| bounds(format!("workspace-group-{id}"), cx));
+    let groups = [far, here].map(|id| bounds(format!("workspace-group-{id}"), cx));
 
     assert_eq!(groups[0].top(), list.top(), "the first row starts the list");
     assert!(
@@ -9301,6 +8488,7 @@ fn same_named_remote_rows_should_each_name_their_machine(cx: &mut TestAppContext
 #[gpui::test]
 fn dragging_a_workspace_should_land_it_among_other_servers_workspaces(cx: &mut TestAppContext) {
     let (harness, cx) = MultiServerHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct(
         "penguin",
         named_route("penguin"),
@@ -9344,7 +8532,7 @@ fn dragging_a_workspace_should_land_it_among_other_servers_workspaces(cx: &mut T
         Some(first.origin),
         "the dragged row's place opens before this computer's Workspace"
     );
-    assert_eq!(harness.names(cx), ["Farther", "Default", "Far"]);
+    assert_eq!(harness.names(cx), ["Farther", "Here", "Far"]);
 }
 
 /// Reconnect on a paired server's Workspace resumes that Workspace's route alone.
@@ -9397,8 +8585,8 @@ const SHARED_FOCUS_WORKSPACE: [u8; 32] = [11; 32];
 const SHARED_FOCUS_TAB: [u8; 32] = [12; 32];
 const SHARED_FOCUS_PANE: [u8; 32] = [13; 32];
 
-/// The Workspace the sidebar lists second, which is the shared one every harness here publishes.
-const SHARED_WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(2);
+/// The Workspace the sidebar lists first, which is the shared one every harness here publishes.
+const SHARED_WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(1);
 
 /// One connected shared Workspace, opened from the sidebar so its Pane is the Focused Pane of the
 /// Active Workspace and holds the keyboard.
@@ -9407,48 +8595,46 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
     use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
     use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
 
-    let (manager, _records, cx) = workspace_manager(cx);
+    let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let published = Inventory {
         repositories: None,
         revision: 1,
         close: None,
-        workspaces: vec![Workspace {
-            id: SHARED_FOCUS_WORKSPACE,
-            name: "Build".to_owned(),
-            name_version: 0,
-            pin_version: 0,
-            pinned_directory: None,
-            root_tab: SHARED_FOCUS_TAB,
-            tabs: vec![Tab {
-                worktree: None,
-                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
-                worktree_repository: None,
-                id: SHARED_FOCUS_TAB,
-                root_pane: SHARED_FOCUS_PANE,
-                panes: vec![Pane {
-                    id: SHARED_FOCUS_PANE,
-                    source: None,
-                    axis: Axis::Right,
-                    starting_directory: PathBuf::from("/server/work"),
-                    current_directory: None,
-                    repository_directory: None,
-                    presentation: None,
-                    observers: Default::default(),
-                    confirmed_directory: None,
-                    creator: None,
+        workspaces: vec![
+            Workspace {
+                id: SHARED_FOCUS_WORKSPACE,
+                name: "Build".to_owned(),
+                name_version: 0,
+                pin_version: 0,
+                pinned_directory: None,
+                root_tab: SHARED_FOCUS_TAB,
+                tabs: vec![Tab {
+                    worktree: None,
+                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_repository: None,
+                    id: SHARED_FOCUS_TAB,
+                    root_pane: SHARED_FOCUS_PANE,
+                    panes: vec![Pane {
+                        id: SHARED_FOCUS_PANE,
+                        source: None,
+                        axis: Axis::Right,
+                        starting_directory: PathBuf::from("/server/work"),
+                        current_directory: None,
+                        repository_directory: None,
+                        presentation: None,
+                        observers: Default::default(),
+                        confirmed_directory: None,
+                        creator: None,
+                    }],
                 }],
-            }],
-        }],
+            },
+            shared_close_other(),
+        ],
     };
     let edits = Rc::new(ScriptedEdits::new(Some(published)));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(
-            TestTerminalSessionRecords::default(),
-        )),
-        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-    );
+    let session_factory = server_session_factory();
     let panes = ScriptedPanes::new(session_factory);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -9469,8 +8655,20 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
     assert!(
         harness.manager.read_with(cx, |manager, _| manager
             .is_shared_workspace(SHARED_WORKSPACE_ROW)),
-        "the published Workspace should join the sidebar as the second row"
+        "the published Workspace should join the sidebar as the first row"
     );
+    // The person attaches the server's other Workspace, then returns to this one.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.attach_detached_workspace(
+                ServerKey::LOCAL,
+                SHARED_CLOSE_OTHER_WORKSPACE,
+                window,
+                cx,
+            );
+            manager.activate_workspace(SHARED_WORKSPACE_ROW, window, cx);
+        });
+    });
     // The server reaches the Pane and publishes this client's screen, as a fresh connection does.
     harness.panes.pane(SHARED_FOCUS_PANE).reconnect();
     settle_shared_panes(cx);
@@ -9523,7 +8721,7 @@ fn sidebar_rename_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestCon
 /// Starts the inline rename of the Workspace the sidebar lists first, which the shared Workspace
 /// is not, so the keyboard sits in an editor outside the Pane.
 fn start_sidebar_rename(harness: &SharedPaneHarness, cx: &mut VisualTestContext) {
-    right_click("workspace-row-1-inactive", cx);
+    right_click("workspace-row-2-inactive", cx);
     click("workspace-menu-row-rename", cx);
     assert!(
         sidebar_rename_is_focused(harness, cx),
@@ -9560,7 +8758,7 @@ fn a_shared_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(
     // The Pane a person left the keyboard in gets it back, so typing returns to the shell.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    click("workspace-row-2-active", cx);
+    click("workspace-row-1-active", cx);
     assert!(shared_terminal_is_focused(&harness, cx));
     pane.set(DevelopmentPaneStatus::Reconnecting);
     settle_shared_panes(cx);
@@ -9663,11 +8861,68 @@ const SHARED_CLOSE_SECOND_TAB: [u8; 32] = [25; 32];
 const SHARED_CLOSE_SECOND_PANE: [u8; 32] = [26; 32];
 const SHARED_CLOSE_NEW_PANE: [u8; 32] = [27; 32];
 const SHARED_CLOSE_BOOT: [u8; 32] = [29; 32];
+/// Another Workspace of the same server, which this window presents beside the one it closes.
+const SHARED_CLOSE_OTHER_WORKSPACE: [u8; 32] = [41; 32];
+const SHARED_CLOSE_OTHER_TAB: [u8; 32] = [42; 32];
+const SHARED_CLOSE_OTHER_PANE: [u8; 32] = [43; 32];
 
 /// One published Pane and the live Session it presents, if a shell runs.
 type SharedClosePane = ([u8; 32], Option<[u8; 32]>);
 
-/// The published inventory: each Tab and its Panes, with every Pane's live Session.
+/// The other Workspace the server publishes, whose one Pane runs no shell.
+fn shared_close_other() -> spaceterm_server::hierarchy::Workspace {
+    use spaceterm_server::hierarchy::{Axis, Pane, Tab, Workspace};
+
+    Workspace {
+        id: SHARED_CLOSE_OTHER_WORKSPACE,
+        name: "Other".to_owned(),
+        name_version: 0,
+        pin_version: 0,
+        pinned_directory: None,
+        root_tab: SHARED_CLOSE_OTHER_TAB,
+        tabs: vec![Tab {
+            worktree: None,
+            worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+            worktree_repository: None,
+            id: SHARED_CLOSE_OTHER_TAB,
+            root_pane: SHARED_CLOSE_OTHER_PANE,
+            panes: vec![Pane {
+                id: SHARED_CLOSE_OTHER_PANE,
+                source: None,
+                axis: Axis::Right,
+                starting_directory: PathBuf::from("/server/work"),
+                current_directory: None,
+                repository_directory: None,
+                presentation: None,
+                observers: Default::default(),
+                confirmed_directory: None,
+                creator: None,
+            }],
+        }],
+    }
+}
+
+/// The published inventory once the closed Workspace is gone, leaving only the other one.
+fn shared_close_remaining(revision: u64) -> spaceterm_server::hierarchy::Inventory {
+    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Inventory};
+
+    Inventory {
+        repositories: None,
+        revision,
+        close: Some(CloseInventory {
+            controls: Vec::new(),
+            boot: SHARED_CLOSE_BOOT,
+            sessions: vec![ConfirmedPane {
+                id: SHARED_CLOSE_OTHER_PANE,
+                session: None,
+            }],
+        }),
+        workspaces: vec![shared_close_other()],
+    }
+}
+
+/// The published inventory: each Tab and its Panes, with every Pane's live Session, beside the
+/// other Workspace.
 fn shared_close_inventory(
     revision: u64,
     tabs: &[([u8; 32], &[SharedClosePane])],
@@ -9716,17 +8971,24 @@ fn shared_close_inventory(
                     id: *id,
                     session: *session,
                 })
+                .chain([ConfirmedPane {
+                    id: SHARED_CLOSE_OTHER_PANE,
+                    session: None,
+                }])
                 .collect(),
         }),
-        workspaces: vec![Workspace {
-            id: SHARED_CLOSE_WORKSPACE,
-            name: "Build".to_owned(),
-            name_version: 0,
-            pin_version: 0,
-            pinned_directory: None,
-            root_tab: tabs[0].0,
-            tabs: workspace_tabs,
-        }],
+        workspaces: vec![
+            Workspace {
+                id: SHARED_CLOSE_WORKSPACE,
+                name: "Build".to_owned(),
+                name_version: 0,
+                pin_version: 0,
+                pinned_directory: None,
+                root_tab: tabs[0].0,
+                tabs: workspace_tabs,
+            },
+            shared_close_other(),
+        ],
     }
 }
 
@@ -9746,21 +9008,17 @@ fn shared_close_published() -> spaceterm_server::hierarchy::Inventory {
     )
 }
 
-/// Opens the shared Workspace from the sidebar so its Root Pane holds the keyboard.
+/// Opens the shared Workspace so its Root Pane holds the keyboard, with the server's other
+/// Workspace attached beside it.
 fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut VisualTestContext) {
     use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
-    let (manager, _records, cx) = workspace_manager(cx);
+    let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let edits = Rc::new(ScriptedEdits::new(Some(shared_close_published())));
-    let panes = ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(
-            TestTerminalSessionRecords::default(),
-        )),
-        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-    ));
+    let panes = ScriptedPanes::new(server_session_factory());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.present_shared_workspaces(
@@ -9781,7 +9039,20 @@ fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut Vi
         edits,
         panes,
     };
+    // The person attaches the other Workspace, then returns to the one they started in.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.attach_detached_workspace(
+                ServerKey::LOCAL,
+                SHARED_CLOSE_OTHER_WORKSPACE,
+                window,
+                cx,
+            );
+            manager.activate_workspace(SHARED_WORKSPACE_ROW, window, cx);
+        });
+    });
     harness.panes.pane(SHARED_CLOSE_ROOT_PANE).reconnect();
+    harness.panes.pane(SHARED_CLOSE_OTHER_PANE).reconnect();
     settle_shared_panes(cx);
     focus_active_workspace(&harness.manager, cx);
     (harness, cx)
@@ -9820,14 +9091,37 @@ impl SharedCloseHarness {
             .collect()
     }
 
+    /// How many rows present the Workspace these tests close, which is 1 or 0.
     fn shared_rows(&self, cx: &mut VisualTestContext) -> usize {
         self.manager.read_with(cx, |manager, _| {
+            let other = manager
+                .shared
+                .local()
+                .and_then(|shared| shared.local(SHARED_CLOSE_OTHER_WORKSPACE));
             manager
                 .workspaces
                 .iter()
-                .filter(|workspace| manager.is_shared_workspace(workspace.id()))
+                .filter(|workspace| {
+                    manager.is_shared_workspace(workspace.id()) && Some(workspace.id()) != other
+                })
                 .count()
         })
+    }
+
+    /// Stops presenting the other Workspace, so the one these tests close is this window's last.
+    fn detach_other(&self, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                let other = manager
+                    .shared
+                    .local()
+                    .and_then(|shared| shared.local(SHARED_CLOSE_OTHER_WORKSPACE))
+                    .expect("the other Workspace is presented");
+                manager.detach_shared_workspace(other, window, cx);
+                manager.activate_workspace(SHARED_WORKSPACE_ROW, window, cx);
+            });
+        });
+        settle_shared_panes(cx);
     }
 }
 
@@ -9871,10 +9165,10 @@ fn shared_close_mutation(
 fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_client(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Inventory, Outcome};
+    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Outcome};
 
     let (harness, cx) = shared_close_harness(cx);
-    right_click("workspace-row-2-active", cx);
+    right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-close", cx);
     redraw(cx);
 
@@ -9923,15 +9217,7 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_WORKSPACE,
     });
-    harness.publish(
-        Inventory {
-            repositories: None,
-            revision: 2,
-            workspaces: Vec::new(),
-            close: None,
-        },
-        cx,
-    );
+    harness.publish(shared_close_remaining(2), cx);
     assert_eq!(harness.shared_rows(cx), 0);
     assert!(
         harness
@@ -10379,7 +9665,7 @@ fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut T
 fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Inventory, Outcome};
+    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Outcome};
 
     let (harness, cx) = shared_close_harness(cx);
     harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
@@ -10456,15 +9742,7 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_SECOND_TAB,
     });
-    harness.publish(
-        Inventory {
-            repositories: None,
-            revision: 3,
-            workspaces: Vec::new(),
-            close: None,
-        },
-        cx,
-    );
+    harness.publish(shared_close_remaining(3), cx);
     assert_eq!(harness.shared_rows(cx), 0);
 }
 
@@ -10488,10 +9766,8 @@ fn shared_close_rename_is_focused(
 fn another_clients_removals_should_leave_the_keyboard_where_a_person_is_typing(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Inventory;
-
     let (harness, cx) = shared_close_harness(cx);
-    right_click("workspace-row-1-inactive", cx);
+    right_click("workspace-row-2-inactive", cx);
     click("workspace-menu-row-rename", cx);
     assert!(shared_close_rename_is_focused(&harness, cx));
 
@@ -10524,15 +9800,7 @@ fn another_clients_removals_should_leave_the_keyboard_where_a_person_is_typing(
         "another client's Tab close must not pull the keyboard into the Tab that remains"
     );
 
-    harness.publish(
-        Inventory {
-            repositories: None,
-            revision: 4,
-            workspaces: Vec::new(),
-            close: None,
-        },
-        cx,
-    );
+    harness.publish(shared_close_remaining(4), cx);
     assert_eq!(harness.shared_rows(cx), 0);
     assert!(
         shared_close_rename_is_focused(&harness, cx),
@@ -10551,8 +9819,6 @@ fn another_clients_removals_should_leave_the_keyboard_where_a_person_is_typing(
 fn another_clients_removal_of_where_the_keyboard_rests_should_hand_it_to_what_remains(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Inventory;
-
     let (harness, cx) = shared_close_harness(cx);
     harness.panes.pane(SHARED_CLOSE_SPLIT_PANE).reconnect();
     harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
@@ -10601,15 +9867,7 @@ fn another_clients_removal_of_where_the_keyboard_rests_should_hand_it_to_what_re
     );
 
     // Another client kills the Workspace the keyboard is in.
-    harness.publish(
-        Inventory {
-            repositories: None,
-            revision: 4,
-            workspaces: Vec::new(),
-            close: None,
-        },
-        cx,
-    );
+    harness.publish(shared_close_remaining(4), cx);
     assert_eq!(harness.shared_rows(cx), 0);
     assert!(
         shared_close_terminal_is_focused(&harness, cx),
@@ -10625,6 +9883,7 @@ const ATTACHED_DOCS_TAB: [u8; 32] = [25; 32];
 const ATTACHED_DOCS_PANE: [u8; 32] = [26; 32];
 /// The Workspace Switcher result of the detached Build Workspace, named by its leading bytes.
 const DETACHED_BUILD_RESULT: &str = "workspace-switcher-detached-15151515";
+const DETACHED_DOCS_RESULT: &str = "workspace-switcher-detached-18181818";
 
 /// Two shared Workspaces, Build and Docs, beside this window's own Workspace. A new client
 /// attaches Build, and the person attaches Docs, so the sidebar lists the desktop Workspace
@@ -10668,7 +9927,13 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
     Inventory {
         repositories: None,
         revision: 1,
-        close: None,
+        close: Some(spaceterm_server::hierarchy::CloseInventory {
+            boot: [27; 32],
+            controls: Vec::new(),
+            sessions: [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE]
+                .map(|id| spaceterm_server::hierarchy::ConfirmedPane { id, session: None })
+                .to_vec(),
+        }),
         workspaces: vec![
             workspace(
                 ATTACHED_BUILD,
@@ -10685,16 +9950,11 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
-    let (manager, _records, cx) = workspace_manager(cx);
+    let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let edits = Rc::new(ScriptedEdits::new(Some(attachment_inventory())));
-    let panes = ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(
-            TestTerminalSessionRecords::default(),
-        )),
-        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-    ));
+    let panes = ScriptedPanes::new(server_session_factory());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.present_shared_workspaces(
@@ -10716,7 +9976,7 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     harness.sync(cx);
     assert_eq!(
         harness.presented(cx),
-        vec![1, 2],
+        vec![1],
         "a new client attaches only the server's first Workspace"
     );
     // The person attaches the other Workspace, then returns to the one they started in.
@@ -10724,10 +9984,11 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
         harness.manager.update(cx, |manager, cx| {
             manager.attach_detached_workspace(ServerKey::LOCAL, ATTACHED_DOCS, window, cx);
             manager.activate_workspace(WorkspaceId::new(1), window, cx);
+            manager.focus(window, cx);
         });
     });
     settle_shared_panes(cx);
-    assert_eq!(harness.presented(cx), vec![1, 2, 3]);
+    assert_eq!(harness.presented(cx), vec![1, 2]);
     (harness, cx)
 }
 
@@ -10758,16 +10019,11 @@ impl AttachmentHarness {
         settle_shared_panes(cx);
     }
 
-    /// Kills the desktop Workspace through its menu and confirms, leaving the shared ones.
-    fn close_desktop_workspace(&self, cx: &mut VisualTestContext) {
-        right_click(workspace_row(&self.manager, 1, cx), cx);
+    /// Kills a Workspace through its menu and confirms.
+    fn kill(&self, workspace: u64, cx: &mut VisualTestContext) {
+        right_click(workspace_row(&self.manager, workspace, cx), cx);
         click("workspace-menu-row-close", cx);
-        if cx
-            .debug_bounds("modal-action-close-confirmation-confirm")
-            .is_some()
-        {
-            click("modal-action-close-confirmation-confirm", cx);
-        }
+        click("modal-action-shared-close-confirm", cx);
         settle_shared_panes(cx);
     }
 }
@@ -10810,17 +10066,17 @@ fn detach_workspace_should_stop_presenting_it_here_and_offer_it_detached_in_the_
     harness.detach(2, cx);
     let presented = harness.presented(cx);
     let confirmation = cx
-        .debug_bounds("modal-action-close-confirmation-confirm")
+        .debug_bounds("modal-action-shared-close-confirm")
         .is_some();
     open_workspace_switcher(cx);
     let tree = A11yTree::read(cx);
     let detached = tree
         .with_role("ListBoxOption")
         .into_iter()
-        .find(|option| option["aria"]["label"] == "Build")
+        .find(|option| option["aria"]["label"] == "Docs")
         .cloned();
 
-    assert_eq!(presented, vec![1, 3], "only Build stops being presented");
+    assert_eq!(presented, vec![1], "only Docs stops being presented");
     assert!(
         !confirmation,
         "Detach Workspace ends nothing, so it asks for no confirmation"
@@ -10851,13 +10107,13 @@ fn choosing_a_detached_workspace_should_attach_and_activate_it_without_taking_ov
     harness.detach(2, cx);
 
     open_workspace_switcher(cx);
-    click(DETACHED_BUILD_RESULT, cx);
+    click(DETACHED_DOCS_RESULT, cx);
     harness.sync(cx);
     let reattached = harness.manager.read_with(cx, |manager, _| {
         manager
             .shared
             .local()
-            .and_then(|shared| shared.local(ATTACHED_BUILD))
+            .and_then(|shared| shared.local(ATTACHED_DOCS))
     });
     let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
 
@@ -10870,11 +10126,11 @@ fn choosing_a_detached_workspace_should_attach_and_activate_it_without_taking_ov
     assert!(!switcher_open);
     assert_eq!(
         harness.presented(cx).len(),
-        3,
+        2,
         "attaching presents the Workspace again beside the others"
     );
     assert_eq!(
-        harness.panes.pane(ATTACHED_BUILD_PANE).take_overs(),
+        harness.panes.pane(ATTACHED_DOCS_PANE).take_overs(),
         0,
         "attaching reinstates no control by taking the Pane over"
     );
@@ -10888,18 +10144,32 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = attachment_harness(cx);
+    for pane in [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE] {
+        harness.panes.pane(pane).reconnect();
+    }
+    settle_shared_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
     let selections = || {
         [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE].map(|pane| harness.panes.pane(pane).selections())
     };
     let before = selections();
 
-    harness.close_desktop_workspace(cx);
+    harness.kill(1, cx);
 
-    assert_eq!(harness.presented(cx), vec![2, 3]);
+    assert_eq!(harness.presented(cx), vec![2]);
     assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
     assert_eq!(selections(), before);
     assert!(
-        active_terminal_has_input_focus(&harness.manager, cx),
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .read(cx)
+                .workspaces
+                .active()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        }),
         "the keyboard moves into the Workspace that took the closed one's place"
     );
 }
@@ -10924,7 +10194,7 @@ fn returning_to_an_ended_pane_should_keep_session_ended_without_starting_a_shell
         });
         settle_shared_panes(cx);
     };
-    activate(2, cx);
+    activate(1, cx);
     pane.set(DevelopmentPaneStatus::SessionEnded(SessionEnd::Exited {
         code: 1,
     }));
@@ -10932,11 +10202,11 @@ fn returning_to_an_ended_pane_should_keep_session_ended_without_starting_a_shell
     let cause = "Session Ended. The shell exited with code 1.";
     assert!(A11yTree::read(cx).find(cause).is_some());
 
-    for workspace in [3, 2, 1, 2] {
+    for workspace in [2, 1, 2, 1] {
         activate(workspace, cx);
     }
 
-    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(1)));
     assert!(
         A11yTree::read(cx).find(cause).is_some(),
         "the cause outlives switching away and back"
@@ -10959,9 +10229,9 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
             .set(crate::terminal::server_session::DevelopmentPaneStatus::Restored);
     }
     settle_shared_panes(cx);
-    let selections = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
+    let selections = harness.panes.pane(ATTACHED_DOCS_PANE).selections();
 
-    harness.close_desktop_workspace(cx);
+    harness.kill(1, cx);
     let landing = A11yTree::read(cx)
         .focused()
         .map(|node| node["aria"]["label"].clone());
@@ -10975,10 +10245,10 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
     assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
     assert_eq!(focused, Some(serde_json::json!("Start Session")));
     assert_eq!(
-        harness.panes.pane(ATTACHED_BUILD_PANE).selections(),
+        harness.panes.pane(ATTACHED_DOCS_PANE).selections(),
         selections
     );
-    assert_eq!(harness.panes.pane(ATTACHED_BUILD_PANE).restored_starts(), 0);
+    assert_eq!(harness.panes.pane(ATTACHED_DOCS_PANE).restored_starts(), 0);
 }
 
 /// Detaching the Active Workspace opens its neighbor the same way: with the keyboard, without
@@ -10990,16 +10260,16 @@ fn detaching_the_active_workspace_should_open_its_neighbor_without_selecting_its
     let (harness, cx) = attachment_harness(cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.activate_workspace(WorkspaceId::new(3), window, cx);
+            manager.activate_workspace(WorkspaceId::new(2), window, cx);
         });
     });
     settle_shared_panes(cx);
     let before = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
 
-    harness.detach(3, cx);
+    harness.detach(2, cx);
 
-    assert_eq!(harness.presented(cx), vec![1, 2]);
-    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(harness.presented(cx), vec![1]);
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(1)));
     assert_eq!(harness.panes.pane(ATTACHED_BUILD_PANE).selections(), before);
     assert!(active_terminal_has_input_focus(&harness.manager, cx));
 }
@@ -11011,9 +10281,8 @@ fn detaching_the_final_workspace_should_leave_an_empty_view_without_a_replacemen
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
 
     let count = harness
         .manager
@@ -11048,9 +10317,8 @@ fn the_empty_view_action_should_open_the_switcher_with_the_detached_workspaces(
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
 
     // Plain Tab moves from the empty view to its action, and Return activates it.
     cx.simulate_keystrokes("tab");
@@ -11107,10 +10375,6 @@ fn detach_workspace_should_be_named_apart_from_kill_and_carry_no_shortcut(cx: &m
     right_click(workspace_row(&harness.manager, 2, cx), cx);
     let shared_menu = menu_item_labels(cx);
     let detach = A11yTree::read(cx).node("Detach Workspace").clone();
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    right_click(workspace_row(&harness.manager, 1, cx), cx);
-    let desktop_menu = menu_item_labels(cx);
 
     let position = |label: &str| shared_menu.iter().position(|item| item == label);
     assert!(
@@ -11122,10 +10386,6 @@ fn detach_workspace_should_be_named_apart_from_kill_and_carry_no_shortcut(cx: &m
         "Detach Workspace has no default Shortcut"
     );
     assert_ne!(detach["aria"]["disabled"], true);
-    assert!(
-        !desktop_menu.iter().any(|item| item.starts_with("Detach")),
-        "a Workspace this window owns has no attachment to detach: {desktop_menu:?}"
-    );
 }
 
 #[gpui::test]
@@ -11138,16 +10398,16 @@ fn offline_detach_should_still_stop_presenting_while_shared_edits_stay_unavailab
     harness.edits.set_connected(false);
     harness.sync(cx);
 
-    right_click(workspace_row(&harness.manager, 2, cx), cx);
+    // Navigation through what this window presents keeps working offline.
+    click(workspace_row(&harness.manager, 2, cx), cx);
+    let navigated = harness.active(cx);
+    right_click(workspace_row(&harness.manager, 1, cx), cx);
     let tree = A11yTree::read(cx);
     let detach_disabled = tree.node("Detach Workspace")["aria"]["disabled"].clone();
     let kill_disabled = tree.node("Kill Workspace")["aria"]["disabled"].clone();
     click("workspace-menu-row-detach", cx);
     settle_shared_panes(cx);
     let after_detach = harness.presented(cx);
-    // Navigation through what this window still presents keeps working offline.
-    click(workspace_row(&harness.manager, 3, cx), cx);
-    let navigated = harness.active(cx);
     open_workspace_switcher(cx);
     let offered_offline = cx.debug_bounds(DETACHED_BUILD_RESULT).is_some();
     cx.simulate_keystrokes("escape");
@@ -11162,8 +10422,8 @@ fn offline_detach_should_still_stop_presenting_while_shared_edits_stay_unavailab
         "Detach Workspace needs no server"
     );
     assert_eq!(kill_disabled, true, "Kill Workspace waits for the server");
-    assert_eq!(after_detach, vec![1, 3]);
-    assert_eq!(navigated, Some(WorkspaceId::new(3)));
+    assert_eq!(navigated, Some(WorkspaceId::new(2)));
+    assert_eq!(after_detach, vec![2]);
     assert!(
         !offered_offline,
         "an unreachable server's detached Workspaces are not offered"
@@ -11182,11 +10442,10 @@ fn the_offline_empty_view_should_name_the_unreachable_server_and_offer_a_way_bac
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
     harness.edits.set_connected(false);
     harness.sync(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
 
     let tree = A11yTree::read(cx);
     let empty = tree.node(super::empty::OFFLINE_TITLE).clone();
@@ -11224,11 +10483,10 @@ fn try_again_on_the_offline_empty_view_should_reconnect_now_and_say_when_it_fail
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
     harness.edits.set_connected(false);
     harness.sync(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
 
     click(super::empty::RECONNECT_SELECTOR, cx);
     let retries = harness.edits.retries();
@@ -11251,14 +10509,13 @@ fn try_again_on_the_offline_empty_view_should_reconnect_now_and_say_when_it_fail
 #[gpui::test]
 fn a_stopped_server_offers_start_server_on_the_empty_view(cx: &mut TestAppContext) {
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
     harness.edits.set_connected(false);
     harness
         .edits
         .set_error(spaceterm_server::ServerError::Stopped);
     harness.sync(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
 
     assert!(
         cx.debug_bounds("server-launch-start").is_some(),
@@ -11273,9 +10530,8 @@ fn a_stopped_server_offers_start_server_on_the_empty_view(cx: &mut TestAppContex
 #[gpui::test]
 fn the_empty_view_should_draw_a_panes_rim_and_offer_local_creation(cx: &mut TestAppContext) {
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
 
     let stage = cx.debug_bounds("empty-workspace-stage");
     let pane = cx.debug_bounds("empty-workspace-pane");
@@ -11300,9 +10556,8 @@ fn the_empty_stage_should_reach_the_window_top_when_no_tab_strip_holds_the_band(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
 
     let frame = workspace_frame(cx);
     let stage = cx
@@ -11384,9 +10639,8 @@ fn the_empty_views_workspace_switcher_should_slide_with_the_sidebar_like_its_tog
     use crate::ui::drag_and_drop::AnimatePresence;
 
     let (harness, cx) = attachment_harness(cx);
-    harness.close_desktop_workspace(cx);
+    harness.detach(1, cx);
     harness.detach(2, cx);
-    harness.detach(3, cx);
     let surface = |selector: &'static str, cx: &mut VisualTestContext| {
         let bounds = cx.debug_bounds(selector).unwrap();
         let painted = cx.update(|window, _| {
@@ -12066,8 +11320,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 LocalFilesystemAuthority::testing_with_failure(
                     crate::platform::local_filesystem::LocalFilesystemError::PermissionDenied,
                 ),
@@ -12103,8 +11356,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 filesystem,
             );
             let context = context();
@@ -12144,8 +11396,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 filesystem,
             );
             let blocked = submit(
@@ -12177,8 +11428,7 @@ mod shared_repositories {
                 cx,
                 live(),
                 &PaneConstruction::testing(),
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                 filesystem,
             );
             let context = context();
@@ -12273,7 +11523,6 @@ mod shared_repositories {
                 live(),
                 &construction,
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed()
                     .with_client_filesystem(crate::runtime::local_filesystem()),
                 crate::runtime::local_filesystem(),
             );
@@ -12311,7 +11560,6 @@ mod shared_repositories {
                 live(),
                 &construction,
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed()
                     .with_client_filesystem(crate::runtime::local_filesystem()),
                 LocalFilesystemAuthority::testing_observed(
                     &crate::runtime::local_filesystem(),
@@ -12368,7 +11616,6 @@ mod shared_repositories {
                 live(),
                 &PaneConstruction::testing(),
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed()
                     .with_client_filesystem(crate::runtime::local_filesystem()),
                 crate::runtime::local_filesystem(),
             );
@@ -12402,13 +11649,9 @@ mod shared_repositories {
                     let penguin = super::super::named_route("penguin");
                     let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
                     source.replace_transport(Rc::clone(&edits) as Rc<_>);
-                    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-                        Rc::new(
-                            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                                .server_backed(),
-                        ),
-                        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-                    );
+                    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                        TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
+                    ));
                     let key = manager.present_server_workspaces(
                         ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
                             route: penguin,
@@ -12443,13 +11686,50 @@ mod shared_repositories {
         manager: Entity<WorkspaceManager>,
         edits: Rc<ScriptedEdits>,
         shared: WorkspaceId,
-        /// What the desktop's own Terminal Sessions were asked.
+        /// What the shared Panes' Terminal Sessions were asked.
         sessions: TestTerminalSessionRecords,
     }
 
+    const OTHER_WORKSPACE: [u8; 32] = [61; 32];
+    const OTHER_TAB: [u8; 32] = [62; 32];
+    const OTHER_PANE: [u8; 32] = [63; 32];
+
+    /// `inventory` with the server's other Workspace first, outside every repository.
+    fn with_other(mut inventory: Inventory) -> Inventory {
+        inventory.workspaces.insert(
+            0,
+            Workspace {
+                id: OTHER_WORKSPACE,
+                name: "Other".to_owned(),
+                name_version: 0,
+                pin_version: 0,
+                pinned_directory: None,
+                root_tab: OTHER_TAB,
+                tabs: vec![Tab {
+                    worktree: None,
+                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_repository: None,
+                    id: OTHER_TAB,
+                    root_pane: OTHER_PANE,
+                    panes: vec![pane(OTHER_PANE, "/srv/elsewhere")],
+                }],
+            },
+        );
+        if let Some(close) = inventory.close.as_mut() {
+            close
+                .sessions
+                .push(spaceterm_server::hierarchy::ConfirmedPane {
+                    id: OTHER_PANE,
+                    session: None,
+                });
+        }
+        inventory
+    }
+
     impl Harness {
+        /// The server publishes `inventory` beside its other Workspace, and the window reads it.
         fn publish(&self, inventory: Inventory, cx: &mut VisualTestContext) {
-            self.edits.set_inventory(inventory);
+            self.edits.set_inventory(with_other(inventory));
             cx.update(|window, cx| {
                 self.manager.update(cx, |manager, cx| {
                     manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
@@ -12487,11 +11767,13 @@ mod shared_repositories {
     }
 
     fn harness(cx: &mut TestAppContext, initial: Inventory) -> (Harness, &mut VisualTestContext) {
-        harness_constructing(
+        let records = TestTerminalSessionRecords::default();
+        harness_recording(
             cx,
             initial,
             &PaneConstruction::testing(),
-            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()).server_backed(),
+            TestTerminalSessionFactory::new(records.clone()),
+            records,
             crate::runtime::local_filesystem(),
         )
     }
@@ -12505,12 +11787,28 @@ mod shared_repositories {
         sessions: TestTerminalSessionFactory,
         local_files: LocalFilesystemAuthority,
     ) -> (Harness, &'a mut VisualTestContext) {
-        let (manager, sessions_asked, cx) = workspace_manager(cx);
-        let edits = Rc::new(ScriptedEdits::new(Some(initial)));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(sessions),
-            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-        );
+        harness_recording(
+            cx,
+            initial,
+            construction,
+            sessions,
+            TestTerminalSessionRecords::default(),
+            local_files,
+        )
+    }
+
+    /// [`harness_constructing`] whose `sessions` record what they are asked in `records`.
+    fn harness_recording<'a>(
+        cx: &'a mut TestAppContext,
+        initial: Inventory,
+        construction: &PaneConstruction,
+        sessions: TestTerminalSessionFactory,
+        records: TestTerminalSessionRecords,
+        local_files: LocalFilesystemAuthority,
+    ) -> (Harness, &'a mut VisualTestContext) {
+        let (manager, _, cx) = serverless_workspace_manager(cx);
+        let edits = Rc::new(ScriptedEdits::new(Some(with_other(initial))));
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(sessions));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.present_shared_workspaces(
@@ -12523,7 +11821,9 @@ mod shared_repositories {
                     cx,
                 );
                 manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
-                // The person returns to the desktop's own Workspace, so this one is inactive.
+                // The person attaches this Workspace, then returns to the other one, so this
+                // one is inactive.
+                manager.attach_detached_workspace(ServerKey::LOCAL, WORKSPACE, window, cx);
                 manager.activate_workspace(WorkspaceId::new(1), window, cx);
             });
         });
@@ -12531,10 +11831,9 @@ mod shared_repositories {
         let shared = manager
             .read_with(cx, |manager, _| {
                 manager
-                    .workspaces
-                    .iter()
-                    .map(|workspace| workspace.id())
-                    .find(|id| manager.is_shared_workspace(*id))
+                    .shared
+                    .local()
+                    .and_then(|shared| shared.local(WORKSPACE))
             })
             .expect("the published Workspace joins the sidebar");
         (
@@ -12542,7 +11841,7 @@ mod shared_repositories {
                 manager,
                 edits,
                 shared,
-                sessions: sessions_asked,
+                sessions: records,
             },
             cx,
         )
@@ -12561,7 +11860,6 @@ mod shared_repositories {
     ) {
         let (manager, sessions, cx) = workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
-        edits.set_worktree_writes(true);
         let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
         cx.update(|window, cx| {
             crate::ui::server_worktrees::testing::present_direct(
@@ -12581,7 +11879,9 @@ mod shared_repositories {
                     .workspaces
                     .iter()
                     .map(|workspace| workspace.id())
-                    .find(|id| manager.is_shared_workspace(*id))
+                    .find(|id| {
+                        manager.is_shared_workspace(*id) && !manager.is_local_server_workspace(*id)
+                    })
             })
             .expect("penguin's Workspace joins the sidebar");
         (
@@ -12606,13 +11906,9 @@ mod shared_repositories {
         cx: &mut Context<WorkspaceManager>,
     ) {
         let penguin = super::named_route("penguin");
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .server_backed(),
-            ),
-            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
-        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
+        ));
         // As launch does, the window presents the route through its one source.
         let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
         source.replace_transport(Rc::clone(edits) as Rc<_>);
@@ -12643,11 +11939,10 @@ mod shared_repositories {
     fn reopened_window(edits: &Rc<ScriptedEdits>, cx: &VisualTestContext) -> VisualTestContext {
         let mut app = cx.cx.clone();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                .with_fallback_title("zsh"),
+            server_sessions(TestTerminalSessionRecords::default()).with_fallback_title("zsh"),
         );
         let handle = app.add_window(|window, cx| {
-            new_desktop_manager(
+            local_server_manager(
                 session_factory,
                 std::env::temp_dir(),
                 workspace_adapters(),
@@ -13233,7 +12528,8 @@ mod shared_repositories {
             "each server Tab sits in the Worktree the server says it belongs to"
         );
         assert_eq!(rows[0].removal, WorktreeRemoval::Main);
-        assert_eq!(rows[1].removal, WorktreeRemoval::Server);
+        // This window has no writer for the server, so nothing can remove the Worktree yet.
+        assert_eq!(rows[1].removal, WorktreeRemoval::NeedsServer);
         assert!(rows.iter().all(|row| !row.opens_tabs() && row.closes_tabs));
         assert!(!creates_worktrees, "New Worktree stays unavailable");
     }
@@ -14012,7 +13308,7 @@ mod shared_repositories {
         harness.manager.read_with(cx, |manager, _| {
             assert_eq!(
                 manager.shared.local().unwrap().latest_inventory(),
-                Some(&initial),
+                Some(&with_other(initial.clone())),
                 "optimistic presentation changes no server membership"
             );
         });
@@ -14419,7 +13715,7 @@ mod shared_repositories {
         cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
         let (harness, cx) = harness(cx, published(1, "main", true));
         let first_frame = worktrees_disclosed(&harness, cx);
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
         finish_slides(cx);
         let id = harness.shared.get();
         let below = WorkspaceId::new(id + 1);
@@ -14860,7 +14156,7 @@ mod shared_repositories {
         cx: &mut TestAppContext,
     ) {
         let (harness, cx) = harness(cx, published(1, "main", true));
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
         finish_slides(cx);
         animate(cx);
         let id = harness.shared.get();
@@ -14971,7 +14267,7 @@ mod shared_repositories {
         tabs[1].worktree = Some(EXTRA_ROOT.into());
         tabs[1].panes = vec![pane(FEATURE_PANE, EXTRA_ROOT)];
         let (harness, cx) = harness(cx, initial);
-        new_desktop_workspace(cx);
+        publish_workspace(cx);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
                 manager.activate_workspace(harness.shared, window, cx);
@@ -15243,7 +14539,7 @@ mod shared_repositories {
     ) {
         let (harness, cx) = harness(cx, published(1, "main", true));
         for _ in 0..24 {
-            new_desktop_workspace(cx);
+            publish_workspace(cx);
         }
         let last = harness
             .manager
@@ -15640,7 +14936,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
 ) {
     use spaceterm_server::hierarchy::Mutation;
 
-    // The harness's server compares no directories, so the exact pin decides here. The native
+    // The harness's server matches only a directory spelled the same as the pin. The native
     // adapter test covers a server matching one directory through a symbolic link. Its directory
     // channel answers from its own thread.
     cx.executor().allow_parking();
@@ -15868,6 +15164,12 @@ fn late_directory_answer_after(
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.activate_workspace(here, window, cx);
+            manager.focus(window, cx);
+        })
+    });
+    redraw(cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
             manager.open_server_directory(key, String::new(), PathBuf::from(directory), window, cx);
         })
     });
@@ -15892,6 +15194,14 @@ fn late_directory_answer_after(
     for step in navigation {
         let before = terminal(cx);
         if let Navigation::FindOpened | Navigation::FindClosed = step {
+            // Window readiness starts the Pane's Terminal Session, which Find reads, a step per
+            // frame once a frame measured the stage.
+            for _ in 0..4 {
+                redraw(cx);
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+            }
+            redraw(cx);
             cx.dispatch_action(crate::ui::OpenTerminalFind);
             cx.run_until_parked();
             assert!(cx.debug_bounds("terminal-find-bar").is_some());

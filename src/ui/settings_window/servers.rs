@@ -294,11 +294,6 @@ impl LocalServerRow {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn status(&self) -> LocalServerStatus {
-        self.status
-    }
-
     pub(super) fn presentation(&self) -> LocalServerPresentation {
         let status = match &self.control {
             Err(error) => LocalServerStatus::Failed(*error),
@@ -367,23 +362,13 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                     "The server is set up but not running. Start it below, or open a SpaceTerm \
                      window, to connect.",
                 ),
-                ServerError::AuthenticationRefused => {
+                ServerError::AuthenticationRefused | ServerError::IncompatibleState => {
                     (SharedString::from(error.to_string()), CaptionTone::Error)
                 }
-                ServerError::IncompatibleState => (
-                    SharedString::from(format!(
-                        "{error} To start over, review and confirm a development state reset, then choose Check Now."
-                    )),
-                    CaptionTone::Error,
-                ),
                 // The refusal is scoped to this connection. The server and its Terminal Sessions
                 // keep running, and the Server row offers any verified update.
                 ServerError::IncompatibleProtocol => (
                     SharedString::new_static(INCOMPATIBLE_PROTOCOL),
-                    CaptionTone::Error,
-                ),
-                ServerError::MissingRequiredCapability => (
-                    SharedString::new_static(MISSING_CAPABILITY),
                     CaptionTone::Error,
                 ),
                 ServerError::ActivationUnresolved => {
@@ -459,11 +444,6 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         ServerError::IncompatibleProtocol => (
             "Incompatible",
             "settings-local-server-state-incompatible",
-            true,
-        ),
-        ServerError::MissingRequiredCapability => (
-            "Incompatible",
-            "settings-local-server-state-missing-capability",
             true,
         ),
         // Only a fresh SpaceTerm process uses its replaced installation's server package, so
@@ -550,9 +530,6 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
 /// Why this client refused a server with no protocol major in common. Neither side's release
 /// number says which one is older, so the wording names no side.
 pub(crate) const INCOMPATIBLE_PROTOCOL: &str = "SpaceTerm and this server are incompatible.";
-
-/// Why this client refused a server that lacks a capability it requires.
-pub(crate) const MISSING_CAPABILITY: &str = "This server needs an update.";
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
 /// stopped through account login and computer startup alike.

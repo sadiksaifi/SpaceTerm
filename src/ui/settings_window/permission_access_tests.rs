@@ -63,7 +63,7 @@ fn open_settings(
                 system_permissions: access,
                 permission_setup,
             },
-            None,
+            crate::theme_registry::testing::offline(),
             None,
             window,
             cx,

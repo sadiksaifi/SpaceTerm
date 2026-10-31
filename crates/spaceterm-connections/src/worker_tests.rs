@@ -182,7 +182,7 @@ fn fixture(
         blocked_through,
     });
     let connections =
-        DirectConnections::new("spaceterm-development", records, credentials, network);
+        DirectConnections::new("spaceterm-development", records, credentials, network, None);
     connections.resume_retained();
     (connections, received, ReleaseOnDrop(release))
 }

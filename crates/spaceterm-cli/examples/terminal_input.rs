@@ -162,12 +162,9 @@ fn attached(claimed: Claimed, failure: &'static str) -> Result<Pane, Box<dyn Err
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
-        .parse()?;
-    let first = ServerConnection::for_development_client("input-first", major)?;
-    let second = ServerConnection::for_development_client("input-second", major)?;
+    let major = spaceterm_server::protocol::MAJOR;
+    let first = ServerConnection::for_development_client("input-first")?;
+    let second = ServerConnection::for_development_client("input-second")?;
     require_idle(&first)?;
     first.setup()?;
     second.setup()?;

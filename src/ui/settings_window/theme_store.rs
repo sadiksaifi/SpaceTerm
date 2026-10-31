@@ -63,7 +63,7 @@ pub(super) enum ExtensionAction {
 /// themes belong to the Settings Window that owns this store.
 pub(super) struct ThemeStore {
     owner: WeakEntity<SettingsWindow>,
-    registry: Option<ZedThemeRegistry>,
+    registry: ZedThemeRegistry,
     listing: Listing,
     installing: BTreeSet<String>,
     /// What the last install or import did, until the sheet next opens.
@@ -75,7 +75,7 @@ pub(super) struct ThemeStore {
 impl ThemeStore {
     pub(super) fn new(
         owner: WeakEntity<SettingsWindow>,
-        registry: Option<ZedThemeRegistry>,
+        registry: ZedThemeRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -139,9 +139,7 @@ impl ThemeStore {
 
     /// Fetches the registry listing unless it is loaded or loading.
     fn browse(&mut self, cx: &mut Context<Self>) {
-        let Some(registry) = self.registry.clone() else {
-            return;
-        };
+        let registry = self.registry.clone();
         if matches!(self.listing, Listing::Loading | Listing::Loaded(_)) {
             return;
         }
@@ -164,9 +162,7 @@ impl ThemeStore {
     }
 
     fn install(&mut self, extension: RegistryExtension, cx: &mut Context<Self>) {
-        let Some(registry) = self.registry.clone() else {
-            return;
-        };
+        let registry = self.registry.clone();
         if !self.editable(cx) || !self.installing.insert(extension.id.clone()) {
             return;
         }
@@ -250,14 +246,7 @@ impl ThemeStore {
 
     /// Asks for a Zed theme file and installs every theme in it.
     fn begin_import(&mut self, cx: &mut Context<Self>) {
-        let Some(opener) = cx
-            .try_global::<crate::app::SelectedFileAccess>()
-            .map(|access| Arc::clone(&access.0))
-        else {
-            self.status = Some("File import is unavailable.".into());
-            cx.notify();
-            return;
-        };
+        let opener = Arc::clone(&cx.global::<crate::app::SelectedFileAccess>().0);
         let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -343,12 +332,6 @@ impl ThemeStore {
                 .text_center()
         };
         match self.listing.clone() {
-            _ if self.registry.is_none() => placeholder()
-                .child(secondary(
-                    "settings-theme-store-unavailable",
-                    "Zed extension registry unavailable. Import a theme file.".into(),
-                ))
-                .into_any_element(),
             Listing::NotRequested | Listing::Loading => placeholder()
                 .child(
                     div().w(appearance.spacing(LOADING_BAR_WIDTH)).child(

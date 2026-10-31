@@ -25,11 +25,7 @@ fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
     harness.publish(inventory.clone(), cx);
     harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
     settle_shared_panes(cx);
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            manager.close_workspace_activating(WorkspaceId::new(1), false, window, cx);
-        })
-    });
+    harness.detach_other(cx);
     let manager = harness.manager.read_with(cx, |manager, _| {
         manager.workspaces.active().payload().clone()
     });
@@ -129,9 +125,9 @@ fn batched_conflict_notices_are_reviewed_one_at_a_time_beyond_the_modal_queue_li
             let shared = manager.shared.local_mut().unwrap();
             for index in 0..12 {
                 let workspace = if index % 2 == 0 {
-                    WorkspaceId::new(2)
+                    WorkspaceId::new(1)
                 } else {
-                    WorkspaceId::new(3)
+                    WorkspaceId::new(2)
                 };
                 assert_eq!(
                     shared.rename(workspace, format!("queued-draft-{index}-end"), Some(0)),
@@ -224,7 +220,7 @@ fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
         assert!(manager.workspaces.parked_ids().next().is_none());
         assert!(manager.shared.get(remote).is_none());
     });
-    assert_eq!(harness.names(cx), ["Default"]);
+    assert!(harness.names(cx).is_empty());
 }
 
 #[gpui::test]
@@ -248,7 +244,7 @@ fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
         0,
         "approved close hides the Workspace before its reply"
     );
-    right_click("workspace-row-1-active", cx);
+    right_click("workspace-row-2-active", cx);
     click("workspace-menu-row-rename", cx);
     harness
         .edits
@@ -274,7 +270,7 @@ fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
 /// at once to the Workspace that takes its place, and the server's answer leaves it there.
 #[gpui::test]
 fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::{Inventory, Outcome};
+    use spaceterm_server::hierarchy::Outcome;
 
     let (harness, cx) = shared_close_harness(cx);
     assert!(shared_close_terminal_is_focused(&harness, cx));
@@ -317,15 +313,7 @@ fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &m
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_WORKSPACE,
     });
-    harness.publish(
-        Inventory {
-            repositories: None,
-            revision: 3,
-            workspaces: Vec::new(),
-            close: None,
-        },
-        cx,
-    );
+    harness.publish(shared_close_remaining(3), cx);
     assert!(shared_close_terminal_is_focused(&harness, cx));
 }
 
@@ -333,13 +321,13 @@ fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &m
 fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{Inventory, Mutation, Outcome};
+    use spaceterm_server::hierarchy::{Mutation, Outcome};
 
     let (harness, cx) = shared_close_harness(cx);
     cx.dispatch_action(crate::ui::CloseWorkspace);
     cx.run_until_parked();
     click("modal-action-shared-close-confirm", cx);
-    right_click("workspace-row-1-active", cx);
+    right_click("workspace-row-2-active", cx);
     click("workspace-menu-row-rename", cx);
     cx.simulate_keystrokes("d r a f t");
     cx.run_until_parked();
@@ -396,15 +384,7 @@ fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_WORKSPACE,
     });
-    harness.publish(
-        Inventory {
-            revision: 2,
-            repositories: None,
-            close: None,
-            workspaces: Vec::new(),
-        },
-        cx,
-    );
+    harness.publish(shared_close_remaining(2), cx);
     assert!(shared_close_rename_is_focused(&harness, cx));
     assert_eq!(
         input.read_with(cx, |input, _| input.value().to_owned()),
@@ -438,7 +418,7 @@ fn a_disconnect_notice_keeps_a_newer_rename_draft_and_its_focus(cx: &mut TestApp
         1,
         "the second edit waits behind the first"
     );
-    right_click("workspace-row-2-active", cx);
+    right_click("workspace-row-1-active", cx);
     click("workspace-menu-row-rename", cx);
     cx.simulate_keystrokes("d r a f t");
     cx.run_until_parked();
@@ -501,7 +481,7 @@ fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editin
         assert!(cx.debug_bounds("shared-pane-notice-1").is_none());
         assert_eq!(shared_close_counts(&harness, cx), (1, 1));
     }
-    right_click("workspace-row-1-inactive", cx);
+    right_click("workspace-row-2-inactive", cx);
     click("workspace-menu-row-rename", cx);
     harness
         .edits
@@ -522,11 +502,7 @@ fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editin
 fn final_workspace_close_dismisses_on_publication_without_acknowledgement(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Inventory;
     let (harness, cx) = shared_close_harness(cx);
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            manager.close_workspace_activating(WorkspaceId::new(1), false, window, cx)
-        })
-    });
+    harness.detach_other(cx);
     cx.dispatch_action(crate::ui::CloseWorkspace);
     cx.run_until_parked();
     click("modal-action-shared-close-confirm", cx);

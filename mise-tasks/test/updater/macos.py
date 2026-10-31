@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# MISE description="Exercise authenticated updates and certificate identity transitions in isolated bundles"
+# MISE description="Exercise authenticated updates and certificate-signed installs in isolated bundles"
 """Exercise Sparkle signature rejection, cancellation, installation and relaunch in temp apps."""
 
 import base64
@@ -87,13 +87,12 @@ def main():
                 "-o",
                 str(binary),
             )
-            for scenario, mode, signed_old, signed_new in (
-                ("tampered", "tampered", False, False),
-                ("cancel", "cancel", False, False),
-                ("install", "install", False, False),
-                ("quit", "quit", False, False),
-                ("certificate-install", "install", True, True),
-                ("identity-transition", "install", False, True),
+            for scenario, mode, signed in (
+                ("tampered", "tampered", False),
+                ("cancel", "cancel", False),
+                ("install", "install", False),
+                ("quit", "quit", False),
+                ("certificate-install", "install", True),
             ):
                 directory = root / scenario
                 directory.mkdir()
@@ -132,7 +131,6 @@ def main():
                         "SPTTestMode": mode,
                     }
                     (contents / "Info.plist").write_bytes(plistlib.dumps(plist))
-                    signed = signed_old if version == "0.1.0" else signed_new
                     run(
                         "codesign",
                         "--force",
@@ -261,7 +259,7 @@ def main():
                         assert (
                             "confirmed" in events and "relaunched" in events and version == "0.1.1"
                         ), events
-                    if signed_new and version == "0.1.1":
+                    if signed and version == "0.1.1":
                         verify_release_signature(
                             apps[0], fingerprint, plist["CFBundleIdentifier"], scenario
                         )

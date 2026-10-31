@@ -26,9 +26,9 @@ use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::tab_manager::TabManager;
 
-const WORKSPACE: Id = [1; 32];
-const ROOT_TAB: Id = [2; 32];
-const ROOT_PANE: Id = [3; 32];
+pub(crate) const WORKSPACE: Id = [1; 32];
+pub(crate) const ROOT_TAB: Id = [2; 32];
+pub(crate) const ROOT_PANE: Id = [3; 32];
 const SECOND_TAB: Id = [4; 32];
 const SECOND_TAB_PANE: Id = [5; 32];
 const SPLIT_PANE: Id = [6; 32];
@@ -37,15 +37,13 @@ const SECOND_REPLACEMENT_PANE: Id = [8; 32];
 
 /// The first Workspace a collection owns, which every harness here binds the server Workspace to.
 fn first_workspace_id() -> crate::domain::WorkspaceId {
-    crate::domain::workspace_collection::tests::local_collection(
-        crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
-        |_, _| (),
-    )
-    .active_workspace_id()
-    .expect("a new collection presents its first Workspace")
+    let mut workspaces = crate::domain::workspace_collection::WorkspaceCollection::empty();
+    workspaces
+        .create_workspace("Build".to_owned(), |_| ())
+        .expect("an empty collection presents its first Workspace")
 }
 
-fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
+pub(crate) fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
     Pane {
         id,
         source,
@@ -60,7 +58,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
     }
 }
 
-fn tab(id: Id, panes: Vec<Pane>) -> Tab {
+pub(crate) fn tab(id: Id, panes: Vec<Pane>) -> Tab {
     Tab {
         worktree: None,
         worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
@@ -75,7 +73,7 @@ fn tab(id: Id, panes: Vec<Pane>) -> Tab {
 const BOOT: Id = [9; 32];
 
 /// One server Workspace with `tabs`, whose Panes have no running shell yet.
-fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
+pub(crate) fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
     let sessions = tabs
         .iter()
         .flat_map(|tab| &tab.panes)
@@ -121,14 +119,13 @@ struct SharedHarness {
 fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+        crate::terminal::testing::TestTerminalSessionFactory::new(
             crate::terminal::testing::TestTerminalSessionRecords::default(),
-        ));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared-test")),
+        )
+        .with_reading_available(true),
     );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
     let panes = ScriptedPanes::new(session_factory.clone());
     let sessions = SharedPaneSessions::with_opener(
         Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
@@ -136,24 +133,28 @@ fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTes
     );
     let edits = Rc::new(ScriptedEdits::new(Some(root_only())));
     let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
-    let (manager, cx) =
-        cx.add_window_view(|window, cx| TabManager::new(session_factory.clone(), window, cx));
+    let (_, state) = panes
+        .open(ROOT_PANE)
+        .expect("the Root Pane subscription must open");
+    let (manager, cx) = cx.add_window_view(|window, cx| {
+        TabManager::shared(
+            SharedTabs::new(source, sessions, WORKSPACE),
+            crate::ui::tab_manager::SharedRoot {
+                tab: ROOT_TAB,
+                pane: ROOT_PANE,
+                state,
+            },
+            session_factory.clone(),
+            Rc::new(
+                crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform::default(),
+            ),
+            window,
+            cx,
+        )
+    });
     cx.update(|window, cx| {
         window.activate_window();
-        let (_, state) = panes
-            .open(ROOT_PANE)
-            .expect("the Root Pane subscription must open");
-        manager.update(cx, |manager, cx| {
-            manager.adopt_shared(
-                SharedTabs::new(source, sessions, WORKSPACE),
-                ROOT_TAB,
-                ROOT_PANE,
-                state,
-                window,
-                cx,
-            );
-            manager.focus(window, cx);
-        });
+        manager.update(cx, |manager, cx| manager.focus(window, cx));
     });
     cx.run_until_parked();
     (
@@ -227,8 +228,14 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut TestAppContext) {
     let (harness, cx) = shared_tab_manager(cx);
     assert_eq!(tab_count(&harness, cx), 1);
+    let root = harness
+        .manager
+        .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0);
 
     click("create-tab-button", cx);
+    let active = harness
+        .manager
+        .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0);
 
     assert_eq!(
         harness.edits.submitted(),
@@ -244,6 +251,25 @@ fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut T
         2,
         "the initiating interaction presents its provisional Tab at once"
     );
+    assert_ne!(active, root, "the provisional Tab becomes the Active Tab");
+}
+
+#[gpui::test]
+fn command_t_should_ask_the_server_for_a_tab_beside_the_active_one(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateTab {
+            workspace: WORKSPACE,
+            source: Some(ROOT_PANE),
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
+        }],
+    );
+    assert_eq!(tab_count(&harness, cx), 2, "the earlier Tab stays");
 }
 
 #[gpui::test]
@@ -1365,14 +1391,13 @@ mod edits {
 
     /// A Workspace Window's reading of `source`, which every window of one process shares.
     fn window(source: SharedEditSource) -> SharedWorkspaces {
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
-            ));
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            session_factory,
-            crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
+            )
+            .with_reading_available(true),
         );
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
         let sessions = SharedPaneSessions::with_opener(
             ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
             &PaneConstruction::testing(),
@@ -2224,12 +2249,12 @@ mod close {
     fn shared(inventory: Inventory) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
         let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+            crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
-            )),
-            crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
-        );
+            )
+            .with_reading_available(true),
+        ));
         let sessions = SharedPaneSessions::with_opener(
             ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
             &PaneConstruction::testing(),
@@ -2767,27 +2792,6 @@ mod draft {
             submitted_rename(&events),
             ("Mine".to_owned(), Some(1)),
             "a draft started on the published name is fenced to that name"
-        );
-    }
-
-    #[gpui::test]
-    fn a_rename_of_a_workspace_this_window_owns_should_carry_no_shared_version(
-        cx: &mut TestAppContext,
-    ) {
-        let (sidebar, events, cx) = sidebar(cx);
-        let mut own = row("Build", 0);
-        own.shared = None;
-        publish(&sidebar, own, cx);
-
-        right_click("workspace-row-1-active", cx);
-        click("workspace-menu-row-rename", cx);
-        cx.simulate_keystrokes("cmd-a M i n e enter");
-        cx.run_until_parked();
-
-        assert_eq!(
-            submitted_rename(&events),
-            ("Mine".to_owned(), None),
-            "a Workspace this window owns has no server version to fence"
         );
     }
 }

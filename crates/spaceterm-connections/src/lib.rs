@@ -1,5 +1,4 @@
 //! Saved direct routes and restricted revocation recovery, outside Client Settings.
-pub mod account;
 pub mod credentials;
 pub mod records;
 pub mod setup;
@@ -126,16 +125,6 @@ impl direct::DirectConnector for NoConnection {
     }
 }
 
-/// Resolves account-local revocation authority without network or credential access.
-pub trait AccountRevocationResolver: Send + Sync {
-    fn route_for(&self, server: &ServerConnection) -> Result<records::AccountRoute, DirectError>;
-    fn resolve(
-        &self,
-        route: &records::AccountRoute,
-        interaction: Interaction,
-    ) -> Result<ServerConnection, DirectError>;
-}
-
 #[derive(Clone)]
 pub struct DirectConnections(Arc<Inner>);
 
@@ -146,7 +135,9 @@ struct Inner {
     network: Arc<dyn worker::DirectNetwork>,
     state: Mutex<State>,
     changes: Mutex<Vec<async_channel::Sender<()>>>,
-    resolver: Mutex<Option<Arc<dyn AccountRevocationResolver>>>,
+    /// The account-local server. It alone carries out a revocation recorded with
+    /// [`DirectConnections::revoke_other`].
+    local: Option<ServerConnection>,
     /// Removes what the client retained for a route once the person removes the route.
     route_removed: Mutex<Option<Arc<RouteCleanup>>>,
     /// Wakes the worker thread. The worker holds only this and a weak owner while it waits.
@@ -219,10 +210,8 @@ impl DirectConnections {
             records,
             credentials,
             Arc::new(worker::NativeNetwork),
+            ServerConnection::for_identity(identity).ok(),
         );
-        if let Ok(local) = ServerConnection::for_identity(identity) {
-            registry.set_account_resolver(Arc::new(account::LocalRevocationResolver(local)));
-        }
         let owner = identity.to_owned();
         registry.on_route_removed(Arc::new(move |route: &DirectRouteId| {
             // A copy that stays behind names a route nothing presents again.
@@ -245,6 +234,7 @@ impl DirectConnections {
         records: Arc<dyn Records>,
         credentials: Arc<dyn CredentialStore>,
         network: Arc<dyn worker::DirectNetwork>,
+        local: Option<ServerConnection>,
     ) -> Self {
         Self(Arc::new(Inner {
             identity: identity.to_owned(),
@@ -253,14 +243,10 @@ impl DirectConnections {
             network,
             state: Mutex::new(State::default()),
             changes: Mutex::default(),
-            resolver: Mutex::default(),
+            local,
             route_removed: Mutex::default(),
             work: Arc::default(),
         }))
-    }
-
-    pub fn set_account_resolver(&self, resolver: Arc<dyn AccountRevocationResolver>) {
-        *self.0.resolver.lock().unwrap_or_else(|e| e.into_inner()) = Some(resolver);
     }
 
     /// The startup owner calls this once. Construction and snapshot reads are inert.
@@ -672,21 +658,19 @@ impl DirectConnections {
         label: String,
     ) -> Result<(), DirectError> {
         let pin = server.direct_status()?.pin;
-        let route = self
-            .0
-            .resolver
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .ok_or(DirectError::Transport)?
-            .route_for(&server)?;
+        if self.0.local.is_none() {
+            return Err(DirectError::Transport);
+        }
+        if !server.is_account_local() {
+            return Err(DirectError::AuthenticationRefused);
+        }
         let operation = random_id()?;
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.document.ensure_capacity()?;
         state
             .document
             .pending
-            .push(PendingRecord::account(operation, label, pin, route, target));
+            .push(PendingRecord::account(operation, label, pin, target));
         state
             .pending
             .insert(operation, Retry::new(Interaction::Quiet));

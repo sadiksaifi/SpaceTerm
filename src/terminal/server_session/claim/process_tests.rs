@@ -311,14 +311,7 @@ fn prove_shell_started(host: &mut crate::runtime::SharedWorkspaceHost, lease: Le
         },
     ] {
         assert!(matches!(
-            host.request(
-                [1; 32],
-                lease.connection,
-                Request::Key {
-                    lease,
-                    key: encode_key(key)
-                }
-            ),
+            crate::runtime::directory_testing::type_keys(host, lease, vec![encode_key(key)]),
             Reply::Unchanged
         ));
     }
@@ -517,7 +510,6 @@ fn client_process() {
             cell_height: 16,
         }),
         appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
-        directory_recovery: true,
         attached_session: &mut false,
         takeover: &mut false,
         paste_unconfirmed: &mut false,

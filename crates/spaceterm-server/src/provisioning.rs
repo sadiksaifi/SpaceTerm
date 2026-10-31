@@ -147,23 +147,6 @@ pub fn cancel_direct(
 /// The client name setup connects under.
 const SETUP: &str = "Server setup";
 
-/// Saves where the running server listens and whether it does, through owning-account IPC, and
-/// returns its status once applied. `None` keeps the address saved before.
-pub fn set_network_access(
-    identity: &str,
-    policy: Option<NetworkPolicy>,
-    enabled: bool,
-) -> Result<DirectStatus, ServerError> {
-    match manage(
-        identity,
-        "Service command",
-        Management::SetPolicy { policy, enabled },
-    )? {
-        ManagementReply::Status(status) => Ok(status),
-        _ => Err(ServerError::Protocol),
-    }
-}
-
 fn manage(identity: &str, name: &str, request: Management) -> Result<ManagementReply, ServerError> {
     let paths = host::Paths::for_identity(identity)?;
     // Remote setup observes this reply for 15 s, so it never waits out a long operation.
@@ -171,13 +154,7 @@ fn manage(identity: &str, name: &str, request: Management) -> Result<ManagementR
     let server = Directory::open(&paths.data, false)?.read()?.server;
     let client = protocol::random()?;
     let mut stream = host::connect(&paths)?;
-    protocol::admit_client(
-        &mut stream,
-        (&client, &name.into()),
-        &server,
-        identity,
-        &[protocol::MAJOR],
-    )?;
+    protocol::admit_client(&mut stream, (&client, &name.into()), &server, identity)?;
     let link = host::link(stream, Arc::new(|_| {}))?;
     let reply = link
         .request(crate::protocol::Operation::Direct(request))?
@@ -205,7 +182,6 @@ pub struct AccountDiscovery {
     pub stopped: bool,
     pub start_observation: Option<crate::service::SetupStartObservation>,
     pub protocol_majors: Vec<u16>,
-    pub capabilities: Vec<String>,
     pub target: String,
     pub version: String,
     pub commit: String,
@@ -237,7 +213,6 @@ pub fn discover(identity: &str) -> Result<AccountDiscovery, ServerError> {
         stopped: status.stopped,
         start_observation,
         protocol_majors: vec![protocol::MAJOR],
-        capabilities: vec!["workspace_policy".into()],
         target: String::new(),
         version: String::new(),
         commit: String::new(),

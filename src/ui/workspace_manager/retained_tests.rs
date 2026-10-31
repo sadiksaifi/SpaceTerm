@@ -238,7 +238,7 @@ fn a_saved_route_should_present_what_it_retained_before_it_connects(cx: &mut Tes
     let farther = harness.local(key, 2, cx).expect("Farther is presented");
     harness.activate(farther, cx);
 
-    assert_eq!(harness.names(cx), ["Default", "Here", "Far", "Farther"]);
+    assert_eq!(harness.names(cx), ["Here", "Far", "Farther"]);
     assert_eq!(harness.active_name(cx), "Farther");
     // Storage keeps the shell's name, never the title a program set.
     assert_eq!(harness.active_tabs(cx), ("zsh".to_owned(), 1));
@@ -302,7 +302,7 @@ fn disconnect_should_keep_the_routes_workspaces_until_reconnecting_reconciles_th
     assert_eq!(
         disconnected,
         (
-            vec!["Default".to_owned(), "Far".to_owned(), "Farther".to_owned()],
+            vec!["Far".to_owned(), "Farther".to_owned()],
             far,
             farther,
             "Farther".to_owned(),
@@ -317,7 +317,7 @@ fn disconnect_should_keep_the_routes_workspaces_until_reconnecting_reconciles_th
         Some(RetainedInventory::retain(&published)),
         "Disconnect keeps what the server last confirmed"
     );
-    assert_eq!(harness.names(cx), ["Default", "Farther"]);
+    assert_eq!(harness.names(cx), ["Farther"]);
     assert_eq!(
         harness.local(key, 2, cx),
         farther,
@@ -379,7 +379,7 @@ fn a_server_publishing_the_retained_revision_should_open_the_routes_panes(cx: &m
         (false, true),
         "a relaunched client permits no Pane yet"
     );
-    assert_eq!(harness.names(cx), ["Default", "Far", "Farther"]);
+    assert_eq!(harness.names(cx), ["Far", "Farther"]);
     assert!(harness.permits(key, 101, cx) && harness.permits(key, 102, cx));
     assert!(
         !panes.opened().is_empty(),
@@ -408,7 +408,7 @@ fn reconnecting_at_the_same_revision_should_open_the_routes_panes_again(cx: &mut
     harness.republish(key, &returned, published, cx);
 
     assert!(disconnected);
-    assert_eq!(harness.names(cx), ["Default", "Far"]);
+    assert_eq!(harness.names(cx), ["Far"]);
     assert!(harness.permits(key, 101, cx));
     assert!(!panes.opened().is_empty());
     assert!(!offline_notice_shown(cx));
@@ -441,7 +441,7 @@ fn a_connection_should_take_edits_only_once_the_server_publishes(cx: &mut TestAp
     assert_eq!(
         waiting,
         (
-            vec!["Default".to_owned(), "Far".to_owned()],
+            vec!["Far".to_owned()],
             Some("Not connected"),
             SharedSubmission::Refused(SharedRefusalReason::Offline),
         )
@@ -505,7 +505,6 @@ fn a_window_should_leave_a_failure_settings_still_shows_to_settings(cx: &mut Tes
         harness.next_revision(),
         &[("Far", 1)],
     ))));
-    edits.set_worktree_writes(true);
     // Settings writes through the route's writer and keeps the answer it shows.
     let answer = cx.update(|_, cx| {
         crate::ui::server_worktrees::testing::present_direct(

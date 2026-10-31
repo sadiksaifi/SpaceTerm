@@ -15,7 +15,6 @@ use gpui::{App, Context, SharedString, Task, Window, div};
 use spaceterm_ui::{Button, ProgressRing, ProgressSize, ProgressState};
 
 use super::WorkspaceManager;
-use crate::domain::ValidatedLocalDirectory;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::server_connection::{ServerConnection, ServerError};
 use crate::ui::pane_lifecycle::PaneConstruction;
@@ -79,7 +78,6 @@ pub(crate) struct SharedServerConnection {
 pub(crate) trait SharedServerConnector {
     fn connect(
         &self,
-        client_home: ValidatedLocalDirectory,
         local_files: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         cx: &mut App,
@@ -161,7 +159,6 @@ struct AccountConnector;
 impl SharedServerConnector for AccountConnector {
     fn connect(
         &self,
-        client_home: ValidatedLocalDirectory,
         local_files: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         cx: &mut App,
@@ -171,13 +168,7 @@ impl SharedServerConnector for AccountConnector {
         let server = client.server.clone();
         Some(SharedServerConnection {
             edits: client.source,
-            sessions: SharedPaneSessions::new(
-                server.clone(),
-                client.controls,
-                client_home,
-                local_files,
-                panes,
-            ),
+            sessions: SharedPaneSessions::new(server.clone(), client.controls, local_files, panes),
             retained: Some(server),
         })
     }
@@ -309,9 +300,7 @@ const BUSY_DETAIL: &str =
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: ServerError) -> &'static str {
     match error {
-        ServerError::IncompatibleState
-        | ServerError::IncompatibleProtocol
-        | ServerError::MissingRequiredCapability => "Incompatible Server",
+        ServerError::IncompatibleState | ServerError::IncompatibleProtocol => "Incompatible Server",
         ServerError::ActivationUnresolved | ServerError::ReturnUnavailable => {
             "Server Update Unfinished"
         }
@@ -347,7 +336,6 @@ const fn ends_opening(error: ServerError) -> bool {
     matches!(
         error,
         ServerError::IncompatibleProtocol
-            | ServerError::MissingRequiredCapability
             | ServerError::ActivationUnresolved
             | ServerError::IncompatibleState
             | ServerError::StorageUnavailable
@@ -358,10 +346,7 @@ const fn ends_opening(error: ServerError) -> bool {
 
 /// Whether this client refused the server itself, which keeps running for its other clients.
 const fn incompatible(error: ServerError) -> bool {
-    matches!(
-        error,
-        ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability
-    )
+    matches!(error, ServerError::IncompatibleProtocol)
 }
 
 /// What launch presents for a failure. A refused server offers the update journey only when a
@@ -442,10 +427,10 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             waiting: false,
         },
         LaunchState::Incompatible { reason, update } => {
-            let detail = match (update, reason) {
-                (true, _) => "Updating the server ends its Terminal Sessions for every client.",
-                (false, ServerError::MissingRequiredCapability) => "This server needs an update.",
-                (false, _) => "SpaceTerm and this server are incompatible.",
+            let detail = if update {
+                "Updating the server ends its Terminal Sessions for every client."
+            } else {
+                "SpaceTerm and this server are incompatible."
             };
             LaunchPresentation {
                 title: failure_title(reason),
@@ -755,7 +740,8 @@ impl WorkspaceManager {
         }
         // The screen's own focus moves to its default action when one appears. The keyboard the
         // person or a reopened window left in the sidebar stays there.
-        if self.workspaces.active_workspace_id().is_none() && !self.sidebar_holds_keyboard(window, cx)
+        if self.workspaces.active_workspace_id().is_none()
+            && !self.sidebar_holds_keyboard(window, cx)
         {
             self.focus(window, cx);
         }
@@ -794,19 +780,10 @@ impl WorkspaceManager {
             });
             return LaunchState::Ready;
         }
-        // The client home only completes the launch plan a server-backed Terminal Session
-        // ignores. It is never the directory the server starts a shell in.
-        let client_home = match self.local_home_directory() {
-            Ok(client_home) => client_home,
-            Err(_) => return LaunchState::Failed(ServerError::StorageUnavailable),
-        };
         let connector = Rc::clone(&self.launch.adapters.connector);
-        let Some(connection) = connector.connect(
-            client_home,
-            self.local_filesystem.clone(),
-            &self.pane_construction,
-            cx,
-        ) else {
+        let Some(connection) =
+            connector.connect(self.local_filesystem.clone(), &self.pane_construction, cx)
+        else {
             return LaunchState::Failed(ServerError::Protocol);
         };
         self.present_shared_workspaces(connection.edits, connection.sessions, window, cx);
@@ -1111,7 +1088,6 @@ pub(crate) mod testing {
         impl SharedServerConnector for Presenting {
             fn connect(
                 &self,
-                client_home: crate::domain::ValidatedLocalDirectory,
                 _: crate::platform::local_filesystem::LocalFilesystemAuthority,
                 panes: &crate::ui::pane_lifecycle::PaneConstruction,
                 _: &mut gpui::App,
@@ -1138,7 +1114,7 @@ pub(crate) mod testing {
                                 id: [53; 32],
                                 source: None,
                                 axis: Axis::Right,
-                                starting_directory: client_home.path().to_owned(),
+                                starting_directory: std::env::temp_dir(),
                                 current_directory: None,
                                 repository_directory: None,
                                 presentation: None,
@@ -1150,10 +1126,9 @@ pub(crate) mod testing {
                     }],
                 };
                 let opener = ScriptedPanes::new(
-                    crate::terminal::WorkspaceTerminalSessionFactory::new_local(
-                        Rc::clone(&self.0),
-                        client_home,
-                    ),
+                    crate::terminal::WorkspaceTerminalSessionFactory::new_server(Rc::clone(
+                        &self.0,
+                    )),
                 );
                 Some(super::SharedServerConnection {
                     edits: SharedEditSource::new(Rc::new(ScriptedEdits::new(Some(inventory)))),
@@ -1177,7 +1152,6 @@ pub(crate) mod testing {
         impl SharedServerConnector for Unreachable {
             fn connect(
                 &self,
-                _: crate::domain::ValidatedLocalDirectory,
                 _: crate::platform::local_filesystem::LocalFilesystemAuthority,
                 _: &crate::ui::pane_lifecycle::PaneConstruction,
                 _: &mut gpui::App,

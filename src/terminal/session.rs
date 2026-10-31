@@ -18,7 +18,7 @@ pub(crate) use subscriptions::SubscriptionNotifier;
 pub use subscriptions::TerminalSubscription;
 use subscriptions::{TerminalEventPublisher, WorkerEventLifetime};
 mod schedules;
-use schedules::{FindQueryUpdate, ScheduleInput, WorkerSchedules};
+use schedules::{ScheduleInput, WorkerSchedules};
 mod launch;
 use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
@@ -46,13 +46,16 @@ use crate::platform::native_pty::{
 };
 use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchPlanner};
 use crate::terminal::accessibility::AccessibilitySelectionRefs;
+#[cfg(feature = "desktop")]
 use crate::terminal::accessibility::AccessibilitySelectionRequest;
 use crate::terminal::accessibility::TerminalAccessibilityModel;
 use crate::terminal::attention::AttentionEvent;
 #[cfg(test)]
 use crate::terminal::emulator::MAX_SYNCHRONIZED_OUTPUT_DURATION;
+#[cfg(feature = "desktop")]
+use crate::terminal::emulator::ScrollbackMovement;
 use crate::terminal::emulator::{
-    EmulatorAction, PresentationGeneration, ScreenSnapshot, ScrollbackMovement, TerminalEmulator,
+    EmulatorAction, PresentationGeneration, ScreenSnapshot, TerminalEmulator,
 };
 use crate::terminal::geometry::TerminalGeometry;
 #[cfg(test)]
@@ -68,6 +71,7 @@ use crate::terminal::paste::{
 };
 use crate::terminal::permission_request::{PermissionRequest, PermissionRequestFilter};
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
+#[cfg(feature = "desktop")]
 use crate::terminal::{FindDirection, FindQueryGeneration};
 
 const FINAL_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -105,8 +109,6 @@ pub enum TerminalSessionEvent {
     Line(spaceterm_server::pane::LineState),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
-    /// A program asked for a Permission Setup.
-    PermissionRequested(PermissionRequest),
     Exited(TerminalSessionExit),
     Failed(TerminalSessionFailure),
 }
@@ -278,6 +280,7 @@ impl From<std::io::Error> for TerminalSessionError {
     }
 }
 
+#[cfg(feature = "desktop")]
 pub struct StartedTerminalSession {
     pub handle: Box<dyn TerminalSessionHandle>,
     pub events: async_channel::Receiver<TerminalSessionEvent>,
@@ -288,7 +291,6 @@ pub struct StartedTerminalSession {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionCopyError {
     Formatting,
-    WorkerStopped,
 }
 
 /// Server-backed delivery for native accessibility requests, which the server Pane's
@@ -299,13 +301,6 @@ pub(crate) type ServerAccessibilitySelection =
 #[cfg(feature = "desktop")]
 pub(crate) type ServerAccessibilityDemand = Arc<dyn Fn() + Send + Sync>;
 
-#[derive(Clone)]
-enum AccessibilitySelectionTarget {
-    Worker(CommandSender<Command>),
-    #[cfg(feature = "desktop")]
-    Server(ServerAccessibilitySelection),
-}
-
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -314,10 +309,12 @@ enum AccessibilitySelectionTarget {
     )
 )]
 #[derive(Clone)]
+#[cfg(feature = "desktop")]
 pub struct AccessibilitySelectionSender {
-    target: AccessibilitySelectionTarget,
+    deliver: ServerAccessibilitySelection,
 }
 
+#[cfg(feature = "desktop")]
 impl fmt::Debug for AccessibilitySelectionSender {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("AccessibilitySelectionSender")
@@ -331,40 +328,30 @@ impl fmt::Debug for AccessibilitySelectionSender {
         reason = "only a native accessibility Adapter requests accessibility work"
     )
 )]
+#[cfg(feature = "desktop")]
 impl AccessibilitySelectionSender {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "desktop"))]
     pub fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
-        let (commands, receiver) = mpsc::channel();
+        let (requests, receiver) = mpsc::channel();
+        let requests = Mutex::new(requests);
         (
-            Self {
-                target: AccessibilitySelectionTarget::Worker(commands),
-            },
+            Self::server(Arc::new(move |request| {
+                let _ = requests
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .send(request);
+            })),
             RecordingAccessibilitySelectionReceiver(receiver),
         )
     }
 
     #[cfg(feature = "desktop")]
     pub(crate) fn server(deliver: ServerAccessibilitySelection) -> Self {
-        Self {
-            target: AccessibilitySelectionTarget::Server(deliver),
-        }
+        Self { deliver }
     }
 
     pub fn request(&self, request: AccessibilitySelectionRequest) {
-        match &self.target {
-            AccessibilitySelectionTarget::Worker(commands) => {
-                if commands
-                    .send(Command::AccessibilitySelection(request))
-                    .is_err()
-                {
-                    eprintln!(
-                        "terminal accessibility selection was dropped because the worker has stopped"
-                    );
-                }
-            }
-            #[cfg(feature = "desktop")]
-            AccessibilitySelectionTarget::Server(deliver) => deliver(request),
-        }
+        (self.deliver)(request);
     }
 }
 
@@ -435,19 +422,13 @@ impl AccessibilityDemandSender {
     }
 }
 
-#[cfg(test)]
-pub struct RecordingAccessibilitySelectionReceiver(CommandReceiver<Command>);
+#[cfg(all(test, feature = "desktop"))]
+pub struct RecordingAccessibilitySelectionReceiver(mpsc::Receiver<AccessibilitySelectionRequest>);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 impl RecordingAccessibilitySelectionReceiver {
     pub fn drain(&self) -> Vec<AccessibilitySelectionRequest> {
-        self.0
-            .try_iter()
-            .map(|command| match command {
-                Command::AccessibilitySelection(request) => request,
-                _ => unreachable!("Selection authority only sends Selection commands"),
-            })
-            .collect()
+        self.0.try_iter().collect()
     }
 }
 
@@ -471,41 +452,21 @@ impl TerminalSessionMetadataState {
     }
 }
 
-/// Requests are a bounded set of supported permissions, retained independently of UI wakeups.
-#[derive(Clone, Default)]
-struct TerminalSessionPermissionRequestState(Arc<Mutex<Option<PermissionRequest>>>);
-
-impl TerminalSessionPermissionRequestState {
-    fn snapshot(&self) -> Option<PermissionRequest> {
-        self.0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-    }
-
-    fn publish(&self, request: &PermissionRequest) {
-        let mut retained = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        match retained.as_mut() {
-            Some(retained) => retained.merge(request.clone()),
-            None => *retained = Some(request.clone()),
-        }
-    }
-}
-
-/// What a Terminal Session's current connection has answered about interactive terminal input.
+/// Whether a Terminal Session's current connection takes interactive terminal input yet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "desktop")]
 pub enum InteractiveInput {
-    /// The connection has not answered yet, so neither acceptance nor refusal is known.
+    /// The connection is still attaching or was interrupted.
     Pending,
     Accepted,
-    /// The connection answered that it carries no interactive terminal input.
-    Refused,
 }
 
 /// Bounds one host commit and the text retained while its transport completes.
+#[cfg(feature = "desktop")]
 pub const MAX_INPUT_METHOD_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+#[cfg(feature = "desktop")]
 pub enum InputMethodRefusal {
     #[error("Input method text is over 65,536 bytes.")]
     TooLarge,
@@ -514,12 +475,14 @@ pub enum InputMethodRefusal {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "desktop")]
 pub enum InputMethodOutcome {
     Written,
     /// Some text may have reached the terminal. Never replay this commit automatically.
     Interrupted,
 }
 
+#[cfg(feature = "desktop")]
 pub trait TerminalSessionHandle {
     /// Drains bounded native requests independently of replaceable presentation wakeups.
     fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
@@ -528,16 +491,6 @@ pub trait TerminalSessionHandle {
 
     /// Retained host hidden-input state when presentation notifications can coalesce.
     fn hidden_input(&self) -> Option<bool> {
-        None
-    }
-
-    /// The newest Terminal Metadata the Terminal Session retained, presentable or not.
-    fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
-        None
-    }
-
-    /// The permissions requested by this Terminal Session, retained across event replacement.
-    fn permission_request(&self) -> Option<PermissionRequest> {
         None
     }
 
@@ -647,13 +600,11 @@ pub trait TerminalSessionHandle {
 }
 
 /// Starts a server-owned Terminal Session or its client presentation.
+#[cfg(feature = "desktop")]
 pub trait TerminalSessionFactory {
-    /// Native runtimes consume the local launch authority. Server presentations use their
-    /// server-owned Pane and grant no client-local directory authority from this plan.
     fn start(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError>;
 
@@ -672,16 +623,10 @@ pub trait TerminalSessionFactory {
     fn local_file_authority(&self) -> Option<&LocalFilesystemAuthority> {
         None
     }
-
-    /// Whether the shell runs in a SpaceTerm Server rather than this application.
-    fn is_server_backed(&self) -> bool {
-        false
-    }
 }
 
 pub struct TerminalRuntime {
     metadata_state: TerminalSessionMetadataState,
-    permission_request_state: TerminalSessionPermissionRequestState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
@@ -761,14 +706,6 @@ impl TerminalRuntime {
             let _ = commands.send(Command::ApplicationWheel(input));
         }
     }
-    /// Routes native requests through the authenticated controlling client.
-    pub(crate) fn route_client_effects(&self) {
-        self.clipboard_authority.route();
-        self.schedule_input.set_accessibility_demand_enabled(true);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::RouteClientEffects);
-        }
-    }
     pub(crate) fn client_effect_focus(&self, focused: Option<bool>) {
         self.clipboard_authority.client_focus(focused);
     }
@@ -824,22 +761,6 @@ impl TerminalRuntime {
             clipboard,
             state: self.event_publisher.clone(),
         }
-    }
-
-    fn copy_selection_query(
-        &self,
-        generation: Option<PresentationGeneration>,
-    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        let Some(commands) = &self.commands else {
-            return Err(SelectionCopyError::WorkerStopped);
-        };
-        let (reply, receiver) = mpsc::sync_channel(1);
-        commands
-            .send(Command::SelectionCopy(generation, reply))
-            .map_err(|_| SelectionCopyError::WorkerStopped)?;
-        receiver
-            .recv()
-            .map_err(|_| SelectionCopyError::WorkerStopped)?
     }
 
     fn request_shutdown(&mut self) {
@@ -903,16 +824,12 @@ impl TerminalRuntime {
     }
 }
 
-impl TerminalSessionHandle for TerminalRuntime {
-    fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
+impl TerminalRuntime {
+    pub fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.metadata_state.snapshot()
     }
 
-    fn permission_request(&self) -> Option<PermissionRequest> {
-        self.permission_request_state.snapshot()
-    }
-
-    fn key(&self, input: KeyInput) {
+    pub fn key(&self, input: KeyInput) {
         if let Some(commands) = &self.commands
             && commands.send(Command::Key(input)).is_err()
         {
@@ -920,7 +837,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         }
     }
 
-    fn clear_screen_and_scrollback(&self) {
+    pub fn clear_screen_and_scrollback(&self) {
         if let Some(commands) = &self.commands
             && commands.send(Command::ClearScreenAndScrollback).is_err()
         {
@@ -928,7 +845,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         }
     }
 
-    fn focus(&self, focused: bool) {
+    pub fn focus(&self, focused: bool) {
         self.clipboard_authority.focus(focused);
         if let Some(commands) = &self.commands
             && commands.send(Command::Focus(focused)).is_err()
@@ -937,7 +854,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         }
     }
 
-    fn focus_paste_confirmation(&self, id: PasteConfirmationId) {
+    pub fn focus_paste_confirmation(&self, id: PasteConfirmationId) {
         self.clipboard_authority.focus(false);
         if let Some(commands) = &self.commands
             && commands.send(Command::FocusPasteConfirmation(id)).is_err()
@@ -948,7 +865,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         }
     }
 
-    fn resize(&self, geometry: TerminalGeometry) {
+    pub fn resize(&self, geometry: TerminalGeometry) {
         if let Some(commands) = &self.commands {
             let should_notify = self.schedule_input.enqueue_resize(geometry);
             let notification_delivered = should_notify && commands.send(Command::Resize).is_ok();
@@ -958,85 +875,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         }
     }
 
-    fn pointer(&self, input: PointerInput) {
-        if let Some(commands) = &self.commands
-            && commands.send(Command::Pointer(input)).is_err()
-        {
-            eprintln!("terminal pointer input was dropped because the worker has stopped");
-        }
-    }
-
-    fn pointer_and_copy_selection(
-        &self,
-        input: PointerInput,
-    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        let Some(commands) = &self.commands else {
-            return Err(SelectionCopyError::WorkerStopped);
-        };
-        let (reply, receiver) = mpsc::sync_channel(1);
-        commands
-            .send(Command::PointerAndCopySelection(input, reply))
-            .map_err(|_| SelectionCopyError::WorkerStopped)?;
-        receiver
-            .recv()
-            .map_err(|_| SelectionCopyError::WorkerStopped)?
-    }
-
-    fn wheel(&self, input: WheelInput) {
-        if let Some(commands) = &self.commands
-            && commands.send(Command::Wheel(input)).is_err()
-        {
-            eprintln!("terminal wheel input was dropped because the worker has stopped");
-        }
-    }
-
-    fn scroll_to(&self, offset_rows: u64, generation: PresentationGeneration) {
-        if let Some(commands) = &self.commands
-            && commands
-                .send(Command::ScrollTo(offset_rows, generation))
-                .is_err()
-        {
-            eprintln!("terminal scrollbar input was dropped because the worker has stopped");
-        }
-    }
-
-    fn scroll_scrollback(&self, movement: ScrollbackMovement) {
-        if let Some(commands) = &self.commands
-            && commands.send(Command::ScrollScrollback(movement)).is_err()
-        {
-            eprintln!("terminal scroll was dropped because the worker has stopped");
-        }
-    }
-
-    fn set_find_query(&self, generation: FindQueryGeneration, query: String) {
-        if let Some(commands) = &self.commands
-            && self.schedule_input.enqueue_find_query(generation, query)
-            && commands.send(Command::FindQueryChanged).is_err()
-        {
-            eprintln!("terminal Find query was dropped because the worker has stopped");
-        }
-    }
-
-    fn navigate_find(&self, generation: FindQueryGeneration, direction: FindDirection) {
-        if let Some(commands) = &self.commands
-            && commands
-                .send(Command::NavigateFind(generation, direction))
-                .is_err()
-        {
-            eprintln!("terminal Find navigation was dropped because the worker has stopped");
-        }
-    }
-
-    fn end_find(&self, generation: FindQueryGeneration) {
-        if let Some(commands) = &self.commands
-            && self.schedule_input.enqueue_find_end(generation)
-            && commands.send(Command::FindQueryChanged).is_err()
-        {
-            eprintln!("terminal Find close was dropped because the worker has stopped");
-        }
-    }
-
-    fn request_paste(
+    pub fn request_paste(
         &self,
         text: PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
@@ -1054,7 +893,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         receiver
     }
 
-    fn resolve_paste(
+    pub fn resolve_paste(
         &self,
         id: PasteConfirmationId,
         decision: PasteDecision,
@@ -1073,43 +912,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         receiver
     }
 
-    fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        self.copy_selection_query(None)
-    }
-
-    fn copy_or_forward(
-        &self,
-        modifiers: InputModifiers,
-    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        let commands = self
-            .commands
-            .as_ref()
-            .ok_or(SelectionCopyError::WorkerStopped)?;
-        let (reply, receiver) = mpsc::sync_channel(1);
-        commands
-            .send(Command::CopyOrForward(modifiers, reply))
-            .map_err(|_| SelectionCopyError::WorkerStopped)?;
-        receiver
-            .recv()
-            .map_err(|_| SelectionCopyError::WorkerStopped)?
-    }
-
-    fn copy_selection_at(
-        &self,
-        generation: PresentationGeneration,
-    ) -> Result<Option<SelectionCopy>, SelectionCopyError> {
-        self.copy_selection_query(Some(generation))
-    }
-
-    fn accessibility_selection_sender(&self) -> Option<AccessibilitySelectionSender> {
-        self.commands
-            .as_ref()
-            .map(|commands| AccessibilitySelectionSender {
-                target: AccessibilitySelectionTarget::Worker(commands.clone()),
-            })
-    }
-
-    fn accessibility_demand_sender(&self) -> Option<AccessibilityDemandSender> {
+    pub fn accessibility_demand_sender(&self) -> Option<AccessibilityDemandSender> {
         self.commands
             .as_ref()
             .map(|commands| AccessibilityDemandSender {
@@ -1120,11 +923,7 @@ impl TerminalSessionHandle for TerminalRuntime {
             })
     }
 
-    fn set_presentable(&self, presentable: bool) {
-        if !self.clipboard_authority.routed() {
-            self.schedule_input
-                .set_accessibility_demand_enabled(presentable);
-        }
+    pub fn set_presentable(&self, presentable: bool) {
         if let Some(commands) = &self.commands
             && commands.send(Command::SetPresentable(presentable)).is_err()
         {
@@ -1132,7 +931,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         }
     }
 
-    fn update_appearance(&self, update: TerminalAppearanceUpdate) {
+    pub fn update_appearance(&self, update: TerminalAppearanceUpdate) {
         let Some(commands) = &self.commands else {
             return;
         };
@@ -1198,7 +997,6 @@ enum Command {
     Run(String, RunReply),
     ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
-    RouteClientEffects,
     Subscribe {
         accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
         clipboard: async_channel::Sender<ClipboardRequest>,
@@ -1208,19 +1006,9 @@ enum Command {
     Focus(bool),
     FocusPasteConfirmation(PasteConfirmationId),
     Resize,
-    Pointer(PointerInput),
     ApplicationPointer(PointerInput, u64, u64),
     CancelApplicationPointer,
     ApplicationWheel(WheelInput),
-    PointerAndCopySelection(
-        PointerInput,
-        mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
-    ),
-    Wheel(WheelInput),
-    ScrollTo(u64, PresentationGeneration),
-    ScrollScrollback(ScrollbackMovement),
-    FindQueryChanged,
-    NavigateFind(FindQueryGeneration, FindDirection),
     RequestPaste(
         PastePayload,
         async_channel::Sender<Result<PasteRequestOutcome, String>>,
@@ -1231,18 +1019,6 @@ enum Command {
         async_channel::Sender<Result<PasteResolution, String>>,
     ),
     PasteConfirmationExpired,
-    SelectionCopy(
-        Option<PresentationGeneration>,
-        mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
-    ),
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "only a native accessibility Adapter requests accessibility work"
-        )
-    )]
-    AccessibilitySelection(AccessibilitySelectionRequest),
     #[cfg_attr(
         not(target_os = "macos"),
         allow(
@@ -1255,7 +1031,6 @@ enum Command {
     PublishAccessibility,
     /// A hidden Terminal Session reports metadata that changed while it was paced.
     PublishMetadata,
-    SelectionAutoscrollTick,
     PublishPendingScreen,
     MetadataStatusTick,
     GraphicsAnimationTick,
@@ -1286,14 +1061,8 @@ impl Command {
     fn requires_presentation_barrier(&self) -> bool {
         matches!(
             self,
-            Self::Pointer(..)
-                | Self::ApplicationPointer(..)
-                | Self::PointerAndCopySelection(..)
-                | Self::Wheel(..)
-                | Self::ScrollTo(..)
-                | Self::SelectionCopy(Some(_), _)
+            Self::ApplicationPointer(..)
                 | Self::ServerAccessibilitySelection(..)
-                | Self::AccessibilitySelection(..)
                 | Self::AccessibilityContinue
                 | Self::PublishAccessibility
         )
@@ -1307,33 +1076,22 @@ impl fmt::Debug for Command {
             Self::Run(..) => "Run",
             Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
-            Self::RouteClientEffects => "RouteClientEffects",
             Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
             Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
             Self::Focus(..) => "Focus",
             Self::FocusPasteConfirmation(..) => "FocusPasteConfirmation",
             Self::Resize => "Resize",
-            Self::Pointer(..) => "Pointer",
             Self::ApplicationPointer(..) => "ApplicationPointer",
             Self::CancelApplicationPointer => "CancelApplicationPointer",
             Self::ApplicationWheel(..) => "ApplicationWheel",
-            Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
-            Self::Wheel(..) => "Wheel",
-            Self::ScrollTo(..) => "ScrollTo",
-            Self::ScrollScrollback(..) => "ScrollScrollback",
-            Self::FindQueryChanged => "FindQueryChanged",
-            Self::NavigateFind(..) => "NavigateFind",
             Self::RequestPaste(..) => "RequestPaste",
             Self::ResolvePaste(..) => "ResolvePaste",
             Self::PasteConfirmationExpired => "PasteConfirmationExpired",
-            Self::SelectionCopy(..) => "SelectionCopy",
-            Self::AccessibilitySelection(..) => "AccessibilitySelection",
             Self::AccessibilityDemand => "AccessibilityDemand",
             Self::AccessibilityContinue => "AccessibilityContinue",
             Self::PublishAccessibility => "PublishAccessibility",
             Self::PublishMetadata => "PublishMetadata",
-            Self::SelectionAutoscrollTick => "SelectionAutoscrollTick",
             Self::PublishPendingScreen => "PublishPendingScreen",
             Self::MetadataStatusTick => "MetadataStatusTick",
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
@@ -1359,12 +1117,9 @@ impl fmt::Debug for Command {
 
 struct TerminalWorker {
     metadata_state: TerminalSessionMetadataState,
-    permission_request_state: TerminalSessionPermissionRequestState,
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
-    /// The worker presents a SpaceTerm Server Pane: clients present and read its screens.
-    served: bool,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
     events: TerminalEventPublisher,
@@ -1400,7 +1155,6 @@ struct TerminalWorkerContext {
 struct TerminalWorkerPublishers {
     clipboard: WorkerClipboard,
     metadata_state: TerminalSessionMetadataState,
-    permission_request_state: TerminalSessionPermissionRequestState,
     events: TerminalEventPublisher,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
@@ -1511,7 +1265,6 @@ impl TerminalWorker {
         let TerminalWorkerPublishers {
             clipboard,
             metadata_state,
-            permission_request_state,
             events,
             accessibility,
         } = publishers;
@@ -1561,11 +1314,9 @@ impl TerminalWorker {
 
         let mut worker = Self {
             metadata_state,
-            permission_request_state,
             native_pty,
             input: PtyInput::default(),
             emulator,
-            served: false,
             commands,
             reader_events: reader_event_rx,
             events,
@@ -1754,8 +1505,7 @@ impl TerminalWorker {
     }
 
     fn order_presentation_barrier(&mut self, command: Command) -> Command {
-        if self.served
-            && !self.schedules.is_presentable()
+        if !self.schedules.is_presentable()
             && matches!(
                 &command,
                 Command::AccessibilityContinue | Command::PublishAccessibility
@@ -1789,9 +1539,7 @@ impl TerminalWorker {
                 match self.emulator.set_accessibility_selection_refs(selection) {
                     Ok(changed) => {
                         let _ = reply.send(changed);
-                        !changed
-                            || (self.apply_emulator_action(EmulatorAction::screen_changed())
-                                && self.refresh_selection_autoscroll())
+                        !changed || self.apply_emulator_action(EmulatorAction::screen_changed())
                     }
                     Err(message) => {
                         let _ = reply.send(false);
@@ -1802,13 +1550,6 @@ impl TerminalWorker {
             }
             Command::EndAccessibilityDemand(ended_at) => {
                 self.schedules.end_accessibility_demand(ended_at);
-                true
-            }
-            Command::RouteClientEffects => {
-                self.emulator.enable_client_clipboard();
-                self.served = true;
-                self.schedules
-                    .set_server_presentable(self.schedules.is_presentable(), Instant::now());
                 true
             }
             Command::Subscribe {
@@ -1891,10 +1632,7 @@ impl TerminalWorker {
                 })();
 
                 match result {
-                    Ok(()) => {
-                        self.apply_emulator_action(EmulatorAction::screen_changed())
-                            && self.refresh_selection_autoscroll()
-                    }
+                    Ok(()) => self.apply_emulator_action(EmulatorAction::screen_changed()),
                     Err(message) => {
                         self.send_runtime_failure(message);
                         false
@@ -1925,75 +1663,6 @@ impl TerminalWorker {
                     false
                 }
             },
-            Command::Pointer(input) => match self.emulator.pointer(input) {
-                Ok(action) => {
-                    self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
-                }
-                Err(message) => {
-                    self.send_runtime_failure(message);
-                    false
-                }
-            },
-            Command::PointerAndCopySelection(input, reply) => match self.emulator.pointer(input) {
-                Ok(action) => {
-                    let copy = if action.selection_completed {
-                        self.emulator
-                            .selection_copy(SelectionCopyOptions::default())
-                            .map_err(|_| SelectionCopyError::Formatting)
-                    } else {
-                        Ok(None)
-                    };
-                    let _ = reply.send(copy);
-                    self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
-                }
-                Err(message) => {
-                    let _ = reply.send(Ok(None));
-                    self.send_runtime_failure(message);
-                    false
-                }
-            },
-            Command::Wheel(input) => match self.emulator.wheel(input) {
-                Ok(action) => self.apply_emulator_action(action),
-                Err(message) => {
-                    self.send_runtime_failure(message);
-                    false
-                }
-            },
-            Command::ScrollTo(offset_rows, generation) => {
-                if self.emulator.synchronized_output_deadline().is_some() {
-                    return true;
-                }
-                let action = self.emulator.scroll_to_at(offset_rows, generation);
-                self.apply_emulator_action(action)
-            }
-            Command::ScrollScrollback(movement) => {
-                if self.emulator.synchronized_output_deadline().is_some() {
-                    return true;
-                }
-                let action = self.emulator.scroll_scrollback(movement);
-                self.apply_emulator_action(action)
-            }
-            Command::FindQueryChanged => {
-                let Some(update) = self.schedules.take_find_query() else {
-                    return true;
-                };
-                let action = match update {
-                    FindQueryUpdate::Set(generation, query) => {
-                        self.emulator.set_find_query(generation, query)
-                    }
-                    FindQueryUpdate::End(generation) => self.emulator.end_find(generation),
-                };
-                self.apply_emulator_action(action)
-            }
-            Command::NavigateFind(generation, direction) => {
-                match self.emulator.navigate_find(generation, direction) {
-                    Ok(action) => self.apply_emulator_action(action),
-                    Err(message) => {
-                        self.send_runtime_failure(message);
-                        false
-                    }
-                }
-            }
             Command::RequestPaste(text, reply) => self.process_paste_request(text, reply),
             Command::ResolvePaste(id, decision, reply) => {
                 self.process_paste_resolution(id, decision, reply)
@@ -2022,31 +1691,6 @@ impl TerminalWorker {
                 let _ = reply.send(selection);
                 keep_running
             }
-            Command::SelectionCopy(generation, reply) => {
-                let selection = if generation.is_some_and(|generation| {
-                    generation != self.emulator.presentation_generation()
-                        || self.emulator.synchronized_output_deadline().is_some()
-                }) {
-                    Ok(None)
-                } else {
-                    self.emulator
-                        .selection_copy(SelectionCopyOptions::default())
-                        .map_err(|_| SelectionCopyError::Formatting)
-                };
-                let _ = reply.send(selection);
-                true
-            }
-            Command::AccessibilitySelection(request) => {
-                match self.emulator.set_accessibility_selection(request) {
-                    Ok(action) => {
-                        self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
-                    }
-                    Err(message) => {
-                        self.send_runtime_failure(message);
-                        false
-                    }
-                }
-            }
             Command::AccessibilityDemand => {
                 self.schedules.accessibility_demand_received(Instant::now());
                 true
@@ -2054,20 +1698,6 @@ impl TerminalWorker {
             Command::AccessibilityContinue => self.publish_accessibility(false),
             Command::PublishAccessibility => self.publish_accessibility(true),
             Command::PublishMetadata => self.publish_metadata_changed(),
-            Command::SelectionAutoscrollTick => {
-                if self.emulator.synchronized_output_deadline().is_some() {
-                    return self.refresh_selection_autoscroll();
-                }
-                match self.emulator.selection_autoscroll_tick() {
-                    Ok(action) => {
-                        self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
-                    }
-                    Err(message) => {
-                        self.send_runtime_failure(message);
-                        false
-                    }
-                }
-            }
             Command::PublishPendingScreen => self.publish_screen(),
             Command::MetadataStatusTick => self.advance_metadata_status(),
             Command::GraphicsAnimationTick => {
@@ -2081,11 +1711,7 @@ impl TerminalWorker {
             }
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
-                if self.served {
-                    self.schedules.set_server_presentable(presentable, now);
-                } else {
-                    self.schedules.set_presentable(presentable, now);
-                }
+                self.schedules.set_presentable(presentable, now);
                 if !presentable && !self.cancel_pointer_drag() {
                     return false;
                 }
@@ -2252,21 +1878,6 @@ impl TerminalWorker {
             }
         }
     }
-
-    fn refresh_selection_autoscroll(&mut self) -> bool {
-        match self.emulator.selection_autoscroll_interval() {
-            Ok(interval) => {
-                self.schedules
-                    .update_selection_autoscroll(Instant::now(), interval);
-                true
-            }
-            Err(message) => {
-                self.send_runtime_failure(message);
-                false
-            }
-        }
-    }
-
     fn process_reader_events(&mut self, epoch: Option<u64>) -> bool {
         self.process_reader_events_limit(PTY_OUTPUT_QUEUE_CAPACITY, epoch)
     }
@@ -2400,9 +2011,6 @@ impl TerminalWorker {
             }
         }
         if let Some((request, epoch)) = requested {
-            if !self.clipboard.authority.routed() {
-                self.permission_request_state.publish(&request);
-            }
             let effect = spaceterm_server::pane::effects::Effect::PermissionSetup {
                 screen_recording: request.permissions().contains(
                     &crate::platform::permission_access::SystemPermission::ScreenRecording,
@@ -2411,19 +2019,13 @@ impl TerminalWorker {
                     .permissions()
                     .contains(&crate::platform::permission_access::SystemPermission::Accessibility),
             };
-            if !self.send_client_effect(
-                TerminalSessionEvent::PermissionRequested(request),
-                effect,
-                epoch,
-            ) {
+            if !self.send_client_effect(effect, epoch) {
                 return false;
             }
         }
 
         if received_output {
-            if self.served {
-                self.schedules.note_hidden_server_content_changed();
-            }
+            self.schedules.note_hidden_server_content_changed();
             let metadata = self.emulator.metadata();
             let metadata_revised = metadata.revision != previous_metadata.revision;
             if metadata_revised {
@@ -2517,7 +2119,7 @@ impl TerminalWorker {
                     duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
                 },
             };
-            if !self.send_client_effect(TerminalSessionEvent::Attention(event), effect, epoch) {
+            if !self.send_client_effect(effect, epoch) {
                 return false;
             }
         }
@@ -2584,7 +2186,7 @@ impl TerminalWorker {
 
     fn cancel_pointer_drag(&mut self) -> bool {
         match self.emulator.cancel_pointer_drag() {
-            Ok(action) => self.apply_emulator_action(action) && self.refresh_selection_autoscroll(),
+            Ok(action) => self.apply_emulator_action(action),
             Err(message) => {
                 self.send_runtime_failure(message);
                 false
@@ -2669,9 +2271,7 @@ impl TerminalWorker {
     }
 
     fn publish_visible_screen_change(&mut self) -> bool {
-        if self.served {
-            self.schedules.note_hidden_server_content_changed();
-        }
+        self.schedules.note_hidden_server_content_changed();
         self.schedules.request_presentation();
         if self.schedules.take_visible_presentation() {
             self.publish_screen()
@@ -2710,11 +2310,7 @@ impl TerminalWorker {
     fn publish_screen(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
-            if self.served {
-                self.schedules.set_server_presentable(false, Instant::now());
-            } else {
-                self.schedules.set_presentable(false, Instant::now());
-            }
+            self.schedules.set_presentable(false, Instant::now());
             return true;
         }
 
@@ -2915,15 +2511,13 @@ impl TerminalWorker {
         ))
     }
 
+    /// Relays an effect to the controlling client that held focus when its output arrived.
+    /// An effect without that client is dropped.
     fn send_client_effect(
         &self,
-        direct: TerminalSessionEvent,
         effect: spaceterm_server::pane::effects::Effect,
         epoch: Option<u64>,
     ) -> bool {
-        if !self.clipboard.authority.routed() {
-            return self.send_terminal_event(direct);
-        }
         if self.clipboard.authority.native_request(epoch) {
             self.events.client_effect(ClientEffectRequest::new(
                 effect,
@@ -2931,10 +2525,8 @@ impl TerminalWorker {
                 epoch.unwrap_or_default(),
                 Duration::from_secs(1),
             ));
-            true
-        } else {
-            true
         }
+        true
     }
 
     fn send_terminal_event(&self, event: TerminalSessionEvent) -> bool {

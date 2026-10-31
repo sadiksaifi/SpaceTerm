@@ -18,11 +18,10 @@ use spaceterm_ui::{
 
 use super::appearance::{ChromeAppearance, gpui_color};
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
-use crate::platform::local_filesystem::{LocalFilesystemError, NewDirectoryTarget};
 use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::worktrees::git::{BranchList, BranchName, WorktreeBranch, WorktreeCreateError};
-use crate::worktrees::path_template::expand;
 use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
+use spaceterm_server::worktree::path_template::expand;
 
 const FORM_MODAL_ID: &str = "new-worktree-form";
 const CREATE_ACTION_SELECTOR: &str = "new-worktree-create";
@@ -33,11 +32,8 @@ const CREATING: &str = "Creating Worktree\u{2026}";
 const CONNECTION_LOST: &str = "Connection lost. SpaceTerm checks the result when it reconnects.";
 const LOADING_BRANCHES: &str = "Loading Branches\u{2026}";
 
-/// Runs the dialog's git work for one repository.
+/// Runs the dialog's git work for one repository on its owning server.
 pub(crate) trait WorktreeFormBackend {
-    fn server(&self) -> bool {
-        false
-    }
     /// The other computer whose server runs Git, or `None` for this computer's.
     fn machine(&self) -> Option<&str> {
         None
@@ -59,10 +55,6 @@ pub(crate) trait WorktreeFormBackend {
     /// The form will not present the answer to its last Create, so the Workspace Window does.
     fn release(&self) {}
 }
-
-/// Checks whether a new directory may go at a path.
-pub(crate) type LocationProbe =
-    Rc<dyn Fn(&Path) -> Result<NewDirectoryTarget, LocalFilesystemError>>;
 
 /// What the dialog proposes from: the repository, the person's template, and its Worktrees.
 pub(crate) struct WorktreeFormContext {
@@ -137,7 +129,6 @@ impl FormErrors {
 pub(crate) struct WorktreeForm {
     backend: Rc<dyn WorktreeFormBackend>,
     context: WorktreeFormContext,
-    probe: LocationProbe,
     source: BranchSource,
     name: Entity<TextInput>,
     location: Entity<TextInput>,
@@ -175,7 +166,6 @@ impl WorktreeForm {
     pub(crate) fn new(
         backend: Rc<dyn WorktreeFormBackend>,
         context: WorktreeFormContext,
-        probe: LocationProbe,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -202,7 +192,6 @@ impl WorktreeForm {
         let mut form = Self {
             backend,
             context,
-            probe,
             source: BranchSource::New,
             name,
             location,
@@ -270,17 +259,13 @@ impl WorktreeForm {
             ],
             DialogInitialFocus::Body(self.name.read(cx).focus_handle()),
         )
-        .description(match (self.backend.server(), self.backend.machine()) {
-            (true, Some(machine)) => format!(
+        .description(match self.backend.machine() {
+            Some(machine) => format!(
                 "Create a Worktree for a branch of {} on \u{201C}{machine}\u{201D}.",
                 self.context.repository_name
             ),
-            (true, None) => format!(
+            None => format!(
                 "Create a Worktree for a branch of {}.",
-                self.context.repository_name
-            ),
-            (false, _) => format!(
-                "Check out a branch of {} in its own directory.",
                 self.context.repository_name
             ),
         })
@@ -518,9 +503,7 @@ impl WorktreeForm {
     ) -> DialogCloseDecision {
         self.answered();
         match action {
-            FormAction::Cancel
-                if self.pending && self.backend.server() && !self.backend.connected() =>
-            {
+            FormAction::Cancel if self.pending && !self.backend.connected() => {
                 DialogCloseDecision::Allow
             }
             FormAction::Cancel if self.pending => {
@@ -540,20 +523,8 @@ impl WorktreeForm {
             FormAction::Create => {
                 self.submit_attempted = true;
                 self.backend_error = None;
-                let checked =
-                    self.validate(cx)
-                        .and_then(|(path, branch)| match (self.probe)(&path) {
-                            Ok(NewDirectoryTarget::Free) => Ok((path, branch)),
-                            Ok(NewDirectoryTarget::Occupied) => Err(FormErrors {
-                                location: Some("Choose a new or empty directory.".into()),
-                                ..FormErrors::default()
-                            }),
-                            Err(_) => Err(FormErrors {
-                                location: Some("Can\u{2019}t use this location.".into()),
-                                ..FormErrors::default()
-                            }),
-                        });
-                match checked {
+                // The owning server checks the location when it creates the Worktree.
+                match self.validate(cx) {
                     Ok((path, branch)) => {
                         self.start_create(path, branch, completion, window_handle, cx);
                         DialogCloseDecision::Pending
@@ -581,26 +552,25 @@ impl WorktreeForm {
         cx: &mut Context<Self>,
     ) {
         self.pending = true;
-        if self.backend.server() {
-            self._status = cx.spawn(async move |form, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(150))
-                        .await;
-                    if !form
-                        .update(cx, |f, cx| {
-                            if f.pending {
-                                cx.notify();
-                            }
-                            f.pending && f.open
-                        })
-                        .unwrap_or(false)
-                    {
-                        break;
-                    }
+        // The status follows the server connection while the Create waits.
+        self._status = cx.spawn(async move |form, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                if !form
+                    .update(cx, |f, cx| {
+                        if f.pending {
+                            cx.notify();
+                        }
+                        f.pending && f.open
+                    })
+                    .unwrap_or(false)
+                {
+                    break;
                 }
-            });
-        }
+            }
+        });
         self.set_enabled(false, cx);
         let generation = self.generation;
         let task = self.backend.create(path, branch, cx);
@@ -1242,8 +1212,6 @@ mod tests {
     struct ScriptedBackend {
         results: RefCell<Vec<Result<(), WorktreeCreateError>>>,
         created: RefCell<Vec<(PathBuf, WorktreeBranch)>>,
-        /// Runs git on a server, whose connection can be lost.
-        server: bool,
         disconnected: Cell<bool>,
         /// Holds git's answers until the test sends them.
         held_branches: Option<async_channel::Receiver<Option<BranchList>>>,
@@ -1255,10 +1223,6 @@ mod tests {
     }
 
     impl WorktreeFormBackend for ScriptedBackend {
-        fn server(&self) -> bool {
-            self.server
-        }
-
         fn connected(&self) -> bool {
             !self.disconnected.get()
         }
@@ -1320,7 +1284,6 @@ mod tests {
 
     fn form_window(
         backend: Rc<ScriptedBackend>,
-        free: bool,
         cx: &mut TestAppContext,
     ) -> (Entity<WorktreeForm>, Events, &mut VisualTestContext) {
         cx.update(crate::ui::init)
@@ -1330,7 +1293,8 @@ mod tests {
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let context = WorktreeFormContext {
                 repository_name: "app".into(),
-                template: crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE.into(),
+                template: spaceterm_server::worktree::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+                    .into(),
                 home: HOME.into(),
                 checked_out: vec![
                     ("main".into(), "app".into()),
@@ -1338,16 +1302,7 @@ mod tests {
                 ],
                 default_base: Some("main".into()),
             };
-            let form = cx.new(|cx| {
-                let probe: LocationProbe = Rc::new(move |_| {
-                    Ok(if free {
-                        NewDirectoryTarget::Free
-                    } else {
-                        NewDirectoryTarget::Occupied
-                    })
-                });
-                WorktreeForm::new(backend, context, probe, window, cx)
-            });
+            let form = cx.new(|cx| WorktreeForm::new(backend, context, window, cx));
             cx.subscribe(&form, move |_, _, event, _| {
                 captured.borrow_mut().push(event.clone());
             })
@@ -1456,14 +1411,13 @@ mod tests {
     }
 
     /// Starts a Create that git holds, pressing Create twice.
-    fn create_and_hold(server: bool, cx: &mut TestAppContext) -> (Held, &mut VisualTestContext) {
+    fn create_and_hold(cx: &mut TestAppContext) -> (Held, &mut VisualTestContext) {
         let (answer, held) = async_channel::bounded(1);
         let backend = Rc::new(ScriptedBackend {
-            server,
             held_create: Some(held),
             ..ScriptedBackend::default()
         });
-        let (form, events, cx) = form_window(Rc::clone(&backend), true, cx);
+        let (form, events, cx) = form_window(Rc::clone(&backend), cx);
         type_into(&form, FormField::Name, "fresh", cx);
         create(cx);
         create(cx);
@@ -1476,11 +1430,9 @@ mod tests {
         (held, cx)
     }
 
-    fn creating_should_show_a_spinner_until_git_creates_the_worktree(
-        server: bool,
-        cx: &mut TestAppContext,
-    ) {
-        let (held, cx) = create_and_hold(server, cx);
+    #[gpui::test]
+    fn creating_should_show_a_spinner_until_git_creates_the_worktree(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(cx);
         let pending = progress(cx);
         let attempts = held.backend.created.borrow().len();
 
@@ -1499,24 +1451,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn creating_locally_should_show_a_spinner_until_git_creates_the_worktree(
-        cx: &mut TestAppContext,
-    ) {
-        creating_should_show_a_spinner_until_git_creates_the_worktree(false, cx);
-    }
-
-    #[gpui::test]
-    fn creating_on_a_server_should_show_a_spinner_until_git_creates_the_worktree(
-        cx: &mut TestAppContext,
-    ) {
-        creating_should_show_a_spinner_until_git_creates_the_worktree(true, cx);
-    }
-
-    fn a_failed_create_should_replace_the_spinner_with_its_error(
-        server: bool,
-        cx: &mut TestAppContext,
-    ) {
-        let (held, cx) = create_and_hold(server, cx);
+    fn a_failed_create_should_replace_the_spinner_with_its_error(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(cx);
         let pending = progress(cx);
 
         held.answer
@@ -1542,7 +1478,7 @@ mod tests {
     /// here by editing a field.
     #[gpui::test]
     fn an_error_should_count_as_seen_when_the_person_next_edits(cx: &mut TestAppContext) {
-        let (held, cx) = create_and_hold(true, cx);
+        let (held, cx) = create_and_hold(cx);
         held.answer
             .try_send(Err(WorktreeCreateError::BranchExists))
             .expect("git is waiting");
@@ -1561,7 +1497,7 @@ mod tests {
     /// The form never showed that failure, so it leaves it to the Workspace Window.
     #[gpui::test]
     fn escape_before_the_error_draws_should_leave_the_failure_unanswered(cx: &mut TestAppContext) {
-        let (held, cx) = create_and_hold(true, cx);
+        let (held, cx) = create_and_hold(cx);
         let form = held.form.clone();
         // The form notifies once it holds the failure. Observers run before the frame that would
         // draw the error, as an Escape the person pressed just then does.
@@ -1596,18 +1532,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_failed_local_create_should_replace_the_spinner_with_its_error(cx: &mut TestAppContext) {
-        a_failed_create_should_replace_the_spinner_with_its_error(false, cx);
-    }
-
-    #[gpui::test]
-    fn a_failed_server_create_should_replace_the_spinner_with_its_error(cx: &mut TestAppContext) {
-        a_failed_create_should_replace_the_spinner_with_its_error(true, cx);
-    }
-
-    #[gpui::test]
     fn a_pending_create_should_disable_every_control(cx: &mut TestAppContext) {
-        let (held, cx) = create_and_hold(false, cx);
+        let (held, cx) = create_and_hold(cx);
         let disabled = |cx: &mut VisualTestContext| {
             let tree = A11yTree::read(cx);
             [
@@ -1636,7 +1562,7 @@ mod tests {
             held_create: Some(held),
             ..ScriptedBackend::default()
         });
-        let (form, _, cx) = form_window(backend, true, cx);
+        let (form, _, cx) = form_window(backend, cx);
         type_into(&form, FormField::Name, "fresh", cx);
         let position = |cx: &mut VisualTestContext| {
             cx.debug_bounds("modal-action-new-worktree-create")
@@ -1657,7 +1583,7 @@ mod tests {
 
     #[gpui::test]
     fn losing_the_connection_should_keep_the_spinner_and_let_cancel_close(cx: &mut TestAppContext) {
-        let (held, cx) = create_and_hold(true, cx);
+        let (held, cx) = create_and_hold(cx);
 
         held.backend.disconnected.set(true);
         cx.executor()
@@ -1671,8 +1597,9 @@ mod tests {
         assert!(!held.form.read_with(cx, |form, _| form.is_open()));
     }
 
-    fn cancel_should_wait_for_the_started_create(server: bool, cx: &mut TestAppContext) {
-        let (held, cx) = create_and_hold(server, cx);
+    #[gpui::test]
+    fn cancel_should_wait_for_the_started_create(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(cx);
 
         click("modal-action-new-worktree-cancel", cx);
         let waiting = (
@@ -1692,23 +1619,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancel_should_wait_for_a_started_local_create(cx: &mut TestAppContext) {
-        cancel_should_wait_for_the_started_create(false, cx);
-    }
-
-    #[gpui::test]
-    fn cancel_should_wait_for_a_started_server_create(cx: &mut TestAppContext) {
-        cancel_should_wait_for_the_started_create(true, cx);
-    }
-
-    #[gpui::test]
     fn the_branch_field_should_show_its_branches_loading(cx: &mut TestAppContext) {
         let (branches, held) = async_channel::bounded(1);
         let backend = Rc::new(ScriptedBackend {
             held_branches: Some(held),
             ..ScriptedBackend::default()
         });
-        let (_, _, cx) = form_window(backend, true, cx);
+        let (_, _, cx) = form_window(backend, cx);
         let loading = progress(cx).spinners;
 
         branches
@@ -1727,7 +1644,7 @@ mod tests {
 
     #[gpui::test]
     fn branch_picker_should_sanitize_labels_and_keep_raw_branch_choices(cx: &mut TestAppContext) {
-        let (form, _, cx) = form_window(Rc::new(ScriptedBackend::default()), true, cx);
+        let (form, _, cx) = form_window(Rc::new(ScriptedBackend::default()), cx);
         let local = "feature/\u{202e}search".to_owned();
         let remote = format!("origin/{local}");
         form.update(cx, |form, cx| {
@@ -1774,7 +1691,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let backend = Rc::new(ScriptedBackend::default());
-        let (form, events, cx) = form_window(Rc::clone(&backend), true, cx);
+        let (form, events, cx) = form_window(Rc::clone(&backend), cx);
 
         type_into(&form, FormField::Name, "feature/search", cx);
         let proposed = location(&form, cx);
@@ -1801,7 +1718,7 @@ mod tests {
 
     #[gpui::test]
     fn the_branch_source_should_be_chosen_from_the_keyboard(cx: &mut TestAppContext) {
-        let (form, _, cx) = form_window(Rc::default(), true, cx);
+        let (form, _, cx) = form_window(Rc::default(), cx);
 
         cx.simulate_keystrokes("shift-tab right");
         cx.run_until_parked();
@@ -1814,7 +1731,7 @@ mod tests {
 
     #[gpui::test]
     fn names_git_refuses_or_already_has_should_show_while_typing(cx: &mut TestAppContext) {
-        let (form, _, cx) = form_window(Rc::default(), true, cx);
+        let (form, _, cx) = form_window(Rc::default(), cx);
 
         type_into(&form, FormField::Name, "my branch", cx);
         let invalid = visible_errors(&form, cx);
@@ -1835,7 +1752,7 @@ mod tests {
 
     #[gpui::test]
     fn a_typed_location_should_stay_when_the_branch_name_changes(cx: &mut TestAppContext) {
-        let (form, _, cx) = form_window(Rc::default(), true, cx);
+        let (form, _, cx) = form_window(Rc::default(), cx);
 
         type_into(&form, FormField::Name, "one", cx);
         type_into(&form, FormField::Location, "/srv/work/one", cx);
@@ -1849,7 +1766,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let backend = Rc::new(ScriptedBackend::default());
-        let (form, _, cx) = form_window(Rc::clone(&backend), true, cx);
+        let (form, _, cx) = form_window(Rc::clone(&backend), cx);
         form.update(cx, |form, cx| form.set_source(BranchSource::Existing, cx));
 
         let offered = form.read_with(cx, |form, _| {
@@ -1894,7 +1811,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let backend = Rc::new(ScriptedBackend::default());
-        let (form, _, cx) = form_window(Rc::clone(&backend), true, cx);
+        let (form, _, cx) = form_window(Rc::clone(&backend), cx);
         form.update(cx, |form, cx| {
             form.set_source(BranchSource::Remote, cx);
             form.choose(
@@ -1926,25 +1843,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_occupied_location_should_keep_the_dialog_open_without_running_git(
-        cx: &mut TestAppContext,
-    ) {
-        let backend = Rc::new(ScriptedBackend::default());
-        let (form, events, cx) = form_window(Rc::clone(&backend), false, cx);
-
-        type_into(&form, FormField::Name, "fresh", cx);
-        create(cx);
-
-        assert_eq!(
-            visible_errors(&form, cx)[2].as_deref(),
-            Some("Choose a new or empty directory.")
-        );
-        assert!(backend.created.borrow().is_empty());
-        assert!(events.borrow().is_empty());
-        assert!(form.read_with(cx, |form, _| form.is_open()));
-    }
-
-    #[gpui::test]
     fn a_create_that_was_not_submitted_shows_its_actual_reason(cx: &mut TestAppContext) {
         let backend = Rc::new(ScriptedBackend::default());
         backend
@@ -1953,7 +1851,7 @@ mod tests {
             .push(Err(WorktreeCreateError::NotSubmitted(
                 "SpaceTerm is not connected.",
             )));
-        let (form, events, cx) = form_window(backend, true, cx);
+        let (form, events, cx) = form_window(backend, cx);
         type_into(&form, FormField::Name, "fresh", cx);
         create(cx);
         assert_eq!(
@@ -1968,27 +1866,40 @@ mod tests {
     #[gpui::test]
     fn a_refused_create_should_show_its_reason_on_the_field_and_stay_open(cx: &mut TestAppContext) {
         let backend = Rc::new(ScriptedBackend::default());
-        backend
-            .results
-            .borrow_mut()
-            .push(Err(WorktreeCreateError::BranchExists));
-        let (form, events, cx) = form_window(Rc::clone(&backend), true, cx);
-
+        let (form, events, cx) = form_window(Rc::clone(&backend), cx);
         type_into(&form, FormField::Name, "fresh", cx);
-        create(cx);
+        for (refusal, field, reason) in [
+            (
+                WorktreeCreateError::BranchExists,
+                FormField::Name,
+                "Branch name already exists.",
+            ),
+            (
+                WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location),
+                FormField::Location,
+                "Choose a new or empty directory.",
+            ),
+        ] {
+            backend.results.borrow_mut().push(Err(refusal));
+            create(cx);
 
-        assert_eq!(
-            visible_errors(&form, cx)[0].as_deref(),
-            Some("Branch name already exists.")
-        );
-        assert!(events.borrow().is_empty());
-        assert!(form.read_with(cx, |form, _| form.is_open() && !form.pending));
-        assert!(cx.update(|window, cx| {
-            form.read(cx)
-                .name
-                .read(cx)
-                .focus_handle()
-                .is_focused(window)
-        }));
+            let index = match field {
+                FormField::Name => 0,
+                FormField::Branch => 1,
+                FormField::Location => 2,
+            };
+            assert_eq!(
+                visible_errors(&form, cx)[index].as_deref(),
+                Some(reason),
+                "{refusal:?}"
+            );
+            assert!(events.borrow().is_empty());
+            assert!(form.read_with(cx, |form, _| form.is_open() && !form.pending));
+            assert!(cx.update(|window, cx| {
+                form.read(cx)
+                    .focus_for_field(field, cx)
+                    .is_some_and(|focus| focus.is_focused(window))
+            }));
+        }
     }
 }

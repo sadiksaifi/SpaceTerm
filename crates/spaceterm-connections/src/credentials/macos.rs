@@ -20,7 +20,6 @@ use zeroize::Zeroizing;
 use super::{CredentialError, CredentialStore, Interaction, account};
 
 mod security_tool;
-mod tool_access;
 pub(super) use security_tool::SecurityTool;
 
 unsafe extern "C" {

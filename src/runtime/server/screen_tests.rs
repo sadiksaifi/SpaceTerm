@@ -1,4 +1,4 @@
-use super::tests::{attach, await_text, command, frame_bytes, host, keyframe, lines, screen, size};
+use super::tests::{attach, await_text, command, frame_bytes, host, keyframe, lines, screen};
 use super::*;
 use spaceterm_server::protocol::PaneEvent;
 
@@ -121,18 +121,7 @@ fn row_changes_follow_the_exact_baseline_and_connection_lease() {
         .expect("the screen changed");
     assert!(changes.geometry.is_none());
     assert!(!changes.rows.is_empty() && changes.rows.len() < 24);
-    let Reply::Attached { lease: replacement } = host.request(
-        [1; 32],
-        [2; 32],
-        Request::Attach {
-            create: false,
-            size: size(),
-            resume: Some(lease),
-            style: None,
-        },
-    ) else {
-        panic!("reattachment failed")
-    };
+    let replacement = attach(&mut host, 2, false);
     assert!(matches!(
         screen(&mut host, [1; 32], lease),
         Err(PaneEvent::Takeover(_))

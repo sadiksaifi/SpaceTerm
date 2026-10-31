@@ -343,7 +343,6 @@ fn admit_server_transport(
     Ok(Admission::Work(Admitted {
         status: AuthenticatedStatus {
             protocol_major: selected,
-            development_pane: false,
         },
         client,
         agent: hello.agent,
@@ -416,10 +415,9 @@ pub(crate) fn admit_client<'a>(
     caller: impl Into<Caller<'a>>,
     server: &[u8; 32],
     build: &str,
-    versions: &[u16],
 ) -> Result<AuthenticatedStatus, ServerError> {
     crate::host::check_peer(stream)?;
-    admit_transport(stream, caller, server, build, versions)
+    admit_transport(stream, caller, server, build)
 }
 
 pub(crate) fn admit_transport<'a>(
@@ -427,12 +425,11 @@ pub(crate) fn admit_transport<'a>(
     caller: impl Into<Caller<'a>>,
     server: &[u8; 32],
     build: &str,
-    versions: &[u16],
 ) -> Result<AuthenticatedStatus, ServerError> {
     let caller = caller.into();
     let mut wire = Wire::new(stream);
     wire.write(&Hello {
-        versions: versions.to_vec(),
+        versions: vec![MAJOR],
         build: build.to_owned(),
         server: *server,
         client: *caller.client,
@@ -444,15 +441,11 @@ pub(crate) fn admit_transport<'a>(
     if offer.build != build || offer.server != *server || offer.client != caller.effective() {
         return Err(ServerError::AuthenticationRefused);
     }
-    if offer.selected == 0 {
-        return Err(ServerError::IncompatibleProtocol);
-    }
-    if offer.selected != MAJOR || !versions.contains(&offer.selected) {
+    if offer.selected != MAJOR {
         return Err(ServerError::IncompatibleProtocol);
     }
     Ok(AuthenticatedStatus {
         protocol_major: offer.selected,
-        development_pane: false,
     })
 }
 
@@ -460,33 +453,47 @@ pub(crate) fn admit_transport<'a>(
 mod tests {
     use super::*;
     #[test]
-    fn account_admission_preserves_nonsecret_client_identity_and_refuses_incompatible_majors() {
-        for versions in [vec![3], vec![1], vec![4, 3]] {
-            let (mut client, mut server) = UnixStream::pair().unwrap();
-            let accepted = versions.contains(&MAJOR);
-            let thread = std::thread::spawn(move || {
-                admit_server(&mut server, &[7; 32], "spaceterm-development")
-            });
-            let result = admit_client(
-                &mut client,
-                (&[9; 32], &"Build Mac".into()),
-                &[7; 32],
-                "spaceterm-development",
-                &versions,
-            );
-            let server_result = thread.join().unwrap();
-            if accepted {
-                assert_eq!(result.unwrap().protocol_major, MAJOR);
-                let admitted = server_result.unwrap().work();
-                assert_eq!(
-                    (admitted.client, admitted.name.as_str()),
-                    ([9; 32], "Build Mac")
-                );
-            } else {
-                assert_eq!(result, Err(ServerError::IncompatibleProtocol));
-                assert_eq!(server_result, Err(ServerError::IncompatibleProtocol));
-            }
-        }
+    fn account_admission_preserves_nonsecret_client_identity() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            admit_server(&mut server, &[7; 32], "spaceterm-development")
+        });
+        let result = admit_client(
+            &mut client,
+            (&[9; 32], &"Build Mac".into()),
+            &[7; 32],
+            "spaceterm-development",
+        );
+        assert_eq!(result.unwrap().protocol_major, MAJOR);
+        let admitted = thread.join().unwrap().unwrap().work();
+        assert_eq!(
+            (admitted.client, admitted.name.as_str()),
+            ([9; 32], "Build Mac")
+        );
+    }
+    #[test]
+    fn a_client_of_another_major_is_offered_none_and_refused() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            admit_server(&mut server, &[7; 32], "spaceterm-development")
+        });
+        let mut wire = Wire::new(&mut client);
+        wire.write(&Hello {
+            versions: vec![MAJOR + 1],
+            build: "spaceterm-development".into(),
+            server: [7; 32],
+            client: [9; 32],
+            name: "Build Mac".into(),
+            agent: None,
+            lane: Lane::Work,
+        })
+        .unwrap();
+        let offer: Offer = wire.read().unwrap();
+        assert_eq!(offer.selected, 0);
+        assert_eq!(
+            thread.join().unwrap().err(),
+            Some(ServerError::IncompatibleProtocol)
+        );
     }
     #[test]
     fn substituted_build_or_server_is_refused_before_operations() {
@@ -496,14 +503,7 @@ mod tests {
                 admit_server(&mut server, &[7; 32], "spaceterm-development")
             });
             assert!(
-                admit_client(
-                    &mut client,
-                    (&[9; 32], &"Build Mac".into()),
-                    &id,
-                    build,
-                    &[MAJOR]
-                )
-                .is_err()
+                admit_client(&mut client, (&[9; 32], &"Build Mac".into()), &id, build).is_err()
             );
             assert_eq!(
                 thread.join().unwrap(),
@@ -533,7 +533,6 @@ mod tests {
                     (&[9; 32], &"Build Mac".into()),
                     &[7; 32],
                     "spaceterm-development",
-                    &[MAJOR]
                 ),
                 Err(ServerError::AuthenticationRefused)
             );
@@ -582,7 +581,6 @@ mod tests {
             },
             &[7; 32],
             "spaceterm-development",
-            &[MAJOR],
         )
         .unwrap();
         let admitted = thread.join().unwrap().unwrap().work();
@@ -608,7 +606,6 @@ mod tests {
                 },
                 &[7; 32],
                 "spaceterm-development",
-                &[MAJOR],
             )
             .is_err()
         );
@@ -640,7 +637,6 @@ mod tests {
                 },
                 &[7; 32],
                 "spaceterm-development",
-                &[MAJOR],
             )
             .is_err()
         );

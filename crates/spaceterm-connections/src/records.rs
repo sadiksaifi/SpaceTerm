@@ -16,17 +16,12 @@ pub struct SavedRoute {
     pub active: bool,
 }
 
-/// Account-local authority for resolving an exact retained revocation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum AccountRoute {
-    Local,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Authority {
     Direct(SavedRoute),
+    /// The account-local server, expected to still present `pin`.
     Account {
-        route: AccountRoute,
         pin: ServerPin,
     },
     Enrollment {
@@ -63,18 +58,12 @@ impl PendingRecord {
         }
     }
 
-    pub fn account(
-        operation: UnpairKey,
-        label: String,
-        pin: ServerPin,
-        route: AccountRoute,
-        target: PairingId,
-    ) -> Self {
+    pub fn account(operation: UnpairKey, label: String, pin: ServerPin, target: PairingId) -> Self {
         Self {
             operation,
             label,
             target,
-            authority: Authority::Account { route, pin },
+            authority: Authority::Account { pin },
             dismissed: false,
             confirmed: false,
             cancel_requested: false,
@@ -109,7 +98,7 @@ impl PendingRecord {
     pub fn server(&self) -> [u8; 32] {
         match &self.authority {
             Authority::Direct(actor) => actor.route.paired.pin.server,
-            Authority::Account { pin, .. } => pin.server,
+            Authority::Account { pin } => pin.server,
             Authority::Enrollment { pin, .. } => pin.server,
         }
     }
@@ -188,7 +177,7 @@ impl Document {
                         return Err(());
                     }
                 }
-                Authority::Account { pin, .. } => validate_pin(pin)?,
+                Authority::Account { pin } => validate_pin(pin)?,
             }
         }
         Ok(())

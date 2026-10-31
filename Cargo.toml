@@ -63,7 +63,6 @@ desktop = [
     "dep:block2",
     "dep:dispatch2",
     "dep:objc2",
-    "dep:objc2-av-foundation",
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
     "dep:objc2-quick-look-ui",
@@ -71,7 +70,6 @@ desktop = [
     "dep:raw-window-handle",
     "dep:core-foundation",
     "dep:futures-lite",
-    "dep:async-io",
     "dep:gpui_macos",
 ]
 
@@ -141,7 +139,6 @@ spaceterm-server = { path = "crates/spaceterm-server", features = ["test-support
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify = { version = "=8.2.0", default-features = false }
-async-io = { version = "=2.6.0", optional = true }
 fontconfig_sys = { package = "yeslogic-fontconfig-sys", version = "=6.0.1", optional = true }
 zbus = { version = "=5.19.0", features = ["blocking-api"], optional = true }
 roxmltree = { version = "=0.21.1", optional = true }
@@ -152,7 +149,6 @@ core-foundation = { version = "=0.10.1", optional = true }
 block2 = { version = "0.6", optional = true }
 dispatch2 = { version = "=0.3.1", optional = true }
 objc2 = { version = "0.6", optional = true }
-objc2-av-foundation = { version = "=0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"], optional = true }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityElement", "NSAccessibilityProtocols", "NSAlert", "NSAppearance", "NSApplication", "NSAttributedString", "NSBezierPath", "NSBitmapImageRep", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSEvent", "NSFont", "NSFontDescriptor", "NSFontManager", "NSGlassEffectView", "NSGraphics", "NSGraphicsContext", "NSHelpManager", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSParagraphStyle", "NSResponder", "NSRunningApplication", "NSScreen", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSStringDrawing", "NSText", "NSUserInterfaceLayout", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "block2", "libc", "objc2-core-foundation"], optional = true }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSNotification", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSRange", "NSRunLoop", "NSString", "NSThread", "NSURL", "NSUserDefaults", "NSValue", "block2", "std"], optional = true }
 objc2-quick-look-ui = { version = "=0.3.2", default-features = false, features = ["QLPreviewItem", "QLPreviewView", "objc2-app-kit"], optional = true }
@@ -169,9 +165,6 @@ optional = true
 git = "https://github.com/sadiksaifi/zed"
 tag = "spaceterm-2026-10-28"
 optional = true
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 # Keep local feature-matrix builds compact. SpaceTerm retains line tables for its
 # own crates while dependencies, build scripts, and proc macros omit debug data.

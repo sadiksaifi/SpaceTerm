@@ -61,7 +61,6 @@ BUILD_KEYS = {
     "commit",
     "version",
     "protocol_major",
-    "capabilities",
     "source_sha256",
 }
 
@@ -167,13 +166,6 @@ def document(data):
             or value["schema"] != 1
             or type(value["protocol_major"]) is not int
             or not 0 < value["protocol_major"] <= 65535
-            or not isinstance(value["capabilities"], list)
-            or len(value["capabilities"]) > 32
-            or any(
-                not isinstance(capability, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", capability)
-                for capability in value["capabilities"]
-            )
-            or len(set(value["capabilities"])) != len(value["capabilities"])
             or (
                 value["source_sha256"] is not None
                 and not re.fullmatch(r"[0-9a-f]{64}", value["source_sha256"])
@@ -845,8 +837,6 @@ def compatible_candidate(info, identity, *, target=None):
         raise TaskError("the server candidate has a different identity or target")
     if info["protocol_major"] != PROTOCOL_MAJOR:
         raise TaskError("the server candidate has an incompatible protocol major")
-    if "workspace_policy" not in info["capabilities"]:
-        raise TaskError("the server candidate is missing a required capability")
 
 
 def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog_destination=None):

@@ -663,6 +663,3 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-
-#[cfg(all(test, feature = "client"))]
-mod vm;

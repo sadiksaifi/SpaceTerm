@@ -240,27 +240,20 @@ fn a_restored_pane_that_stopped_reconnecting_names_the_failure() {
 
 #[test]
 fn an_incompatible_server_is_named_without_claiming_which_side_is_older() {
-    for (error, cause) in [
-        (
-            ServerError::IncompatibleProtocol,
-            "SpaceTerm and this server are incompatible.",
-        ),
-        (
-            ServerError::MissingRequiredCapability,
-            "This server needs an update.",
-        ),
-    ] {
-        let connection = Connection::new(DevelopmentPaneStatus::Connected);
-        let mut view = ServerPaneView::new(connection.clone());
-        connection.set(DevelopmentPaneStatus::Failed(error));
-        view.sync();
+    let connection = Connection::new(DevelopmentPaneStatus::Connected);
+    let mut view = ServerPaneView::new(connection.clone());
+    connection.set(DevelopmentPaneStatus::Failed(
+        ServerError::IncompatibleProtocol,
+    ));
+    view.sync();
 
-        assert_eq!(
-            notice(&view),
-            Some(("Incompatible Server".to_owned(), cause.to_owned())),
-            "{error:?}"
-        );
-    }
+    assert_eq!(
+        notice(&view),
+        Some((
+            "Incompatible Server".to_owned(),
+            "SpaceTerm and this server are incompatible.".to_owned()
+        ))
+    );
 }
 
 #[test]

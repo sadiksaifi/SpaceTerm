@@ -71,12 +71,6 @@ impl Candidate {
     pub fn digest(&self) -> &str {
         &self.digest
     }
-    pub fn protocol_major(&self) -> u16 {
-        self.metadata.protocol_major
-    }
-    pub fn capabilities(&self) -> &[String] {
-        &self.metadata.capabilities
-    }
     pub fn is_approved(
         &self,
         installation: &spaceterm_server::service::RetainedInstallation,
@@ -96,7 +90,6 @@ impl Candidate {
             &self.paths.signature,
             &self.digest,
             spaceterm_server::protocol::MAJOR,
-            &["workspace_policy"],
         )
     }
 }
@@ -144,7 +137,6 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
                 &paths.signature,
                 digest,
                 spaceterm_server::protocol::MAJOR,
-                &["workspace_policy"],
             )
         })
         .map_err(|error| match error {

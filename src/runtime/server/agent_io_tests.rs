@@ -1,6 +1,7 @@
 //! `pane run` and observation through the protocol, on real headless PTYs. Runs use each installed
 //! shell with SpaceTerm shell integration; shells that are not installed are skipped.
 use super::dispatch::Served;
+use super::pane_host::decode_key;
 use super::tests::{create_shared, shared_inventory, size};
 use super::*;
 use spaceterm_server::attachments::Attachment;

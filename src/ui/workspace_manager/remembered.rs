@@ -226,9 +226,8 @@ impl WorkspaceManager {
         let Some(owner) = shared.owner() else {
             return;
         };
-        self.restoration.published(owner, |target| {
-            shared.local(target.workspace).is_some()
-        });
+        self.restoration
+            .published(owner, |target| shared.local(target.workspace).is_some());
         let held: Vec<_> = self
             .restoration
             .take_held(owner)
@@ -257,7 +256,11 @@ impl WorkspaceManager {
     /// and the person has selected nothing since. A saved order still being read decides which
     /// Workspace is first, so the selection waits for it, and each later publication selects the
     /// first Workspace again until the person gives the window input.
-    pub(super) fn select_remembered_fallback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_remembered_fallback(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.display_order_ready() || !self.restoration.falls_back() {
             return;
         }

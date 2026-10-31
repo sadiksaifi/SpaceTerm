@@ -45,18 +45,64 @@ fn a_shell_that_never_started_allows_pane_close_and_server_shutdown() {
                 let reply = host.request([1; 32], [1; 32], Request::Close { lease });
                 assert!(matches!(reply, Reply::Closed), "{failure:?}: {reply:?}");
             }
-            let reply = host.request([1; 32], [1; 32], Request::Shutdown);
-            assert!(matches!(reply, Reply::Closed), "{failure:?}: {reply:?}");
+            assert_eq!(host.shutdown(), Ok(()), "{failure:?}");
         }
     }
 }
 
-pub(super) fn native_command(
-    host: &mut impl HostCommands,
-    lease: Lease,
-    generation: u64,
-    text: &str,
-) {
+/// A host the helpers below drive: one Pane's host, or a host of shared Workspaces.
+pub(super) trait Driven {
+    fn send(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
+    fn watch(&mut self, device: [u8; 32], lease: &Lease) -> Observed;
+    fn page(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        lease: &Lease,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal>;
+}
+
+impl<H: HostCommands> Driven for H {
+    fn send(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
+        self.request(device, connection, request)
+    }
+    fn watch(&mut self, device: [u8; 32], lease: &Lease) -> Observed {
+        self.observe(device, lease)
+    }
+    fn page(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        lease: &Lease,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        self.scrollback_page(device, connection, lease, read, reply)
+    }
+}
+
+impl Driven for DevelopmentPaneHost {
+    fn send(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
+        self.request(device, connection, request)
+    }
+    fn watch(&mut self, device: [u8; 32], lease: &Lease) -> Observed {
+        self.observe(device, lease)
+    }
+    fn page(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        lease: &Lease,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        self.scrollback_page(device, connection, lease, read, reply)
+    }
+}
+
+pub(super) fn native_command(host: &mut impl Driven, lease: Lease, generation: u64, text: &str) {
     assert!(matches!(
         input(host, lease, generation, text_key(text, false)),
         Reply::Unchanged
@@ -74,14 +120,9 @@ pub(super) fn native_command(
     ));
 }
 
-pub(super) fn focus(
-    host: &mut impl HostCommands,
-    lease: Lease,
-    generation: u64,
-    target: FocusTarget,
-) {
+pub(super) fn focus(host: &mut impl Driven, lease: Lease, generation: u64, target: FocusTarget) {
     assert!(matches!(
-        host.request(
+        host.send(
             [1; 32],
             lease.connection,
             Request::Focus {
@@ -95,12 +136,12 @@ pub(super) fn focus(
 }
 
 pub(super) fn input(
-    host: &mut impl HostCommands,
+    host: &mut impl Driven,
     lease: Lease,
     generation: u64,
     input: InteractiveInput,
 ) -> Reply {
-    host.request(
+    host.send(
         [1; 32],
         lease.connection,
         Request::Input {
@@ -448,7 +489,7 @@ fn initial_shared_organization_is_prepared_once_without_starting_a_shell() {
 }
 
 #[test]
-fn legacy_opening_does_not_refill_deliberately_empty_shared_organization() {
+fn preparation_does_not_refill_deliberately_empty_shared_organization() {
     use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
     let mut host = SharedWorkspaceHost::new(host());
     let workspace = create_shared(&mut host, 1);
@@ -459,50 +500,8 @@ fn legacy_opening_does_not_refill_deliberately_empty_shared_organization() {
         sequence: 2,
         mutation: Mutation::Close { target: CloseTarget::Workspace { workspace }, confirmation },
     }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
-    for create in [false, true] {
-        assert!(matches!(
-            host.request(
-                [1; 32],
-                [2; 32],
-                Request::Attach {
-                    create,
-                    size: size(),
-                    resume: None,
-                    style: None,
-                }
-            ),
-            Reply::Refused(Refusal::Missing)
-        ));
-    }
     host.prepare_initial_organization().unwrap();
     assert!(shared_inventory(&mut host).workspaces.is_empty());
-    host.shutdown().unwrap();
-}
-
-#[test]
-fn opening_the_legacy_pane_cannot_consume_a_shared_edits_operation_identity() {
-    use spaceterm_server::hierarchy::{Mutation, Outcome};
-    let mut host = SharedWorkspaceHost::new(host());
-    let Reply::Inventory { next_sequence, .. } = host.request([1; 32], [1; 32], Request::Inventory)
-    else {
-        panic!()
-    };
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [2; 32],
-            Request::Attach {
-                create: true,
-                size: size(),
-                resume: None,
-                style: None
-            }
-        ),
-        Reply::Attached { .. }
-    ));
-    assert!(
-        matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into(), directory: None, control: spaceterm_server::hierarchy::CreateControl::Creator, } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
-    );
     host.shutdown().unwrap();
 }
 
@@ -730,63 +729,83 @@ pub(super) fn size() -> PaneSize {
     }
 }
 
+/// A Pane identity for a host the tests run on its own, whose Sessions start in `directory`.
+pub(super) fn identity(directory: std::path::PathBuf) -> PaneIdentity {
+    PaneIdentity {
+        workspace: [11; 32],
+        tab: [12; 32],
+        pane: [13; 32],
+        starting_directory: directory,
+        confirmed_directory: None,
+    }
+}
+
+/// Selects `host`'s Pane for the client `[1; 32]` over `connection`. With `create`, the selection
+/// is explicit, so it starts the Pane's first Session; without it, it claims the running one.
 pub(super) fn attach(host: &mut DevelopmentPaneHost, connection: u8, create: bool) -> Lease {
-    let Reply::Attached { lease } = host.request(
-        [1; 32],
-        [connection; 32],
-        Request::Attach {
-            create,
-            size: size(),
-            resume: None,
-            style: None,
-        },
-    ) else {
+    attach_sized(host, connection, create, size())
+}
+
+/// [`attach`] at `size`.
+pub(super) fn attach_sized(
+    host: &mut DevelopmentPaneHost,
+    connection: u8,
+    create: bool,
+    size: PaneSize,
+) -> Lease {
+    host.identity
+        .get_or_insert_with(|| identity(host.directory.clone()));
+    let Ok(Reply::Attached { lease }) = host.select([1; 32], [connection; 32], create, size, None)
+    else {
         panic!("expected attachment")
     };
     lease
 }
 
-pub(super) fn command(
-    host: &mut impl HostCommands,
-    connection: u8,
-    lease: Lease,
-    text: &str,
-) -> Reply {
-    let result = host.request(
+/// The focus generation [`command`] types at. A test that sets its own focus starts at this
+/// generation with the terminal focused, or above it.
+pub(super) const COMMAND_FOCUS: u64 = 1;
+
+/// Types `text` and Enter at the shell of `lease`'s Pane, as the client `[1; 32]` with the
+/// terminal focused at [`COMMAND_FOCUS`].
+pub(super) fn command(host: &mut impl Driven, connection: u8, lease: Lease, text: &str) -> Reply {
+    let connection = [connection; 32];
+    let focused = host.send(
         [1; 32],
-        [connection; 32],
-        Request::Key {
+        connection,
+        Request::Focus {
             lease,
-            key: Key {
-                physical: PhysicalKey::Unidentified as u32,
-                action: 0,
-                logical: "text-input".into(),
-                text: Some(text.trim_end_matches('\n').into()),
-                unshifted: None,
-                modifiers: 0,
-                consumed: 0,
-                option_as_alt: false,
-            },
+            generation: COMMAND_FOCUS,
+            target: FocusTarget::Terminal,
         },
     );
-    if !matches!(result, Reply::Unchanged) {
-        return result;
+    if !matches!(focused, Reply::Unchanged) {
+        return focused;
     }
-    host.request(
+    let key = |physical: PhysicalKey, logical: &str, text: Option<String>| Key {
+        physical: physical as u32,
+        action: 0,
+        logical: logical.into(),
+        text,
+        unshifted: None,
+        modifiers: 0,
+        consumed: 0,
+        option_as_alt: false,
+    };
+    host.send(
         [1; 32],
-        [connection; 32],
-        Request::Key {
+        connection,
+        Request::Keys {
             lease,
-            key: Key {
-                physical: PhysicalKey::Enter as u32,
-                action: 0,
-                logical: "enter".into(),
-                text: None,
-                unshifted: None,
-                modifiers: 0,
-                consumed: 0,
-                option_as_alt: false,
-            },
+            generation: COMMAND_FOCUS,
+            keys: vec![
+                key(
+                    PhysicalKey::Unidentified,
+                    "text-input",
+                    Some(text.trim_end_matches('\n').into()),
+                ),
+                key(PhysicalKey::Enter, "enter", None),
+            ],
         },
     )
 }
@@ -794,11 +813,11 @@ pub(super) fn command(
 /// What the channel bound to `lease`, claimed by `device`, receives now: the Pane's current screen
 /// as a keyframe, or the channel's last event once the lease no longer presents the Pane.
 pub(super) fn screen(
-    host: &mut impl HostCommands,
+    host: &mut impl Driven,
     device: [u8; 32],
     lease: Lease,
 ) -> Result<Option<ScreenUpdate>, PaneEvent> {
-    match host.observe(device, &lease) {
+    match host.watch(device, &lease) {
         Observed::Live(observation) => Ok(observation.screen.map(|capture| {
             screen_encoder::ScreenEncoder::default()
                 .encode(&capture, 1, None)
@@ -843,7 +862,7 @@ pub(super) fn await_read(
 }
 
 /// Waits until a row of the Pane's screen reads exactly `text`, for the client `[1; 32]`.
-pub(super) fn await_text(host: &mut impl HostCommands, lease: Lease, text: &str) {
+pub(super) fn await_text(host: &mut impl Driven, lease: Lease, text: &str) {
     await_screen(host, [1; 32], lease, |update| {
         lines(update).iter().any(|line| line.trim_end() == text)
     });
@@ -851,7 +870,7 @@ pub(super) fn await_text(host: &mut impl HostCommands, lease: Lease, text: &str)
 
 /// Waits until the Pane's screen satisfies `ready` and returns it.
 pub(super) fn await_screen(
-    host: &mut impl HostCommands,
+    host: &mut impl Driven,
     device: [u8; 32],
     lease: Lease,
     ready: impl Fn(&ScreenUpdate) -> bool,
@@ -881,14 +900,14 @@ pub(super) fn await_screen(
 /// Observes the Pane until it has released `count` client effects to the client `[1; 32]`,
 /// oldest first.
 pub(super) fn effects(
-    host: &mut impl HostCommands,
+    host: &mut impl Driven,
     lease: Lease,
     count: usize,
 ) -> Vec<pane::effects::Request> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut effects = Vec::new();
     loop {
-        match host.observe([1; 32], &lease) {
+        match host.watch([1; 32], &lease) {
             Observed::Live(observation) => effects.extend(observation.effects),
             Observed::Gone { event, .. } => panic!("the channel ended with {event:?}"),
         }
@@ -905,7 +924,7 @@ pub(super) fn effects(
 /// The text of every Scrollback row the Pane retains, read through `ScrollbackPage` as a client
 /// reads it, oldest first.
 pub(super) fn history_text(
-    host: &mut impl HostCommands,
+    host: &mut impl Driven,
     device: [u8; 32],
     lease: Lease,
     history: spaceterm_server::protocol::screen::History,
@@ -914,7 +933,7 @@ pub(super) fn history_text(
     let mut start = history.oldest;
     while start < history.total {
         let (sent, received) = std::sync::mpsc::channel();
-        host.scrollback_page(
+        host.page(
             device,
             lease.connection,
             &lease,

@@ -2,7 +2,6 @@
 mod identity;
 
 const PROTOCOL_MAJOR: u16 = 4;
-const CAPABILITIES: &[&str] = &["workspace_policy"];
 
 fn main() {
     let root = std::path::PathBuf::from(
@@ -49,15 +48,13 @@ fn main() {
     let source = source.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
     // All strings come from the validated build identity or Cargo's target triple.
     let document = format!(
-        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{PROTOCOL_MAJOR},\"capabilities\":{CAPABILITIES:?}}}\n",
+        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{PROTOCOL_MAJOR}}}\n",
         build.version, build.commit,
     );
     std::fs::write(output.join("build-info.json"), document).expect("write server build metadata");
     std::fs::write(
         output.join("build-info.rs"),
-        format!(
-            "const PROTOCOL_MAJOR: u16 = {PROTOCOL_MAJOR};\nconst CAPABILITIES: &[&str] = &{CAPABILITIES:?};\n"
-        ),
+        format!("const PROTOCOL_MAJOR: u16 = {PROTOCOL_MAJOR};\n"),
     )
     .expect("write server admission metadata");
 }

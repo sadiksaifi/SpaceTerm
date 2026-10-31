@@ -8,7 +8,6 @@ use super::{
     DirectoryListing, DirectoryRow, DirectorySelection, DirectorySource, DirectorySourceError,
     ExactPathState, MAXIMUM_DIRECTORY_ROWS, PickerPath, SourceFuture,
 };
-use crate::domain::PinnedDirectory;
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 
 /// Reads local directories on the background executor, with `~` naming the account's home.
@@ -106,7 +105,6 @@ impl DirectorySource for LocalDirectorySource {
         self.run(&directory, |filesystem, path| {
             filesystem
                 .validate_directory(&path)
-                .map(PinnedDirectory::Local)
                 .map(DirectorySelection::Pin)
         })
     }
@@ -215,8 +213,7 @@ mod tests {
             .create_directory_recursively(path("~/New/Nested/"))
             .await
             .unwrap();
-        let Ok(DirectorySelection::Pin(PinnedDirectory::Local(directory))) =
-            source.select(path("~/New/Nested/")).await
+        let Ok(DirectorySelection::Pin(directory)) = source.select(path("~/New/Nested/")).await
         else {
             panic!("the created directory was not pinned as a local directory");
         };

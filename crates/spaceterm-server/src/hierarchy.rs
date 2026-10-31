@@ -15,12 +15,10 @@ const MAX_DEVICES: usize = 64;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
     /// Live owning-server Git facts. Excluded from retained Organization.
-    #[serde(default)]
     pub repositories: Option<crate::repository::Snapshot>,
     pub revision: u64,
     pub workspaces: Vec<Workspace>,
     /// Live facts accompany publication only; retained organization never supplies authority.
-    #[serde(default)]
     pub close: Option<CloseInventory>,
 }
 
@@ -221,15 +219,13 @@ pub enum WorktreeMembership {
     Repaired,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tab {
     /// An unpinned Root Tab whose Root Pane reads outside any repository returns to Following.
-    #[serde(default)]
     pub worktree_membership: WorktreeMembership,
     /// Saved membership, retained even when Git no longer lists the directory.
-    #[serde(default)]
     pub worktree: Option<PathBuf>,
     /// Main Worktree discovery locator for this membership, revalidated after each boot.
-    #[serde(default)]
     pub worktree_repository: Option<PathBuf>,
     pub id: Id,
     pub root_pane: Id,
@@ -255,7 +251,6 @@ pub struct Pane {
     /// Live terminal directory presentation. Never retained as restoration authority.
     pub current_directory: Option<PathBuf>,
     /// Protected Repository Source Directory from the owning Terminal Session, never retained.
-    #[serde(default)]
     pub repository_directory: Option<PathBuf>,
     /// Current presentation for every authorized client, independent of Pane control or visibility.
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
@@ -432,20 +427,18 @@ struct WorkspaceName {
     automatic_base: String,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     home_directory: Option<PathBuf>,
     names: Vec<WorkspaceName>,
-    #[serde(default)]
-    pub worktree_settings: Option<crate::worktree::Settings>,
+    pub worktree_settings: crate::worktree::Settings,
     pub inventory: Inventory,
     /// Ordered from the least to the most recently editing device.
     devices: Vec<DeviceOutcomes>,
     /// The highest sequence of any device record the server replaced. A device without a record
     /// continues above it, so a replaced device's new edits never reuse a sequence. Its
     /// unresolved Original Operation keeps its own sequence, which [`State::apply`] accepts.
-    #[serde(default)]
     sequence_floor: u64,
-    #[serde(default)]
     creator_boot: Option<Id>,
     /// Durable cleanup intent names original Sessions, never future replacements.
     session_ends: Option<CloseInventory>,
@@ -455,7 +448,7 @@ impl State {
         Self {
             home_directory: None,
             names: Vec::new(),
-            worktree_settings: None,
+            worktree_settings: Default::default(),
             inventory: Inventory {
                 repositories: None,
                 revision: 0,
@@ -485,8 +478,9 @@ impl State {
             self.creator_boot = Some(boot);
         }
     }
-    /// First-Workspace seeding has no shared-edit operation identity. It must not retire a
-    /// sequence a concurrent client edit has already reserved in its durable journal.
+    /// Seeds a test's first Workspace without a shared-edit operation identity, so it retires no
+    /// sequence a client edit has reserved in its durable journal.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_first_workspace(&mut self, device: Id, directory: &Path) -> Result<(), Refusal> {
         if self.inventory.workspaces.is_empty() {
             self.edit(
@@ -502,42 +496,49 @@ impl State {
         }
         Ok(())
     }
-    pub fn from_organization(org: &crate::organization::Organization) -> Self {
-        org.shared.as_deref().cloned().unwrap_or_else(|| Self {
-            home_directory: Some(org.starting_directory.clone()),
+    /// The first Workspace a server prepares: one Tab with one Pane in `directory`, named
+    /// "Default", with no Terminal Session.
+    pub fn first(directory: &Path) -> Result<Self, ServerError> {
+        let (workspace, tab, pane) = (
+            crate::protocol::random()?,
+            crate::protocol::random()?,
+            crate::protocol::random()?,
+        );
+        let state = Self {
+            home_directory: Some(directory.to_owned()),
             names: vec![WorkspaceName {
-                workspace: org.workspace,
-                custom: (org.name != "Default").then(|| org.name.clone()),
+                workspace,
+                custom: None,
                 automatic_base: "Default".into(),
             }],
-            worktree_settings: None,
+            worktree_settings: Default::default(),
             inventory: Inventory {
                 repositories: None,
                 revision: 0,
                 close: None,
                 workspaces: vec![Workspace {
-                    id: org.workspace,
-                    name: org.name.clone(),
+                    id: workspace,
+                    name: "Default".into(),
                     name_version: 0,
                     pin_version: 0,
-                    pinned_directory: org.pinned_directory.clone(),
-                    root_tab: org.tab,
+                    pinned_directory: None,
+                    root_tab: tab,
                     tabs: vec![Tab {
                         worktree: None,
                         worktree_membership: WorktreeMembership::Following,
                         worktree_repository: None,
-                        id: org.tab,
-                        root_pane: org.pane,
+                        id: tab,
+                        root_pane: pane,
                         panes: vec![Pane {
-                            id: org.pane,
+                            id: pane,
                             source: None,
                             axis: Axis::Right,
-                            starting_directory: org.starting_directory.clone(),
+                            starting_directory: directory.to_owned(),
                             current_directory: None,
                             repository_directory: None,
                             presentation: None,
                             observers: Default::default(),
-                            confirmed_directory: org.confirmed_directory.clone(),
+                            confirmed_directory: None,
                             creator: None,
                         }],
                     }],
@@ -547,34 +548,12 @@ impl State {
             sequence_floor: 0,
             creator_boot: None,
             session_ends: None,
-        })
+        };
+        state.validate()?;
+        Ok(state)
     }
-    pub fn envelope(
-        &self,
-        directory: &Path,
-    ) -> Result<crate::organization::Organization, ServerError> {
-        // The envelope describes the first Workspace. Shared organization is authoritative,
-        // including when its inventory is empty.
-        let mut org = crate::organization::Organization::first(directory.to_owned())?;
-        if let Some(w) = self.inventory.workspaces.first() {
-            let t = w
-                .tabs
-                .iter()
-                .find(|t| t.id == w.root_tab)
-                .ok_or(ServerError::UnsafeStorage)?;
-            let p = t
-                .panes
-                .iter()
-                .find(|p| p.id == t.root_pane)
-                .ok_or(ServerError::UnsafeStorage)?;
-            org.workspace = w.id;
-            org.tab = t.id;
-            org.pane = p.id;
-            org.name.clone_from(&w.name);
-            org.pinned_directory.clone_from(&w.pinned_directory);
-            org.starting_directory.clone_from(&p.starting_directory);
-            org.confirmed_directory.clone_from(&p.confirmed_directory);
-        }
+    /// The record a server retains: this state without its live facts.
+    pub fn envelope(&self) -> crate::organization::Organization {
         let mut retained = self.clone();
         retained.inventory.repositories = None;
         retained.inventory.close = None;
@@ -590,8 +569,7 @@ impl State {
             pane.presentation = None;
             pane.observers = PaneObservers::default();
         }
-        org.shared = Some(Box::new(retained));
-        Ok(org)
+        crate::organization::Organization::new(retained)
     }
     pub fn outcome(&self, device: Id, sequence: u64) -> Option<&RetainedOutcome> {
         self.devices
@@ -1437,13 +1415,10 @@ struct JournalRecord {
     last: Option<RetainedOutcome>,
     /// Retired outcomes the client has not presented yet, oldest first. This is the client's
     /// own record; the server's acknowledgement retires an outcome independently.
-    #[serde(default)]
     unseen: Vec<RetainedOutcome>,
     /// How many unseen outcomes the bound ever forgot, and how many of those the client has
     /// said went unseen. Both only grow, so recording a presentation again changes nothing.
-    #[serde(default)]
     forgotten: u64,
-    #[serde(default)]
     forgotten_presented: u64,
 }
 /// Pending shared edits live outside Settings and are fenced to their original authority.
@@ -1766,9 +1741,10 @@ mod tests {
         let outcome = state.outcome([2; 32], 2).unwrap().clone();
         state.acknowledge([2; 32], 1).unwrap();
         state.acknowledge([2; 32], 2).unwrap();
-        let envelope = state.envelope("/home/test".as_ref()).unwrap();
-        let record = serde_json::from_slice(&serde_json::to_vec(&envelope).unwrap()).unwrap();
-        let mut recovered = State::from_organization(&record);
+        let envelope = state.envelope();
+        let record: crate::organization::Organization =
+            serde_json::from_slice(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let mut recovered = *record.shared;
         recovered.validate().unwrap();
         recovered.begin_boot([9; 32]);
         assert_eq!(
@@ -2778,9 +2754,9 @@ mod tests {
             names: vec!["Observer CLI".into()],
             others: 4,
         };
-        let envelope = state.envelope("/tmp".as_ref()).unwrap();
+        let envelope = state.envelope();
         assert_eq!(
-            envelope.shared.unwrap().inventory.workspaces[0].tabs[0].panes[0].observers,
+            envelope.shared.inventory.workspaces[0].tabs[0].panes[0].observers,
             PaneObservers::default()
         );
         let bytes = serde_json::to_vec(&state).unwrap();
@@ -2842,10 +2818,10 @@ mod tests {
             panic!()
         };
         state.remove_pane(source);
-        let envelope = state.envelope("/tmp".as_ref()).unwrap();
+        let envelope = state.envelope();
         let reopened: crate::organization::Organization =
             serde_json::from_slice(&serde_json::to_vec(&envelope).unwrap()).unwrap();
-        let mut restored = State::from_organization(&reopened);
+        let mut restored = *reopened.shared;
         restored.validate().unwrap();
         let tab = &restored.inventory.workspaces[0].tabs[0];
         assert_eq!(tab.root_pane, pane);
@@ -2977,27 +2953,6 @@ mod tests {
                 (3, 2),
                 "only the one forgotten after that notice still needs one"
             );
-        }
-
-        /// A journal written before the client recorded unseen outcomes still opens, with none.
-        #[test]
-        fn a_journal_without_unseen_outcomes_should_open_with_none() {
-            let root = Root::new();
-            drop(root.open());
-            let directory = crate::storage::Directory::open(&root.0, false).unwrap();
-            directory
-                .write_json(
-                    c"operations.json",
-                    &serde_json::json!({
-                        "server": SERVER,
-                        "client": CLIENT,
-                        "pending": null,
-                        "last": null,
-                    }),
-                )
-                .unwrap();
-
-            assert!(root.open().unseen().is_empty());
         }
     }
 

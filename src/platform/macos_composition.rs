@@ -161,12 +161,12 @@ fn compose(
         home_directory: startup.home_directory,
         adapters: crate::app::ApplicationCapabilities {
             updates: update_adapter(identity),
-            selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
-            settings_file: Some(settings_file),
+            selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
+            settings_file,
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
             ),
-            desktop_events: Some(Rc::new(super::macos_text_input_focus::MacosTextInputFocus)),
+            desktop_events: Rc::new(super::macos_text_input_focus::MacosTextInputFocus),
             application_quit: Rc::new(
                 super::macos_application_quit::MacosApplicationQuitAdapter::new(),
             ),
@@ -199,13 +199,13 @@ fn compose(
                 as Rc<dyn crate::platform::permission_access::PermissionAccess>),
             setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
                 as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
-            theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
+            theme_registry: Arc::new(super::https_transport::HttpsTransport::new()),
             repository_status: Some(repository_status),
             background_images: Some(background_images),
             local_server: crate::ui::LocalServerAdapters::account(),
-            ssh_setup: Some(ssh_setup),
-            direct_servers: Some(direct_servers),
-            server_context_paths: Some(server_context_paths),
+            ssh_setup,
+            direct_servers,
+            server_context_paths,
             command_line_tool,
             desktop_channel: super::unix_desktop_channel::DesktopChannelListener::bind(
                 identity.directory_name(),

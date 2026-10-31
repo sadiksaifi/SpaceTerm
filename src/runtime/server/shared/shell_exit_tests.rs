@@ -90,19 +90,26 @@ fn session(host: &mut SharedWorkspaceHost, pane: Id) -> Option<Id> {
 }
 
 #[test]
-fn a_zero_exit_closes_only_its_pane() {
+fn a_zero_exit_closes_only_its_pane_even_without_a_connected_client() {
     let mut host = SharedWorkspaceHost::new(host());
     let (_, tab, root, second) = split(&mut host);
     let lease = start(&mut host, 1, second);
 
-    assert!(matches!(
-        exit_with(&mut host, 1, lease, "exit 0"),
-        PaneEvent::Ended
-    ));
-    host.tick(Instant::now());
+    command(&mut host, 1, lease, "exit 0");
+    host.disconnected([1; 32]);
+    // Only the host's own ticks run. No client observes the Pane.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while panes(&mut host) != vec![root] {
+        assert!(Instant::now() < deadline, "the exited Pane did not close");
+        host.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
-    assert_eq!(panes(&mut host), vec![root], "the exited Pane closes");
     assert_eq!(shared_inventory(&mut host).workspaces[0].tabs[0].id, tab);
+    assert!(matches!(
+        screen(&mut host, [1; 32], lease),
+        Err(PaneEvent::Ended)
+    ));
     host.shutdown().unwrap();
 }
 
@@ -278,10 +285,8 @@ fn a_server_restart_keeps_the_exited_pane_but_not_its_exit() {
     let lease = start(&mut host, 1, pane);
     exit_with(&mut host, 1, lease, "exit 4");
     host.tick(Instant::now());
-    let record: Organization = serde_json::from_slice(
-        &serde_json::to_vec(&host.state.envelope(&host.prototype.directory).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let record: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&host.state.envelope()).unwrap()).unwrap();
     host.shutdown().unwrap();
 
     let mut restarted = SharedWorkspaceHost::new(super::super::tests::host());

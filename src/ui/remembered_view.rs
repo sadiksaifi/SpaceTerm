@@ -37,10 +37,8 @@ pub(crate) fn take_workspace_window(cx: &mut App) -> Option<WindowView> {
 /// Remembers where the closing Settings Window was and the Settings Section it showed.
 pub(crate) fn remember_settings_window(section: SettingsSectionId, window: &Window, cx: &mut App) {
     let placement = WindowPlacement::of(window, cx);
-    cx.default_global::<Remembered>().settings_window = Some(SettingsWindowView {
-        placement,
-        section,
-    });
+    cx.default_global::<Remembered>().settings_window =
+        Some(SettingsWindowView { placement, section });
 }
 
 /// Where the last closed Settings Window was, and its Settings Section.
@@ -173,9 +171,9 @@ fn place(
     positions: bool,
     minimum: Size<Pixels>,
 ) -> Option<Placed> {
-    let remembered = displays.iter().find(|display| {
-        placement.display.is_some() && display.identity == placement.display
-    });
+    let remembered = displays
+        .iter()
+        .find(|display| placement.display.is_some() && display.identity == placement.display);
     let display = remembered.or_else(|| displays.first())?;
     let area = display.visible;
     let restore = placement.bounds.get_bounds();

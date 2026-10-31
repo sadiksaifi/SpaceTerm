@@ -2261,53 +2261,6 @@ fn client_clock_cannot_expire_or_reject_an_invitation_before_server_observation(
     }
 }
 
-/// A setup reserved over WSS, before QUIC replaced it, is dropped when the server loads its
-/// record. Everything else loads, and the unfinished setup is reported as abandoned.
-#[test]
-fn a_wss_setup_reservation_is_dropped_and_the_record_still_loads() {
-    let mut fixture = Fixture::new();
-    fixture.enable();
-    let credential = DeviceCredential::generate().unwrap();
-    let paired = fixture.enroll(&credential);
-    let reservation = DeviceCredential::generate().unwrap();
-    let request = setup(&fixture, [105; 32], &reservation);
-    reserve(&fixture, &request);
-    let Management::Setup { operation, .. } = &request else {
-        panic!()
-    };
-    let operation = *operation;
-    fixture.state.lock().unwrap().stop();
-    let path = fixture.paths.data.join("direct.json");
-    let stored = std::fs::read_to_string(&path).unwrap();
-    let (start, _) = stored
-        .match_indices("\"endpoint\":\"quic://")
-        .next()
-        .unwrap();
-    let rest = &stored[start + "\"endpoint\":\"quic://".len()..];
-    let authority = &rest[..rest.find('"').unwrap()];
-    let obsolete = stored.replacen(
-        &format!("\"endpoint\":\"quic://{authority}\""),
-        &format!("\"endpoint\":\"wss://{authority}/spaceterm\""),
-        1,
-    );
-    assert_ne!(obsolete, stored);
-    std::fs::write(&path, obsolete).unwrap();
-    fixture.state = host::State::open(&fixture.paths).unwrap();
-    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
-        panic!()
-    };
-    assert_eq!(status.abandoned_setups, [operation]);
-    assert!(matches!(status.listener, ListenerState::Listening { .. }));
-    let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap() else {
-        panic!()
-    };
-    assert!(
-        devices
-            .iter()
-            .any(|device| device.pairing == paired.pairing)
-    );
-}
-
 #[test]
 fn setup_preserves_distinct_public_and_listener_ports_across_reopen_and_exact_replay() {
     let mut fixture = Fixture::new();
@@ -2921,7 +2874,6 @@ mod quic_connections {
             (&paired.client, &"Test".into()),
             &paired.pin.server,
             &paired.pin.build,
-            &[crate::protocol::MAJOR],
         )
         .unwrap();
         stream.into_carrier()

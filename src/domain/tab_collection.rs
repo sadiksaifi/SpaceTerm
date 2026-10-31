@@ -90,6 +90,7 @@ impl<T> TabCollection<T> {
         self.root_tab_id
     }
 
+    #[cfg(test)]
     pub(crate) fn root_tab(&self) -> &T {
         self.tab(self.root_tab_id)
             .expect("the Root Tab must belong to the Workspace")

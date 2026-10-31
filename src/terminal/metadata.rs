@@ -228,10 +228,6 @@ impl RemoteTerminalMetadataContext {
     pub const fn initial_directory(&self) -> &RemoteDirectory {
         &self.initial_directory
     }
-
-    pub fn set_initial_directory(&mut self, directory: RemoteDirectory) {
-        self.initial_directory = directory;
-    }
 }
 
 /// A per-session secret that SpaceTerm's shell integration attaches to its own prompt markers.

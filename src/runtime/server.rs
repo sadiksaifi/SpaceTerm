@@ -1,7 +1,34 @@
-//! The first retained Development Workspace and its independently owned live Terminal Session.
+//! The server runtime: the shared Workspace host and the per-Pane hosts that own each live
+//! Terminal Session.
+use crate::appearance::resolution::AppearanceGeneration;
+use crate::appearance::terminal_theme::Appearance;
+use crate::domain::workspace_collection::ValidatedLocalDirectory;
+use crate::platform::local_filesystem::LocalFilesystemError;
+use crate::terminal::accessibility::{
+    AccessibilityCellRef, AccessibilityRowId, AccessibilityScreen, TerminalAccessibilityModel,
+};
+use crate::terminal::emulator::{
+    ActiveScreenSnapshot, CellSnapshot, CursorShapeSnapshot, PresentationGeneration, RowSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
+};
+use crate::terminal::failure::TerminalFailure;
+use crate::terminal::graphics::GraphicsSnapshot;
+use crate::terminal::key::*;
+use crate::terminal::native_services::hyperlink::{HyperlinkKind, HyperlinkTarget};
+use crate::terminal::native_services::osc52::{Osc52Operation, Osc52Target};
+use crate::terminal::native_services::paste::{
+    PasteConfirmationId, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
+};
+use crate::terminal::pointer_input::*;
+use crate::terminal::session::{
+    ClipboardCompletion, ClipboardRequest, LocalTerminalLaunchPlan, NativeTerminalSessionFactory,
+    TerminalAppearanceUpdate, TerminalRuntime, TerminalSessionEvent, TerminalSessionFailure,
+    TerminalSubscription,
+};
+
 use super::*;
 use crate::terminal::session::TerminalSessionStartupStage;
-use spaceterm_server::organization::{Organization, OrganizationStore};
+use spaceterm_server::organization::OrganizationStore;
 use spaceterm_server::{
     ServerError,
     pane::{self, *},
@@ -22,6 +49,53 @@ pub(crate) mod testing {
 
     pub(crate) fn terminal_host() -> SharedWorkspaceHost {
         SharedWorkspaceHost::new(super::tests::host())
+    }
+
+    /// Prepares `host`'s first Workspace and starts its Pane at `size` for the client `[1; 32]`
+    /// over the connection `[1; 32]`.
+    pub(crate) fn started_pane(host: &mut SharedWorkspaceHost, size: PaneSize) -> Lease {
+        host.prepare_initial_organization()
+            .expect("the first Workspace is prepared");
+        let pane = super::tests::shared_inventory(host).workspaces[0].tabs[0].root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size,
+                style: None,
+            },
+        ) else {
+            panic!("the first Pane did not start")
+        };
+        lease
+    }
+
+    /// Types `keys` in `lease`'s Pane as the client `[1; 32]` with the terminal focused.
+    pub(crate) fn type_keys(host: &mut SharedWorkspaceHost, lease: Lease, keys: Vec<Key>) -> Reply {
+        let generation = super::tests::COMMAND_FOCUS;
+        let focused = host.request(
+            [1; 32],
+            lease.connection,
+            Request::Focus {
+                lease,
+                generation,
+                target: FocusTarget::Terminal,
+            },
+        );
+        if !matches!(focused, Reply::Unchanged) {
+            return focused;
+        }
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::Keys {
+                lease,
+                generation,
+                keys,
+            },
+        )
     }
 
     /// A server's directory reads and creations, in process, for one client connection.
@@ -117,8 +191,7 @@ pub(crate) mod testing {
 mod directory_tests;
 mod dispatch;
 pub use dispatch::{HostCommands, HostRead, Observers, RunAnswer, RunRequest, Served, SettledRead};
-pub use publish::{Observation, Observed};
-pub use screen_encoder::ScreenCapture;
+
 #[cfg(test)]
 #[path = "server/effect_tests.rs"]
 mod effect_tests;
@@ -131,7 +204,7 @@ mod graphics;
 mod graphics_tests;
 #[cfg(test)]
 mod input_tests;
-mod metadata;
+pub(super) mod metadata;
 #[cfg(test)]
 mod metadata_tests;
 mod observe;
@@ -158,7 +231,7 @@ pub use shared::SharedWorkspaceHost;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use self::pane_host::{decode_key, geometry};
+pub(crate) use self::pane_host::geometry;
 use self::screen::appearance;
 
 pub struct DevelopmentPaneHost {
@@ -166,13 +239,12 @@ pub struct DevelopmentPaneHost {
     pane: Option<OwnedPane>,
     factory: NativeTerminalSessionFactory,
     directory: std::path::PathBuf,
-    organization: Option<Organization>,
-    store: Option<OrganizationStore>,
-    uncertain: bool,
+    /// The shared Pane this host runs. `None` on the server's prototype, and once the Pane
+    /// closed.
+    identity: Option<PaneIdentity>,
     directory_unavailable: bool,
     failed_directory_session: Option<PaneTarget>,
     dormant: Option<DormantPane>,
-    directories: directories::DirectoryOperations,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
@@ -199,6 +271,23 @@ impl ServerSessionContext {
             server: spaceterm_server::local_server_id(identity)?,
             cli: std::env::current_exe().map_err(|_| ServerError::StartupFailed)?,
         })
+    }
+}
+/// Which shared Pane a per-Pane host runs, and the directories its Sessions start in.
+#[derive(Clone)]
+struct PaneIdentity {
+    workspace: [u8; 32],
+    tab: [u8; 32],
+    pane: [u8; 32],
+    starting_directory: std::path::PathBuf,
+    /// The directory the owning shell last confirmed. A new Session starts there.
+    confirmed_directory: Option<std::path::PathBuf>,
+}
+impl PaneIdentity {
+    fn startup_directory(&self) -> &std::path::Path {
+        self.confirmed_directory
+            .as_deref()
+            .unwrap_or(&self.starting_directory)
     }
 }
 /// A Pane the running server keeps after its Session ended, with the control grant it had.
@@ -257,6 +346,7 @@ impl DevelopmentPaneHost {
             .filter(|pane| !pane.ended)
             .map(|pane| pane.lease.session)
     }
+    #[cfg(test)]
     pub fn new(
         factory: NativeTerminalSessionFactory,
         directory: ValidatedLocalDirectory,
@@ -266,13 +356,10 @@ impl DevelopmentPaneHost {
             pane: None,
             factory,
             directory: directory.path().to_owned(),
-            organization: None,
-            store: None,
-            uncertain: false,
+            identity: None,
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
             session_context: None,
@@ -302,16 +389,21 @@ impl DevelopmentPaneHost {
             pane: None,
             factory,
             directory,
-            organization: None,
-            store: None,
-            uncertain: false,
+            identity: None,
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
             notifier: None,
             session_context: None,
         })
     }
 }
+
+#[cfg(test)]
+pub(crate) use publish::Observed;
+#[cfg(test)]
+use screen_encoder::ScreenCapture;
+
+#[cfg(test)]
+use crate::local_path::LocalPathSemantics;

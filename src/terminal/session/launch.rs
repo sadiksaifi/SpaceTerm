@@ -180,28 +180,6 @@ impl NativeTerminalSessionFactory {
     }
 }
 
-#[cfg(test)]
-impl TerminalSessionFactory for NativeTerminalSessionFactory {
-    fn start(
-        &self,
-        geometry: TerminalGeometry,
-        local: LocalTerminalLaunchPlan,
-        initial_appearance: TerminalAppearanceUpdate,
-    ) -> Result<StartedTerminalSession, TerminalSessionError> {
-        let (session, subscription) = self.start_subscribed(geometry, local, initial_appearance)?;
-        Ok(StartedTerminalSession {
-            clipboard: subscription.clipboard,
-            handle: Box::new(session),
-            events: subscription.events,
-            accessibility: subscription.accessibility,
-        })
-    }
-
-    fn fallback_title(&self) -> String {
-        self.launch_planner.fallback_title()
-    }
-}
-
 impl TerminalRuntime {
     #[cfg(test)]
     pub fn start(
@@ -318,8 +296,6 @@ impl TerminalRuntime {
         let worker_schedule_input = schedule_input.clone();
         let metadata_state = TerminalSessionMetadataState::default();
         let worker_metadata_state = metadata_state.clone();
-        let permission_request_state = TerminalSessionPermissionRequestState::default();
-        let worker_permission_request_state = permission_request_state.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
         clipboard_authority.observe_subscription(event_tx.clone());
         let event_tx = TerminalEventPublisher::from(event_tx);
@@ -377,7 +353,6 @@ impl TerminalRuntime {
                     TerminalWorkerPublishers {
                         clipboard,
                         metadata_state: worker_metadata_state,
-                        permission_request_state: worker_permission_request_state,
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
@@ -388,7 +363,6 @@ impl TerminalRuntime {
         Ok((
             Self {
                 metadata_state,
-                permission_request_state,
                 commands: Some(command_tx),
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),

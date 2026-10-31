@@ -254,7 +254,7 @@ fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
         "failed discovery cannot erase saved membership"
     );
     assert_eq!(facts.failure, Some(RepositoryReadError::Unavailable));
-    let restored = State::from_organization(&reading.state.envelope(&git.0).unwrap());
+    let restored = *reading.state.envelope().shared;
     assert_eq!(
         restored.inventory.workspaces[0].tabs[0].worktree.as_ref(),
         Some(&tree)

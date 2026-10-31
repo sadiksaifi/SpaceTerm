@@ -12,19 +12,17 @@ use gpui::{
 use super::*;
 #[path = "interaction_tests.rs"]
 mod interaction_tests;
-use crate::appearance::{Color, TerminalColors};
+use crate::appearance::Color;
 use crate::terminal::native_services::clipboard::{
     ClipboardError, ClipboardRead, SelectionClipboard,
 };
 use crate::terminal::native_services::file_preview::{FilePreviewError, FilePreviewSubmission};
 use crate::terminal::testing::{
-    RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords, test_local_directory,
+    RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
 use crate::terminal::{
-    LocalTerminalLaunchPlan, ScrollbarSnapshot, TerminalSessionExit, TerminalSessionFactory,
-    TerminalSessionFailure,
+    ScrollbarSnapshot, TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
 };
-use crate::ui::appearance::TerminalFonts;
 
 #[gpui::test]
 fn pane_floating_shell_selects_the_window_activity_catalog(cx: &mut TestAppContext) {
@@ -381,7 +379,7 @@ fn text_screen(generation: u64, rows: &[&str]) -> Arc<ScreenSnapshot> {
 fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
     focused_pane(
         cx,
-        TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+        server_sessions(TestTerminalSessionRecords::default())
             .with_start_failure("terminal session unavailable in UI test"),
     )
 }
@@ -392,10 +390,7 @@ fn focused_pane(
 ) -> (Entity<TerminalPane>, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(sessions),
-        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
-    );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(sessions));
     let (pane, cx) =
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
@@ -448,10 +443,8 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
         Rc::new(crate::platform::window_visibility::RecordingWindowVisibilityFactory::default());
     let mut dependencies = PaneLifecycleDependencies::testing();
     dependencies.visibility = factory.clone();
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(records.clone())),
-        test_local_directory(std::env::temp_dir()),
-    );
+    let session_factory =
+        WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(records.clone())));
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::with_adapters(
             session_factory, crate::terminal::testing::test_terminal_key_input_adapter(),
@@ -636,29 +629,94 @@ fn remote_directory_screen(generation: u64, path: &str) -> Arc<ScreenSnapshot> {
     screen
 }
 
+const SERVER_RUN: ServerSessionRun = ServerSessionRun {
+    boot: [1; 32],
+    session: [2; 32],
+};
+
+fn published_metadata(
+    revision: u64,
+    screen: Arc<ScreenSnapshot>,
+) -> Arc<crate::terminal::metadata::TerminalMetadataSnapshot> {
+    let mut metadata = Arc::clone(&screen.metadata);
+    Arc::make_mut(&mut metadata).revision = revision;
+    metadata
+}
+
 #[gpui::test]
-fn retained_directory_metadata_should_reject_older_screens_and_clear_stale_directory(
-    cx: &mut TestAppContext,
-) {
+fn server_metadata_rejects_older_revisions_and_clears_a_stale_directory(cx: &mut TestAppContext) {
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
-    let (pane, cx) = terminal_pane(cx);
-    let latest = CurrentDirectory::Local(PathBuf::from("/projects/latest"));
-    let retained = |revision, freshness| {
-        let screen = directory_screen(1, "/projects/latest", freshness);
-        let mut metadata = Arc::clone(&screen.metadata);
-        Arc::make_mut(&mut metadata).revision = revision;
-        metadata
-    };
+    let (pane, cx, _) = server_terminal_pane(cx, true);
+    fn present(
+        revision: u64,
+        path: &str,
+        freshness: MetadataFreshness,
+        pane: &mut TerminalPane,
+        cx: &mut Context<TerminalPane>,
+    ) {
+        let metadata = published_metadata(revision, directory_screen(1, path, freshness));
+        pane.present_server_metadata(Some((SERVER_RUN, metadata)), cx);
+    }
     pane.update(cx, |pane, cx| {
-        assert!(pane.accept_metadata(retained(20, MetadataFreshness::Live)));
-        let mut old_screen = directory_screen(2, "/projects/old", MetadataFreshness::Live);
-        Arc::make_mut(&mut Arc::make_mut(&mut old_screen).metadata).revision = 10;
-        pane.handle_event(TerminalSessionEvent::Screen(old_screen), cx);
-        assert_eq!(pane.current_directory(), Some(latest.clone()));
+        present(20, "/projects/latest", MetadataFreshness::Live, pane, cx);
+        present(10, "/projects/old", MetadataFreshness::Live, pane, cx);
+        assert_eq!(
+            pane.current_directory(),
+            Some(CurrentDirectory::Local(PathBuf::from("/projects/latest")))
+        );
         assert_eq!(pane.caption().directory.as_ref(), "/projects/latest");
-        assert!(pane.accept_metadata(retained(21, MetadataFreshness::Stale)));
+        present(21, "/projects/latest", MetadataFreshness::Stale, pane, cx);
         assert_eq!(pane.current_directory(), None);
     });
+}
+
+#[gpui::test]
+fn server_metadata_of_another_session_run_replaces_a_higher_revision(cx: &mut TestAppContext) {
+    use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
+    let (pane, cx, _) = server_terminal_pane(cx, true);
+    let restarted = ServerSessionRun {
+        boot: [3; 32],
+        ..SERVER_RUN
+    };
+    pane.update(cx, |pane, cx| {
+        let before = directory_screen(1, "/projects/before", MetadataFreshness::Live);
+        pane.present_server_metadata(Some((SERVER_RUN, published_metadata(40, before))), cx);
+        let after = directory_screen(1, "/projects/after", MetadataFreshness::Live);
+        pane.present_server_metadata(Some((restarted, published_metadata(1, after))), cx);
+        assert_eq!(
+            pane.current_directory(),
+            Some(CurrentDirectory::Local(PathBuf::from("/projects/after")))
+        );
+        assert!(pane.presents_server_metadata(restarted, 1));
+    });
+}
+
+#[gpui::test]
+fn server_metadata_ending_clears_progress_and_directory(cx: &mut TestAppContext) {
+    use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata};
+    use crate::ui::terminal_status::TerminalProgress;
+    let (pane, cx, _) = server_terminal_pane(cx, true);
+    let mut screen = directory_screen(1, "/projects/build", MetadataFreshness::Live);
+    Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).progress = ProgressMetadata::Normal(45);
+    let captions = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&captions);
+    cx.update(|_, cx| {
+        cx.subscribe(&pane, move |_, event, _| {
+            if matches!(event, TerminalPaneEvent::CaptionChanged) {
+                observed.set(observed.get() + 1);
+            }
+        })
+        .detach();
+    });
+    pane.update(cx, |pane, cx| {
+        pane.present_server_metadata(Some((SERVER_RUN, published_metadata(1, screen))), cx);
+        assert_eq!(pane.caption().progress, TerminalProgress::Normal(45));
+        pane.present_server_metadata(None, cx);
+        assert_eq!(pane.caption().progress, TerminalProgress::None);
+        assert_eq!(pane.current_directory(), None);
+    });
+    cx.run_until_parked();
+    assert_eq!(captions.get(), 2);
 }
 
 #[gpui::test]
@@ -666,20 +724,34 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
     cx: &mut TestAppContext,
 ) {
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
-    let (pane, cx) = terminal_pane(cx);
-    for (generation, path, freshness, expected) in [
+    let (pane, cx, _) = server_terminal_pane(cx, true);
+    for (revision, screen, expected) in [
         (
             1,
-            "/Users/test/live",
-            MetadataFreshness::Live,
+            directory_screen(1, "/Users/test/live", MetadataFreshness::Live),
             Some(CurrentDirectory::Local(PathBuf::from("/Users/test/live"))),
         ),
-        (2, "/Users/test/stale", MetadataFreshness::Stale, None),
-        (3, "relative", MetadataFreshness::Live, None),
+        (
+            2,
+            directory_screen(1, "/Users/test/stale", MetadataFreshness::Stale),
+            None,
+        ),
+        (
+            3,
+            directory_screen(1, "relative", MetadataFreshness::Live),
+            None,
+        ),
+        (
+            4,
+            remote_directory_screen(1, "/srv/app"),
+            Some(CurrentDirectory::Remote(
+                crate::domain::RemoteDirectory::new("/srv/app".into()).unwrap(),
+            )),
+        ),
     ] {
         pane.update(cx, |pane, cx| {
-            pane.handle_event(
-                TerminalSessionEvent::Screen(directory_screen(generation, path, freshness)),
+            pane.present_server_metadata(
+                Some((SERVER_RUN, published_metadata(revision, screen))),
                 cx,
             );
         });
@@ -688,18 +760,6 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
             expected
         );
     }
-    pane.update(cx, |pane, cx| {
-        pane.handle_event(
-            TerminalSessionEvent::Screen(remote_directory_screen(4, "/srv/app")),
-            cx,
-        );
-    });
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.current_directory()),
-        Some(CurrentDirectory::Remote(
-            crate::domain::RemoteDirectory::new("/srv/app".into()).unwrap()
-        ))
-    );
 }
 
 #[gpui::test]
@@ -828,7 +888,7 @@ fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppCo
     let (reply, receiver) = async_channel::bounded(1);
     let (pane, cx) = focused_pane(
         cx,
-        TestTerminalSessionFactory::new(records.clone())
+        server_sessions(records.clone())
             .with_pending_paste_response(receiver)
             .with_paste_resolution(Ok(PasteResolution::Cancelled)),
     );
@@ -868,9 +928,114 @@ fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppCo
     );
 }
 
+#[gpui::test]
+fn deactivating_a_tab_delivers_focus_out_to_its_server_session(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let server = crate::terminal::server_session::push_tests::ConnectedPane::new();
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(server.factory.clone()));
+    let (pane, cx) = cx.add_window_view(|window, cx| TerminalPane::new(factory, window, cx));
+    cx.update(|window, cx| {
+        window.activate_window();
+        pane.update(cx, |pane, cx| pane.focus(window, cx));
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pane.read_with(cx, |pane, _| {
+        pane.terminal_session
+            .session
+            .as_ref()
+            .is_some_and(|session| {
+                session.interactive_input() == crate::terminal::InteractiveInput::Accepted
+            })
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the server never admitted terminal input"
+        );
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            assert!(pane.synchronize_terminal_input_focus(window, cx));
+        });
+    });
+    // Ignore focus-in events while the shell waits for DEC mode 1004's three focus-out bytes.
+    pane.update(cx, |pane, cx| {
+        pane.send_key_translation(KeyTranslation::Encoded(KeyInput::input_method_commit(
+            "set +m; stty raw -echo; printf '\\033[?1004h\\033[2J\\033[HREADY\\r\\n'; while :; do bytes=$(dd bs=1 count=3 2>/dev/null | od -v -An -tx1 | tr -d ' \\n'); printf '%s\\r\\n' \"$bytes\"; [ \"$bytes\" = 1b5b4f ] && break; done"
+        )), cx);
+    });
+    cx.simulate_keystrokes("enter");
+    let screen_text = |pane: &TerminalPane| {
+        pane.screen
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pane.read_with(cx, |pane, _| {
+        screen_text(pane).lines().any(|line| line == "READY")
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the shell never enabled focus reporting: {}",
+            pane.read_with(cx, |pane, _| screen_text(pane))
+        );
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                active_tab: false,
+                ..Default::default()
+            },
+            cx,
+        );
+    });
+    // A hidden Pane receives no frames. Showing it without activating its Tab reads the result
+    // without sending focus-in, so focus-out alone must have completed the shell's read.
+    pane.update(cx, |pane, _| {
+        pane.terminal_session
+            .session
+            .as_ref()
+            .unwrap()
+            .set_presentable(true)
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pane.read_with(cx, |pane, _| {
+        screen_text(pane).lines().any(|line| line == "1b5b4f")
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "Tab deactivation never reached the server PTY as focus-out: {}",
+            pane.read_with(cx, |pane, _| screen_text(pane))
+        );
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pane.update(cx, |pane, _| pane.close());
+}
+
+/// Sessions of a server Pane whose connection presents what the server reads.
+fn server_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
+    TestTerminalSessionFactory::new(records).with_reading_available(true)
+}
+
 /// Sessions with this client's file authority, as a same-machine server grants local Panes.
 fn same_machine_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
-    TestTerminalSessionFactory::new(records).with_client_filesystem(
+    server_sessions(records).with_client_filesystem(
         crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
     )
 }
@@ -886,37 +1051,6 @@ fn connected_terminal_pane(
     let (pane, cx) = focused_pane(cx, same_machine_sessions(records.clone()));
     (pane, cx, records)
 }
-#[gpui::test]
-fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
-    let session_id = records.starts().last().unwrap().session_id;
-    records.report_metadata(session_id, |metadata| {
-        metadata.freshness = crate::terminal::metadata::MetadataFreshness::Live;
-        metadata.progress = crate::terminal::metadata::ProgressMetadata::Normal(45);
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.caption().progress),
-        super::super::terminal_status::TerminalProgress::Normal(45)
-    );
-
-    records
-        .event_sender(session_id)
-        .unwrap()
-        .try_send(TerminalSessionEvent::Failed(
-            TerminalSessionFailure::Runtime(crate::terminal::TerminalFailure::emulator(
-                "session-runtime",
-            )),
-        ))
-        .unwrap();
-    cx.run_until_parked();
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.caption().progress),
-        super::super::terminal_status::TerminalProgress::None
-    );
-}
-
 #[gpui::test]
 fn accessibility_uses_its_bounded_latest_lane_instead_of_screen_rows(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
@@ -974,14 +1108,10 @@ fn accessibility_models_are_applied_only_with_their_matching_screen_generation(
 fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut TestAppContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(
-        Rc::new(
-            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                .server_backed()
-                .with_fallback_title("Terminal"),
-        ),
-        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
-    );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+        TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+            .with_fallback_title("Terminal"),
+    ));
     let (pane, cx) =
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     let former = text_screen(5, &["secret"]);
@@ -1034,14 +1164,9 @@ fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interr
 
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(
-        Rc::new(
-            TestTerminalSessionFactory::new(records.clone())
-                .server_backed()
-                .with_reading_available(true),
-        ),
-        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
-    );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+        TestTerminalSessionFactory::new(records.clone()).with_reading_available(true),
+    ));
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::with_adapters(
             session_factory,
@@ -1195,10 +1320,8 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
 
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(records)),
-        test_local_directory(PathBuf::from("/")),
-    );
+    let session_factory =
+        WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(records)));
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::with_adapters(
             session_factory,
@@ -1276,14 +1399,9 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
     let (_, cx) = terminal_pane(cx);
     let factory =
         crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default();
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(
-            TestTerminalSessionRecords::default(),
-        )),
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-accessibility-test",
-        )),
-    );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(
+        TestTerminalSessionRecords::default(),
+    )));
     let pane = cx.update(|window, cx| {
         cx.new(|cx| {
             TerminalPane::with_adapters(
@@ -1569,7 +1687,7 @@ fn hidden_focus_gain_is_delivered_once_when_the_pane_becomes_presented(cx: &mut 
 fn focus_out_and_in_between_presentations_delivers_one_retained_focus_notification(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx) = terminal_pane(cx);
+    let (pane, cx, _) = connected_terminal_pane(cx);
     let accessibility_record = prepare_accessibility_presentation(&pane, cx);
     cx.update(|window, cx| {
         pane.update(cx, |pane, _| {
@@ -1619,14 +1737,8 @@ fn connected_terminal_pane_with_key_propagation(
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-keyboard-propagation-test",
-        )),
-    );
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(server_sessions(records.clone()));
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
     let propagated_key_downs = Rc::new(Cell::new(0));
     let propagated_for_probe = Rc::clone(&propagated_key_downs);
     let (probe, cx) = cx.add_window_view(|window, cx| {
@@ -1668,8 +1780,7 @@ fn terminal_pane_with_selection_copy(
     let records = TestTerminalSessionRecords::default();
     let (pane, cx) = focused_pane(
         cx,
-        TestTerminalSessionFactory::new(records.clone())
-            .with_selection_copy_response(Ok(Some(copy))),
+        server_sessions(records.clone()).with_selection_copy_response(Ok(Some(copy))),
     );
     (pane, cx, records)
 }
@@ -1700,10 +1811,9 @@ fn terminal_pane_with_session_options(
 ) {
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(configure(same_machine_sessions(records.clone()))),
-        test_local_directory(std::env::temp_dir()),
-    );
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(configure(
+        same_machine_sessions(records.clone()),
+    )));
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::with_adapters(
             session_factory,
@@ -1736,7 +1846,7 @@ fn server_terminal_pane(
 ) {
     terminal_pane_with_session_options(cx, |sessions| {
         sessions
-            .server_backed()
+            .with_reading_available(false)
             .with_interactive_input_available(available)
     })
 }
@@ -1745,7 +1855,6 @@ fn server_terminal_pane(
 fn capable_server_pane_reuses_find_scroll_copy_and_services(cx: &mut TestAppContext) {
     let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
         sessions
-            .server_backed()
             .with_reading_available(true)
             .with_selection_copy_response(Ok(Some(SelectionCopy {
                 plain_text: "complete retained selection".into(),
@@ -1835,7 +1944,7 @@ fn server_pane_pastes_text_once_without_local_selection_find_or_scrollback(
 }
 
 #[gpui::test]
-fn server_pane_without_interactive_capability_discards_keys_ime_and_paste_chords(
+fn server_pane_awaiting_interactive_input_discards_keys_ime_and_paste_chords(
     cx: &mut TestAppContext,
 ) {
     let (pane, cx, records) = server_terminal_pane(cx, false);
@@ -2090,67 +2199,6 @@ fn server_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut Te
 }
 
 #[gpui::test]
-fn typing_unavailable_waits_for_the_connection_to_refuse_input(cx: &mut TestAppContext) {
-    use crate::terminal::InteractiveInput;
-    use spaceterm_ui::a11y_testing::A11yTree;
-    let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
-        sessions
-            .server_backed()
-            .with_interactive_input(InteractiveInput::Pending)
-    });
-    cx.run_until_parked();
-    assert!(
-        A11yTree::read(cx).find("Typing Unavailable").is_none(),
-        "a Pane whose connection has not answered claims no incompatibility"
-    );
-    records.set_interactive_input(1, InteractiveInput::Accepted);
-    pane.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert!(A11yTree::read(cx).find("Typing Unavailable").is_none());
-    records.set_interactive_input(1, InteractiveInput::Pending);
-    pane.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert!(
-        A11yTree::read(cx).find("Typing Unavailable").is_none(),
-        "an interrupted connection is not a refusal"
-    );
-    records.set_interactive_input(1, InteractiveInput::Refused);
-    pane.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let tree = A11yTree::read(cx);
-    assert_eq!(tree.node("Typing Unavailable")["aria"]["role"], "Status");
-    assert!(cx.debug_bounds("terminal-input-unavailable").is_some());
-}
-
-#[gpui::test]
-fn server_pane_status_stacks_above_typing_unavailable_without_hiding_either_notice(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-    let (pane, cx, _records) = server_terminal_pane(cx, false);
-    pane.update(cx, |pane, cx| {
-        pane.status = Some("Diagnostics exported".to_owned());
-        pane.status_intent = StatusIntent::Success;
-        cx.notify();
-    });
-    let tree = A11yTree::read(cx);
-    for label in ["Terminal status", "Typing Unavailable"] {
-        assert_eq!(tree.node(label)["aria"]["role"], "Status");
-        assert!(tree.exposed(tree.node(label)));
-    }
-    let status = cx.debug_bounds("terminal-status").unwrap();
-    let unsupported = cx.debug_bounds("terminal-input-unavailable").unwrap();
-    let pane = cx.debug_bounds("terminal-pane").unwrap();
-    assert_eq!(
-        status.bottom() + px(8.0),
-        unsupported.top(),
-        "the notices keep an 8px vertical gap"
-    );
-    assert_eq!(status.right(), unsupported.right());
-    assert_eq!(unsupported.right() + px(12.0), pane.right());
-}
-
-#[gpui::test]
 fn server_pane_context_menu_offers_native_links_and_paste_without_selection_or_find(
     cx: &mut TestAppContext,
 ) {
@@ -2340,20 +2388,6 @@ fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
     assert_eq!((before, after), (18.0, 19.0));
 }
 
-#[gpui::test]
-fn command_k_should_clear_the_terminal_screen_and_scrollback(cx: &mut TestAppContext) {
-    let (_pane, cx, records) = connected_terminal_pane(cx);
-
-    cx.simulate_keystrokes("cmd-k");
-
-    assert!(
-        records
-            .commands()
-            .iter()
-            .any(|call| matches!(call.command, RecordedCommand::ClearScreenAndScrollback))
-    );
-}
-
 fn clear_requests(records: &TestTerminalSessionRecords) -> usize {
     records
         .commands()
@@ -2370,9 +2404,9 @@ fn command_k_should_ask_the_server_to_clear_the_screen_and_scrollback(cx: &mut T
     assert_eq!(clear_requests(&records), 1);
 }
 
-/// A server that takes no input from this client cannot clear for it either.
+/// A Pane whose connection takes no input yet cannot ask its server to clear either.
 #[gpui::test]
-fn command_k_should_ask_nothing_of_a_server_that_takes_no_input(cx: &mut TestAppContext) {
+fn command_k_should_ask_nothing_before_the_connection_takes_input(cx: &mut TestAppContext) {
     let (_pane, cx, records) = server_terminal_pane(cx, false);
     cx.simulate_keystrokes("cmd-k");
     assert_eq!(clear_requests(&records), 0);
@@ -2610,9 +2644,8 @@ fn terminal_find_open_edit_navigate_and_close_are_pane_scoped(cx: &mut TestAppCo
 
 #[gpui::test]
 fn server_find_reports_an_oversized_query_and_recovers_after_edit(cx: &mut TestAppContext) {
-    let (pane, cx, _) = terminal_pane_with_session_options(cx, |sessions| {
-        sessions.server_backed().with_reading_available(true)
-    });
+    let (pane, cx, _) =
+        terminal_pane_with_session_options(cx, |sessions| sessions.with_reading_available(true));
     cx.dispatch_action(OpenTerminalFind);
     let input = terminal_find_input(&pane, cx);
     let query = "界".repeat(1366);
@@ -3080,7 +3113,7 @@ fn open_crowded_repository_popover(pane: &Entity<TerminalPane>, cx: &mut VisualT
     use crate::ui::ShowRepositoryStatus;
 
     pane.update(cx, |pane, cx| {
-        pane.present_repository_view(
+        pane.present_server_repository(
             RepositoryView::Repository(Arc::new(crowded_repository_status())),
             cx,
         );
@@ -3268,7 +3301,7 @@ fn repository_status_popover_holds_input_until_escape_returns_it(cx: &mut TestAp
         read_failure: None,
     };
     pane.update(cx, |pane, cx| {
-        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+        pane.present_server_repository(RepositoryView::Repository(Arc::new(status)), cx);
     });
     let command_count = records.commands().len();
     cx.dispatch_action(ShowRepositoryStatus);
@@ -3326,7 +3359,7 @@ fn hiding_repository_status_under_an_open_popover_should_return_input_to_the_ter
         read_failure: None,
     };
     pane.update(cx, |pane, cx| {
-        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+        pane.present_server_repository(RepositoryView::Repository(Arc::new(status)), cx);
     });
     cx.dispatch_action(ShowRepositoryStatus);
     cx.run_until_parked();
@@ -3335,7 +3368,7 @@ fn hiding_repository_status_under_an_open_popover_should_return_input_to_the_ter
     // Settings turns Repository Status off while its own window is in front.
     cx.deactivate_window();
     pane.update(cx, |pane, cx| {
-        pane.present_repository_view(RepositoryView::Hidden, cx);
+        pane.present_server_repository(RepositoryView::Hidden, cx);
     });
     cx.run_until_parked();
     cx.update(|window, _| window.activate_window());
@@ -3385,7 +3418,7 @@ fn repository_status_popover_should_stay_open_while_another_window_is_in_front(
         read_failure: None,
     };
     pane.update(cx, |pane, cx| {
-        pane.present_repository_view(RepositoryView::Repository(Arc::new(status)), cx);
+        pane.present_server_repository(RepositoryView::Repository(Arc::new(status)), cx);
     });
     cx.dispatch_action(ShowRepositoryStatus);
     cx.run_until_parked();
@@ -3694,7 +3727,7 @@ fn text_blink_uses_an_injected_clock_only_while_visible_content_demands_it(
 
 #[gpui::test]
 fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
+    let (pane, cx, _) = connected_terminal_pane(cx);
     cx.update(|_window, cx| {
         pane.update(cx, |pane, cx| {
             pane.set_product_focus(
@@ -3753,7 +3786,7 @@ fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn cursor_blink_retains_the_fitted_grid_line_height(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
+    let (pane, cx, _) = connected_terminal_pane(cx);
     let nominal_height = pane.read_with(cx, |pane, _| pane.line_height);
     cx.simulate_resize(gpui::size(
         px(800.0),
@@ -4332,7 +4365,7 @@ fn accepted_input_redraws_only_a_hidden_blinking_cursor(cx: &mut TestAppContext)
 fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx) = terminal_pane(cx);
+    let (pane, cx, _) = connected_terminal_pane(cx);
     let focused = TerminalProductFocus {
         active_workspace: true,
         active_tab: true,
@@ -4482,6 +4515,7 @@ fn command_minus_should_decrease_terminal_font_size(cx: &mut TestAppContext) {
 #[gpui::test]
 fn command_zero_should_reset_terminal_font_size(cx: &mut TestAppContext) {
     let (pane, cx) = terminal_pane(cx);
+    let default = pane.read_with(cx, |pane, _cx| pane.font_size());
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| pane.set_font_size(20.0, window, cx));
     });
@@ -4490,7 +4524,7 @@ fn command_zero_should_reset_terminal_font_size(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-0");
     let after = pane.read_with(cx, |pane, _cx| pane.font_size());
 
-    assert_eq!((before, after), (20.0, DEFAULT_FONT_SIZE));
+    assert_eq!((before, after), (20.0, default));
 }
 
 #[gpui::test]
@@ -5924,7 +5958,7 @@ fn authoritative_focus_transitions_share_one_deduplicated_terminal_session_path(
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(focus_commands(), vec![false, true]);
+    assert_eq!(focus_commands(), vec![false, false, true]);
 
     cx.update(|_window, app| {
         pane.update(app, |pane, app| {
@@ -5939,7 +5973,7 @@ fn authoritative_focus_transitions_share_one_deduplicated_terminal_session_path(
         });
     });
     cx.run_until_parked();
-    assert_eq!(focus_commands(), vec![false, true, false]);
+    assert_eq!(focus_commands(), vec![false, false, true, false]);
 
     cx.update(|_window, app| {
         pane.update(app, |pane, app| {
@@ -5954,7 +5988,7 @@ fn authoritative_focus_transitions_share_one_deduplicated_terminal_session_path(
         });
     });
     cx.run_until_parked();
-    assert_eq!(focus_commands(), vec![false, true, false]);
+    assert_eq!(focus_commands(), vec![false, false, true, false]);
 
     cx.update(|_window, app| {
         pane.update(app, |pane, app| {
@@ -5963,10 +5997,13 @@ fn authoritative_focus_transitions_share_one_deduplicated_terminal_session_path(
         });
     });
     cx.run_until_parked();
-    assert_eq!(focus_commands(), vec![false, true, false, true]);
+    assert_eq!(focus_commands(), vec![false, false, true, false, true]);
 
     cx.deactivate_window();
-    assert_eq!(focus_commands(), vec![false, true, false, true, false]);
+    assert_eq!(
+        focus_commands(),
+        vec![false, false, true, false, true, false]
+    );
 }
 
 #[gpui::test]
@@ -6359,40 +6396,6 @@ fn marked_text_edit_replaces_logical_preedit_clusters(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn headless_shaper_preserves_emoji_run_routing(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    let fonts = pane.read_with(cx, |pane, _| {
-        TerminalFonts::prepare(&pane.appearance.terminal.typography)
-    });
-
-    cx.update(|window, _cx| {
-        let text = "👩\u{200d}💻";
-        let run = TextRun {
-            len: text.len(),
-            font: fonts.regular.clone(),
-            color: gpui_color(TerminalColors::default().foreground).into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-
-        let shaped =
-            window
-                .text_system()
-                .shape_line(text.into(), px(DEFAULT_FONT_SIZE), &[run], None);
-
-        assert_eq!(shaped.len(), text.len());
-        assert!(
-            shaped
-                .runs
-                .iter()
-                .flat_map(|run| &run.glyphs)
-                .any(|glyph| glyph.is_emoji)
-        );
-    });
-}
-
-#[gpui::test]
 fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppContext) {
     let (_pane, cx) = terminal_pane(cx);
 
@@ -6410,8 +6413,7 @@ fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppC
 
 #[gpui::test]
 fn an_oversized_server_input_method_commit_preserves_the_entire_host_text(cx: &mut TestAppContext) {
-    let (pane, cx, records) =
-        terminal_pane_with_session_options(cx, |sessions| sessions.server_backed());
+    let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| sessions);
     let text = "界🙂".repeat(10_000);
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
@@ -6530,34 +6532,6 @@ fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAp
             .iter()
             .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
     );
-}
-
-#[gpui::test]
-fn input_method_text_reaches_the_session_while_a_host_accessory_holds_key_status(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
-    // A host emoji picker takes key status from the Operating-System Window while the Pane's
-    // input context stays current.
-    cx.deactivate_window();
-    cx.run_until_parked();
-    assert!(!cx.update(|window, app| pane.read(app).terminal_input_focused(window, app)));
-
-    cx.update(|window, app| {
-        pane.update(app, |pane, pane_cx| {
-            pane.replace_text_in_range(None, "😂", window, pane_cx);
-        });
-    });
-
-    let commits = records
-        .commands()
-        .into_iter()
-        .filter_map(|call| match call.command {
-            RecordedCommand::Key(input) if input.is_input_method_commit() => input.text,
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(commits, ["😂"]);
 }
 
 #[gpui::test]
@@ -6995,7 +6969,7 @@ fn context_menu_focus_blocker_reports_focus_out_before_focus_in(cx: &mut TestApp
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(reports, [false, true, false, true]);
+    assert_eq!(reports, [false, false, true, false, true]);
 }
 
 #[gpui::test]
@@ -7580,21 +7554,6 @@ fn terminal_session_exit_dismisses_file_preview_and_the_context_menu(cx: &mut Te
     assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
 }
 
-#[gpui::test]
-fn context_copy_stays_eligible_for_offscreen_selection_presence(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-
-    let actions = pane.update(cx, |pane, _| {
-        let mut screen =
-            ScreenSnapshot::from_test_parts(Arc::from([]), ScrollbarSnapshot::default(), "");
-        Arc::make_mut(&mut screen).selection_present = true;
-        pane.screen = screen;
-        pane.native_context_actions()
-    });
-
-    assert!(actions.copy);
-}
-
 #[test]
 fn maps_gpui_buttons_and_modifiers_to_terminal_input() {
     assert_eq!(pointer_button(MouseButton::Left), Some(PointerButton::Left));
@@ -7617,43 +7576,6 @@ fn maps_gpui_buttons_and_modifiers_to_terminal_input() {
             platform: true,
             ..InputModifiers::default()
         }
-    );
-}
-
-#[gpui::test]
-fn terminal_scrollbar_should_request_exact_row_offsets(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    let records = TestTerminalSessionRecords::default();
-    let session = TestTerminalSessionFactory::new(records.clone())
-        .start(
-            TerminalGeometry::from_grid(
-                CellGridSize::new(80, 24),
-                LogicalCellSize::new(8.0, 16.0),
-                BackingScale::ONE,
-            ),
-            LocalTerminalLaunchPlan::new(test_local_directory(PathBuf::from(
-                "/tmp/spaceterm-terminal-pane-test",
-            ))),
-            crate::terminal::test_terminal_appearance_update(),
-        )
-        .expect("the test terminal session should start");
-    let screen =
-        ScreenSnapshot::from_test_parts_at(Arc::from([]), ScrollbarSnapshot::default(), "", 7);
-    let generation = screen.generation;
-    let scrollbar = pane.update(cx, |pane, _| {
-        pane.terminal_session.session = Some(session.handle);
-        pane.screen = screen;
-        pane.scrollbar.clone()
-    });
-
-    scrollbar.update(cx, |_, cx| {
-        cx.emit(OverlayScrollbarEvent::OffsetRequested(u64::MAX - 1));
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        records.commands().last().map(|input| &input.command),
-        Some(&RecordedCommand::ScrollTo(u64::MAX - 1, generation,))
     );
 }
 
@@ -7702,14 +7624,8 @@ fn backing_scale_change_should_preserve_the_grid_and_resize_backing_pixels(
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        session_factory,
-        crate::terminal::testing::test_local_directory(PathBuf::from(
-            "/tmp/spaceterm-terminal-pane-scale-test",
-        )),
-    );
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(server_sessions(records.clone()));
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
     let (pane, cx) =
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.run_until_parked();
@@ -8090,45 +8006,6 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
 }
 
 #[gpui::test]
-fn graphics_post_mutation_failures_remain_quota_bounded_for_changing_keys(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
-    records
-        .last_event_sender()
-        .unwrap()
-        .try_send(TerminalSessionEvent::Screen(graphics_screen(1, 1)))
-        .unwrap();
-    cx.run_until_parked();
-    let cache = pane.read_with(cx, |pane, _| pane.graphics_cache.clone());
-    let retained = cache.read_with(cx, |cache, _| cache.retained_bytes());
-
-    for generation in 2..18 {
-        let screen = graphics_screen(generation, generation as u32);
-        let result = cx.update(|window, cx| {
-            cache.update(cx, |cache, cx| {
-                cache.fail_after_staging();
-                cache.sync(screen.active_screen, &screen.graphics, window, cx)
-            })
-        });
-        assert!(result.is_err());
-        assert_eq!(
-            cache.read_with(cx, |cache, _| (
-                cache.cached_image_keys(),
-                cache.staged_image_keys(),
-                cache.retained_bytes(),
-            )),
-            (
-                vec![crate::terminal::ImageKey {
-                    image_id: 1,
-                    generation: 1,
-                }],
-                Vec::new(),
-                retained,
-            )
-        );
-    }
-}
-
-#[gpui::test]
 fn server_graphics_recovery_clears_only_its_own_failure_notice(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
@@ -8199,56 +8076,6 @@ fn stale_graphics_attempt_cannot_roll_back_a_newer_same_generation_stage(cx: &mu
             image_id: 3,
             generation: 2,
         }]
-    );
-}
-
-#[gpui::test]
-fn stale_recoverable_and_export_completions_cannot_mask_a_fatal_failure(cx: &mut TestAppContext) {
-    let (pane, cx, _records) = connected_terminal_pane(cx);
-    let (recovery, export) = pane.update(cx, |pane, _| {
-        pane.present_failure(
-            TerminalFailure::platform("recoverable-operation"),
-            true,
-            Some(RecoveryAction::CopySelection),
-        );
-        let recovery = pane.pending_recovery.unwrap();
-        let export = pane.begin_operation(pane.screen.generation, None);
-        pane.latest_export_operation = Some(export.id);
-        (recovery, export)
-    });
-    pane.update(cx, |pane, cx| {
-        pane.handle_event(
-            TerminalSessionEvent::Failed(TerminalSessionFailure::PtyRead {
-                read_error: "unavailable".to_owned(),
-                exit_status: "exit code 7".to_owned(),
-            }),
-            cx,
-        );
-        assert!(!pane.clear_recovery(recovery));
-        pane.finish_export(export, Ok(()), PathBuf::from("stale"), cx);
-        pane.finish_export(
-            export,
-            Err(std::io::Error::other("stale failure")),
-            PathBuf::from("stale"),
-            cx,
-        );
-        pane.handle_event(
-            TerminalSessionEvent::Exited(crate::terminal::TerminalSessionExit::Success),
-            cx,
-        );
-    });
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| (
-            pane.pane_state.failure().map(TerminalFailure::class),
-            pane.pending_recovery,
-            pane.authoritative_status(),
-        )),
-        (
-            Some(crate::terminal::FailureClass::Pty),
-            None,
-            Some("This Terminal Session failed. Close this Pane.".to_owned(),),
-        )
     );
 }
 
@@ -8498,84 +8325,6 @@ fn native_platform_retry_requires_a_successful_selection_write_to_clear_failure(
     );
 }
 
-#[gpui::test]
-fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
-    let exits = Rc::new(Cell::new(0));
-    let exits_for_subscription = Rc::clone(&exits);
-    pane.update(cx, |_, cx| {
-        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
-            if matches!(event, TerminalPaneEvent::Exited) {
-                exits_for_subscription.update(|exits| exits + 1);
-            }
-        })
-        .detach();
-    });
-    cx.run_until_parked();
-    let sender = records
-        .event_sender(1)
-        .expect("rendering the Pane must start its Terminal Session");
-
-    sender
-        .try_send(TerminalSessionEvent::Failed(
-            TerminalSessionFailure::PtyRead {
-                read_error: "read unavailable".to_owned(),
-                exit_status: "exit code 7".to_owned(),
-            },
-        ))
-        .unwrap();
-    cx.run_until_parked();
-
-    let state = pane.read_with(cx, |pane, _| {
-        (
-            pane.authoritative_status(),
-            pane.terminal_session.session.is_some(),
-            pane.pane_state
-                .failure()
-                .map(crate::terminal::TerminalFailure::class),
-            pane.diagnostics.record_count(),
-        )
-    });
-    assert_eq!(
-        state,
-        (
-            Some("This Terminal Session failed. Close this Pane.".to_owned()),
-            true,
-            Some(crate::terminal::FailureClass::Pty),
-            1,
-        )
-    );
-    assert_eq!(
-        (exits.get(), records.dropped_session_ids()),
-        (0, Vec::new())
-    );
-    assert!(cx.debug_bounds("terminal-status").is_some());
-    assert!(cx.debug_bounds("retry-terminal-recovery").is_none());
-    assert_eq!(cx.opened_url(), None);
-    let report = cx
-        .debug_bounds("report-terminal-failure")
-        .expect("typed failure should offer a GitHub issue draft");
-    cx.simulate_click(report.center(), Modifiers::none());
-    cx.run_until_parked();
-    let url = gpui::http_client::Url::parse(&cx.opened_url().unwrap()).unwrap();
-    assert_eq!(url.host_str(), Some("github.com"));
-    assert_eq!(url.path(), "/sadiksaifi/SpaceTerm/issues/new");
-    let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
-    assert_eq!(
-        query.get("title").unwrap(),
-        "[Terminal failure] PTY: read-shell-output"
-    );
-    let body = query.get("body").unwrap();
-    assert!(body.contains("class=Pty recoverability=Fatal operation=read-shell-output"));
-    assert!(!body.contains("read unavailable"));
-    assert!(!cx.did_prompt_for_new_path());
-    let export = cx
-        .debug_bounds("export-terminal-diagnostics")
-        .expect("typed failure should expose explicit diagnostic export");
-    cx.simulate_click(export.center(), Modifiers::none());
-    cx.run_until_parked();
-    assert!(cx.did_prompt_for_new_path());
-}
 #[cfg(all(
     test,
     any(target_os = "macos", target_os = "linux"),
@@ -9128,18 +8877,16 @@ impl crate::terminal::native_services::clipboard::PrimarySelection for SlowPrima
 
 fn terminal_pane_with_slow_primary(
     cx: &mut TestAppContext,
-    server_backed: bool,
+    reading_available: bool,
 ) -> (
     Entity<TerminalPane>,
     &mut VisualTestContext,
     TestTerminalSessionRecords,
     async_channel::Sender<String>,
 ) {
-    let (pane, cx, records) = if server_backed {
-        server_terminal_pane(cx, true)
-    } else {
-        connected_terminal_pane(cx)
-    };
+    let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
+        sessions.with_reading_available(reading_available)
+    });
     let (owner, answer) = async_channel::unbounded();
     pane.update(cx, |pane, _| {
         pane.primary_selection = Some(Rc::new(SlowPrimary(answer)));
@@ -9160,7 +8907,7 @@ fn requested_pastes(records: &TestTerminalSessionRecords) -> Vec<RecordedCommand
 fn paste_selection_from_a_slow_owner_leaves_the_pane_free_and_pastes_when_answered(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, true);
 
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
@@ -9180,7 +8927,7 @@ fn paste_selection_from_a_slow_owner_leaves_the_pane_free_and_pastes_when_answer
 fn paste_reads_completing_after_focus_moved_or_the_terminal_session_closed_are_discarded(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, true);
 
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
@@ -9199,7 +8946,7 @@ fn paste_reads_completing_after_focus_moved_or_the_terminal_session_closed_are_d
 
 #[gpui::test]
 fn server_untracked_middle_click_pastes_primary_without_selection_support(cx: &mut TestAppContext) {
-    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, true);
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
     let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
     cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
     cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::none());
@@ -9220,7 +8967,7 @@ fn server_untracked_middle_click_pastes_primary_without_selection_support(cx: &m
 fn server_paste_read_from_a_former_connection_is_discarded_without_a_visible_outage(
     cx: &mut TestAppContext,
 ) {
-    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, true);
+    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
     records.advance_input_generation(1);
@@ -9239,7 +8986,7 @@ fn server_paste_read_from_a_former_connection_is_discarded_without_a_visible_out
 
 #[gpui::test]
 fn a_newer_paste_discards_the_read_it_replaces(cx: &mut TestAppContext) {
-    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
+    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, true);
 
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
@@ -9265,7 +9012,6 @@ mod permission_requests {
     use crate::platform::permission_access::testing::ScriptedPermissionAccess;
     use crate::platform::permission_access::{PermissionAuthorization, SystemPermission};
     use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
-    use crate::terminal::permission_request::PermissionRequest;
     use crate::ui::permission_setup::PermissionSetup;
     use SystemPermission::{Accessibility, ScreenRecording};
 
@@ -9307,11 +9053,20 @@ mod permission_requests {
         permissions: &[SystemPermission],
         cx: &mut VisualTestContext,
     ) {
+        let authority =
+            Arc::new(crate::terminal::session::clipboard::ClipboardAuthority::default());
+        authority.client_focus(Some(true));
+        let request = crate::terminal::session::ClientEffectRequest::new(
+            spaceterm_server::pane::effects::Effect::PermissionSetup {
+                screen_recording: permissions.contains(&SystemPermission::ScreenRecording),
+                accessibility: permissions.contains(&SystemPermission::Accessibility),
+            },
+            Arc::clone(&authority),
+            authority.output_epoch().unwrap(),
+            Duration::from_secs(1),
+        );
         pane.update(cx, |pane, cx| {
-            if pane.handle_event(
-                TerminalSessionEvent::PermissionRequested(PermissionRequest::for_test(permissions)),
-                cx,
-            ) {
+            if pane.handle_event(TerminalSessionEvent::ClientEffect(request), cx) {
                 cx.notify();
             }
         });
@@ -9324,7 +9079,7 @@ mod permission_requests {
     ) {
         for (local_authority, revoke) in [(false, false), (true, false), (true, true)] {
             let (pane, cx, _) = terminal_pane_with_session_options(cx, |sessions| {
-                let sessions = sessions.server_backed();
+                let sessions = sessions;
                 if local_authority {
                     sessions.with_client_filesystem(crate::platform::runtime_local_filesystem())
                 } else {
@@ -9339,7 +9094,6 @@ mod permission_requests {
             );
             let authority =
                 Arc::new(crate::terminal::session::clipboard::ClipboardAuthority::default());
-            authority.route();
             authority.client_focus(Some(true));
             let request = crate::terminal::session::ClientEffectRequest::new(
                 spaceterm_server::pane::effects::Effect::PermissionSetup {
@@ -9471,40 +9225,6 @@ mod permission_requests {
                 .is_none()
         );
         assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
-    }
-
-    #[gpui::test]
-    fn a_retained_request_survives_its_wakeup_only_while_the_terminal_session_is_live(
-        cx: &mut TestAppContext,
-    ) {
-        let (pane, cx, records) = connected_terminal_pane(cx);
-        install_setup(
-            &pane,
-            PermissionAuthorization::NotGranted,
-            PermissionAuthorization::NotGranted,
-            cx,
-        );
-        let session_id = records.starts().last().unwrap().session_id;
-        records
-            .retain_permission_request(session_id, PermissionRequest::for_test(&[Accessibility]));
-        let events = records.last_event_sender().unwrap();
-        // The request's event was replaced by a Screen before the Pane consumed it.
-        events
-            .try_send(TerminalSessionEvent::Screen(text_screen(1, &["prompt"])))
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("permission-request").is_some());
-        assert_eq!(
-            pane.read_with(cx, |pane, _| pane.permission_request.clone()),
-            [Accessibility]
-        );
-
-        events
-            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("permission-request").is_none());
-        assert!(pane.read_with(cx, |pane, _| pane.permission_request.is_empty()));
     }
 
     #[gpui::test]
@@ -9882,35 +9602,6 @@ mod permission_requests {
         assert_eq!(offered(&pane, cx), [Accessibility]);
     }
 
-    /// The system reports no change to Screen Recording, so a person who turns it on directly in
-    /// System Settings is seen when they return to the window.
-    #[gpui::test]
-    fn returning_to_the_window_reads_a_grant_made_elsewhere(cx: &mut TestAppContext) {
-        let (pane, cx, _) = connected_terminal_pane(cx);
-        let access = install_setup(
-            &pane,
-            PermissionAuthorization::NotGranted,
-            PermissionAuthorization::NotGranted,
-            cx,
-        );
-        request(&pane, &[ScreenRecording], cx);
-
-        access.set(ScreenRecording, Ok(PermissionAuthorization::Granted));
-        cx.deactivate_window();
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-
-        assert!(offered(&pane, cx).is_empty());
-        assert!(cx.debug_bounds("permission-request").is_none());
-
-        access.set(ScreenRecording, Ok(PermissionAuthorization::NotGranted));
-        cx.deactivate_window();
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-
-        assert_eq!(offered(&pane, cx), [ScreenRecording]);
-    }
-
     /// A grant read from a cache can be stale. When a verification finds it withdrawn, the Pane
     /// offers the setup the program asked for.
     #[gpui::test]
@@ -10033,10 +9724,8 @@ fn headless_pane() -> (
     });
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
-    let factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(records.clone())),
-        test_local_directory(PathBuf::from("/tmp/spaceterm-glyph-failure-test")),
-    );
+    let factory =
+        WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(records.clone())));
     let handle = cx
         .open_window(size(px(800.0), px(600.0)), move |window, cx| {
             cx.new(|cx| TerminalPane::new(factory, window, cx))
@@ -10054,7 +9743,7 @@ fn headless_pane() -> (
 
 fn accessible_paste_confirmation(
     cx: &mut TestAppContext,
-    server_backed: bool,
+    reading_available: bool,
 ) -> (
     Entity<TerminalPane>,
     &mut VisualTestContext,
@@ -10062,11 +9751,7 @@ fn accessible_paste_confirmation(
     PasteConfirmation,
 ) {
     accessible_paste_confirmation_with_session_options(cx, |sessions| {
-        if server_backed {
-            sessions.server_backed()
-        } else {
-            sessions
-        }
+        sessions.with_reading_available(reading_available)
     })
 }
 
@@ -10104,7 +9789,7 @@ fn accessible_paste_confirmation_with_session_options(
 
 fn approve_deferred_paste_resolution(
     cx: &mut TestAppContext,
-    server_backed: bool,
+    reading_available: bool,
 ) -> (
     Entity<TerminalPane>,
     &mut VisualTestContext,
@@ -10117,11 +9802,7 @@ fn approve_deferred_paste_resolution(
     let (pane, cx, records, confirmation) =
         accessible_paste_confirmation_with_session_options(cx, |sessions| {
             let sessions = sessions.with_pending_paste_resolution(response);
-            if server_backed {
-                sessions.server_backed()
-            } else {
-                sessions
-            }
+            sessions.with_reading_available(reading_available)
         });
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
@@ -10144,19 +9825,17 @@ fn approve_deferred_paste_resolution(
 }
 
 #[gpui::test]
-fn deferred_paste_resolution_stale_reply_warns_after_local_or_server_approval(
-    cx: &mut TestAppContext,
-) {
+fn deferred_paste_resolution_stale_reply_warns_after_approval(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    for server_backed in [false, true] {
-        let (_pane, cx, _records, reply) = approve_deferred_paste_resolution(cx, server_backed);
+    for reading_available in [false, true] {
+        let (_pane, cx, _records, reply) = approve_deferred_paste_resolution(cx, reading_available);
         reply.try_send(Ok(PasteResolution::Stale)).unwrap();
         let tree = A11yTree::read(cx);
         let status = tree.node("Terminal status");
         assert_eq!(status["aria"]["role"], "Status");
         assert_eq!(
             status["aria"]["value"], "Warning",
-            "server_backed={server_backed}"
+            "reading_available={reading_available}"
         );
         assert_eq!(
             status["aria"]["description"],
@@ -10166,19 +9845,17 @@ fn deferred_paste_resolution_stale_reply_warns_after_local_or_server_approval(
 }
 
 #[gpui::test]
-fn deferred_paste_resolution_lost_reply_reports_error_after_local_or_server_approval(
-    cx: &mut TestAppContext,
-) {
+fn deferred_paste_resolution_lost_reply_reports_error_after_approval(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    for server_backed in [false, true] {
-        let (_pane, cx, _records, reply) = approve_deferred_paste_resolution(cx, server_backed);
+    for reading_available in [false, true] {
+        let (_pane, cx, _records, reply) = approve_deferred_paste_resolution(cx, reading_available);
         drop(reply);
         let tree = A11yTree::read(cx);
         let status = tree.node("Terminal status");
         assert_eq!(status["aria"]["role"], "Status");
         assert_eq!(
             status["aria"]["value"], "Error",
-            "server_backed={server_backed}"
+            "reading_available={reading_available}"
         );
         assert_eq!(
             status["aria"]["description"],
@@ -10192,13 +9869,13 @@ fn deferred_paste_resolution_from_a_former_input_generation_publishes_no_status(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    for server_backed in [false, true] {
-        let (_pane, cx, records, reply) = approve_deferred_paste_resolution(cx, server_backed);
+    for reading_available in [false, true] {
+        let (_pane, cx, records, reply) = approve_deferred_paste_resolution(cx, reading_available);
         records.advance_input_generation(1);
         reply.try_send(Ok(PasteResolution::Stale)).unwrap();
         assert!(
             A11yTree::read(cx).find("Terminal status").is_none(),
-            "server_backed={server_backed}"
+            "reading_available={reading_available}"
         );
     }
 }
@@ -10207,7 +9884,7 @@ fn deferred_paste_resolution_from_a_former_input_generation_publishes_no_status(
 fn server_paste_confirmation_from_a_former_connection_cannot_be_approved(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
-    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
+    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
     assert_eq!(tree.with_role("AlertDialog").len(), 1);
@@ -10244,9 +9921,7 @@ fn server_paste_response_from_a_former_connection_cannot_open_confirmation(
     };
     let (sender, response) = async_channel::bounded(1);
     let (_pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
-        sessions
-            .server_backed()
-            .with_pending_paste_response(response)
+        sessions.with_pending_paste_response(response)
     });
     cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".into()));
     cx.dispatch_action(PasteClipboard);
@@ -10316,7 +9991,7 @@ fn server_preedit_commit_from_a_former_connection_is_discarded(cx: &mut TestAppC
 fn paste_confirmation_publishes_dialog_text_and_contains_accessibility(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     A11yTree::read(cx);
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
@@ -10367,7 +10042,7 @@ fn paste_confirmation_restores_terminal_focus_after_escape_and_accessibility_can
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     let original_focus = A11yTree::read(cx).focused().unwrap()["accesskit_id"].clone();
     for escape in [true, false] {
         let before = records.commands().len();
@@ -10411,7 +10086,7 @@ fn paste_confirmation_accessibility_confirm_resolves_once_and_restores_terminal_
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     let original_focus = A11yTree::read(cx).focused().unwrap()["accesskit_id"].clone();
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
@@ -10439,7 +10114,7 @@ fn paste_confirmation_accessibility_confirm_resolves_once_and_restores_terminal_
 #[gpui::test]
 fn server_session_exit_cancels_paste_confirmation(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
+    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     cx.dispatch_action(PasteClipboard);
     assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
     records
@@ -10467,7 +10142,7 @@ fn paste_confirmation_retirement_removes_the_dialog_and_cancels_the_payload(
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     cx.dispatch_action(PasteClipboard);
     assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
     pane.update(cx, |pane, _| pane.close());
@@ -10498,7 +10173,7 @@ fn paste_confirmation_retirement_removes_the_dialog_and_cancels_the_payload(
 #[gpui::test]
 fn paste_confirmation_cancels_when_focus_leaves_its_pane_or_window(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     for target in 0..5 {
         cx.dispatch_action(PasteClipboard);
         assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
@@ -10558,7 +10233,7 @@ fn paste_confirmation_keeps_authority_when_the_main_window_sets_its_modal_blocke
 ) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     cx.dispatch_action(PasteClipboard);
     assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
     pane.update(cx, |pane, cx| {
@@ -10603,7 +10278,7 @@ fn paste_confirmation_cancels_a_press_after_focus_moves_to_a_background_control(
 ) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     let background = cx.update(|window, cx| {
         let background = cx.focus_handle();
         window

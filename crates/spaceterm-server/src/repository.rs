@@ -119,8 +119,6 @@ pub enum RepositoryReadError {
     OutputTooLarge,
     #[error("the repository read returned an invalid response")]
     InvalidResponse,
-    #[error("the server connection is unavailable")]
-    ConnectionUnavailable,
 }
 
 /// A GitHub repository named by a remote URL: the Pull Request lookup's `--repo` target.
@@ -222,7 +220,6 @@ pub struct Repository {
     pub changes: Result<ChangeSummary, RepositoryReadError>,
     /// A pending count carries the last successful summary, or an unavailable placeholder.
     /// Readers that understand progress ignore that placeholder until the count finishes.
-    #[serde(default)]
     pub counting: Option<ChangeCounting>,
     /// Parsed target only. Raw remote URLs and Git configuration stay on the server.
     pub pull_request: Option<PullRequestQuery>,
@@ -252,9 +249,7 @@ pub struct Snapshot {
     pub directories: Vec<DirectoryFacts>,
     /// Listed Worktree roots that physically contain a Workspace's Pinned Directory.
     /// The owning server resolves symbolic links; clients grant no local file authority.
-    #[serde(default)]
     pub pinned_worktrees: Vec<PathBuf>,
-    #[serde(default)]
     pub pin_check: PinCheckState,
 }
 

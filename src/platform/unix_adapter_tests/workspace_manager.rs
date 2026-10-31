@@ -17,11 +17,11 @@ fn workspace_manager_with_directory_selection(
     });
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
+        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        new_desktop_manager(
+        local_server_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -33,7 +33,7 @@ fn workspace_manager_with_directory_selection(
                 directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 local_server: crate::ui::launch_testing::unanswered(),
-                server_directories: crate::ui::directory_picker::server_directory_testing::older(),
+                server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
             },
             SidebarState::Expanded,
             window,
@@ -60,14 +60,11 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
     choose_pin_directory(&manager, cx);
     choose_pin_directory(&manager, cx);
 
-    let state = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active();
-        (
-            manager.workspaces.len(),
-            workspace.local_display_directory().unwrap().to_path_buf(),
-        )
-    });
-    assert_eq!(state, (1, equivalent.clone()));
+    let workspaces = manager.read_with(cx, |manager, _| manager.workspaces.len());
+    let pinned = local_server(cx).edits.applied_inventory().workspaces[0]
+        .pinned_directory
+        .clone();
+    assert_eq!((workspaces, pinned), (1, Some(equivalent.clone())));
     fs::remove_dir_all(root).unwrap();
 }
 

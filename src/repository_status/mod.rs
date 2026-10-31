@@ -16,7 +16,6 @@ pub(crate) mod presentation;
 pub(crate) mod pull_request;
 pub(crate) mod pull_request_lookup;
 pub(crate) mod remote_url;
-pub(crate) mod scheduler;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod tool_check;
@@ -378,19 +377,6 @@ pub(crate) struct WatchDirectory {
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 #[error("the repository could not be watched")]
 pub(crate) struct RepositoryWatchError;
-
-/// Dropping the value stops watching.
-pub(crate) trait RepositoryWatch: Send {}
-
-/// Watches local git directories, never a work tree.
-pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
-    /// Calls `changed` after any change, and after any watch error, below `directories`.
-    fn watch(
-        &self,
-        directories: Vec<WatchDirectory>,
-        changed: Box<dyn Fn() + Send + Sync>,
-    ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError>;
-}
 
 /// Called with the paths a watch set saw change. An empty list means the paths are unknown, as
 /// after a watch error.

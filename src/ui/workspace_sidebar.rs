@@ -139,9 +139,8 @@ pub(super) enum WorktreeRemoval {
     PinnedDirectoriesUnavailable,
     /// The repository the Workspace reads doesn't list the Worktree, so only its Tabs remain.
     Unlisted,
-    /// A SpaceTerm Server owns the Worktree, and removing it there is not available yet.
-    Server,
-    /// Shared edits wait for a connection or the previous server answer.
+    /// This client has no writer for the owning server, or shared edits wait for a connection
+    /// or the previous server answer.
     NeedsServer,
 }
 

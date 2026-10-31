@@ -136,14 +136,14 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
     );
     let mut state = State::empty();
     state.inventory = current;
-    let retained = state.envelope(&git.0).unwrap();
+    let retained = state.envelope();
     assert!(
-        retained.shared.as_ref().unwrap().inventory.workspaces[0].tabs[0].panes[0]
+        retained.shared.inventory.workspaces[0].tabs[0].panes[0]
             .current_directory
             .is_none()
     );
     assert!(
-        retained.shared.as_ref().unwrap().inventory.workspaces[0].tabs[0].panes[0]
+        retained.shared.inventory.workspaces[0].tabs[0].panes[0]
             .presentation
             .is_none()
     );
@@ -155,9 +155,11 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
             "{live}"
         );
     }
-    let restored = State::from_organization(
-        &serde_json::from_slice(&serde_json::to_vec(&retained).unwrap()).unwrap(),
-    );
+    let restored = *serde_json::from_slice::<spaceterm_server::organization::Organization>(
+        &serde_json::to_vec(&retained).unwrap(),
+    )
+    .unwrap()
+    .shared;
     assert_eq!(
         restored.inventory.workspaces[0].tabs[0].panes[0].confirmed_directory,
         None
@@ -463,8 +465,8 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     });
     let mut retained = spaceterm_server::hierarchy::State::empty();
     retained.inventory = missing.clone();
-    let envelope = retained.envelope(&git.0).unwrap();
-    let restored = spaceterm_server::hierarchy::State::from_organization(&envelope);
+    let envelope = retained.envelope();
+    let restored = *envelope.shared;
     assert!(restored.inventory.repositories.is_none());
     assert_eq!(
         restored
@@ -501,10 +503,13 @@ fn a_deleted_sole_worktree_rediscovers_its_repository_after_restart() {
     let mut state = State::empty();
     state.inventory = inventory;
     // Exercise the actual retained serialization, with no live repository facts at restore.
-    let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
+    let bytes = serde_json::to_vec(&state.envelope()).unwrap();
     host.shutdown().unwrap();
     std::fs::remove_dir_all(&tree).unwrap();
-    let mut restored = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
+    let mut restored =
+        *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+            .unwrap()
+            .shared;
     restored.begin_boot([9; 32]);
     assert!(restored.inventory.repositories.is_none());
     let mut repositories = super::repositories::ServerRepositories::new([9; 32]);
@@ -969,9 +974,12 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     let saved = current.clone();
     let mut state = State::empty();
     state.inventory = left;
-    let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
+    let bytes = serde_json::to_vec(&state.envelope()).unwrap();
     host.shutdown().unwrap();
-    let mut restored = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
+    let mut restored =
+        *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+            .unwrap()
+            .shared;
     restored.begin_boot([9; 32]);
     let mut reads = super::repositories::ServerRepositories::new([9; 32]);
     reads.subscribe([1; 32]);
@@ -1187,9 +1195,12 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     );
     let mut state = State::empty();
     state.inventory = after;
-    let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
+    let bytes = serde_json::to_vec(&state.envelope()).unwrap();
     host.shutdown().unwrap();
-    let mut restored = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
+    let mut restored =
+        *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
+            .unwrap()
+            .shared;
     restored.begin_boot([9; 32]);
     let mut reads = super::repositories::ServerRepositories::new([9; 32]);
     reads.subscribe([1; 32]);

@@ -50,7 +50,7 @@ fn open_keybindings_on(
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             None,
             window,
             cx,

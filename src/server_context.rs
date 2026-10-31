@@ -174,11 +174,8 @@ pub(crate) struct LastKnownFacts {
     pub(crate) running_sessions: Option<u32>,
     pub(crate) git: GitToolStatus,
     /// Last observed display copy. Edits and writability checks require the owning server.
-    #[serde(default)]
     pub(crate) worktree_location: Option<String>,
-    #[serde(default)]
     pub(crate) network_access: Option<NetworkAccessFacts>,
-    #[serde(default)]
     pub(crate) paired_devices: Option<PairedDevicesFacts>,
 }
 

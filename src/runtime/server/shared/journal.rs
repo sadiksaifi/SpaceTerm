@@ -289,9 +289,13 @@ mod tests {
     }
 
     fn named(name: &str) -> Organization {
-        let mut organization = Organization::first("/".into()).unwrap();
-        organization.name = name.into();
-        organization
+        let mut state = spaceterm_server::hierarchy::State::first("/".as_ref()).unwrap();
+        state.inventory.workspaces[0].name = name.into();
+        state.envelope()
+    }
+
+    fn name(organization: &Organization) -> &str {
+        &organization.shared.inventory.workspaces[0].name
     }
 
     #[test]
@@ -303,7 +307,7 @@ mod tests {
         assert!(!journal.settled());
         assert_eq!(journal.sync(first), Ok(()));
         assert_eq!(memory.writes.load(Ordering::SeqCst), 1);
-        assert_eq!(memory.retained().unwrap().name, "third");
+        assert_eq!(name(&memory.retained().unwrap()), "third");
         assert_eq!(journal.sync(third), Ok(()));
         assert_eq!(journal.sync(second), Ok(()));
         assert_eq!(
@@ -335,7 +339,7 @@ mod tests {
         assert_eq!(writer.join().unwrap(), Ok(()));
         assert_eq!(waiter.join().unwrap(), Ok(()));
         assert_eq!(memory.writes.load(Ordering::SeqCst), 2);
-        assert_eq!(memory.retained().unwrap().name, "second");
+        assert_eq!(name(&memory.retained().unwrap()), "second");
     }
 
     #[test]
@@ -359,7 +363,7 @@ mod tests {
             "an unreadable record stays uncertain"
         );
         memory.fail.store(false, Ordering::SeqCst);
-        assert_eq!(journal.recover().unwrap().unwrap().name, "kept");
+        assert_eq!(name(&journal.recover().unwrap().unwrap()), "kept");
         assert!(journal.settled());
         let later = journal.submit(named("later"));
         journal.sync(later).unwrap();

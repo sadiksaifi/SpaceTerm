@@ -155,13 +155,8 @@ fn local_filesystem_policy_cannot_reintroduce_native_identity_or_host_selection(
             "FromRawFd",
             "OpenOptionsExt",
             "PermissionsExt",
-            "macos_local_identity",
-            "linux_local_identity",
             "unix_local_identity",
             "target_os",
-            "identity.device",
-            "identity.inode",
-            "identity.file",
         ] {
             assert!(!source.contains(forbidden), "{name} contains {forbidden}");
         }
@@ -283,12 +278,7 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         }
         let production = source.split(TEST_MODULE).next().unwrap();
         if path.starts_with(root.join("ssh")) {
-            for forbidden in [
-                "std::fs::",
-                "NativeHostConfigFilesystem",
-                "getpeereid",
-                "Apple OpenSSH",
-            ] {
+            for forbidden in ["std::fs::", "getpeereid"] {
                 assert!(
                     !production.contains(forbidden),
                     "{} contains {forbidden}",
@@ -540,7 +530,6 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
         .filter(|character| !character.is_whitespace())
         .collect();
     [
-        "testing_desktop_profile",
         "macos_",
         "Macos",
         "MacOs",
@@ -807,18 +796,6 @@ fn local_interaction_policy_cannot_discover_the_host_or_embed_desktop_branding()
             );
         }
     }
-    let ssh = std::fs::read_to_string(root.join("ssh/command.rs")).unwrap();
-    assert!(!ssh.contains("/usr/bin/false"));
-    for name in [
-        "platform/macos_composition.rs",
-        "platform/linux_composition.rs",
-    ] {
-        let composition = std::fs::read_to_string(root.join(name)).unwrap();
-        assert!(!composition.contains("GpuiDirectorySelection"), "{name}");
-        assert!(!composition.contains("SystemDirectorySelection"), "{name}");
-    }
-    let platform = std::fs::read_to_string(root.join("platform/mod.rs")).unwrap();
-    assert!(!platform.contains("mod directory_selection"));
     for name in [
         "terminal/metadata.rs",
         "terminal/emulator.rs",

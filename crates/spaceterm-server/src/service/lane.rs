@@ -56,8 +56,6 @@ pub const MAX_CHUNK: usize = 64 * 1024;
 const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 /// How often an admitted operation's fence is rechecked against the ledger.
 const FENCE_INTERVAL: Duration = Duration::from_millis(500);
-/// The capability every candidate needs: it keeps server organization across the change.
-const REQUIRED: &[&str] = &["workspace_policy"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case", deny_unknown_fields)]
@@ -668,7 +666,7 @@ impl LaneServer {
             .sync_all()
             .map_err(|_| ServerError::StorageUnavailable)?;
         self.service
-            .stage_candidate(&upload.archive, &upload.signature, &upload.sha256, REQUIRED)
+            .stage_candidate(&upload.archive, &upload.signature, &upload.sha256)
             .map(|installation| staged_reply(&installation))
     }
 
@@ -1203,7 +1201,7 @@ impl Admin<'_> {
                 .write_all(&feed.archive.signature)
                 .map_err(|_| ServerError::StorageUnavailable)?;
             self.service
-                .stage_candidate(&archive, &signature, &feed.archive.sha256, REQUIRED)
+                .stage_candidate(&archive, &signature, &feed.archive.sha256)
         })();
         let _ = std::fs::remove_file(&archive);
         let _ = std::fs::remove_file(&signature);
@@ -1221,8 +1219,7 @@ impl Admin<'_> {
             return Err(ServerError::RuntimeUnavailable);
         }
         let sha256 = hex(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
-        self.service
-            .stage_candidate(archive, signature, &sha256, REQUIRED)
+        self.service.stage_candidate(archive, signature, &sha256)
     }
 
     /// Observes the service for `action` without changing it.

@@ -44,13 +44,7 @@ fn connect(client: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
 }
 
 fn retain(service: &Service, args: &[String]) -> Result<RetainedInstallation, ServerError> {
-    service.provision_candidate(
-        Path::new(&args[0]),
-        Path::new(&args[1]),
-        &args[2],
-        MAJOR,
-        &["workspace_policy"],
-    )
+    service.provision_candidate(Path::new(&args[0]), Path::new(&args[1]), &args[2], MAJOR)
 }
 
 fn inventory(link: &ServerLink) -> Result<spaceterm_server::hierarchy::Inventory, Box<dyn Error>> {
@@ -92,8 +86,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     if installed.stopped {
         service.start()?;
     }
-    let first = ServerConnection::for_development_client("update-smoke-a", MAJOR)?;
-    let second = ServerConnection::for_development_client("update-smoke-b", MAJOR)?;
+    let first = ServerConnection::for_development_client("update-smoke-a")?;
+    let second = ServerConnection::for_development_client("update-smoke-b")?;
     first.setup()?;
     second.setup()?;
     let a = connect(&first)?;
@@ -128,52 +122,22 @@ fn run() -> Result<(), Box<dyn Error>> {
     let archive = Path::new(&args[3]);
     let signature = Path::new(&args[4]);
     if !matches!(
-        service.inspect_candidate(
-            archive,
-            signature,
-            &"0".repeat(64),
-            MAJOR,
-            &["workspace_policy"]
-        ),
+        service.inspect_candidate(archive, signature, &"0".repeat(64), MAJOR),
         Err(ServerError::CandidateChanged)
     ) {
         return Err("a changed client pin was accepted".into());
     }
     if !matches!(
-        service.inspect_candidate(
-            archive,
-            Path::new(&args[1]),
-            &args[5],
-            MAJOR,
-            &["workspace_policy"]
-        ),
+        service.inspect_candidate(archive, Path::new(&args[1]), &args[5], MAJOR),
         Err(ServerError::RuntimeUnavailable)
     ) {
         return Err("an inconsistent signed pair was accepted".into());
     }
     if !matches!(
-        service.inspect_candidate(
-            archive,
-            signature,
-            &args[5],
-            MAJOR + 1,
-            &["workspace_policy"]
-        ),
+        service.inspect_candidate(archive, signature, &args[5], MAJOR + 1),
         Err(ServerError::IncompatibleProtocol)
     ) {
         return Err("an unsupported required major was accepted".into());
-    }
-    if !matches!(
-        service.inspect_candidate(
-            archive,
-            signature,
-            &args[5],
-            MAJOR,
-            &["unavailable_required_feature"]
-        ),
-        Err(ServerError::MissingRequiredCapability)
-    ) {
-        return Err("a missing required capability was accepted".into());
     }
     let candidate = retain(&service, &args[3..6])?;
     if previous.directory == candidate.directory {
@@ -194,7 +158,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("staging changed shared organization".into());
     }
     let created_while_staged = create_workspace(&b, "Created while staged")?;
-    let newcomer = ServerConnection::for_development_client("update-smoke-c", MAJOR)?;
+    let newcomer = ServerConnection::for_development_client("update-smoke-c")?;
     newcomer.setup()?;
     let c = connect(&newcomer)?;
     if inventory(&c)?

@@ -73,7 +73,7 @@ fn open_unread(facts: UpdateFacts, cx: &mut TestAppContext) -> Harness<'_> {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             Some(offered),
             window,
             cx,
@@ -654,7 +654,7 @@ fn confirmed_update_after_reopening(
         let mut settings = SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
-            None,
+            crate::theme_registry::testing::offline(),
             Some(offered),
             window,
             cx,

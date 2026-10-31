@@ -37,6 +37,6 @@ pub(super) fn appearance(
     }
     Ok(update)
 }
-fn from_rgb(c: [u8; 3]) -> super::super::Color {
-    super::super::Color::from_rgb_components(c[0], c[1], c[2])
+fn from_rgb(c: [u8; 3]) -> crate::appearance::color::Color {
+    crate::appearance::color::Color::from_rgb_components(c[0], c[1], c[2])
 }

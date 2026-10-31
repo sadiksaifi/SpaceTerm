@@ -834,7 +834,6 @@ codes! {
     UnsafeStorage = "unsafe_storage", Unavailable, false, "Storage has unsafe permissions.";
     AuthenticationRefused = "authentication_refused", ActionRequired, false, "SpaceTerm couldn\u{2019}t verify the server or account for this connection.";
     IncompatibleProtocol = "incompatible_protocol", Unavailable, false, "This CLI and the server are incompatible. Update the older one.";
-    MissingCapability = "missing_capability", Unavailable, false, "The server needs an update.";
     CandidateChanged = "candidate_changed", Unavailable, false, "The installation changed while the command ran.";
     ProtocolError = "protocol_error", Unavailable, false, "The server connection did not complete.";
     StartupFailed = "startup_failed", Failed, false, "The Terminal Session could not start.";
@@ -916,7 +915,6 @@ pub fn from_server_error(error: ServerError) -> Failure {
         ServerError::UnsafeStorage => Code::UnsafeStorage,
         ServerError::AuthenticationRefused => Code::AuthenticationRefused,
         ServerError::IncompatibleProtocol => Code::IncompatibleProtocol,
-        ServerError::MissingRequiredCapability => Code::MissingCapability,
         ServerError::CandidateChanged => Code::CandidateChanged,
         ServerError::Protocol => Code::ProtocolError,
         ServerError::StartupFailed => Code::StartupFailed,
@@ -2199,7 +2197,6 @@ mod tests {
             (E::UnsafeStorage, "unsafe_storage", 5),
             (E::AuthenticationRefused, "authentication_refused", 3),
             (E::IncompatibleProtocol, "incompatible_protocol", 5),
-            (E::MissingRequiredCapability, "missing_capability", 5),
             (E::CandidateChanged, "candidate_changed", 5),
             (E::Protocol, "protocol_error", 5),
             (E::StartupFailed, "startup_failed", 1),

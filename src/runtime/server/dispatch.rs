@@ -12,98 +12,39 @@ use spaceterm_server::protocol::{
 use std::collections::BTreeMap;
 
 impl DevelopmentPaneHost {
-    pub(super) fn handle(
+    /// Answers one command for this Pane. A refusal is the reply [`Reply::Refused`].
+    pub(super) fn request(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        request: Request,
+    ) -> Reply {
+        self.handle(device, connection, request)
+            .unwrap_or_else(Reply::Refused)
+    }
+    fn handle(
         &mut self,
         device: [u8; 32],
         connection: [u8; 32],
         request: Request,
     ) -> Result<Reply, Refusal> {
-        self.recover()?;
-        self.retain_directory()?;
-        match request {
-            Request::RepairDirectory {
-                target,
-                replacement,
-                size,
-                style,
-            } => {
-                return self.repair_directory(device, connection, target, replacement, size, style);
+        self.retain_directory();
+        if let Request::TakeOver {
+            target,
+            size,
+            style,
+        } = request
+        {
+            self.reconcile_selection()?;
+            // The shell exited and kept its Pane. A new claim offers Session Ended.
+            if self.pane.is_none() && self.dormant.is_some() {
+                return Err(Refusal::Stale);
             }
-            Request::StartRestored {
-                server,
-                pane,
-                size,
-                style,
-            } => {
-                if server != self.boot
-                    || self
-                        .organization
-                        .as_ref()
-                        .is_none_or(|org| org.pane != pane)
-                {
-                    return Err(Refusal::Stale);
-                }
-                if self.pane.is_some() {
-                    return self.select(device, connection, false, size, None, style);
-                }
-                return self.select(device, connection, true, size, None, style);
+            let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
+            if PaneTarget::from(pane.lease) != target {
+                return Err(Refusal::Stale);
             }
-            Request::Attach {
-                create,
-                size,
-                resume,
-                style,
-            } => {
-                // `Attach` resumes only its own lease and refuses another client's control.
-                if let (Some(pane), Some(old)) = (&self.pane, resume)
-                    && (old.server, old.session, old.control)
-                        != (pane.lease.server, pane.lease.session, pane.lease.control)
-                {
-                    return Err(Refusal::Stale);
-                }
-                let reply = self.select(
-                    device,
-                    connection,
-                    create,
-                    size,
-                    resume.map(Into::into),
-                    style,
-                )?;
-                return if matches!(reply, Reply::Takeover { .. }) {
-                    Err(Refusal::Controlled)
-                } else {
-                    Ok(reply)
-                };
-            }
-            Request::Select {
-                create,
-                size,
-                resume,
-                style,
-            } => {
-                return self.select(device, connection, create, size, resume, style);
-            }
-            Request::TakeOver {
-                target,
-                size,
-                style,
-            } => {
-                self.reconcile_selection()?;
-                // The shell exited and kept its Pane. A new claim offers Session Ended.
-                if self.pane.is_none() && self.dormant.is_some() {
-                    return Err(Refusal::Stale);
-                }
-                let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
-                if PaneTarget::from(pane.lease) != target {
-                    return Err(Refusal::Stale);
-                }
-                return pane.claim(device, connection, size, style, true);
-            }
-            _ => {}
-        }
-        if matches!(request, Request::Shutdown) {
-            self.shutdown().map_err(|_| Refusal::CleanupUnresolved)?;
-            return Ok(Reply::Closed);
+            return pane.claim(device, connection, size, style, true);
         }
         // The protocol bounds an Input message too. Check before decoding or dispatching any
         // key, including malformed later events in a batch.
@@ -122,7 +63,6 @@ impl DevelopmentPaneHost {
             | Request::Focus { lease, .. }
             | Request::Input { lease, .. }
             | Request::Keys { lease, .. }
-            | Request::Key { lease, .. }
             | Request::Resize { lease, .. }
             | Request::ClearScreenAndScrollback { lease }
             | Request::Close { lease }
@@ -194,17 +134,6 @@ impl DevelopmentPaneHost {
                 pane.effects.complete(id, completion);
                 Ok(Reply::Unchanged)
             }
-            Request::Key { key, .. } => {
-                if pane.focus_generation != 0 {
-                    return Err(Refusal::Unsupported);
-                }
-                if pane.ended || pane.failed {
-                    return Err(Refusal::Missing);
-                }
-                pane.runtime
-                    .key(decode_key(key).ok_or(Refusal::Unsupported)?);
-                Ok(Reply::Unchanged)
-            }
             Request::Focus {
                 generation, target, ..
             } => pane.focus(generation, target),
@@ -261,7 +190,7 @@ impl DevelopmentPaneHost {
                 pane.runtime
                     .shutdown_and_wait(Duration::from_secs(5))
                     .map_err(|_| Refusal::CleanupUnresolved)?;
-                self.retain(None)?;
+                self.identity = None;
                 self.pane = None;
                 Ok(Reply::Closed)
             }
@@ -269,58 +198,18 @@ impl DevelopmentPaneHost {
         }
     }
 }
-impl HostCommands for DevelopmentPaneHost {
-    fn sessions(&self) -> Vec<[u8; 32]> {
-        self.live_session().into_iter().collect()
-    }
-    fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
-        self.organization = store.read()?;
-        self.store = Some(store);
-        Ok(())
-    }
-    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
-        self.directories.tick();
-        if self.recover().is_ok() && self.retain_directory().is_ok() {
-            let _ = self.retire_exited();
-        }
-        let pane = self.pane.is_some().then_some(now + TICK);
-        [pane, self.directories.due()].into_iter().flatten().min()
-    }
-    fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
-        self.directories.set_wake(wake);
-    }
-    fn read(
-        &mut self,
-        _device: [u8; 32],
-        connection: [u8; 32],
-        id: RequestId,
-        read: HostRead,
-    ) -> Option<Result<ReplyBody, Refusal>> {
-        if let Err(refusal) = self.recover().and_then(|()| self.retain_directory()) {
-            return Some(Err(refusal));
-        }
-        self.directories.read(connection, id, read)
-    }
-    fn cancel_read(&mut self, connection: [u8; 32], id: RequestId) {
-        self.directories.cancel((connection, id));
-    }
-    fn settled_reads(&mut self) -> Vec<SettledRead> {
-        self.directories.settled_reads()
-    }
-    fn admitted(&mut self, client: [u8; 32], name: control::ClientName) {
+impl DevelopmentPaneHost {
+    pub(super) fn admitted(&mut self, client: [u8; 32], name: control::ClientName) {
         self.names
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .admit(client, name);
     }
-    fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
-        self.handle(device, connection, request)
-            .unwrap_or_else(Reply::Refused)
-    }
-    fn lease_live(&self, lease: &Lease) -> bool {
+    pub(super) fn lease_live(&self, lease: &Lease) -> bool {
         self.pane.as_ref().is_some_and(|pane| pane.lease == *lease)
     }
-    fn unbound(&mut self, connection: [u8; 32], lease: &Lease) {
+    /// See [`HostCommands::unbound`].
+    pub(super) fn unbound(&mut self, connection: [u8; 32], lease: &Lease) {
         if let Some(pane) = &mut self.pane
             && pane.lease == *lease
             && pane.lease.connection == connection
@@ -329,33 +218,7 @@ impl HostCommands for DevelopmentPaneHost {
             pane.connected = false;
         }
     }
-    fn set_notifier(&mut self, notifier: SessionNotifiers) {
-        self.notifier = Some(notifier);
-    }
-    fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed {
-        DevelopmentPaneHost::observe(self, device, lease)
-    }
-    fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8) {
-        DevelopmentPaneHost::view(self, lease, visible, max_hz);
-    }
-    fn scrollback_page(
-        &mut self,
-        device: [u8; 32],
-        connection: [u8; 32],
-        lease: &Lease,
-        read: ScrollbackRead,
-        reply: PageReply,
-    ) -> Result<(), Refusal> {
-        DevelopmentPaneHost::scrollback_page(self, device, connection, lease, read, reply)
-    }
-    fn input_written(&mut self, lease: &Lease, serial: u32) {
-        DevelopmentPaneHost::input_written(self, lease, serial);
-    }
-    fn restart_input(&mut self, lease: &Lease) {
-        DevelopmentPaneHost::restart_input(self, lease);
-    }
-    fn disconnected(&mut self, connection: [u8; 32]) {
-        self.directories.cancel_connection(connection);
+    pub(super) fn disconnected(&mut self, connection: [u8; 32]) {
         if let Some(pane) = &mut self.pane
             && pane.lease.connection == connection
         {
@@ -363,10 +226,8 @@ impl HostCommands for DevelopmentPaneHost {
             pane.connected = false;
         }
     }
-    fn revoked(&mut self, client: [u8; 32]) {
-        self.release_control(client);
-    }
-    fn release_control(&mut self, client: [u8; 32]) {
+    /// See [`HostCommands::release_control`].
+    pub(super) fn release_control(&mut self, client: [u8; 32]) {
         if let Some(dormant) = &mut self.dormant
             && dormant.device == Some(client)
         {
@@ -376,7 +237,6 @@ impl HostCommands for DevelopmentPaneHost {
         if let Some(pane) = &mut self.pane
             && pane.device == Some(client)
         {
-            self.directories.cancel_connection(pane.lease.connection);
             pane.invalidate_input();
             pane.device = None;
             pane.connected = false;
@@ -384,13 +244,9 @@ impl HostCommands for DevelopmentPaneHost {
             pane.lease.control = [0; 32];
         }
     }
-    fn shutdown(&mut self) -> Result<(), ServerError> {
-        self.directories.stop();
-        // Persist final confirmed metadata before ending live work. Refuse uncertain shutdown.
-        self.recover()
-            .map_err(|_| ServerError::StorageUnavailable)?;
-        self.retain_directory()
-            .map_err(|_| ServerError::StorageUnavailable)?;
+    /// Ends this Pane's Terminal Session, keeping the directory its shell confirmed.
+    pub(super) fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.retain_directory();
         if let Some(pane) = &mut self.pane {
             pane.invalidate_input();
             pane.connected = false;

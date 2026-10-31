@@ -1085,17 +1085,13 @@ pub(crate) mod tests {
         window: &mut Window,
         cx: &mut gpui::Context<crate::ui::TerminalPane>,
     ) -> crate::ui::TerminalPane {
-        let session_factory = crate::terminal::WorkspaceTerminalSessionFactory::new_local(
-            std::rc::Rc::new(
+        let session_factory =
+            crate::terminal::WorkspaceTerminalSessionFactory::new_server(std::rc::Rc::new(
                 crate::terminal::testing::TestTerminalSessionFactory::new(
                     crate::terminal::testing::TestTerminalSessionRecords::default(),
                 )
-                .with_start_failure("terminal session unavailable in accessibility test"),
-            ),
-            crate::terminal::testing::test_local_directory(std::path::PathBuf::from(
-                "/tmp/spaceterm-accessibility-test",
-            )),
-        );
+                .with_reading_available(true),
+            ));
         crate::ui::TerminalPane::with_adapters(
             session_factory.clone(),
             crate::terminal::testing::test_terminal_key_input_adapter(),

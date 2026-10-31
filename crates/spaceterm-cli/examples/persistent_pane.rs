@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err(ServerError::NotInstalled.into());
     }
-    let server = ServerConnection::for_development_client("persistent-pane-native", 4)?;
+    let server = ServerConnection::for_development_client("persistent-pane-native")?;
     let first = repository::connect(&server)?;
     let baseline = repository::inventory(&first)?.0;
     let shutdown = std::env::args().any(|argument| argument == "--shutdown");

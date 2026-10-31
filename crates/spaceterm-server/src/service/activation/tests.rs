@@ -744,8 +744,11 @@ fn candidate_state_mutation_refuses_return_without_restoring_a_snapshot() {
         );
         let data = Directory::open(&service.paths.data, false).unwrap();
         let mut record = data.read().unwrap();
-        record.organization =
-            Some(crate::organization::Organization::first(PathBuf::from("/")).unwrap());
+        record.organization = Some(
+            crate::hierarchy::State::first("/".as_ref())
+                .unwrap()
+                .envelope(),
+        );
         data.write(&record).unwrap();
         let newer = std::fs::read(service.paths.data.join("identity.json")).unwrap();
         assert!(matches!(

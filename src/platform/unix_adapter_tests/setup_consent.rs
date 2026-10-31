@@ -403,7 +403,7 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
     let target = "x86_64-unknown-linux-gnu";
     let directory = catalog.join(target);
     std::fs::create_dir_all(&directory).unwrap();
-    let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_server::protocol::MAJOR,"capabilities":["workspace_policy"]}).to_string().into_bytes();
+    let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_server::protocol::MAJOR}).to_string().into_bytes();
     let mut entries = vec![
         ("server/build.json".to_owned(), manifest, 0o644),
         (
@@ -743,7 +743,6 @@ fn discovery(running: bool) -> AccountDiscovery {
         running,
         stopped: !running,
         protocol_majors: vec![spaceterm_server::protocol::MAJOR],
-        capabilities: vec!["workspace_policy".into()],
         target: "x86_64-unknown-linux-gnu".into(),
         version: "1.0.0".into(),
         commit: "a".repeat(40),
@@ -773,7 +772,6 @@ fn status() -> DirectStatus {
         server_name: "Remote".into(),
         listener: spaceterm_server::direct::ListenerState::Off,
         network_addresses: Err(DirectError::Transport),
-        abandoned_setups: Vec::new(),
         setup_generation: 0,
     }
 }

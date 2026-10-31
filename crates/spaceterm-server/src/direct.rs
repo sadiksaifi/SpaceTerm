@@ -122,9 +122,6 @@ pub struct DirectStatus {
     pub listener: ListenerState,
     /// Fresh observations from the machine that owns this server.
     pub network_addresses: Result<NetworkAddresses, DirectError>,
-    /// SSH setups that were reserved over WSS and dropped unfinished when QUIC replaced it.
-    /// Each must start again.
-    pub abandoned_setups: Vec<OperationId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -276,9 +273,7 @@ impl From<ServerError> for DirectError {
             ServerError::StorageUnavailable
             | ServerError::UnsafeStorage
             | ServerError::IncompatibleState => Self::StorageUnavailable,
-            ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability => {
-                Self::IncompatibleProtocol
-            }
+            ServerError::IncompatibleProtocol => Self::IncompatibleProtocol,
             ServerError::AuthenticationRefused => Self::AuthenticationRefused,
             ServerError::Capacity => Self::Capacity,
             _ => Self::Transport,

@@ -273,12 +273,6 @@ impl<'a> BuildName<'a> {
     }
 }
 
-/// Names a server build by version and abbreviated source commit.
-pub fn build_label(version: &str, commit: &str) -> String {
-    let commit = commit.get(..7).unwrap_or(commit);
-    format!("{version} (commit {commit})")
-}
-
 /// Names two builds so they read apart. Version and commit name each build, and the package
 /// digest's prefix is added only when those match, since the packages then differ elsewhere.
 pub fn build_labels(first: BuildName<'_>, second: BuildName<'_>) -> (String, String) {

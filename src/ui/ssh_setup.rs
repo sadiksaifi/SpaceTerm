@@ -246,7 +246,6 @@ pub(crate) fn start_failure() -> SetupProblem {
 const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
     match kind {
         IncompatibilityKind::Protocol => "SpaceTerm and this server are incompatible.",
-        IncompatibilityKind::Capability => "This server needs an update.",
         IncompatibilityKind::Platform => {
             "SpaceTerm Server is unavailable for this computer\u{2019}s operating system or processor."
         }

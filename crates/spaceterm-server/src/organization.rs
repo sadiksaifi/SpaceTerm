@@ -1,80 +1,30 @@
-//! The first server-owned Workspace. Personal arrangement and live terminal state are absent.
+//! The retained shared hierarchy of a server. Personal arrangement and live terminal state are
+//! absent.
 use crate::{ServerError, storage::Directory};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// The Worktree write lock. It ends when dropped unless a Git child must inherit it.
 pub use crate::storage::Lock as WorktreeLock;
 
-/// First-Workspace seed and retained shared hierarchy. The seed's sole Tab and Pane are its Roots.
+/// The retained shared hierarchy.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Organization {
     pub version: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shared: Option<Box<crate::hierarchy::State>>,
-    pub workspace: [u8; 32],
-    pub tab: [u8; 32],
-    pub pane: [u8; 32],
-    pub name: String,
-    pub pinned_directory: Option<PathBuf>,
-    pub starting_directory: PathBuf,
-    pub confirmed_directory: Option<PathBuf>,
+    pub shared: Box<crate::hierarchy::State>,
 }
 impl Organization {
-    pub fn first(starting_directory: PathBuf) -> Result<Self, ServerError> {
-        let value = Self {
+    pub fn new(shared: crate::hierarchy::State) -> Self {
+        Self {
             version: 1,
-            shared: None,
-            workspace: crate::protocol::random()?,
-            tab: crate::protocol::random()?,
-            pane: crate::protocol::random()?,
-            name: "Default".into(),
-            pinned_directory: None,
-            starting_directory,
-            confirmed_directory: None,
-        };
-        value.validate()?;
-        Ok(value)
+            shared: Box::new(shared),
+        }
     }
     pub(crate) fn validate(&self) -> Result<(), ServerError> {
-        let path_valid = |path: &std::path::Path| {
-            use std::os::unix::ffi::OsStrExt;
-            path.is_absolute()
-                && path.as_os_str().len() <= 4096
-                && !path.as_os_str().as_bytes().contains(&0)
-        };
-        if self.version != 1
-            || self.name.len() > 256
-            || self.name.is_empty()
-            || self.name.chars().any(char::is_control)
-            || self.workspace == [0; 32]
-            || self.tab == [0; 32]
-            || self.pane == [0; 32]
-            || self.workspace == self.tab
-            || self.workspace == self.pane
-            || self.tab == self.pane
-            || !path_valid(&self.starting_directory)
-            || self
-                .confirmed_directory
-                .as_deref()
-                .is_some_and(|p| !path_valid(p))
-            || self
-                .pinned_directory
-                .as_deref()
-                .is_some_and(|p| !path_valid(p))
-        {
+        if self.version != 1 {
             return Err(ServerError::UnsafeStorage);
         }
-        if let Some(state) = &self.shared {
-            state.validate()?;
-        }
-        Ok(())
-    }
-    pub fn startup_directory(&self) -> &std::path::Path {
-        self.confirmed_directory
-            .as_deref()
-            .unwrap_or(&self.starting_directory)
+        self.shared.validate()
     }
 }
 
