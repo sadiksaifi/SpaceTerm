@@ -8573,7 +8573,7 @@ const FOCUS_WORKSPACE: [u8; 32] = [11; 32];
 const FOCUS_TAB: [u8; 32] = [12; 32];
 const FOCUS_PANE: [u8; 32] = [13; 32];
 
-/// The Workspace the sidebar lists first, which is the shared one every harness here publishes.
+/// The Workspace the sidebar lists first, which every harness here publishes.
 const WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(1);
 
 /// One connected Workspace, opened from the sidebar so its Pane is the Focused Pane of the
@@ -8671,7 +8671,7 @@ fn focus_active_workspace(manager: &Entity<WorkspaceManager>, cx: &mut VisualTes
     cx.run_until_parked();
 }
 
-/// Lets every shared Pane read its connection and paints the frame that follows.
+/// Lets every Pane read its connection and paints the frame that follows.
 fn settle_panes(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
@@ -11590,7 +11590,7 @@ mod workspace_repositories {
         manager: Entity<WorkspaceManager>,
         edits: Rc<ScriptedEdits>,
         binding: WorkspaceId,
-        /// What the shared Panes' Terminal Sessions were asked.
+        /// What the Panes' Terminal Sessions were asked.
         sessions: TestTerminalSessionRecords,
     }
 
@@ -11653,7 +11653,7 @@ mod workspace_repositories {
             })
         }
 
-        /// Each shared Pane's Repository Status caption, as its Pane presents it.
+        /// Each Pane's Repository Status caption, as its Pane presents it.
         fn captions(&self, cx: &mut VisualTestContext) -> Vec<Option<String>> {
             cx.update(|_, cx| {
                 let manager = self.manager.read(cx);
@@ -11682,7 +11682,7 @@ mod workspace_repositories {
         )
     }
 
-    /// [`harness`] whose shared Panes are built by `construction` over `sessions`, with the
+    /// [`harness`] whose Panes are built by `construction` over `sessions`, with the
     /// account-local route's filesystem authority `local_files`.
     fn harness_constructing<'a>(
         cx: &'a mut TestAppContext,
@@ -12770,7 +12770,7 @@ mod workspace_repositories {
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 
-    /// Activating a shared Worktree row shows its Tab, and one without Tabs opens nothing.
+    /// Activating a Worktree row shows its Tab, and one without Tabs opens nothing.
     #[gpui::test]
     fn activating_a_worktree_should_show_its_tab_without_asking_the_server(
         cx: &mut TestAppContext,

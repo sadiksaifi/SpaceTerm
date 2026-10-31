@@ -1,4 +1,4 @@
-//! Shared Workspace gaps, optical Split trim, native edge insets, and derived Pane radii.
+//! Workspace gaps, optical Split trim, native edge insets, and derived Pane radii.
 //! Split gaps are two points narrower because the lighter band and adjacent rounded corners make
 //! them appear wider.
 

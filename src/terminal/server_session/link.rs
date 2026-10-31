@@ -1133,7 +1133,7 @@ impl PaneLink {
             Request::Mutate { sequence, mutation } => {
                 mutation_reply(self.request(Operation::Mutate { sequence, mutation })?)
             }
-            // The shared Workspace client reads pushed inventory and resolves by dispatching.
+            // The Workspace client reads pushed inventory and resolves by dispatching.
             Request::Inventory | Request::Resolve { .. } => Err(ServerError::Unsupported),
             Request::Acknowledge { sequence } => {
                 self.link.acknowledge(sequence)?;

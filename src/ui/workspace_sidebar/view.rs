@@ -2323,8 +2323,8 @@ fn workspace_menu_entries(
         entries.push(entry);
     }
     entries.push(
-        // Kill Workspace ends every Pane in the Workspace after a confirmation. A shared
-        // Workspace's kill asks its server, so it waits while this client cannot ask.
+        // Kill Workspace ends every Pane in the Workspace after a confirmation. It asks the
+        // server, so it waits while this client cannot ask.
         MenuEntry::action(
             "Kill Workspace",
             RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),

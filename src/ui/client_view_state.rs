@@ -1,4 +1,4 @@
-//! Background persistence for this client's arrangements of shared Workspaces, outside Settings.
+//! Background persistence for this client's arrangements of Workspaces, outside Settings.
 use spaceterm_server::client_view::{ClientView, RetainedInventory};
 use spaceterm_server::{ServerConnection, ServerError};
 use std::sync::{Arc, Mutex};

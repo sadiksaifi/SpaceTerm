@@ -477,7 +477,7 @@ pub(super) fn offline_detail(place: &str) -> SharedString {
 }
 
 /// Plain Tab moves from the view's own focus to its action, as it does on the screens that
-/// replace a shared Pane.
+/// replace a Pane.
 fn with_tab_traversal(surface: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
     surface.on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
         let modifiers = event.keystroke.modifiers;

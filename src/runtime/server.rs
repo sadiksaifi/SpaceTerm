@@ -239,7 +239,7 @@ pub struct ServerPaneHost {
     pane: Option<OwnedPane>,
     factory: NativeTerminalSessionFactory,
     directory: std::path::PathBuf,
-    /// The shared Pane this host runs. `None` on the server's prototype, and once the Pane
+    /// The Pane this host runs. `None` on the server's prototype, and once the Pane
     /// closed.
     identity: Option<PaneIdentity>,
     directory_unavailable: bool,
@@ -273,7 +273,7 @@ impl ServerSessionContext {
         })
     }
 }
-/// Which shared Pane a per-Pane host runs, and the directories its Sessions start in.
+/// Which Pane a per-Pane host runs, and the directories its Sessions start in.
 #[derive(Clone)]
 struct PaneIdentity {
     workspace: [u8; 32],

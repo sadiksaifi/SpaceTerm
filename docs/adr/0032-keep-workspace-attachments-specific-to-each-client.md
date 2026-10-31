@@ -4,7 +4,7 @@ Each SpaceTerm Client chooses which server-owned Workspaces it attaches and pres
 
 [ADR 0022](0022-give-one-client-control-of-each-pane.md) defines how Detach Workspace releases Pane control.
 
-Offline Detach Workspace follows [ADR 0047](0047-keep-shared-workspace-edits-unavailable-offline.md).
+Offline Detach Workspace follows [ADR 0047](0047-keep-workspace-edits-unavailable-offline.md).
 
 Each client's attachment choices persist across quitting and relaunching that client. A detached Workspace stays detached until the person explicitly attaches it again; launching the client does not attach every Workspace available from its servers.
 

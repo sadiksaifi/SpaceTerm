@@ -10,7 +10,7 @@
 //! Terminal Session and grant no input authority. A refusal recomputes the affected presentation
 //! without replacing later intent, and an offline client queues no new shared work.
 //!
-//! Closing a shared Pane or Tab, and Kill Workspace, end Terminal Sessions for every client. Each
+//! Closing a Pane or Tab, and Kill Workspace, end Terminal Sessions for every client. Each
 //! one asks the server to end exactly the Panes and Sessions a person reviewed, so a confirmation
 //! that another client's change made stale ends nothing.
 //!
@@ -1055,7 +1055,7 @@ mod server {
 
     /// Opens passive subscriptions to the server's Panes and supplies their Pane construction.
     ///
-    /// Shared Panes reuse native client effects and obtain accessible shell text from the server.
+    /// Panes reuse native client effects and obtain accessible shell text from the server.
     /// Same-machine file authority applies only to Panes on this machine's server.
     #[derive(Clone)]
     pub(crate) struct WorkspacePaneSessions {
@@ -1194,7 +1194,7 @@ mod server {
         fn start_restored(&self) {}
     }
 
-    /// One shared Tab's Panes: their server identities, each one's view of its connection, and
+    /// One Tab's Panes: their server identities, each one's view of its connection, and
     /// the focus the screen replacing a Pane rests on.
     pub(crate) struct WorkspacePanes {
         edits: WorkspaceEditSource,
@@ -3259,7 +3259,7 @@ mod server {
             local: WorkspaceId,
             facts: WorkspaceFacts,
         },
-        /// The server no longer has the Workspace, so this client stops presenting it as shared.
+        /// The server no longer has the Workspace, so this client stops presenting it.
         Removed {
             local: WorkspaceId,
         },

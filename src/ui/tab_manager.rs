@@ -1357,7 +1357,7 @@ impl TabManager {
     }
 
     fn request_close_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
-        // A shared Tab's close goes up to the Workspace Window, which asks the server after Close
+        // A Tab's close goes up to the Workspace Window, which asks the server after Close
         // Confirmation. Nothing here closes it locally.
         if self.close_workspace_requested || self.tabs.tab(tab_id).is_none() {
             return;
@@ -1575,7 +1575,7 @@ impl TabManager {
         // Native activation can precede dispatch of an accepts-first-mouse event. Retain whether
         // this action was visible in the pre-activation frame so a hidden inactive-Tab control
         // cannot close its Tab through a stale hitbox. The selected Tab remains available.
-        // A shared Tab's close asks the server, so its control waits, and says why, while this
+        // A Tab's close asks the server, so its control waits, and says why, while this
         // client cannot ask.
         let close_reason = (!binding.edits).then_some(binding.edits_reason);
         let close_action_available = (active || appearance.active) && close_reason.is_none();
@@ -3102,7 +3102,7 @@ impl TabManager {
             };
             let _ = Alert::new(
                 ModalId::new("workspace-tab-unavailable"),
-                "Shared change unavailable",
+                "Tab change unavailable",
                 "Couldn\u{2019}t Create Tab",
                 detail,
                 vec![ModalAction::new(
@@ -3144,7 +3144,7 @@ impl TabManager {
             .any(|(_, view)| view.read(cx).holds_keyboard(window, cx))
     }
 
-    /// Tags each shared Tab with the Worktree the server says it belongs to. The server owns
+    /// Tags each Tab with the Worktree the server says it belongs to. The server owns
     /// membership, so this client only mirrors it; the Tab strip and the Tab Commands then act on
     /// the Active Worktree's Tabs, as they do in a local Workspace.
     ///
@@ -3161,7 +3161,7 @@ impl TabManager {
             .iter()
             .filter_map(|(tab_id, _)| Some((tab_id, scope(binding.server_tab(tab_id)?)?)))
             .collect();
-        // Only the scope changes. A shared Tab's launch policy never takes the server's root,
+        // Only the scope changes. A Tab's launch policy never takes the server's root,
         // which names no directory this client may validate or start in.
         let mut changed = false;
         for (tab_id, scope) in scopes {
@@ -3181,7 +3181,7 @@ impl TabManager {
         }
     }
 
-    /// Shows a shared Worktree's most recent Tab, and reports whether it has one. It never opens a
+    /// Shows a Worktree's most recent Tab, and reports whether it has one. It never opens a
     /// Tab: the server opens none in a chosen Worktree yet.
     pub(crate) fn show_worktree(
         &mut self,
@@ -3211,7 +3211,7 @@ impl TabManager {
         view.server_pane(view.focused_pane_id())
     }
 
-    /// Presents the Repository Status the server read for every shared Pane in this strip,
+    /// Presents the Repository Status the server read for every Pane in this strip,
     /// including Tabs outside the Active Worktree.
     pub(crate) fn present_repositories(
         &mut self,
@@ -3224,7 +3224,7 @@ impl TabManager {
         }
     }
 
-    /// Presents the Terminal Metadata the server published for every shared Pane in this strip,
+    /// Presents the Terminal Metadata the server published for every Pane in this strip,
     /// including Tabs outside the Active Worktree and Tabs this client never opened.
     pub(crate) fn present_metadata<'p>(
         &mut self,
@@ -3242,12 +3242,12 @@ impl TabManager {
         }
     }
 
-    /// The server identity of one shared Tab this strip presents.
+    /// The server identity of one Tab this strip presents.
     pub(crate) fn server_tab(&self, tab_id: TabId) -> Option<spaceterm_server::hierarchy::Id> {
         self.binding.server_tab(tab_id)
     }
 
-    /// The server identity of one shared Pane in one of this strip's Tabs.
+    /// The server identity of one Pane in one of this strip's Tabs.
     pub(crate) fn server_pane(
         &self,
         tab_id: TabId,

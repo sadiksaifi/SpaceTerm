@@ -39,7 +39,7 @@ mod server {
     };
     use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
-    /// What this window keeps beside the server's facts: a stable handle for each shared
+    /// What this window keeps beside the server's facts: a stable handle for each
     /// Worktree, and whether a person collapsed its Workspace row.
     #[derive(Default)]
     pub(in crate::ui::workspace_manager) struct WorkspaceRepositories {
@@ -147,7 +147,7 @@ mod server {
             )
         }
 
-        /// Each shared Pane's view, by its server identity.
+        /// Each Pane's view, by its server identity.
         fn pane_views(
             &self,
             workspace_ids: &[WorkspaceId],
@@ -546,7 +546,7 @@ mod server {
             }
         }
 
-        /// Shows a shared Worktree's Tabs. It reports `None` for a Workspace this window owns.
+        /// Shows a Worktree's Tabs. It reports `None` for a Workspace this window does not present.
         ///
         /// An existing Worktree without Tabs requests its first Tab from the owning server.
         pub(in crate::ui::workspace_manager) fn open_server_worktree(
@@ -570,7 +570,7 @@ mod server {
             Some(shown || self.open_server_worktree_tab(workspace_id, worktree_id, window, cx))
         }
 
-        /// A shared Worktree's root, as the server reported it.
+        /// A Worktree's root, as the server reported it.
         pub(in crate::ui::workspace_manager) fn worktree_root(
             &self,
             workspace_id: WorkspaceId,

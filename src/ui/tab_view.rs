@@ -522,7 +522,7 @@ pub(crate) struct TabView {
     binding: WorkspacePaneBinding,
     parked_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
     directory_recovery: Option<Entity<super::server_pane::DirectoryRecovery>>,
-    /// Reads every shared Pane's connection status while the Tab lives.
+    /// Reads every Pane's connection status while the Tab lives.
     _workspace_status: gpui::Task<()>,
 }
 
@@ -1331,7 +1331,7 @@ impl TabView {
     }
 
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        // A shared Pane's close goes up to the Workspace Window, which asks the server after Close
+        // A Pane's close goes up to the Workspace Window, which asks the server after Close
         // Confirmation. Nothing here closes it locally.
         if self.close_tab_requested || self.tab.pane(pane_id).is_none() {
             return;
@@ -1984,7 +1984,7 @@ impl TabView {
             // focus, as a press on the caption does.
             .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
                 let _ = focus_view.update(cx, |view, cx| {
-                    // A press is an explicit Pane selection, so a shared Pane asks the server for
+                    // A press is an explicit Pane selection, so a Pane asks the server for
                     // itself. Focus a Pane regains on its own never does. Neither does a press on
                     // Split, which validates the restored allocation first, or on Close, which
                     // only asks for confirmation.
@@ -2035,7 +2035,7 @@ impl TabView {
                     .mr(-(inset.left + inset.right))
                     .mb(-(inset.top + inset.bottom))
                     .overflow_hidden()
-                    // A shared Pane's screen replaces its terminal outright, so no Screen, title,
+                    // A Pane's screen replaces its terminal outright, so no Screen, title,
                     // or accessible text of a former shell paints behind it.
                     .map(|body| match surface.screen {
                         Some(screen) => body.child(screen),
@@ -2535,7 +2535,7 @@ impl TabView {
         }
     }
 
-    /// The server ended a shared Pane's Terminal Session.
+    /// The server ended a Pane's Terminal Session.
     ///
     /// The Pane keeps its place until the server publishes an inventory without it, so a Tab this
     /// client has not caught up with never closes from membership it no longer knows. Its screen
@@ -2555,12 +2555,12 @@ impl TabView {
         cx.notify();
     }
 
-    /// The server identity of one shared Pane this Tab presents.
+    /// The server identity of one Pane this Tab presents.
     pub(crate) fn server_pane(&self, pane_id: PaneId) -> Option<spaceterm_server::hierarchy::Id> {
         self.binding.server_pane(pane_id)
     }
 
-    /// Presents the Repository Status the server read for each shared Pane's directory.
+    /// Presents the Repository Status the server read for each Pane's directory.
     pub(crate) fn present_repositories(
         &mut self,
         view: &dyn Fn(spaceterm_server::hierarchy::Id) -> crate::repository_status::RepositoryView,
@@ -2579,7 +2579,7 @@ impl TabView {
         }
     }
 
-    /// Presents the Terminal Metadata the server published for each shared Pane, including Panes
+    /// Presents the Terminal Metadata the server published for each Pane, including Panes
     /// this client never painted. `published` names the Session run and its latest metadata, or
     /// `None` while the Pane runs no Session.
     pub(crate) fn present_metadata<'p>(
@@ -2791,7 +2791,7 @@ impl TabView {
         };
         let _ = Alert::new(
             ModalId::new("pane-edit-unavailable"),
-            "Shared change unavailable",
+            "Pane change unavailable",
             "Couldn\u{2019}t Create Pane",
             detail,
             vec![ModalAction::new(
@@ -2805,7 +2805,7 @@ impl TabView {
         .present(window, cx, |_, _| {});
     }
 
-    /// Reads every shared Pane's connection and presents what changed.
+    /// Reads every Pane's connection and presents what changed.
     fn sync_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane_ids = self.binding.pane_ids();
         let mut changed = false;
@@ -2900,7 +2900,7 @@ impl TabView {
         })
     }
 
-    /// What replaces and overlays a shared Pane: the screen for a Pane this client cannot present
+    /// What replaces and overlays a Pane: the screen for a Pane this client cannot present
     /// authoritatively, and the notice for an interruption over a frozen screen.
     fn pane_surface(
         &self,
@@ -3324,7 +3324,7 @@ impl TabView {
             self.focus(window, cx);
         }
     }
-    /// Reconnects each shared Pane the person's stop interrupted, once they started the server.
+    /// Reconnects each Pane the person's stop interrupted, once they started the server.
     pub(crate) fn server_started(&mut self, cx: &mut Context<Self>) {
         let binding = &mut self.binding;
         for pane_id in binding.pane_ids() {
@@ -3370,7 +3370,7 @@ impl TabView {
         }
     }
 
-    /// Whether the keyboard rests in this shared Pane: in its terminal, or anywhere in the screen
+    /// Whether the keyboard rests in this Pane: in its terminal, or anywhere in the screen
     /// replacing it, including that screen's action.
     ///
     /// Terminal Find sits inside the Pane and owns the keyboard itself, so it does not count. Only
@@ -4027,7 +4027,7 @@ fn render_pane_caption_content(
         .flex()
         .items_center()
         .justify_end();
-    // A shared Pane's split and close ask the server, so they wait while this client is offline
+    // A Pane's split and close ask the server, so they wait while this client is offline
     // or an earlier edit is unanswered.
     let split_unavailable =
         binding.and_then(|binding| (!binding.edits).then_some(binding.edits_reason));

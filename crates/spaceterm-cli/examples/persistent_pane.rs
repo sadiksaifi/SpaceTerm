@@ -7,7 +7,7 @@
 mod repository;
 #[expect(
     dead_code,
-    reason = "this exercise selects shared Panes and never uses `support::attach`"
+    reason = "this exercise selects Panes and never uses `support::attach`"
 )]
 mod support;
 #[path = "support/terminal_semantics.rs"]

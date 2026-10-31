@@ -5,10 +5,7 @@
     reason = "Shared edits use the handle's shared connection instead of the fixture connection helper."
 )]
 mod lifecycle;
-#[expect(
-    dead_code,
-    reason = "The shared-Pane exercise never uses `support::attach`."
-)]
+#[expect(dead_code, reason = "The Pane exercise never uses `support::attach`.")]
 mod support;
 use lifecycle::{Server, require_idle, size};
 use spaceterm_server::{

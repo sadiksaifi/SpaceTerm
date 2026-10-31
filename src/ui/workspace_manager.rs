@@ -4119,7 +4119,7 @@ impl WorkspaceManager {
 
     /// Returns whether the alert was presented over the active Settings Window.
     fn show_unavailable(detail: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        Self::show_unavailable_with_title("Shared Change Unavailable", detail, window, cx)
+        Self::show_unavailable_with_title("Workspace Change Unavailable", detail, window, cx)
     }
 
     fn show_unavailable_with_title(
@@ -4132,7 +4132,7 @@ impl WorkspaceManager {
         let alert = move || {
             Alert::new(
                 ModalId::new("workspace-unavailable"),
-                "Shared change unavailable",
+                "Workspace change unavailable",
                 title,
                 detail.clone(),
                 vec![ModalAction::new(

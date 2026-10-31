@@ -1,6 +1,6 @@
 # Negotiate one protocol major
 
-SpaceTerm uses one SpaceTerm Protocol work major at a time, with negotiated optional capabilities. [The protocol constant](../../crates/spaceterm-server/src/protocol/major.rs) owns the work major. Work admission checks the shared major and required capabilities before reporting a server ready or admitting dependent operations. A missing optional capability disables only its feature; client and server release numbers need not match.
+SpaceTerm uses one SpaceTerm Protocol work major at a time. [The protocol constant](../../crates/spaceterm-server/src/protocol/major.rs) owns the work major. Work admission requires a shared major before reporting a server ready or admitting dependent operations. Client and server release numbers need not match.
 
 The server-client architecture has no backward-compatibility requirement. Replace obsolete protocols, Settings, serialized Commands and retained formats directly. Keep no migrations, legacy readers, compatibility shims, dual transports or SSH fallbacks. Incompatible connections follow [ADR 0034](0034-confirm-server-update-restarts-and-explain-incompatibility.md).
 
