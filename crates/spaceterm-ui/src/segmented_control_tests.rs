@@ -1296,6 +1296,25 @@ fn interaction_paint_reaches_segment_fill_border_and_label(cx: &mut TestAppConte
         cx.simulate_mouse_up(segment.center(), gpui::MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
     }
+    // The active refinement must also supply typography when the base style has none.
+    let font = gpui::font("Test Font");
+    let refinement = SegmentedPaintRefinement {
+        paint: pressed,
+        font: font.clone(),
+        font_size: px(13.0),
+        line_height: 1.4,
+    };
+    assert_eq!(
+        refinement.segment(StyleRefinement::default()),
+        StyleRefinement::default()
+            .bg(rgba(0x334455ff))
+            .border_color(rgba(0x99aabbff))
+            .font(font)
+            .text_size(px(13.0))
+            .line_height(gpui::relative(1.4))
+            .text_color(rgba(0xccddeeff)),
+        "pointer-pressed refinement must supply every paint and typography field"
+    );
 }
 
 #[test]

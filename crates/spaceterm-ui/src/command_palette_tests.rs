@@ -291,6 +291,38 @@ fn matcher_should_search_labels_and_keywords() {
             .item_index,
         2
     );
+
+    for query in ["", "  "] {
+        assert_eq!(
+            match_command_palette_items(&items, query, CommandPaletteMatching::Semantic)
+                .iter()
+                .map(|matched| matched.item_index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2],
+            "an empty query preserves provider order"
+        );
+    }
+    assert_eq!(
+        match_command_palette_items(&items, "open project", CommandPaletteMatching::Semantic)
+            .iter()
+            .map(|matched| matched.item_index)
+            .collect::<Vec<_>>(),
+        [0],
+        "query tokens may match both the label and keywords"
+    );
+    let competing = vec![
+        CommandPaletteItem::new(1, "Open").keywords(["window"]),
+        CommandPaletteItem::new(2, "Window Settings"),
+        CommandPaletteItem::new(3, "Window Settings"),
+    ];
+    assert_eq!(
+        match_command_palette_items(&competing, "window", CommandPaletteMatching::Semantic)
+            .iter()
+            .map(|matched| matched.item_index)
+            .collect::<Vec<_>>(),
+        [1, 2, 0],
+        "label matches rank above keywords and equal scores preserve provider order"
+    );
 }
 
 #[test]
