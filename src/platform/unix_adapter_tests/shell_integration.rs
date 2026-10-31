@@ -631,6 +631,274 @@ impl Drop for DirectoryFixture {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+#[cfg(target_os = "linux")]
+use crate::platform::linux_pty_host::LinuxPtyHost as ShellPtyHost;
+#[cfg(target_os = "macos")]
+use crate::platform::macos_pty_host::MacosPtyHost as ShellPtyHost;
+use crate::platform::unix_pty::{ProcessIdentity, ProcessObservation, UnixPtyHost};
+
+fn live_shell_process(process: i32) -> Option<ProcessObservation> {
+    shell_parent(process)?;
+    ShellPtyHost.observe_process(process)
+}
+
+#[cfg(target_os = "linux")]
+fn shell_parent(process: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{process}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    let mut fields = fields.split_ascii_whitespace();
+    if matches!(fields.next()?, "Z" | "X" | "x") {
+        return None;
+    }
+    fields.next()?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn shell_parent(process: i32) -> Option<i32> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).unwrap();
+    // SAFETY: proc_pidinfo fills at most size bytes in the live output buffer.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            process,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    // SAFETY: proc_pidinfo returned the complete initialized structure.
+    let info = unsafe { info.assume_init() };
+    if info.pbi_status == libc::SZOMB {
+        return None;
+    }
+    i32::try_from(info.pbi_ppid).ok()
+}
+
+/// Capture the private session created for script's child, while its ancestry is still intact.
+fn script_pty_session(script: i32) -> Option<ProcessIdentity> {
+    let recorder = live_shell_process(script)?;
+    for process in ShellPtyHost.process_ids().ok()? {
+        if shell_parent(process) != Some(script) {
+            continue;
+        }
+        let Some(child) = live_shell_process(process) else {
+            continue;
+        };
+        if child.session == recorder.session {
+            continue;
+        }
+        let Some(leader) = live_shell_process(child.session) else {
+            continue;
+        };
+        if leader.session == leader.identity.process && shell_parent(process) == Some(script) {
+            return Some(leader.identity);
+        }
+    }
+    None
+}
+
+fn kill_pty_session(leader: ProcessIdentity) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        // A reused PID does not grant authority over a different session.
+        if live_shell_process(leader.process).is_some_and(|current| current.identity != leader) {
+            return true;
+        }
+        let Ok(processes) = ShellPtyHost.process_ids() else {
+            return false;
+        };
+        let members = processes
+            .into_iter()
+            .filter_map(live_shell_process)
+            .filter(|process| process.session == leader.process)
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            return true;
+        }
+        let mut groups = members
+            .iter()
+            .map(|process| process.process_group)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        // Keep the session leader until the other job groups have been signalled.
+        groups.sort_by_key(|group| *group == leader.process);
+        for group in groups {
+            let owned = members
+                .iter()
+                .filter(|member| member.process_group == group)
+                .any(|member| {
+                    live_shell_process(member.identity.process).is_some_and(|current| {
+                        current.identity == member.identity
+                            && current.session == leader.process
+                            && current.process_group == group
+                    })
+                });
+            if owned {
+                // SAFETY: a matching process start, session and group identify our PTY job group.
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_shell_timeout_kills_hup_ignoring_descendants_in_the_pty_session() {
+    struct Descendants(Vec<ProcessObservation>);
+    impl Drop for Descendants {
+        fn drop(&mut self) {
+            for before in &self.0 {
+                if live_shell_process(before.identity.process)
+                    .is_some_and(|after| after.identity == before.identity)
+                {
+                    // SAFETY: the matching start identity identifies our still-live fixture session.
+                    unsafe {
+                        libc::kill(-before.process_group, libc::SIGKILL);
+                        libc::kill(-before.session, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+    }
+    let fixture = DirectoryFixture::new();
+    let script = r#"
+trap '' HUP
+set -m
+/bin/sh -c '
+    trap "" HUP
+    sleep 300 &
+    printf "%s\n%s\n" "$$" "$!" > "$1/pids"
+    : > "$1/ready"
+    wait
+' descendant "$1" &
+wait
+"#;
+    let mut command = controlling_terminal_command(&[
+        "/bin/sh".as_ref(),
+        "-c".as_ref(),
+        script.as_ref(),
+        "parent".as_ref(),
+        fixture.path().as_os_str(),
+    ]);
+    std::thread::scope(|scope| {
+        let running = scope.spawn(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                bounded_shell_output(&mut command, &fixture, "HUP-ignoring fixture", None)
+            }))
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.path().join("ready").is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "the HUP-ignoring descendant never became ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let descendants = Descendants(
+            std::fs::read_to_string(fixture.path().join("pids"))
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    live_shell_process(line.parse().unwrap())
+                        .expect("ready descendant must be live")
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(descendants.0.len(), 2);
+        assert!(
+            descendants
+                .0
+                .iter()
+                .all(|process| process.process_group != process.session),
+            "job control must put the descendants outside the session leader's process group"
+        );
+        let failure = running
+            .join()
+            .unwrap()
+            .expect_err("the held shell must time out");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("timeout has a diagnostic");
+        assert!(message.contains("failed to finish within 10s"), "{message}");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let survivors = loop {
+            let survivors = descendants
+                .0
+                .iter()
+                .filter(|before| {
+                    live_shell_process(before.identity.process)
+                        .is_some_and(|after| after.identity == before.identity)
+                })
+                .collect::<Vec<_>>();
+            if survivors.is_empty() || Instant::now() >= deadline {
+                break survivors;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            survivors.is_empty(),
+            "HUP-ignoring descendants survived timeout: {survivors:?}"
+        );
+    });
+}
+
+/// Capture to files so a descendant holding stdout cannot keep cleanup waiting for pipe EOF.
+fn bounded_shell_output(
+    command: &mut Command,
+    fixture: &DirectoryFixture,
+    shell: &str,
+    version: Option<&str>,
+) -> std::process::Output {
+    use std::os::unix::process::CommandExt;
+
+    let stdout = fixture.path().join("stdout");
+    let stderr = fixture.path().join("stderr");
+    command
+        .stdin(Stdio::null())
+        .stdout(std::fs::File::create(&stdout).unwrap())
+        .stderr(std::fs::File::create(&stderr).unwrap())
+        .process_group(0);
+    let uses_pty = command.get_program() == "/usr/bin/script";
+    let mut pty_session = None;
+    let mut child = command.spawn().unwrap();
+    let limit = Duration::from_secs(10);
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if uses_pty && pty_session.is_none() {
+            pty_session = script_pty_session(i32::try_from(child.id()).unwrap());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                let pty_stopped = pty_session.map(kill_pty_session).unwrap_or(!uses_pty);
+                // SAFETY: spawn put the recorder or direct shell in a private group with this PID.
+                unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "{shell} protocol version {version:?} failed to finish within {limit:?}: {result:?}; PTY session stopped: {pty_stopped}"
+                );
+            }
+        }
+    };
+    std::process::Output {
+        status,
+        stdout: std::fs::read(stdout).unwrap(),
+        stderr: std::fs::read(stderr).unwrap(),
+    }
+}
+
 #[test]
 fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
     let root = resource_root().join("shell-integration");
@@ -677,9 +945,12 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
                 }
                 "elvish" => {
                     let rc = fixture.path().join("rc.elv");
-                    std::fs::write(&rc, format!(
-                        "eval (slurp < '{}'); if (> (count $edit:before-readline) 0) {{ $edit:before-readline[-1] }}; exit",
-                        root.join("elvish/lib/spaceterm-integration.elv").display())).unwrap();
+                    // Load the shipped bootstrap as a real rc file, including its module import.
+                    let mut startup = std::fs::read_to_string(root.join("elvish/rc.elv")).unwrap();
+                    startup.push_str(
+                        "\nif (> (count $edit:before-readline) 0) { $edit:before-readline[-1] }; printf \"\\nSPACETERM_RC_READY\\n\"; exit\n",
+                    );
+                    std::fs::write(&rc, startup).unwrap();
                     // Elvish's editor hooks require a controlling terminal.
                     controlling_terminal_command(&[
                         program.as_os_str(),
@@ -700,8 +971,18 @@ fn every_supported_resource_uses_the_same_version_and_protocol_marks() {
             if let Some(version) = version {
                 command.env("SPACETERM_SHELL_INTEGRATION_VERSION", version);
             }
-            let output = command.output().unwrap();
+            if shell == "elvish" {
+                command.env("XDG_DATA_DIRS", &root);
+            }
+            let output = bounded_shell_output(&mut command, &fixture, shell, version);
             assert!(output.status.success(), "{shell} {version:?}: {output:?}");
+            if shell == "elvish" {
+                let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+                assert!(
+                    stdout.contains("\nSPACETERM_RC_READY\n"),
+                    "Elvish rc did not resume after version {version:?}: {output:?}"
+                );
+            }
             let reports = osc_reports(&output.stdout);
             if version == Some("1") {
                 let expected = if shell == "bash" {
