@@ -6566,36 +6566,51 @@ fn cancellation_and_focus_loss_discard_marked_text_without_bytes(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn input_method_text_is_dropped_without_pane_focus_while_the_window_is_not_key(
+fn input_method_text_is_dropped_without_pane_ownership_while_the_window_is_not_key(
     cx: &mut TestAppContext,
 ) {
     let (pane, cx, records) = connected_terminal_pane(cx);
-    cx.update(|_window, app| {
-        pane.update(app, |pane, app| {
-            pane.set_product_focus(
-                TerminalProductFocus {
-                    focused_pane: false,
-                    ..TerminalProductFocus::default()
-                },
-                app,
-            );
+    for (owner, focus) in [
+        (
+            "inactive Tab",
+            TerminalProductFocus {
+                active_tab: false,
+                ..Default::default()
+            },
+        ),
+        (
+            "inactive Workspace",
+            TerminalProductFocus {
+                active_workspace: false,
+                ..Default::default()
+            },
+        ),
+        (
+            "unfocused Pane",
+            TerminalProductFocus {
+                focused_pane: false,
+                ..Default::default()
+            },
+        ),
+    ] {
+        cx.update(|_, app| {
+            pane.update(app, |pane, app| pane.set_product_focus(focus, app));
         });
-    });
-    cx.deactivate_window();
-    cx.run_until_parked();
-
-    cx.update(|window, app| {
-        pane.update(app, |pane, pane_cx| {
-            pane.replace_text_in_range(None, "😂", window, pane_cx);
+        cx.deactivate_window();
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            pane.update(app, |pane, pane_cx| {
+                pane.replace_text_in_range(None, "😂", window, pane_cx);
+            });
         });
-    });
-
-    assert!(
-        records
-            .commands()
-            .iter()
-            .all(|call| !matches!(call.command, RecordedCommand::Key(_)))
-    );
+        assert!(
+            records
+                .commands()
+                .iter()
+                .all(|call| !matches!(call.command, RecordedCommand::Key(_))),
+            "{owner} must receive no input-method commit"
+        );
+    }
 }
 
 #[gpui::test]
