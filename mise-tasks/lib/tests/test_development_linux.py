@@ -98,6 +98,9 @@ class LinuxPrefixTests(unittest.TestCase):
             )
         for name in ("server-nonproduction-trust.json", "server-resources.json"):
             shutil.copyfile(ROOT / "packaging" / name, self.root / "packaging" / name)
+        major = self.root / server_package.PROTOCOL_MAJOR_SOURCE
+        major.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
         (self.root / ".gitignore").write_text("target/\nrecord\n__pycache__/\n")
         for arguments in (
             ("init", "-q"),

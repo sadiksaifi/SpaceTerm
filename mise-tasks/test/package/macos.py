@@ -38,6 +38,9 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
+        major = self.root / server_package.PROTOCOL_MAJOR_SOURCE
+        major.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
         config = self.root / "packaging/macos/spaceterm/Packager.toml"
         config.write_text(
             re.sub(
