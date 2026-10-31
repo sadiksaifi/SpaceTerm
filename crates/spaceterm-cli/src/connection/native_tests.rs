@@ -145,7 +145,7 @@ fn native_client() {
         .admit(
             IDENTITY,
             None,
-            &NativeCredentials(IDENTITY),
+            &CliCredentials::new(IDENTITY),
             connections::Interaction::Quiet,
             Instant::now() + Duration::from_secs(30),
             &|| false,
@@ -156,7 +156,7 @@ fn native_client() {
         .admit(
             IDENTITY,
             targeting.agent,
-            &NativeCredentials(IDENTITY),
+            &CliCredentials::new(IDENTITY),
             connections::Interaction::Quiet,
             Instant::now() + Duration::from_secs(30),
             &|| false,

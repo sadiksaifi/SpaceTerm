@@ -6,7 +6,7 @@ use super::{
     execute::{self, Environment},
     output::Output,
 };
-use crate::connection::{NativeCredentials, route};
+use crate::connection::{CliCredentials, route};
 use crate::{
     args::{Cli, Command, WorktreeCommand},
     contract::*,
@@ -21,10 +21,13 @@ pub fn start(cli: &Cli) -> Option<Output> {
     if !execute::handles(&cli.command) {
         return None;
     }
-    Some(selected(cli))
+    let credentials = CliCredentials::new(env!("SPACETERM_SERVER_IDENTITY"));
+    let mut output = selected(cli, &credentials);
+    credentials.report(&mut output.envelope);
+    Some(output)
 }
 
-fn selected(cli: &Cli) -> Output {
+fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
     let failed = |failure| {
         Output::failed(
             cli.command.path(),
@@ -59,7 +62,7 @@ fn selected(cli: &Cli) -> Output {
         connection,
         agent,
         interaction,
-    } = match route::connect(identity, &cli.global, Some(deadline)) {
+    } = match route::connect(identity, &cli.global, credentials, Some(deadline)) {
         Ok(routed) => routed,
         Err(error) => {
             let data = error.operational_data();
@@ -72,7 +75,6 @@ fn selected(cli: &Cli) -> Output {
             );
         }
     };
-    let credentials = NativeCredentials(identity);
     let link = match connection.link_cancellable(&|| Instant::now() >= deadline) {
         Ok(link) => link,
         Err(e) => {
@@ -95,7 +97,7 @@ fn selected(cli: &Cli) -> Output {
                 selected.server_connection(
                     identity,
                     agent.cloned(),
-                    &credentials,
+                    credentials,
                     interaction,
                     Some(deadline),
                 )

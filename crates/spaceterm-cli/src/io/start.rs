@@ -5,7 +5,7 @@
 //! inventory snapshot. `read` is passive; the others mutate.
 use super::{Deadline, Done, PaneTarget, read, run, send};
 use crate::args::{Cli, Command, PaneCommand};
-use crate::connection::{NativeCredentials, route};
+use crate::connection::{CliCredentials, route};
 use crate::contract::*;
 use crate::scope::{self, Snapshot, TargetData};
 use crate::work::backend::{Connected, Read as _};
@@ -26,14 +26,17 @@ pub fn start(cli: &Cli) -> Option<Output> {
     else {
         return None;
     };
-    Some(selected(cli, command))
+    let credentials = CliCredentials::new(env!("SPACETERM_SERVER_IDENTITY"));
+    let mut output = selected(cli, command, &credentials);
+    credentials.report(&mut output.envelope);
+    Some(output)
 }
 
 fn failed(path: &str, server: Option<ServerRef>, failure: Failure) -> Output {
     Output::failed(path, server, failure, serde_json::json!({}), String::new())
 }
 
-fn selected(cli: &Cli, command: &PaneCommand) -> Output {
+fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) -> Output {
     let path = cli.command.path();
     let identity = env!("SPACETERM_SERVER_IDENTITY");
     let deadline = Deadline::after(cli.global.timeout);
@@ -48,7 +51,7 @@ fn selected(cli: &Cli, command: &PaneCommand) -> Output {
         connection,
         agent,
         interaction,
-    } = match route::connect(identity, &cli.global, Some(connecting)) {
+    } = match route::connect(identity, &cli.global, credentials, Some(connecting)) {
         Ok(routed) => routed,
         Err(error) => {
             let data = error.operational_data();
@@ -77,12 +80,11 @@ fn selected(cli: &Cli, command: &PaneCommand) -> Output {
         Err(error) => return failed(path, None, from_server_error(error)),
     };
     let server = selected.reference(&server_id);
-    let credentials = NativeCredentials(identity);
     let mut reconnect = |agent: Option<&AgentName>| {
         selected.server_connection(
             identity,
             agent.cloned(),
-            &credentials,
+            credentials,
             interaction,
             Some(connecting),
         )
@@ -157,7 +159,7 @@ fn selected(cli: &Cli, command: &PaneCommand) -> Output {
                     .server_connection(
                         identity,
                         agent.clone(),
-                        &credentials,
+                        credentials,
                         interaction,
                         Some(Instant::now() + CONNECT_TIMEOUT),
                     )

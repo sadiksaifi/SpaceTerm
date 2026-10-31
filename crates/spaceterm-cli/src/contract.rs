@@ -803,7 +803,7 @@ codes! {
     DisconnectsEveryDevice = "disconnects_every_device", Unavailable, false, "This change would leave no connected device a route to the server. Make it on the server's own machine.";
     UnsupportedSession = "unsupported_session", Unavailable, false, "This session does not support the command.";
     IdentityBusy = "identity_busy", Unavailable, true, "Another command of this identity is running.";
-    CredentialUnavailable = "credential_unavailable", Unavailable, false, "This machine has no credential store for SpaceTerm pairings. Use a desktop session with a Keychain or Secret Service.";
+    CredentialUnavailable = "credential_unavailable", Unavailable, false, "The pairing credential store is unavailable or unsafe.";
     // CLI-native: deadline.
     Timeout = "timeout", Deadline, true, "The deadline passed.";
     // CLI-native: uncertainty.
@@ -1053,6 +1053,7 @@ pub enum WarningCode {
     CoverageCoalesced,
     CandidateOlder,
     ClientMajorDiffers,
+    PrivateCredentialFile,
 }
 
 impl WarningCode {
@@ -1065,6 +1066,7 @@ impl WarningCode {
         Self::CoverageCoalesced,
         Self::CandidateOlder,
         Self::ClientMajorDiffers,
+        Self::PrivateCredentialFile,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -1077,6 +1079,7 @@ impl WarningCode {
             Self::CoverageCoalesced => "coverage_coalesced",
             Self::CandidateOlder => "candidate_older",
             Self::ClientMajorDiffers => "client_major_differs",
+            Self::PrivateCredentialFile => "private_credential_file",
         }
     }
 
@@ -1086,6 +1089,9 @@ impl WarningCode {
                 "SpaceTerm settled an earlier command first. See data.recovered_operations."
             }
             Self::LauncherNotOnPath => "The spaceterm launcher is not on PATH.",
+            Self::PrivateCredentialFile => {
+                "CLI pairing secrets use a private file because this machine has no usable Secret Service."
+            }
             Self::UnpairPending => {
                 "The server has not confirmed the unpairing yet. Later connection commands retry it."
             }
@@ -1679,6 +1685,7 @@ pub struct ServerUnpair {
 pub enum StoreKind {
     Keychain,
     SecretService,
+    PrivateFile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

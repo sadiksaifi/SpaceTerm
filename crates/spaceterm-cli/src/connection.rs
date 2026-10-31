@@ -27,10 +27,32 @@ use zeroize::Zeroizing;
 pub trait CredentialProvider {
     fn open(&self) -> Result<Arc<dyn CredentialStore>, CredentialError>;
 }
-pub struct NativeCredentials<'a>(pub &'a str);
-impl CredentialProvider for NativeCredentials<'_> {
+pub struct CliCredentials<'a> {
+    identity: &'a str,
+    private_file: std::cell::Cell<bool>,
+}
+impl<'a> CliCredentials<'a> {
+    pub fn new(identity: &'a str) -> Self {
+        Self {
+            identity,
+            private_file: std::cell::Cell::new(false),
+        }
+    }
+    pub fn report<D: Serialize>(&self, envelope: &mut Envelope<D>) {
+        if self.private_file.get() {
+            envelope.warnings.push(Warning::new(
+                WarningCode::PrivateCredentialFile,
+                WarningDetails::None,
+            ));
+        }
+    }
+}
+impl CredentialProvider for CliCredentials<'_> {
     fn open(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        connections::native(self.0)
+        let store = connections::credentials::for_cli(self.identity)?;
+        self.private_file
+            .set(self.private_file.get() || store.kind() == connections::StoreKind::PrivateFile);
+        Ok(store)
     }
 }
 /// Reading held outcomes never admits a connection or settles a journal.
@@ -136,16 +158,20 @@ pub fn execute(command: &ConnectionCommand, global: &Global, identity: &str) -> 
         Ok(io) => io,
         Err(failure) => return CommandOutput::failure(path, failure),
     };
-    Connections {
+    let credentials = CliCredentials::new(identity);
+    let mut result = Connections {
         identity,
         global,
         store: &store,
-        credentials: &NativeCredentials(identity),
+        credentials: &credentials,
         held: &NativeHeld(identity),
         network: &enrollment::NativeNetwork,
         io: &mut io,
     }
-    .run(command)
+    .run(command);
+    credentials.report(&mut result.erased);
+    result.envelope = serde_json::to_value(&result.erased).unwrap_or_default();
+    result
 }
 
 pub struct Connections<'a> {
@@ -669,6 +695,7 @@ fn store_kind(kind: connections::StoreKind) -> contract::StoreKind {
     match kind {
         connections::StoreKind::Keychain => contract::StoreKind::Keychain,
         connections::StoreKind::SecretService => contract::StoreKind::SecretService,
+        connections::StoreKind::PrivateFile => contract::StoreKind::PrivateFile,
     }
 }
 fn platform_kind() -> contract::StoreKind {
@@ -685,6 +712,7 @@ fn kind_name(kind: contract::StoreKind) -> &'static str {
     match kind {
         contract::StoreKind::Keychain => "Keychain",
         contract::StoreKind::SecretService => "Secret Service",
+        contract::StoreKind::PrivateFile => "private file",
     }
 }
 fn connection_data(

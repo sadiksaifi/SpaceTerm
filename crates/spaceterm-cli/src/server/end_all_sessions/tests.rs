@@ -160,6 +160,7 @@ fn paired_route_is_refused_before_local_state_or_transport_access() {
     );
     let reply = run(
         &Context {
+            credentials: crate::connection::CliCredentials::new("no-such-application"),
             identity: "no-such-application",
             global: &cli.global,
         },

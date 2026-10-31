@@ -1,9 +1,11 @@
-//! Native storage for one immutable secret per direct-network pairing.
+//! Storage for one immutable secret per direct-network pairing.
 
 use std::sync::Arc;
 
 use zeroize::Zeroizing;
 
+#[cfg(any(target_os = "linux", test))]
+mod file;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -25,6 +27,7 @@ pub enum CredentialError {
 pub enum StoreKind {
     Keychain,
     SecretService,
+    PrivateFile,
 }
 
 pub trait CredentialStore: Send + Sync {
@@ -64,6 +67,40 @@ pub fn native(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialErro
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     Err(CredentialError::Unavailable)
+}
+
+/// CLI policy only. Desktop callers continue to use `native` directly.
+pub fn for_cli(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    let native = native(identity);
+    #[cfg(target_os = "linux")]
+    {
+        cli_store(native, || {
+            if !matches!(
+                identity,
+                "spaceterm" | "spaceterm-preflight" | "spaceterm-development"
+            ) {
+                return Err(CredentialError::Unavailable);
+            }
+            let directories = spaceterm_directories::AppDirectories::resolve(identity)
+                .map_err(|_| CredentialError::Unavailable)?;
+            Ok(Arc::new(file::PrivateFiles(
+                directories.data.join("cli-credentials"),
+            )))
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    native
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn cli_store(
+    native: Result<Arc<dyn CredentialStore>, CredentialError>,
+    fallback: impl FnOnce() -> Result<Arc<dyn CredentialStore>, CredentialError>,
+) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    match native {
+        Err(CredentialError::Unavailable) => fallback(),
+        other => other,
+    }
 }
 
 fn account(key: &[u8; 32]) -> String {
