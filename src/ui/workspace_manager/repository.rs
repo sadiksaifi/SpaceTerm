@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use gpui::{App, Context, Entity, Subscription};
 
 use super::WorkspaceManager;
-use crate::domain::{PinnedDirectory, WorkspaceEntry, WorkspaceId};
+use crate::domain::{WorkspaceEntry, WorkspaceId};
 use crate::repository_status::presentation::{SidebarBadge, chip_tooltip_line};
 use crate::repository_status::scheduler::{Interest, InterestId, SourceDirectory};
 use crate::repository_status::{RepositoryMachine, RepositoryView};
@@ -233,7 +233,7 @@ impl WorkspaceManager {
         cx: &App,
     ) -> Option<(RepositoryMachine, SourceDirectory)> {
         let (machine, directory) = match workspace.pinned_directory() {
-            Some(PinnedDirectory::Local(directory)) => (
+            Some(directory) => (
                 RepositoryMachine::Local,
                 SourceDirectory::Local(directory.path().to_path_buf()),
             ),

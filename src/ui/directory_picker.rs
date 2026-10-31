@@ -27,7 +27,7 @@ use super::{
     ShowRepositoryStatus, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
-use crate::domain::PinnedDirectory;
+use crate::domain::ValidatedLocalDirectory;
 
 mod local_source;
 #[cfg(test)]
@@ -98,7 +98,7 @@ pub(crate) type SourceFuture<T> = Pin<Box<dyn Future<Output = Result<T, Director
 /// A server path grants no authority to the client's filesystem or Workspace pin.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum DirectorySelection {
-    Pin(PinnedDirectory),
+    Pin(ValidatedLocalDirectory),
     Server(std::path::PathBuf),
 }
 impl fmt::Debug for DirectorySelection {

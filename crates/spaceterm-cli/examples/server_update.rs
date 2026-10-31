@@ -92,8 +92,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     if installed.stopped {
         service.start()?;
     }
-    let first = ServerConnection::for_development_client("update-smoke-a", MAJOR)?;
-    let second = ServerConnection::for_development_client("update-smoke-b", MAJOR)?;
+    let first = ServerConnection::for_development_client("update-smoke-a")?;
+    let second = ServerConnection::for_development_client("update-smoke-b")?;
     first.setup()?;
     second.setup()?;
     let a = connect(&first)?;
@@ -194,7 +194,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("staging changed shared organization".into());
     }
     let created_while_staged = create_workspace(&b, "Created while staged")?;
-    let newcomer = ServerConnection::for_development_client("update-smoke-c", MAJOR)?;
+    let newcomer = ServerConnection::for_development_client("update-smoke-c")?;
     newcomer.setup()?;
     let c = connect(&newcomer)?;
     if inventory(&c)?

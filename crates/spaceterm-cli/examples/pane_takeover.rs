@@ -48,12 +48,9 @@ fn controlled_by(controller: Controller, development: &str) -> Result<String, Bo
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
-        .parse()?;
-    let first = ServerConnection::for_development_client("takeover-first", major)?;
-    let second = ServerConnection::for_development_client("takeover-second", major)?;
+    let major = spaceterm_server::protocol::MAJOR;
+    let first = ServerConnection::for_development_client("takeover-first")?;
+    let second = ServerConnection::for_development_client("takeover-second")?;
     lifecycle::require_idle(&first)?;
     first.setup()?;
     second.setup()?;

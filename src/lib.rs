@@ -32,10 +32,6 @@ pub fn run_desktop() {
             println!("Usage: spaceterm-desktop [--version | --build-info | --help]");
             return;
         }
-        [command, ..] if command.as_encoded_bytes().starts_with(b"service-") => {
-            eprintln!("Invalid arguments. Use spaceterm server --help.");
-            std::process::exit(2);
-        }
         _ => {}
     }
     if let Err(error) = local_startup::supervise_development_client() {

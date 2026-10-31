@@ -3,22 +3,6 @@ name = "spaceterm-cli"
 publish = false
 edition = "2024"
 
-[features]
-default = []
-client = ["spaceterm-server/client"]
-
-[[example]]
-name = "persistent_pane"
-required-features = ["client"]
-
-[[example]]
-name = "pane_takeover"
-required-features = ["client"]
-
-[[example]]
-name = "terminal_input"
-required-features = ["client"]
-
 [[bin]]
 name = "spaceterm"
 path = "src/main.rs"
@@ -42,38 +26,6 @@ spaceterm = { path = "../..", default-features = false }
 spaceterm-connections = { path = "../spaceterm-connections" }
 spaceterm-server = { path = "../spaceterm-server", features = ["client"] }
 
-[[example]]
-name = "restored_workspace"
-required-features = ["client"]
-
-[[example]]
-name = "shared_workspaces"
-required-features = ["client"]
-
-[[example]]
-name = "repository_reads"
-required-features = ["client"]
-
 [dev-dependencies]
 quircs = "=0.10.3"
 spaceterm-directories = { path = "../spaceterm-directories" }
-
-[[example]]
-name = "service_session"
-required-features = ["client"]
-
-[[example]]
-name = "directory_recovery"
-required-features = ["client"]
-
-[[example]]
-name = "worktree_writes"
-required-features = ["client"]
-
-[[example]]
-name = "server_update"
-required-features = ["client"]
-
-[[example]]
-name = "latency_probe"
-required-features = ["client"]

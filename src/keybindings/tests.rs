@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use gpui::KeyBinding;
 
+use super::preferences::KeybindingPreferencesError;
 use super::*;
 
 fn shortcut(source: &str) -> Shortcut {

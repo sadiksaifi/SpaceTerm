@@ -30,39 +30,6 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
 }
 
 #[test]
-fn removed_arguments_fail_before_server_access_without_echoing_the_input() {
-    let identity = "private-identity-must-not-appear";
-    for args in [
-        vec!["serve", identity],
-        vec!["development-serve", identity],
-        vec!["service-serve", identity],
-        vec!["status", identity],
-        vec!["setup-state", identity],
-        vec!["service-status", identity],
-        vec!["service-install", identity, "/private/path-must-not-appear"],
-        vec!["ssh-discover", identity],
-        vec!["setup-start", identity],
-        vec!["setup-direct", identity, "127.0.0.1:9231"],
-        vec!["ssh-enable-linger-password", identity],
-        vec!["--build-info"],
-        vec!["--check"],
-        vec!["server", "provision", "return"],
-        vec!["server", "provision", "recover"],
-        vec!["server", "provision", "network"],
-        vec!["server", "provision", "automatic-start"],
-        vec!["server", "provision", "linger"],
-        vec!["server", "pair", "--qr"],
-        vec!["server", "run", "--identity", identity],
-        vec!["server", "run", "--service", "--owned"],
-    ] {
-        let output = spaceterm(&args);
-        assert_eq!(output.status.code(), Some(2), "{args:?}");
-        assert!(output.stdout.is_empty(), "{args:?}");
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("must-not-appear"));
-    }
-}
-
-#[test]
 fn pairing_json_keeps_the_interaction_required_contract_without_a_qr() {
     let output = spaceterm(&["server", "pair", "--json"]);
     assert_eq!(output.status.code(), Some(3));
@@ -81,7 +48,6 @@ fn server_help_hides_internal_steps_and_gives_the_exact_uninstall_line() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(!help.contains("provision"));
-    assert!(!help.contains("service-run"));
     assert!(help.contains("curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall"));
 }
 

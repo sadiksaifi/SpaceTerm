@@ -362,25 +362,6 @@ impl Service {
         Ok(info.into())
     }
 
-    /// Retain an authenticated native update, including an update across protocol majors.
-    /// This stages files only. It does not select, stop or start a runtime.
-    pub fn provision_update_candidate(
-        &self,
-        archive: &Path,
-        signature: &Path,
-        expected_sha256: &str,
-    ) -> Result<RetainedInstallation, ServerError> {
-        let (bytes, signature, info) =
-            update_candidate(&self.identity, archive, signature, expected_sha256)?;
-        retain(
-            &self.paths.data.join("installations"),
-            &self.identity,
-            &bytes,
-            &signature,
-            &info,
-        )
-    }
-
     /// Authenticate a signed remote-target candidate without executing or extracting it.
     pub fn inspect_candidate_for_target(
         &self,

@@ -103,11 +103,8 @@ fn cleanup_exercise(connection: &ServerLink) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
-        .parse()?;
-    let client = ServerConnection::for_development_client("directory-recovery", major)?;
+    let major = spaceterm_server::protocol::MAJOR;
+    let client = ServerConnection::for_development_client("directory-recovery")?;
     require_idle(&client)?;
     client.setup()?;
     let mut host = Server::start()?;

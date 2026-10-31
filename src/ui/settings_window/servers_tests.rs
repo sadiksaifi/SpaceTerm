@@ -464,7 +464,7 @@ fn opening_settings_asks_the_local_server_nothing(cx: &mut TestAppContext) {
         window.read_with(cx, |settings, _| settings
             .local_server
             .as_ref()
-            .map(|row| row.status())),
+            .map(|row| row.current_status())),
         Some(LocalServerStatus::NotChecked)
     ));
 }
@@ -1170,7 +1170,7 @@ fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
         window.read_with(cx, |settings, _| settings
             .local_server
             .as_ref()
-            .map(|row| row.status())),
+            .map(|row| row.current_status())),
         Some(LocalServerStatus::Failed(ServerError::Stopped))
     ));
     assert!(!presentation(&window, cx).check);

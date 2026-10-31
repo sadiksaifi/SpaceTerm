@@ -1428,7 +1428,7 @@ mod tests {
 
     use super::*;
     use crate::repository_status::{
-        ChangeTotal, Divergence, RemoteMachineKey, RepositoryOperation, Upstream,
+        ChangeTotal, Divergence, RepositoryOperation, Upstream,
     };
 
     const PANE: InterestId = InterestId::new(1);
@@ -1442,39 +1442,14 @@ mod tests {
         }
     }
 
-    fn build_machine() -> RepositoryMachine {
-        RepositoryMachine::Remote(RemoteMachineKey::new("build-01"))
-    }
-
-    fn remote_key(root: &str) -> RepositoryKey {
-        RepositoryKey {
-            machine: build_machine(),
-            root: RepositoryRoot::Remote(root.into()),
-        }
-    }
-
     fn local(directory: &str) -> SourceDirectory {
         SourceDirectory::Local(PathBuf::from(directory))
-    }
-
-    fn remote(directory: &str) -> SourceDirectory {
-        SourceDirectory::Remote(directory.into())
     }
 
     fn local_interest(directory: &str) -> Interest {
         Interest {
             machine: RepositoryMachine::Local,
             directory: local(directory),
-            visible: true,
-            available: true,
-            finished_commands: 0,
-        }
-    }
-
-    fn remote_interest(directory: &str) -> Interest {
-        Interest {
-            machine: build_machine(),
-            directory: remote(directory),
             visible: true,
             available: true,
             finished_commands: 0,
@@ -1594,11 +1569,6 @@ mod tests {
 
         fn set_visible(&mut self, id: InterestId, visible: bool) {
             let update = self.scheduler.set_visible(id, visible, self.now);
-            self.record(update);
-        }
-
-        fn set_available(&mut self, id: InterestId, available: bool) {
-            let update = self.scheduler.set_available(id, available, self.now);
             self.record(update);
         }
 
@@ -2096,35 +2066,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_triggers_debounce_two_seconds_per_repository() {
-        let key = remote_key("/srv/api");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/api"));
-        harness.register(OTHER, remote_interest("/srv/api"));
-        for (probe, _) in harness.probes() {
-            harness.finish_probe(probe, Ok(on_branch(&key, "main")));
-        }
-        let count = harness.only_count();
-        harness.finish_count(count, Ok(changes(0)));
-        harness.wakes();
-
-        harness.command_finished(PANE, 1);
-        harness.advance(500);
-        harness.command_finished(OTHER, 1);
-        harness.window_activated();
-        assert!(harness.probes().is_empty());
-        assert_eq!(harness.wakes(), vec![harness.at(2_000)]);
-
-        harness.advance(1_499);
-        harness.tick();
-        assert!(harness.probes().is_empty());
-        harness.advance(1);
-        harness.tick();
-        let (_, directory) = harness.only_probe();
-        assert_eq!(directory, remote("/srv/api"));
-    }
-
-    #[test]
     fn a_repository_created_below_a_pane_without_moving_it_should_be_found() {
         let parent = local_key("/src/app");
         let nested = local_key("/src/app/new");
@@ -2161,177 +2102,6 @@ mod tests {
             .collect();
         directories.sort_by_key(|directory| format!("{directory:?}"));
         assert_eq!(directories, vec![local("/src/app"), local("/src/app/new")]);
-    }
-
-    #[test]
-    fn a_tick_should_ask_for_the_next_remote_debounce_still_pending() {
-        let api = remote_key("/srv/api");
-        let web = remote_key("/srv/web");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/api"));
-        harness.read(on_branch(&api, "main"), 0);
-        harness.register(OTHER, remote_interest("/srv/web"));
-        harness.read(on_branch(&web, "main"), 0);
-
-        harness.command_finished(PANE, 1);
-        harness.advance(500);
-        harness.command_finished(OTHER, 1);
-        assert_eq!(harness.wakes(), vec![harness.at(2_000), harness.at(2_500)]);
-
-        harness.advance(1_500);
-        harness.tick();
-        let (_, directory) = harness.only_probe();
-        assert_eq!(directory, remote("/srv/api"));
-        assert_eq!(harness.wakes(), vec![harness.at(2_500)]);
-
-        harness.advance(500);
-        harness.tick();
-        let (_, directory) = harness.only_probe();
-        assert_eq!(directory, remote("/srv/web"));
-    }
-
-    #[test]
-    fn remote_source_changes_debounce_and_leaving_clears_at_once() {
-        let key = remote_key("/srv/api");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/api"));
-        harness.read(on_branch(&key, "main"), 0);
-        harness.wakes();
-
-        harness.set_source(PANE, remote("/srv/other"));
-        assert!(harness.hidden(PANE));
-        assert!(harness.probes().is_empty());
-        assert_eq!(harness.wakes(), vec![harness.at(2_000)]);
-
-        harness.advance(2_000);
-        harness.tick();
-        let (_, directory) = harness.only_probe();
-        assert_eq!(directory, remote("/srv/other"));
-    }
-
-    #[test]
-    fn a_hidden_remote_interest_reads_once_when_shown() {
-        let key = remote_key("/srv/api");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/api"));
-        harness.read(on_branch(&key, "main"), 0);
-
-        harness.set_visible(PANE, false);
-        harness.command_finished(PANE, 1);
-        harness.window_activated();
-        harness.advance(5_000);
-        harness.tick();
-        assert!(harness.probes().is_empty());
-
-        harness.set_visible(PANE, true);
-        let (_, directory) = harness.only_probe();
-        assert_eq!(directory, remote("/srv/api"));
-
-        harness.set_visible(PANE, false);
-        harness.set_visible(PANE, true);
-        assert!(
-            harness.probes().is_empty(),
-            "a current value is not read again"
-        );
-    }
-
-    #[test]
-    fn a_hidden_remote_interest_registers_without_reading() {
-        let mut harness = Harness::new();
-        harness.register(
-            PANE,
-            Interest {
-                visible: false,
-                ..remote_interest("/srv/api")
-            },
-        );
-        assert!(harness.probes().is_empty());
-        harness.set_visible(PANE, true);
-        assert_eq!(harness.only_probe().1, remote("/srv/api"));
-    }
-
-    #[test]
-    fn a_hidden_remote_interest_that_moved_should_probe_its_new_directory_when_shown() {
-        let key = remote_key("/srv/app");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/app"));
-        harness.read(on_branch(&key, "main"), 0);
-
-        harness.set_visible(PANE, false);
-        harness.set_source(PANE, remote("/srv/app/module"));
-        harness.advance(2_000);
-        harness.tick();
-        assert!(harness.probes().is_empty());
-
-        harness.set_visible(PANE, true);
-        assert_eq!(harness.only_probe().1, remote("/srv/app/module"));
-    }
-
-    #[test]
-    fn a_hidden_remote_interest_that_moved_should_probe_its_new_directory_after_its_repository_was_read()
-     {
-        let key = remote_key("/srv/app");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/app"));
-        harness.register(OTHER, remote_interest("/srv/app"));
-        harness.read(on_branch(&key, "main"), 0);
-
-        harness.set_visible(PANE, false);
-        harness.set_source(PANE, remote("/srv/app/module"));
-        // Another Pane still shows the repository and reads it again.
-        harness.command_finished(OTHER, 1);
-        harness.advance(2_000);
-        harness.tick();
-        let (ticket, directory) = harness.only_probe();
-        assert_eq!(directory, remote("/srv/app"));
-        harness.finish_probe(ticket, Ok(on_branch(&key, "main")));
-        harness.counts();
-
-        harness.set_visible(PANE, true);
-        assert_eq!(harness.only_probe().1, remote("/srv/app/module"));
-    }
-
-    #[test]
-    fn an_unavailable_remote_machine_is_not_read_and_presents_last_known() {
-        let key = remote_key("/srv/api");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/api"));
-        harness.read(on_branch(&key, "main"), 2);
-        let read_at = harness.now;
-
-        harness.advance(180_000);
-        harness.set_available(PANE, false);
-        assert_eq!(harness.changed, vec![PANE]);
-        let status = harness.status(PANE);
-        assert_eq!(status.freshness, Freshness::LastKnown { as_of: read_at });
-        assert_eq!(status.read_failure, None);
-        assert_eq!(status.changes, ChangeState::Known(changes(2)));
-
-        harness.command_finished(PANE, 1);
-        harness.repository_changed(&key);
-        harness.window_activated();
-        harness.set_source(PANE, remote("/srv/api/web"));
-        harness.advance(5_000);
-        harness.tick();
-        assert!(harness.probes().is_empty());
-
-        harness.set_available(PANE, true);
-        assert_eq!(harness.probes().len(), 1);
-    }
-
-    #[test]
-    fn an_unavailable_remote_interest_registers_without_reading() {
-        let mut harness = Harness::new();
-        harness.register(
-            PANE,
-            Interest {
-                available: false,
-                ..remote_interest("/srv/api")
-            },
-        );
-        assert!(harness.probes().is_empty());
-        harness.set_available(PANE, true);
-        assert_eq!(harness.only_probe().1, remote("/srv/api"));
     }
 
     #[test]
@@ -2441,17 +2211,6 @@ mod tests {
         assert_eq!(directory, local("/src/app/sub"));
         harness.finish_probe(probe, Ok(ProbeOutcome::NotRepository));
         assert!(harness.hidden(PANE));
-    }
-
-    #[test]
-    fn remote_repositories_are_not_watched() {
-        let key = remote_key("/srv/api");
-        let mut harness = Harness::new();
-        harness.register(PANE, remote_interest("/srv/api"));
-        harness.read(on_branch(&key, "main"), 0);
-        assert!(harness.watch_starts().is_empty());
-        harness.unregister(PANE);
-        assert!(harness.watch_stops().is_empty());
     }
 
     #[test]

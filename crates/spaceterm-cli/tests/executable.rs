@@ -31,13 +31,10 @@ fn help_shows_the_visible_tree_without_hidden_commands() {
 }
 
 #[test]
-fn old_grammar_and_bad_values_are_usage_errors_without_the_value() {
+fn bad_values_are_usage_errors_without_the_value() {
     let identity = "private-identity-must-not-appear";
     for args in [
-        &["serve", identity][..],
-        &["service-status", identity],
-        &["--build-info"],
-        &["list", "--timeout", identity],
+        &["list", "--timeout", identity][..],
         &["--private-flag-must-not-appear", "list"],
     ] {
         let output = spaceterm(args);

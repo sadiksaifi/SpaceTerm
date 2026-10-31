@@ -344,18 +344,17 @@ fn count(digits: &[u8]) -> Option<u32> {
     std::str::from_utf8(digits).ok()?.parse().ok()
 }
 
-/// Parses one complete stream held in memory.
-#[cfg(test)]
-pub(crate) fn parse_porcelain(output: &[u8]) -> Result<PorcelainSummary, RepositoryReadError> {
-    let mut parser = PorcelainParser::new();
-    parser.push(output);
-    parser.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::repository_status::{ChangeSummary, StatusHeaders};
+
+    /// Parses one complete stream held in memory.
+    fn parse_porcelain(output: &[u8]) -> Result<PorcelainSummary, RepositoryReadError> {
+        let mut parser = PorcelainParser::new();
+        parser.push(output);
+        parser.finish()
+    }
 
     const OID: &str = "1bccb23a55670b76916d70699c1b04ef507bb38d";
     const MODES: &str = "N... 100644 100644 100644";

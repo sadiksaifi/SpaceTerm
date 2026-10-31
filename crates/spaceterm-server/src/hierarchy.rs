@@ -478,8 +478,9 @@ impl State {
             self.creator_boot = Some(boot);
         }
     }
-    /// First-Workspace seeding has no shared-edit operation identity. It must not retire a
-    /// sequence a concurrent client edit has already reserved in its durable journal.
+    /// Seeds a test's first Workspace without a shared-edit operation identity, so it retires no
+    /// sequence a client edit has reserved in its durable journal.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_first_workspace(&mut self, device: Id, directory: &Path) -> Result<(), Refusal> {
         if self.inventory.workspaces.is_empty() {
             self.edit(

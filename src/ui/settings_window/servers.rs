@@ -294,11 +294,6 @@ impl LocalServerRow {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn status(&self) -> LocalServerStatus {
-        self.status
-    }
-
     pub(super) fn presentation(&self) -> LocalServerPresentation {
         let status = match &self.control {
             Err(error) => LocalServerStatus::Failed(*error),
@@ -367,15 +362,9 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                     "The server is set up but not running. Start it below, or open a SpaceTerm \
                      window, to connect.",
                 ),
-                ServerError::AuthenticationRefused => {
+                ServerError::AuthenticationRefused | ServerError::IncompatibleState => {
                     (SharedString::from(error.to_string()), CaptionTone::Error)
                 }
-                ServerError::IncompatibleState => (
-                    SharedString::from(format!(
-                        "{error} To start over, review and confirm a development state reset, then choose Check Now."
-                    )),
-                    CaptionTone::Error,
-                ),
                 // The refusal is scoped to this connection. The server and its Terminal Sessions
                 // keep running, and the Server row offers any verified update.
                 ServerError::IncompatibleProtocol => (

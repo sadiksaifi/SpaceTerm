@@ -1,4 +1,4 @@
-//! Authenticated shared edits, replay, independent Pane control, and forced restart on protocol major 4.
+//! Authenticated shared edits, replay, independent Pane control, and forced restart.
 #[path = "support/lifecycle.rs"]
 #[expect(
     dead_code,
@@ -170,12 +170,9 @@ fn attachment_workflow(a: &ServerConnection, b: &ServerConnection) -> Result<(),
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
-        .parse()?;
-    let a = ServerConnection::for_development_client("shared-smoke-a", major)?;
-    let b = ServerConnection::for_development_client("shared-smoke-b", major)?;
+    let major = spaceterm_server::protocol::MAJOR;
+    let a = ServerConnection::for_development_client("shared-smoke-a")?;
+    let b = ServerConnection::for_development_client("shared-smoke-b")?;
     require_idle(&a)?;
     a.setup()?;
     b.setup()?;

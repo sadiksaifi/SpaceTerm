@@ -2874,7 +2874,6 @@ mod quic_connections {
             (&paired.client, &"Test".into()),
             &paired.pin.server,
             &paired.pin.build,
-            &[crate::protocol::MAJOR],
         )
         .unwrap();
         stream.into_carrier()

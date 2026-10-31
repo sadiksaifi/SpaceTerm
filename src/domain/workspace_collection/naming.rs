@@ -92,7 +92,7 @@ mod tests {
         workspaces
             .update_automatic_directory(
                 first,
-                CurrentDirectory::Local(PathBuf::from("/projects/api")),
+                PathBuf::from("/projects/api"),
             )
             .unwrap();
         assert_eq!(workspaces.workspace(first).unwrap().name(), "api");
@@ -103,36 +103,16 @@ mod tests {
             .rename_workspace(second, "Default".into())
             .unwrap();
         workspaces
-            .update_automatic_directory(first, CurrentDirectory::Local(PathBuf::from("/home/test")))
+            .update_automatic_directory(first, PathBuf::from("/home/test"))
             .unwrap();
         assert_eq!(workspaces.workspace(first).unwrap().name(), "Default (2)");
         workspaces
             .update_automatic_directory(
                 second,
-                CurrentDirectory::Local(PathBuf::from("/projects/other")),
+                PathBuf::from("/projects/other"),
             )
             .unwrap();
         assert_eq!(workspaces.workspace(second).unwrap().name(), "Default");
-    }
-
-    #[test]
-    fn automatic_directory_should_reject_cross_machine_values_without_mutation() {
-        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
-            validated("/home/test", 0),
-            |_, _| (),
-        );
-        let id = workspaces.active_id();
-        assert_eq!(
-            workspaces.update_automatic_directory(
-                id,
-                CurrentDirectory::Remote(RemoteDirectory::new("/srv/api".into()).unwrap())
-            ),
-            Err(WorkspaceError::DirectoryLocationMismatch(id))
-        );
-        assert_eq!(
-            workspaces.active().local_display_directory(),
-            Some(Path::new("/home/test"))
-        );
     }
 
     #[test]
@@ -151,10 +131,10 @@ mod tests {
             workspaces
                 .set_pinned_directory(
                     id,
-                    Some(PinnedDirectory::Local(ValidatedLocalDirectory::new(
+                    Some(ValidatedLocalDirectory::new(
                         PathBuf::from(directory),
                         LocalDirectoryIdentity::for_test(index as u64 + 1),
-                    ))),
+                    )),
                 )
                 .unwrap();
         }

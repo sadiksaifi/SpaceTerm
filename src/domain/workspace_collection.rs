@@ -114,12 +114,6 @@ impl RemoteDirectory {
     }
 }
 
-/// An explicit starting-directory override with authority retained on its own machine.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PinnedDirectory {
-    Local(ValidatedLocalDirectory),
-}
-
 #[derive(Clone, Eq)]
 /// A validated local directory and its local filesystem identity.
 ///
@@ -165,8 +159,6 @@ impl fmt::Display for WorkspaceId {
 pub(crate) enum WorkspaceError {
     #[error("Workspace {0} does not belong to this collection")]
     WorkspaceNotFound(WorkspaceId),
-    #[error("Workspace {0} directory belongs to a different machine")]
-    DirectoryLocationMismatch(WorkspaceId),
     #[error("Workspace ID space is exhausted")]
     IdSpaceExhausted,
     #[error("Workspace position {position} is outside a collection of {len} Workspaces")]
@@ -178,8 +170,9 @@ pub(crate) struct WorkspaceEntry<T> {
     name: String,
     custom_name: Option<String>,
     automatic_name_base: String,
-    automatic_directory: Option<CurrentDirectory>,
-    pinned_directory: Option<PinnedDirectory>,
+    automatic_directory: Option<PathBuf>,
+    /// An explicit starting-directory override with its local authority.
+    pinned_directory: Option<ValidatedLocalDirectory>,
     home_directory: ValidatedLocalDirectory,
     payload: T,
 }
@@ -199,15 +192,15 @@ impl<T> WorkspaceEntry<T> {
 
     pub(crate) fn local_display_directory(&self) -> Option<&Path> {
         match &self.pinned_directory {
-            Some(PinnedDirectory::Local(directory)) => Some(directory.path()),
+            Some(directory) => Some(directory.path()),
             None => match &self.automatic_directory {
-                Some(CurrentDirectory::Local(directory)) => Some(directory),
-                _ => self.local_home_directory(),
+                Some(directory) => Some(directory),
+                None => self.local_home_directory(),
             },
         }
     }
 
-    pub(crate) const fn pinned_directory(&self) -> Option<&PinnedDirectory> {
+    pub(crate) const fn pinned_directory(&self) -> Option<&ValidatedLocalDirectory> {
         self.pinned_directory.as_ref()
     }
 
@@ -287,14 +280,11 @@ impl<T> WorkspaceCollection<T> {
     pub(crate) fn update_automatic_directory(
         &mut self,
         workspace_id: WorkspaceId,
-        directory: CurrentDirectory,
+        directory: PathBuf,
     ) -> Result<(), WorkspaceError> {
         let workspace = self
             .workspace_mut(workspace_id)
             .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
-        if !matches!(directory, CurrentDirectory::Local(_)) {
-            return Err(WorkspaceError::DirectoryLocationMismatch(workspace_id));
-        }
         if workspace.automatic_directory.as_ref() == Some(&directory) {
             return Ok(());
         }
@@ -306,7 +296,7 @@ impl<T> WorkspaceCollection<T> {
     pub(crate) fn set_pinned_directory(
         &mut self,
         workspace_id: WorkspaceId,
-        pin: Option<PinnedDirectory>,
+        pin: Option<ValidatedLocalDirectory>,
     ) -> Result<(), WorkspaceError> {
         let workspace = self
             .workspace_mut(workspace_id)
@@ -627,7 +617,7 @@ pub(crate) mod tests {
         let second = workspaces
             .create_local_workspace(validated("/home/me", 1), |_, _| ())
             .unwrap();
-        let pin = PinnedDirectory::Local(validated("/app/frontend", 2));
+        let pin = validated("/app/frontend", 2);
         workspaces
             .set_pinned_directory(first, Some(pin.clone()))
             .unwrap();
@@ -937,7 +927,7 @@ pub(crate) mod tests {
         workspaces
             .set_pinned_directory(
                 first,
-                Some(PinnedDirectory::Local(validated("/different/service", 91))),
+                Some(validated("/different/service", 91)),
             )
             .unwrap();
         assert_eq!(workspaces.workspace(first).unwrap().name(), automatic_name);
@@ -950,7 +940,7 @@ pub(crate) mod tests {
         workspaces
             .set_pinned_directory(
                 id,
-                Some(PinnedDirectory::Local(validated("/different/project", 90))),
+                Some(validated("/different/project", 90)),
             )
             .unwrap();
 

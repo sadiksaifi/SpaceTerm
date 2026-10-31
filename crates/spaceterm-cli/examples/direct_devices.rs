@@ -2,22 +2,18 @@
 //! The default prints the scope without connecting. The parent prepares/signs both native
 //! examples and starts the foreground server before explicitly authorizing the mutation pass.
 
-#[cfg(feature = "client")]
 #[expect(
     dead_code,
     reason = "this exercise uses only the claim, request and terminal helpers"
 )]
 mod support;
 
-#[cfg(feature = "client")]
 #[path = "support/terminal_semantics.rs"]
 mod terminal_semantics;
 
-#[cfg(feature = "client")]
 #[path = "support/presentation.rs"]
 mod presentation;
 
-#[cfg(feature = "client")]
 mod exercise {
     use std::fs::File;
     use std::io::{Read, Write};
@@ -614,7 +610,7 @@ mod exercise {
             "two-host verification requires a reachable native host address",
         )?;
         let name = format!("direct541-owner-{}", &hex(&random()?)[..6]);
-        let owner = api(ServerConnection::for_development_client(&name, 4))?;
+        let owner = api(ServerConnection::for_development_client(&name))?;
         require(
             api(owner.refresh())?.protocol_major == 4,
             "expected protocol major 4",
@@ -796,7 +792,7 @@ mod exercise {
                 "hidden presentation phase missing",
             )?;
             let observer_name = format!("p612-observer-{}", &hex(&random()?)[..6]);
-            let observer = api(ServerConnection::for_development_client(&observer_name, 4))?;
+            let observer = api(ServerConnection::for_development_client(&observer_name))?;
             let observer = api(support::connect(&observer))?;
             super::presentation::observe_hidden_inventory(&observer, pane).map_err(|failure| {
                 eprintln!("QUIC inventory observer: {failure}");
@@ -1482,7 +1478,6 @@ mod exercise {
     }
 }
 
-#[cfg(feature = "client")]
 fn main() -> std::process::ExitCode {
     match exercise::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -1491,10 +1486,4 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
-}
-
-#[cfg(not(feature = "client"))]
-fn main() {
-    eprintln!("direct_devices requires the client feature");
-    std::process::exit(2);
 }

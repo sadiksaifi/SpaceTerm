@@ -15,7 +15,7 @@ pub(crate) use workspace_collection::LocalDirectoryIdentity;
 #[cfg(test)]
 pub(crate) use workspace_collection::tests::PresentedWorkspace;
 pub(crate) use workspace_collection::{
-    CurrentDirectory, PinnedDirectory, RemoteDirectory, SshDestination, ValidatedLocalDirectory,
+    CurrentDirectory, RemoteDirectory, SshDestination, ValidatedLocalDirectory,
     WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 pub(crate) use worktree::{RepositoryIdentity, WorktreeId, WorktreeKey, WorktreeRegistry};

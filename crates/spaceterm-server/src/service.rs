@@ -1600,7 +1600,7 @@ mod tests {
     fn foreground_start_cannot_bypass_the_approved_service_runtime() {
         let fixture = Fixture::new();
         assert_eq!(
-            crate::host::serve(&fixture.paths),
+            crate::host::serve_with_panes(&fixture.paths, None),
             Err(ServerError::RuntimeUnavailable)
         );
         assert!(!fixture.paths.socket().exists());
@@ -1807,7 +1807,6 @@ mod tests {
                         (&[11; 32], &"Test".into()),
                         &pin,
                         &self.paths.identity,
-                        &[protocol::MAJOR],
                     )?;
                     let link = crate::host::link(stream, Arc::new(|_| {}))?;
                     assert!(matches!(

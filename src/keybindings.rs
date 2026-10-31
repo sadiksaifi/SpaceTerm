@@ -8,14 +8,6 @@ mod terminal_conventions;
 
 pub use keymap::*;
 pub use preferences::KeybindingPreferences;
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "exported for the later Settings Document validation step"
-    )
-)]
-pub use preferences::KeybindingPreferencesError;
 pub use shortcut::{Shortcut, ShortcutRejection};
 pub(crate) use terminal_conventions::is_presentable;
 pub use terminal_conventions::{TerminalConvention, TerminalConventions};

@@ -119,8 +119,6 @@ pub enum RepositoryReadError {
     OutputTooLarge,
     #[error("the repository read returned an invalid response")]
     InvalidResponse,
-    #[error("the server connection is unavailable")]
-    ConnectionUnavailable,
 }
 
 /// A GitHub repository named by a remote URL: the Pull Request lookup's `--repo` target.

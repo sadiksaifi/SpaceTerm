@@ -44,14 +44,6 @@ die() {
     exit 1
 }
 
-# The installed server's package layout is not this installer's, such as a macOS server from
-# before its app-like bundle. It names no path. The code and exit status match the CLI output
-# contract's `incompatible_state`.
-incompatible() {
-    printf 'error: incompatible_state: the installed server is from an incompatible SpaceTerm. Uninstall it with the installer of that version.\n' >&2
-    exit 5
-}
-
 cleanup() {
     if [ -n "$volume" ]; then
         hdiutil detach "$volume" -force >/dev/null 2>&1 || true
@@ -446,7 +438,7 @@ headless_uninstall() {
         [ ! -L "$executable" ] || die "the CLI installation has unsafe links"
         case "$rest" in */*) rest="${rest#*/}" ;; *) rest="" ;; esac
     done
-    [ -f "$executable" ] && [ -x "$executable" ] || incompatible
+    [ -f "$executable" ] && [ -x "$executable" ] || die "the installed server executable is missing"
     if [ -n "$headless_confirm" ]; then
         "$executable" server provision uninstall --confirm "$headless_confirm"
         return

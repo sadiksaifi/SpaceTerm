@@ -34,7 +34,6 @@ pub use storage::{Directory, Lock, LockWait};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthenticatedStatus {
     pub protocol_major: u16,
-    pub development_pane: bool,
 }
 
 /// Bounded classifications. Native errors and peer-supplied values never cross this boundary.
@@ -127,14 +126,6 @@ pub fn local_server_id(identity: &str) -> Result<[u8; 32], ServerError> {
     )
 }
 
-/// Runs an explicitly requested local server. No service registration or listener
-/// is installed by library construction or desktop launch.
-pub fn run_local(identity: &str) -> Result<(), ServerError> {
-    host::install_shutdown_signals()?;
-    let paths = host::Paths::for_identity(identity)?;
-    host::serve(&paths)
-}
-
 /// Builds the service once the host has its one [`connection::sync::SyncWorker`], which the
 /// service shares for its disk syncs.
 pub type PaneFactory = Box<
@@ -152,6 +143,8 @@ pub fn panes<P: connection::service::PaneService + 'static>(
     })
 }
 
+/// Runs an explicitly requested local server. No service registration or listener
+/// is installed by library construction or desktop launch.
 pub fn run_local_with_panes(identity: &str, panes: PaneFactory) -> Result<(), ServerError> {
     host::install_shutdown_signals()?;
     host::serve_with_panes(&host::Paths::for_identity(identity)?, Some(panes))

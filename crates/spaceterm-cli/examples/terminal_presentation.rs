@@ -1,31 +1,24 @@
 //! Existing foreground Development server acceptance. Never starts or installs a server.
-#[cfg(feature = "client")]
 #[path = "support/lifecycle.rs"]
 #[expect(dead_code, reason = "only the common Pane size is needed")]
 mod lifecycle;
-#[cfg(feature = "client")]
 #[path = "support/presentation.rs"]
 mod presentation;
-#[cfg(feature = "client")]
 #[path = "support/repository.rs"]
 #[expect(dead_code, reason = "only shared inventory operations are needed")]
 mod repository;
-#[cfg(feature = "client")]
 #[expect(
     dead_code,
     reason = "shared fixture modules also serve other native exercises"
 )]
 mod support;
-#[cfg(feature = "client")]
 #[path = "support/terminal_semantics.rs"]
 #[expect(dead_code, reason = "only bounded failure diagnostics are needed")]
 mod terminal_semantics;
-#[cfg(feature = "client")]
 #[path = "support/worktree.rs"]
 #[expect(dead_code, reason = "only journaled hierarchy operations are needed")]
 mod worktree_fixture;
 
-#[cfg(feature = "client")]
 mod exercise {
     use super::{
         lifecycle, presentation, repository, support, terminal_semantics::*, worktree_fixture,
@@ -183,11 +176,11 @@ mod exercise {
         }
         let server = stage(
             "ipc-client",
-            ServerConnection::for_development_client(&name, 4),
+            ServerConnection::for_development_client(&name),
         )?;
         let observer = stage(
             "ipc-observer",
-            ServerConnection::for_development_client(&format!("{name}-observer"), 4),
+            ServerConnection::for_development_client(&format!("{name}-observer")),
         )?;
         // Client credentials are created by admission, without service registration or setup/reset.
         let connection = stage("presentation-connect", support::connect(&server))?;
@@ -257,7 +250,6 @@ mod exercise {
     }
 }
 
-#[cfg(feature = "client")]
 fn main() -> std::process::ExitCode {
     match exercise::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -266,9 +258,4 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
-}
-#[cfg(not(feature = "client"))]
-fn main() {
-    eprintln!("terminal_presentation requires the client feature");
-    std::process::exit(2);
 }

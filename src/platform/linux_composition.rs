@@ -268,12 +268,12 @@ fn compose(
         home_directory: startup.home_directory,
         adapters: crate::app::ApplicationCapabilities {
             updates,
-            selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
-            settings_file: Some(settings_file),
+            selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
+            settings_file,
             application_menu: Rc::new(
                 super::linux_application_menu::LinuxApplicationMenuAdapter,
             ),
-            desktop_events: Some(Rc::new(desktop_events)),
+            desktop_events: Rc::new(desktop_events),
             application_quit: Rc::new(
                 super::linux_application_quit::LinuxApplicationQuitAdapter::new(|cx| cx.quit()),
             ),
@@ -297,7 +297,7 @@ fn compose(
             capture_access: None,
             permission_access: None,
             setup_guide: None,
-            theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
+            theme_registry: Arc::new(super::https_transport::HttpsTransport::new()),
             repository_status,
             background_images: None,
             local_server: crate::ui::LocalServerAdapters::account(),

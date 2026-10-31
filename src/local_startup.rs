@@ -71,12 +71,6 @@ impl Candidate {
     pub fn digest(&self) -> &str {
         &self.digest
     }
-    pub fn protocol_major(&self) -> u16 {
-        self.metadata.protocol_major
-    }
-    pub fn capabilities(&self) -> &[String] {
-        &self.metadata.capabilities
-    }
     pub fn is_approved(
         &self,
         installation: &spaceterm_server::service::RetainedInstallation,

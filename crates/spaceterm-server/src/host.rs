@@ -206,10 +206,6 @@ pub(crate) fn connect_socket(endpoint: &Path) -> Result<UnixStream, SocketUnavai
     Ok(UnixStream::from(descriptor))
 }
 
-pub(crate) fn serve(paths: &Paths) -> Result<(), ServerError> {
-    serve_with_panes(paths, None)
-}
-
 pub(crate) fn serve_with_panes(
     paths: &Paths,
     panes: Option<crate::PaneFactory>,
@@ -1267,7 +1263,6 @@ mod tests {
             (&[9; 32], &"Test".into()),
             &[7; 32],
             &fixture.paths.identity,
-            &[protocol::MAJOR],
         )
         .unwrap();
         let link = link(client, Arc::new(|_| {})).unwrap();
@@ -1596,7 +1591,6 @@ mod startup_tests {
             (device, &"Test".into()),
             &fixture.pin,
             "spaceterm-development",
-            &[protocol::MAJOR],
         )
         .unwrap();
         link(stream, Arc::new(|_| {})).unwrap()
@@ -1606,11 +1600,14 @@ mod startup_tests {
     #[ignore = "runs only as a child of the server startup tests"]
     fn server_start_child() {
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
-        let result = serve(&Paths {
-            identity: "spaceterm-development".into(),
-            data: root.join("d"),
-            runtime: root.join("r"),
-        });
+        let result = serve_with_panes(
+            &Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            None,
+        );
         assert_eq!(result, Err(ServerError::StorageUnavailable));
     }
 
@@ -1726,11 +1723,14 @@ mod startup_tests {
     fn server_signal_child() {
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
-        serve(&Paths {
-            identity: "spaceterm-development".into(),
-            data: root.join("d"),
-            runtime: root.join("r"),
-        })
+        serve_with_panes(
+            &Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            None,
+        )
         .unwrap();
     }
 
@@ -1751,11 +1751,14 @@ mod startup_tests {
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
-        serve(&Paths {
-            identity: "spaceterm-development".into(),
-            data: root.join("d"),
-            runtime: root.join("r"),
-        })
+        serve_with_panes(
+            &Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            None,
+        )
         .unwrap();
     }
 
@@ -1784,7 +1787,6 @@ mod startup_tests {
                 (&fixture.device, &"Test".into()),
                 &fixture.pin,
                 "spaceterm-development",
-                &[protocol::MAJOR],
             )
             .is_ok()
             {
@@ -1831,7 +1833,6 @@ mod startup_tests {
             (&fixture.device, &"Test".into()),
             &fixture.pin,
             "spaceterm-development",
-            &[protocol::MAJOR],
         )
         .unwrap();
         let mut idle = UnixStream::connect(fixture.paths.socket()).unwrap();
@@ -2064,7 +2065,6 @@ mod startup_tests {
                 (&fixture.device, &"Test".into()),
                 &fixture.pin,
                 "spaceterm-development",
-                &[protocol::MAJOR],
             )
             .unwrap();
             // Replies exceed socket buffering. This admitted client deliberately reads none.
@@ -2181,7 +2181,6 @@ mod startup_tests {
             (&fixture.device, &"Test".into()),
             &fixture.pin,
             "spaceterm-development",
-            &[protocol::MAJOR],
         )
         .unwrap();
         let frame = encode_client(&ClientMessage::Request(Box::new(Request {
@@ -2299,11 +2298,9 @@ mod startup_tests {
                 (&fixture.device, &"Test".into()),
                 &fixture.pin,
                 "spaceterm-development",
-                &[protocol::MAJOR]
             ),
             Ok(crate::AuthenticatedStatus {
                 protocol_major: protocol::MAJOR,
-                development_pane: false
             })
         );
     }

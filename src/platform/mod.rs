@@ -370,24 +370,10 @@ mod unix_askpass_transport;
 pub(crate) mod unix_askpass_transport;
 
 #[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "desktop composition owns this host capability"
-    )
-)]
+#[cfg(feature = "desktop")]
 mod unix_host_config_filesystem;
 #[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "desktop composition owns this host capability"
-    )
-)]
+#[cfg(feature = "desktop")]
 pub(crate) mod unix_host_config_filesystem;
 
 #[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
@@ -451,24 +437,10 @@ mod unix_secure_filesystem;
 pub(crate) mod unix_secure_filesystem;
 
 #[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "desktop composition owns this host capability"
-    )
-)]
+#[cfg(feature = "desktop")]
 mod unix_ssh_process;
 #[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "desktop composition owns this host capability"
-    )
-)]
+#[cfg(feature = "desktop")]
 pub(crate) mod unix_ssh_process;
 
 // Irreducible macOS differences inside the shared POSIX mechanics.

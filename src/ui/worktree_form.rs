@@ -21,7 +21,7 @@ use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::platform::local_filesystem::{LocalFilesystemError, NewDirectoryTarget};
 use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::worktrees::git::{BranchList, BranchName, WorktreeBranch, WorktreeCreateError};
-use crate::worktrees::path_template::expand;
+use spaceterm_server::worktree::path_template::expand;
 use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
 
 const FORM_MODAL_ID: &str = "new-worktree-form";
@@ -1330,7 +1330,7 @@ mod tests {
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let context = WorktreeFormContext {
                 repository_name: "app".into(),
-                template: crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE.into(),
+                template: spaceterm_server::worktree::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE.into(),
                 home: HOME.into(),
                 checked_out: vec![
                     ("main".into(), "app".into()),

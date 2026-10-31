@@ -1,4 +1,4 @@
-//! Authenticated Git writes, stale confirmations, original-operation recovery and Stop on protocol major 4.
+//! Authenticated Git writes, stale confirmations, original-operation recovery and Stop.
 #[path = "support/lifecycle.rs"]
 #[expect(dead_code, reason = "This exercise uses shared hierarchy connections.")]
 mod lifecycle;
@@ -53,12 +53,9 @@ fn reconcile_fixture_originals(c: &ServerLink) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| spaceterm_server::protocol::MAJOR.to_string())
-        .parse()?;
-    let a = ServerConnection::for_development_client("worktree-writes-a", major)?;
-    let b = ServerConnection::for_development_client("worktree-writes-b", major)?;
+    let major = spaceterm_server::protocol::MAJOR;
+    let a = ServerConnection::for_development_client("worktree-writes-a")?;
+    let b = ServerConnection::for_development_client("worktree-writes-b")?;
     eprintln!("Worktree smoke: idle guard");
     lifecycle::require_idle(&a)?;
     eprintln!("Worktree smoke: first client setup");

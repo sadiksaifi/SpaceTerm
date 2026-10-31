@@ -1352,11 +1352,11 @@ pub(crate) fn window_application_id() -> Option<String> {
 pub(crate) struct ApplicationCapabilities {
     pub(crate) updates: Rc<dyn crate::updates::UpdateAdapter>,
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
-    pub(crate) desktop_events: Option<Rc<dyn crate::platform::desktop_events::DesktopEventAdapter>>,
+    pub(crate) desktop_events: Rc<dyn crate::platform::desktop_events::DesktopEventAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
-    pub(crate) selected_files: Option<Arc<dyn crate::platform::selected_file::SelectedFileOpener>>,
+    pub(crate) selected_files: Arc<dyn crate::platform::selected_file::SelectedFileOpener>,
     /// Opens and watches the settings file the person edits in their own editor.
-    pub(crate) settings_file: Option<Rc<dyn crate::platform::settings_file::SettingsFileAccess>>,
+    pub(crate) settings_file: Rc<dyn crate::platform::settings_file::SettingsFileAccess>,
     pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pub(crate) key_input: Rc<dyn crate::terminal::TerminalKeyInputAdapterFactory>,
     pub(crate) accessibility:
@@ -1371,7 +1371,7 @@ pub(crate) struct ApplicationCapabilities {
     /// Docks the Setup Guide on System Settings' window during a Permission Setup.
     pub(crate) setup_guide: Option<Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>>,
     /// Reaches the Zed extension registry when the person browses it for Terminal Themes.
-    pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,
+    pub(crate) theme_registry: Arc<dyn crate::theme_registry::RegistryTransport>,
     /// Runs git and the GitHub CLI for Repository Status.
     pub(crate) repository_status:
         Option<crate::ui::repository_status_store::RepositoryStatusAdapters>,
@@ -1613,9 +1613,7 @@ pub(crate) fn initialize_application(
     cx.set_global(host.window_chrome.clone());
     host.window_chrome.install_controls(cx);
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
-    if let Some(opener) = &host.adapters.selected_files {
-        cx.set_global(SelectedFileAccess(Arc::clone(opener)));
-    }
+    cx.set_global(SelectedFileAccess(Arc::clone(&host.adapters.selected_files)));
     // Native menu construction reads the keymap; install both before Settings I/O and fonts.
     let keymap = host.profile.install(cx);
     crate::keybindings::runtime::install(keymap, cx);
@@ -1656,15 +1654,12 @@ pub(crate) fn initialize_application(
             system_permissions: host.adapters.permission_access.clone(),
             permission_setup: host.permission_setup.get().cloned(),
         },
-        host.adapters
-            .theme_registry
-            .clone()
-            .map(crate::theme_registry::ZedThemeRegistry::new),
+        Some(crate::theme_registry::ZedThemeRegistry::new(Arc::clone(
+            &host.adapters.theme_registry,
+        ))),
         cx,
     );
-    if let Some(events) = &host.adapters.desktop_events {
-        events.install(cx);
-    }
+    host.adapters.desktop_events.install(cx);
     init(
         cx,
         Rc::clone(&host.adapters.application_menu),
@@ -1679,9 +1674,11 @@ pub(crate) fn initialize_application(
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
         crate::keybindings::runtime::follow(&settings, cx);
-        if let Some(file) = &host.adapters.settings_file {
-            crate::ui::settings_file::SettingsFile::install(settings.clone(), Rc::clone(file), cx);
-        }
+        crate::ui::settings_file::SettingsFile::install(
+            settings.clone(),
+            Rc::clone(&host.adapters.settings_file),
+            cx,
+        );
         if let Some(adapters) = &host.adapters.repository_status {
             crate::ui::repository_status_store::install(&settings, adapters.clone(), cx);
         }
@@ -2467,6 +2464,21 @@ mod runtime_tests {
             movement
         }
     }
+    /// Opens no selected file.
+    struct NoSelectedFiles;
+    impl crate::platform::selected_file::SelectedFileOpener for NoSelectedFiles {
+        fn open(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<std::fs::File, crate::platform::selected_file::SelectedFileOpenError> {
+            Err(crate::platform::selected_file::SelectedFileOpenError)
+        }
+    }
+    /// Delivers no native desktop callbacks.
+    struct NoDesktopEvents;
+    impl crate::platform::desktop_events::DesktopEventAdapter for NoDesktopEvents {
+        fn install(&self, _: &mut App) {}
+    }
     fn parts(
         services: Rc<RecordingServices>,
         movement: Rc<RecordingMovement>,
@@ -2479,12 +2491,14 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             adapters: ApplicationCapabilities {
                 updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
-                selected_files: None,
-                settings_file: None,
+                selected_files: Arc::new(NoSelectedFiles),
+                settings_file: Rc::new(
+                    crate::platform::settings_file::testing::RecordingSettingsFile::default(),
+                ),
                 application_menu: Rc::new(
                     crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
                 ),
-                desktop_events: None,
+                desktop_events: Rc::new(NoDesktopEvents),
                 application_quit: Rc::new(
                     crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
                 ),
@@ -2496,7 +2510,7 @@ mod runtime_tests {
                 capture_access: None,
                 permission_access: None,
                 setup_guide: None,
-                theme_registry: None,
+                theme_registry: Arc::new(crate::theme_registry::testing::MemoryTransport::default()),
                 repository_status: None,
                 background_images: None,
                 local_server: crate::ui::launch_testing::presenting(session_factory),

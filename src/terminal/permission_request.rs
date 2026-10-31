@@ -96,19 +96,6 @@ impl PermissionRequestFilter {
     ///
     /// Output between requests reaches `terminal` in one call, except for a prefix split across
     /// reads.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "unfenced parser is used by filter regressions")
-    )]
-    pub(crate) fn feed(
-        &mut self,
-        bytes: &[u8],
-        terminal: impl FnMut(&[u8]),
-        mut request: impl FnMut(PermissionRequest),
-    ) {
-        self.feed_with_context(bytes, None, terminal, |value, _| request(value));
-    }
-
     pub(crate) fn feed_with_context(
         &mut self,
         bytes: &[u8],
@@ -287,8 +274,9 @@ mod tests {
         let mut filter = PermissionRequestFilter::default();
         let output = std::cell::RefCell::new(Vec::new());
         for chunk in chunks {
-            filter.feed(
+            filter.feed_with_context(
                 chunk,
+                None,
                 |bytes| {
                     let mut output = output.borrow_mut();
                     if let Some(Output::Terminal(previous)) = output.last_mut() {
@@ -297,7 +285,7 @@ mod tests {
                         output.push(Output::Terminal(bytes.to_vec()));
                     }
                 },
-                |request| {
+                |request, _| {
                     output
                         .borrow_mut()
                         .push(Output::Request(request.permissions().to_vec()));
@@ -493,13 +481,14 @@ mod tests {
         let mut filter = PermissionRequestFilter::default();
         let mut calls = 0;
         let mut output = Vec::new();
-        filter.feed(
+        filter.feed_with_context(
             &raw,
+            None,
             |bytes| {
                 calls += 1;
                 output.extend_from_slice(bytes);
             },
-            |_| {},
+            |_, _| {},
         );
         assert_eq!(calls, 1);
         assert_eq!(output, raw);

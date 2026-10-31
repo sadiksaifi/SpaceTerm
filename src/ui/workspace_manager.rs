@@ -43,7 +43,7 @@ use crate::close_confirmation::{
 };
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    PaneId, PinnedDirectory, RemoteConnectionPhase, TabId, ValidatedLocalDirectory,
+    PaneId, RemoteConnectionPhase, TabId, ValidatedLocalDirectory,
     WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
@@ -538,7 +538,8 @@ impl WorkspaceManager {
                     // the server publishes. A server path never becomes this Workspace's own
                     // directory, which local pinning and file actions would read as authority.
                     if !workspace_manager.is_shared_workspace(workspace_id)
-                        && let Some(directory) = tab_manager.read(cx).automatic_directory(cx)
+                        && let Some(crate::domain::CurrentDirectory::Local(directory)) =
+                            tab_manager.read(cx).automatic_directory(cx)
                     {
                         let _ = workspace_manager
                             .workspaces
@@ -955,7 +956,7 @@ impl WorkspaceManager {
         };
         self.apply_directory_pin(
             workspace_id,
-            Some(PinnedDirectory::Local(directory)),
+            Some(directory),
             window,
             cx,
         )
@@ -964,7 +965,7 @@ impl WorkspaceManager {
     fn apply_directory_pin(
         &mut self,
         workspace_id: WorkspaceId,
-        pin: Option<PinnedDirectory>,
+        pin: Option<ValidatedLocalDirectory>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1097,7 +1098,7 @@ impl WorkspaceManager {
                         let application = match (current, selection.clone(), target.clone()) {
                             (
                                 true,
-                                DirectorySelection::Pin(PinnedDirectory::Local(directory)),
+                                DirectorySelection::Pin(directory),
                                 target,
                             ) if !remote => {
                                 manager.apply_local_pin_target(target, directory, window, cx)
@@ -3586,7 +3587,7 @@ impl WorkspaceManager {
     fn pin_shared_workspace(
         &mut self,
         workspace_id: WorkspaceId,
-        pin: Option<&PinnedDirectory>,
+        pin: Option<&ValidatedLocalDirectory>,
         observed_version: Option<u64>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3597,12 +3598,12 @@ impl WorkspaceManager {
         let directory = match pin {
             // A local directory names a directory on this machine, which only the account-local
             // server shares. Another server's Workspace never receives one.
-            Some(PinnedDirectory::Local(_)) if owner != ServerKey::LOCAL => {
+            Some(_) if owner != ServerKey::LOCAL => {
                 self.transient.end_pin();
                 Self::show_shared_unavailable(REMOTE_LOCAL_PIN_REFUSED, window, cx);
                 return Some(false);
             }
-            Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
+            Some(directory) => Some(directory.path().to_owned()),
             None => None,
         };
         self.pin_operation = self.pin_operation.wrapping_add(1);

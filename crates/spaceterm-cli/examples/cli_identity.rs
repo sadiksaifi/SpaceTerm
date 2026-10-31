@@ -261,10 +261,7 @@ fn exercise(base: &ServerConnection, data: &std::path::Path) -> Result<()> {
     drop(editor);
     assert!(state.held(&RouteKey::Local)?.is_empty());
     println!("the next command settled {ABANDONED} killed agents");
-    let desktop = ServerConnection::for_development_client(
-        "cli-identity",
-        spaceterm_server::protocol::MAJOR,
-    )?;
+    let desktop = ServerConnection::for_development_client("cli-identity")?;
     let desktop_link = connect(&desktop)?;
     assert!(matches!(
         desktop_edit(&desktop_link, "desktop after settlement")?,

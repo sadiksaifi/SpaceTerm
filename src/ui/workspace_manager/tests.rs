@@ -1354,10 +1354,11 @@ fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
     cx.run_until_parked();
 
     let pinned = manager.read_with(cx, |manager, _| {
-        match manager.workspaces.active().pinned_directory() {
-            Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
-            _ => None,
-        }
+        manager
+            .workspaces
+            .active()
+            .pinned_directory()
+            .map(|directory| directory.path().to_owned())
     });
     assert_eq!(pinned, Some(project.clone()));
     assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
@@ -4703,7 +4704,7 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
                 .unwrap();
             manager.apply_directory_pin(
                 WorkspaceId::new(1),
-                Some(PinnedDirectory::Local(directory)),
+                Some(directory),
                 window,
                 cx,
             );
@@ -6599,9 +6600,7 @@ fn workspace_switcher_should_not_expose_the_workspace_path_as_a_description(
             .workspaces
             .update_automatic_directory(
                 WorkspaceId::new(1),
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/Ångström",
-                )),
+                PathBuf::from("/project/Ångström"),
             )
             .unwrap();
     });
@@ -6632,9 +6631,7 @@ fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) 
             .workspaces
             .update_automatic_directory(
                 WorkspaceId::new(1),
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/Ångström",
-                )),
+                PathBuf::from("/project/Ångström"),
             )
             .unwrap();
     });

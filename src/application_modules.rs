@@ -68,22 +68,12 @@ mod platform;
     )
 )]
 mod repository_status;
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(dead_code, reason = "the desktop owns server presentation context")
-)]
+#[cfg(feature = "desktop")]
 mod server_context;
 mod server_settings;
 #[cfg(feature = "desktop")]
 mod settings;
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "desktop SSH orchestration shares launch-plan types"
-    )
-)]
+#[cfg(feature = "desktop")]
 mod ssh;
 #[cfg(feature = "desktop")]
 mod status_menu;
