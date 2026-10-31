@@ -3,6 +3,13 @@
 //! [`crate::ui::remembered_view`] keeps the view while no window is open. This module captures it
 //! when the window closes, and presents it as the next window's Workspaces arrive. Every step is
 //! passive: nothing selects a Pane, so no Pane control moves and no restored shell starts.
+//!
+//! The person's keyboard or pointer input in the window settles what is still awaited, so a
+//! remembered choice never replaces one the person made. The window learns of that input in one
+//! place, [`WorkspaceManager::person_input`], from two listeners that see it before any element
+//! handles it: a keystroke interceptor for this window, and a window-wide capture-phase listener
+//! for presses and scrolling. The window's own changes are not input, so they never settle
+//! anything.
 
 use gpui::{App, Context, Window};
 use spaceterm_server::workspace_order::WorkspaceReference;
@@ -11,14 +18,6 @@ use super::{ServerKey, WorkspaceManager};
 use crate::domain::WorkspaceId;
 use crate::ui::remembered_view::{Restoration, SidebarView, WindowPlacement, WindowView};
 
-/// Where navigation stands for restoration: the person's navigation, and the explicit Pane
-/// choices in the Active Tab, which can choose the Pane already focused or change its zoom.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct RestorationMark {
-    navigation: super::NavigationMark,
-    choices: u64,
-}
-
 impl WorkspaceManager {
     /// Closes the window, leaving its view for the next Workspace Window.
     pub(super) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -26,11 +25,8 @@ impl WorkspaceManager {
         window.remove_window();
     }
 
-    /// Leaves this window's view for the next Workspace Window, as the window closes. A choice the
-    /// person made since the window last changed its own presentation settles what it restores
-    /// first, so the next window never brings back a selection the person replaced.
+    /// Leaves this window's view for the next Workspace Window, as the window closes.
     pub(super) fn remember_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.observe_navigation(cx);
         let view = self.remembered_view(window, cx);
         crate::ui::remembered_view::remember_workspace_window(view, cx);
     }
@@ -88,7 +84,52 @@ impl WorkspaceManager {
                 workspace_sidebar.take_keyboard(sidebar.focus_visible, window, cx);
             }
         });
-        self.restoration = Restoration::new(view, self.restoration_mark(cx));
+        self.restoration = Restoration::new(view);
+    }
+
+    /// Follows the person's keystrokes in this window, before anything in it handles them, so
+    /// every key counts, whatever it does.
+    pub(super) fn follow_person_input(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let this_window = window.window_handle().window_id();
+        let manager = cx.weak_entity();
+        self._person_input = Some(cx.intercept_keystrokes(move |_, window, cx| {
+            if window.window_handle().window_id() == this_window {
+                let _ = manager.update(cx, |manager, _| manager.person_input());
+            }
+        }));
+    }
+
+    /// Listens for the person's presses and scrolling anywhere in this window, before any element
+    /// handles or blocks them. It draws nothing.
+    pub(super) fn person_pointer_input(cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{DispatchPhase, MouseDownEvent, ScrollWheelEvent, Styled as _};
+
+        let manager = cx.weak_entity();
+        gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let pressed = manager.clone();
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = pressed.update(cx, |manager, _| manager.person_input());
+                    }
+                });
+                let scrolled = manager.clone();
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = scrolled.update(cx, |manager, _| manager.person_input());
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
+    }
+
+    /// The person gave this window keyboard or pointer input, which is their choice of what it
+    /// shows. Nothing remembered moves the view after it.
+    pub(super) fn person_input(&mut self) {
+        self.restoration.person_input();
     }
 
     /// Whether the window opened from a remembered view, which never opens a Workspace for a
@@ -97,32 +138,8 @@ impl WorkspaceManager {
         self.restoration.remembered()
     }
 
-    /// Where the person's navigation stands, counting every explicit Pane choice, even of the
-    /// Pane already focused, and every zoom change.
-    pub(super) fn restoration_mark(&self, cx: &App) -> RestorationMark {
-        RestorationMark {
-            navigation: self.navigation(cx),
-            choices: self
-                .active_tab_manager()
-                .map_or(0, |manager| manager.read(cx).choices(cx)),
-        }
-    }
-
-    /// Settles every remembered choice when the person navigated since the window last changed
-    /// its own presentation. Call before the window changes it.
-    pub(super) fn observe_navigation(&mut self, cx: &Context<Self>) {
-        let mark = self.restoration_mark(cx);
-        self.restoration.observe(mark);
-    }
-
-    /// Records where navigation stands after the window changed its own presentation.
-    pub(super) fn record_navigation(&mut self, cx: &Context<Self>) {
-        let mark = self.restoration_mark(cx);
-        self.restoration.record(mark);
-    }
-
     /// Presents the remembered view of a Workspace its server just presented, and selects it
-    /// when it was the Active Workspace and the person has selected nothing since.
+    /// when it was the Active Workspace and the person has given the window no input since.
     pub(super) fn restore_remembered_workspace(
         &mut self,
         key: ServerKey,
@@ -221,13 +238,12 @@ impl WorkspaceManager {
             }
         }
         self.select_remembered_fallback(window, cx);
-        self.record_navigation(cx);
     }
 
     /// Selects the first Workspace in display order when the remembered Active Workspace is gone
     /// and the person has selected nothing since. A saved order still being read decides which
     /// Workspace is first, so the selection waits for it, and each later publication selects the
-    /// first Workspace again until the person navigates.
+    /// first Workspace again until the person gives the window input.
     pub(super) fn select_remembered_fallback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.display_order_ready() || !self.restoration.falls_back() {
             return;
@@ -241,7 +257,6 @@ impl WorkspaceManager {
             if keyboard {
                 self.focus(window, cx);
             }
-            self.record_navigation(cx);
         }
     }
 

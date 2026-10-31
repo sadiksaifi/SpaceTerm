@@ -2944,12 +2944,6 @@ impl TabManager {
         cx.notify();
     }
 
-    /// How many explicit Pane choices the Active Tab has had, such as selections and zoom
-    /// changes.
-    pub(crate) fn choices(&self, cx: &App) -> u64 {
-        self.tabs.active_tab().read(cx).choices()
-    }
-
     /// Adds the Tabs the server published that this strip does not present yet, then reconciles
     /// each Tab's Panes. A new Tab joins at the end of the strip and never takes the Active Tab.
     pub(crate) fn reconcile_shared(

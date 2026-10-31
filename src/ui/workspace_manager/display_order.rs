@@ -112,7 +112,6 @@ impl WorkspaceManager {
         }
         self.save_display_order(&previous);
         // A remembered Active Workspace that is gone waited for this order to choose the first.
-        self.observe_navigation(cx);
         self.select_remembered_fallback(window, cx);
         self.report_client_view_error(window, cx);
         cx.notify();

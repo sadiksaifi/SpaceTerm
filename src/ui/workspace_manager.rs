@@ -318,7 +318,9 @@ pub(crate) struct WorkspaceManager {
     display_order: display_order::DisplayOrder,
     /// The view the last closed Workspace Window left, which this window presents as its
     /// Workspaces arrive.
-    restoration: crate::ui::remembered_view::Restoration<remembered::RestorationMark>,
+    restoration: crate::ui::remembered_view::Restoration,
+    /// Follows the person's keyboard input in this window, which settles the restoration.
+    _person_input: Option<gpui::Subscription>,
 }
 
 impl WorkspaceManager {
@@ -447,7 +449,9 @@ impl WorkspaceManager {
             launch: launch::LocalLaunchState::new(local_server),
             display_order: display_order::DisplayOrder::default(),
             restoration: crate::ui::remembered_view::Restoration::none(),
+            _person_input: None,
         };
+        manager.follow_person_input(window, cx);
         manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
         manager.follow_direct_servers(window, cx);
@@ -3006,8 +3010,6 @@ impl WorkspaceManager {
         if key == ServerKey::LOCAL {
             return;
         }
-        // Withdrawing a route's Workspaces is the window's own change, never the person's.
-        self.observe_navigation(cx);
         self.save_shared_arrangements(cx);
         let presented: Vec<WorkspaceId> = self
             .workspaces
@@ -3032,7 +3034,6 @@ impl WorkspaceManager {
         if let Some(mut withdrawn) = self.shared.remove(key) {
             withdrawn.flush_client_views();
         }
-        self.record_navigation(cx);
         // A Workspace still waiting for this server says it couldn't open rather than vanishing.
         if self
             .pending_server_directory
@@ -3071,8 +3072,6 @@ impl WorkspaceManager {
         else {
             return;
         };
-        // Membership this reading presents is the window's own change, never the person's.
-        self.observe_navigation(cx);
         self.reconcile_parked_shared_workspaces(key, window, cx);
         // Approved closes already moved presentation. Published membership never replaces newer focus.
         let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
@@ -3089,8 +3088,6 @@ impl WorkspaceManager {
             self.apply_shared_inventory(key, &inventory, removal, window, cx);
             self.settle_remembered_view(key, window, cx);
         }
-        // What follows opens what a person asked for, which is their navigation.
-        self.record_navigation(cx);
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
         // Active Tab and its Focused Pane's shell. Later launches restore views passively, and
         // so does a window reopened with the view the last one left, which nobody chose here.
@@ -3321,7 +3318,6 @@ impl WorkspaceManager {
         let Some(plan) = self.shared.get(key).map(|shared| shared.plan(inventory)) else {
             return;
         };
-        self.observe_navigation(cx);
         for step in plan {
             match step {
                 SharedWorkspacePlan::Create { facts } => {
@@ -3380,7 +3376,6 @@ impl WorkspaceManager {
         // metadata now. A later poll may carry the same inventory and report no change.
         self.present_shared_metadata(key, inventory, cx);
         self.synchronize_tab_manager_layouts(window, cx);
-        self.record_navigation(cx);
         cx.notify();
     }
 
@@ -5233,6 +5228,7 @@ impl WorkspaceManager {
         };
         let content = Self::workspace_action_scope(actions, cx)
             .id("workspace-manager")
+            .child(Self::person_pointer_input(cx))
             .bg(gpui_color(super::appearance::chrome(cx).surface(
                 crate::appearance::SurfaceRole::Sheet,
                 super::appearance::chrome(cx).colors.background,

@@ -183,6 +183,29 @@ fn select(manager: &Entity<WorkspaceManager>, name: &str, cx: &mut VisualTestCon
     cx.run_until_parked();
 }
 
+/// Clicks the sidebar row of the Workspace `name`, as the person selects it.
+fn click_row(manager: &Entity<WorkspaceManager>, name: &str, cx: &mut VisualTestContext) {
+    let workspace_id = named(manager, name, cx);
+    super::redraw(cx);
+    super::click(
+        format!("workspace-row-{}-inactive", workspace_id.get()).leak(),
+        cx,
+    );
+}
+
+/// Clicks the Active Tab's Focused Pane, as the person selects the Pane already focused.
+fn click_focused_pane(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
+    let (_, pane) = manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("a Workspace is active")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    super::redraw(cx);
+    super::click(format!("pane-surface-{}", pane.get()).leak(), cx);
+}
+
 /// Opens the Tab `tab` of the Active Workspace, as clicking it does.
 fn open_tab(manager: &Entity<WorkspaceManager>, tab: Id, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
@@ -324,7 +347,7 @@ fn a_selection_after_reopening_stays_when_the_offline_server_returns(cx: &mut Te
     let (manager, mut window) = open_window(cx);
     present(&manager, ServerOrigin::Local, LOCAL_OWNER, &more, &[1, 2], &mut window);
     let key = present_penguin(&manager, &offline, &[5], &mut window);
-    select(&manager, "There", &mut window);
+    click_row(&manager, "There", &mut window);
 
     offline.set_inventory(server_inventory(2, &[("Far", 5)]));
     offline.set_connected(true);
@@ -540,17 +563,7 @@ fn selecting_the_focused_pane_after_reopening_keeps_it_when_the_server_returns(
     present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     assert_eq!(focused_pane(&manager, &mut window), Some(root_pane(1)));
-    window.update(|window, cx| {
-        let tabs = manager
-            .read(cx)
-            .active_tab_manager()
-            .expect("Here is active");
-        let tab = tabs.read(cx).active_tab_view();
-        tab.update(cx, |tab, cx| {
-            tab.focus_shared_pane_explicitly(root_pane(1), window, cx);
-        });
-    });
-    window.run_until_parked();
+    click_focused_pane(&manager, &mut window);
 
     offline.set_inventory(server_inventory(2, &[("Far", 5)]));
     offline.set_connected(true);
@@ -632,6 +645,24 @@ fn split_root_tab(revision: u64) -> Inventory {
     inventory
 }
 
+/// Presses and releases `key`, as a button activates on release.
+fn press(cx: &mut VisualTestContext, key: &str) {
+    let keystroke = gpui::Keystroke::parse(key).expect("the key parses");
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        prefer_character_input: false,
+        is_held: false,
+    });
+    cx.simulate_event(gpui::KeyUpEvent { keystroke });
+    cx.run_until_parked();
+}
+
+/// Moves the keyboard to the Active Tab's Focused Pane without any input, as the window does.
+fn focus_content(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+    cx.run_until_parked();
+}
+
 /// Whether the Active Tab presents its Focused Pane zoomed.
 fn zoomed(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> bool {
     manager.read_with(cx, |manager, cx| {
@@ -661,15 +692,8 @@ fn a_zoom_changed_before_the_server_publishes_stays(cx: &mut TestAppContext) {
         &mut window,
     );
     // Cmd+Shift+Enter in the Root Tab.
-    window.update(|window, cx| {
-        let tab = manager
-            .read(cx)
-            .active_tab_manager()
-            .expect("Build is active")
-            .read(cx)
-            .active_tab_view();
-        tab.update(cx, |tab, cx| tab.toggle_zoom(window, cx));
-    });
+    focus_content(&manager, &mut window);
+    window.simulate_keystrokes("cmd-shift-enter");
     window.run_until_parked();
     assert!(zoomed(&manager, &mut window));
 
@@ -694,7 +718,7 @@ fn closing_right_after_a_selection_keeps_that_selection(cx: &mut TestAppContext)
     let (manager, mut window) = open_window(cx);
     present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
     present_penguin(&manager, &offline, &[5], &mut window);
-    select(&manager, "There", &mut window);
+    click_row(&manager, "There", &mut window);
     close(&manager, &mut window);
 
     let online = Rc::new(ScriptedEdits::new(Some(server_inventory(3, &[("Far", 5)]))));
@@ -746,4 +770,101 @@ fn a_fallback_confirmed_before_any_workspace_selects_the_first_to_arrive_in_orde
     present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
 
     assert_eq!(active_name(&manager, &mut window), "B");
+}
+
+/// Taking over the Pane already focused with the keyboard is the person's input, so the
+/// remembered Workspace never replaces it, or takes the keyboard, when its server returns.
+#[gpui::test]
+fn taking_over_the_focused_pane_with_the_keyboard_keeps_it_when_the_server_returns(
+    cx: &mut TestAppContext,
+) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+    let local_panes = ScriptedPanes::new(MultiServerHarness::session_factory());
+
+    let (manager, mut window) = open_window(cx);
+    present_with(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        Some(&[1]),
+        &local_panes,
+        &mut window,
+    );
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    local_panes
+        .pane(root_pane(1))
+        .set(crate::terminal::server_session::DevelopmentPaneStatus::Takeover);
+    super::settle_shared_panes(&mut window);
+    focus_content(&manager, &mut window);
+    window.simulate_keystrokes("tab");
+    press(&mut window, "enter");
+    assert_eq!(local_panes.pane(root_pane(1)).take_overs(), 1);
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+    assert!(window.update(|window, cx| {
+        manager
+            .read(cx)
+            .active_tab_manager()
+            .is_some_and(|tabs| tabs.read(cx).holds_keyboard(window, cx))
+    }));
+}
+
+/// A refused close of the window's only Workspace presents it again from the empty view, as when
+/// the server answers a stale confirmation. That is the window's own change, so the remembered
+/// Workspace still returns with its server.
+#[gpui::test]
+fn a_parked_workspace_presented_again_never_cancels_the_restore(cx: &mut TestAppContext) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+
+    let (manager, mut window) = open_window(cx);
+    let local_key = present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1], &mut window);
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    let here = named(&manager, "Here", &mut window);
+    // The close parks Here while the server answers, which leaves the window empty.
+    manager.update(&mut window, |manager, _| {
+        manager
+            .workspaces
+            .park_workspace(here)
+            .expect("Here is presented");
+    });
+    assert_eq!(
+        manager.read_with(&window, |manager, _| manager.workspaces.active_workspace_id()),
+        None
+    );
+    // The server still has Here and closes nothing, so reconciliation presents it again.
+    sync(&manager, local_key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Far");
+}
+
+/// Another client kills the Workspace this window shows while it awaits the remembered one. The
+/// window's own reconciliation moves the selection, which is not the person's choice.
+#[gpui::test]
+fn another_clients_change_never_cancels_the_restore(cx: &mut TestAppContext) {
+    let (_, offline) = closed_on_an_offline_servers_workspace(cx);
+    let local = Rc::new(ScriptedEdits::new(Some(server_inventory(
+        2,
+        &[("Here", 1), ("There", 2)],
+    ))));
+
+    let (manager, mut window) = open_window(cx);
+    let local_key = present(&manager, ServerOrigin::Local, LOCAL_OWNER, &local, &[1, 2], &mut window);
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+    local.set_inventory(server_inventory(3, &[("There", 2)]));
+    sync(&manager, local_key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "There");
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Far");
 }

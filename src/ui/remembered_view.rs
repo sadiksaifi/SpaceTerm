@@ -269,9 +269,10 @@ pub(crate) struct RememberedPane {
 
 /// What a window takes from a remembered view as its Workspaces arrive.
 ///
-/// Every remembered choice yields to the person: once navigation moves from where the window
-/// last left it, nothing remembered changes the view again.
-pub(crate) struct Restoration<M> {
+/// Every remembered choice yields to the person: once they give the window keyboard or pointer
+/// input, nothing remembered moves the view again. The window's own changes, such as presenting
+/// a server's Workspaces, are not input, so they never settle anything.
+pub(crate) struct Restoration {
     /// Whether the window opened from a remembered view, which it presents passively.
     remembered: bool,
     workspaces: BTreeMap<WorkspaceReference, RememberedWorkspace>,
@@ -279,14 +280,12 @@ pub(crate) struct Restoration<M> {
     /// own membership, so a Tab or Pane removed meanwhile falls back to the Root Tab or Pane.
     held: BTreeMap<WorkspaceReference, RememberedWorkspace>,
     selection: Selection,
-    /// Where navigation stood when the window last changed its own presentation, until the
-    /// person navigates.
-    navigation: Option<M>,
+    /// Whether the person gave the window input since it opened.
+    person_chose: bool,
 }
 
-impl<M: Copy + Eq> Restoration<M> {
-    /// Restores `view` from `navigation`, where the person's navigation stands in the new window.
-    pub(crate) fn new(view: WindowView, navigation: M) -> Self {
+impl Restoration {
+    pub(crate) fn new(view: WindowView) -> Self {
         Self {
             remembered: true,
             workspaces: view.workspaces,
@@ -294,7 +293,7 @@ impl<M: Copy + Eq> Restoration<M> {
             selection: view
                 .active_workspace
                 .map_or(Selection::Settled, Selection::Waiting),
-            navigation: Some(navigation),
+            person_chose: false,
         }
     }
 
@@ -305,7 +304,7 @@ impl<M: Copy + Eq> Restoration<M> {
             workspaces: BTreeMap::new(),
             held: BTreeMap::new(),
             selection: Selection::Settled,
-            navigation: None,
+            person_chose: true,
         }
     }
 
@@ -313,6 +312,14 @@ impl<M: Copy + Eq> Restoration<M> {
     /// for a person on its own, as a new client's first view does.
     pub(crate) const fn remembered(&self) -> bool {
         self.remembered
+    }
+
+    /// The person gave the window keyboard or pointer input, which is their choice of what it
+    /// shows. Nothing remembered moves the view after it.
+    pub(crate) fn person_input(&mut self) {
+        self.person_chose = true;
+        self.selection = Selection::Settled;
+        self.held.clear();
     }
 
     /// The remembered view of a Workspace the window presents for the first time, once.
@@ -340,13 +347,16 @@ impl<M: Copy + Eq> Restoration<M> {
 
     /// Keeps the view of a Workspace a retained copy presented, until its server publishes.
     pub(crate) fn hold(&mut self, workspace: WorkspaceReference, view: RememberedWorkspace) {
-        if self.navigation.is_some() {
+        if !self.person_chose {
             self.held.insert(workspace, view);
         }
     }
 
     /// The held views of `owner`'s Workspaces, once its server published its own membership.
-    pub(crate) fn take_held(&mut self, owner: OwnerId) -> Vec<(WorkspaceReference, RememberedWorkspace)> {
+    pub(crate) fn take_held(
+        &mut self,
+        owner: OwnerId,
+    ) -> Vec<(WorkspaceReference, RememberedWorkspace)> {
         let owned: Vec<_> = self
             .held
             .keys()
@@ -359,33 +369,16 @@ impl<M: Copy + Eq> Restoration<M> {
             .collect()
     }
 
-    /// Settles everything when the person navigated since navigation was last recorded. Call
-    /// before the window changes its own presentation.
-    pub(crate) fn observe(&mut self, navigation: M) {
-        if self.navigation.is_some_and(|recorded| recorded != navigation) {
-            self.navigation = None;
-            self.selection = Selection::Settled;
-            self.held.clear();
-        }
-    }
-
-    /// Records where navigation stands after the window changed its own presentation.
-    pub(crate) fn record(&mut self, navigation: M) {
-        if self.navigation.is_some() {
-            self.navigation = Some(navigation);
-        }
-    }
-
     /// Whether the window should select `workspace`, which it just presented. The remembered
-    /// Active Workspace returns while the person has selected nothing since the window opened.
+    /// Active Workspace returns while the person has given the window no input since it opened.
     pub(crate) fn selects(&self, workspace: &WorkspaceReference) -> bool {
         matches!(&self.selection, Selection::Waiting(target) if target == workspace)
     }
 
     /// Settles the Active Workspace once `owner`'s server published its own inventory, which
     /// `presents` reads. When the window lacks the remembered Workspace after it, the window's
-    /// default comes next: see [`Self::take_fallback`]. A retained copy standing in for an
-    /// offline server is not its server's inventory.
+    /// default comes next: see [`Self::falls_back`]. A retained copy standing in for an offline
+    /// server is not its server's inventory.
     pub(crate) fn published(
         &mut self,
         owner: OwnerId,
@@ -405,9 +398,9 @@ impl<M: Copy + Eq> Restoration<M> {
     }
 
     /// Whether the window selects its default Workspace, because the remembered one is gone and
-    /// the person has selected nothing since. The default is the first Workspace in the order the
+    /// the person has given no input since. The default is the first Workspace in the order the
     /// person keeps, which each later publication or order reading can change, so this holds
-    /// until the person navigates.
+    /// until the person's input.
     pub(crate) fn falls_back(&self) -> bool {
         matches!(self.selection, Selection::Fallback)
     }
@@ -640,7 +633,7 @@ mod tests {
 
     #[test]
     fn each_workspace_view_returns_once() {
-        let mut restoration = Restoration::new(view(None), 0);
+        let mut restoration = Restoration::new(view(None));
         assert_eq!(
             restoration
                 .take_workspace(&reference(1, 1))
@@ -653,7 +646,7 @@ mod tests {
 
     #[test]
     fn the_remembered_active_workspace_returns_when_its_server_presents_it() {
-        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
+        let mut restoration = Restoration::new(view(Some(reference(1, 1))));
         assert!(restoration.remembered());
         assert!(!restoration.selects(&reference(1, 2)));
         assert!(restoration.selects(&reference(1, 1)));
@@ -664,63 +657,47 @@ mod tests {
     }
 
     #[test]
-    fn a_killed_or_detached_active_workspace_falls_back_until_the_person_navigates() {
-        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
+    fn a_killed_or_detached_active_workspace_falls_back_until_the_persons_input() {
+        let mut restoration = Restoration::new(view(Some(reference(1, 1))));
         // Another server's inventory says nothing about it.
         restoration.published(owner(2), |_| false);
         assert!(!restoration.falls_back());
         restoration.published(owner(1), |_| false);
         assert!(!restoration.selects(&reference(1, 1)));
         // Each later publication may put another Workspace first, so the default holds.
-        restoration.record(1);
-        restoration.observe(1);
+        restoration.published(owner(2), |_| false);
         assert!(restoration.falls_back());
-        restoration.observe(2);
-        assert!(!restoration.falls_back());
-    }
-
-    #[test]
-    fn a_fallback_waiting_for_the_workspace_order_yields_to_navigation() {
-        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
-        restoration.published(owner(1), |_| false);
-        // The window's own presentation changes nothing while the order is read.
-        restoration.record(1);
-        restoration.observe(1);
-        assert!(restoration.falls_back());
-
-        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
-        restoration.published(owner(1), |_| false);
-        restoration.observe(2);
+        restoration.person_input();
         assert!(!restoration.falls_back());
     }
 
     #[test]
     fn an_offline_servers_workspace_returns_when_the_server_does() {
-        let mut restoration = Restoration::new(view(Some(reference(2, 1))), 0);
-        // The local server and the window's own presentation change nothing.
-        restoration.observe(0);
+        let mut restoration = Restoration::new(view(Some(reference(2, 1))));
+        // The local server's inventory changes nothing.
         restoration.published(owner(1), |_| false);
-        restoration.record(1);
-        restoration.observe(1);
         assert!(!restoration.falls_back());
         assert!(restoration.selects(&reference(2, 1)));
     }
 
     #[test]
-    fn selecting_anything_after_reopening_keeps_the_persons_choice() {
-        let mut restoration = Restoration::new(view(Some(reference(2, 1))), 0);
+    fn the_persons_input_after_reopening_settles_every_remembered_choice() {
+        let mut restoration = Restoration::new(view(Some(reference(2, 1))));
         restoration.hold(reference(2, 1), RememberedWorkspace::default());
-        restoration.record(1);
-        restoration.observe(2);
+        restoration.person_input();
         assert!(!restoration.selects(&reference(2, 1)));
         restoration.published(owner(2), |_| false);
         assert!(!restoration.falls_back());
         assert_eq!(restoration.take_held(owner(2)), Vec::new());
+        restoration.hold(reference(2, 1), RememberedWorkspace::default());
+        assert_eq!(restoration.take_held(owner(2)), Vec::new());
+        // A Workspace's own view still waits for it: the person's input chose nothing there.
+        assert!(restoration.take_workspace(&reference(1, 1)).is_some());
     }
 
     #[test]
     fn a_view_a_retained_copy_presented_applies_again_when_its_server_publishes() {
-        let mut restoration = Restoration::new(view(None), 0);
+        let mut restoration = Restoration::new(view(None));
         let remembered = restoration
             .take_workspace(&reference(1, 1))
             .expect("the view is remembered");
@@ -735,16 +712,16 @@ mod tests {
 
     #[test]
     fn a_window_closed_before_its_view_arrived_carries_it_into_the_next() {
-        let mut restoration = Restoration::new(view(Some(reference(1, 1))), 0);
+        let mut restoration = Restoration::new(view(Some(reference(1, 1))));
         let mut next = view(None);
         next.workspaces.clear();
         restoration.carry_into(&mut next);
         assert_eq!(next.active_workspace, Some(reference(1, 1)));
         assert!(next.workspaces.contains_key(&reference(1, 1)));
 
-        // Once presented or chosen against, nothing is carried.
+        // Once presented or replaced by the person's input, nothing is carried.
         let _ = restoration.take_workspace(&reference(1, 1));
-        restoration.observe(1);
+        restoration.person_input();
         let mut later = view(None);
         later.workspaces.clear();
         restoration.carry_into(&mut later);
@@ -754,7 +731,7 @@ mod tests {
 
     #[test]
     fn a_window_without_a_remembered_view_restores_nothing() {
-        let mut restoration = Restoration::<u8>::none();
+        let mut restoration = Restoration::none();
         assert!(!restoration.remembered());
         assert!(!restoration.selects(&reference(1, 1)));
         restoration.published(owner(1), |_| false);
