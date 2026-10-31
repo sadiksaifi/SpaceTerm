@@ -1205,6 +1205,177 @@ fn only_installed_themes_offer_removal(cx: &mut TestAppContext) {
 // Reset --------------------------------------------------------------------------------------
 
 #[gpui::test]
+fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
+    use crate::appearance::{AppearancePreferences, TerminalFontFamily, ThemeId};
+    type ExpectedReset = fn(&mut AppearancePreferences, Appearance);
+
+    for row in super::catalog::rows().map(|descriptor| descriptor.id) {
+        let expected_reset: ExpectedReset = match row {
+            SettingsRowId::AppearanceMode => |value, _| value.mode = AppearanceMode::default(),
+            SettingsRowId::Opacity => |value, _| value.window.opacity = 0.65,
+            SettingsRowId::Blur => |value, _| value.window.blur = true,
+            SettingsRowId::BackgroundImage => |value, _| value.window.background_image = None,
+            SettingsRowId::Density => |value, _| value.window.density = ChromeDensity::Compact,
+            SettingsRowId::TerminalTheme => |value, slot| match slot {
+                Appearance::Light => {
+                    value.terminal.themes.light = ThemeId::new("builtin.spaceterm.light").unwrap()
+                }
+                Appearance::Dark => {
+                    value.terminal.themes.dark = ThemeId::new("builtin.spaceterm.dark").unwrap()
+                }
+            },
+            SettingsRowId::TerminalFontFamily => {
+                |value, _| value.terminal.typography.family = TerminalFontFamily::DefaultMonospace
+            }
+            SettingsRowId::TerminalBaseSize => |value, _| {
+                value.terminal.typography.base_size = AppearancePreferences::default()
+                    .terminal
+                    .typography
+                    .base_size
+            },
+            SettingsRowId::TerminalRegularWeight => {
+                |value, _| value.terminal.typography.regular_weight = 400
+            }
+            SettingsRowId::TerminalBoldWeight => {
+                |value, _| value.terminal.typography.bold_weight = 700
+            }
+            SettingsRowId::TerminalLineHeight => |value, _| {
+                value.terminal.typography.line_height = AppearancePreferences::default()
+                    .terminal
+                    .typography
+                    .line_height
+            },
+            SettingsRowId::TerminalItalic => |value, _| value.terminal.typography.italic = true,
+            SettingsRowId::TerminalBoldAsBright => {
+                |value, _| value.terminal.rendering.bold_as_bright = true
+            }
+            SettingsRowId::SidebarDefaultState
+            | SettingsRowId::InstalledThemes
+            | SettingsRowId::MicrophoneAccess
+            | SettingsRowId::CameraAccess
+            | SettingsRowId::ScreenRecordingAccess
+            | SettingsRowId::AccessibilityAccess
+            | SettingsRowId::ClipboardWrites
+            | SettingsRowId::ClipboardReads
+            | SettingsRowId::ShowRepositoryStatus
+            | SettingsRowId::GitTool
+            | SettingsRowId::ShowPullRequests
+            | SettingsRowId::GitHubCli
+            | SettingsRowId::ServerWorktreeLocation
+            | SettingsRowId::ServerStatus
+            | SettingsRowId::ServerAutoStart
+            | SettingsRowId::EndAllSessions
+            | SettingsRowId::NetworkAccess
+            | SettingsRowId::PairedDevices
+            | SettingsRowId::AllServers
+            | SettingsRowId::AddServer
+            | SettingsRowId::CommandLineTool
+            | SettingsRowId::UpdateStatus
+            | SettingsRowId::AutomaticUpdateDownloads
+            | SettingsRowId::UpdateCheckInterval
+            | SettingsRowId::UpdateReminderInterval
+            | SettingsRowId::Shortcut(_)
+            | SettingsRowId::SettingsFile
+            | SettingsRowId::ExportSettings
+            | SettingsRowId::ImportSettings
+            | SettingsRowId::ResetAllSettings => continue,
+        };
+        let slots = if row == SettingsRowId::TerminalTheme {
+            &[Appearance::Light, Appearance::Dark][..]
+        } else {
+            &[Appearance::Light][..]
+        };
+        for &slot in slots {
+            let store = Arc::new(crate::background_image::testing::store().0);
+            let image = store
+                .install(crate::background_image::testing::PNG)
+                .unwrap();
+            let mut document = distinct_appearance_document();
+            let dark = crate::appearance::translate_zed_family(br##"{"name":"Reset Dark","themes":[{"name":"Reset Dark","appearance":"dark","style":{"terminal.foreground":"#abcdef"}}]}"##).unwrap();
+            document.appearance.terminal.themes.dark = dark[0].id.clone();
+            document.terminal_themes.extend(dark);
+            document.appearance.mode = slot.into();
+            document.appearance.window.background_image = Some(image);
+            document.appearance.terminal.typography.family = TerminalFontFamily::Named {
+                family: "Reset Fixture Mono".into(),
+            };
+            document.appearance.terminal.typography.regular_weight = 800;
+            document.appearance.terminal.typography.bold_weight = 900;
+            document.validate().unwrap();
+            let mut expected = document.appearance.clone();
+            expected_reset(&mut expected, slot);
+            assert_ne!(
+                expected, document.appearance,
+                "{row:?}/{slot:?} starts non-default"
+            );
+            let themes = document.terminal_themes.clone();
+            let (window, harness, cx) = open_settings_with_capabilities(
+                cx,
+                MemoryStorage::with_document(&document),
+                Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+                crate::theme_registry::testing::offline(),
+                Some(store),
+            );
+            set_window_effects(&harness, true, true, cx);
+            select_section(row.descriptor().section, cx);
+            set_query(
+                &window,
+                row.descriptor()
+                    .label(crate::platform::permission_access::AccessibilityNaming::Accessibility),
+                cx,
+            );
+            let reset = leaked_owned(format!("{}-reset", row.descriptor().selector));
+            if row == SettingsRowId::TerminalTheme {
+                // The full-width theme preview hides its label and Reset button. Exercise the
+                // window's pending reset so its slot association remains covered as well.
+                cx.update(|_, cx| {
+                    window.update(cx, |settings, cx| {
+                        let Some(super::RowReset::Appearance(target)) =
+                            settings.pending_reset(row, cx)
+                        else {
+                            panic!("{row:?}/{slot:?} has a pending reset");
+                        };
+                        assert_eq!(target, crate::appearance::ResetTarget::TerminalTheme(slot));
+                        settings.editor.reset(target, cx);
+                    })
+                });
+            } else {
+                assert!(
+                    cx.debug_bounds(reset).is_some(),
+                    "{row:?}/{slot:?} offers its row Reset"
+                );
+                click(reset, cx);
+            }
+            settle(cx);
+            let after = document_of(&window, cx);
+            assert_eq!(
+                after.appearance, expected,
+                "{row:?}/{slot:?} resets only its field"
+            );
+            assert_eq!(
+                after.terminal_themes, themes,
+                "{row:?}/{slot:?} keeps installed themes"
+            );
+            assert!(
+                !window.read_with(cx, |window, cx| window.pending_reset(row, cx).is_some()),
+                "{row:?}/{slot:?} is now default"
+            );
+            let saved = harness
+                .storage
+                .document()
+                .expect("the row reset is persisted");
+            assert_eq!(
+                saved.appearance, expected,
+                "{row:?}/{slot:?} persists only its field reset"
+            );
+            assert_eq!(saved.terminal_themes, themes);
+            cx.update(|window, _| window.remove_window());
+            cx.run_until_parked();
+        }
+    }
+}
+
+#[gpui::test]
 fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &mut TestAppContext) {
     let (window, _harness, cx) = open_settings(cx);
     assert!(!window.read_with(cx, |window, cx| {
