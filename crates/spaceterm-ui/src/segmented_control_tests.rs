@@ -6,16 +6,11 @@ use gpui::{
 
 use super::*;
 
-#[test]
-fn density_scales_segment_bounds_but_not_radius() {
-    let original = test_theme().resolve(SegmentedSize::Regular).metrics;
-    let comfortable = test_theme()
-        .scaled_spacing(1.25)
-        .resolve(SegmentedSize::Regular)
-        .metrics;
-
-    assert!(comfortable.option_height > original.option_height);
-    assert_eq!(comfortable.radius, original.radius);
+pub(crate) fn density_extents(theme: SegmentedControlTheme) -> (gpui::Pixels, gpui::Pixels) {
+    (
+        theme.resolve(SegmentedSize::Regular).metrics.option_height,
+        theme.resolve(SegmentedSize::Regular).metrics.radius,
+    )
 }
 
 #[test]
@@ -263,12 +258,14 @@ struct TestRoot {
     other_focus: FocusHandle,
     container_focus: FocusHandle,
     preview_font: Rc<RefCell<Option<gpui::Font>>>,
+    preview_text: Rc<RefCell<Option<gpui::TextStyle>>>,
 }
 
 impl Render for TestRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let changes = Rc::clone(&self.changes);
         let preview_font = Rc::clone(&self.preview_font);
+        let preview_text = Rc::clone(&self.preview_text);
         let control = SegmentedControl::new(
             "test-segmented",
             "Appearance",
@@ -280,6 +277,7 @@ impl Render for TestRoot {
                     .disabled(self.disable_light)
                     .preview(move |color, extent| {
                         let preview_font = Rc::clone(&preview_font);
+                        let preview_text = Rc::clone(&preview_text);
                         div()
                             .debug_selector(|| "test-segmented-light-preview".to_owned())
                             .w(extent)
@@ -291,7 +289,9 @@ impl Render for TestRoot {
                                         *preview_font.borrow_mut() =
                                             Some(window.text_style().font());
                                     },
-                                    |_, _, _, _| {},
+                                    move |_, _, window, _| {
+                                        *preview_text.borrow_mut() = Some(window.text_style());
+                                    },
                                 )
                                 .size_full(),
                             )
@@ -354,6 +354,7 @@ fn segmented_window(cx: &mut TestAppContext) -> SegmentedWindow<'_> {
         other_focus: cx.focus_handle().tab_stop(true),
         container_focus: cx.focus_handle(),
         preview_font: Rc::default(),
+        preview_text: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -417,6 +418,24 @@ fn selection_keeps_segment_and_label_geometry_stable(cx: &mut TestAppContext) {
             "test-segmented-auto-label",
         ];
         let before = selectors.map(|selector| cx.debug_bounds(selector).unwrap());
+        let target = cx.debug_bounds("test-segmented-light").unwrap().center();
+        cx.simulate_mouse_move(target, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("test-segmented"),
+            Some(before[0]),
+            "hover must not resize {size:?}"
+        );
+        cx.simulate_mouse_down(target, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("test-segmented"),
+            Some(before[0]),
+            "press must not resize {size:?}"
+        );
+        cx.simulate_mouse_up(target, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
         for mode in [Mode::Light, Mode::Auto, Mode::Dark] {
             cx.update(|_, cx| {
                 root.update(cx, |root, cx| {
@@ -504,31 +523,6 @@ fn navigation_over_a_fully_disabled_set_reaches_nothing() {
     assert_eq!(step(&navigable, None, true), None);
     assert_eq!(boundary(&navigable, true), None);
     assert_eq!(boundary(&navigable, false), None);
-}
-
-#[test]
-fn interaction_paint_refines_every_rendered_part_of_a_segment() {
-    let paint = SegmentedPaint::new(rgba(0x111111ff), rgba(0x121212ff), rgba(0x131313ff));
-    let font = gpui::font("Test Font");
-    let refinement = SegmentedPaintRefinement {
-        paint,
-        font: font.clone(),
-        font_size: px(12.0),
-        line_height: 1.2,
-    };
-
-    // The refinement restates the segment's typography: GPUI replaces a text style rather than
-    // merging it, so a refinement carrying only a color would reflow the segment under the pointer.
-    assert_eq!(
-        refinement.segment(StyleRefinement::default()),
-        StyleRefinement::default()
-            .bg(paint.background())
-            .border_color(paint.border())
-            .font(font)
-            .text_size(px(12.0))
-            .line_height(gpui::relative(1.2))
-            .text_color(paint.label())
-    );
 }
 
 #[gpui::test]
@@ -1107,6 +1101,7 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
         other_focus: cx.focus_handle().tab_stop(true),
         container_focus: cx.focus_handle(),
         preview_font: Rc::default(),
+        preview_text: Rc::default(),
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -1223,4 +1218,142 @@ fn only_a_focused_segmented_control_claims_its_selected_option(cx: &mut TestAppC
     focus_control(cx);
     let tree = A11yTree::read(cx);
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Dark");
+}
+
+#[gpui::test]
+fn interaction_paint_reaches_segment_fill_border_and_label(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    let normal = SegmentedPaint::new(rgba(0x112233ff), rgba(0xaabbccff), rgba(0x778899ff));
+    let hovered = SegmentedPaint::new(rgba(0x223344ff), rgba(0xbbccddff), rgba(0x8899aaff));
+    let pressed = SegmentedPaint::new(rgba(0x334455ff), rgba(0xccddeeff), rgba(0x99aabbff));
+    let values = |paint| SegmentedValuePaints::new(paint, paint);
+    let mut theme = test_theme();
+    theme.paints = SegmentedPaints::new(
+        values(normal),
+        values(hovered),
+        values(pressed),
+        values(normal),
+    );
+    theme = theme.card_paints(theme.paints);
+    cx.update(|window, cx| {
+        cx.set_global(theme);
+        window.refresh();
+    });
+    for size in [SegmentedSize::Regular, SegmentedSize::Card] {
+        root.update(cx, |root, cx| {
+            root.size = size;
+            cx.notify();
+        });
+        cx.simulate_mouse_move(gpui::point(px(500.0), px(500.0)), None, Modifiers::none());
+        crate::hover_fade::settle(cx);
+        let segment = cx.debug_bounds("test-segmented-light").unwrap();
+        let label = cx.debug_bounds("test-segmented-light-label").unwrap();
+        for (state, paint) in [(0, normal), (1, hovered), (2, pressed)] {
+            if state == 1 {
+                cx.simulate_mouse_move(segment.center(), None, Modifiers::none());
+                crate::hover_fade::settle(cx);
+            } else if state == 2 {
+                cx.simulate_mouse_down(
+                    segment.center(),
+                    gpui::MouseButton::Left,
+                    Modifiers::none(),
+                );
+            }
+            cx.run_until_parked();
+            assert_eq!(
+                cx.debug_bounds("test-segmented-light-label"),
+                Some(label),
+                "interaction must preserve label geometry"
+            );
+
+            if size == SegmentedSize::Card {
+                let text =
+                    root.read_with(cx, |root, _| root.preview_text.borrow().clone().unwrap());
+                assert_eq!(
+                    text.color,
+                    paint.label().into(),
+                    "segment foreground state {state}"
+                );
+            }
+            cx.update(|window, _| {
+                let segment = segment.scale(window.scale_factor());
+
+                assert!(
+                    window
+                        .painted_quads()
+                        .iter()
+                        .any(|q| q.bounds == segment && q.background == paint.background().into()),
+                    "segment fill state {state}/{size:?}"
+                );
+                assert!(
+                    window.painted_quads().iter().any(|q| q.bounds == segment
+                        && q.border_color == paint.border().into()
+                        && !q.bounds.intersect(&q.content_mask.bounds).is_empty()),
+                    "segment border state {state}/{size:?}"
+                );
+            });
+        }
+        cx.simulate_mouse_up(segment.center(), gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+}
+
+#[test]
+fn interaction_catalog_overrides_preserve_joined_and_card_states() {
+    let paint = |seed| {
+        SegmentedPaint::new(rgba(seed), rgba(seed + 1), rgba(seed + 2)).description(rgba(seed + 3))
+    };
+    let joined = [10, 20, 30, 40, 50, 60, 70, 80].map(paint);
+    let card = [110, 120, 130, 140, 150, 160, 170, 180].map(paint);
+    let catalog = |states: [SegmentedPaint; 8]| {
+        SegmentedPaints::new(
+            SegmentedValuePaints::new(states[0], states[1]),
+            SegmentedValuePaints::new(states[2], states[3]),
+            SegmentedValuePaints::new(states[4], states[5]),
+            SegmentedValuePaints::new(states[6], states[7]),
+        )
+    };
+    let mut original = test_theme();
+    original.paints = catalog(joined);
+    original.card_paints = original.paints;
+    let card_paints = catalog(card);
+    let updated = original.card_paints(card_paints);
+    assert_eq!(
+        updated,
+        SegmentedControlTheme {
+            card_paints,
+            ..original
+        },
+        "card interaction overrides must preserve joined and track paints"
+    );
+    for (enabled, hovered, pressed, state) in [
+        (true, false, false, 0),
+        (true, true, false, 1),
+        (true, false, true, 2),
+        (true, true, true, 2),
+        (false, false, false, 3),
+        (false, true, false, 3),
+        (false, false, true, 3),
+        (false, true, true, 3),
+    ] {
+        for (selected, offset) in [(false, 0), (true, 1)] {
+            let index = state * 2 + offset;
+            assert_eq!(
+                original.paint(selected, enabled, hovered, pressed),
+                joined[index]
+            );
+            assert_eq!(
+                original.card_paint(selected, enabled, hovered, pressed),
+                joined[index]
+            );
+            assert_eq!(
+                updated.paint(selected, enabled, hovered, pressed),
+                joined[index]
+            );
+            assert_eq!(
+                updated.card_paint(selected, enabled, hovered, pressed),
+                card[index]
+            );
+        }
+    }
 }

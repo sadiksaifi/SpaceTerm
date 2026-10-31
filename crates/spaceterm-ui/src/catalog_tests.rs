@@ -279,6 +279,49 @@ fn catalog_replacement_requires_one_generation_and_is_atomic(cx: &mut TestAppCon
 fn catalog_metric_scaling_composes_for_floating_shells_and_hosted_controls() {
     let initial = catalog(1);
     let scaled = initial.clone().scale_spacing(1.25);
+    for (name, (before, detail), (after, scaled_detail)) in [
+        (
+            "combo_box",
+            crate::combo_box::tests::density_extents(initial.combo_box),
+            crate::combo_box::tests::density_extents(scaled.combo_box),
+        ),
+        (
+            "command_palette",
+            crate::command_palette::tests::density_extents(initial.command_palette),
+            crate::command_palette::tests::density_extents(scaled.command_palette),
+        ),
+        (
+            "menu",
+            crate::menu::tests::density_extents(initial.menu),
+            crate::menu::tests::density_extents(scaled.menu),
+        ),
+        (
+            "resize_handle",
+            crate::resize_handle::tests::density_extents(initial.resize_handle),
+            crate::resize_handle::tests::density_extents(scaled.resize_handle),
+        ),
+        (
+            "search_field",
+            crate::search_field::tests::density_extents(initial.search_field),
+            crate::search_field::tests::density_extents(scaled.search_field),
+        ),
+        (
+            "segmented_control",
+            crate::segmented_control::tests::density_extents(initial.segmented_control),
+            crate::segmented_control::tests::density_extents(scaled.segmented_control),
+        ),
+        (
+            "toggle",
+            crate::toggle::tests::density_extents(initial.toggle),
+            crate::toggle::tests::density_extents(scaled.toggle),
+        ),
+    ] {
+        assert!(after > before, "{name} must expand with density");
+        assert_eq!(
+            scaled_detail, detail,
+            "{name} must retain its radius or hairline"
+        );
+    }
     let identity_after_scale = scaled.clone().scale_spacing(1.0);
     let chained = scaled.clone().scale_spacing(1.2);
     let direct = initial.scale_spacing(1.5);
@@ -399,4 +442,35 @@ fn replacement_should_publish_all_families_and_refresh_observers(cx: &mut TestAp
             Ok(ControlThemeReplacement::Unchanged)
         );
     });
+}
+
+#[test]
+fn shortcut_consumers_use_the_shortcut_font_and_tooltip_text_uses_regular() {
+    let regular = gpui::font("Regular");
+    let shortcut = gpui::font("Shortcut");
+    let typography = ControlTypography::new(
+        regular.clone(),
+        gpui::font("Medium"),
+        gpui::font("Semibold"),
+    )
+    .semantic_fonts(shortcut.clone(), gpui::font("Caption"), gpui::font("Badge"));
+    for (consumer, actual, expected) in [
+        (
+            "combo box",
+            crate::combo_box::tests::consumer_fonts(&typography),
+            vec![shortcut.clone()],
+        ),
+        (
+            "menu",
+            crate::menu::tests::consumer_fonts(&typography),
+            vec![shortcut.clone()],
+        ),
+        (
+            "tooltip",
+            crate::tooltip::tests::consumer_fonts(&typography),
+            vec![regular.clone(), regular, shortcut],
+        ),
+    ] {
+        assert_eq!(actual, expected, "{consumer}");
+    }
 }

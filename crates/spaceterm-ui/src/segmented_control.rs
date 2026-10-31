@@ -1318,4 +1318,4 @@ impl SegmentedControlState {
 
 #[cfg(test)]
 #[path = "segmented_control_tests.rs"]
-mod tests;
+pub(crate) mod tests;

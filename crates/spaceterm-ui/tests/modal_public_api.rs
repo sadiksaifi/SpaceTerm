@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Context, FocusHandle, InteractiveElement as _, ParentElement as _, Render, TestAppContext,
-    Window, div,
+    AppContext as _, Context, FocusHandle, InteractiveElement as _, ParentElement as _, Render,
+    Styled as _, TestAppContext, Window, div, px,
 };
 use spaceterm_ui::{
     Alert, AlertAccessory, AlertIntent, AlertOutcome, DeterminateProgress, Dialog,
@@ -132,35 +132,124 @@ impl Render for ReentrantCallbackCaller {
     }
 }
 
+struct PublicCustomDialogHost {
+    dialog: Option<DialogCompletion>,
+}
+
+impl Render for PublicCustomDialogHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        spaceterm_ui::ModalLayer::new(div().size_full())
+    }
+}
+
+fn install_public_dialog_themes(cx: &mut TestAppContext) {
+    use spaceterm_ui::{
+        ButtonMetrics, ButtonPaint, ButtonSizes, ButtonTheme, ButtonVariantStyle, ButtonVariants,
+        ModalMetrics, ModalPaint, ModalTheme, ScrollbarTheme,
+    };
+    let color = gpui::rgba(0x606060ff);
+    cx.set_global(ModalTheme::new(
+        ModalPaint::new(color, color, color, color, color),
+        ModalMetrics::new(px(360.0), px(480.0), px(640.0)),
+    ));
+    let paint = ButtonPaint::new(color, gpui::rgba(0xffffffff), color);
+    let variant = ButtonVariantStyle::new(paint, paint, paint, paint);
+    let metrics = ButtonMetrics::new(px(24.0));
+    cx.set_global(ButtonTheme::new(
+        ButtonVariants::new(
+            variant, variant, variant, variant, variant, variant, variant,
+        ),
+        ButtonSizes::new(metrics, metrics, metrics, metrics),
+        color,
+    ));
+    cx.set_global(ScrollbarTheme::new(color, color, color));
+}
+
 struct PublicCustomDialogBody {
-    focus: FocusHandle,
+    first: FocusHandle,
+    second: FocusHandle,
 }
 
 impl Render for PublicCustomDialogBody {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        DialogFocusTarget::new(
-            div()
-                .track_focus(&self.focus)
-                .child("Caller-owned custom control"),
-            self.focus.clone(),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .child(DialogFocusTarget::new(
+                div()
+                    .debug_selector(|| "public-custom-first".to_owned())
+                    .h(px(28.0))
+                    .flex_shrink_0()
+                    .track_focus(&self.first)
+                    .child("First custom control"),
+                self.first.clone(),
+            ))
+            .child(div().h(px(600.0)).flex_shrink_0())
+            .child(DialogFocusTarget::new(
+                div()
+                    .debug_selector(|| "public-custom-second".to_owned())
+                    .h(px(28.0))
+                    .flex_shrink_0()
+                    .track_focus(&self.second)
+                    .child("Second custom control"),
+                self.second.clone(),
+            ))
     }
 }
 
 #[gpui::test]
 fn public_dialog_focus_target_wraps_custom_controls_without_scroll_types(cx: &mut TestAppContext) {
-    let (body, cx) = cx.add_window_view(|_, cx| PublicCustomDialogBody {
-        focus: cx.focus_handle().tab_stop(true),
+    install_public_dialog_themes(cx);
+    cx.update(spaceterm_ui::install_portable_modal_keybindings);
+    cx.update(|cx| install_modal_policy(cx, ModalDesktopPolicy::mac_os()));
+    let (caller, cx) = cx.add_window_view(|_, _| PublicCustomDialogHost { dialog: None });
+    let body = cx.update(|_, cx| {
+        cx.new(|cx| PublicCustomDialogBody {
+            first: cx.focus_handle().tab_stop(true),
+            second: cx.focus_handle().tab_stop(true),
+        })
     });
-    let focus = body.read_with(cx, |body, _| body.focus.clone());
-
+    let (first, second) = body.read_with(cx, |body, _| (body.first.clone(), body.second.clone()));
     cx.update(|window, cx| {
         window.activate_window();
-        focus.focus(window, cx);
+        caller.update(cx, |caller, cx| {
+            caller.dialog = Some(
+                Dialog::new(
+                    ModalId::new("public-custom-dialog"),
+                    "Custom controls",
+                    "Custom controls",
+                    vec![save_action(), cancel_action()],
+                    DialogInitialFocus::Body(second.clone()),
+                )
+                .body(body.clone())
+                .present(window, cx, |_, _, _| DialogCloseDecision::Allow, |_, _| {})
+                .expect("custom dialog"),
+            );
+        });
     });
     cx.run_until_parked();
-
-    assert!(cx.update(|window, _| focus.is_focused(window)));
+    let assert_visible =
+        |cx: &mut gpui::VisualTestContext, selector: &'static str, focus: &FocusHandle| {
+            let viewport = cx
+                .debug_bounds("modal-body-viewport")
+                .expect("presented dialog viewport");
+            let target = cx.debug_bounds(selector).expect("custom control");
+            assert!(
+                cx.update(|window, _| focus.is_focused(window)),
+                "{selector} should receive focus"
+            );
+            assert!(
+                target.top() >= viewport.top() && target.bottom() <= viewport.bottom(),
+                "{target:?} outside {viewport:?}"
+            );
+        };
+    assert_visible(cx, "public-custom-second", &second);
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert_visible(cx, "public-custom-first", &first);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_visible(cx, "public-custom-second", &second);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

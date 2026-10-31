@@ -4165,4 +4165,4 @@ fn render_accessory(
 
 #[cfg(test)]
 #[path = "command_palette_tests.rs"]
-mod tests;
+pub(crate) mod tests;

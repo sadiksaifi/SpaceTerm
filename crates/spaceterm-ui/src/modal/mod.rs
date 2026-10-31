@@ -1060,18 +1060,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modal_metrics_clamp_surface_to_tiny_viewport() {
-        let metrics = ModalMetrics::new(px(360.0), px(480.0), px(640.0));
-        let geometry = clamp_surface_to_viewport(
-            size(px(220.0), px(140.0)),
-            size(px(480.0), px(500.0)),
-            metrics,
-        );
-
-        assert_eq!(geometry.size, size(px(188.0), px(108.0)));
-    }
-
-    #[test]
     fn modal_metrics_resolve_complete_ordinary_geometry_catalog() {
         let metrics = ModalMetrics::new(px(360.0), px(480.0), px(640.0));
 

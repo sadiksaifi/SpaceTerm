@@ -890,48 +890,59 @@ mod tests {
     }
 
     #[test]
-    fn embedded_assets_should_only_resolve_owned_asset_paths() {
-        let path = CustomIconName::RectangleStack.path();
-        assert!(matches!(
-            EmbeddedAssets.load(path).expect("asset lookup"),
-            Some(Cow::Borrowed(_))
-        ));
-        assert!(
-            EmbeddedAssets
-                .load("icons/rectangle-stack.svg")
-                .expect("unknown path")
-                .is_none()
-        );
-        assert!(
-            EmbeddedAssets
-                .load("spaceterm-ui/icons/../rectangle-stack.svg")
-                .expect("unknown path")
-                .is_none()
-        );
+    fn embedded_assets_resolve_exact_owned_paths_and_reject_foreign_or_malformed_paths() {
+        let expected = [
+            "window-close.svg",
+            "window-minimize.svg",
+            "window-maximize.svg",
+            "window-restore.svg",
+            "panel-left.svg",
+            "panel-right.svg",
+            "plus.svg",
+            "filter-circle.svg",
+            "rectangle-stack.svg",
+            "globe-plus.svg",
+            "rectangle-stack-badge-plus.svg",
+            "folder-badge-plus.svg",
+            "folder-badge-globe.svg",
+        ]
+        .map(|name| format!("spaceterm-ui/icons/{name}"));
+        let listed = EmbeddedAssets
+            .list("spaceterm-ui/icons")
+            .expect("owned directory");
         assert_eq!(
-            EmbeddedAssets
-                .list("spaceterm-ui/icons")
-                .expect("owned directory"),
-            vec![
-                CustomIconName::WindowClose.path().into(),
-                CustomIconName::WindowMinimize.path().into(),
-                CustomIconName::WindowMaximize.path().into(),
-                CustomIconName::WindowRestore.path().into(),
-                CustomIconName::PanelLeft.path().into(),
-                CustomIconName::PanelRight.path().into(),
-                CustomIconName::Plus.path().into(),
-                CustomIconName::FilterCircle.path().into(),
-                SharedString::from(path),
-                CustomIconName::GlobePlus.path().into(),
-                CustomIconName::RectangleStackBadgePlus.path().into(),
-                CustomIconName::FolderBadgePlus.path().into(),
-                CustomIconName::FolderBadgeGlobe.path().into(),
-            ]
+            listed.iter().map(|p| p.as_ref()).collect::<Vec<&str>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
         );
+        for path in expected {
+            let bytes = EmbeddedAssets
+                .load(&path)
+                .expect("owned lookup")
+                .expect("listed asset must load");
+            assert!(
+                std::str::from_utf8(&bytes)
+                    .expect("SVG is UTF-8")
+                    .contains("<svg"),
+                "{path}"
+            );
+        }
+        for path in [
+            "icons/rectangle-stack.svg",
+            "spaceterm-ui/icons/../rectangle-stack.svg",
+            "spaceterm-ui/icons/missing.svg",
+            "spaceterm-ui/icons/Rectangle-Stack.svg",
+            "/spaceterm-ui/icons/rectangle-stack.svg",
+            "spaceterm-ui/icons/rectangle-stack.svg/extra",
+        ] {
+            assert!(
+                EmbeddedAssets.load(path).expect("unowned lookup").is_none(),
+                "{path}"
+            );
+        }
         assert!(
             EmbeddedAssets
                 .list("other/icons")
-                .expect("unknown directory")
+                .expect("unowned directory")
                 .is_empty()
         );
     }
