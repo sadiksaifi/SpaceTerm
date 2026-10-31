@@ -50,6 +50,13 @@ impl Fixture {
             },
         }
     }
+    fn provider(&self) -> Provider {
+        Provider {
+            store: self.credentials.clone(),
+            calls: AtomicUsize::new(0),
+            unavailable: false,
+        }
+    }
     fn run(&mut self, command: &ConnectionCommand) -> CommandOutput {
         self.run_with(command, global())
     }
@@ -82,6 +89,7 @@ impl Fixture {
             endpoint: "quic://192.0.2.8:9231".into(),
             paired: paired(),
             credential: key,
+            credential_store: StoreKind::Keychain,
             unpair: UnpairState::Paired,
         };
         transaction(&self.store)
@@ -140,6 +148,7 @@ fn add(name: &str) -> ConnectionCommand {
 }
 #[derive(Default)]
 struct Credentials {
+    kind: Option<StoreKind>,
     values: Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>,
     locked: AtomicBool,
     reads: Mutex<Vec<Interaction>>,
@@ -147,7 +156,7 @@ struct Credentials {
 }
 impl CredentialStore for Credentials {
     fn kind(&self) -> StoreKind {
-        StoreKind::Keychain
+        self.kind.unwrap_or(StoreKind::Keychain)
     }
     fn read(
         &self,
@@ -187,7 +196,7 @@ struct Provider {
     unavailable: bool,
 }
 impl CredentialProvider for Provider {
-    fn open(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.unavailable {
             Err(CredentialError::Unavailable)
@@ -195,7 +204,15 @@ impl CredentialProvider for Provider {
             Ok(self.store.clone())
         }
     }
+    fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+        let store = self.select()?;
+        if store.kind() != kind {
+            return Err(CredentialError::Unavailable);
+        }
+        Ok(store)
+    }
 }
+
 struct NoHeld;
 impl HeldOutcomes for NoHeld {
     fn count(&self, _: &[u8; 32]) -> Result<u32, Failure> {
@@ -398,7 +415,7 @@ fn interrupted_join_cancels_only_its_retained_claim_or_reports_unconfirmed() {
             fixture.network.fail_cancel.store(false, Ordering::Relaxed);
             let client = PairingClient {
                 store: &fixture.store,
-                credentials: fixture.credentials.as_ref(),
+                credentials: &fixture.provider(),
                 network: &fixture.network,
             };
             assert_eq!(
@@ -508,32 +525,40 @@ fn stale_and_expired_removal_tokens_change_nothing() {
 
 #[test]
 fn list_never_constructs_a_credential_store_or_opens_a_connection() {
-    let mut fixture = Fixture::new();
-    fixture.insert(1, "penguin");
-    let provider = Provider {
-        store: fixture.credentials.clone(),
-        calls: AtomicUsize::new(0),
-        unavailable: true,
-    };
-    let output = Connections {
-        identity: "spaceterm-development",
-        global: &global(),
-        store: &fixture.store,
-        credentials: &provider,
-        held: &NoHeld,
-        network: &fixture.network,
-        io: &mut fixture.io,
+    for (kind, golden) in [
+        (StoreKind::Keychain, "connection_list_keychain"),
+        (StoreKind::SecretService, "connection_list_secret_service"),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.insert(1, "penguin");
+        transaction(&fixture.store)
+            .commit_guarded(|rows| {
+                rows[0].credential_store = kind;
+                Ok(())
+            })
+            .unwrap();
+        let provider = Provider {
+            store: fixture.credentials.clone(),
+            calls: AtomicUsize::new(0),
+            unavailable: true,
+        };
+        let output = Connections {
+            identity: "spaceterm-development",
+            global: &global(),
+            store: &fixture.store,
+            credentials: &provider,
+            held: &NoHeld,
+            network: &fixture.network,
+            io: &mut fixture.io,
+        }
+        .run(&ConnectionCommand::List);
+        assert_eq!(output.exit, 0);
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+        assert!(fixture.network.submits.lock().unwrap().is_empty());
+        assert!(fixture.network.revocations.lock().unwrap().is_empty());
+        assert_eq!(output.envelope["data"]["connections"][0]["name"], "penguin");
+        contract::golden::assert_golden(golden, &output.envelope);
     }
-    .run(&ConnectionCommand::List);
-    assert_eq!(output.exit, 0);
-    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
-    assert!(fixture.network.submits.lock().unwrap().is_empty());
-    assert!(fixture.network.revocations.lock().unwrap().is_empty());
-    assert_eq!(output.envelope["data"]["connections"][0]["name"], "penguin");
-    #[cfg(target_os = "macos")]
-    contract::golden::assert_golden("connection_list_keychain", &output.envelope);
-    #[cfg(not(target_os = "macos"))]
-    contract::golden::assert_golden("connection_list_secret_service", &output.envelope);
 }
 
 #[test]
@@ -708,12 +733,12 @@ fn a_live_join_is_skipped_by_recovery_and_a_published_join_is_never_cancelled() 
     let invitation = Invitation::parse(&invitation()).unwrap();
     let first = PairingClient {
         store: &fixture.store,
-        credentials: fixture.credentials.as_ref(),
+        credentials: &fixture.provider(),
         network: &fixture.network,
     };
     let second = PairingClient {
         store: &fixture.store,
-        credentials: fixture.credentials.as_ref(),
+        credentials: &fixture.provider(),
         network: &fixture.network,
     };
     let mut join = first
@@ -1058,4 +1083,167 @@ fn contended_rename_observes_cancellation_without_a_late_write() {
     assert_eq!(output.exit, 130);
     assert_eq!(during, before);
     assert_eq!(std::fs::read(fixture.store_path()).unwrap(), before);
+}
+
+struct ChangingProvider {
+    native: Arc<Credentials>,
+    files: Arc<Credentials>,
+    native_available: AtomicBool,
+}
+impl ChangingProvider {
+    fn new(native_available: bool) -> Self {
+        Self {
+            native: Arc::new(Credentials::default()),
+            files: Arc::new(Credentials {
+                kind: Some(StoreKind::PrivateFile),
+                ..Default::default()
+            }),
+            native_available: AtomicBool::new(native_available),
+        }
+    }
+}
+impl CredentialProvider for ChangingProvider {
+    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+        if self.native_available.load(Ordering::Relaxed) {
+            Ok(self.native.clone())
+        } else {
+            Ok(self.files.clone())
+        }
+    }
+    fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+        match kind {
+            StoreKind::PrivateFile => Ok(self.files.clone()),
+            StoreKind::Keychain if self.native_available.load(Ordering::Relaxed) => {
+                Ok(self.native.clone())
+            }
+            _ => Err(CredentialError::Unavailable),
+        }
+    }
+}
+
+fn using_provider(
+    fixture: &mut Fixture,
+    provider: &dyn CredentialProvider,
+    command: &ConnectionCommand,
+) -> CommandOutput {
+    Connections {
+        identity: "spaceterm-development",
+        global: &global(),
+        store: &fixture.store,
+        credentials: provider,
+        held: &NoHeld,
+        network: &fixture.network,
+        io: &mut fixture.io,
+    }
+    .run(command)
+}
+
+#[test]
+fn file_pairing_still_reads_and_revokes_after_native_becomes_available() {
+    let mut fixture = Fixture::new();
+    let provider = ChangingProvider::new(false);
+    assert_eq!(
+        using_provider(&mut fixture, &provider, &add("file-pairing")).exit,
+        0
+    );
+    let saved = fixture.store.load().unwrap().pop().unwrap();
+    provider.native_available.store(true, Ordering::Relaxed);
+    assert_eq!(saved.credential_store, StoreKind::PrivateFile);
+    let store = provider.open(saved.credential_store).unwrap();
+    assert!(
+        store
+            .read(&saved.credential, Interaction::Quiet)
+            .unwrap()
+            .is_some()
+    );
+    let preview = transaction(&fixture.store)
+        .preview_remove(&saved.name, unix_now().unwrap())
+        .unwrap();
+    let removed = using_provider(
+        &mut fixture,
+        &provider,
+        &ConnectionCommand::Remove {
+            name: saved.name.clone(),
+            confirm: Some(format!("c1-{}", hex(&preview.token))),
+        },
+    );
+    assert_eq!(removed.envelope["data"]["revocation"], "confirmed");
+    assert!(provider.files.values.lock().unwrap().is_empty());
+    assert!(provider.native.reads.lock().unwrap().is_empty());
+}
+
+#[test]
+fn native_pairing_never_reads_or_removes_a_file_secret_when_native_disappears() {
+    let mut fixture = Fixture::new();
+    let provider = ChangingProvider::new(true);
+    assert_eq!(
+        using_provider(&mut fixture, &provider, &add("native-pairing")).exit,
+        0
+    );
+    let saved = fixture.store.load().unwrap().pop().unwrap();
+    // An identical file item must grant no authority for this native-backed record.
+    let secret = provider.native.values.lock().unwrap()[&saved.credential].clone();
+    provider.files.insert(&saved.credential, &secret).unwrap();
+    provider.native_available.store(false, Ordering::Relaxed);
+    assert_eq!(saved.credential_store, StoreKind::Keychain);
+    assert!(matches!(
+        provider
+            .open(saved.credential_store)
+            .and_then(|store| store.read(&saved.credential, Interaction::Quiet)),
+        Err(CredentialError::Unavailable)
+    ));
+    let preview = transaction(&fixture.store)
+        .preview_remove(&saved.name, unix_now().unwrap())
+        .unwrap();
+    let removed = using_provider(
+        &mut fixture,
+        &provider,
+        &ConnectionCommand::Remove {
+            name: saved.name.clone(),
+            confirm: Some(format!("c1-{}", hex(&preview.token))),
+        },
+    );
+    assert_eq!(removed.envelope["data"]["revocation"], "pending");
+    assert!(provider.files.reads.lock().unwrap().is_empty());
+    assert!(
+        provider
+            .files
+            .values
+            .lock()
+            .unwrap()
+            .contains_key(&saved.credential)
+    );
+    assert!(fixture.network.revocations.lock().unwrap().is_empty());
+}
+
+#[test]
+fn unfinished_file_enrollment_cleans_up_after_native_becomes_available() {
+    let mut fixture = Fixture::new();
+    let provider = ChangingProvider::new(false);
+    fixture
+        .network
+        .interrupt_finish
+        .store(true, Ordering::Relaxed);
+    fixture.network.fail_cancel.store(true, Ordering::Relaxed);
+    assert_eq!(
+        using_provider(&mut fixture, &provider, &add("unfinished-file")).exit,
+        7
+    );
+    let pending = fixture.store.pending_enrollments().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].credential_store, StoreKind::PrivateFile);
+    provider.native_available.store(true, Ordering::Relaxed);
+    fixture.network.fail_cancel.store(false, Ordering::Relaxed);
+    let client = PairingClient {
+        store: &fixture.store,
+        credentials: &provider,
+        network: &fixture.network,
+    };
+    assert_eq!(
+        client.recover(Instant::now() + Duration::from_secs(1)),
+        Ok(0)
+    );
+    assert!(fixture.store.pending_enrollments().unwrap().is_empty());
+    assert!(provider.files.values.lock().unwrap().is_empty());
+    assert!(provider.native.reads.lock().unwrap().is_empty());
 }

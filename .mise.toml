@@ -738,3 +738,10 @@ run = [
   "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- server_find_reports_an_oversized_query",
   "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- an_oversized_server_input_method_commit",
 ]
+
+[tasks."cli:credentials:test"]
+description = "Test pairing credential stores and CLI access without desktop dynamic linking"
+run = [
+  "cargo test --package spaceterm-connections --all-features --locked",
+  "cargo test --package spaceterm-cli --all-features --locked",
+]

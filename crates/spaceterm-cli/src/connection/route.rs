@@ -244,7 +244,7 @@ impl Route {
         let route = match self {
             Self::Local => CliRoute::Local,
             Self::Paired(saved) => {
-                let credentials = credentials.open().map_err(|error| {
+                let credentials = credentials.open(saved.credential_store).map_err(|error| {
                     ServerError::Direct(match error {
                         CredentialError::InteractionRequired => DirectError::InteractionRequired,
                         CredentialError::Unavailable => DirectError::CredentialUnavailable,
@@ -330,6 +330,7 @@ pub struct RoutedConnection {
 pub fn connect(
     identity: &str,
     global: &Global,
+    credentials: &dyn CredentialProvider,
     deadline: Option<Instant>,
 ) -> Result<RoutedConnection, ResolutionError> {
     let agent = if let Some(agent) = &global.agent {
@@ -354,13 +355,7 @@ pub fn connect(
         Interaction::Requested
     };
     let connection = selected
-        .server_connection(
-            identity,
-            agent.clone(),
-            &super::NativeCredentials(identity),
-            interaction,
-            deadline,
-        )
+        .server_connection(identity, agent.clone(), credentials, interaction, deadline)
         .map_err(|error| {
             let mut error = ResolutionError::from(crate::contract::from_server_error(error));
             if let Route::Paired(saved) = &selected {

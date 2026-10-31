@@ -1,9 +1,11 @@
-//! Native storage for one immutable secret per direct-network pairing.
+//! Storage for one immutable secret per direct-network pairing.
 
 use std::sync::Arc;
 
 use zeroize::Zeroizing;
 
+#[cfg(any(target_os = "linux", test))]
+mod file;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -21,10 +23,12 @@ pub enum CredentialError {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StoreKind {
     Keychain,
     SecretService,
+    PrivateFile,
 }
 
 pub trait CredentialStore: Send + Sync {
@@ -38,6 +42,12 @@ pub trait CredentialStore: Send + Sync {
     fn insert(&self, key: &[u8; 32], secret: &[u8]) -> Result<(), CredentialError>;
 
     fn remove(&self, key: &[u8; 32], interaction: Interaction) -> Result<(), CredentialError>;
+}
+
+/// Enrollment selects once; later access opens only the backend retained by its record.
+pub trait CredentialProvider {
+    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError>;
+    fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError>;
 }
 
 pub fn native(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialError> {
@@ -64,6 +74,69 @@ pub fn native(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialErro
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     Err(CredentialError::Unavailable)
+}
+
+/// CLI policy only. Desktop callers continue to use `native` directly.
+pub fn for_cli_enrollment(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    let native = native(identity);
+    #[cfg(target_os = "linux")]
+    {
+        cli_store(native, || private_files(identity))
+    }
+    #[cfg(not(target_os = "linux"))]
+    native
+}
+
+/// Opens exactly the recorded backend. Native failures never grant file access.
+pub fn for_cli_record(
+    identity: &str,
+    kind: StoreKind,
+) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    match kind {
+        StoreKind::PrivateFile => {
+            #[cfg(target_os = "linux")]
+            {
+                private_files(identity)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(CredentialError::Unavailable)
+            }
+        }
+        StoreKind::Keychain | StoreKind::SecretService => {
+            let store = native(identity)?;
+            if store.kind() != kind {
+                return Err(CredentialError::Unavailable);
+            }
+            Ok(store)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn private_files(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    if !matches!(
+        identity,
+        "spaceterm" | "spaceterm-preflight" | "spaceterm-development"
+    ) {
+        return Err(CredentialError::Unavailable);
+    }
+    let directories = spaceterm_directories::AppDirectories::resolve(identity)
+        .map_err(|_| CredentialError::Unavailable)?;
+    Ok(Arc::new(file::PrivateFiles(
+        directories.data.join("cli-credentials"),
+    )))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn cli_store(
+    native: Result<Arc<dyn CredentialStore>, CredentialError>,
+    fallback: impl FnOnce() -> Result<Arc<dyn CredentialStore>, CredentialError>,
+) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    match native {
+        Err(CredentialError::Unavailable) => fallback(),
+        other => other,
+    }
 }
 
 fn account(key: &[u8; 32]) -> String {

@@ -113,9 +113,13 @@ impl Reply {
 /// Runs one `server` command for the server of `identity`, the identity this executable was
 /// built as.
 pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
-    let context = Context { identity, global };
+    let context = Context {
+        identity,
+        global,
+        credentials: crate::connection::CliCredentials::new(identity),
+    };
     let path = path(command);
-    match command {
+    let mut reply = match command {
         ServerCommand::Setup {
             network,
             automatic_start,
@@ -155,7 +159,9 @@ pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
         ServerCommand::Run { .. } | ServerCommand::Provision(_) => {
             Reply::failure(path, None, Failure::new(Code::Unsupported))
         }
-    }
+    };
+    context.credentials.report(&mut reply.envelope);
+    reply
 }
 
 /// The dotted command path of a server command.
@@ -185,6 +191,7 @@ fn path(command: &ServerCommand) -> &'static str {
 pub struct Context<'a> {
     pub identity: &'a str,
     pub global: &'a Global,
+    pub credentials: crate::connection::CliCredentials<'a>,
 }
 
 impl Context<'_> {
@@ -219,6 +226,7 @@ impl Context<'_> {
         let routed = crate::connection::route::connect(
             self.identity,
             self.global,
+            &self.credentials,
             self.global
                 .timeout
                 .map(|timeout| std::time::Instant::now() + timeout),

@@ -378,6 +378,7 @@ mod tests {
     fn a_request_says_what_the_person_does_next() {
         let global = global(None);
         let context = Context {
+            credentials: crate::connection::CliCredentials::new("spaceterm"),
             identity: "spaceterm",
             global: &global,
         };
@@ -439,6 +440,7 @@ mod tests {
     fn a_remote_server_is_refused_before_anything_is_sent() {
         let global = global(Some("studio"));
         let context = Context {
+            credentials: crate::connection::CliCredentials::new("spaceterm-development"),
             identity: "spaceterm-development",
             global: &global,
         };

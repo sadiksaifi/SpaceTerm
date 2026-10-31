@@ -8,6 +8,8 @@ native-tests = []
 test-support = []
 
 [dependencies]
+libc = "=0.2.189"
+spaceterm-directories = { path = "../spaceterm-directories" }
 spaceterm-server = { path = "../spaceterm-server", features = ["client"] }
 zeroize = "=1.9.0"
 serde = { version = "=1.0.229", features = ["derive"] }
