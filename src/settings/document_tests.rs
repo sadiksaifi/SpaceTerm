@@ -445,58 +445,6 @@ fn invalid_bounds_and_protocol_alpha_are_rejected() {
 }
 
 #[test]
-fn update_preferences_round_trip_and_reset_with_the_settings_document() {
-    use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
-    let document = SettingsDocument {
-        updates: UpdatePreferences {
-            automatic_downloads: false,
-            check_interval: CheckInterval::Hourly,
-            reminder_interval: ReminderInterval::EightHours,
-        },
-        ..Default::default()
-    };
-    let encoded = export_settings(&document).unwrap();
-    let mut restored = parse_settings(encoded.as_bytes()).unwrap();
-    assert_eq!(restored.updates, document.updates);
-    restored.reset_all();
-    assert_eq!(restored.updates, UpdatePreferences::default());
-}
-
-#[test]
-fn keybinding_overrides_round_trip_as_a_sparse_map() {
-    let document = SettingsDocument {
-        keybindings: serde_json::from_value(serde_json::json!({
-            "close_tab": null,
-            "new_workspace": "shift-cmd-t"
-        }))
-        .unwrap(),
-        ..Default::default()
-    };
-
-    let encoded = export_settings(&document).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(
-        value["keybindings"],
-        serde_json::json!({"close_tab": null, "new_workspace": "shift-cmd-t"})
-    );
-    assert_eq!(parse_settings(encoded.as_bytes()).unwrap(), document);
-    assert!(encoded.find("\"updates\"").unwrap() < encoded.find("\"keybindings\"").unwrap());
-    assert!(encoded.find("\"keybindings\"").unwrap() < encoded.find("\"appearance\"").unwrap());
-
-    let mut without_overrides = value;
-    without_overrides
-        .as_object_mut()
-        .unwrap()
-        .remove("keybindings");
-    assert_eq!(
-        parse_settings(&serde_json::to_vec(&without_overrides).unwrap())
-            .unwrap()
-            .keybindings,
-        Default::default()
-    );
-}
-
-#[test]
 fn invalid_keybinding_overrides_are_rejected_by_the_settings_document() {
     let mut value = serde_json::to_value(SettingsDocument::default()).unwrap();
     value["keybindings"] = serde_json::json!({
@@ -529,47 +477,93 @@ fn invalid_keybinding_overrides_are_rejected_by_the_settings_document() {
 }
 
 #[test]
-fn replacing_settings_takes_the_imported_catalog_and_keeps_identity() {
-    let imported = reset_fixture();
-    let mut document = SettingsDocument {
-        revision: 4,
-        ..SettingsDocument::default()
+fn every_settings_section_round_trips_replaces_and_resets_without_changing_identity() {
+    use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
+
+    let mut source = reset_fixture();
+    source.revision = 19;
+    source.updates = UpdatePreferences {
+        automatic_downloads: false,
+        check_interval: CheckInterval::Hourly,
+        reminder_interval: ReminderInterval::EightHours,
     };
+    source.keybindings = serde_json::from_value(serde_json::json!({
+        "close_tab": null, "new_workspace": "shift-cmd-t"
+    }))
+    .unwrap();
+    source.clipboard.allow_write = false;
+    source.clipboard.allow_read = true;
+    source.git.show_repository_status = false;
+    source.git.show_pull_requests = false;
+    source.sidebar.default_state = SidebarState::Collapsed;
 
-    document.replace_settings(imported.clone());
+    let encoded = export_settings(&source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        value["keybindings"],
+        serde_json::json!({
+            "close_tab": null, "new_workspace": "shift-cmd-t"
+        })
+    );
+    assert_eq!(value["sidebar"]["default_state"], "collapsed");
+    assert!(encoded.find("\"updates\"").unwrap() < encoded.find("\"keybindings\"").unwrap());
+    assert!(encoded.find("\"keybindings\"").unwrap() < encoded.find("\"appearance\"").unwrap());
+    let restored = parse_settings(encoded.as_bytes()).unwrap();
+    assert_eq!(restored, source);
 
-    assert_eq!(document.appearance, imported.appearance);
-    assert_eq!(document.terminal_themes, imported.terminal_themes);
-    assert_eq!(document.revision, 4);
-    document.validate().unwrap();
-}
+    // A struct pattern without `..` makes a new document field require a fixture and assertion.
+    let SettingsDocument {
+        schema_version,
+        revision,
+        updates,
+        keybindings,
+        clipboard,
+        git,
+        sidebar,
+        appearance,
+        terminal_themes,
+    } = &source;
+    let mut target = SettingsDocument {
+        revision: 4,
+        ..Default::default()
+    };
+    target.replace_settings(restored);
+    assert_eq!(
+        target,
+        SettingsDocument {
+            schema_version: *schema_version,
+            revision: 4,
+            updates: *updates,
+            keybindings: keybindings.clone(),
+            clipboard: *clipboard,
+            git: git.clone(),
+            sidebar: *sidebar,
+            appearance: appearance.clone(),
+            terminal_themes: terminal_themes.clone(),
+        }
+    );
+    assert_ne!(target.revision, *revision);
+    target.validate().unwrap();
+    target.reset_all();
+    assert_eq!(
+        target,
+        SettingsDocument {
+            revision: 4,
+            ..Default::default()
+        }
+    );
 
-#[test]
-fn clipboard_settings_round_trip_import_and_reset() {
-    let mut document = SettingsDocument::default();
-    document.clipboard.allow_write = false;
-    document.clipboard.allow_read = true;
-    let restored = parse_settings(export_settings(&document).unwrap().as_bytes()).unwrap();
-    assert_eq!(restored.clipboard, document.clipboard);
-    let mut imported = SettingsDocument::default();
-    imported.replace_settings(restored);
-    assert_eq!(imported.clipboard, document.clipboard);
-    imported.reset_all();
-    assert_eq!(imported.clipboard, Default::default());
-}
-
-#[test]
-fn git_settings_round_trip_import_and_reset() {
-    let mut document = SettingsDocument::default();
-    document.git.show_repository_status = false;
-    document.git.show_pull_requests = false;
-    let restored = parse_settings(export_settings(&document).unwrap().as_bytes()).unwrap();
-    assert_eq!(restored.git, document.git);
-    let mut imported = SettingsDocument::default();
-    imported.replace_settings(restored);
-    assert_eq!(imported.git, document.git);
-    imported.reset_all();
-    assert_eq!(imported.git, Default::default());
+    let mut without_overrides = value;
+    without_overrides
+        .as_object_mut()
+        .unwrap()
+        .remove("keybindings");
+    assert_eq!(
+        parse_settings(&serde_json::to_vec(&without_overrides).unwrap())
+            .unwrap()
+            .keybindings,
+        Default::default()
+    );
 }
 
 #[test]
@@ -581,22 +575,6 @@ fn git_settings_reject_unknown_fields() {
         parse_settings(&serde_json::to_vec(&value).unwrap()),
         Err(SettingsDocumentError::InvalidJson)
     ));
-}
-
-#[test]
-fn sidebar_settings_round_trip_import_and_reset() {
-    let mut document = SettingsDocument::default();
-    document.sidebar.default_state = SidebarState::Collapsed;
-    let exported = export_settings(&document).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&exported).unwrap();
-    assert_eq!(value["sidebar"]["default_state"], "collapsed");
-    let restored = parse_settings(exported.as_bytes()).unwrap();
-    assert_eq!(restored.sidebar, document.sidebar);
-    let mut imported = SettingsDocument::default();
-    imported.replace_settings(restored);
-    assert_eq!(imported.sidebar, document.sidebar);
-    imported.reset_all();
-    assert_eq!(imported.sidebar.default_state, SidebarState::Expanded);
 }
 
 #[test]

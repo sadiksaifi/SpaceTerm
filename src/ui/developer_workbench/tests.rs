@@ -484,99 +484,68 @@ fn differentiate_without_color_renders_two_status_cues_and_the_failed_glyph(
 }
 
 #[gpui::test]
-fn closing_the_workbench_ends_its_preview_simulations_and_fixtures(cx: &mut TestAppContext) {
-    let (settings, _, _) = install(cx);
-    let window = cx.add_window(DeveloperWorkbench::new);
-    window
-        .update(cx, |workbench, _, cx| {
-            workbench.set_mode(AppearanceMode::Light, cx);
-            workbench.simulate(
-                Simulation::Accessibility(AccessibilityPreviewFact::IncreaseContrast),
-                cx,
-            );
-            terminal::set_caption_fixture(true, cx);
-            terminal::set_link_preview_fixture(true, cx);
-        })
-        .unwrap();
-    cx.run_until_parked();
-    cx.update(|cx| {
-        assert!(caption_fixture(cx).is_some());
-        assert!(link_preview_fixture(cx).is_some());
-    });
-    cx.run_until_parked();
-
-    window
-        .update(cx, |_, window, _| window.remove_window())
-        .unwrap();
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        let current = appearance_runtime::current(cx);
-        assert_eq!(current.chrome.appearance, Appearance::Dark);
-        assert!(!current.chrome.composition.capabilities.increase_contrast);
-        assert!(caption_fixture(cx).is_none());
-        assert!(link_preview_fixture(cx).is_none());
-    });
-    let revision = settings.snapshot().committed.revision;
-    assert!(settings.begin_preview(revision).is_ok());
-}
-
-#[gpui::test]
 fn clicking_client_close_ends_the_workbench_preview_simulations_and_fixtures(
     cx: &mut TestAppContext,
 ) {
-    let (settings, _, _) = install(cx);
-    let movement = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
-    let window = open_framed_workbench(movement.clone(), cx);
-    window
-        .update(cx, |workbench, _, cx| {
-            workbench.set_mode(AppearanceMode::Light, cx);
-            workbench.simulate(
-                Simulation::Accessibility(AccessibilityPreviewFact::IncreaseContrast),
-                cx,
-            );
-            terminal::set_caption_fixture(true, cx);
-            terminal::set_link_preview_fixture(true, cx);
-        })
-        .unwrap();
-    cx.run_until_parked();
-    cx.update(|cx| {
-        assert_eq!(
-            appearance_runtime::current(cx).chrome.appearance,
-            Appearance::Light
-        );
-        assert!(
-            appearance_runtime::current(cx)
-                .chrome
-                .composition
-                .capabilities
-                .increase_contrast
-        );
-        assert!(caption_fixture(cx).is_some());
-        assert!(link_preview_fixture(cx).is_some());
-    });
-
-    {
-        let cx = &mut VisualTestContext::from_window(window.into(), cx);
-        cx.simulate_decorations(gpui::Decorations::Client {
-            tiling: gpui::Tiling::default(),
-        });
-        cx.update(|window, _| window.activate_window());
+    for native_close in [false, true] {
+        let (settings, _, _) = install(cx);
+        let movement = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
+        let window = open_framed_workbench(movement.clone(), cx);
+        window
+            .update(cx, |workbench, _, cx| {
+                workbench.set_mode(AppearanceMode::Light, cx);
+                workbench.simulate(
+                    Simulation::Accessibility(AccessibilityPreviewFact::IncreaseContrast),
+                    cx,
+                );
+                terminal::set_caption_fixture(true, cx);
+                terminal::set_link_preview_fixture(true, cx);
+            })
+            .unwrap();
         cx.run_until_parked();
-        click("window-close", cx);
-    }
+        cx.update(|cx| {
+            assert_eq!(
+                appearance_runtime::current(cx).chrome.appearance,
+                Appearance::Light
+            );
+            assert!(
+                appearance_runtime::current(cx)
+                    .chrome
+                    .composition
+                    .capabilities
+                    .increase_contrast
+            );
+            assert!(caption_fixture(cx).is_some());
+            assert!(link_preview_fixture(cx).is_some());
+        });
 
-    assert!(!cx.windows().contains(&window.into()));
-    assert_eq!(movement.counts(), (0, 0, 0));
-    cx.update(|cx| {
-        let current = appearance_runtime::current(cx);
-        assert_eq!(current.chrome.appearance, Appearance::Dark);
-        assert!(!current.chrome.composition.capabilities.increase_contrast);
-        assert!(caption_fixture(cx).is_none());
-        assert!(link_preview_fixture(cx).is_none());
-    });
-    let revision = settings.snapshot().committed.revision;
-    assert!(settings.begin_preview(revision).is_ok());
+        {
+            let cx = &mut VisualTestContext::from_window(window.into(), cx);
+            cx.simulate_decorations(gpui::Decorations::Client {
+                tiling: gpui::Tiling::default(),
+            });
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            if native_close {
+                cx.update(|window, _| window.remove_window());
+                cx.run_until_parked();
+            } else {
+                click("window-close", cx);
+            }
+        }
+
+        assert!(!cx.windows().contains(&window.into()));
+        assert_eq!(movement.counts(), (0, 0, 0));
+        cx.update(|cx| {
+            let current = appearance_runtime::current(cx);
+            assert_eq!(current.chrome.appearance, Appearance::Dark);
+            assert!(!current.chrome.composition.capabilities.increase_contrast);
+            assert!(caption_fixture(cx).is_none());
+            assert!(link_preview_fixture(cx).is_none());
+        });
+        let revision = settings.snapshot().committed.revision;
+        assert!(settings.begin_preview(revision).is_ok());
+    }
 }
 
 #[gpui::test]

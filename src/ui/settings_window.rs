@@ -189,6 +189,10 @@ pub(crate) fn present_over_active_settings(
     true
 }
 
+fn window_options(cx: &gpui::App) -> gpui::WindowOptions {
+    super::sidebar_window::window_options("Settings", size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx)
+}
+
 /// Opens Settings, or activates it when it is already open, showing `section` when one is given.
 pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App) {
     if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
@@ -220,11 +224,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     // request names one.
     let remembered = super::remembered_view::settings_window(cx);
     let section = section.or(remembered.as_ref().map(|remembered| remembered.section));
-    let mut options = super::sidebar_window::window_options(
-        "Settings",
-        size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
-        cx,
-    );
+    let mut options = window_options(cx);
     let placement = remembered.map(|remembered| remembered.placement.apply(&mut options, cx));
     let opened = cx.open_window(options, |window, cx| {
         if let Some(placement) = placement {
