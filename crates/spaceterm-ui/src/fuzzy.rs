@@ -192,11 +192,18 @@ mod tests {
 
     #[test]
     fn contiguous_match_ranks_above_non_contiguous_match() {
-        let items = ["remote operation", "projects"];
+        let items = ["remote operation", "projects", "projects"];
 
         let matches = fuzzy_filter(&items, "ro", |item| FuzzyTarget::new(item));
 
-        assert_eq!(matches[0].item_index(), 1, "matches: {matches:?}");
+        assert_eq!(
+            matches
+                .iter()
+                .map(super::FuzzyMatch::item_index)
+                .collect::<Vec<_>>(),
+            [1, 2, 0],
+            "contiguous matches rank first and equal scores preserve source order"
+        );
     }
 
     #[test]
