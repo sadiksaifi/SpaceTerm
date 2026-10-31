@@ -33,7 +33,7 @@ fn workspace_manager_with_directory_selection(
                 directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 local_server: crate::ui::launch_testing::unanswered(),
-                server_directories: crate::ui::directory_picker::server_directory_testing::older(),
+                server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
             },
             SidebarState::Expanded,
             window,

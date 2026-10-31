@@ -286,8 +286,6 @@ impl UnavailableEdits {
 impl SharedWorkspaceEdits for UnavailableEdits {
     fn snapshot(&self) -> SharedWorkspaceSnapshot {
         SharedWorkspaceSnapshot {
-            end_all_sessions: false,
-            worktree_writes: false,
             inventory: None,
             connected: false,
             pending: false,

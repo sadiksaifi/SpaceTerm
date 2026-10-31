@@ -71,9 +71,9 @@ fn failure(error: ServerError) -> ToolFailure {
         ServerError::ServiceBusy => ToolFailure::Busy,
         ServerError::CandidateMissing => ToolFailure::NoServerPackage,
         ServerError::CandidateChanged => ToolFailure::RestartRequired,
-        ServerError::RuntimeUnavailable
-        | ServerError::IncompatibleProtocol
-        | ServerError::MissingRequiredCapability => ToolFailure::Unverified,
+        ServerError::RuntimeUnavailable | ServerError::IncompatibleProtocol => {
+            ToolFailure::Unverified
+        }
         ServerError::UnsafeStorage => ToolFailure::UnsafeStorage,
         _ => ToolFailure::StorageUnavailable,
     }
@@ -90,10 +90,7 @@ mod tests {
             (ServerError::CandidateMissing, ToolFailure::NoServerPackage),
             (ServerError::CandidateChanged, ToolFailure::RestartRequired),
             (ServerError::RuntimeUnavailable, ToolFailure::Unverified),
-            (
-                ServerError::MissingRequiredCapability,
-                ToolFailure::Unverified,
-            ),
+            (ServerError::IncompatibleProtocol, ToolFailure::Unverified),
             (ServerError::UnsafeStorage, ToolFailure::UnsafeStorage),
             (ServerError::Changed, ToolFailure::StorageUnavailable),
             (

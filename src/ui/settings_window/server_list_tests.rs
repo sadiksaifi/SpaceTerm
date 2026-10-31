@@ -883,7 +883,6 @@ fn present_both<'a>(
         .zip(servers.routes.clone())
         .map(|(name, route)| {
             let edits = Rc::new(ScriptedEdits::new(None));
-            edits.set_worktree_writes(true);
             let reads = ScriptedReads::new(&format!("~/{name}/{{repository}}/{{branch}}"));
             let writer = edits.clone();
             servers
@@ -1184,34 +1183,6 @@ fn end_all_sessions_refuses_a_confirmation_whose_sessions_changed(cx: &mut TestA
         "got {caption:?}"
     );
     assert!(!caption.contains("restarted"), "got {caption:?}");
-}
-
-/// A connected server that doesn't offer End All Sessions says so and asks nothing.
-#[gpui::test]
-fn end_all_sessions_is_unavailable_on_a_server_without_it(cx: &mut TestAppContext) {
-    use super::super::end_sessions::END_SELECTOR;
-
-    let local = local_writer(running_sessions(2, 2));
-    local.set_end_all_sessions(false);
-    let servers = present_local_sessions(local.clone(), cx);
-    let name = local_name();
-    servers.cx.run_until_parked();
-
-    assert_eq!(
-        end_all_sessions_caption(&servers),
-        format!(
-            "{name} doesn\u{2019}t support ending all its Terminal Sessions. Update the server to \
-             use End All Sessions."
-        )
-    );
-    click(END_SELECTOR, servers.cx);
-    assert!(
-        A11yTree::read(servers.cx)
-            .find(&format!("End All Sessions on {name}?"))
-            .is_none(),
-        "nothing asks to confirm an action the server doesn't offer"
-    );
-    assert!(local.submitted().is_empty());
 }
 
 fn bounds(selector: &str, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {

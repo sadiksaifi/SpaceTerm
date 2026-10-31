@@ -3305,14 +3305,11 @@ impl TabView {
                     retry: selector("directory-retry"),
                     choose: selector("choose-directory"),
                     enabled: offered && !starting && !self.directory_recovery_is_open(cx),
-                    offer: match editability.filter(|_| target.is_some()) {
-                        Some(editability) if editability.available() => {
-                            server_pane::ChooseDirectory::Offered
-                        }
-                        Some(editability) => {
+                    offer: match editability {
+                        Some(editability) if !editability.available() => {
                             server_pane::ChooseDirectory::Withheld(editability.explanation())
                         }
-                        None => server_pane::ChooseDirectory::Unsupported,
+                        _ => server_pane::ChooseDirectory::Offered,
                     },
                     on_retry: move |window: &mut Window, cx: &mut App| {
                         let _ = retry_owner

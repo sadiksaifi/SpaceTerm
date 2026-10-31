@@ -30,16 +30,15 @@ pub struct CandidateMetadata {
     pub version: String,
     pub commit: String,
     pub protocol_major: u16,
-    pub capabilities: Vec<String>,
 }
 
 /// Authenticate the exact captured archive and signature for one application and target.
-/// This verifies the digest, archive contents and required protocol capabilities without I/O.
+/// This verifies the digest, archive contents and protocol major without I/O.
 ///
 /// # Errors
 /// Returns RuntimeUnavailable for invalid authentication, bounds, target or archive contents;
-/// CandidateChanged for a different digest; IncompatibleProtocol or MissingRequiredCapability
-/// when the signed declarations do not meet the connection requirements.
+/// CandidateChanged for a different digest; IncompatibleProtocol when the signed protocol major
+/// is not `required_major`.
 pub fn verify_candidate_bytes(
     identity: &str,
     archive: &[u8],
@@ -47,7 +46,6 @@ pub fn verify_candidate_bytes(
     expected_sha256: &str,
     target: &str,
     required_major: u16,
-    required_capabilities: &[&str],
 ) -> Result<CandidateMetadata, ServerError> {
     verified_candidate_build(
         identity,
@@ -56,7 +54,6 @@ pub fn verify_candidate_bytes(
         expected_sha256,
         target,
         Some(required_major),
-        required_capabilities,
     )
     .map(Into::into)
 }
@@ -138,7 +135,7 @@ impl Service {
         let signature = source(&installation.join("artifact.sig"), 64)?;
         authenticate(&archive, &signature, &self.identity)?;
         let info = contents(&archive, &self.identity, |_, _, _, _| Ok(()))?;
-        info.require_compatibility(Some(crate::protocol::MAJOR), &["workspace_policy"])?;
+        info.require_compatibility(Some(crate::protocol::MAJOR))?;
         let retained = retain(
             &self.paths.data.join("installations"),
             &self.identity,
@@ -370,7 +367,6 @@ impl Service {
         expected_sha256: &str,
         target: &str,
         required_major: u16,
-        required_capabilities: &[&str],
     ) -> Result<CandidateMetadata, ServerError> {
         let (_, _, info) = candidate_for_target(
             &self.identity,
@@ -379,7 +375,6 @@ impl Service {
             expected_sha256,
             target,
             Some(required_major),
-            required_capabilities,
         )?;
         Ok(info.into())
     }
@@ -428,7 +423,6 @@ impl Service {
         signature: &Path,
         expected_sha256: &str,
         required_major: u16,
-        required_capabilities: &[&str],
     ) -> Result<CandidateMetadata, ServerError> {
         let (_, _, info) = candidate(
             &self.identity,
@@ -436,19 +430,16 @@ impl Service {
             signature,
             expected_sha256,
             Some(required_major),
-            required_capabilities,
         )?;
         Ok(info.into())
     }
 
     /// Verify and retain the archive pinned by the running client, independently of its release.
-    ///
-    /// Required package capabilities gate staging; optional ones do not.
     /// This changes no service policy, approved installation, Stop intent or running work.
     ///
     /// # Errors
-    /// Returns CandidateChanged for a different whole-archive digest, IncompatibleProtocol or
-    /// MissingRequiredCapability for unsupported declarations, and the ordinary verification
+    /// Returns CandidateChanged for a different whole-archive digest, IncompatibleProtocol for
+    /// another protocol major, and the ordinary verification
     /// or storage classifications for an invalid artifact or inaccessible installation store.
     pub fn provision_candidate(
         &self,
@@ -456,7 +447,6 @@ impl Service {
         signature: &Path,
         expected_sha256: &str,
         required_major: u16,
-        required_capabilities: &[&str],
     ) -> Result<RetainedInstallation, ServerError> {
         provision_candidate(
             &self.paths.data.join("installations"),
@@ -465,7 +455,6 @@ impl Service {
             signature,
             expected_sha256,
             Some(required_major),
-            required_capabilities,
         )
     }
 
@@ -476,7 +465,6 @@ impl Service {
         archive: &Path,
         signature: &Path,
         expected_sha256: &str,
-        required_capabilities: &[&str],
     ) -> Result<RetainedInstallation, ServerError> {
         provision_candidate(
             &self.paths.data.join("installations"),
@@ -485,7 +473,6 @@ impl Service {
             signature,
             expected_sha256,
             None,
-            required_capabilities,
         )
     }
 }
@@ -550,26 +537,10 @@ pub(super) fn authenticate(
         .verify(bytes, signature)
         .map_err(|_| ServerError::RuntimeUnavailable)
 }
+/// Recheck an installation's authenticated retained declarations. Any protocol major passes:
+/// the build information must be self-consistent and native, and the service lane reaches it
+/// across majors.
 pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
-    verify_installation(path, identity, None)
-}
-
-/// Recheck authenticated retained declarations at activation admission and dispatch. Any
-/// protocol major activates: the candidate's own build information must be self-consistent and
-/// native, and the service lane reaches it across majors.
-pub(super) fn verify_candidate_installation(
-    path: &Path,
-    identity: &str,
-    required_capabilities: &[&str],
-) -> Result<(), ServerError> {
-    verify_installation(path, identity, Some((None, required_capabilities)))
-}
-
-fn verify_installation(
-    path: &Path,
-    identity: &str,
-    candidate_requirements: Option<(Option<u16>, &[&str])>,
-) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
     let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
     let signature = read_file(&directory, Path::new("artifact.sig"), 64)?;
@@ -578,9 +549,6 @@ fn verify_installation(
     }
     authenticate(&bytes, &signature, identity)?;
     let info = verify_contents(&directory, &bytes, identity)?;
-    if let Some((major, capabilities)) = candidate_requirements {
-        info.require_compatibility(major, capabilities)?;
-    }
     verify_native(path, identity)?;
     verify_executable(path, &info)?;
     verify_directory_path(&directory, path)
@@ -668,7 +636,6 @@ struct Build {
     commit: String,
     version: String,
     protocol_major: u16,
-    capabilities: Vec<String>,
     source_sha256: Option<String>,
 }
 impl From<Build> for CandidateMetadata {
@@ -677,25 +644,14 @@ impl From<Build> for CandidateMetadata {
             version: info.version,
             commit: info.commit,
             protocol_major: info.protocol_major,
-            capabilities: info.capabilities,
         }
     }
 }
 impl Build {
     /// `None` accepts any protocol major.
-    fn require_compatibility(
-        &self,
-        required_major: Option<u16>,
-        required_capabilities: &[&str],
-    ) -> Result<(), ServerError> {
+    fn require_compatibility(&self, required_major: Option<u16>) -> Result<(), ServerError> {
         if required_major.is_some_and(|major| self.protocol_major != major) {
             return Err(ServerError::IncompatibleProtocol);
-        }
-        if required_capabilities
-            .iter()
-            .any(|required| !self.capabilities.iter().any(|value| value == required))
-        {
-            return Err(ServerError::MissingRequiredCapability);
         }
         Ok(())
     }
@@ -746,15 +702,6 @@ impl Build {
                 .as_deref()
                 .is_some_and(|value| !digest_valid(value))
             || info.protocol_major == 0
-            || info.capabilities.len() > 32
-            || info.capabilities.iter().any(|value| {
-                value.is_empty()
-                    || value.len() > 64
-                    || !value.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
-                    })
-            })
-            || info.capabilities.iter().collect::<BTreeSet<_>>().len() != info.capabilities.len()
         {
             return Err(ServerError::RuntimeUnavailable);
         }
@@ -992,7 +939,6 @@ fn provision_candidate(
     signature: &Path,
     expected_sha256: &str,
     required_major: Option<u16>,
-    required_capabilities: &[&str],
 ) -> Result<RetainedInstallation, ServerError> {
     let (bytes, signature, info) = candidate(
         identity,
@@ -1000,7 +946,6 @@ fn provision_candidate(
         signature,
         expected_sha256,
         required_major,
-        required_capabilities,
     )?;
     retain(parent, identity, &bytes, &signature, &info)
 }
@@ -1027,7 +972,6 @@ fn candidate(
     signature: &Path,
     expected_sha256: &str,
     required_major: Option<u16>,
-    required_capabilities: &[&str],
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     candidate_for_target(
         identity,
@@ -1036,7 +980,6 @@ fn candidate(
         expected_sha256,
         TARGET,
         required_major,
-        required_capabilities,
     )
 }
 fn candidate_for_target(
@@ -1046,7 +989,6 @@ fn candidate_for_target(
     expected_sha256: &str,
     target: &str,
     required_major: Option<u16>,
-    required_capabilities: &[&str],
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     let bytes = source(archive, MAX_ARCHIVE)?;
     let signature = source(signature, 64)?;
@@ -1057,7 +999,6 @@ fn candidate_for_target(
         expected_sha256,
         target,
         required_major,
-        required_capabilities,
     )?;
     Ok((bytes, signature, info))
 }
@@ -1069,7 +1010,6 @@ fn verified_candidate_build(
     expected_sha256: &str,
     target: &str,
     required_major: Option<u16>,
-    required_capabilities: &[&str],
 ) -> Result<Build, ServerError> {
     if archive.len() as u64 > MAX_ARCHIVE || signature.len() > 64 {
         return Err(ServerError::RuntimeUnavailable);
@@ -1079,7 +1019,7 @@ fn verified_candidate_build(
         return Err(ServerError::CandidateChanged);
     }
     let info = contents_for_target(archive, identity, target, |_, _, _, _| Ok(()))?;
-    info.require_compatibility(required_major, required_capabilities)?;
+    info.require_compatibility(required_major)?;
     Ok(info)
 }
 

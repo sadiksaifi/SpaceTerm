@@ -77,9 +77,7 @@ pub(super) fn local_status(
 ) -> Option<ObservedServerStatus> {
     match (connection, service) {
         (
-            LocalServerStatus::Failed(
-                ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability,
-            ),
+            LocalServerStatus::Failed(ServerError::IncompatibleProtocol),
             _,
         ) => Some(ObservedServerStatus::NeedsUpdate),
         (LocalServerStatus::Connected(_), _) => Some(ObservedServerStatus::Running),

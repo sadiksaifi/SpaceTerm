@@ -1826,7 +1826,7 @@ fn an_admitted_start_notifies_a_waiting_workspace_after_settings_closes(cx: &mut
                 directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 local_server,
-                server_directories: crate::ui::directory_picker::server_directory_testing::older(),
+                server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
             },
             crate::settings::sidebar::SidebarState::Expanded,
             window,

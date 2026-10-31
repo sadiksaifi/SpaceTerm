@@ -98,8 +98,6 @@ impl OpenInvitation {
 pub(crate) enum AccessFailure {
     /// The server isn't running, or this client isn't connected to it.
     Unreachable,
-    /// The server's version doesn't offer direct network connections.
-    Unsupported,
     /// The address isn't one the server can listen at.
     InvalidAddress,
     /// The server couldn't listen at the address and port, so nothing changed.
@@ -256,12 +254,13 @@ fn device(device: DeviceInfo) -> Device {
 /// errors convert to their direct network classification first.
 fn classify(error: impl Into<DirectError>) -> AccessFailure {
     match error.into() {
-        // A route whose own key or credential storage is unavailable can't reach the server.
+        // A route whose own key or credential storage is unavailable can't reach the server,
+        // and neither can a client that doesn't speak the server's protocol major.
         DirectError::Transport
         | DirectError::InteractionRequired
         | DirectError::CredentialUnavailable
-        | DirectError::Revoked => AccessFailure::Unreachable,
-        DirectError::IncompatibleProtocol => AccessFailure::Unsupported,
+        | DirectError::Revoked
+        | DirectError::IncompatibleProtocol => AccessFailure::Unreachable,
         DirectError::InvalidAddress => AccessFailure::InvalidAddress,
         DirectError::AddressUnavailable => AccessFailure::AddressUnavailable,
         DirectError::Disabled => AccessFailure::Disabled,
@@ -305,11 +304,6 @@ impl AccessFailure {
         match self {
             Self::Unreachable => {
                 format!("SpaceTerm can\u{2019}t reach \u{201C}{server}\u{201D}. Try again.")
-            }
-            Self::Unsupported => {
-                format!(
-                    "Update the server on \u{201C}{server}\u{201D} to use direct network connections."
-                )
             }
             Self::InvalidAddress => {
                 format!(

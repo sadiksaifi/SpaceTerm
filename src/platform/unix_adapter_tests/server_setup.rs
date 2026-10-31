@@ -2203,7 +2203,6 @@ impl SshServerBootstrap for StoppedDiscovery {
                 stopped: true,
             }),
             protocol_majors: vec![spaceterm_server::protocol::MAJOR],
-            capabilities: vec!["workspace_policy".into()],
             target: env!("SPACETERM_TARGET").into(),
             version: "1.0.0".into(),
             commit: "b".repeat(40),

@@ -192,14 +192,14 @@ impl TestTerminalSessionRecords {
             .or_default() += 1;
     }
 
-    /// The connection answers that it accepts, or refuses, interactive terminal input.
+    /// The connection accepts interactive terminal input, or has not yet.
     pub(crate) fn set_interactive_input_available(&self, session_id: usize, available: bool) {
         self.set_interactive_input(
             session_id,
             if available {
                 crate::terminal::InteractiveInput::Accepted
             } else {
-                crate::terminal::InteractiveInput::Refused
+                crate::terminal::InteractiveInput::Pending
             },
         );
     }
@@ -405,12 +405,12 @@ impl TestTerminalSessionFactory {
         self
     }
 
-    /// Starts Terminal Sessions whose connection accepts, or refuses, interactive input.
+    /// Starts Terminal Sessions whose connection accepts interactive input, or has not yet.
     pub(crate) fn with_interactive_input_available(self, available: bool) -> Self {
         self.with_interactive_input(if available {
             crate::terminal::InteractiveInput::Accepted
         } else {
-            crate::terminal::InteractiveInput::Refused
+            crate::terminal::InteractiveInput::Pending
         })
     }
 

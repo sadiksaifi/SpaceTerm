@@ -492,14 +492,12 @@ impl TerminalSessionPermissionRequestState {
     }
 }
 
-/// What a Terminal Session's current connection has answered about interactive terminal input.
+/// Whether a Terminal Session's current connection takes interactive terminal input yet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InteractiveInput {
-    /// The connection has not answered yet, so neither acceptance nor refusal is known.
+    /// The connection is still attaching or was interrupted.
     Pending,
     Accepted,
-    /// The connection answered that it carries no interactive terminal input.
-    Refused,
 }
 
 /// Bounds one host commit and the text retained while its transport completes.

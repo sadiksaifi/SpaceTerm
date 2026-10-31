@@ -12,7 +12,6 @@ pub(super) struct ClaimWorker<'a> {
     pub attachment: &'a Option<spaceterm_server::attachments::AttachmentPermit>,
     pub size: &'a Mutex<PaneSize>,
     pub appearance: &'a Mutex<TerminalAppearanceUpdate>,
-    pub directory_recovery: bool,
     pub attached_session: &'a mut bool,
     pub takeover: &'a mut bool,
     pub paste_unconfirmed: &'a mut bool,
@@ -197,7 +196,6 @@ impl ClaimWorker<'_> {
             attachment,
             size,
             appearance,
-            directory_recovery,
             attached_session,
             takeover,
             paste_unconfirmed,
@@ -273,7 +271,7 @@ impl ClaimWorker<'_> {
                     discard_presentation();
                 }
                 *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) =
-                    recovery.clone().filter(|_| directory_recovery);
+                    recovery.clone();
                 unavailable |= directory_unavailable;
                 state.set_session_end(session_ended);
                 state.admission(Admission::Waiting);
@@ -461,7 +459,6 @@ mod tests {
                 cell_height: 16,
             }),
             appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
-            directory_recovery: true,
             attached_session: &mut false,
             takeover: &mut false,
             paste_unconfirmed: &mut false,
@@ -534,7 +531,6 @@ mod tests {
                     cell_height: 16,
                 }),
                 appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
-                directory_recovery: true,
                 attached_session: &mut false,
                 takeover: &mut false,
                 paste_unconfirmed: &mut false,
@@ -605,7 +601,6 @@ mod tests {
             attachment: &None,
             size: &handle.size,
             appearance: &handle.appearance,
-            directory_recovery: true,
             attached_session: &mut false,
             takeover: &mut false,
             paste_unconfirmed: &mut false,
@@ -731,7 +726,6 @@ mod tests {
                         columns: 80, rows: 24, cell_width: 8, cell_height: 16,
                     }),
                     appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
-                    directory_recovery: true,
                     attached_session: &mut false,
                     takeover: &mut false,
                     paste_unconfirmed: &mut false,
@@ -1427,7 +1421,6 @@ mod tests {
             attachment: &None,
             size: &size,
             appearance: &appearance,
-            directory_recovery: true,
             attached_session: &mut attached_session,
             takeover: &mut takeover,
             paste_unconfirmed: &mut paste_unconfirmed,
@@ -1512,7 +1505,6 @@ mod tests {
             attachment: &None,
             size: &size,
             appearance: &appearance,
-            directory_recovery: true,
             attached_session: &mut attached_session,
             takeover: &mut takeover,
             paste_unconfirmed: &mut paste_unconfirmed,

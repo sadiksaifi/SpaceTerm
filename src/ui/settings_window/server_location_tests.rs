@@ -215,7 +215,6 @@ mod presented {
         let paired = connected_paired(&["penguin"], cx);
         let servers = open_penguin(paired, cx);
         let edits = Rc::new(ScriptedEdits::new(None));
-        edits.set_worktree_writes(true);
         let writer = edits.clone();
         let route = servers.routes[0];
         servers.cx.update(|_, cx| {

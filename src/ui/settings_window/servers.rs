@@ -371,10 +371,6 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                     SharedString::new_static(INCOMPATIBLE_PROTOCOL),
                     CaptionTone::Error,
                 ),
-                ServerError::MissingRequiredCapability => (
-                    SharedString::new_static(MISSING_CAPABILITY),
-                    CaptionTone::Error,
-                ),
                 ServerError::ActivationUnresolved => {
                     guidance("Choose Finish Update to complete the server update and reconnect.")
                 }
@@ -448,11 +444,6 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         ServerError::IncompatibleProtocol => (
             "Incompatible",
             "settings-local-server-state-incompatible",
-            true,
-        ),
-        ServerError::MissingRequiredCapability => (
-            "Incompatible",
-            "settings-local-server-state-missing-capability",
             true,
         ),
         // Only a fresh SpaceTerm process uses its replaced installation's server package, so
@@ -539,9 +530,6 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
 /// Why this client refused a server with no protocol major in common. Neither side's release
 /// number says which one is older, so the wording names no side.
 pub(crate) const INCOMPATIBLE_PROTOCOL: &str = "SpaceTerm and this server are incompatible.";
-
-/// Why this client refused a server that lacks a capability it requires.
-pub(crate) const MISSING_CAPABILITY: &str = "This server needs an update.";
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
 /// stopped through account login and computer startup alike.

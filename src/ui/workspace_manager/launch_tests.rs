@@ -803,8 +803,8 @@ fn a_refused_server_offers_an_update_only_from_a_verified_build(cx: &mut TestApp
     );
 }
 
-/// Admission can succeed before Pane negotiation refuses a required capability. That refusal
-/// reads the same verified offer, once, and offers the same update journey.
+/// A reconnection after the first admission can be refused too, such as by a replaced server.
+/// That refusal reads the same verified offer, once, and offers the same update journey.
 #[gpui::test]
 fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext) {
     let edits = ScriptedEdits::new(None);
@@ -817,7 +817,7 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
 
     harness
         .edits
-        .set_error(ServerError::MissingRequiredCapability);
+        .set_error(ServerError::IncompatibleProtocol);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
@@ -827,20 +827,6 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
         ["run", "update_offered"],
         "one read per refusal, and nothing starts or activates"
     );
-}
-
-#[gpui::test]
-fn a_missing_capability_without_a_build_names_no_update(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Err(ServerError::MissingRequiredCapability)], cx);
-    cx.run_until_parked();
-    let presentation = harness
-        .manager
-        .read_with(cx, |manager, _| manager.launch_presentation())
-        .expect("the refusal is presented");
-    assert_eq!(presentation.title, "Incompatible Server");
-    assert_eq!(presentation.detail, "This server needs an update.");
-    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_none());
-    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
 }
 
 /// A Stop between admission and the first inventory offers Start Server, which opens the

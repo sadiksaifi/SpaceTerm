@@ -389,9 +389,9 @@ mod development {
                     })
                 {
                     WorktreeRemoval::HoldsPinnedDirectory
-                } else if !worktree_writes {
-                    WorktreeRemoval::Server
-                } else if !owning.is_some_and(|s| s.editability().available()) {
+                } else if !worktree_writes
+                    || !owning.is_some_and(|s| s.editability().available())
+                {
                     WorktreeRemoval::NeedsServer
                 } else if matches!(pin_check, Some(PinCheckState::Checking)) {
                     WorktreeRemoval::CheckingPinnedDirectories

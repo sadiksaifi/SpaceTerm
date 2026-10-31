@@ -139,8 +139,6 @@ const RETRY_DIRECTORY: &str = "Try Again";
 const CHOOSE_DIRECTORY: &str = "Choose Directory…";
 const RETRY_DIRECTORY_DESCRIPTION: &str = "Try starting the shell in this directory again.";
 const CHOOSE_DIRECTORY_DESCRIPTION: &str = "Choose a directory for this Pane only; keep its Workspace\u{2019}s Pinned Directory and Worktree.";
-const CHOOSE_DIRECTORY_UNSUPPORTED: &str =
-    "Update this SpaceTerm Server to choose another directory.";
 pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
 /// A start the server may have run. Starting again could leave a second shell in the Pane, so the
 /// screen offers a check, which never starts a shell, and names the one restart that ends the wait
@@ -169,10 +167,6 @@ fn failure_copy(error: ServerError) -> (&'static str, SharedString) {
         ServerError::IncompatibleProtocol => (
             "Incompatible Server",
             SharedString::new_static("SpaceTerm and this server are incompatible."),
-        ),
-        ServerError::MissingRequiredCapability => (
-            "Incompatible Server",
-            SharedString::new_static("This server needs an update."),
         ),
         error => (OFFLINE_TITLE, SharedString::from(error.to_string())),
     }
@@ -518,10 +512,8 @@ pub(crate) struct DirectoryActions<Retry, Choose> {
 /// What the owning server and this client allow for Choose Directory, beyond a busy screen.
 #[derive(Clone, Copy)]
 pub(crate) enum ChooseDirectory {
-    /// The owning server offers a recovery target for this Pane.
+    /// This client can change the Workspace, so it can choose a directory for this Pane.
     Offered,
-    /// The owning server negotiated no directory recovery.
-    Unsupported,
     /// This client cannot change the Workspace, for a reason it already explains.
     Withheld(&'static str),
 }
@@ -530,7 +522,6 @@ impl ChooseDirectory {
     const fn description(self) -> &'static str {
         match self {
             Self::Offered => CHOOSE_DIRECTORY_DESCRIPTION,
-            Self::Unsupported => CHOOSE_DIRECTORY_UNSUPPORTED,
             Self::Withheld(explanation) => explanation,
         }
     }

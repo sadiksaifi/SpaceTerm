@@ -508,14 +508,12 @@ impl Adapter {
     pub(super) fn drain_rounds(
         &mut self,
         rounds: usize,
-        batches: bool,
         mut exchange: impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
         for _ in 0..rounds {
             self.active.drain(
                 &self.handle.state,
                 &self.input,
-                batches,
                 &mut exchange,
                 &mut self.unconfirmed,
             )?;
@@ -1125,7 +1123,7 @@ fn leaving_the_pane_cancels_an_approval_even_after_modal_focus_restoration() {
 }
 
 #[test]
-fn unsupported_interaction_disables_typing_without_starting_reconnection() {
+fn an_unsupported_refusal_drops_only_that_message() {
     let mut adapter = Adapter::new();
     adapter.handle.key(KeyInput::text_input("before"));
     adapter
@@ -1137,15 +1135,20 @@ fn unsupported_interaction_disables_typing_without_starting_reconnection() {
             }
         })
         .unwrap();
-    assert!(!adapter.handle.interactive_input_available());
+    assert!(adapter.handle.interactive_input_available());
     assert_eq!(
         adapter.handle.state.status(),
         DevelopmentPaneStatus::Connected
     );
     adapter.handle.key(KeyInput::input_method_commit("after"));
+    let mut sent = 0;
     adapter
-        .drain(|_| panic!("input was sent after capability refusal"))
+        .drain(|request| {
+            sent += usize::from(matches!(request, Request::Input { .. }));
+            Ok(Reply::Unchanged)
+        })
         .unwrap();
+    assert_eq!(sent, 1, "input after the refusal still reaches the server");
 }
 
 fn assert_tracked_continuation_after_output(tracking_after_output: bool) {
@@ -1604,13 +1607,13 @@ fn an_ended_session_is_a_permanent_failure_after_control_loss() {
 }
 
 #[test]
-fn only_a_connected_answer_reads_as_refused_input() {
+fn only_an_interactive_connection_accepts_input() {
     use crate::terminal::InteractiveInput;
     let state = DevelopmentPaneState::new();
     assert_eq!(
         state.interactive_input(),
         InteractiveInput::Pending,
-        "a Pane still attaching has no answer"
+        "a Pane still attaching takes no input yet"
     );
     state.interaction.lock().unwrap().interactive = true;
     state.set(DevelopmentPaneStatus::Connected);
@@ -1619,14 +1622,10 @@ fn only_a_connected_answer_reads_as_refused_input() {
     assert_eq!(
         state.interactive_input(),
         InteractiveInput::Pending,
-        "an interrupted connection is not a refusal"
+        "an interrupted connection takes no input until it is interactive again"
     );
     state.set(DevelopmentPaneStatus::Connected);
-    assert_eq!(
-        state.interactive_input(),
-        InteractiveInput::Refused,
-        "a connection that negotiated no input refuses it"
-    );
+    assert_eq!(state.interactive_input(), InteractiveInput::Pending);
 }
 
 #[test]
@@ -1648,7 +1647,7 @@ fn a_resolving_update_keeps_the_pane_reconnecting_without_carrying_a_click() {
     for error in [
         ServerError::Stopped,
         ServerError::AuthenticationRefused,
-        ServerError::MissingRequiredCapability,
+        ServerError::IncompatibleProtocol,
     ] {
         let state = DevelopmentPaneState::new();
         assert!(!state.connection_failed(error, false), "{error:?}");

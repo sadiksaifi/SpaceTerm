@@ -82,8 +82,6 @@ pub enum ServerError {
     AuthenticationRefused,
     #[error("SpaceTerm and this server are incompatible.")]
     IncompatibleProtocol,
-    #[error("This server needs an update.")]
-    MissingRequiredCapability,
     #[error(
         "SpaceTerm was updated or moved after it opened. Quit and reopen SpaceTerm to continue."
     )]

@@ -147,9 +147,7 @@ fn local_observed(
     let connected = matches!(connection, LocalServerStatus::Connected(_));
     if matches!(
         connection,
-        LocalServerStatus::Failed(
-            ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability
-        )
+        LocalServerStatus::Failed(ServerError::IncompatibleProtocol)
     ) {
         return ServerState::new("Needs update", "Needs update", Tone::Problem);
     }
@@ -509,7 +507,6 @@ impl SettingsWindow {
                         | ServerError::StartupFailed
                         | ServerError::AuthorizationRequired
                         | ServerError::IncompatibleProtocol
-                        | ServerError::MissingRequiredCapability
                         | ServerError::ActivationUnresolved
                         | ServerError::AuthenticationRefused
                 );

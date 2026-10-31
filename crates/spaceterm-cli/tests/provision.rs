@@ -20,13 +20,7 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
     assert_eq!(info["version"], env!("SPACETERM_SERVER_VERSION"));
     assert_eq!(info["commit"], env!("SPACETERM_SERVER_COMMIT"));
     assert_eq!(info["protocol_major"], spaceterm_server::protocol::MAJOR);
-    assert!(
-        info["capabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "workspace_policy")
-    );
+    assert_eq!(info.as_object().unwrap().len(), 7, "{info}");
 }
 
 #[test]

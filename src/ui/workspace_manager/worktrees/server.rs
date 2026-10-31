@@ -7,7 +7,7 @@ use super::*;
 use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::ui::server_worktrees::{Client, FormBackend, WriteError};
 use crate::ui::shared_workspaces::{OutcomeNotice, SharedSubmission};
-use crate::ui::worktree_form::{LocationProbe, WorktreeFormContext, WorktreeFormEvent};
+use crate::ui::worktree_form::{WorktreeFormContext, WorktreeFormEvent};
 use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 use spaceterm_server::hierarchy::Mutation;
 use spaceterm_server::worktree::{Operation, Read, ReadReply};
@@ -128,9 +128,7 @@ impl WorkspaceManager {
                     machine,
                     owner: std::cell::RefCell::default(),
                 });
-                let probe: LocationProbe =
-                    Rc::new(|_| Ok(crate::platform::local_filesystem::NewDirectoryTarget::Free));
-                let form = cx.new(|cx| WorktreeForm::new(backend, context, probe, window, cx));
+                let form = cx.new(|cx| WorktreeForm::new(backend, context, window, cx));
                 cx.subscribe_in(
                     &form,
                     window,

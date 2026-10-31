@@ -51,7 +51,6 @@ class ServerCatalogTests(unittest.TestCase):
             commit="a" * 40,
             version="dev.aaaaaaaaaaaa",
             protocol_major=4,
-            capabilities=["workspace_policy"],
         )
         info.update(changed)
         # The tree follows the native target's layout, whatever the signed document declares.
@@ -259,7 +258,7 @@ int main(int argc, char **argv) {{
             else:
                 stage_catalog(local, local_signature, destination, self.identity, source=source)
 
-    def test_signed_incompatible_identity_target_protocol_or_capability_is_refused(self):
+    def test_signed_incompatible_identity_target_or_protocol_is_refused(self):
         for changed in [
             {"identity": "spaceterm-development"},
             {
@@ -268,7 +267,6 @@ int main(int argc, char **argv) {{
                 )
             },
             {"protocol_major": 1},
-            {"capabilities": []},
         ]:
             with self.subTest(changed=changed):
                 archive, signature, _ = self.artifact(self.target, **changed)

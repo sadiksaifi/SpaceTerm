@@ -123,11 +123,6 @@ mod development {
         /// stays the authority.
         fn subscribe(&self) -> async_channel::Receiver<()>;
 
-        /// Whether the server accepts Worktree writes, without copying the hierarchy.
-        fn worktree_writes(&self) -> bool {
-            self.snapshot().worktree_writes
-        }
-
         /// Reconnects now, rather than after the reconnect delay, while the connection is down.
         fn retry(&self) {}
 
@@ -142,10 +137,6 @@ mod development {
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
         fn snapshot(&self) -> SharedWorkspaceSnapshot {
             Self::snapshot(self)
-        }
-
-        fn worktree_writes(&self) -> bool {
-            Self::supports_worktree_writes(self)
         }
 
         fn availability(&self) -> (bool, bool) {
@@ -3568,8 +3559,6 @@ mod development {
             pub(crate) fn new(inventory: Option<Inventory>) -> Self {
                 Self {
                     snapshot: Mutex::new(SharedWorkspaceSnapshot {
-                        end_all_sessions: true,
-                        worktree_writes: false,
                         inventory,
                         connected: true,
                         pending: false,
@@ -3613,17 +3602,8 @@ mod development {
                 self.publish(|snapshot| snapshot.inventory = Some(inventory));
             }
 
-            /// Whether the scripted server negotiated End All Sessions.
-            pub(crate) fn set_end_all_sessions(&self, offered: bool) {
-                self.publish(|snapshot| snapshot.end_all_sessions = offered);
-            }
-
             pub(crate) fn set_connected(&self, connected: bool) {
                 self.publish(|snapshot| snapshot.connected = connected);
-            }
-
-            pub(crate) fn set_worktree_writes(&self, worktree_writes: bool) {
-                self.publish(|snapshot| snapshot.worktree_writes = worktree_writes);
             }
 
             pub(crate) fn set_error(&self, error: spaceterm_server::ServerError) {
@@ -3662,7 +3642,6 @@ mod development {
                 let snapshot = self.snapshot.lock().expect("snapshot").clone();
                 let relaunched = Self::new(snapshot.inventory.clone());
                 relaunched.publish(|fresh| {
-                    fresh.worktree_writes = snapshot.worktree_writes;
                     fresh.outcome = snapshot.outcome;
                     fresh.unseen = snapshot.unseen;
                     fresh.forgotten = snapshot.forgotten;

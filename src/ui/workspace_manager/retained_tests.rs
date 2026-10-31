@@ -505,7 +505,6 @@ fn a_window_should_leave_a_failure_settings_still_shows_to_settings(cx: &mut Tes
         harness.next_revision(),
         &[("Far", 1)],
     ))));
-    edits.set_worktree_writes(true);
     // Settings writes through the route's writer and keeps the answer it shows.
     let answer = cx.update(|_, cx| {
         crate::ui::server_worktrees::testing::present_direct(

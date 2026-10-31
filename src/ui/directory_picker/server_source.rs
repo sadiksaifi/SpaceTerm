@@ -15,14 +15,6 @@ use std::{
 /// One connection to the owning server's directory channel. Nothing behind it reads or
 /// changes this computer's filesystem.
 pub(crate) trait DirectoryConnection: Send {
-    /// Whether the server reads directories for this client.
-    fn reads_directories(&self) -> bool;
-    /// Whether the server creates directories for this client.
-    fn creates_directories(&self) -> bool;
-    /// Whether the server says if a directory is the same one another path names.
-    fn matches_directories(&self) -> bool {
-        false
-    }
     /// Starts `operation`, a directory read or creation, as operation `id`. Its reply arrives
     /// when the server settles it.
     fn begin(&mut self, id: u64, operation: protocol::Operation) -> Result<(), ()>;
@@ -45,16 +37,6 @@ struct LinkDirectories {
 }
 
 impl DirectoryConnection for LinkDirectories {
-    // Protocol major 3 servers read, create and match directories.
-    fn reads_directories(&self) -> bool {
-        true
-    }
-    fn creates_directories(&self) -> bool {
-        true
-    }
-    fn matches_directories(&self) -> bool {
-        true
-    }
     fn begin(&mut self, id: u64, operation: protocol::Operation) -> Result<(), ()> {
         let pending = self.link.request(operation).map_err(|_| ())?;
         self.reads.insert(id, pending);
@@ -121,10 +103,8 @@ pub(crate) struct ServerDirectorySource {
     /// The other computer's name, for a server that runs on one.
     machine: Option<String>,
     selection_label: &'static str,
-    /// Whether this picker may offer to create a missing directory at all.
+    /// Whether this picker offers to create a missing directory.
     creation: bool,
-    /// Whether the server said it creates directories, learned on the first connection.
-    creates: Rc<std::cell::Cell<bool>>,
     available: Rc<dyn Fn() -> bool>,
     initial: Rc<std::cell::RefCell<Option<PickerPath>>>,
     home: Rc<std::cell::RefCell<Option<PathBuf>>>,
@@ -145,8 +125,7 @@ impl ServerDirectorySource {
         }
     }
     /// Browses the server's directories from its home, naming `machine` when the server runs on
-    /// another computer. A missing directory can be created there, after the person confirms,
-    /// when the server creates directories.
+    /// another computer. A missing directory can be created there, after the person confirms.
     pub(crate) fn browsing(
         server: ServerConnection,
         machine: Option<String>,
@@ -165,26 +144,16 @@ impl ServerDirectorySource {
             machine,
             selection_label: "Open",
             creation: true,
-            creates: Rc::default(),
             available,
             initial: Rc::default(),
             home: Rc::default(),
         }
     }
     fn run(&self, job: Job) -> SourceFuture<Value> {
-        self.run_reporting(job, Lane::Kept, None)
+        self.run_in(Lane::Kept, job)
     }
+    /// Runs `job` on the server.
     fn run_in(&self, lane: Lane, job: Job) -> SourceFuture<Value> {
-        self.run_reporting(job, lane, None)
-    }
-    /// Runs `job` on the server, recording into `creates` whether that server creates
-    /// directories.
-    fn run_reporting(
-        &self,
-        job: Job,
-        lane: Lane,
-        creates: Option<Rc<std::cell::Cell<bool>>>,
-    ) -> SourceFuture<Value> {
         if !(self.available)() {
             return Box::pin(async { Err(DirectorySourceError::ConnectionLost) });
         }
@@ -198,21 +167,16 @@ impl ServerDirectorySource {
             if !available() {
                 return Err(DirectorySourceError::ConnectionLost);
             }
-            let (value, server_creates) = result.map_err(|failure| match failure {
+            result.map_err(|failure| match failure {
                 // The server's route is still up, so a channel that couldn't open says nothing
                 // about the connection.
                 Failure::ChannelUnavailable => DirectorySourceError::Other,
                 Failure::Source(error) => error,
-            })?;
-            if let Some(creates) = creates {
-                creates.set(server_creates);
-            }
-            Ok(value)
+            })
         })
     }
     /// Asks the server which of `candidates` names the same directory as `path`, by the
-    /// directories' identity on that server, returning the first match's position. A server
-    /// that can't compare directories reports none.
+    /// directories' identity on that server, returning the first match's position.
     pub(crate) fn match_directory(
         &self,
         path: PathBuf,
@@ -254,7 +218,7 @@ enum Failure {
     Source(DirectorySourceError),
 }
 
-type Answer = Result<(Value, bool), Failure>;
+type Answer = Result<Value, Failure>;
 
 struct Queued {
     job: Job,
@@ -431,7 +395,6 @@ fn serve(connector: &dyn DirectoryConnector, jobs: &Jobs) {
                 continue;
             };
             next_id += 1;
-            let creates = open.creates_directories();
             match exchange(
                 open.as_mut(),
                 queued.job.clone(),
@@ -439,7 +402,7 @@ fn serve(connector: &dyn DirectoryConnector, jobs: &Jobs) {
                 &queued.cancelled,
             ) {
                 Ok(value) => {
-                    answer = Ok((value, creates));
+                    answer = Ok(value);
                     break;
                 }
                 Err(Exchange::Lost) => {
@@ -471,19 +434,6 @@ fn exchange(
     id: u64,
     cancelled: &AtomicBool,
 ) -> Result<Value, Exchange> {
-    let creating = matches!(job, Job::Create(_));
-    if !(if creating {
-        connection.creates_directories()
-    } else {
-        connection.reads_directories()
-    }) {
-        return Err(Exchange::Answered(DirectorySourceError::Other));
-    }
-    // A server that can't compare directories is never asked to; it reports no match, as
-    // comparing only the paths' spellings would.
-    if matches!(job, Job::Read(Operation::Match { .. })) && !connection.matches_directories() {
-        return Ok(Value::Match { index: None });
-    }
     let operation = match job {
         Job::Read(operation) => protocol::Operation::DirectoryRead(operation),
         Job::Create(path) => protocol::Operation::DirectoryCreate(Creation { path }),
@@ -513,7 +463,7 @@ impl DirectorySource for ServerDirectorySource {
         self.machine.as_deref()
     }
     fn allows_creation(&self) -> bool {
-        self.creation && self.creates.get()
+        self.creation
     }
     fn initial_query(&self) -> Option<PickerPath> {
         self.initial.borrow().clone()
@@ -522,11 +472,7 @@ impl DirectorySource for ServerDirectorySource {
         self.selection_label
     }
     fn discover_home(&self) -> SourceFuture<PickerPath> {
-        let read = self.run_reporting(
-            Job::Read(Operation::Home),
-            Lane::Kept,
-            Some(Rc::clone(&self.creates)),
-        );
+        let read = self.run(Job::Read(Operation::Home));
         let home = Rc::clone(&self.home);
         let ancestor = self
             .original
@@ -640,33 +586,17 @@ pub(crate) mod testing {
 
     struct InProcessConnection {
         server: ServerHandler,
-        reads: bool,
-        creates: bool,
-        matches: bool,
     }
 
     impl DirectoryConnector for InProcessServer {
         fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-            // Protocol major 3 servers read, create and match directories.
             Ok(Box::new(InProcessConnection {
                 server: Arc::clone(&self.0),
-                reads: true,
-                creates: true,
-                matches: true,
             }))
         }
     }
 
     impl DirectoryConnection for InProcessConnection {
-        fn reads_directories(&self) -> bool {
-            self.reads
-        }
-        fn creates_directories(&self) -> bool {
-            self.creates
-        }
-        fn matches_directories(&self) -> bool {
-            self.matches
-        }
         fn begin(&mut self, id: u64, operation: Operation) -> Result<(), ()> {
             self.server.lock().unwrap().begin(id, operation)
         }
@@ -693,43 +623,54 @@ pub(crate) mod testing {
         Rc::new(move |_| Arc::clone(&server) as Arc<dyn DirectoryConnector>)
     }
 
-    /// A server from before directories could be compared: it reads directories and answers
-    /// nothing else.
-    pub(crate) fn older() -> ServerDirectories {
+    /// A server on which every directory is the one its path spells: it says which candidate
+    /// names the same directory as a path, and reads nothing else.
+    pub(crate) fn matching() -> ServerDirectories {
         gated(Arc::new(std::sync::atomic::AtomicBool::new(true)))
     }
 
-    /// The [`older`] server over a channel that opens only once `open` is set, so a test holds
+    /// The [`matching`] server over a channel that opens only once `open` is set, so a test holds
     /// its answers back.
     pub(crate) fn gated(open: Arc<std::sync::atomic::AtomicBool>) -> ServerDirectories {
-        struct Older(Arc<std::sync::atomic::AtomicBool>);
-        struct OlderConnection;
-        impl DirectoryConnector for Older {
+        struct Matching(Arc<std::sync::atomic::AtomicBool>);
+        #[derive(Default)]
+        struct MatchingConnection(std::collections::HashMap<u64, Result<Value, Error>>);
+        impl DirectoryConnector for Matching {
             fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
                 while !self.0.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                Ok(Box::new(OlderConnection))
+                Ok(Box::<MatchingConnection>::default())
             }
         }
-        impl DirectoryConnection for OlderConnection {
-            fn reads_directories(&self) -> bool {
-                true
+        impl DirectoryConnection for MatchingConnection {
+            fn begin(&mut self, id: u64, operation: Operation) -> Result<(), ()> {
+                use spaceterm_server::pane::directories::Operation as Read;
+                let answer = match operation {
+                    Operation::DirectoryRead(Read::Match { path, candidates }) => Ok(Value::Match {
+                        index: candidates
+                            .iter()
+                            .position(|candidate| *candidate == path)
+                            .and_then(|index| u16::try_from(index).ok()),
+                    }),
+                    _ => Err(Error::Unavailable),
+                };
+                self.0.insert(id, answer);
+                Ok(())
             }
-            fn creates_directories(&self) -> bool {
-                false
+            fn settled(
+                &mut self,
+                id: u64,
+                _: Duration,
+            ) -> Result<Option<Result<Value, Error>>, ()> {
+                self.0.remove(&id).map(Some).ok_or(())
             }
-            fn begin(&mut self, _: u64, _: Operation) -> Result<(), ()> {
-                Err(())
-            }
-            fn settled(&mut self, _: u64, _: Duration) -> Result<Option<Result<Value, Error>>, ()> {
-                Err(())
-            }
-            fn cancel(&mut self, _: u64) -> Result<(), ()> {
-                Err(())
+            fn cancel(&mut self, id: u64) -> Result<(), ()> {
+                self.0.remove(&id);
+                Ok(())
             }
         }
-        let server = Arc::new(Older(open));
+        let server = Arc::new(Matching(open));
         Rc::new(move |_| Arc::clone(&server) as Arc<dyn DirectoryConnector>)
     }
 }

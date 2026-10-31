@@ -510,7 +510,6 @@ fn client_process() {
             cell_height: 16,
         }),
         appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
-        directory_recovery: true,
         attached_session: &mut false,
         takeover: &mut false,
         paste_unconfirmed: &mut false,

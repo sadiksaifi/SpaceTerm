@@ -33,8 +33,6 @@ impl DelayedServer {
             RefCell::new(Delivery {
                 server,
                 snapshot: SharedWorkspaceSnapshot {
-                    end_all_sessions: true,
-                    worktree_writes: false,
                     inventory: Some(inventory),
                     connected: true,
                     pending: false,

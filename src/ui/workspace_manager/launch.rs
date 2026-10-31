@@ -309,9 +309,7 @@ const BUSY_DETAIL: &str =
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: ServerError) -> &'static str {
     match error {
-        ServerError::IncompatibleState
-        | ServerError::IncompatibleProtocol
-        | ServerError::MissingRequiredCapability => "Incompatible Server",
+        ServerError::IncompatibleState | ServerError::IncompatibleProtocol => "Incompatible Server",
         ServerError::ActivationUnresolved | ServerError::ReturnUnavailable => {
             "Server Update Unfinished"
         }
@@ -347,7 +345,6 @@ const fn ends_opening(error: ServerError) -> bool {
     matches!(
         error,
         ServerError::IncompatibleProtocol
-            | ServerError::MissingRequiredCapability
             | ServerError::ActivationUnresolved
             | ServerError::IncompatibleState
             | ServerError::StorageUnavailable
@@ -358,10 +355,7 @@ const fn ends_opening(error: ServerError) -> bool {
 
 /// Whether this client refused the server itself, which keeps running for its other clients.
 const fn incompatible(error: ServerError) -> bool {
-    matches!(
-        error,
-        ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability
-    )
+    matches!(error, ServerError::IncompatibleProtocol)
 }
 
 /// What launch presents for a failure. A refused server offers the update journey only when a
@@ -442,10 +436,10 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             waiting: false,
         },
         LaunchState::Incompatible { reason, update } => {
-            let detail = match (update, reason) {
-                (true, _) => "Updating the server ends its Terminal Sessions for every client.",
-                (false, ServerError::MissingRequiredCapability) => "This server needs an update.",
-                (false, _) => "SpaceTerm and this server are incompatible.",
+            let detail = if update {
+                "Updating the server ends its Terminal Sessions for every client."
+            } else {
+                "SpaceTerm and this server are incompatible."
             };
             LaunchPresentation {
                 title: failure_title(reason),

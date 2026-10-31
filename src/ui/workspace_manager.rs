@@ -1327,11 +1327,7 @@ impl WorkspaceManager {
         } else {
             match self.match_server_directory(key, &directory, &pins, window, cx) {
                 None => return,
-                Some(Ok(matched)) => matched.or_else(|| {
-                    pins.iter()
-                        .find(|(_, pin)| *pin == directory)
-                        .map(|(workspace_id, _)| *workspace_id)
-                }),
+                Some(Ok(matched)) => matched,
                 Some(Err(())) => {
                     self.finish_server_directory();
                     Self::show_shared_unavailable_with_title(

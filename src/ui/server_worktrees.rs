@@ -218,9 +218,6 @@ impl Client {
             source.replace_transport(Rc::new(disconnected_transport(*route, cx)()));
         }
     }
-    pub(crate) fn supports_worktree_writes(&self) -> bool {
-        self.edits.worktree_writes()
-    }
     pub(crate) fn availability(&self) -> (bool, bool) {
         self.edits.availability()
     }
@@ -299,9 +296,6 @@ pub(crate) struct FormBackend {
     pub owner: std::cell::RefCell<Option<OutcomeOwner>>,
 }
 impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
-    fn server(&self) -> bool {
-        true
-    }
     fn machine(&self) -> Option<&str> {
         self.machine.as_deref()
     }
@@ -381,11 +375,6 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
     fn release(&self) {
         drop(self.owner.borrow_mut().take());
     }
-}
-
-pub(crate) fn available(cx: &App) -> bool {
-    cx.try_global::<Client>()
-        .is_some_and(Client::supports_worktree_writes)
 }
 
 fn creation_refusal(reason: SharedRefusalReason) -> &'static str {

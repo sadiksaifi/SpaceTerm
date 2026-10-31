@@ -532,7 +532,7 @@ impl QuitSessions for DevelopmentQuitSessions {
             .inventory
             .close
             .clone()
-            .ok_or(ServerError::MissingRequiredCapability)
+            .ok_or(ServerError::Protocol)
     }
 }
 

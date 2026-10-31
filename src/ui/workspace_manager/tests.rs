@@ -430,8 +430,9 @@ fn workspace_adapters() -> WorkspaceManagerAdapters {
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
         local_server: crate::ui::launch_testing::unanswered(),
-        // A presented server here predates comparing directories, unless a test says otherwise.
-        server_directories: crate::ui::directory_picker::server_directory_testing::older(),
+        // A presented server here matches only directories spelled the same, unless a test says
+        // otherwise.
+        server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
     }
 }
 
@@ -12558,7 +12559,6 @@ mod shared_repositories {
     ) {
         let (manager, sessions, cx) = workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
-        edits.set_worktree_writes(true);
         let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
         cx.update(|window, cx| {
             crate::ui::server_worktrees::testing::present_direct(
@@ -13230,7 +13230,8 @@ mod shared_repositories {
             "each server Tab sits in the Worktree the server says it belongs to"
         );
         assert_eq!(rows[0].removal, WorktreeRemoval::Main);
-        assert_eq!(rows[1].removal, WorktreeRemoval::Server);
+        // This window has no writer for the server, so nothing can remove the Worktree yet.
+        assert_eq!(rows[1].removal, WorktreeRemoval::NeedsServer);
         assert!(rows.iter().all(|row| !row.opens_tabs() && row.closes_tabs));
         assert!(!creates_worktrees, "New Worktree stays unavailable");
     }
@@ -15637,7 +15638,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
 ) {
     use spaceterm_server::hierarchy::Mutation;
 
-    // The harness's server compares no directories, so the exact pin decides here. The native
+    // The harness's server matches only a directory spelled the same as the pin. The native
     // adapter test covers a server matching one directory through a symbolic link. Its directory
     // channel answers from its own thread.
     cx.executor().allow_parking();

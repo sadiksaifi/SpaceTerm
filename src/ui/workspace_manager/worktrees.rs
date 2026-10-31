@@ -81,8 +81,8 @@ impl WorkspaceManager {
             && self.shared_inventory(workspace_id).is_some()
     }
 
-    /// Whether the server that owns a Workspace accepts Worktree writes over this client's route.
-    /// Reading it reaches no computer.
+    /// Whether this client has a writer for the server that owns a Workspace, which takes its
+    /// Worktree writes. Reading it reaches no computer.
     pub(super) fn owner_writes_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
         use crate::ui::server_worktrees::Client;
 
@@ -94,22 +94,20 @@ impl WorkspaceManager {
             return false;
         };
         match origin {
-            super::ServerOrigin::Local => crate::ui::server_worktrees::available(cx),
-            super::ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx)
-                .is_some_and(|client| client.supports_worktree_writes()),
+            super::ServerOrigin::Local => cx.has_global::<Client>(),
+            super::ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx).is_some(),
         }
     }
 
-    /// The edit writer of the server that owns a Workspace, when it accepts Worktree writes. Every
-    /// Worktree read and write for that Workspace goes through it, so Git runs on the owning
-    /// server's computer and never on this one's unless that server is this computer's.
+    /// The edit writer of the server that owns a Workspace. Every Worktree read and write for
+    /// that Workspace goes through it, so Git runs on the owning server's computer and never on
+    /// this one's unless that server is this computer's.
     pub(super) fn owning_worktree_client(
         &self,
         workspace_id: WorkspaceId,
         cx: &mut App,
     ) -> Option<crate::ui::server_worktrees::Client> {
         self.owning_client(workspace_id, cx)
-            .filter(crate::ui::server_worktrees::Client::supports_worktree_writes)
     }
 
     /// The name of the other computer whose server owns a Workspace, or `None` for this

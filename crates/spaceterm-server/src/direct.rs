@@ -273,9 +273,7 @@ impl From<ServerError> for DirectError {
             ServerError::StorageUnavailable
             | ServerError::UnsafeStorage
             | ServerError::IncompatibleState => Self::StorageUnavailable,
-            ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability => {
-                Self::IncompatibleProtocol
-            }
+            ServerError::IncompatibleProtocol => Self::IncompatibleProtocol,
             ServerError::AuthenticationRefused => Self::AuthenticationRefused,
             ServerError::Capacity => Self::Capacity,
             _ => Self::Transport,

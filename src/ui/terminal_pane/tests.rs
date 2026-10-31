@@ -1835,7 +1835,7 @@ fn server_pane_pastes_text_once_without_local_selection_find_or_scrollback(
 }
 
 #[gpui::test]
-fn server_pane_without_interactive_capability_discards_keys_ime_and_paste_chords(
+fn server_pane_awaiting_interactive_input_discards_keys_ime_and_paste_chords(
     cx: &mut TestAppContext,
 ) {
     let (pane, cx, records) = server_terminal_pane(cx, false);
@@ -2090,67 +2090,6 @@ fn server_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut Te
 }
 
 #[gpui::test]
-fn typing_unavailable_waits_for_the_connection_to_refuse_input(cx: &mut TestAppContext) {
-    use crate::terminal::InteractiveInput;
-    use spaceterm_ui::a11y_testing::A11yTree;
-    let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
-        sessions
-            .server_backed()
-            .with_interactive_input(InteractiveInput::Pending)
-    });
-    cx.run_until_parked();
-    assert!(
-        A11yTree::read(cx).find("Typing Unavailable").is_none(),
-        "a Pane whose connection has not answered claims no incompatibility"
-    );
-    records.set_interactive_input(1, InteractiveInput::Accepted);
-    pane.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert!(A11yTree::read(cx).find("Typing Unavailable").is_none());
-    records.set_interactive_input(1, InteractiveInput::Pending);
-    pane.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert!(
-        A11yTree::read(cx).find("Typing Unavailable").is_none(),
-        "an interrupted connection is not a refusal"
-    );
-    records.set_interactive_input(1, InteractiveInput::Refused);
-    pane.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let tree = A11yTree::read(cx);
-    assert_eq!(tree.node("Typing Unavailable")["aria"]["role"], "Status");
-    assert!(cx.debug_bounds("terminal-input-unavailable").is_some());
-}
-
-#[gpui::test]
-fn server_pane_status_stacks_above_typing_unavailable_without_hiding_either_notice(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-    let (pane, cx, _records) = server_terminal_pane(cx, false);
-    pane.update(cx, |pane, cx| {
-        pane.status = Some("Diagnostics exported".to_owned());
-        pane.status_intent = StatusIntent::Success;
-        cx.notify();
-    });
-    let tree = A11yTree::read(cx);
-    for label in ["Terminal status", "Typing Unavailable"] {
-        assert_eq!(tree.node(label)["aria"]["role"], "Status");
-        assert!(tree.exposed(tree.node(label)));
-    }
-    let status = cx.debug_bounds("terminal-status").unwrap();
-    let unsupported = cx.debug_bounds("terminal-input-unavailable").unwrap();
-    let pane = cx.debug_bounds("terminal-pane").unwrap();
-    assert_eq!(
-        status.bottom() + px(8.0),
-        unsupported.top(),
-        "the notices keep an 8px vertical gap"
-    );
-    assert_eq!(status.right(), unsupported.right());
-    assert_eq!(unsupported.right() + px(12.0), pane.right());
-}
-
-#[gpui::test]
 fn server_pane_context_menu_offers_native_links_and_paste_without_selection_or_find(
     cx: &mut TestAppContext,
 ) {
@@ -2370,9 +2309,9 @@ fn command_k_should_ask_the_server_to_clear_the_screen_and_scrollback(cx: &mut T
     assert_eq!(clear_requests(&records), 1);
 }
 
-/// A server that takes no input from this client cannot clear for it either.
+/// A Pane whose connection takes no input yet cannot ask its server to clear either.
 #[gpui::test]
-fn command_k_should_ask_nothing_of_a_server_that_takes_no_input(cx: &mut TestAppContext) {
+fn command_k_should_ask_nothing_before_the_connection_takes_input(cx: &mut TestAppContext) {
     let (_pane, cx, records) = server_terminal_pane(cx, false);
     cx.simulate_keystrokes("cmd-k");
     assert_eq!(clear_requests(&records), 0);

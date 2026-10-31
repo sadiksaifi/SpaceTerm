@@ -261,7 +261,7 @@ mod tests {
                     ),
                     local_server: crate::ui::launch_testing::unanswered(),
                     server_directories:
-                        crate::ui::directory_picker::server_directory_testing::older(),
+                        crate::ui::directory_picker::server_directory_testing::matching(),
                 },
                 SidebarState::Expanded,
                 window,

@@ -244,11 +244,7 @@ impl Service {
         let installations = owned_directory(&self.paths.data.join("installations"))?;
         let _installations = lock_directory(&installations)?;
         self.verify_choice(candidate)?;
-        runtime::verify_candidate_installation(
-            &candidate.directory,
-            &self.identity,
-            &["workspace_policy"],
-        )?;
+        runtime::verify(&candidate.directory, &self.identity)?;
         let previous = self.describe_approved(&state)?;
         if previous.directory == candidate.directory {
             return Ok(None);
@@ -288,11 +284,7 @@ impl Service {
             let _installations = lock_directory(&installations)?;
             self.verify_choice(&approval.previous)?;
             self.verify_choice(&approval.candidate)?;
-            runtime::verify_candidate_installation(
-                &approval.candidate.directory,
-                &self.identity,
-                &["workspace_policy"],
-            )?;
+            runtime::verify(&approval.candidate.directory, &self.identity)?;
             state.activation = Some(Operation {
                 schema: 1,
                 id: crate::protocol::random()?,
