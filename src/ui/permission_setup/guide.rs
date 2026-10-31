@@ -267,7 +267,7 @@ impl SetupGuide {
         } else {
             let advice = if presentation.cleared {
                 format!(
-                    "SpaceTerm removed an earlier entry for {holder} and asked macOS to list it again."
+                    "SpaceTerm removed an earlier entry for {holder} and asked the system to list it again."
                 )
             } else {
                 format!(
