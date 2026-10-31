@@ -1047,10 +1047,38 @@ fn declining_a_sign_in_before_any_change_returns_to_the_form(cx: &mut TestAppCon
     sheet.begin(AddServerRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    // The backend has entered its cancellation wait, rather than merely being scheduled.
+    sheet
+        .cx
+        .foreground_executor()
+        .clone()
+        .block_test(sheet.computers.starts.recv())
+        .expect("the setup worker starts");
+    sheet.cx.run_until_parked();
+    assert!(sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    assert!(sheet.find("Set Up").is_none());
+    let completion = sheet.cx.update(|window, cx| {
+        open_sheet(window, cx)
+            .unwrap()
+            .update(cx, |sheet, _| sheet._setup.take().unwrap())
+    });
 
     sheet.decline_prompt();
-    sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Server");
+    assert!(
+        sheet.find("Set Up").is_none(),
+        "the held worker has not answered yet"
+    );
+    sheet.computers.release_cancelled();
+    // This task returns only after the backend returned and its answer reached the sheet.
+    sheet
+        .cx
+        .foreground_executor()
+        .clone()
+        .block_test(completion);
+    sheet.cx.run_until_parked();
+    assert!(sheet.open());
+    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.node("Set Up")["aria"]["role"], "Button");
 
     assert!(
         !sheet.disabled("Set Up"),
