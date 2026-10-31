@@ -2864,6 +2864,56 @@ impl TabManager {
         cx.notify();
     }
 
+    /// Leaves this client's view of this server Workspace's Tabs for the next window, by server
+    /// identity. A Workspace this window owns has none.
+    pub(crate) fn remember(
+        &self,
+        cx: &App,
+    ) -> Option<crate::ui::remembered_view::RememberedWorkspace> {
+        let shared = self.shared.as_ref()?;
+        Some(crate::ui::remembered_view::RememberedWorkspace {
+            active_tab: shared.server_tab(self.tabs.active_tab_id()),
+            tabs: self
+                .tabs
+                .iter()
+                .filter_map(|(tab_id, view)| {
+                    Some((shared.server_tab(tab_id)?, view.read(cx).remember(cx)?))
+                })
+                .collect(),
+            worktrees_expanded: None,
+        })
+    }
+
+    /// Presents the view another window left of this Workspace's Tabs. The remembered Active
+    /// Tab returns without selecting its Focused Pane, and a Tab that is gone leaves the Active
+    /// Tab as it is.
+    pub(crate) fn restore_remembered(
+        &mut self,
+        remembered: &crate::ui::remembered_view::RememberedWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let tabs: Vec<_> = remembered
+            .tabs
+            .iter()
+            .filter_map(|(server, tab)| Some((self.tabs.tab(shared.local_tab(*server)?)?.clone(), tab)))
+            .collect();
+        let active = remembered
+            .active_tab
+            .and_then(|server| shared.local_tab(server))
+            .filter(|tab_id| *tab_id != self.tabs.active_tab_id());
+        for (view, tab) in tabs {
+            view.update(cx, |view, cx| view.restore_remembered(tab, window, cx));
+        }
+        if let Some(tab_id) = active {
+            self.activate_tab_focusing(tab_id, false, window, cx);
+        }
+        cx.notify();
+    }
+
     /// Adds the Tabs the server published that this strip does not present yet, then reconciles
     /// each Tab's Panes. A new Tab joins at the end of the strip and never takes the Active Tab.
     pub(crate) fn reconcile_shared(

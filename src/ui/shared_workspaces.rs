@@ -1323,6 +1323,13 @@ mod development {
             self.panes.get(&pane_id).map(|id| self.edits.canonical(*id))
         }
 
+        /// Leaves this client's view of every Pane for the next window that presents it.
+        pub(crate) fn retain_views(&self) {
+            for view in self.views.values() {
+                view.retain_view();
+            }
+        }
+
         pub(crate) fn closing(&self, pane_id: PaneId) -> bool {
             self.server_pane(pane_id)
                 .is_some_and(|id| self.edits.closing(id))
@@ -1852,6 +1859,15 @@ mod development {
             self.confirmed = Some(copy);
         }
 
+        /// Attaches `attached`, as a window reads this client's attachments from its server.
+        #[cfg(test)]
+        pub(crate) fn attach_for_test(&mut self, attached: &[Id]) {
+            if let Ok(attachments) = spaceterm_server::attachments::Attachments::relaunched(attached)
+            {
+                self.attachments = attachments;
+            }
+        }
+
         /// The copy last written to this client's storage.
         #[cfg(test)]
         pub(crate) const fn saved_copy(&self) -> Option<&RetainedInventory> {
@@ -1865,7 +1881,6 @@ mod development {
         }
 
         /// Whether this binding presents the retained copy rather than the server's inventory.
-        #[cfg(test)]
         pub(crate) const fn presents_retained_copy(&self) -> bool {
             self.standing_in
         }

@@ -150,6 +150,15 @@ impl Scrollback {
         self.warm = true;
     }
 
+    /// Keeps the cached rows, the view's position and the Selection for the next presentation
+    /// of the same Terminal Session. Find ends, because that presentation sends its own query.
+    pub(crate) fn retain(&mut self) {
+        self.cache.forget_in_flight();
+        self.find = find::LocalFind::default();
+        self.copying = None;
+        self.prepared = None;
+    }
+
     /// Applies the newest decoded frame and the history it reports.
     pub(crate) fn screen(&mut self, screen: Arc<ScreenSnapshot>) {
         let history = screen.history;

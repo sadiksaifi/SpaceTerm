@@ -216,12 +216,20 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     let permissions = composition.permissions.clone();
     let theme_registry = composition.theme_registry.clone();
     let local_server = servers::offered_local_server(command_line_tool::offered(cx));
+    // Settings returns where it last closed, on the Settings Section it showed, unless the
+    // request names one.
+    let remembered = super::remembered_view::settings_window(cx);
+    let section = section.or(remembered.map(|remembered| remembered.section));
+    let mut options = super::sidebar_window::window_options(
+        "Settings",
+        size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
+        cx,
+    );
+    if let Some(remembered) = remembered {
+        remembered.placement.apply(&mut options, cx);
+    }
     let opened = cx.open_window(
-        super::sidebar_window::window_options(
-            "Settings",
-            size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)),
-            cx,
-        ),
+        options,
         |window, cx| {
             let settings = cx.new(|cx| {
                 let mut settings = SettingsWindow::new_with_capabilities(
@@ -920,9 +928,15 @@ impl SettingsWindow {
         if self.editor.flush(cx) {
             self.close_after_save = None;
             match intent {
-                CloseIntent::Window(handle) => cx.defer(move |cx| {
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
-                }),
+                CloseIntent::Window(handle) => {
+                    let section = self.active_section;
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            super::remembered_view::remember_settings_window(section, window, cx);
+                            window.remove_window();
+                        });
+                    });
+                }
                 CloseIntent::Application(completion) => completion.saved(cx),
             }
         } else if !self.editor.is_writing() {

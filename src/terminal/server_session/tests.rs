@@ -39,6 +39,117 @@ fn paired_panes_have_no_local_file_authority_even_with_local_composition() {
 }
 
 #[test]
+fn a_closed_windows_view_returns_with_the_next_presentation_of_the_same_session() {
+    use super::super::pointer_input::*;
+    struct Route;
+    impl spaceterm_server::direct::DirectConnector for Route {
+        fn connect(
+            &self,
+        ) -> Result<spaceterm_server::direct::DirectConnection, spaceterm_server::direct::DirectError>
+        {
+            panic!("factory construction must not connect");
+        }
+    }
+    let server = ServerConnection::direct(
+        "spaceterm-development",
+        [4; 32],
+        spaceterm_server::direct::PairedDevice {
+            pin: spaceterm_server::direct::ServerPin {
+                build: "spaceterm-development".into(),
+                server: [9; 32],
+                public_key: [2; 32],
+                certificate: [3; 32],
+            },
+            pairing: [5; 32],
+            client: [6; 32],
+        },
+        Arc::new(Route),
+    )
+    .unwrap();
+    let controls = PaneControls::default();
+    let present = || {
+        DevelopmentServerSessionFactory::for_pane(
+            server.clone(),
+            &controls,
+            crate::platform::runtime_local_filesystem(),
+            [8; 32],
+        )
+        .1
+    };
+
+    // The closing window scrolled back and selected rows of Terminal Session [2; 32].
+    let adapter = Adapter::new();
+    let mapping = adapter.frame(40);
+    adapter.handle.scroll_scrollback(ScrollbackMovement::Top);
+    let pointer = |phase, y| PointerInput {
+        generation: mapping.local,
+        phase,
+        button: Some(PointerButton::Left),
+        position: SurfacePosition { x: 1.0, y },
+        modifiers: Default::default(),
+        shift_selection: ShiftSelectionPolicy::ReportToApplication,
+    };
+    adapter.handle.pointer(pointer(PointerPhase::Press, 1.0));
+    adapter.handle.pointer(pointer(PointerPhase::Motion, 41.0));
+    adapter.handle.pointer(pointer(PointerPhase::Release, 41.0));
+    // The closing window's connection asked for the rows above the screen.
+    let asked = adapter
+        .handle
+        .state
+        .reading
+        .lock()
+        .unwrap()
+        .scrollback
+        .requests();
+    assert!(!asked.is_empty());
+    let closing = present();
+    std::mem::swap(
+        &mut *closing.reading.lock().unwrap(),
+        &mut *adapter.handle.state.reading.lock().unwrap(),
+    );
+    closing.retain_view();
+    assert!(
+        closing.reading.lock().unwrap().scrollback.following(),
+        "the closing presentation keeps nothing"
+    );
+
+    let reopened = present();
+    let mut reading = reopened.reading.lock().unwrap();
+    reading.scrollback.attach([2; 32]);
+    assert!(!reading.scrollback.following());
+    assert!(reading.scrollback.selection_present());
+    let span = |requests: &[super::scrollback::PageRequest]| {
+        let start = requests.iter().map(|request| request.start).min();
+        let end = requests
+            .iter()
+            .map(|request| request.start + u64::from(request.rows))
+            .max();
+        start.zip(end)
+    };
+    assert_eq!(
+        span(&reading.scrollback.requests()),
+        span(&asked),
+        "the next connection asks again for rows the ended one never received"
+    );
+    drop(reading);
+    // The view returns once.
+    assert!(present().reading.lock().unwrap().scrollback.following());
+
+    // After a server restart the Pane has a new Terminal Session, which starts at its screen.
+    let closing = present();
+    std::mem::swap(
+        &mut *closing.reading.lock().unwrap(),
+        &mut *reopened.reading.lock().unwrap(),
+    );
+    closing.retain_view();
+    let restarted = present();
+    let mut reading = restarted.reading.lock().unwrap();
+    reading.scrollback.attach([7; 32]);
+    assert!(reading.scrollback.following());
+    assert!(!reading.scrollback.selection_present());
+}
+
+#[test]
 fn clear_screen_and_scrollback_uses_the_current_epoch_and_exact_lease_without_focus() {
     let mut adapter = Adapter::new();
     adapter.handle.interactive_focus(false, false);

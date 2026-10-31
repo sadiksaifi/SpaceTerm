@@ -426,6 +426,41 @@ impl<T> Tab<T> {
         }
     }
 
+    /// The Pane focus history, oldest first. Previous Pane and Next Pane move through it.
+    pub(crate) fn focus_history(&self) -> &[PaneId] {
+        &self.focus_history
+    }
+
+    /// Restores focus another presentation of this Tab left: its history order, its Focused
+    /// Pane, and whether that Pane was zoomed. Panes it names that are gone are skipped, and
+    /// Panes it never knew keep their place before the ones it names. A Focused Pane that is gone
+    /// leaves the Root Pane focused and the Tab unzoomed.
+    pub(crate) fn restore_focus(&mut self, history: &[PaneId], focused: Option<PaneId>, zoomed: bool) {
+        let mut restored: Vec<PaneId> = self
+            .focus_history
+            .iter()
+            .copied()
+            .filter(|pane_id| !history.contains(pane_id))
+            .collect();
+        for pane_id in history {
+            if self.panes.contains_key(pane_id) && !restored.contains(pane_id) {
+                restored.push(*pane_id);
+            }
+        }
+        let focused = focused.filter(|pane_id| self.panes.contains_key(pane_id));
+        let focused_pane_id = focused.unwrap_or(self.root_pane_id);
+        if !restored.contains(&focused_pane_id) {
+            restored.push(focused_pane_id);
+        }
+        self.focus_history = restored;
+        self.focused_pane_id = focused_pane_id;
+        self.zoom_state = if zoomed && focused.is_some() && self.pane_count() > 1 {
+            ZoomState::Zoomed(focused_pane_id)
+        } else {
+            ZoomState::Restored
+        };
+    }
+
     pub(crate) fn toggle_zoom(&mut self) -> Option<ZoomState> {
         if self.pane_count() <= 1 {
             return None;
@@ -1461,6 +1496,36 @@ mod tests {
             )),
             [false, true]
         );
+    }
+
+    #[test]
+    fn restored_focus_keeps_its_history_focused_pane_and_zoom() {
+        let mut tab = four_pane_tab();
+        tab.restore_focus(
+            &[PaneId::new(3), PaneId::new(1), PaneId::new(2)],
+            Some(PaneId::new(1)),
+            true,
+        );
+        assert_eq!(
+            tab.focus_history(),
+            [PaneId::new(4), PaneId::new(3), PaneId::new(1), PaneId::new(2)]
+        );
+        assert_eq!(tab.focused_pane_id(), PaneId::new(1));
+        assert_eq!(tab.zoom_state(), ZoomState::Zoomed(PaneId::new(1)));
+        assert_eq!(tab.focus_previous_pane(), Some(PaneId::new(3)));
+    }
+
+    #[test]
+    fn restored_focus_falls_back_to_the_root_pane_when_its_pane_is_gone() {
+        let mut tab = four_pane_tab();
+        tab.restore_focus(&[PaneId::new(9), PaneId::new(2)], None, true);
+        assert_eq!(tab.focused_pane_id(), tab.root_pane_id());
+        assert_eq!(tab.zoom_state(), ZoomState::Restored);
+        assert!(!tab.focus_history().contains(&PaneId::new(9)));
+        assert_eq!(tab.focus_history().len(), 4);
+
+        tab.restore_focus(&[], Some(PaneId::new(9)), false);
+        assert_eq!(tab.focused_pane_id(), tab.root_pane_id());
     }
 
     #[test]

@@ -61,6 +61,20 @@ impl Reading {
         self.prediction = None;
     }
 
+    /// Takes this view for the next presentation of the same Pane, as when its window closes.
+    /// What stays follows a reconnect: the rows, position and Selection of the same Terminal
+    /// Session.
+    pub(super) fn retain(&mut self) -> Self {
+        self.disconnect();
+        let mut retained = std::mem::take(self);
+        retained.scrollback.retain();
+        retained.pages.clear();
+        retained.copy_available = false;
+        retained.grid = None;
+        retained.changed = true;
+        retained
+    }
+
     /// The screen the view shows: the Scrollback's view, with the predictions drawn over it while
     /// the view follows the screen. A scrolled view shows history unmarked.
     pub(super) fn presented(

@@ -933,6 +933,71 @@ impl TabView {
         }
     }
 
+    /// Leaves this client's view of this server Tab for the next window. It returns the Tab's
+    /// focus and each Pane's own view by server identity, and each Pane's connection keeps its
+    /// reading for that window.
+    pub(crate) fn remember(&self, cx: &App) -> Option<crate::ui::remembered_view::RememberedTab> {
+        let shared = self.shared.as_ref()?;
+        shared.retain_views();
+        Some(crate::ui::remembered_view::RememberedTab {
+            history: self
+                .tab
+                .focus_history()
+                .iter()
+                .filter_map(|pane_id| shared.server_pane(*pane_id))
+                .collect(),
+            focused: shared.server_pane(self.tab.focused_pane_id())?,
+            zoomed: matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)),
+            panes: self
+                .tab
+                .panes_with_ids()
+                .filter_map(|(pane_id, terminal)| {
+                    Some((shared.server_pane(pane_id)?, terminal.read(cx).remembered(cx)))
+                })
+                .collect(),
+        })
+    }
+
+    /// Presents the view another window left of this Tab. Pane control is untouched: the
+    /// Focused Pane is restored, never selected.
+    pub(crate) fn restore_remembered(
+        &mut self,
+        remembered: &crate::ui::remembered_view::RememberedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let history: Vec<PaneId> = remembered
+            .history
+            .iter()
+            .filter_map(|server| shared.local_pane(*server))
+            .collect();
+        let focused = shared.local_pane(remembered.focused);
+        let panes: Vec<_> = remembered
+            .panes
+            .iter()
+            .filter_map(|(server, pane)| Some((shared.local_pane(*server)?, pane)))
+            .collect();
+        self.tab
+            .restore_focus(&history, focused, remembered.zoomed);
+        self.advance_native_service_hierarchy_generation(cx);
+        self.pane_layout_revision += 1;
+        self.sync_terminal_focus(cx);
+        for (pane_id, pane) in panes {
+            if let Some(terminal) = self.tab.pane(pane_id).cloned() {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.restore_remembered(pane, window, cx);
+                });
+            }
+        }
+        cx.emit(TabViewEvent::PresentationChanged {
+            tab_id: self.tab.id(),
+        });
+        cx.notify();
+    }
+
     /// How many explicit Focused Pane changes this Tab has had.
     pub(crate) const fn focus_epoch(&self) -> u64 {
         self.focus_epoch

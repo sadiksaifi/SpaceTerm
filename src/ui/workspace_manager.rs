@@ -316,6 +316,9 @@ pub(crate) struct WorkspaceManager {
     launch: launch::LocalLaunchState,
     /// This client's one Workspace order across every server, kept across launches.
     display_order: display_order::DisplayOrder,
+    /// The view the last closed Workspace Window left, which this window presents as its
+    /// Workspaces arrive.
+    restoration: crate::ui::remembered_view::Restoration<NavigationMark>,
 }
 
 impl WorkspaceManager {
@@ -443,6 +446,7 @@ impl WorkspaceManager {
             empty_band: std::cell::RefCell::default(),
             launch: launch::LocalLaunchState::new(local_server),
             display_order: display_order::DisplayOrder::default(),
+            restoration: crate::ui::remembered_view::Restoration::none(),
         };
         manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
@@ -1859,7 +1863,7 @@ impl WorkspaceManager {
                     self.close_workspace(workspace_id, window, cx);
                 }
             }
-            CloseTarget::Window => window.remove_window(),
+            CloseTarget::Window => self.close_window(window, cx),
         }
     }
 
@@ -1881,6 +1885,7 @@ impl WorkspaceManager {
             .close_target_requires_confirmation(CloseTarget::Window, cx)
             .is_some_and(|requires| !requires)
         {
+            self.remember_view(window, cx);
             return true;
         }
         self.present_close_confirmation(CloseTarget::Window, window, cx);
@@ -3073,6 +3078,7 @@ impl WorkspaceManager {
         };
         if let Some(inventory) = poll.inventory {
             self.apply_shared_inventory(key, &inventory, removal, window, cx);
+            self.settle_remembered_selection(key, window, cx);
         }
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
         // Active Tab and its Focused Pane's shell. Later launches restore views passively.
@@ -3188,7 +3194,7 @@ impl WorkspaceManager {
             if cx.windows().len() == 1 {
                 crate::status_menu::show_in_dock(cx, false);
             }
-            window.remove_window();
+            self.close_window(window, cx);
             return;
         }
         self.reread_after_modal(window, cx);
@@ -3302,6 +3308,7 @@ impl WorkspaceManager {
         let Some(plan) = self.shared.get(key).map(|shared| shared.plan(inventory)) else {
             return;
         };
+        self.observe_navigation(cx);
         for step in plan {
             match step {
                 SharedWorkspacePlan::Create { facts } => {
@@ -3360,6 +3367,7 @@ impl WorkspaceManager {
         // metadata now. A later poll may carry the same inventory and report no change.
         self.present_shared_metadata(key, inventory, cx);
         self.synchronize_tab_manager_layouts(window, cx);
+        self.record_navigation(cx);
         cx.notify();
     }
 
@@ -3500,6 +3508,7 @@ impl WorkspaceManager {
                 manager.restore_shared_arrangement(&saved, workspace, cx)
             });
         }
+        self.restore_remembered_workspace(key, workspace_id, workspace.id, window, cx);
     }
 
     /// Asks the server for a Workspace it owns and every connected client presents.
@@ -5580,6 +5589,7 @@ mod desktop_requests;
 pub(crate) use desktop_requests::serve as serve_desktop_requests;
 mod direct_servers;
 mod display_order;
+mod remembered;
 mod shared_repositories;
 mod worktrees;
 

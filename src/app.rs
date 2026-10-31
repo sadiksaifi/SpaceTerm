@@ -302,6 +302,12 @@ pub(crate) fn init(
         }
     })
     .detach();
+    // A real quit ends the view a closed window left. Only a closed window keeps one.
+    cx.on_app_quit(|cx| {
+        crate::ui::remembered_view::forget(cx);
+        async {}
+    })
+    .detach();
     crate::ui::settings_window::init(cx);
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::init(cx);
@@ -1030,7 +1036,13 @@ pub(crate) fn open(
         .unwrap_or_default();
     let ssh_setup = host.adapters.ssh_setup.clone();
     let direct_servers = host.adapters.direct_servers.clone();
-    let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
+    // A window reopened while the client kept running presents the view the last one left.
+    let remembered = crate::ui::remembered_view::take_workspace_window(cx);
+    let mut options = workspace_window_options(host, cx);
+    if let Some(placement) = remembered.as_ref().and_then(|view| view.placement) {
+        placement.apply(&mut options, cx);
+    }
+    let result = cx.open_window(options, |window, cx| {
         crate::ui::updates::install_local_updates(Arc::new(NativeLocalUpdates), cx);
         // Both enrollment methods publish into this paired connection registry.
         if let Some(direct) = direct_servers.clone() {
@@ -1060,6 +1072,9 @@ pub(crate) fn open(
         });
         workspace_manager.update(cx, |workspace_manager, cx| {
             workspace_manager.focus(window, cx);
+            if let Some(view) = remembered {
+                workspace_manager.restore_remembered(view, window, cx);
+            }
         });
         let close_manager = workspace_manager.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -2549,7 +2564,9 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn workspace_window_should_open_windowed_at_the_default_size(cx: &mut gpui::TestAppContext) {
+    fn the_first_workspace_window_after_launch_opens_windowed_at_the_default_size(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let host = host_with_settings();
         let window = cx.update(|cx| start_application(cx, &host).unwrap());
         cx.run_until_parked();
@@ -2567,6 +2584,51 @@ mod runtime_tests {
                 .unwrap()
         });
         assert_eq!(initial_size, size(px(900.0), px(580.0)));
+    }
+
+    #[gpui::test]
+    fn a_workspace_window_reopened_after_closing_returns_where_it_was(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = host_with_settings();
+        let window = cx.update(|cx| start_application(cx, &host).unwrap());
+        cx.run_until_parked();
+        let moved = Bounds {
+            origin: gpui::point(px(120.0), px(90.0)),
+            size: size(px(1100.0), px(720.0)),
+        };
+        let bounds = |window: gpui::WindowHandle<WorkspaceManager>,
+                      cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |_, window, _| window.window_bounds())
+                .unwrap()
+        };
+        let close = |window: gpui::WindowHandle<WorkspaceManager>,
+                     cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |manager, window, cx| manager.request_window_close(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+            assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+        };
+        window
+            .update(cx, |_, window, _| window.set_bounds(moved, None))
+            .unwrap();
+        close(window, cx);
+
+        let reopened = cx.update(|cx| open(cx, &host).unwrap());
+        cx.run_until_parked();
+        assert_eq!(bounds(reopened, cx), WindowBounds::Windowed(moved));
+
+        // A real quit drops the view, so the next launch opens at the default size again.
+        close(reopened, cx);
+        cx.update(crate::ui::remembered_view::forget);
+        let relaunched = cx.update(|cx| open(cx, &host).unwrap());
+        cx.run_until_parked();
+        assert_eq!(
+            bounds(relaunched, cx).get_bounds().size,
+            size(px(900.0), px(580.0))
+        );
     }
 
     #[gpui::test]
@@ -2760,7 +2822,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn a_new_workspace_window_opens_its_sidebar_in_the_default_state(
+    fn the_first_workspace_window_after_launch_opens_its_sidebar_in_the_default_state(
         cx: &mut gpui::TestAppContext,
     ) {
         let mut document = crate::settings::SettingsDocument::default();
@@ -2800,13 +2862,31 @@ mod runtime_tests {
                 .run()
                 .unwrap();
         });
-        let reopened = cx.update(|cx| open(cx, &host).unwrap());
         cx.run_until_parked();
-        assert!(sidebar_visible(reopened, cx));
         assert!(
             !sidebar_visible(workspace, cx),
             "an open window keeps its sidebar when the default changes"
         );
+        let close = |workspace: gpui::WindowHandle<WorkspaceManager>,
+                     cx: &mut gpui::TestAppContext| {
+            workspace
+                .update(cx, |manager, window, cx| manager.request_window_close(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+
+        // Reopening while the client keeps running presents the sidebar the window left.
+        close(workspace, cx);
+        let reopened = cx.update(|cx| open(cx, &host).unwrap());
+        cx.run_until_parked();
+        assert!(!sidebar_visible(reopened, cx));
+
+        // After a real quit, the next launch's window follows Settings again.
+        close(reopened, cx);
+        cx.update(crate::ui::remembered_view::forget);
+        let relaunched = cx.update(|cx| open(cx, &host).unwrap());
+        cx.run_until_parked();
+        assert!(sidebar_visible(relaunched, cx));
     }
 
     #[gpui::test]

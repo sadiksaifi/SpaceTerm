@@ -1627,6 +1627,12 @@ impl WorkspaceSidebar {
     pub(super) fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
     }
+    /// Gives the sidebar the keyboard, as a restored window does when the sidebar held it.
+    pub(super) fn take_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout.visible {
+            self.focus.focus(window, cx);
+        }
+    }
     /// Whether the sidebar has focus that the keyboard brought to it.
     pub(super) fn has_visible_focus(&self, window: &Window) -> bool {
         self.focus_visible && self.is_focused(window)
