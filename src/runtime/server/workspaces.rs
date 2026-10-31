@@ -10,20 +10,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 #[cfg(test)]
-#[path = "shared/close_control_tests.rs"]
+#[path = "workspaces/close_control_tests.rs"]
 mod close_control_tests;
 #[cfg(test)]
-#[path = "shared/create_control_tests.rs"]
+#[path = "workspaces/create_control_tests.rs"]
 mod create_control_tests;
 mod edits;
 mod journal;
 mod publication;
 mod runs;
 #[cfg(test)]
-#[path = "shared/session_end_tests.rs"]
+#[path = "workspaces/session_end_tests.rs"]
 mod session_end_tests;
 #[cfg(test)]
-#[path = "shared/shell_exit_tests.rs"]
+#[path = "workspaces/shell_exit_tests.rs"]
 mod shell_exit_tests;
 mod worktrees;
 use journal::{Journal, Retention, Revision};
@@ -60,13 +60,13 @@ impl Selection {
     }
 }
 
-pub struct SharedWorkspaceHost {
+pub struct WorkspaceHost {
     writes: worktrees::Writes,
-    prototype: DevelopmentPaneHost,
+    prototype: ServerPaneHost,
     directories: super::directories::DirectoryOperations,
     repositories: super::repositories::ServerRepositories,
     state: State,
-    panes: BTreeMap<Id, DevelopmentPaneHost>,
+    panes: BTreeMap<Id, ServerPaneHost>,
     /// Distinct observer clients of each running Terminal Session, never retained.
     observers: BTreeMap<Id, super::Observers>,
     /// Pane identities introduced in this server run, independent of their control grants.
@@ -114,16 +114,16 @@ enum Answer {
     Pending,
 }
 
-impl SharedWorkspaceHost {
+impl WorkspaceHost {
     /// `sync` is the server's one sync worker, shared with its connections.
     pub fn local(sync: SyncWorker) -> Result<Self, ServerError> {
-        Ok(Self::with_sync(DevelopmentPaneHost::local()?, sync))
+        Ok(Self::with_sync(ServerPaneHost::local()?, sync))
     }
 
     /// Compose an account service whose new terminals follow the current login agent.
     pub fn account_service(sync: SyncWorker) -> Result<Self, ServerError> {
         Ok(Self::with_sync(
-            DevelopmentPaneHost::local_with_pty_factory(crate::platform::service_pty_factory())?,
+            ServerPaneHost::local_with_pty_factory(crate::platform::service_pty_factory())?,
             sync,
         ))
     }
@@ -138,11 +138,11 @@ impl SharedWorkspaceHost {
     }
     /// A host with a sync worker of its own.
     #[cfg(test)]
-    pub(super) fn new(prototype: DevelopmentPaneHost) -> Self {
+    pub(super) fn new(prototype: ServerPaneHost) -> Self {
         let (sync, _) = SyncWorker::spawn().expect("sync worker");
         Self::with_sync(prototype, sync)
     }
-    fn with_sync(prototype: DevelopmentPaneHost, sync: SyncWorker) -> Self {
+    fn with_sync(prototype: ServerPaneHost, sync: SyncWorker) -> Self {
         let mut state = State::empty();
         state.begin_boot(prototype.boot);
         let repositories = super::repositories::ServerRepositories::new(prototype.boot);
@@ -452,7 +452,7 @@ impl SharedWorkspaceHost {
         });
         inventory
     }
-    fn pane_host(&mut self, id: Id) -> Result<&mut DevelopmentPaneHost, Refusal> {
+    fn pane_host(&mut self, id: Id) -> Result<&mut ServerPaneHost, Refusal> {
         let (w, t, p) = self.state.pane(id).ok_or(Refusal::Missing)?;
         if !self.panes.contains_key(&id) {
             let identity = PaneIdentity {
@@ -462,7 +462,7 @@ impl SharedWorkspaceHost {
                 starting_directory: p.starting_directory.clone(),
                 confirmed_directory: p.confirmed_directory.clone(),
             };
-            let host = DevelopmentPaneHost {
+            let host = ServerPaneHost {
                 boot: self.prototype.boot,
                 pane: None,
                 factory: self.prototype.factory.clone(),
@@ -1046,7 +1046,7 @@ impl SharedWorkspaceHost {
         }
     }
 }
-impl SharedWorkspaceHost {
+impl WorkspaceHost {
     fn retain_in(&mut self, retention: Box<dyn Retention>) -> Result<(), ServerError> {
         let record = retention.read()?;
         self.restore_organization(record.as_ref());
@@ -1120,11 +1120,11 @@ impl SharedWorkspaceHost {
         }
     }
 }
-impl HostCommands for SharedWorkspaceHost {
+impl HostCommands for WorkspaceHost {
     fn sessions(&self) -> Vec<[u8; 32]> {
         self.panes
             .values()
-            .filter_map(DevelopmentPaneHost::live_session)
+            .filter_map(ServerPaneHost::live_session)
             .collect()
     }
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
@@ -1470,23 +1470,23 @@ impl HostCommands for SharedWorkspaceHost {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{host, screen, shared_inventory, size};
+    use super::super::tests::{host, screen, size, workspace_inventory};
     use super::*;
     use spaceterm_server::attachments::Attachment;
 
-    fn retained(host: &SharedWorkspaceHost) -> Organization {
+    fn retained(host: &WorkspaceHost) -> Organization {
         serde_json::from_slice(&serde_json::to_vec(&host.state.envelope()).unwrap()).unwrap()
     }
 
-    fn journaled() -> (SharedWorkspaceHost, Arc<journal::memory::Memory>) {
+    fn journaled() -> (WorkspaceHost, Arc<journal::memory::Memory>) {
         let memory = Arc::new(journal::memory::Memory::default());
-        let mut host = SharedWorkspaceHost::new(host());
+        let mut host = WorkspaceHost::new(host());
         host.retain_in(Box::new(journal::memory::Shared(Arc::clone(&memory))))
             .unwrap();
         (host, memory)
     }
 
-    fn rename(host: &SharedWorkspaceHost, name: &str) -> Mutation {
+    fn rename(host: &WorkspaceHost, name: &str) -> Mutation {
         let workspace = &host.state.inventory.workspaces[0];
         Mutation::RenameWorkspace {
             workspace: workspace.id,
@@ -1598,7 +1598,7 @@ mod tests {
         host.shutdown().unwrap();
     }
 
-    fn edit(host: &mut SharedWorkspaceHost, device: Id, sequence: u64, name: &str) -> Reply {
+    fn edit(host: &mut WorkspaceHost, device: Id, sequence: u64, name: &str) -> Reply {
         let mutation = rename(host, name);
         host.request(device, device, Request::Mutate { sequence, mutation })
     }
@@ -1668,7 +1668,7 @@ mod tests {
         assert!(retained_outcome(&memory, device, 1), "the write was lost");
 
         let restart = || {
-            let mut host = SharedWorkspaceHost::new(host());
+            let mut host = WorkspaceHost::new(host());
             host.retain_in(Box::new(journal::memory::Shared(Arc::clone(&memory))))
                 .unwrap();
             host
@@ -1730,7 +1730,7 @@ mod tests {
     #[test]
     fn presentation_changes_are_pushed_at_most_once_per_interval() {
         use spaceterm_server::protocol::ServerMessage;
-        let mut host = SharedWorkspaceHost::new(host());
+        let mut host = WorkspaceHost::new(host());
         host.prepare_initial_organization().unwrap();
         let outbox = Outbox::new(Arc::new(|| {}));
         // A subscriber without Git facts, so nothing else is due.
@@ -1763,9 +1763,9 @@ mod tests {
     fn a_shell_that_exits_with_another_keeps_its_final_screen_for_its_channel() {
         use super::super::publish::Observed;
         use super::super::tests::command;
-        let mut host = SharedWorkspaceHost::new(host());
+        let mut host = WorkspaceHost::new(host());
         host.prepare_initial_organization().unwrap();
-        let workspace = shared_inventory(&mut host).workspaces[0].id;
+        let workspace = workspace_inventory(&mut host).workspaces[0].id;
         assert!(matches!(
             host.request(
                 [1; 32],
@@ -1781,7 +1781,7 @@ mod tests {
             ),
             Reply::Outcome(_)
         ));
-        let panes: Vec<_> = shared_inventory(&mut host).workspaces[0]
+        let panes: Vec<_> = workspace_inventory(&mut host).workspaces[0]
             .tabs
             .iter()
             .map(|tab| tab.root_pane)
@@ -1872,7 +1872,7 @@ mod tests {
     fn a_deleted_session_ends_only_after_its_deletion_is_retained() {
         use spaceterm_server::hierarchy::Outcome;
         let (mut host, _memory) = journaled();
-        let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+        let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
         let Reply::Attached { lease } = host.request(
             [1; 32],
             [1; 32],
@@ -1885,7 +1885,7 @@ mod tests {
         ) else {
             panic!("explicit first use");
         };
-        let confirmation = shared_inventory(&mut host).close.unwrap();
+        let confirmation = workspace_inventory(&mut host).close.unwrap();
         let Ok(Answer::Outcome { outcome, revision }) =
             host.mutate([2; 32], 1, Mutation::EndAllSessions { confirmation })
         else {
@@ -1911,7 +1911,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         let (mut host, memory) = journaled();
         let device = [1; 32];
-        let original = shared_inventory(&mut host).workspaces[0].name.clone();
+        let original = workspace_inventory(&mut host).workspaces[0].name.clone();
         let mutation = rename(&host, "Lost");
         memory.fail.store(true, Ordering::SeqCst);
         assert!(matches!(
@@ -1930,20 +1930,20 @@ mod tests {
             Reply::Refused(Refusal::StorageUnavailable)
         ));
         memory.fail.store(false, Ordering::SeqCst);
-        assert_eq!(shared_inventory(&mut host).workspaces[0].name, original);
+        assert_eq!(workspace_inventory(&mut host).workspaces[0].name, original);
         assert!(matches!(
             host.request(device, device, Request::Mutate { sequence: 1, mutation }),
             Reply::Outcome(record) if matches!(record.outcome, spaceterm_server::hierarchy::Outcome::Accepted { .. })
         ));
-        assert_eq!(shared_inventory(&mut host).workspaces[0].name, "Lost");
+        assert_eq!(workspace_inventory(&mut host).workspaces[0].name, "Lost");
         host.shutdown().unwrap();
     }
 
     #[test]
     fn same_run_organization_recovery_keeps_a_fresh_pane_waiting_for_first_use() {
-        let mut host = SharedWorkspaceHost::new(host());
+        let mut host = WorkspaceHost::new(host());
         host.prepare_initial_organization().unwrap();
-        let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+        let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
         let record = retained(&host);
         host.restore_organization(Some(&record));
         assert!(matches!(
@@ -1964,7 +1964,7 @@ mod tests {
             }
         ));
         assert!(
-            shared_inventory(&mut host)
+            workspace_inventory(&mut host)
                 .close
                 .unwrap()
                 .sessions
@@ -1979,10 +1979,10 @@ mod tests {
     fn end_all_sessions_clears_runtime_and_preserves_control_without_incidental_restart() {
         use spaceterm_server::hierarchy::{Mutation, Outcome};
         use spaceterm_server::pane::control::Controller;
-        let mut host = SharedWorkspaceHost::new(host());
+        let mut host = WorkspaceHost::new(host());
         host.prepare_initial_organization().unwrap();
         host.admitted([1; 32], "Studio".into());
-        let original = shared_inventory(&mut host);
+        let original = workspace_inventory(&mut host);
         let pane = original.workspaces[0].tabs[0].root_pane;
         let select = |explicit| Request::SelectPane {
             pane,
@@ -1995,12 +1995,12 @@ mod tests {
         };
         host.disconnected([1; 32]);
         let mutation = Mutation::EndAllSessions {
-            confirmation: shared_inventory(&mut host).close.unwrap(),
+            confirmation: workspace_inventory(&mut host).close.unwrap(),
         };
         assert!(matches!(host.request([2; 32], [2; 32], Request::Mutate {
             sequence: 1, mutation: mutation.clone(),
         }), Reply::Outcome(result) if result.outcome == Outcome::Accepted { target: lease.server }));
-        let ended = shared_inventory(&mut host);
+        let ended = workspace_inventory(&mut host);
         assert!(
             ended
                 .close
@@ -2067,7 +2067,7 @@ mod tests {
             Reply::Outcome(_)
         ));
         assert_eq!(
-            shared_inventory(&mut host).close.unwrap().sessions[0].session,
+            workspace_inventory(&mut host).close.unwrap().sessions[0].session,
             Some(replacement.session)
         );
         host.shutdown().unwrap();
@@ -2075,12 +2075,12 @@ mod tests {
 
     #[test]
     fn retained_empty_organization_is_prepared_even_without_a_previous_mutation() {
-        let original = SharedWorkspaceHost::new(host());
+        let original = WorkspaceHost::new(host());
         let record = retained(&original);
-        let mut restored = SharedWorkspaceHost::new(host());
+        let mut restored = WorkspaceHost::new(host());
         restored.restore_organization(Some(&record));
         restored.prepare_initial_organization().unwrap();
-        assert!(shared_inventory(&mut restored).workspaces.is_empty());
+        assert!(workspace_inventory(&mut restored).workspaces.is_empty());
         restored.shutdown().unwrap();
     }
 
@@ -2088,9 +2088,9 @@ mod tests {
     fn clients_learn_who_controls_a_pane_as_control_moves_and_ends() {
         use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
         use spaceterm_server::pane::control::Controller;
-        let mut host = SharedWorkspaceHost::new(host());
+        let mut host = WorkspaceHost::new(host());
         host.prepare_initial_organization().unwrap();
-        let inventory = shared_inventory(&mut host);
+        let inventory = workspace_inventory(&mut host);
         let (workspace, tab) = (&inventory.workspaces[0], &inventory.workspaces[0].tabs[0]);
         let pane = tab.root_pane;
         host.admitted([1; 32], "Studio".into());
@@ -2101,7 +2101,7 @@ mod tests {
             size: size(),
             style: None,
         };
-        let observe = |host: &mut SharedWorkspaceHost, client: u8, pane| match host.request(
+        let observe = |host: &mut WorkspaceHost, client: u8, pane| match host.request(
             [client; 32],
             [client; 32],
             select(pane, false),
@@ -2188,9 +2188,9 @@ mod tests {
 
     #[test]
     fn retained_attachments_observe_dormant_restart_then_resume_only_running_owned_work() {
-        let mut original = SharedWorkspaceHost::new(host());
+        let mut original = WorkspaceHost::new(host());
         original.prepare_initial_organization().unwrap();
-        let initial = shared_inventory(&mut original);
+        let initial = workspace_inventory(&mut original);
         let workspace = &initial.workspaces[0];
         let pane = workspace.tabs[0].root_pane;
         let attachment = Attachment {
@@ -2209,11 +2209,11 @@ mod tests {
         };
         original.shutdown().unwrap();
         let record = retained(&original);
-        let mut restored = SharedWorkspaceHost::new(host());
+        let mut restored = WorkspaceHost::new(host());
         restored.restore_organization(Some(&record));
         restored.prepare_initial_organization().unwrap();
         assert_eq!(
-            shared_inventory(&mut restored).workspaces,
+            workspace_inventory(&mut restored).workspaces,
             initial.workspaces
         );
         assert!(matches!(
@@ -2225,7 +2225,7 @@ mod tests {
             }
         ));
         assert!(
-            shared_inventory(&mut restored)
+            workspace_inventory(&mut restored)
                 .close
                 .unwrap()
                 .sessions
@@ -2263,7 +2263,7 @@ mod tests {
             Reply::Takeover { .. }
         ));
         assert_eq!(
-            shared_inventory(&mut restored).close.unwrap().sessions[0].session,
+            workspace_inventory(&mut restored).close.unwrap().sessions[0].session,
             Some(started.session)
         );
         restored.shutdown().unwrap();

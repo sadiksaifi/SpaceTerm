@@ -17,8 +17,8 @@ use crate::direct_connections::{
     DirectConnections, DirectRouteId, DirectRouteStatus, RefusalReason,
 };
 use crate::ui::ServerTarget;
-use crate::ui::shared_workspaces::{
-    DirectRoutePanes, DirectServer, SharedPaneOpener, SharedPaneSessions, UnavailableEdits,
+use crate::ui::workspaces::{
+    DirectRoutePanes, DirectServer, UnavailableEdits, WorkspacePaneOpener, WorkspacePaneSessions,
 };
 
 /// One presented paired route: its binding, its Pane opener and the connection both follow.
@@ -82,7 +82,7 @@ impl WorkspaceManager {
             return;
         };
         // One device presents its servers in one Workspace Window.
-        if let Some(existing) = crate::ui::shared_workspaces::presenting_window(cx)
+        if let Some(existing) = crate::ui::workspaces::presenting_window(cx)
             && window.window_handle().window_id() != existing.window_id()
         {
             return;
@@ -93,8 +93,8 @@ impl WorkspaceManager {
             |route| self.direct_route_presented(route),
             |route| self.retained_revision(route),
         );
-        for key in self.shared.keys() {
-            let Some(ServerOrigin::Direct(direct)) = self.shared.origin(key) else {
+        for key in self.binding.keys() {
+            let Some(ServerOrigin::Direct(direct)) = self.binding.origin(key) else {
                 continue;
             };
             let route = direct.route;
@@ -107,11 +107,11 @@ impl WorkspaceManager {
                     None => true,
                     Some(status) => status == DirectRouteStatus::Refused(RefusalReason::Revoked),
                 };
-            if let Some(shared) = self.shared.get_mut(key) {
+            if let Some(binding) = self.binding.get_mut(key) {
                 if removed {
-                    shared.discard_retained_copy();
+                    binding.discard_retained_copy();
                 }
-                let revision = shared.retained_copy().map(|copy| copy.revision);
+                let revision = binding.retained_copy().map(|copy| copy.revision);
                 self.direct_routes.1.read.insert(route, revision);
             }
             self.withdraw_server_workspaces(key, window, cx);
@@ -165,9 +165,9 @@ impl WorkspaceManager {
     fn retained_revision(&self, route: &DirectRouteId) -> Option<Option<u64>> {
         if let Some(followed) = self.direct_routes.0.get(route) {
             return Some(
-                self.shared
+                self.binding
                     .get(followed.key)
-                    .and_then(|shared| shared.retained_copy())
+                    .and_then(|binding| binding.retained_copy())
                     .map(|copy| copy.revision),
             );
         }
@@ -189,19 +189,19 @@ impl WorkspaceManager {
         let Some(key) = self.present_direct_route(direct, window, cx) else {
             return;
         };
-        let Some(shared) = self.shared.get_mut(key) else {
+        let Some(binding) = self.binding.get_mut(key) else {
             return;
         };
-        shared.identify(Rc::new(storage.clone()));
-        shared.retain_inventory_copies();
-        shared.retain_client_views(storage);
-        let read = shared.client_views_read();
+        binding.identify(Rc::new(storage.clone()));
+        binding.retain_inventory_copies();
+        binding.retain_client_views(storage);
+        let read = binding.client_views_read();
         self.follow_direct_connection(&route, server, cx);
         cx.spawn_in(window, async move |manager, cx| {
             read.await;
             let _ = manager.update_in(cx, |manager, window, cx| {
                 manager.present_retained_copy(&route);
-                manager.sync_shared_workspaces(key, window, cx);
+                manager.sync_workspaces(key, window, cx);
             });
         })
         .detach();
@@ -216,8 +216,8 @@ impl WorkspaceManager {
     ) -> Option<ServerKey> {
         let route = direct.route;
         let panes = Rc::new(DirectRoutePanes::new(direct.clone()));
-        let sessions = SharedPaneSessions::with_opener(
-            Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
+        let sessions = WorkspacePaneSessions::with_opener(
+            Rc::clone(&panes) as Rc<dyn WorkspacePaneOpener>,
             &self.pane_construction,
         );
         let unavailable = crate::ui::server_worktrees::disconnected_transport(route, cx);
@@ -247,9 +247,9 @@ impl WorkspaceManager {
         let Some(followed) = self.direct_routes.0.get(route) else {
             return;
         };
-        if let Some(shared) = self.shared.get_mut(followed.key) {
-            shared.present_retained_copy();
-            followed.panes.retain_titles(shared.unavailable_titles());
+        if let Some(binding) = self.binding.get_mut(followed.key) {
+            binding.present_retained_copy();
+            followed.panes.retain_titles(binding.unavailable_titles());
         }
     }
 
@@ -279,7 +279,7 @@ impl WorkspaceManager {
                 let client =
                     crate::ui::server_worktrees::Client::for_direct(*route, server.clone(), cx);
                 let opener =
-                    SharedPaneSessions::remote_opener(server, client.controls.clone(), direct);
+                    WorkspacePaneSessions::remote_opener(server, client.controls.clone(), direct);
                 Some((client.transport(), opener))
             }
             _ => {
@@ -297,25 +297,25 @@ impl WorkspaceManager {
         &mut self,
         route: &DirectRouteId,
         connection: Option<(
-            Rc<dyn crate::ui::shared_workspaces::SharedWorkspaceEdits>,
-            Rc<dyn SharedPaneOpener>,
+            Rc<dyn crate::ui::workspaces::WorkspaceEdits>,
+            Rc<dyn WorkspacePaneOpener>,
         )>,
     ) {
         let Some(followed) = self.direct_routes.0.get(route) else {
             return;
         };
-        let Some(shared) = self.shared.get_mut(followed.key) else {
+        let Some(binding) = self.binding.get_mut(followed.key) else {
             return;
         };
         match connection {
             Some((edits, opener)) => {
                 followed.panes.follow(Some(opener));
-                shared.replace_transport(edits);
+                binding.replace_transport(edits);
             }
             None => {
-                followed.panes.retain_titles(shared.unavailable_titles());
+                followed.panes.retain_titles(binding.unavailable_titles());
                 followed.panes.follow(None);
-                shared.replace_transport(Rc::new((followed.unavailable)()));
+                binding.replace_transport(Rc::new((followed.unavailable)()));
             }
         }
     }
@@ -323,15 +323,15 @@ impl WorkspaceManager {
     /// Whether this window's presentation of `route` is connected, so it can take shared edits.
     pub(super) fn direct_route_connected(&self, route: &DirectRouteId) -> bool {
         self.server_key(&ServerTarget::Direct(*route))
-            .and_then(|key| self.shared.get(key))
-            .is_some_and(crate::ui::shared_workspaces::SharedWorkspaces::connected)
+            .and_then(|key| self.binding.get(key))
+            .is_some_and(crate::ui::workspaces::Workspaces::connected)
     }
 
     /// The direct route `route`'s presented binding, if any.
     pub(super) fn direct_route_presented(&self, route: &DirectRouteId) -> bool {
-        self.shared.keys().into_iter().any(|key| {
+        self.binding.keys().into_iter().any(|key| {
             matches!(
-                self.shared.origin(key),
+                self.binding.origin(key),
                 Some(ServerOrigin::Direct(bound)) if bound.route == *route
             )
         })
@@ -347,22 +347,22 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::ui::shared_workspaces::{SharedRefusalReason, SharedSubmission};
+        use crate::ui::workspaces::{WorkspaceRefusalReason, WorkspaceSubmission};
 
-        let Some(shared) = self
+        let Some(binding) = self
             .server_key(target)
-            .and_then(|key| self.shared.get_mut(key))
+            .and_then(|key| self.binding.get_mut(key))
         else {
-            WorkspaceManager::show_shared_refusal(
+            WorkspaceManager::show_refusal(
                 "create a Workspace",
-                SharedRefusalReason::Offline,
+                WorkspaceRefusalReason::Offline,
                 window,
                 cx,
             );
             return;
         };
-        if let SharedSubmission::Refused(reason) = shared.create_workspace(name, None) {
-            WorkspaceManager::show_shared_refusal("create a Workspace", reason, window, cx);
+        if let WorkspaceSubmission::Refused(reason) = binding.create_workspace(name, None) {
+            WorkspaceManager::show_refusal("create a Workspace", reason, window, cx);
         }
         cx.notify();
     }
@@ -412,10 +412,10 @@ impl WorkspaceManager {
 
     /// The binding presenting `target`'s server, if this window presents it.
     pub(super) fn server_key(&self, target: &ServerTarget) -> Option<ServerKey> {
-        self.shared
+        self.binding
             .keys()
             .into_iter()
-            .find(|key| match (self.shared.origin(*key), target) {
+            .find(|key| match (self.binding.origin(*key), target) {
                 (Some(ServerOrigin::Local), ServerTarget::Local) => true,
                 (Some(ServerOrigin::Direct(bound)), ServerTarget::Direct(route)) => {
                     bound.route == *route

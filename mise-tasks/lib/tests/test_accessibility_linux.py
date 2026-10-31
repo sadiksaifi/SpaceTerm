@@ -46,8 +46,8 @@ class SourceAccessibilitySessionTests(unittest.TestCase):
             client.write_text(
                 "import os, pathlib, socket\n"
                 "assert os.environ['SPACETERM_DEVELOPMENT_FOREGROUND'] == '1'\n"
-                "assert 'SPACETERM_SERVER_ARCHIVE' not in os.environ\n"
-                "assert 'SPACETERM_SERVER_SIGNATURE' not in os.environ\n"
+                "assert 'SPACETERM_CLI_ARCHIVE' not in os.environ\n"
+                "assert 'SPACETERM_CLI_SIGNATURE' not in os.environ\n"
                 "assert 'PYTHONPATH' not in os.environ\n"
                 "connection = socket.socket(socket.AF_UNIX)\n"
                 "connection.connect(os.environ['SPACETERM_DEVELOPMENT_OWNER_SOCKET'])\n"
@@ -65,8 +65,8 @@ class SourceAccessibilitySessionTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "PYTHONPATH": str(LIBRARY),
-                    "SPACETERM_SERVER_ARCHIVE": "unusable distribution artifact",
-                    "SPACETERM_SERVER_SIGNATURE": "unusable signature",
+                    "SPACETERM_CLI_ARCHIVE": "unusable distribution artifact",
+                    "SPACETERM_CLI_SIGNATURE": "unusable signature",
                 },
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -696,8 +696,8 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
                 "import json, os, sys\n"
                 "assert sys.argv[sys.argv.index('--bin') + 1] == 'spaceterm'\n"
                 "assert '--no-default-features' in sys.argv\n"
-                "assert 'SPACETERM_SERVER_ARCHIVE' not in os.environ\n"
-                "assert 'SPACETERM_SERVER_SIGNATURE' not in os.environ\n"
+                "assert 'SPACETERM_CLI_ARCHIVE' not in os.environ\n"
+                "assert 'SPACETERM_CLI_SIGNATURE' not in os.environ\n"
                 "print(json.dumps({'reason': 'compiler-artifact', "
                 "'target': {'name': 'spaceterm'}, "
                 f"'executable': {str(server)!r}}}))\n"
@@ -724,8 +724,8 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
                     os.environ,
                     {
                         "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                        "SPACETERM_SERVER_ARCHIVE": "unused candidate",
-                        "SPACETERM_SERVER_SIGNATURE": "unused signature",
+                        "SPACETERM_CLI_ARCHIVE": "unused candidate",
+                        "SPACETERM_CLI_SIGNATURE": "unused signature",
                     },
                 ),
                 patch("spaceterm_tasks.accessibility_linux.shutil.which", return_value="tool"),

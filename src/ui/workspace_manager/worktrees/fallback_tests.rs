@@ -35,8 +35,8 @@ fn sync(harness: &Harness, inventory: Inventory, cx: &mut VisualTestContext) {
     harness.edits.set_inventory(inventory);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            let owner = manager.shared.owner(harness.shared).unwrap();
-            manager.sync_shared_workspaces(owner, window, cx);
+            let owner = manager.binding.owner(harness.binding).unwrap();
+            manager.sync_workspaces(owner, window, cx);
         });
     });
     redraw(cx);
@@ -46,9 +46,9 @@ fn request(harness: &Harness, cx: &mut VisualTestContext) {
     let (_, feature) = worktree_ids(harness, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.request_shared_close(
+            manager.request_server_close(
                 CloseTarget::Worktree {
-                    workspace_id: harness.shared,
+                    workspace_id: harness.binding,
                     worktree_id: feature,
                 },
                 window,
@@ -100,7 +100,7 @@ fn worktree_fallback_acceptance_reviews_current_exact_targets_without_opening_th
     request(&harness, cx);
     assert_eq!(harness.edits.submitted(), [expected_open(MAIN_ROOT)]);
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
+        cx.debug_bounds("modal-action-close-confirm")
             .is_none()
     );
 
@@ -128,11 +128,11 @@ fn worktree_fallback_acceptance_reviews_current_exact_targets_without_opening_th
     let active_server_tab = harness.manager.read_with(cx, |manager, cx| {
         let tabs = manager
             .workspaces
-            .workspace(harness.shared)
+            .workspace(harness.binding)
             .unwrap()
             .payload()
             .read(cx);
-        tabs.shared_server_tab(tabs.active_terminal_identity(cx).0)
+        tabs.server_tab(tabs.active_terminal_identity(cx).0)
     });
     assert_eq!(
         active_server_tab,
@@ -140,10 +140,10 @@ fn worktree_fallback_acceptance_reviews_current_exact_targets_without_opening_th
         "fallback membership does not activate it"
     );
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
+        cx.debug_bounds("modal-action-close-confirm")
             .is_some()
     );
-    click("modal-action-shared-close-confirm", cx);
+    click("modal-action-close-confirm", cx);
     let target = ServerCloseTarget::Worktree {
         workspace: WORKSPACE,
         tab: FEATURE_TAB,
@@ -172,7 +172,7 @@ fn worktree_fallback_failure_keeps_every_existing_tab(cx: &mut TestAppContext) {
     sync(&harness, initial, cx);
     assert_eq!(harness.edits.submitted(), [expected_open(MAIN_ROOT)]);
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
+        cx.debug_bounds("modal-action-close-confirm")
             .is_none()
     );
     assert!(
@@ -245,14 +245,14 @@ fn worktree_fallback_requires_accepted_membership_even_when_a_tab_is_published(
     let published = accepted_inventory(initial);
     sync(&harness, published.clone(), cx);
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
+        cx.debug_bounds("modal-action-close-confirm")
             .is_none()
     );
     assert_eq!(harness.edits.submitted(), [expected_open(MAIN_ROOT)]);
     harness.edits.answer(Outcome::Accepted { target: [99; 32] });
     sync(&harness, published, cx);
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
+        cx.debug_bounds("modal-action-close-confirm")
             .is_none()
     );
     assert_eq!(harness.edits.submitted(), [expected_open(MAIN_ROOT)]);
@@ -283,7 +283,7 @@ fn worktree_fallback_with_no_usable_destination_closes_nothing(cx: &mut TestAppC
     request(&harness, cx);
     assert!(harness.edits.submitted().is_empty());
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
+        cx.debug_bounds("modal-action-close-confirm")
             .is_none()
     );
     assert!(
@@ -304,7 +304,7 @@ fn worktree_fallback_never_closes_a_reassigned_original_anchor(cx: &mut TestAppC
     sync(&harness, accepted, cx);
     assert_eq!(harness.edits.submitted(), [expected_open(MAIN_ROOT)]);
     assert!(
-        cx.debug_bounds("modal-action-shared-close-confirm")
+        cx.debug_bounds("modal-action-close-confirm")
             .is_none()
     );
 }

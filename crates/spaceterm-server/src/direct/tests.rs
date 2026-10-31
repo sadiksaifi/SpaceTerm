@@ -346,7 +346,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn exposure_defaults_off_and_retains_only_the_explicit_listener_across_restart() {
+fn network_access_defaults_off_and_retains_only_the_explicit_listener_across_restart() {
     let fixture = Fixture::new();
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
@@ -1361,7 +1361,8 @@ fn a_valid_tls_pin_does_not_replace_validation_of_the_servers_public_claim_proof
 }
 
 #[test]
-fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_after_reenable() {
+fn a_retired_network_access_generation_refuses_inflight_proof_and_late_registration_after_reenable()
+{
     let fixture = Fixture::new();
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -1429,7 +1430,7 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
     assert_eq!(
         state.authorized(&paired),
         Ok(()),
-        "the pairing remains valid under new explicit exposure"
+        "the pairing remains valid under new explicit Network Access"
     );
 }
 
@@ -2174,7 +2175,7 @@ fn unknown_current_generation_requires_account_cancellation_to_fence_delayed_pre
 }
 
 #[test]
-fn configured_listener_survives_off_on_and_can_be_selected_before_exposure() {
+fn configured_listener_survives_off_on_and_can_be_selected_before_network_access() {
     let mut fixture = Fixture::new();
     assert!(matches!(
         fixture.management(Management::SetPolicy {
@@ -3056,7 +3057,7 @@ mod quic_connections {
     /// listener back instead of binding a socket the old connection still holds, and that
     /// connection still receives its goodbye.
     #[test]
-    fn toggling_exposure_with_a_connected_client_keeps_the_listener() {
+    fn toggling_network_access_with_a_connected_client_keeps_the_listener() {
         let fixture = Fixture::new();
         fixture.enable();
         let credential = DeviceCredential::generate().unwrap();

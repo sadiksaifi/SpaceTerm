@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn a_theme_family_installs_without_an_open_preview() {
+    fn a_theme_family_installs_while_the_preview_is_open() {
         let mut preview = preview();
         let family =
             r##"{"name":"Sample","themes":[{"name":"Sample","appearance":"light","style":{}}]}"##;

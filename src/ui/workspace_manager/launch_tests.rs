@@ -9,13 +9,13 @@ use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
 
 use super::*;
 use crate::server_connection::ServerError;
-use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 use crate::ui::workspace_manager::launch::{
     LAUNCH_AUTHORIZE_SELECTOR, LAUNCH_RETRY_SELECTOR, LAUNCH_SELECTOR, LAUNCH_START_SELECTOR,
-    LaunchOutcome, SharedServerConnection, SharedServerConnector,
+    LaunchOutcome, WorkspaceServerConnection, WorkspaceServerConnector,
 };
 use crate::ui::workspace_manager::launch_testing::ScriptedLaunch;
+use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
 const WORKSPACE: [u8; 32] = [31; 32];
 const TAB: [u8; 32] = [32; 32];
@@ -62,16 +62,16 @@ struct ScriptedConnector {
     panes: Rc<ScriptedPanes>,
 }
 
-impl SharedServerConnector for ScriptedConnector {
+impl WorkspaceServerConnector for ScriptedConnector {
     fn connect(
         &self,
         _: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         _: &mut App,
-    ) -> Option<SharedServerConnection> {
-        Some(SharedServerConnection {
-            edits: SharedEditSource::new(Rc::clone(&self.edits) as Rc<_>),
-            sessions: SharedPaneSessions::with_opener(Rc::clone(&self.panes) as Rc<_>, panes),
+    ) -> Option<WorkspaceServerConnection> {
+        Some(WorkspaceServerConnection {
+            edits: WorkspaceEditSource::new(Rc::clone(&self.edits) as Rc<_>),
+            sessions: WorkspacePaneSessions::with_opener(Rc::clone(&self.panes) as Rc<_>, panes),
             retained: None,
         })
     }
@@ -85,12 +85,12 @@ struct LaunchHarness {
 }
 
 impl LaunchHarness {
-    fn shared_rows(&self, cx: &mut VisualTestContext) -> usize {
+    fn rows(&self, cx: &mut VisualTestContext) -> usize {
         self.manager.read_with(cx, |manager, _| {
             manager
                 .workspaces
                 .iter()
-                .filter(|workspace| manager.is_shared_workspace(workspace.id()))
+                .filter(|workspace| manager.has_workspace(workspace.id()))
                 .count()
         })
     }
@@ -103,7 +103,7 @@ impl LaunchHarness {
     fn authoritative_inventory(&self, cx: &mut VisualTestContext) -> Inventory {
         self.manager.read_with(cx, |manager, _| {
             manager
-                .shared
+                .binding
                 .local()
                 .expect("the local server is presented")
                 .latest_inventory()
@@ -230,7 +230,7 @@ fn launch_harness_restoring(
 fn sync(harness: &LaunchHarness, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+            manager.sync_workspaces(ServerKey::LOCAL, window, cx)
         });
     });
     cx.run_until_parked();
@@ -241,15 +241,13 @@ fn ready() -> Result<LaunchOutcome, ServerError> {
 }
 
 #[gpui::test]
-fn launch_presents_the_server_workspace_and_opens_its_pane_without_a_local_one(
-    cx: &mut TestAppContext,
-) {
+fn launch_presents_the_workspace_and_opens_its_server_pane(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
     // The window reads the ready server at once, without waiting for a poll interval.
     cx.run_until_parked();
 
     assert_eq!(harness.workspace_count(cx), 1, "no desktop-owned Workspace");
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
     assert_eq!(harness.launch_title(cx), None);
     assert_eq!(
         harness.panes.pane(PANE).selections(),
@@ -302,7 +300,7 @@ fn a_launch_that_opens_within_its_quiet_period_never_shows_the_launch_screen(
     harness.edits.set_inventory(inventory());
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), None);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
     cx.executor().advance_clock(launch::LAUNCH_QUIET_PERIOD);
     cx.run_until_parked();
     assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_none());
@@ -369,7 +367,7 @@ fn a_launch_during_a_server_operation_opens_the_workspaces_once_it_ends(cx: &mut
 
     assert_eq!(harness.launch.steps(), ["run", "wait_for_service", "run"]);
     assert_eq!(harness.launch_title(cx), None);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 /// An operation that outlasts the server's bounded wait is the one failure the wait reports.
@@ -382,7 +380,7 @@ fn an_operation_that_outlasts_the_wait_offers_try_again(cx: &mut TestAppContext)
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     sync(&harness, cx);
     assert_eq!(harness.launch.steps(), ["run", "run"]);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 #[gpui::test]
@@ -396,7 +394,7 @@ fn a_stopped_server_stays_stopped_until_start_server(cx: &mut TestAppContext) {
     harness.click(LAUNCH_START_SELECTOR, cx);
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
     sync(&harness, cx);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
     assert_eq!(harness.launch_title(cx), None);
 }
 
@@ -411,7 +409,7 @@ fn a_local_server_started_after_a_paired_server_joins_the_same_window(cx: &mut T
 
     present_paired_server(&harness, inventory(), cx);
     assert_eq!(
-        harness.shared_rows(cx),
+        harness.rows(cx),
         1,
         "the paired server's Workspace is presented"
     );
@@ -424,7 +422,7 @@ fn a_local_server_started_after_a_paired_server_joins_the_same_window(cx: &mut T
 
     assert_eq!(harness.launch.steps(), ["run", "run"]);
     assert_eq!(
-        harness.shared_rows(cx),
+        harness.rows(cx),
         2,
         "the local server's Workspace joins the window already presenting the paired server"
     );
@@ -440,19 +438,19 @@ fn present_paired_server(
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             let key = manager.present_server_workspaces(
-                ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
                     route: [9; 32],
                     name: "penguin".into(),
                 }),
-                SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
-                SharedPaneSessions::with_opener(
+                WorkspaceEditSource::new(Rc::clone(&remote) as Rc<_>),
+                WorkspacePaneSessions::with_opener(
                     Rc::clone(&harness.panes) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.sync_workspaces(key, window, cx);
         });
     });
     cx.run_until_parked();
@@ -508,7 +506,7 @@ fn startup_without_usable_server_state_presents_recovery_across_the_window(
     // Recovery holds while launch runs again, then the Workspaces bring their controls back.
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     sync(&harness, cx);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
     assert_eq!(workspace_controls_presented(cx), WORKSPACE_CONTROLS);
     assert!(creation_available(cx));
 }
@@ -569,7 +567,7 @@ fn a_failed_local_server_keeps_another_servers_workspaces_presented(cx: &mut Tes
     assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
 
     present_paired_server(&harness, inventory(), cx);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
     assert_eq!(
         workspace_controls_presented(cx).len(),
         WORKSPACE_CONTROLS.len()
@@ -619,7 +617,7 @@ fn a_refused_start_explains_itself_and_retries_launch_only_when_asked(cx: &mut T
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
     sync(&harness, cx);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 #[gpui::test]
@@ -662,7 +660,7 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
         ["run", "authorize", "authorize", "run"]
     );
     sync(&harness, cx);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 /// An authorization that failed for another reason, before the prompt or after the system may
@@ -842,7 +840,7 @@ fn a_stop_before_inventory_offers_start_server(cx: &mut TestAppContext) {
 
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
     assert_eq!(harness.launch_title(cx), None);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 #[gpui::test]
@@ -850,7 +848,7 @@ fn removing_the_final_server_workspace_closes_its_window(cx: &mut TestAppContext
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     sync(&harness, cx);
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 
     harness.edits.set_inventory(Inventory {
         revision: 2,
@@ -1019,7 +1017,7 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
         0,
         "a second window must not present the same server's Workspaces"
     );
-    assert_eq!(harness.shared_rows(cx), 1, "the first window keeps them");
+    assert_eq!(harness.rows(cx), 1, "the first window keeps them");
     assert_eq!(
         cx.update(|_, cx| cx.active_window().map(|active| active.window_id())),
         Some(first),
@@ -1036,7 +1034,7 @@ fn ready_harness(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestCont
 }
 
 /// Whether the window's only Workspace row replaces its directory with a shared status.
-fn shared_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContext) -> bool {
+fn workspace_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContext) -> bool {
     let id = harness.manager.read_with(cx, |manager, _| {
         manager
             .workspaces
@@ -1046,7 +1044,7 @@ fn shared_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContext) 
             .id()
     });
     let selector: &'static str =
-        Box::leak(format!("workspace-row-shared-status-{}", id.get()).into_boxed_str());
+        Box::leak(format!("workspace-row-status-{}", id.get()).into_boxed_str());
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     cx.debug_bounds(selector).is_some()
@@ -1056,7 +1054,7 @@ fn shared_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContext) 
 fn a_tab_creation_leaves_the_workspace_rows_as_they_are(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Mutation;
     let (harness, cx) = ready_harness(cx);
-    assert!(!shared_row_status_drawn(&harness, cx));
+    assert!(!workspace_row_status_drawn(&harness, cx));
 
     harness.click("create-tab-button", cx);
     sync(&harness, cx);
@@ -1065,7 +1063,7 @@ fn a_tab_creation_leaves_the_workspace_rows_as_they_are(cx: &mut TestAppContext)
         [Mutation::CreateTab { .. }]
     ));
     assert!(
-        !shared_row_status_drawn(&harness, cx),
+        !workspace_row_status_drawn(&harness, cx),
         "a waiting Tab creation changes nothing a Workspace row shows"
     );
 }
@@ -1075,8 +1073,8 @@ fn a_pending_rename_presents_its_name_without_a_saving_label(cx: &mut TestAppCon
     let (harness, cx) = ready_harness(cx);
     harness.manager.update(cx, |manager, cx| {
         let id = manager.workspaces.iter().next().expect("one row").id();
-        let shared = manager.shared.local_mut().expect("shared Workspaces");
-        let _ = shared.rename(id, "Logs".to_owned(), None);
+        let binding = manager.binding.local_mut().expect("Workspaces");
+        let _ = binding.rename(id, "Logs".to_owned(), None);
         cx.notify();
     });
     sync(&harness, cx);
@@ -1086,7 +1084,7 @@ fn a_pending_rename_presents_its_name_without_a_saving_label(cx: &mut TestAppCon
         }),
         "Logs"
     );
-    assert!(!shared_row_status_drawn(&harness, cx));
+    assert!(!workspace_row_status_drawn(&harness, cx));
     assert_eq!(harness.authoritative_inventory(cx), inventory());
 }
 
@@ -1097,13 +1095,13 @@ fn not_connected_appears_only_once_the_connection_is_lost(cx: &mut TestAppContex
     harness.edits.set_connected(false);
     sync(&harness, cx);
     assert!(
-        !shared_row_status_drawn(&harness, cx),
+        !workspace_row_status_drawn(&harness, cx),
         "a connection still being established has not been lost"
     );
 
     harness.edits.set_error(ServerError::NotRunning);
     sync(&harness, cx);
-    assert!(shared_row_status_drawn(&harness, cx));
+    assert!(workspace_row_status_drawn(&harness, cx));
 }
 
 fn created_names(harness: &LaunchHarness) -> Vec<String> {
@@ -1300,7 +1298,7 @@ fn a_refused_first_workspace_creation_keeps_the_window_and_its_notice(cx: &mut T
     );
     assert_eq!(harness.workspace_count(cx), 0);
     let action = cx
-        .debug_bounds("modal-action-shared-workspace-refused-ok")
+        .debug_bounds("modal-action-workspace-refused-ok")
         .expect("the refusal remains readable");
     cx.simulate_click(action.center(), Modifiers::none());
     cx.run_until_parked();
@@ -1321,7 +1319,7 @@ fn active_server_workspace(
     harness.manager.read_with(cx, |manager, _| {
         let local = manager.workspaces.active_workspace_id()?;
         manager
-            .shared
+            .binding
             .local()?
             .facts(local)
             .map(|facts| facts.server)
@@ -1493,7 +1491,7 @@ fn a_service_start_elsewhere_resumes_only_a_waiting_launch(cx: &mut TestAppConte
         ["run", "run"],
         "no Start of its own"
     );
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 
     cx.cx
         .update(crate::ui::workspace_manager::resume_waiting_launches);
@@ -1540,21 +1538,21 @@ fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_server(cx: &mut Tes
         ["run", "run"],
         "no Start of its own"
     );
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 /// Stopping the server from Settings while its Workspaces are open leaves each Pane saying so,
 /// with Start Server where retrying could never connect.
 fn stopped_in_session(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {
     stopped_in_session_as(
-        crate::terminal::server_session::DevelopmentPaneStatus::Failed(ServerError::Stopped),
+        crate::terminal::server_session::ServerPaneStatus::Failed(ServerError::Stopped),
         cx,
     )
 }
 
 /// Like `stopped_in_session`, with the Pane left in `status` when the server stopped.
 fn stopped_in_session_as(
-    status: crate::terminal::server_session::DevelopmentPaneStatus,
+    status: crate::terminal::server_session::ServerPaneStatus,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
     let (harness, cx) = ready_harness(cx);
@@ -1569,10 +1567,10 @@ fn stopped_in_session_as(
 #[gpui::test]
 fn a_pane_stopped_in_session_offers_start_server_instead_of_retry(cx: &mut TestAppContext) {
     let (harness, cx) = stopped_in_session(cx);
-    assert!(cx.debug_bounds("shared-pane-start-server-1").is_some());
-    assert!(cx.debug_bounds("shared-pane-retry-1").is_none());
+    assert!(cx.debug_bounds("pane-start-server-1").is_some());
+    assert!(cx.debug_bounds("pane-retry-1").is_none());
 
-    harness.click("shared-pane-start-server-1", cx);
+    harness.click("pane-start-server-1", cx);
 
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
 }
@@ -1580,13 +1578,13 @@ fn a_pane_stopped_in_session_offers_start_server_instead_of_retry(cx: &mut TestA
 /// Once Start Server in a Pane starts the server, a Pane it stopped connects again, so the
 /// server says what became of it. Nothing takes control or starts a shell on the person's behalf.
 fn assert_start_reconnects(
-    status: crate::terminal::server_session::DevelopmentPaneStatus,
+    status: crate::terminal::server_session::ServerPaneStatus,
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = stopped_in_session_as(status, cx);
     let pane = harness.panes.pane(PANE);
 
-    harness.click("shared-pane-start-server-1", cx);
+    harness.click("pane-start-server-1", cx);
 
     assert_eq!(
         (pane.retries(), pane.take_overs(), pane.restored_starts()),
@@ -1597,7 +1595,7 @@ fn assert_start_reconnects(
 #[gpui::test]
 fn starting_the_server_from_a_pane_reconnects_its_stopped_pane(cx: &mut TestAppContext) {
     assert_start_reconnects(
-        crate::terminal::server_session::DevelopmentPaneStatus::Failed(ServerError::Stopped),
+        crate::terminal::server_session::ServerPaneStatus::Failed(ServerError::Stopped),
         cx,
     );
 }
@@ -1609,9 +1607,7 @@ fn starting_the_server_reconnects_a_stopped_take_over_pane_without_taking_contro
     cx: &mut TestAppContext,
 ) {
     assert_start_reconnects(
-        crate::terminal::server_session::DevelopmentPaneStatus::TakeoverFailed(
-            ServerError::Stopped,
-        ),
+        crate::terminal::server_session::ServerPaneStatus::TakeoverFailed(ServerError::Stopped),
         cx,
     );
 }
@@ -1621,7 +1617,7 @@ fn a_refused_start_while_presenting_explains_itself(cx: &mut TestAppContext) {
     let (harness, cx) = stopped_in_session(cx);
     harness.launch.refuse_start(ServerError::NotInstalled);
 
-    harness.click("shared-pane-start-server-1", cx);
+    harness.click("pane-start-server-1", cx);
 
     assert_eq!(harness.launch.steps(), ["run", "start"]);
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
@@ -1692,7 +1688,7 @@ fn a_service_start_during_launch_runs_launch_again_when_it_finishes(cx: &mut Tes
         ["run", "run", "run"],
         "no Start of its own"
     );
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
 }
 
 #[gpui::test]
@@ -1706,7 +1702,7 @@ fn a_service_start_during_launch_keeps_a_deliberate_stop(cx: &mut TestAppContext
     cx.run_until_parked();
     assert_eq!(harness.launch.steps(), ["run", "run", "run"]);
     assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
-    assert_eq!(harness.shared_rows(cx), 0);
+    assert_eq!(harness.rows(cx), 0);
 }
 
 const HIDDEN_TAB: [u8; 32] = [34; 32];
@@ -1969,14 +1965,14 @@ fn a_reattached_workspace_names_what_its_hidden_tab_runs_from_an_unchanged_inven
     attach(cx);
     let other = harness.manager.read_with(cx, |manager, _| {
         manager
-            .shared
+            .binding
             .get(ServerKey::LOCAL)
-            .and_then(|shared| shared.local(OTHER_WORKSPACE))
+            .and_then(|binding| binding.local(OTHER_WORKSPACE))
             .expect("the attached Workspace is presented")
     });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.detach_shared_workspace(other, window, cx);
+            manager.detach_workspace(other, window, cx);
         });
     });
     cx.run_until_parked();
@@ -2035,16 +2031,13 @@ fn session_statuses(cx: &mut VisualTestContext) -> Vec<String> {
 
 #[gpui::test]
 fn a_pane_another_client_controls_keeps_showing_its_sessions_progress(cx: &mut TestAppContext) {
-    use crate::terminal::server_session::DevelopmentPaneStatus;
+    use crate::terminal::server_session::ServerPaneStatus;
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     harness.edits.set_inventory(with_root_progress(2, 3, 40));
     sync(&harness, cx);
 
-    harness
-        .panes
-        .pane(PANE)
-        .set(DevelopmentPaneStatus::Takeover);
+    harness.panes.pane(PANE).set(ServerPaneStatus::Takeover);
     cx.run_until_parked();
     harness.edits.set_inventory(with_root_progress(3, 4, 60));
     sync(&harness, cx);
@@ -2052,7 +2045,7 @@ fn a_pane_another_client_controls_keeps_showing_its_sessions_progress(cx: &mut T
     cx.run_until_parked();
 
     assert!(
-        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        cx.debug_bounds("pane-takeover-1").is_some(),
         "typing still belongs to the other client"
     );
     assert!(
@@ -2123,7 +2116,7 @@ fn a_reopened_window_keeps_the_keyboard_in_its_sidebar_through_launch(cx: &mut T
     );
     cx.run_until_parked();
 
-    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(harness.rows(cx), 1);
     assert!(cx.update(|window, cx| {
         harness
             .manager

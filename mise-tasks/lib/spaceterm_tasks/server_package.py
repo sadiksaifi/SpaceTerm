@@ -703,7 +703,7 @@ def package(identity, release_tag=None, *, target=None):
     from spaceterm_tasks.server_builds import _source
 
     source = _source(ROOT)[2]
-    environment["SPACETERM_SERVER_SOURCE_STATE"] = source
+    environment["SPACETERM_CLI_SOURCE_STATE"] = source
     seed = artifact_signing_seed(identity)
     executable, metadata = build_executable(
         "--release",
@@ -840,8 +840,8 @@ def stage_desktop_artifact(archive, signature, destination, expected=None, *, id
         for path in destination.iterdir():
             path.chmod(0o644)
     return {
-        "SPACETERM_SERVER_ARCHIVE": str((destination / "artifact.tar.gz").resolve()),
-        "SPACETERM_SERVER_SIGNATURE": str((destination / "artifact.sig").resolve()),
+        "SPACETERM_CLI_ARCHIVE": str((destination / "artifact.tar.gz").resolve()),
+        "SPACETERM_CLI_SIGNATURE": str((destination / "artifact.sig").resolve()),
     }
 
 
@@ -858,13 +858,13 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
     An explicit pair reuses its signed bytes across client releases. Without that pair,
     build the independent package using the existing candidate signing workflow.
     """
-    archive = os.environ.get("SPACETERM_SERVER_ARCHIVE")
-    signature = os.environ.get("SPACETERM_SERVER_SIGNATURE")
+    archive = os.environ.get("SPACETERM_CLI_ARCHIVE")
+    signature = os.environ.get("SPACETERM_CLI_SIGNATURE")
     if (archive is not None or signature is not None) and (not archive or not signature):
-        raise TaskError("supply both SPACETERM_SERVER_ARCHIVE and SPACETERM_SERVER_SIGNATURE")
+        raise TaskError("supply both SPACETERM_CLI_ARCHIVE and SPACETERM_CLI_SIGNATURE")
     if release_tag:
         require_clean_checkout()
-    source = os.environ.get("SPACETERM_SERVER_ARTIFACTS")
+    source = os.environ.get("SPACETERM_CLI_ARTIFACTS")
     if source is not None and not release_tag and host_target() == TARGETS["linux"]:
         from spaceterm_tasks.server_builds import _source
         from spaceterm_tasks.server_catalog import collect_target
@@ -889,8 +889,8 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
         from spaceterm_tasks.server_catalog import stage_catalog
 
         stage_catalog(
-            environment["SPACETERM_SERVER_ARCHIVE"],
-            environment["SPACETERM_SERVER_SIGNATURE"],
+            environment["SPACETERM_CLI_ARCHIVE"],
+            environment["SPACETERM_CLI_SIGNATURE"],
             catalog_destination,
             identity,
             source=source,

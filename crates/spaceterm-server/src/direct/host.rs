@@ -1968,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_storage_recovery_fences_registration_from_the_prior_exposure_generation() {
+    fn uncertain_storage_recovery_fences_registration_from_the_prior_network_access_generation() {
         let fixture = super::super::tests::Fixture::new();
         fixture.enable();
         let credential = DeviceCredential::generate().unwrap();

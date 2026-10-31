@@ -1,6 +1,6 @@
 //! The client's bounded connected intent, separate from the transport's durable Original Operation.
-use super::development::{SharedAcceptance, SharedCloseIntent, SharedRefusalReason};
-use crate::terminal::shared_workspace::SharedWorkspaceSnapshot;
+use super::server::{WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason};
+use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_server::hierarchy::{
     Axis, CloseTarget, Id, Inventory, Mutation, Outcome, Pane, RetainedOutcome, Tab, Workspace,
 };
@@ -8,7 +8,7 @@ use spaceterm_server::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
 
 const CAPACITY: usize = 32;
-type Reply = async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>;
+type Reply = async_channel::Sender<Result<RetainedOutcome, WorkspaceRefusalReason>>;
 /// Where a surface that presents its own answer learns that answer's sequence.
 type Owner = std::rc::Weak<std::cell::Cell<Option<u64>>>;
 
@@ -38,10 +38,10 @@ pub(super) struct Completion {
 pub(super) struct PendingEdits {
     edits: VecDeque<Edit>,
     completed: VecDeque<Completion>,
-    close_intents: VecDeque<SharedCloseIntent>,
+    close_intents: VecDeque<WorkspaceCloseIntent>,
     /// Delivered outcomes keep admission capacity while their rejected drafts await review.
     unread_conflicts: usize,
-    presentations: VecDeque<SharedAcceptance>,
+    presentations: VecDeque<WorkspaceAcceptance>,
     aliases: BTreeMap<Id, Id>,
     observed: Option<u64>,
     pub disconnected: bool,
@@ -69,16 +69,16 @@ impl PendingEdits {
         mut mutation: Mutation,
         reply: Option<Reply>,
         owner: Option<Owner>,
-    ) -> Result<(), SharedRefusalReason> {
+    ) -> Result<(), WorkspaceRefusalReason> {
         if self.full() {
-            return Err(SharedRefusalReason::Pending);
+            return Err(WorkspaceRefusalReason::Pending);
         }
         // Observation can resolve a dependency before this edit arrives. Own its canonical
         // identity now, before binding retires the view's alias while acknowledgement waits.
         remap(&mut mutation, |id| self.canonical(id));
-        let new_id = || -> Result<Id, SharedRefusalReason> {
+        let new_id = || -> Result<Id, WorkspaceRefusalReason> {
             let mut id = [0; 32];
-            getrandom::fill(&mut id).map_err(|_| SharedRefusalReason::Value)?;
+            getrandom::fill(&mut id).map_err(|_| WorkspaceRefusalReason::Value)?;
             Ok(id)
         };
         let creation = match &mutation {
@@ -102,7 +102,7 @@ impl PendingEdits {
             _ => None,
         };
         if let Some(ids) = creation {
-            self.presentations.push_back(SharedAcceptance {
+            self.presentations.push_back(WorkspaceAcceptance {
                 mutation: mutation.clone(),
                 target: ids.workspace.or(ids.tab).unwrap_or(ids.pane),
             });
@@ -137,7 +137,10 @@ impl PendingEdits {
     }
 
     /// Retains an unapproved close only while its exact target depends on creation.
-    pub fn defer_close(&mut self, intent: SharedCloseIntent) -> Result<bool, SharedRefusalReason> {
+    pub fn defer_close(
+        &mut self,
+        intent: WorkspaceCloseIntent,
+    ) -> Result<bool, WorkspaceRefusalReason> {
         if self
             .close_intents
             .iter()
@@ -152,13 +155,13 @@ impl PendingEdits {
             return Ok(false);
         }
         if self.full() {
-            return Err(SharedRefusalReason::Pending);
+            return Err(WorkspaceRefusalReason::Pending);
         }
         self.close_intents.push_back(intent);
         Ok(true)
     }
 
-    pub fn take_close_intent(&mut self) -> Option<SharedCloseIntent> {
+    pub fn take_close_intent(&mut self) -> Option<WorkspaceCloseIntent> {
         let intent = self.close_intents.front()?;
         if close_references(intent.server)
             .iter()
@@ -208,7 +211,7 @@ impl PendingEdits {
 
     /// Settles the dispatched edit an answer belongs to. Returns the sequences of answers a live
     /// owner presents itself.
-    pub fn observe(&mut self, snapshot: &SharedWorkspaceSnapshot) -> Vec<u64> {
+    pub fn observe(&mut self, snapshot: &WorkspaceSnapshot) -> Vec<u64> {
         let mut owned = Vec::new();
         if let Some(outcome) = snapshot
             .outcome
@@ -267,7 +270,7 @@ impl PendingEdits {
         {
             let edit = self.edits.pop_front().expect("matched rejected operation");
             if let Some(reply) = edit.reply {
-                let _ = reply.try_send(Err(SharedRefusalReason::Offline));
+                let _ = reply.try_send(Err(WorkspaceRefusalReason::Offline));
             }
             if let Some(ids) = edit.creation {
                 self.reject_dependencies(ids);
@@ -359,7 +362,7 @@ impl PendingEdits {
                 .any(|id| rejected.contains(id))
             {
                 if let Some(reply) = &edit.reply {
-                    let _ = reply.try_send(Err(SharedRefusalReason::Value));
+                    let _ = reply.try_send(Err(WorkspaceRefusalReason::Value));
                 }
                 if let Some(ids) = edit.creation {
                     rejected.push(ids.pane);
@@ -389,7 +392,7 @@ impl PendingEdits {
                 return true;
             }
             if let Some(reply) = &edit.reply {
-                let _ = reply.try_send(Err(SharedRefusalReason::Offline));
+                let _ = reply.try_send(Err(WorkspaceRefusalReason::Offline));
             }
             false
         });
@@ -407,7 +410,7 @@ impl PendingEdits {
     pub fn take_completions(&mut self) -> Vec<Completion> {
         self.completed.drain(..).collect()
     }
-    pub fn take_presentation(&mut self) -> Option<SharedAcceptance> {
+    pub fn take_presentation(&mut self) -> Option<WorkspaceAcceptance> {
         let latest = self.presentations.pop_back();
         if let Some(event) = &latest {
             for edit in &mut self.edits {

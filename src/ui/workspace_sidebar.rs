@@ -15,7 +15,7 @@ use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
-use crate::domain::{RemoteConnectionPhase, WorkspaceId, WorktreeId};
+use crate::domain::{ServerConnectionPhase, WorkspaceId, WorktreeId};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -155,7 +155,7 @@ enum RowMenuCommand {
 struct WorkspaceRenameState {
     workspace_id: WorkspaceId,
     initial_value: String,
-    /// The name version the row showed when editing began, kept for a shared Workspace.
+    /// The name version the row showed when editing began, kept for a Workspace.
     version: Option<u64>,
     input: Entity<TextInput>,
     focus_handle: FocusHandle,
@@ -174,7 +174,7 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) machine: Option<SharedString>,
     pub(super) tooltip: SharedString,
     pub(super) pinned: bool,
-    pub(super) remote_connection_phase: Option<RemoteConnectionPhase>,
+    pub(super) remote_connection_phase: Option<ServerConnectionPhase>,
     /// The branch or Pull Request that ends line 2, after the directory.
     pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
     /// The Worktrees a git Workspace discloses under its row.
@@ -183,22 +183,22 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) creates_worktrees: bool,
     pub(super) active: bool,
     /// Present when a SpaceTerm Server owns the Workspace, which changes what its row offers.
-    pub(super) shared: Option<SharedWorkspaceRow>,
+    pub(super) binding: Option<WorkspaceRow>,
 }
 
-/// Names a shared Workspace's origin wherever the sidebar and the Tab strip describe it.
+/// Names a Workspace's origin wherever the sidebar and the Tab strip describe it.
 pub(super) const SERVER_WORKSPACE_BADGE: &str = "Server";
 
 /// Introduces the directory of a Worktree's last-used Pane once that Pane has left the Worktree.
 pub(super) const OUTSIDE_PANE_LABEL: &str = "Pane outside this Worktree";
 
-/// What a shared server Workspace's row presents and offers.
+/// What a server Workspace's row presents and offers.
 ///
 /// A shared edit goes to the server, so Rename, the pin commands, and Kill Workspace wait while
 /// this client is offline or an earlier edit is unanswered. Its Repository Status and Worktrees
 /// are what the owning server read; Worktree writes use that server too.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct SharedWorkspaceRow {
+pub(super) struct WorkspaceRow {
     /// The name version the server published, which a rename draft keeps from the moment it
     /// begins.
     pub(super) name_version: u64,
@@ -208,7 +208,7 @@ pub(super) struct SharedWorkspaceRow {
     pub(super) edits_reason: &'static str,
     /// The short status line 2 shows in place of the directory while an edit that changes this
     /// row waits, or after the server connection was lost.
-    pub(super) status: Option<crate::ui::shared_workspaces::SharedRowStatus>,
+    pub(super) status: Option<crate::ui::workspaces::WorkspaceRowStatus>,
     /// Whether this client can change its Workspace Attachments now. Detaching needs no server,
     /// so being offline never withholds it; an attachment write SpaceTerm could not confirm does,
     /// until SpaceTerm reopens.
@@ -920,7 +920,10 @@ impl WorkspaceSidebar {
                     initial_value: input.read(cx).value().to_owned(),
                     // The draft is fenced to the value it opened on, so a rename another client
                     // publishes meanwhile is a conflict rather than something to overwrite.
-                    version: workspace.shared.as_ref().map(|shared| shared.name_version),
+                    version: workspace
+                        .binding
+                        .as_ref()
+                        .map(|binding| binding.name_version),
                     focus_handle: input.read(cx).focus_handle(),
                     input,
                     context_menu_open: false,
@@ -992,24 +995,24 @@ impl WorkspaceSidebar {
         cx.notify();
     }
 }
-pub(super) fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&'static str> {
+pub(super) fn remote_connection_status(phase: ServerConnectionPhase) -> Option<&'static str> {
     match phase {
-        RemoteConnectionPhase::Connected => None,
-        RemoteConnectionPhase::Reconnecting => Some("Reconnecting…"),
-        RemoteConnectionPhase::Disconnected => Some("Not connected"),
-        RemoteConnectionPhase::Failed => Some("Connection failed"),
+        ServerConnectionPhase::Connected => None,
+        ServerConnectionPhase::Reconnecting => Some("Reconnecting…"),
+        ServerConnectionPhase::Disconnected => Some("Not connected"),
+        ServerConnectionPhase::Failed => Some("Connection failed"),
     }
 }
 
 pub(super) fn remote_connection_color(
-    phase: RemoteConnectionPhase,
+    phase: ServerConnectionPhase,
     colors: &ChromeColors,
 ) -> Color {
     match phase {
-        RemoteConnectionPhase::Reconnecting => colors.info,
-        RemoteConnectionPhase::Connected => colors.success,
-        RemoteConnectionPhase::Disconnected => colors.icon_muted,
-        RemoteConnectionPhase::Failed => colors.error,
+        ServerConnectionPhase::Reconnecting => colors.info,
+        ServerConnectionPhase::Connected => colors.success,
+        ServerConnectionPhase::Disconnected => colors.icon_muted,
+        ServerConnectionPhase::Failed => colors.error,
     }
 }
 
@@ -1809,18 +1812,18 @@ mod tests {
     fn connection_states_should_use_semantic_colors() {
         assert_eq!(
             remote_connection_color(
-                RemoteConnectionPhase::Reconnecting,
+                ServerConnectionPhase::Reconnecting,
                 &ChromeColors::default()
             ),
             ChromeColors::default().info
         );
         assert_eq!(
-            remote_connection_color(RemoteConnectionPhase::Failed, &ChromeColors::default()),
+            remote_connection_color(ServerConnectionPhase::Failed, &ChromeColors::default()),
             ChromeColors::default().error
         );
         assert_eq!(
             remote_connection_color(
-                RemoteConnectionPhase::Disconnected,
+                ServerConnectionPhase::Disconnected,
                 &ChromeColors::default()
             ),
             ChromeColors::default().icon_muted

@@ -25,7 +25,7 @@ pub(crate) fn running_executable() -> Option<PathBuf> {
 /// An explicit Development override can select a separate catalog for native checks.
 pub(crate) fn server_artifact_catalog() -> Option<PathBuf> {
     if !cfg!(spaceterm_packaged)
-        && let Some(root) = std::env::var_os("SPACETERM_SERVER_ARTIFACTS")
+        && let Some(root) = std::env::var_os("SPACETERM_CLI_ARTIFACTS")
     {
         return Some(PathBuf::from(root));
     }

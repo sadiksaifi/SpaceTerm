@@ -59,7 +59,7 @@ impl EditServer for ServerConnection {
         ServerConnection::attachments(self)
     }
     fn journal(&self) -> Result<ClientJournal, ServerError> {
-        self.shared_journal()
+        self.operation_journal()
     }
     fn subscribe(&self, sink: Weak<dyn LinkSink>) {
         ServerConnection::subscribe(self, sink);
@@ -95,7 +95,7 @@ impl EditJournal for ClientJournal {
 
 /// What wakes the edit loop.
 enum Event {
-    /// An edit `SharedWorkspaceClient::submit` admitted.
+    /// An edit `WorkspaceClient::submit` admitted.
     Edit(Mutation),
     /// The shared link received an inventory revision or ended.
     Link,
@@ -135,7 +135,7 @@ impl LinkSink for Wakes {
 }
 
 #[derive(Clone)]
-pub(crate) struct SharedWorkspaceSnapshot {
+pub(crate) struct WorkspaceSnapshot {
     pub inventory: Option<Inventory>,
     pub connected: bool,
     pub pending: bool,
@@ -156,7 +156,7 @@ pub(crate) struct SharedWorkspaceSnapshot {
     /// for has finished.
     pub failed_attempts: u64,
 }
-impl SharedWorkspaceSnapshot {
+impl WorkspaceSnapshot {
     /// Publishes the journal's unseen outcomes, except those already presented.
     fn unseen_from(&mut self, journal: &impl EditJournal) {
         self.unseen = journal
@@ -170,18 +170,18 @@ impl SharedWorkspaceSnapshot {
         self.forgotten_presented = self.forgotten_presented.max(presented);
     }
 }
-pub(crate) struct SharedWorkspaceClient {
+pub(crate) struct WorkspaceClient {
     snapshot: Arc<PublishedSnapshot>,
     commands: mpsc::Sender<Event>,
     alive: Arc<AtomicBool>,
 }
 
 struct PublishedSnapshot {
-    value: Mutex<SharedWorkspaceSnapshot>,
+    value: Mutex<WorkspaceSnapshot>,
     subscribers: Mutex<Vec<async_channel::Sender<()>>>,
 }
 impl PublishedSnapshot {
-    fn new(value: SharedWorkspaceSnapshot) -> Self {
+    fn new(value: WorkspaceSnapshot) -> Self {
         Self {
             value: Mutex::new(value),
             subscribers: Mutex::default(),
@@ -195,7 +195,7 @@ impl PublishedSnapshot {
         subscribers.push(sender);
         receiver
     }
-    fn publish<R>(&self, update: impl FnOnce(&mut SharedWorkspaceSnapshot) -> R) -> R {
+    fn publish<R>(&self, update: impl FnOnce(&mut WorkspaceSnapshot) -> R) -> R {
         let result = {
             let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
             update(&mut value)
@@ -213,19 +213,19 @@ impl PublishedSnapshot {
         result
     }
 }
-impl Drop for SharedWorkspaceClient {
+impl Drop for WorkspaceClient {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
         let _ = self.commands.send(Event::Stop);
     }
 }
-impl SharedWorkspaceClient {
+impl WorkspaceClient {
     /// Pane control records last only as long as the server lists their Panes.
     pub(crate) fn new(server: ServerConnection, controls: Arc<PaneControls>) -> Self {
         Self::start(server, controls)
     }
     fn start(server: impl EditServer, controls: Arc<PaneControls>) -> Self {
-        let snapshot = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
+        let snapshot = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: false,
             pending: false,
@@ -257,7 +257,7 @@ impl SharedWorkspaceClient {
             };
         }
         if std::thread::Builder::new()
-            .name("spaceterm-shared-workspaces".into())
+            .name("spaceterm-workspaces".into())
             .spawn(move || run(server, controls, state, receiver, wakes, running))
             .is_err()
         {
@@ -269,7 +269,7 @@ impl SharedWorkspaceClient {
             alive,
         }
     }
-    pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
+    pub(crate) fn snapshot(&self) -> WorkspaceSnapshot {
         self.snapshot
             .value
             .lock()
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn each_subscriber_wakes_after_a_coalesced_publication_without_holding_state() {
         let (commands, _receiver) = mpsc::channel();
-        let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
+        let state = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: true,
             pending: false,
@@ -602,7 +602,7 @@ mod tests {
             error: None,
             failed_attempts: 0,
         }));
-        let client = SharedWorkspaceClient {
+        let client = WorkspaceClient {
             snapshot: Arc::clone(&state),
             commands,
             alive: Arc::new(AtomicBool::new(true)),
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn disconnect_rejects_an_enqueued_edit_without_carrying_it_across_reconnect() {
         let (commands, receiver) = mpsc::channel();
-        let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
+        let state = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: true,
             pending: false,
@@ -645,7 +645,7 @@ mod tests {
             error: None,
             failed_attempts: 0,
         }));
-        let client = SharedWorkspaceClient {
+        let client = WorkspaceClient {
             snapshot: state.clone(),
             commands,
             alive: Arc::new(AtomicBool::new(true)),
@@ -679,7 +679,7 @@ mod tests {
         );
     }
 
-    /// An in-process server: the real shared Workspace host behind real connections, over
+    /// An in-process server: the real Workspace host behind real connections, over
     /// in-memory carriers instead of admitted sockets.
     mod served {
         use super::*;
@@ -704,7 +704,7 @@ mod tests {
         /// A journal that keeps its record in memory, shared with the test.
         pub(super) struct MemoryJournal {
             record: Record,
-            shared: Arc<Mutex<Record>>,
+            binding: Arc<Mutex<Record>>,
         }
 
         impl EditJournal for MemoryJournal {
@@ -727,7 +727,7 @@ mod tests {
                 self.record
                     .unseen
                     .retain(|unseen| unseen.sequence != sequence);
-                self.shared
+                self.binding
                     .lock()
                     .unwrap()
                     .unseen
@@ -737,7 +737,7 @@ mod tests {
             fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
                 let operation = ClientOperation { sequence, mutation };
                 self.record.pending = Some(operation.clone());
-                self.shared.lock().unwrap().pending = Some(operation);
+                self.binding.lock().unwrap().pending = Some(operation);
                 Ok(())
             }
             fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
@@ -746,10 +746,10 @@ mod tests {
                 if result.outcome.needs_presentation() {
                     self.record.unseen.push(result.clone());
                 }
-                let mut shared = self.shared.lock().unwrap();
-                shared.pending = None;
-                shared.unseen.clone_from(&self.record.unseen);
-                shared.last = Some(result);
+                let mut binding = self.binding.lock().unwrap();
+                binding.pending = None;
+                binding.unseen.clone_from(&self.record.unseen);
+                binding.last = Some(result);
                 Ok(())
             }
         }
@@ -760,7 +760,7 @@ mod tests {
             service: SharedPaneService,
             sync: SyncWorker,
             pub client: [u8; 32],
-            shared: Arc<Mutex<Option<(ServerLink, Connection)>>>,
+            binding: Arc<Mutex<Option<(ServerLink, Connection)>>>,
             subscribers: Arc<Mutex<Vec<Weak<dyn LinkSink>>>>,
             pub journal: Arc<Mutex<Record>>,
         }
@@ -768,12 +768,12 @@ mod tests {
         impl Server {
             pub fn new(client: [u8; 32]) -> Self {
                 let (sync, _) = SyncWorker::spawn().unwrap();
-                let host = crate::runtime::SharedWorkspaceHost::local(sync.clone()).unwrap();
+                let host = crate::runtime::WorkspaceHost::local(sync.clone()).unwrap();
                 Self {
                     service: Arc::new(Mutex::new(Box::new(crate::runtime::Served::new(host)))),
                     sync,
                     client,
-                    shared: Arc::default(),
+                    binding: Arc::default(),
                     subscribers: Arc::default(),
                     journal: Arc::default(),
                 }
@@ -784,7 +784,7 @@ mod tests {
                     service: Arc::clone(&self.service),
                     sync: self.sync.clone(),
                     client: self.client,
-                    shared: Arc::clone(&self.shared),
+                    binding: Arc::clone(&self.binding),
                     subscribers: Arc::clone(&self.subscribers),
                     journal: Arc::clone(&self.journal),
                 }
@@ -825,8 +825,8 @@ mod tests {
             }
 
             /// Ends the shared link from the server's side.
-            pub fn end_shared(&self) {
-                if let Some((_, (stopping, wake))) = self.shared.lock().unwrap().take() {
+            pub fn end(&self) {
+                if let Some((_, (stopping, wake))) = self.binding.lock().unwrap().take() {
                     stopping.store(true, Ordering::Release);
                     wake.wake();
                 }
@@ -836,8 +836,8 @@ mod tests {
         impl EditServer for Server {
             type Journal = MemoryJournal;
             fn link(&self, _: &dyn Fn() -> bool) -> Result<ServerLink, ServerError> {
-                let mut shared = self.shared.lock().unwrap();
-                if let Some((link, _)) = shared.as_ref()
+                let mut binding = self.binding.lock().unwrap();
+                if let Some((link, _)) = binding.as_ref()
                     && link.health() == Health::Live
                 {
                     return Ok(link.clone());
@@ -860,21 +860,21 @@ mod tests {
                     }
                 });
                 let (link, connection) = self.connect(self.client, fanout);
-                *shared = Some((link.clone(), connection));
+                *binding = Some((link.clone(), connection));
                 Ok(link)
             }
             fn attachments(&self) -> Result<Attachments, ServerError> {
                 Ok(Attachments::memory())
             }
             fn journal(&self) -> Result<MemoryJournal, ServerError> {
-                let shared = self.journal.lock().unwrap();
+                let binding = self.journal.lock().unwrap();
                 Ok(MemoryJournal {
                     record: Record {
-                        pending: shared.pending.clone(),
-                        last: shared.last.clone(),
-                        unseen: shared.unseen.clone(),
+                        pending: binding.pending.clone(),
+                        last: binding.last.clone(),
+                        unseen: binding.unseen.clone(),
                     },
-                    shared: Arc::clone(&self.journal),
+                    binding: Arc::clone(&self.journal),
                 })
             }
             fn subscribe(&self, sink: Weak<dyn LinkSink>) {
@@ -911,7 +911,7 @@ mod tests {
     }
 
     /// Submits `mutation` through `edits` and waits for its answer.
-    fn edit(edits: &SharedWorkspaceClient, mutation: Mutation) -> RetainedOutcome {
+    fn edit(edits: &WorkspaceClient, mutation: Mutation) -> RetainedOutcome {
         eventually("the client accepts the edit", || {
             edits.submit(mutation.clone())
         });
@@ -934,7 +934,7 @@ mod tests {
         let client = [7; 32];
         let server = served::Server::new(client);
         let ignore: Arc<dyn LinkSink> = Arc::new(|_: LinkEvent| {});
-        let edits = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        let edits = WorkspaceClient::start(server.handle(), Arc::default());
         eventually("the client connects", || edits.snapshot().connected);
         let created = edit(
             &edits,
@@ -974,7 +974,7 @@ mod tests {
         let published = edits.snapshot().unseen;
         drop(edits);
 
-        let relaunched = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        let relaunched = WorkspaceClient::start(server.handle(), Arc::default());
         eventually("the relaunched client connects", || {
             relaunched.snapshot().connected
         });
@@ -984,7 +984,7 @@ mod tests {
             server.journal.lock().unwrap().unseen.len() == 1
         });
         drop(relaunched);
-        let later = SharedWorkspaceClient::start(server.handle(), Arc::default());
+        let later = WorkspaceClient::start(server.handle(), Arc::default());
         eventually("the later client connects", || later.snapshot().connected);
 
         assert_eq!(
@@ -1012,8 +1012,8 @@ mod tests {
         drop(setup);
         server.journal.lock().unwrap().last = Some(lost.clone());
 
-        let edits = SharedWorkspaceClient::start(server.handle(), Arc::default());
-        let workspaces = |edits: &SharedWorkspaceClient| {
+        let edits = WorkspaceClient::start(server.handle(), Arc::default());
+        let workspaces = |edits: &WorkspaceClient| {
             edits
                 .snapshot()
                 .inventory
@@ -1037,7 +1037,7 @@ mod tests {
             )
         });
 
-        server.end_shared();
+        server.end();
         eventually("the client sees the link end", || {
             !edits.snapshot().connected
         });

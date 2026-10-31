@@ -15,7 +15,7 @@ pub(super) struct Admitting {
     answer: super::super::RunAnswer,
 }
 
-impl SharedWorkspaceHost {
+impl WorkspaceHost {
     pub(super) fn admit_run(
         &mut self,
         request: RunRequest,
@@ -173,7 +173,7 @@ impl SharedWorkspaceHost {
 }
 
 #[cfg(test)]
-impl SharedWorkspaceHost {
+impl WorkspaceHost {
     /// The lease of the Pane's running Terminal Session.
     pub(in crate::runtime::server) fn running_lease(&self, pane: Id) -> Option<Lease> {
         self.panes.get(&pane)?.pane.as_ref().map(|pane| pane.lease)
@@ -188,7 +188,7 @@ mod tests {
         NativePtySize,
     };
     use crate::platform::shell_launch::PreparedShellLaunch;
-    use crate::runtime::server::tests::{create_shared, shared_inventory, size};
+    use crate::runtime::server::tests::{create_workspace, size, workspace_inventory};
     use std::sync::Mutex;
 
     /// A stalled external PTY constructor keeps the Session worker from answering admission.
@@ -209,14 +209,14 @@ mod tests {
     fn a_stalled_run_admission_leaves_other_panes_available() {
         let (release, blocked) = mpsc::channel();
         let (entered, started) = mpsc::sync_channel(1);
-        let prototype = DevelopmentPaneHost::local_with_pty_factory(Arc::new(StalledPty(
+        let prototype = ServerPaneHost::local_with_pty_factory(Arc::new(StalledPty(
             Mutex::new(blocked),
             entered,
         )))
         .unwrap();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut host, 1);
-        let pane = shared_inventory(&mut host)
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
+        let pane = workspace_inventory(&mut host)
             .workspaces
             .iter()
             .find(|entry| entry.id == workspace)
@@ -258,7 +258,7 @@ mod tests {
             received.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
-        assert_ne!(create_shared(&mut host, 2), workspace);
+        assert_ne!(create_workspace(&mut host, 2), workspace);
         release.send(()).unwrap();
         let until = Instant::now() + Duration::from_secs(2);
         loop {

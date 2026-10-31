@@ -350,7 +350,7 @@ impl ServerConnection {
             .clone()
     }
     /// One journal writer for this stable client and original server identity.
-    pub fn shared_journal(&self) -> Result<crate::hierarchy::ClientJournal, ServerError> {
+    pub fn operation_journal(&self) -> Result<crate::hierarchy::ClientJournal, ServerError> {
         crate::hierarchy::ClientJournal::open(
             self.client_directory()?,
             self.server_id()?,
@@ -360,7 +360,7 @@ impl ServerConnection {
     /// The journal writer of this handle's identity under `lock`, which the caller took on the
     /// identity directory's `operations.lock`. A CLI holds that lock from sequence allocation
     /// through acknowledgement.
-    pub fn shared_journal_locked(
+    pub fn operation_journal_locked(
         &self,
         lock: crate::storage::Lock,
     ) -> Result<crate::hierarchy::ClientJournal, ServerError> {
@@ -968,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn local_status_admits_major_two_and_binds_the_scope_without_an_operation() {
+    fn local_status_admits_the_protocol_and_binds_the_scope_without_an_operation() {
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
@@ -1441,7 +1441,7 @@ mod tests {
             control: crate::hierarchy::CreateControl::Creator,
         };
         first
-            .shared_journal()
+            .operation_journal()
             .unwrap()
             .submit(3, mutation.clone())
             .unwrap();
@@ -1478,7 +1478,7 @@ mod tests {
         assert_eq!(relaunched.client_id().unwrap(), client);
         assert_eq!(
             relaunched
-                .shared_journal()
+                .operation_journal()
                 .unwrap()
                 .pending()
                 .unwrap()
@@ -1498,14 +1498,14 @@ mod tests {
         changed.client[0] ^= 1;
         let redirected = direct_fixture(&root, changed);
         assert!(matches!(
-            redirected.shared_journal(),
+            redirected.operation_journal(),
             Err(ServerError::AuthenticationRefused)
         ));
         drop(redirected);
         let restored = direct_fixture(&root, paired_identity());
         assert_eq!(
             restored
-                .shared_journal()
+                .operation_journal()
                 .unwrap()
                 .pending()
                 .unwrap()
@@ -1676,22 +1676,22 @@ mod tests {
             control: crate::hierarchy::CreateControl::Creator,
         };
         {
-            let mut journal = first.shared_journal().unwrap();
+            let mut journal = first.operation_journal().unwrap();
             journal.submit(3, mutation.clone()).unwrap();
         }
         drop(first);
         let relaunched = make("first");
         assert_eq!(relaunched.client_id().unwrap(), id);
-        let journal = relaunched.shared_journal().unwrap();
+        let journal = relaunched.operation_journal().unwrap();
         assert_eq!(journal.pending().unwrap().mutation, mutation);
-        assert!(second.shared_journal().unwrap().pending().is_none());
+        assert!(second.operation_journal().unwrap().pending().is_none());
         drop(journal);
         let directory = Directory::open(&root.join("data"), false).unwrap();
         let mut record = directory.read().unwrap();
         record.server = protocol::random().unwrap();
         directory.write(&record).unwrap();
         assert!(matches!(
-            relaunched.shared_journal(),
+            relaunched.operation_journal(),
             Err(ServerError::AuthenticationRefused)
         ));
         std::fs::remove_dir_all(root).unwrap();

@@ -68,7 +68,7 @@ fn workspace(worktrees: Vec<WorktreeRowViewModel>) -> WorkspaceRowViewModel {
         }),
         creates_worktrees: false,
         active: true,
-        shared: None,
+        binding: None,
     }
 }
 

@@ -5,12 +5,12 @@ use sha2::{Digest, Sha256};
 use std::{env, path::PathBuf, process::Command};
 
 fn candidate_provenance(packaged: bool) {
-    for key in ["SPACETERM_SERVER_ARCHIVE", "SPACETERM_SERVER_SIGNATURE"] {
+    for key in ["SPACETERM_CLI_ARCHIVE", "SPACETERM_CLI_SIGNATURE"] {
         println!("cargo:rerun-if-env-changed={key}");
     }
     let pair = (
-        env::var_os("SPACETERM_SERVER_ARCHIVE"),
-        env::var_os("SPACETERM_SERVER_SIGNATURE"),
+        env::var_os("SPACETERM_CLI_ARCHIVE"),
+        env::var_os("SPACETERM_CLI_SIGNATURE"),
     );
     let digest = match pair {
         (Some(archive), Some(signature)) => {
@@ -41,12 +41,12 @@ fn candidate_provenance(packaged: bool) {
         }
         _ => panic!("select both server archive and signature before building the client"),
     };
-    println!("cargo:rustc-env=SPACETERM_SERVER_SHA256={digest}");
+    println!("cargo:rustc-env=SPACETERM_CLI_SHA256={digest}");
 }
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SPACETERM_PACKAGED");
-    println!("cargo:rerun-if-env-changed=SPACETERM_SERVER_SOURCE_STATE");
+    println!("cargo:rerun-if-env-changed=SPACETERM_CLI_SOURCE_STATE");
     println!("cargo:rerun-if-env-changed=SPACETERM_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=SPACETERM_SPARKLE_DIR");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_sparkle)");

@@ -303,7 +303,7 @@ fn a_closing_connection_ends_publication() {
 /// Publishes after each Terminal Session notification until a frame satisfies `until`, and
 /// returns that frame's Input serial. Fails after 10 seconds.
 fn await_frame(
-    host: &mut DevelopmentPaneHost,
+    host: &mut ServerPaneHost,
     lease: Lease,
     wake: &(std::sync::Mutex<bool>, std::sync::Condvar),
     (outbox, publication, rows): (&Outbox, &mut Publication, &mut Rows),
@@ -396,7 +396,7 @@ fn a_shell_echo_is_pushed_with_the_input_serial_that_caused_it() {
 /// only after the matching wake, so a lost wake stalls it.
 mod wakes {
     use super::super::super::dispatch::Served;
-    use super::super::super::tests::{create_shared, host, shared_inventory, size};
+    use super::super::super::tests::{create_workspace, host, size, workspace_inventory};
     use super::*;
     use spaceterm_server::attachments::Attachment;
     use spaceterm_server::connection::service::{Dispatch, PaneService as _, Peer};
@@ -446,7 +446,7 @@ mod wakes {
     }
 
     struct Fixture {
-        served: Served<SharedWorkspaceHost>,
+        served: Served<WorkspaceHost>,
         rings: Arc<Rings>,
         outbox: Outbox,
         rows: Rows,
@@ -482,9 +482,9 @@ mod wakes {
 
         /// A Pane the first client claimed and has not shown yet.
         fn hidden() -> Self {
-            let mut shared = SharedWorkspaceHost::new(host());
-            let workspace = create_shared(&mut shared, 1);
-            let pane = shared_inventory(&mut shared)
+            let mut binding = WorkspaceHost::new(host());
+            let workspace = create_workspace(&mut binding, 1);
+            let pane = workspace_inventory(&mut binding)
                 .workspaces
                 .iter()
                 .find(|candidate| candidate.id == workspace)
@@ -492,7 +492,7 @@ mod wakes {
                 .and_then(|tab| tab.panes.first())
                 .unwrap()
                 .id;
-            let mut served = Served::new(shared);
+            let mut served = Served::new(binding);
             let rings = Arc::new(Rings::default());
             served.ticker(Arc::new({
                 let rings = Arc::clone(&rings);

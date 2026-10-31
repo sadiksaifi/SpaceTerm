@@ -46,7 +46,7 @@ pub fn journaled_mutation(
     link: &ServerLink,
     mutation: Mutation,
 ) -> Result<RetainedOutcome, Box<dyn Error>> {
-    let mut journal = server.shared_journal()?;
+    let mut journal = server.operation_journal()?;
     if journal.pending().is_some() {
         return Err("fixture client has an unresolved original; refusing new work".into());
     }

@@ -31,7 +31,7 @@ The desktop and CLI share [organization plans](../../crates/spaceterm-server/src
 
 Inside a Session, `tab create --workspace api` retains the current Worktree when that Pane belongs to `api`. `--worktree main-worktree` selects the Main Worktree instead. Every successful Workspace, Tab, Split and Worktree create result reports the server-chosen Starting Directory in `data.directory`, as assembled by [the work executor](../../crates/spaceterm-cli/src/work/execute.rs).
 
-Closing all Tabs of a Worktree uses the shared fallback plan. When this would empty the Workspace, it opens a Tab in another usable Worktree before closing the target Tabs. The Main Worktree is preferred, followed by Git's order. The target, missing directories and bare checkouts are excluded. With no destination, the operation fails before closing anything. Worktree removal uses the same destination policy. [The CLI Tab planner](../../crates/spaceterm-cli/src/work/tab.rs) and [desktop repository adapter](../../src/ui/workspace_manager/shared_repositories.rs) use these shared operations.
+Closing all Tabs of a Worktree uses the shared fallback plan. When this would empty the Workspace, it opens a Tab in another usable Worktree before closing the target Tabs. The Main Worktree is preferred, followed by Git's order. The target, missing directories and bare checkouts are excluded. With no destination, the operation fails before closing anything. Worktree removal uses the same destination policy. [The CLI Tab planner](../../crates/spaceterm-cli/src/work/tab.rs) and [desktop repository adapter](../../src/ui/workspace_manager/workspace_repositories.rs) use these shared operations.
 
 ## Run admission
 

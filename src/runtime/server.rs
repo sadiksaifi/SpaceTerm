@@ -1,4 +1,4 @@
-//! The server runtime: the shared Workspace host and the per-Pane hosts that own each live
+//! The server runtime: the Workspace host and the per-Pane hosts that own each live
 //! Terminal Session.
 use crate::appearance::resolution::AppearanceGeneration;
 use crate::appearance::terminal_theme::Appearance;
@@ -47,16 +47,16 @@ mod directories;
 pub(crate) mod testing {
     use super::*;
 
-    pub(crate) fn terminal_host() -> SharedWorkspaceHost {
-        SharedWorkspaceHost::new(super::tests::host())
+    pub(crate) fn terminal_host() -> WorkspaceHost {
+        WorkspaceHost::new(super::tests::host())
     }
 
     /// Prepares `host`'s first Workspace and starts its Pane at `size` for the client `[1; 32]`
     /// over the connection `[1; 32]`.
-    pub(crate) fn started_pane(host: &mut SharedWorkspaceHost, size: PaneSize) -> Lease {
+    pub(crate) fn started_pane(host: &mut WorkspaceHost, size: PaneSize) -> Lease {
         host.prepare_initial_organization()
             .expect("the first Workspace is prepared");
-        let pane = super::tests::shared_inventory(host).workspaces[0].tabs[0].root_pane;
+        let pane = super::tests::workspace_inventory(host).workspaces[0].tabs[0].root_pane;
         let Reply::Attached { lease } = host.request(
             [1; 32],
             [1; 32],
@@ -73,7 +73,7 @@ pub(crate) mod testing {
     }
 
     /// Types `keys` in `lease`'s Pane as the client `[1; 32]` with the terminal focused.
-    pub(crate) fn type_keys(host: &mut SharedWorkspaceHost, lease: Lease, keys: Vec<Key>) -> Reply {
+    pub(crate) fn type_keys(host: &mut WorkspaceHost, lease: Lease, keys: Vec<Key>) -> Reply {
         let generation = super::tests::COMMAND_FOCUS;
         let focused = host.request(
             [1; 32],
@@ -100,7 +100,7 @@ pub(crate) mod testing {
 
     /// A server's directory reads and creations, in process, for one client connection.
     pub(crate) struct DirectoryHost {
-        host: SharedWorkspaceHost,
+        host: WorkspaceHost,
         /// Rung when a read settles.
         woken: std::sync::mpsc::Receiver<()>,
         settled: Vec<SettledRead>,
@@ -226,15 +226,15 @@ mod scrollback;
 pub use self::scrollback::{PageReply, ScrollbackRead};
 #[cfg(test)]
 mod served_tests;
-mod shared;
-pub use shared::SharedWorkspaceHost;
+mod workspaces;
+pub use workspaces::WorkspaceHost;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use self::pane_host::geometry;
 use self::screen::appearance;
 
-pub struct DevelopmentPaneHost {
+pub struct ServerPaneHost {
     boot: [u8; 32],
     pane: Option<OwnedPane>,
     factory: NativeTerminalSessionFactory,
@@ -330,7 +330,7 @@ struct OwnedPane {
     size: PaneSize,
     effects: NativeEffects,
     accessibility: accessibility::Accessibility,
-    /// The Terminal Metadata revision last reported by [`DevelopmentPaneHost::metadata_changed`].
+    /// The Terminal Metadata revision last reported by [`ServerPaneHost::metadata_changed`].
     metadata_revision: u64,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
@@ -338,7 +338,7 @@ fn nonce() -> Result<[u8; 32], ServerError> {
     getrandom::fill(&mut bytes).map_err(|_| ServerError::StartupFailed)?;
     Ok(bytes)
 }
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     /// This Pane's running Terminal Session, if one has not ended.
     pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
         self.pane

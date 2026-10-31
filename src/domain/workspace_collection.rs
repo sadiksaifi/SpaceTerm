@@ -43,7 +43,7 @@ impl std::fmt::Debug for CurrentDirectory {
 /// Validation failures for values that cross the local-to-remote domain boundary.
 ///
 /// Rejected strings must not reach OpenSSH arguments, remote utility commands, or local path APIs.
-pub enum RemoteWorkspaceValueError {
+pub enum RemoteValueError {
     #[error("SSH destination must be one non-option, control-free token")]
     Destination,
     #[error("Remote Directory must be an absolute or ~/ path without control characters")]
@@ -64,14 +64,14 @@ impl fmt::Debug for SshDestination {
 }
 
 impl SshDestination {
-    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+    pub fn new(value: String) -> Result<Self, RemoteValueError> {
         if value.is_empty()
             || value.starts_with('-')
             || value
                 .chars()
                 .any(|character| character.is_whitespace() || character.is_control())
         {
-            return Err(RemoteWorkspaceValueError::Destination);
+            return Err(RemoteValueError::Destination);
         }
         Ok(Self(value))
     }
@@ -99,10 +99,10 @@ impl RemoteDirectory {
         Self("~".into())
     }
 
-    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+    pub fn new(value: String) -> Result<Self, RemoteValueError> {
         let supported_form = value.starts_with('/') || value == "~" || value.starts_with("~/");
         if !supported_form || value.chars().any(char::is_control) {
-            return Err(RemoteWorkspaceValueError::StartingDirectory);
+            return Err(RemoteValueError::StartingDirectory);
         }
         Ok(Self(value))
     }

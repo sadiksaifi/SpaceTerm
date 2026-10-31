@@ -65,7 +65,7 @@ pub struct Owner {
 }
 
 /// Network Access to restore after a temporary change.
-pub struct Exposure {
+pub struct NetworkAccess {
     /// The state before the change, or None when Network Access already matched.
     previous: Option<(Option<NetworkPolicy>, bool)>,
 }
@@ -81,26 +81,26 @@ impl Owner {
     /// Enables Network Access at `bind`. A policy change other than widening to every interface at the
     /// same port disconnects every paired client, so Network Access already enabled at `bind` stays
     /// untouched.
-    pub fn expose(&self, bind: SocketAddr) -> Result<Exposure> {
-        let status = at("exposure status", self.server.direct_status())?;
+    pub fn expose(&self, bind: SocketAddr) -> Result<NetworkAccess> {
+        let status = at("Network Access status", self.server.direct_status())?;
         if status.enabled && status.policy.as_ref().map(|policy| policy.bind) == Some(bind) {
-            return Ok(Exposure { previous: None });
+            return Ok(NetworkAccess { previous: None });
         }
-        let policy = at("exposure address", NetworkPolicy::new(bind))?;
+        let policy = at("Network Access address", NetworkPolicy::new(bind))?;
         at("expose", self.server.set_direct_policy(Some(policy), true))?;
-        Ok(Exposure {
+        Ok(NetworkAccess {
             previous: Some((status.policy, status.enabled)),
         })
     }
 
     /// Restores the previous address and enabled state. When no address was configured
     /// before, the server keeps the probe's address, disabled.
-    pub fn restore(&self, exposure: Exposure) -> Result<()> {
-        let Some((policy, enabled)) = exposure.previous else {
+    pub fn restore(&self, network_access: NetworkAccess) -> Result<()> {
+        let Some((policy, enabled)) = network_access.previous else {
             return Ok(());
         };
         at(
-            "restore exposure",
+            "restore Network Access",
             self.server.set_direct_policy(policy, enabled),
         )
         .map(drop)

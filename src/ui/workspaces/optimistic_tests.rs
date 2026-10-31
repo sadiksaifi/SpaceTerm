@@ -2,7 +2,7 @@
 //! The double delays transport delivery; State::apply owns validation, identities and membership.
 use super::*;
 use crate::domain::{PaneId, TabId};
-use crate::terminal::shared_workspace::SharedWorkspaceSnapshot;
+use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_server::hierarchy::{RetainedOutcome, State};
 use std::cell::RefCell;
 
@@ -11,7 +11,7 @@ const OTHER_DEVICE: Id = [22; 32];
 
 struct Delivery {
     server: State,
-    snapshot: SharedWorkspaceSnapshot,
+    snapshot: WorkspaceSnapshot,
     original: Option<(u64, Mutation)>,
     dispatched: Vec<Mutation>,
     /// Answers a surface presented, which the client journal never lists again.
@@ -32,7 +32,7 @@ impl DelayedServer {
         Rc::new(Self(
             RefCell::new(Delivery {
                 server,
-                snapshot: SharedWorkspaceSnapshot {
+                snapshot: WorkspaceSnapshot {
                     inventory: Some(inventory),
                     connected: true,
                     pending: false,
@@ -179,8 +179,8 @@ fn live_inventory(server: &State) -> Inventory {
     inventory
 }
 
-impl SharedWorkspaceEdits for DelayedServer {
-    fn snapshot(&self) -> SharedWorkspaceSnapshot {
+impl WorkspaceEdits for DelayedServer {
+    fn snapshot(&self) -> WorkspaceSnapshot {
         self.0.borrow().snapshot.clone()
     }
     fn availability(&self) -> (bool, bool) {
@@ -215,7 +215,7 @@ impl SharedWorkspaceEdits for DelayedServer {
 }
 
 fn sessions() -> (
-    SharedPaneSessions,
+    WorkspacePaneSessions,
     Rc<ScriptedPanes>,
     WorkspaceTerminalSessionFactory,
     crate::terminal::testing::TestTerminalSessionRecords,
@@ -227,21 +227,21 @@ fn sessions() -> (
     );
     let factory = WorkspaceTerminalSessionFactory::new_server(factory);
     let panes = ScriptedPanes::new(factory.clone());
-    let sessions = SharedPaneSessions::with_opener(
-        Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
+    let sessions = WorkspacePaneSessions::with_opener(
+        Rc::clone(&panes) as Rc<dyn WorkspacePaneOpener>,
         &PaneConstruction::testing(),
     );
     (sessions, panes, factory, records)
 }
 
-fn model(server: &Rc<DelayedServer>) -> (SharedEditSource, SharedWorkspaces) {
-    let source = SharedEditSource::new(Rc::clone(server) as Rc<dyn SharedWorkspaceEdits>);
+fn model(server: &Rc<DelayedServer>) -> (WorkspaceEditSource, Workspaces) {
+    let source = WorkspaceEditSource::new(Rc::clone(server) as Rc<dyn WorkspaceEdits>);
     let (sessions, _, _, _) = sessions();
-    let mut model = SharedWorkspaces::new(source.clone(), sessions);
+    let mut model = Workspaces::new(source.clone(), sessions);
     let inventory = model.poll().inventory.unwrap();
     model.register(
         first_workspace_id(),
-        SharedWorkspaceFacts::from_server(&inventory.workspaces[0]),
+        WorkspaceFacts::from_server(&inventory.workspaces[0]),
     );
     (source, model)
 }
@@ -287,7 +287,7 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
                 version: 0,
                 name: "Later".into()
             }),
-            SharedSubmission::Submitted
+            WorkspaceSubmission::Submitted
         );
         let target = if close_tab {
             CloseTarget::Tab { workspace, tab }
@@ -315,7 +315,7 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             .unwrap()
             .direct_close(|_, _| true)
             .unwrap();
-        assert_eq!(model.close(approval, local), SharedSubmission::Submitted);
+        assert_eq!(model.close(approval, local), WorkspaceSubmission::Submitted);
         assert_eq!(
             server.dispatched().len(),
             2,
@@ -360,7 +360,7 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             "stale consent never submits a replacement"
         );
         let explicit = model.close_approval(target).unwrap();
-        assert_eq!(model.close(explicit, local), SharedSubmission::Submitted);
+        assert_eq!(model.close(explicit, local), WorkspaceSubmission::Submitted);
         assert!(
             matches!(server.dispatched().last(), Some(Mutation::Close { confirmation, .. })
             if confirmation.own_controls.is_none())
@@ -417,7 +417,7 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
                     tab_id: TabId::new(index as u64 + 1),
                 }
             ),
-            SharedSubmission::Submitted
+            WorkspaceSubmission::Submitted
         );
     }
     assert!(model.poll().inventory.unwrap().workspaces.is_empty());
@@ -540,7 +540,7 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
             axis: Axis::Right,
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
-        SharedSubmission::Submitted
+        WorkspaceSubmission::Submitted
     );
     for inventory in [source.presentation_inventory().unwrap(), {
         server.finish(true, true);
@@ -570,7 +570,7 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
             source: None,
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
-        SharedSubmission::Submitted
+        WorkspaceSubmission::Submitted
     );
     let projected = source.presentation_inventory().unwrap();
     let pending = projected.workspaces[0].tabs.last().unwrap();
@@ -584,7 +584,7 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
             axis: Axis::Down,
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
-        SharedSubmission::Submitted
+        WorkspaceSubmission::Submitted
     );
     assert_eq!(
         source.presentation_inventory().unwrap().workspaces[0]
@@ -692,7 +692,7 @@ fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
     model.poll();
     let workspaces = server.inventory().workspaces;
     let second = crate::domain::WorkspaceId::new(2);
-    model.register(second, SharedWorkspaceFacts::from_server(&workspaces[1]));
+    model.register(second, WorkspaceFacts::from_server(&workspaces[1]));
     for (workspace, draft) in [
         (&workspaces[0], "First draft"),
         (&workspaces[1], "Second draft"),
@@ -703,7 +703,7 @@ fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
                 version: 0,
                 name: draft.into(),
             }),
-            SharedSubmission::Submitted
+            WorkspaceSubmission::Submitted
         );
     }
     server.rename_elsewhere(workspaces[0].id, "First server value");
@@ -722,7 +722,7 @@ fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
             .take_conflict()
             .expect("each independent draft survives the batch");
         assert_eq!(review.workspace, workspace);
-        assert_eq!(review.draft, SharedWorkspaceDraft::Name(draft.into()));
+        assert_eq!(review.draft, WorkspaceDraft::Name(draft.into()));
         assert_eq!(review.authoritative.as_ref(), authoritative);
     }
     assert!(model.take_conflict().is_none());
@@ -741,10 +741,10 @@ fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
             version: 0,
             name: format!("Draft {index}"),
         });
-        if submission == SharedSubmission::Refused(SharedRefusalReason::Pending) {
+        if submission == WorkspaceSubmission::Refused(WorkspaceRefusalReason::Pending) {
             break;
         }
-        assert_eq!(submission, SharedSubmission::Submitted);
+        assert_eq!(submission, WorkspaceSubmission::Submitted);
         assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
         model.poll();
         retained += 1;
@@ -756,7 +756,7 @@ fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
     for index in 0..retained {
         assert_eq!(
             model.take_conflict().unwrap().draft,
-            SharedWorkspaceDraft::Name(format!("Draft {index}"))
+            WorkspaceDraft::Name(format!("Draft {index}"))
         );
     }
     assert_eq!(
@@ -765,7 +765,7 @@ fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
             source: None,
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
-        SharedSubmission::Submitted,
+        WorkspaceSubmission::Submitted,
         "reviewing the retained drafts releases admission capacity"
     );
 }
@@ -801,10 +801,7 @@ fn optimistic_conflict_preserves_its_snapshot_and_draft_beside_a_later_pin() {
     );
     let conflict = model.take_conflict().unwrap();
     assert_eq!(conflict.authoritative.as_ref(), "Their name");
-    assert_eq!(
-        conflict.draft,
-        SharedWorkspaceDraft::Name("My draft".into())
-    );
+    assert_eq!(conflict.draft, WorkspaceDraft::Name("My draft".into()));
 }
 
 #[test]
@@ -869,7 +866,7 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
                 source: None,
                 control: spaceterm_server::hierarchy::CreateControl::Creator,
             }),
-            SharedSubmission::Submitted
+            WorkspaceSubmission::Submitted
         );
     }
     assert_eq!(
@@ -878,7 +875,7 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
             source: None,
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
-        SharedSubmission::Refused(SharedRefusalReason::Pending)
+        WorkspaceSubmission::Refused(WorkspaceRefusalReason::Pending)
     );
     assert_eq!(server.dispatched().len(), 1);
     server.connected(false);
@@ -888,7 +885,7 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
             source: None,
             control: spaceterm_server::hierarchy::CreateControl::Creator,
         }),
-        SharedSubmission::Refused(SharedRefusalReason::Offline)
+        WorkspaceSubmission::Refused(WorkspaceRefusalReason::Offline)
     );
     assert_eq!(
         source.presentation_inventory().unwrap().workspaces[0]
@@ -902,9 +899,9 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
 struct WindowHarness {
     manager: Entity<TabManager>,
     server: Rc<DelayedServer>,
-    source: SharedEditSource,
+    source: WorkspaceEditSource,
     panes: Rc<ScriptedPanes>,
-    model: RefCell<SharedWorkspaces>,
+    model: RefCell<Workspaces>,
     records: crate::terminal::testing::TestTerminalSessionRecords,
 }
 fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestContext) {
@@ -913,19 +910,16 @@ fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestCon
     let inventory = server.inventory();
     let workspace = &inventory.workspaces[0];
     let root = &workspace.tabs[0];
-    let source = SharedEditSource::new(Rc::clone(&server) as Rc<dyn SharedWorkspaceEdits>);
+    let source = WorkspaceEditSource::new(Rc::clone(&server) as Rc<dyn WorkspaceEdits>);
     let (sessions, panes, factory, records) = sessions();
     let (_, state) = panes.open(root.root_pane).unwrap();
-    let mut model = SharedWorkspaces::new(source.clone(), sessions.clone());
+    let mut model = Workspaces::new(source.clone(), sessions.clone());
     model.poll();
-    model.register(
-        first_workspace_id(),
-        SharedWorkspaceFacts::from_server(workspace),
-    );
+    model.register(first_workspace_id(), WorkspaceFacts::from_server(workspace));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        TabManager::shared(
-            SharedTabs::new(source.clone(), sessions, workspace.id),
-            crate::ui::tab_manager::SharedRoot {
+        TabManager::new(
+            WorkspaceTabs::new(source.clone(), sessions, workspace.id),
+            crate::ui::tab_manager::WorkspaceRoot {
                 tab: root.id,
                 pane: root.root_pane,
                 state,
@@ -960,9 +954,9 @@ fn project_window(harness: &WindowHarness, cx: &mut VisualTestContext) {
     let projected = harness.source.presentation_inventory().unwrap();
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.reconcile_shared(
+            manager.reconcile(
                 &projected.workspaces[0],
-                super::super::development::SharedRemoval::Published,
+                super::super::server::WorkspaceRemoval::Published,
                 window,
                 cx,
             );
@@ -977,7 +971,7 @@ fn project_window(harness: &WindowHarness, cx: &mut VisualTestContext) {
 fn close_own_tab(harness: &WindowHarness, tab_id: TabId, cx: &mut VisualTestContext) {
     let tab = harness
         .manager
-        .read_with(cx, |manager, _| manager.shared_server_tab(tab_id))
+        .read_with(cx, |manager, _| manager.server_tab(tab_id))
         .unwrap();
     let workspace = harness.server.inventory().workspaces[0].id;
     let target = spaceterm_server::hierarchy::CloseTarget::Tab { workspace, tab };
@@ -990,11 +984,11 @@ fn close_own_tab(harness: &WindowHarness, tab_id: TabId, cx: &mut VisualTestCont
                 tab_id,
             }
         ),
-        SharedSubmission::Submitted
+        WorkspaceSubmission::Submitted
     );
     cx.update(|_, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.prepare_shared_close_keyboard(true, cx);
+            manager.prepare_close_keyboard(true, cx);
         });
     });
 }
@@ -1045,7 +1039,7 @@ fn optimistic_pending_tab_split_and_later_navigation_keep_the_frame_and_keyboard
     project_window(&harness, cx);
     assert_eq!(local_view(&harness, cx), navigated);
     assert_eq!(cx.update(|window, cx| window.focused(cx)), focus);
-    assert!(cx.debug_bounds("shared-tab-unavailable-ok").is_none());
+    assert!(cx.debug_bounds("workspace-tab-unavailable-ok").is_none());
     let inventory = harness.server.inventory();
     let created = inventory.workspaces[0].tabs.last().unwrap();
     for pane in &created.panes {
@@ -1120,7 +1114,7 @@ fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut 
             pane.admitted();
             assert_eq!(
                 crate::ui::server_pane::ServerPaneConnection::status(pane.as_ref()),
-                crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
+                crate::terminal::server_session::ServerPaneStatus::Connecting,
                 "hidden admission must release capacity without fabricating a first screen"
             );
         }
@@ -1401,7 +1395,7 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
                 pane_id: closed_view.1,
             }
         ),
-        SharedSubmission::Submitted
+        WorkspaceSubmission::Submitted
     );
     project_window(&harness, cx);
     assert_eq!(
@@ -1415,10 +1409,10 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
     harness
         .panes
         .pane(closing)
-        .set(DevelopmentPaneStatus::TakeoverReconnecting);
+        .set(ServerPaneStatus::TakeoverReconnecting);
     cx.run_until_parked();
-    assert!(cx.debug_bounds("shared-pane-takeover-2").is_none());
-    assert!(cx.debug_bounds("shared-pane-notice-2").is_none());
+    assert!(cx.debug_bounds("pane-takeover-2").is_none());
+    assert!(cx.debug_bounds("pane-notice-2").is_none());
     // A changed server confirmation definitely refuses the original close.
     harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
         controls: Vec::new(),
@@ -1462,7 +1456,7 @@ fn optimistic_workspace_close_keeps_its_host_through_a_lost_ack() {
             approval,
             crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id())
         ),
-        SharedSubmission::Submitted
+        WorkspaceSubmission::Submitted
     );
     assert!(model.optimistically_closing(first_workspace_id()));
     assert!(model.poll().inventory.unwrap().workspaces.is_empty());
@@ -1545,7 +1539,7 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
                     tab_id: original[index],
                 },
             ),
-            SharedSubmission::Submitted
+            WorkspaceSubmission::Submitted
         );
         project_window(&harness, cx);
     }
@@ -1593,7 +1587,7 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
                 tab_id: closed.0,
             }
         ),
-        SharedSubmission::Submitted
+        WorkspaceSubmission::Submitted
     );
     project_window(&harness, cx);
     assert_eq!(
@@ -1614,10 +1608,10 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
     harness
         .panes
         .pane(doomed_pane)
-        .set(DevelopmentPaneStatus::TakeoverReconnecting);
+        .set(ServerPaneStatus::TakeoverReconnecting);
     cx.run_until_parked();
-    assert!(cx.debug_bounds("shared-pane-takeover-1").is_none());
-    assert!(cx.debug_bounds("shared-pane-notice-1").is_none());
+    assert!(cx.debug_bounds("pane-takeover-1").is_none());
+    assert!(cx.debug_bounds("pane-notice-1").is_none());
     assert!(matches!(
         harness.server.finish(true, true).outcome,
         Outcome::Accepted { .. }
@@ -1692,7 +1686,7 @@ fn an_answer_published_before_the_close_reconciles_still_opens_the_successor_onc
     let successor = harness
         .panes
         .pane(harness.server.inventory().workspaces[0].tabs[0].root_pane);
-    successor.set(DevelopmentPaneStatus::Restored);
+    successor.set(ServerPaneStatus::Restored);
     click("create-tab-button", cx);
     harness.server.finish(true, true);
     project_window(&harness, cx);
@@ -1737,7 +1731,7 @@ fn another_clients_removal_of_the_active_tab_beside_an_own_close_selects_nothing
     let removed = local_view(&harness, cx).0;
     let removed_server = harness
         .manager
-        .read_with(cx, |manager, _| manager.shared_server_tab(removed))
+        .read_with(cx, |manager, _| manager.server_tab(removed))
         .unwrap();
     let successor = harness
         .panes
@@ -1772,7 +1766,7 @@ fn optimistic_field_presentation_never_renews_an_unseen_conflicting_version() {
     );
     model.register(
         local,
-        SharedWorkspaceFacts::from_server(&projection.workspaces[0]),
+        WorkspaceFacts::from_server(&projection.workspaces[0]),
     );
     let observed = model.facts(local).unwrap().name_version;
     model.rename(local, "Later draft".into(), Some(observed));
@@ -1783,7 +1777,7 @@ fn optimistic_field_presentation_never_renews_an_unseen_conflicting_version() {
     assert_eq!(server.inventory().workspaces[0].name, "Their name");
     for draft in ["First draft", "Later draft"] {
         let conflict = model.take_conflict().unwrap();
-        assert_eq!(conflict.draft, SharedWorkspaceDraft::Name(draft.into()));
+        assert_eq!(conflict.draft, WorkspaceDraft::Name(draft.into()));
         assert_eq!(conflict.authoritative.as_ref(), "Their name");
     }
     assert!(model.take_conflict().is_none());

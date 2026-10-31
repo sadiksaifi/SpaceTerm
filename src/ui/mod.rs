@@ -41,7 +41,6 @@ pub(crate) mod server_worktrees;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
-pub(crate) mod shared_workspaces;
 mod sidebar_motion;
 mod sidebar_window;
 pub(crate) mod ssh_setup;
@@ -65,6 +64,7 @@ mod workspace_manager;
 mod workspace_order_state;
 mod workspace_sidebar;
 mod workspace_status;
+pub(crate) mod workspaces;
 mod worktree_form;
 
 use gpui::{App, actions};

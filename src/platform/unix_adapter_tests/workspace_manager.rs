@@ -123,8 +123,8 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
     cx: &mut TestAppContext,
 ) {
     use crate::ui::server_worktrees::testing::{ScriptedReads, present_direct};
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
+    use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::workspaces::{DirectServer, WorkspaceEditSource, WorkspacePaneSessions};
 
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!(
@@ -159,15 +159,15 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
                     route,
                     name: "Penguin".into(),
                 }),
-                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
+                WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
+                WorkspacePaneSessions::with_opener(
                     ScriptedPanes::new(MultiServerHarness::session_factory()) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.sync_workspaces(key, window, cx);
             key
         })
     });
@@ -192,7 +192,7 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
     }
     let opened = harness.manager.read_with(cx, |manager, _| {
         let active = manager.workspaces.active_workspace_id()?;
-        (manager.shared.owner(active) == Some(key))
+        (manager.binding.owner(active) == Some(key))
             .then(|| manager.workspaces.active().name().to_owned())
     });
     assert_eq!(opened.as_deref(), Some("Far"));

@@ -14,9 +14,9 @@ fn a_worktree_fallback_survives_an_exact_close_and_never_removes_files() {
     ]);
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut server = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut server, 1);
-    let initial = shared_inventory(&mut server).workspaces[0].root_tab;
+    let mut server = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut server, 1);
+    let initial = workspace_inventory(&mut server).workspaces[0].root_tab;
     let open = |path| Operation::OpenTab {
         workspace,
         source: None,
@@ -31,7 +31,7 @@ fn a_worktree_fallback_survives_an_exact_close_and_never_removes_files() {
         workspace,
         tab: initial,
     };
-    let confirmation = shared_inventory(&mut server)
+    let confirmation = workspace_inventory(&mut server)
         .close_confirmation(target)
         .unwrap();
     assert!(matches!(server.request([1; 32], [1; 32], Request::Mutate {
@@ -43,7 +43,7 @@ fn a_worktree_fallback_survives_an_exact_close_and_never_removes_files() {
         tab: anchor,
     };
     assert!(
-        shared_inventory(&mut server)
+        workspace_inventory(&mut server)
             .close_confirmation(target)
             .unwrap()
             .removes_workspace,
@@ -53,7 +53,7 @@ fn a_worktree_fallback_survives_an_exact_close_and_never_removes_files() {
     else {
         panic!("Main Worktree fallback accepted");
     };
-    let old = shared_inventory(&mut server)
+    let old = workspace_inventory(&mut server)
         .close_confirmation(target)
         .unwrap();
     assert!(!old.removes_workspace);
@@ -65,7 +65,7 @@ fn a_worktree_fallback_survives_an_exact_close_and_never_removes_files() {
         sequence: 6, mutation: Mutation::Close { target, confirmation: old },
     }), Reply::Outcome(record) if record.outcome == Outcome::StaleConfirmation));
 
-    let current = shared_inventory(&mut server);
+    let current = workspace_inventory(&mut server);
     let confirmation = current.close_confirmation(target).unwrap();
     assert_eq!(
         confirmation.panes.len(),
@@ -75,7 +75,7 @@ fn a_worktree_fallback_survives_an_exact_close_and_never_removes_files() {
     assert!(matches!(server.request([1; 32], [1; 32], Request::Mutate {
         sequence: 7, mutation: Mutation::Close { target, confirmation },
     }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. })));
-    let remaining = shared_inventory(&mut server);
+    let remaining = workspace_inventory(&mut server);
     let tabs = &remaining.workspaces[0].tabs;
     assert_eq!(tabs.len(), 1);
     assert_eq!(tabs[0].id, fallback);

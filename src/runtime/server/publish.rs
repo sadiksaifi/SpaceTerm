@@ -255,7 +255,7 @@ impl OwnedPane {
     }
 }
 
-impl DevelopmentPaneHost {
+impl ServerPaneHost {
     /// What the Pane holds for the channel bound to `lease`, which `device` claimed. A shell that
     /// exited with code zero yields its final screen once, then the Pane retires. Any other exit
     /// keeps the Pane, which presents Session Ended instead of that screen.

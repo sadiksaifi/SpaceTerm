@@ -11,7 +11,7 @@ fn main() {
     for input in [
         "SPACETERM_PACKAGED",
         "SPACETERM_RELEASE_TAG",
-        "SPACETERM_SERVER_SOURCE_STATE",
+        "SPACETERM_CLI_SOURCE_STATE",
     ] {
         println!("cargo:rerun-if-env-changed={input}");
     }
@@ -30,15 +30,15 @@ fn main() {
         (true, false) => "spaceterm-preflight",
         (true, true) => "spaceterm",
     };
-    println!("cargo:rustc-env=SPACETERM_SERVER_IDENTITY={name}");
-    println!("cargo:rustc-env=SPACETERM_SERVER_VERSION={}", build.version);
+    println!("cargo:rustc-env=SPACETERM_CLI_IDENTITY={name}");
+    println!("cargo:rustc-env=SPACETERM_CLI_VERSION={}", build.version);
     let target = std::env::var("TARGET").expect("Cargo supplies the target");
-    println!("cargo:rustc-env=SPACETERM_SERVER_TARGET={target}");
-    println!("cargo:rustc-env=SPACETERM_SERVER_COMMIT={}", build.commit);
+    println!("cargo:rustc-env=SPACETERM_CLI_TARGET={target}");
+    println!("cargo:rustc-env=SPACETERM_CLI_COMMIT={}", build.commit);
     let output = std::path::PathBuf::from(
         std::env::var_os("OUT_DIR").expect("Cargo supplies the output directory"),
     );
-    let source = std::env::var("SPACETERM_SERVER_SOURCE_STATE").ok();
+    let source = std::env::var("SPACETERM_CLI_SOURCE_STATE").ok();
     assert!(
         source.as_deref().is_none_or(|value| value.len() == 64
             && value

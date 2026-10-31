@@ -278,8 +278,8 @@ class ServerArchiveTests(unittest.TestCase):
                     os.environ,
                     {
                         "PATH": os.environ["PATH"],
-                        "SPACETERM_SERVER_ARCHIVE": str(archive),
-                        "SPACETERM_SERVER_SIGNATURE": str(signature),
+                        "SPACETERM_CLI_ARCHIVE": str(archive),
+                        "SPACETERM_CLI_SIGNATURE": str(signature),
                     },
                     clear=True,
                 ),
@@ -293,7 +293,7 @@ class ServerArchiveTests(unittest.TestCase):
                     reused, self.info["identity"], "v99.0.0"
                 )
                 self.assertEqual(
-                    Path(selected["SPACETERM_SERVER_ARCHIVE"]).read_bytes(), archive.read_bytes()
+                    Path(selected["SPACETERM_CLI_ARCHIVE"]).read_bytes(), archive.read_bytes()
                 )
                 server_package.verify_desktop_artifact(
                     reused, self.info["identity"], executable=client
@@ -326,7 +326,7 @@ class ServerArchiveTests(unittest.TestCase):
             )
 
     def test_desktop_candidate_requires_both_explicit_artifact_inputs(self):
-        with patch.dict(os.environ, {"SPACETERM_SERVER_ARCHIVE": str(self.archive)}, clear=True):
+        with patch.dict(os.environ, {"SPACETERM_CLI_ARCHIVE": str(self.archive)}, clear=True):
             with self.assertRaisesRegex(TaskError, "both"):
                 server_package.prepare_desktop_artifact(
                     self.root / "desktop/server-artifact", "spaceterm-preflight"

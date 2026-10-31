@@ -3,11 +3,11 @@ use crate::{
     server_connection::ServerConnection,
     terminal::{
         server_session::{ControlRoute, PaneControlRegistry},
-        shared_workspace::SharedWorkspaceClient,
+        workspace_client::WorkspaceClient,
     },
-    ui::shared_workspaces::{
-        OutcomeOwner, OutcomeTicket, SharedEditSource, SharedRefusalReason, SharedWorkspaceEdits,
-        UnavailableEdits,
+    ui::workspaces::{
+        OutcomeOwner, OutcomeTicket, UnavailableEdits, WorkspaceEditSource, WorkspaceEdits,
+        WorkspaceRefusalReason,
     },
 };
 use gpui::{App, AppContext as _, Global, Task};
@@ -31,7 +31,7 @@ impl WorktreeReads for ServerConnection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WriteError {
-    Refused(SharedRefusalReason),
+    Refused(WorkspaceRefusalReason),
     Server(Error),
 }
 impl From<Error> for WriteError {
@@ -45,8 +45,8 @@ pub(crate) struct Client {
     pub(crate) server: ServerConnection,
     /// Pane control sequencing outlives every window, like this client's connection.
     pub(crate) controls: std::sync::Arc<crate::terminal::server_session::PaneControls>,
-    pub(crate) source: SharedEditSource,
-    edits: Rc<dyn SharedWorkspaceEdits>,
+    pub(crate) source: WorkspaceEditSource,
+    edits: Rc<dyn WorkspaceEdits>,
     reads: Arc<dyn WorktreeReads>,
 }
 impl Global for Client {}
@@ -55,7 +55,7 @@ impl Global for Client {}
 /// route's connections. An answer one of them holds is then never presented by another.
 #[derive(Default)]
 struct DirectSources(
-    std::collections::HashMap<crate::direct_connections::DirectRouteId, SharedEditSource>,
+    std::collections::HashMap<crate::direct_connections::DirectRouteId, WorkspaceEditSource>,
 );
 impl Global for DirectSources {}
 
@@ -68,12 +68,12 @@ pub(crate) fn disconnected_transport(
     let storage =
         crate::ui::direct_servers::installed(cx).and_then(|direct| direct.storage(&route));
     let retries = cx
-        .default_global::<crate::ui::shared_workspaces::PresentationRetries>()
+        .default_global::<crate::ui::workspaces::PresentationRetries>()
         .clone();
     Rc::new(move || match &storage {
         Some(storage) => UnavailableEdits::recording(
             route,
-            Arc::new(storage.clone()) as Arc<dyn crate::ui::shared_workspaces::PresentationRecord>,
+            Arc::new(storage.clone()) as Arc<dyn crate::ui::workspaces::PresentationRecord>,
             retries.clone(),
         ),
         None => UnavailableEdits::default(),
@@ -100,7 +100,7 @@ impl Client {
         )
         .ok()?;
         let controls = std::sync::Arc::<crate::terminal::server_session::PaneControls>::default();
-        let edits = Rc::new(SharedWorkspaceClient::new(
+        let edits = Rc::new(WorkspaceClient::new(
             server.clone(),
             std::sync::Arc::clone(&controls),
         ));
@@ -108,7 +108,7 @@ impl Client {
             reads: Arc::new(server.clone()),
             server,
             controls,
-            source: SharedEditSource::new(edits.clone()),
+            source: WorkspaceEditSource::new(edits.clone()),
             edits,
         };
         cx.set_global(client.clone());
@@ -132,14 +132,14 @@ impl Client {
             .default_global::<RetainedPaneControls>()
             .0
             .controls(ControlRoute::Direct(route), server.client_scope());
-        let edits = Rc::new(SharedWorkspaceClient::new(
+        let edits = Rc::new(WorkspaceClient::new(
             server.clone(),
             std::sync::Arc::clone(&controls),
         ));
         // Presentations the route's journal refused while it had no connection are recorded by
         // this connection's edit loop, which holds that journal now.
         if let Some(waiting) = cx
-            .try_global::<crate::ui::shared_workspaces::PresentationRetries>()
+            .try_global::<crate::ui::workspaces::PresentationRetries>()
             .and_then(|retries| retries.take(&route))
         {
             for sequence in waiting.sequences {
@@ -183,7 +183,7 @@ impl Client {
             .and_then(|clients| clients.0.get(route).cloned())
     }
     /// The connection's own transport, which a Workspace Window's presentation submits through.
-    pub(crate) fn transport(&self) -> Rc<dyn SharedWorkspaceEdits> {
+    pub(crate) fn transport(&self) -> Rc<dyn WorkspaceEdits> {
         Rc::clone(&self.edits)
     }
     /// The edit source of `route`, which Settings and every Workspace Window share, so they
@@ -192,14 +192,14 @@ impl Client {
     pub(crate) fn route_source(
         route: crate::direct_connections::DirectRouteId,
         cx: &mut App,
-    ) -> SharedEditSource {
+    ) -> WorkspaceEditSource {
         if let Some(source) = cx
             .try_global::<DirectSources>()
             .and_then(|sources| sources.0.get(&route))
         {
             return source.clone();
         }
-        let source = SharedEditSource::new(Rc::new(disconnected_transport(route, cx)()));
+        let source = WorkspaceEditSource::new(Rc::new(disconnected_transport(route, cx)()));
         cx.default_global::<DirectSources>()
             .0
             .insert(route, source.clone());
@@ -243,7 +243,7 @@ impl Client {
     }
 }
 fn write(
-    source: SharedEditSource,
+    source: WorkspaceEditSource,
     operation: Operation,
     owner: Option<OutcomeTicket>,
     cx: &mut App,
@@ -329,7 +329,7 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
             let checked = read.await;
             let Ok(ReadReply::Location(path)) = checked else {
                 return Err(create_error(match checked.err().unwrap_or(Error::Location) {
-                    Error::Unavailable => return Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(if client.availability().0 {"SpaceTerm could not check the Worktree location. Review it before trying again."} else {creation_refusal(SharedRefusalReason::Offline)})),
+                    Error::Unavailable => return Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(if client.availability().0 {"SpaceTerm could not check the Worktree location. Review it before trying again."} else {creation_refusal(WorkspaceRefusalReason::Offline)})),
                     error => error.into(),
                 }));
             };
@@ -377,13 +377,15 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
     }
 }
 
-fn creation_refusal(reason: SharedRefusalReason) -> &'static str {
+fn creation_refusal(reason: WorkspaceRefusalReason) -> &'static str {
     match reason {
-        SharedRefusalReason::Offline => "Reconnect, then create the Worktree again.",
-        SharedRefusalReason::Pending => {
+        WorkspaceRefusalReason::Offline => "Reconnect, then create the Worktree again.",
+        WorkspaceRefusalReason::Pending => {
             "Wait for the current changes to finish, then create the Worktree again."
         }
-        SharedRefusalReason::Value => "Enter a shorter branch name or directory, then try again.",
+        WorkspaceRefusalReason::Value => {
+            "Enter a shorter branch name or directory, then try again."
+        }
     }
 }
 
@@ -403,7 +405,7 @@ fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use crate::ui::workspaces::testing::ScriptedEdits;
     use spaceterm_server::repository::GitToolStatus;
     use spaceterm_server::worktree::Settings;
     use spaceterm_server::worktree::path_template::{self, WorktreePathTemplateError};
@@ -490,7 +492,7 @@ pub(crate) mod testing {
             server: ServerConnection::for_identity("spaceterm-development")
                 .expect("the development identity resolves"),
             controls: Arc::default(),
-            source: SharedEditSource::new(edits.clone()),
+            source: WorkspaceEditSource::new(edits.clone()),
             edits,
             reads,
         };
@@ -538,7 +540,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use crate::ui::workspaces::testing::ScriptedEdits;
     use std::cell::RefCell;
 
     /// A new connection to the same paired server gets its own writer, so edits never travel
@@ -570,11 +572,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shared_write_waiters_keep_their_completions_when_later_edits_finish(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn write_waiters_keep_their_completions_when_later_edits_finish(cx: &mut gpui::TestAppContext) {
         let edits = Rc::new(ScriptedEdits::new(None));
-        let source = SharedEditSource::new(edits.clone());
+        let source = WorkspaceEditSource::new(edits.clone());
         let replies = Rc::new(RefCell::new(Vec::new()));
         let first = Operation::SetLocation {
             version: 0,

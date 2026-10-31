@@ -1,8 +1,8 @@
 use super::*;
-use crate::runtime::server::tests::{effects, focus, host, shared_inventory, size};
+use crate::runtime::server::tests::{effects, focus, host, size, workspace_inventory};
 use spaceterm_server::hierarchy::{CreateControl, Mutation, Outcome};
 
-fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Reply {
+fn select(host: &mut WorkspaceHost, device: u8, pane: Id) -> Reply {
     host.request(
         [device; 32],
         [device; 32],
@@ -16,7 +16,7 @@ fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Reply {
 }
 
 fn create_tab(
-    host: &mut SharedWorkspaceHost,
+    host: &mut WorkspaceHost,
     device: u8,
     sequence: u64,
     workspace: Id,
@@ -39,16 +39,16 @@ fn create_tab(
     let Outcome::Accepted { target } = result.outcome else {
         panic!("the Tab is created");
     };
-    shared_inventory(host).placement(target).unwrap().pane
+    workspace_inventory(host).placement(target).unwrap().pane
 }
 
 /// A CLI inside the desktop's Pane creates a Tab for the desktop: the desktop controls it at
 /// once and its origin Pane's channel alone receives the Reveal.
 #[test]
 fn work_created_for_an_origin_pane_belongs_to_its_controller_and_reveals_there() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let initial = shared_inventory(&mut host);
+    let initial = workspace_inventory(&mut host);
     let workspace = initial.workspaces[0].id;
     let origin = initial.workspaces[0].tabs[0].root_pane;
     let Reply::Attached { lease } = select(&mut host, 1, origin) else {
@@ -62,7 +62,7 @@ fn work_created_for_an_origin_pane_belongs_to_its_controller_and_reveals_there()
         workspace,
         CreateControl::OriginController { pane: origin },
     );
-    let placement = shared_inventory(&mut host).placement(created).unwrap();
+    let placement = workspace_inventory(&mut host).placement(created).unwrap();
     let [request] = effects(&mut host, lease, 1).try_into().unwrap();
     let pane::effects::Effect::Reveal(reveal) = request.effect else {
         panic!("the origin's channel receives a Reveal");
@@ -82,9 +82,9 @@ fn work_created_for_an_origin_pane_belongs_to_its_controller_and_reveals_there()
 /// Screen, while work a creator controls offers one to everyone else.
 #[test]
 fn an_unclaimed_tab_shows_no_takeover_screen() {
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let workspace = shared_inventory(&mut host).workspaces[0].id;
+    let workspace = workspace_inventory(&mut host).workspaces[0].id;
     let unclaimed = create_tab(&mut host, 3, 1, workspace, CreateControl::Unclaimed);
     assert!(matches!(
         select(&mut host, 1, unclaimed),

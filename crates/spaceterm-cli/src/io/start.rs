@@ -26,7 +26,7 @@ pub fn start(cli: &Cli) -> Option<Output> {
     else {
         return None;
     };
-    let credentials = CliCredentials::new(env!("SPACETERM_SERVER_IDENTITY"));
+    let credentials = CliCredentials::new(env!("SPACETERM_CLI_IDENTITY"));
     let mut output = selected(cli, command, &credentials);
     credentials.report(&mut output.envelope);
     Some(output)
@@ -38,7 +38,7 @@ fn failed(path: &str, server: Option<ServerRef>, failure: Failure) -> Output {
 
 fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) -> Output {
     let path = cli.command.path();
-    let identity = env!("SPACETERM_SERVER_IDENTITY");
+    let identity = env!("SPACETERM_CLI_IDENTITY");
     let deadline = Deadline::after(cli.global.timeout);
     let connecting = Instant::now()
         + cli
@@ -216,7 +216,7 @@ fn target(
     };
     let current = scope::current_from_context(
         &snapshot,
-        env!("SPACETERM_SERVER_IDENTITY"),
+        env!("SPACETERM_CLI_IDENTITY"),
         std::env::var("SPACETERM_IDENTITY").ok().as_deref(),
         std::env::var("SPACETERM_SERVER_ID").ok().as_deref(),
         std::env::var("SPACETERM_PANE").ok().as_deref(),

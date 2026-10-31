@@ -83,7 +83,7 @@ fn server_screen_with_many_distinct_links_retains_text_with_bounded_metadata() {
 }
 
 /// The Pane's current screen, as the channel bound to `lease` captures it.
-fn capture(host: &mut DevelopmentPaneHost, lease: Lease) -> ScreenCapture {
+fn capture(host: &mut ServerPaneHost, lease: Lease) -> ScreenCapture {
     let Observed::Live(observation) = host.observe([1; 32], &lease) else {
         panic!("the lease no longer presents the Pane")
     };

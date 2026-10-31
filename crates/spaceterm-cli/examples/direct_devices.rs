@@ -117,7 +117,7 @@ mod exercise {
         connection: &ServerLink,
         mutation: Mutation,
     ) -> Result<Id> {
-        let mut journal = api(server.shared_journal())?;
+        let mut journal = api(server.operation_journal())?;
         require(
             journal.pending().is_none(),
             "resolve this test client's original mutation first",
@@ -518,12 +518,12 @@ mod exercise {
             }
             require(
                 api(self.owner.paired_devices())?.is_empty(),
-                "cleanup preserved an unrelated pairing; exposure requires owner review",
+                "cleanup preserved an unrelated pairing; Network Access requires owner review",
             )?;
             let policy = api(self.owner.direct_status())?.policy;
             require(
                 policy.as_ref() == Some(&self.policy) || policy.is_none(),
-                "cleanup preserved a changed exposure policy",
+                "cleanup preserved a changed Network Access policy",
             )?;
             if policy.is_some() {
                 api(self.owner.set_direct_policy(None, false))?;
@@ -628,7 +628,7 @@ mod exercise {
                 && initial.listener == ListenerState::Off
                 && api(owner.paired_devices())?.is_empty()
                 && api(owner.pairing_claims(None))?.is_empty(),
-            "scope guard refused: exposure, paired devices or pending claims already exist",
+            "scope guard refused: Network Access, paired devices or pending claims already exist",
         )?;
         let policy = api(NetworkPolicy::new(bind))?;
         require(
@@ -656,7 +656,7 @@ mod exercise {
             require(
                 status.pin == initial.pin
                     && status.listener == ListenerState::Listening { addr: bind },
-                "explicit exposure did not bind the requested endpoint",
+                "explicit Network Access did not bind the requested endpoint",
             )?;
             if restart {
                 idle(&inventory(&connection)?.0)?;
@@ -679,7 +679,9 @@ mod exercise {
                     "restart did not retain exact network policy and server identity",
                 )?;
                 idle(&inventory(&connection)?.0)?;
-                println!("PASS explicit idle restart retained exposure policy and server identity");
+                println!(
+                    "PASS explicit idle restart retained Network Access policy and server identity"
+                );
             }
             let mut peer = Peer::penguin()?;
             require(
@@ -909,7 +911,7 @@ mod exercise {
         let cleanup = scope.cleanup();
         if cleanup.is_ok() {
             println!(
-                "PASS scoped cleanup: baseline Workspaces retained, test pairings revoked, exposure off"
+                "PASS scoped cleanup: baseline Workspaces retained, test pairings revoked, Network Access off"
             );
         } else {
             eprintln!(
@@ -1402,7 +1404,7 @@ mod exercise {
                 "Confirms no user Terminal Sessions, paired devices, pending claims or outstanding invitations."
             );
             println!(
-                "Touches one test-created Workspace, two temporary pairings and its own exposure policy; restores exposure off."
+                "Touches one test-created Workspace, two temporary pairings and its own Network Access policy; restores Network Access off."
             );
             println!(
                 "Optional --restart-idle-service authorizes restart before any fixture Terminal Session exists."

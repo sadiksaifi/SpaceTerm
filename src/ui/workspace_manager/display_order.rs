@@ -15,8 +15,8 @@ use spaceterm_server::workspace_order::{WorkspaceOrder, WorkspaceReference};
 
 use super::WorkspaceManager;
 use crate::domain::WorkspaceId;
-use crate::ui::shared_workspaces::ArrangementUnavailable;
 use crate::ui::workspace_order_state::RetainedWorkspaceOrder;
+use crate::ui::workspaces::ArrangementUnavailable;
 
 /// The retained order and the storage that keeps it across launches.
 #[derive(Default)]
@@ -104,7 +104,7 @@ impl WorkspaceManager {
             .collect();
         let restores = self.display_order.adopt_saved(saved, &presented);
         // Inventories that arrived while reading are complete, so they prune now.
-        for key in self.shared.keys() {
+        for key in self.binding.keys() {
             self.prune_display_order(key);
         }
         if restores {
@@ -168,9 +168,9 @@ impl WorkspaceManager {
     /// Forgets the Workspaces the server behind `key` no longer has, by the last complete inventory
     /// that binding read. Other bindings' Workspaces keep their places.
     fn prune_display_order(&mut self, key: super::ServerKey) {
-        if let Some(shared) = self.shared.get(key)
-            && let Some(owner) = shared.owner()
-            && let Some(inventory) = shared.latest_inventory()
+        if let Some(binding) = self.binding.get(key)
+            && let Some(owner) = binding.owner()
+            && let Some(inventory) = binding.latest_inventory()
         {
             let surviving: Vec<_> = inventory
                 .workspaces
@@ -258,9 +258,9 @@ impl WorkspaceManager {
             .iter()
             .map(|workspace| workspace.id())
             .filter(|workspace_id| {
-                self.shared
+                self.binding
                     .owning(*workspace_id)
-                    .is_some_and(|shared| shared.is_provisional(*workspace_id))
+                    .is_some_and(|binding| binding.is_provisional(*workspace_id))
             })
             .collect();
         self.display_order.pending_creations = pending;
@@ -281,7 +281,7 @@ impl WorkspaceManager {
             .iter()
             .filter_map(|workspace| {
                 let reference = self
-                    .shared
+                    .binding
                     .owning(workspace.id())?
                     .workspace_reference(workspace.id())?;
                 Some((workspace.id(), reference))

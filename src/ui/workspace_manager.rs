@@ -41,7 +41,7 @@ use crate::appearance::Color;
 use crate::close_confirmation::{CloseConfirmation, CloseTarget};
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    PaneId, RemoteConnectionPhase, TabId, ValidatedLocalDirectory, WorkspaceCollection,
+    PaneId, ServerConnectionPhase, TabId, ValidatedLocalDirectory, WorkspaceCollection,
     WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
@@ -118,7 +118,7 @@ struct WorkspaceTransientUi {
 }
 
 impl WorkspaceTransientUi {
-    /// Begins one directory selection, keeping the pin version a shared Workspace showed.
+    /// Begins one directory selection, keeping the pin version a Workspace showed.
     fn begin_pin(&mut self, target: PinTarget, version: Option<(WorkspaceId, u64)>) {
         self.pin_target = Some(target);
         self.pin_draft_version = version;
@@ -286,19 +286,19 @@ pub(crate) struct WorkspaceManager {
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     /// A Reveal that waits for its server to publish what it shows.
     pending_reveal: Option<PendingReveal>,
-    close_empty_after_shared_removal: bool,
+    close_empty_after_removal: bool,
     close_confirmation: CloseConfirmation,
     /// Whether the Workspace a shared close names held the keyboard when the person asked for
     /// it. It is kept by confirmation generation, and a Review hands it to the fresh confirmation,
     /// because each confirmation takes the keyboard before an approved close moves it.
-    shared_close_keyboard: SharedCloseKeyboard,
+    close_keyboard: WorkspaceCloseKeyboard,
     /// Reads every server again once the window's modal closes, while a reading waits on it.
     modal_reread: Option<gpui::Subscription>,
     sidebar_worktrees: worktrees::SidebarWorktrees,
-    shared_repositories: shared_repositories::SharedWorkspaceRepositories,
+    workspace_repositories: workspace_repositories::WorkspaceRepositories,
     /// Each presented SpaceTerm Server's Workspaces, their edit state, and the answers still to
     /// present. Adopting a server adds its Workspaces beside the others and changes none of them.
-    shared: ServerBindings,
+    binding: ServerBindings,
     /// Follows the desktop's paired connections while the window lives.
     _direct_servers: Option<crate::ui::direct_servers::DirectChanges>,
     /// Each presented paired route's Pane opener and the connection it follows.
@@ -367,9 +367,9 @@ impl WorkspaceManager {
         // The server owns this window's local Workspaces, which arrive once it is ready.
         let workspaces = WorkspaceCollection::empty();
         cx.on_app_quit(|manager, cx| {
-            manager.save_shared_arrangements(cx);
-            for shared in manager.shared.iter_mut() {
-                shared.flush_client_views();
+            manager.save_arrangements(cx);
+            for binding in manager.binding.iter_mut() {
+                binding.flush_client_views();
             }
             manager.flush_display_order();
             // The direct registry outlives this window's interest in it only until quit.
@@ -378,7 +378,7 @@ impl WorkspaceManager {
         })
         .detach();
         cx.on_release(|manager, cx| {
-            manager.save_shared_arrangements(cx);
+            manager.save_arrangements(cx);
         })
         .detach();
         let sidebar = cx.new(|cx| WorkspaceSidebar::new(sidebar_visible, window, cx));
@@ -429,13 +429,13 @@ impl WorkspaceManager {
             update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
             pending_final_tab_closes: BTreeSet::new(),
             pending_reveal: None,
-            close_empty_after_shared_removal: false,
+            close_empty_after_removal: false,
             close_confirmation: CloseConfirmation::default(),
-            shared_close_keyboard: SharedCloseKeyboard::default(),
+            close_keyboard: WorkspaceCloseKeyboard::default(),
             modal_reread: None,
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
-            shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
-            shared: ServerBindings::default(),
+            workspace_repositories: workspace_repositories::WorkspaceRepositories::default(),
+            binding: ServerBindings::default(),
             _direct_servers: None,
             direct_routes: direct_servers::DirectRoutes::default(),
             empty_focus: cx.focus_handle(),
@@ -452,8 +452,8 @@ impl WorkspaceManager {
     }
 
     fn create_tab_manager(
-        shared: super::shared_workspaces::SharedTabs,
-        root: crate::ui::tab_manager::SharedRoot,
+        binding: super::workspaces::WorkspaceTabs,
+        root: crate::ui::tab_manager::WorkspaceRoot,
         session_factory: WorkspaceTerminalSessionFactory,
         creation: TabManagerCreation,
         window: &mut Window,
@@ -466,8 +466,8 @@ impl WorkspaceManager {
             operating_system_window_drag_platform,
         } = creation;
         let manager = cx.new(|cx| {
-            let mut manager = TabManager::shared(
-                shared,
+            let mut manager = TabManager::new(
+                binding,
                 root,
                 session_factory,
                 operating_system_window_drag_platform,
@@ -688,9 +688,9 @@ impl WorkspaceManager {
             .map(|(index, workspace)| {
                 // Another computer's Workspace carries the globe its sidebar row shows.
                 let remote = self
-                    .shared
+                    .binding
                     .owner(workspace.id())
-                    .and_then(|key| self.shared.origin(key))
+                    .and_then(|key| self.binding.origin(key))
                     .is_some_and(|origin| matches!(origin, ServerOrigin::Direct(_)));
                 let icon = if remote {
                     IconName::Globe
@@ -865,12 +865,12 @@ impl WorkspaceManager {
         let Ok(directory) = self.local_filesystem.revalidate_directory(&directory) else {
             return PinApplication::Failed;
         };
-        self.open_shared_directory_workspace(directory, name, window, cx)
+        self.open_directory_workspace(directory, name, window, cx)
     }
 
     /// Opens a chosen directory as a Workspace the account server owns: the presented Workspace
     /// already pinned there, or a new one whose first Pane starts there.
-    fn open_shared_directory_workspace(
+    fn open_directory_workspace(
         &mut self,
         directory: ValidatedLocalDirectory,
         name: String,
@@ -878,10 +878,10 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) -> PinApplication {
         // Only a server on this machine can hold a local directory.
-        let existing = self.shared.local().and_then(|shared| {
-            let filesystem = shared.sessions().local_filesystem()?;
+        let existing = self.binding.local().and_then(|binding| {
+            let filesystem = binding.sessions().local_filesystem()?;
             self.workspaces.iter().find_map(|entry| {
-                let pin = shared
+                let pin = binding
                     .server_workspace(entry.id())?
                     .pinned_directory
                     .as_deref()?;
@@ -894,9 +894,7 @@ impl WorkspaceManager {
         });
         let opened = match existing {
             Some(workspace_id) => self.activate_workspace(workspace_id, window, cx),
-            None => {
-                self.create_shared_workspace(name, Some(directory.path().to_owned()), window, cx)
-            }
+            None => self.create_workspace(name, Some(directory.path().to_owned()), window, cx),
         };
         if opened {
             self.pin_operation = self.pin_operation.wrapping_add(1);
@@ -954,9 +952,9 @@ impl WorkspaceManager {
         // The version a shared draft began at is read here, before anything ends the chooser:
         // every completion route clears that state as it finishes.
         let observed_version = self.transient.pin_version(workspace_id);
-        // A shared Workspace's Pinned Directory belongs to the server, which decides it for every
+        // A Workspace's Pinned Directory belongs to the server, which decides it for every
         // client. Nothing is pinned locally first.
-        self.pin_shared_workspace(workspace_id, pin.as_ref(), observed_version, window, cx)
+        self.pin_workspace(workspace_id, pin.as_ref(), observed_version, window, cx)
             .unwrap_or(false)
     }
 
@@ -994,13 +992,13 @@ impl WorkspaceManager {
         // this computer reads or validates them.
         let server = match &target {
             PinTarget::Workspace(workspace_id)
-                if self.is_shared_workspace(*workspace_id)
+                if self.has_workspace(*workspace_id)
                     && !self.is_local_server_workspace(*workspace_id) =>
             {
                 let Some(source) = self.owning_directory_source(*workspace_id, cx) else {
-                    Self::show_shared_refusal(
+                    Self::show_refusal(
                         "change the pinned directory",
-                        super::shared_workspaces::SharedRefusalReason::Offline,
+                        super::workspaces::WorkspaceRefusalReason::Offline,
                         window,
                         cx,
                     );
@@ -1011,9 +1009,9 @@ impl WorkspaceManager {
             }
             PinTarget::NewServerWorkspace { key, .. } => {
                 let Some(source) = self.server_directory_source(*key, cx) else {
-                    Self::show_shared_refusal(
+                    Self::show_refusal(
                         "open a remote directory",
-                        super::shared_workspaces::SharedRefusalReason::Offline,
+                        super::workspaces::WorkspaceRefusalReason::Offline,
                         window,
                         cx,
                     );
@@ -1160,9 +1158,9 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let Some(key) = self.server_key(&super::ServerTarget::Direct(route)) else {
-            Self::show_shared_refusal(
+            Self::show_refusal(
                 "open a remote directory",
-                super::shared_workspaces::SharedRefusalReason::Offline,
+                super::workspaces::WorkspaceRefusalReason::Offline,
                 window,
                 cx,
             );
@@ -1238,7 +1236,7 @@ impl WorkspaceManager {
     /// activates the Workspace already pinned to the chosen directory there. Until then the
     /// request waits; a server still finishing its first reading never drops it.
     fn continue_server_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
+        use super::workspaces::{WorkspaceRefusalReason, WorkspaceSubmission};
 
         let Some(PendingServerDirectory {
             key,
@@ -1249,12 +1247,12 @@ impl WorkspaceManager {
         else {
             return;
         };
-        let Some(shared) = self.shared.get(key) else {
+        let Some(binding) = self.binding.get(key) else {
             // The server stopped being presented, so nothing reaches it.
             self.finish_server_directory();
-            Self::show_shared_refusal(
+            Self::show_refusal(
                 "open a remote directory",
-                SharedRefusalReason::Offline,
+                WorkspaceRefusalReason::Offline,
                 window,
                 cx,
             );
@@ -1262,11 +1260,11 @@ impl WorkspaceManager {
             cx.notify();
             return;
         };
-        if !shared.accepts_edits() {
+        if !binding.accepts_edits() {
             return;
         }
         let server_name = self
-            .shared
+            .binding
             .origin(key)
             .and_then(ServerOrigin::remote_name)
             .unwrap_or_default();
@@ -1276,7 +1274,7 @@ impl WorkspaceManager {
             .workspaces
             .iter()
             .filter_map(|entry| {
-                let pin = shared
+                let pin = binding
                     .server_workspace(entry.id())?
                     .pinned_directory
                     .clone()?;
@@ -1291,7 +1289,7 @@ impl WorkspaceManager {
                 Some(Ok(matched)) => matched,
                 Some(Err(())) => {
                     self.finish_server_directory();
-                    Self::show_shared_unavailable_with_title(
+                    Self::show_unavailable_with_title(
                         "Couldn\u{2019}t Open Workspace",
                         &format!(
                             "Couldn\u{2019}t check for an existing Workspace on \u{201C}{server_name}\u{201D}. Try again."
@@ -1316,29 +1314,29 @@ impl WorkspaceManager {
                 }
                 None
             }
-            None => match self.shared.get_mut(key) {
-                Some(shared) => match shared.create_workspace(name, Some(directory)) {
-                    SharedSubmission::Submitted => None,
+            None => match self.binding.get_mut(key) {
+                Some(binding) => match binding.create_workspace(name, Some(directory)) {
+                    WorkspaceSubmission::Submitted => None,
                     // Readiness was just checked, so only a publication arriving between the
                     // check and the submission refuses it this way; the next reading retries.
-                    SharedSubmission::Refused(
-                        SharedRefusalReason::Offline | SharedRefusalReason::Pending,
+                    WorkspaceSubmission::Refused(
+                        WorkspaceRefusalReason::Offline | WorkspaceRefusalReason::Pending,
                     ) => return,
-                    SharedSubmission::Refused(reason) => Some(reason),
+                    WorkspaceSubmission::Refused(reason) => Some(reason),
                 },
                 None => return,
             },
         };
         self.finish_server_directory();
         if let Some(reason) = refusal {
-            Self::show_shared_refusal("create a Workspace", reason, window, cx);
+            Self::show_refusal("create a Workspace", reason, window, cx);
         } else if existing.is_none() {
             // The server still creates the Workspace the person asked for. After newer
             // navigation it joins the sidebar without taking the selection or the keyboard.
             if !intent_kept {
                 self.quiet_creation = Some(key);
             }
-            self.sync_shared_workspaces(key, window, cx);
+            self.sync_workspaces(key, window, cx);
             self.quiet_creation = None;
         }
         self.sync_terminal_focus_blocker(window, cx);
@@ -1443,10 +1441,10 @@ impl WorkspaceManager {
         if self.transient.local_selection_pending {
             return;
         }
-        // A shared Workspace's draft is fenced to the pin version the chooser opened on.
+        // A Workspace's draft is fenced to the pin version the chooser opened on.
         let version = match &target {
             PinTarget::Workspace(workspace_id) => self
-                .shared_pin_version(*workspace_id)
+                .workspace_pin_version(*workspace_id)
                 .map(|version| (*workspace_id, version)),
             PinTarget::NewLocalWorkspace { .. } | PinTarget::NewServerWorkspace { .. } => None,
         };
@@ -1609,7 +1607,7 @@ impl WorkspaceManager {
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         // A SpaceTerm Server owns every Workspace's Tabs, Panes, and Sessions, so closing one
         // asks the server to end them for every client.
-        self.request_shared_close(target, window, cx);
+        self.request_server_close(target, window, cx);
     }
 
     pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1665,8 +1663,8 @@ impl WorkspaceManager {
         };
         closed_manager.update(cx, |manager, cx| manager.close_all(cx));
         self.pending_final_tab_closes.remove(&workspace_id);
-        if let Some(shared) = self.shared.owning_mut(workspace_id) {
-            shared.forget(workspace_id);
+        if let Some(binding) = self.binding.owning_mut(workspace_id) {
+            binding.forget(workspace_id);
         }
         match self.workspaces.active_workspace_id() {
             Some(active_workspace_id) => {
@@ -1766,7 +1764,7 @@ impl WorkspaceManager {
                 // A Workspace's name belongs to its server. The sidebar keeps showing the
                 // server's name until the server accepts this one, and the draft stays fenced to
                 // the version it was started from.
-                self.rename_shared_workspace(workspace_id, &name, version, window, cx);
+                self.rename_workspace(workspace_id, &name, version, window, cx);
             }
             SidebarEvent::Move {
                 workspace_id,
@@ -1880,9 +1878,9 @@ impl WorkspaceManager {
             // The person asked, so the system may ask for this device's key.
             WorkspaceMenuCommand::Reconnect => {
                 let route = self
-                    .shared
+                    .binding
                     .owner(workspace_id)
-                    .and_then(|key| self.shared.origin(key))
+                    .and_then(|key| self.binding.origin(key))
                     .and_then(|origin| match origin {
                         ServerOrigin::Local => None,
                         ServerOrigin::Direct(direct) => Some(direct.route),
@@ -1893,7 +1891,7 @@ impl WorkspaceManager {
                     direct.resume(&route);
                 }
             }
-            WorkspaceMenuCommand::Detach => self.detach_shared_workspace(workspace_id, window, cx),
+            WorkspaceMenuCommand::Detach => self.detach_workspace(workspace_id, window, cx),
             WorkspaceMenuCommand::Close => {
                 self.request_close(CloseTarget::KillWorkspace(workspace_id), window, cx)
             }
@@ -1971,7 +1969,7 @@ impl WorkspaceManager {
         match creation {
             // The account server owns local work, so a new local Workspace is the server's.
             WorkspaceCreation::Local => {
-                self.create_shared_workspace(name, None, window, cx);
+                self.create_workspace(name, None, window, cx);
             }
             WorkspaceCreation::OpenLocalDirectory => self.open_local_directory(name, window, cx),
             WorkspaceCreation::Remote(route) => {
@@ -2123,9 +2121,9 @@ impl WorkspaceManager {
                 status: None,
             };
         };
-        // A shared Workspace's Worktrees and pin live on the owning server, which lists the
+        // A Workspace's Worktrees and pin live on the owning server, which lists the
         // Worktrees and publishes the pin.
-        let shared = self.shared_row_facts(workspace_id);
+        let binding = self.workspace_row_facts(workspace_id);
         WorkspaceChromeIdentity {
             worktree: self.worktree_section(workspace_id, cx).and_then(|section| {
                 section
@@ -2133,7 +2131,7 @@ impl WorkspaceManager {
                     .find(|row| row.active)
                     .map(|row| row.name.to_string())
             }),
-            pinned: shared.as_ref().is_some_and(|shared| shared.pinned),
+            pinned: binding.as_ref().is_some_and(|binding| binding.pinned),
             status: WorkspaceChromeStatus::resolve(self.server_connection_phase(workspace_id, cx)),
             ..chrome_identity(workspace)
         }
@@ -2145,24 +2143,24 @@ impl WorkspaceManager {
         &self,
         workspace_id: WorkspaceId,
         cx: &App,
-    ) -> Option<RemoteConnectionPhase> {
+    ) -> Option<ServerConnectionPhase> {
         use crate::direct_connections::DirectRouteStatus;
 
-        let key = self.shared.owner(workspace_id)?;
-        match self.shared.origin(key)? {
+        let key = self.binding.owner(workspace_id)?;
+        match self.binding.origin(key)? {
             ServerOrigin::Local => None,
             ServerOrigin::Direct(direct) => {
                 let status = crate::ui::direct_servers::installed(cx)?.status(&direct.route)?;
                 Some(match status {
-                    DirectRouteStatus::Connected => RemoteConnectionPhase::Connected,
+                    DirectRouteStatus::Connected => ServerConnectionPhase::Connected,
                     DirectRouteStatus::Connecting | DirectRouteStatus::Reconnecting => {
-                        RemoteConnectionPhase::Reconnecting
+                        ServerConnectionPhase::Reconnecting
                     }
                     DirectRouteStatus::Refused(_) | DirectRouteStatus::Unavailable(_) => {
-                        RemoteConnectionPhase::Failed
+                        ServerConnectionPhase::Failed
                     }
                     DirectRouteStatus::Disconnected | DirectRouteStatus::NeedsInteraction => {
-                        RemoteConnectionPhase::Disconnected
+                        ServerConnectionPhase::Disconnected
                     }
                 })
             }
@@ -2183,19 +2181,19 @@ impl WorkspaceManager {
         let remote_status = self
             .server_connection_phase(workspace.id(), cx)
             .and_then(remote_connection_status);
-        let shared = self.shared_row_facts(workspace.id());
+        let binding = self.workspace_row_facts(workspace.id());
         // The directory belongs to the server, so the chrome shows the server's own.
-        let path = shared.as_ref().map_or_else(String::new, |shared| {
-            compact_home_path(&shared.directory, &self.local_home_directory_path)
+        let path = binding.as_ref().map_or_else(String::new, |binding| {
+            compact_home_path(&binding.directory, &self.local_home_directory_path)
         });
         let tooltip_detail = remote_status
             .map(|status| format!("{path}: {status}"))
             .unwrap_or_else(|| path.clone());
 
-        // A shared Workspace's Repository Status is what the owning server read.
-        let repository = shared
+        // A Workspace's Repository Status is what the owning server read.
+        let repository = binding
             .as_ref()
-            .and_then(|_| self.shared_chip_line(workspace.id(), cx))
+            .and_then(|_| self.chip_line(workspace.id(), cx))
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
         Some((
@@ -2515,29 +2513,29 @@ impl WorkspaceManager {
             .map(|workspace| {
                 let mut path = gpui::SharedString::default();
                 let mut tooltip = String::new();
-                // A shared Workspace's directory, pin, Worktrees, and Repository Status all live
+                // A Workspace's directory, pin, Worktrees, and Repository Status all live
                 // on the owning server. The row shows what the server read and published; this
                 // client reads none of it.
-                let shared = self.shared_row_facts(workspace.id());
-                let mut repository = match &shared {
+                let binding = self.workspace_row_facts(workspace.id());
+                let mut repository = match &binding {
                     // Another computer's directory is shown as that computer reports it: this
                     // computer's home directory says nothing about it.
-                    Some(shared) if shared.machine.is_some() => {
-                        path = shared.directory.display().to_string().into();
+                    Some(binding) if binding.machine.is_some() => {
+                        path = binding.directory.display().to_string().into();
                         tooltip = format!(
                             "{SERVER_WORKSPACE_BADGE} on {}: {}",
-                            shared.machine.as_deref().unwrap_or_default(),
-                            shared.directory.display()
+                            binding.machine.as_deref().unwrap_or_default(),
+                            binding.directory.display()
                         );
-                        self.shared_sidebar_badge(workspace.id(), cx)
+                        self.sidebar_badge(workspace.id(), cx)
                     }
-                    Some(shared) => {
+                    Some(binding) => {
                         path =
-                            compact_home_path(&shared.directory, &self.local_home_directory_path)
+                            compact_home_path(&binding.directory, &self.local_home_directory_path)
                                 .into();
                         tooltip =
-                            format!("{SERVER_WORKSPACE_BADGE}: {}", shared.directory.display());
-                        self.shared_sidebar_badge(workspace.id(), cx)
+                            format!("{SERVER_WORKSPACE_BADGE}: {}", binding.directory.display());
+                        self.sidebar_badge(workspace.id(), cx)
                     }
                     None => None,
                 };
@@ -2545,9 +2543,9 @@ impl WorkspaceManager {
                 // A disclosing row describes the Workspace. Its directory and branch belong to
                 // its Worktrees, and a collapsed row shows its Active Worktree's.
                 if let Some(section) = worktrees.as_ref() {
-                    let pinned = shared
+                    let pinned = binding
                         .as_ref()
-                        .and_then(|shared| shared.pinned.then(|| shared.directory.clone()));
+                        .and_then(|binding| binding.pinned.then(|| binding.directory.clone()));
                     let active = section
                         .rows()
                         .find(|worktree| worktree.active)
@@ -2573,7 +2571,7 @@ impl WorkspaceManager {
                     if let Some(pinned) = pinned {
                         tooltip.push_str(&format!("\nPinned Directory: {}", pinned.display()));
                     }
-                    match shared.as_ref().map(|shared| shared.machine.as_ref()) {
+                    match binding.as_ref().map(|binding| binding.machine.as_ref()) {
                         Some(Some(machine)) => {
                             tooltip = format!("{SERVER_WORKSPACE_BADGE} on {machine}\n{tooltip}");
                         }
@@ -2588,27 +2586,27 @@ impl WorkspaceManager {
                     name: workspace.name().to_owned().into(),
                     path,
                     // Another computer's server Workspace names that computer.
-                    machine: shared
+                    machine: binding
                         .as_ref()
-                        .and_then(|shared| shared.machine.clone())
+                        .and_then(|binding| binding.machine.clone())
                         .map(Into::into),
                     tooltip: tooltip.into(),
-                    pinned: shared.as_ref().is_some_and(|shared| shared.pinned),
+                    pinned: binding.as_ref().is_some_and(|binding| binding.pinned),
                     remote_connection_phase: self.server_connection_phase(workspace.id(), cx),
                     repository,
                     worktrees,
                     creates_worktrees: self.creates_worktrees(workspace.id(), cx),
                     active: Some(workspace.id()) == active_workspace_id,
-                    shared: shared.map(|shared| shared.row),
+                    binding: binding.map(|binding| binding.row),
                 }
             })
             .collect()
     }
 }
 
-/// What a shared Workspace's sidebar row overrides, when a SpaceTerm Server owns the Workspace.
-struct SharedRowFacts {
-    row: super::workspace_sidebar::SharedWorkspaceRow,
+/// What a Workspace's sidebar row overrides, when a SpaceTerm Server owns the Workspace.
+struct WorkspaceRowFacts {
+    row: super::workspace_sidebar::WorkspaceRow,
     /// The directory the server reports. It names no directory this client may read, so the row
     /// only ever displays it.
     directory: PathBuf,
@@ -2617,17 +2615,17 @@ struct SharedRowFacts {
     machine: Option<String>,
 }
 
-/// Shared server Workspaces: adopting them, presenting what the server publishes, submitting the
+/// Server Workspaces: adopting them, presenting what the server publishes, submitting the
 /// edits a person asks for, and refusing the operations the server path does not support yet.
 impl WorkspaceManager {
     /// Presents the Workspaces the account-local server's shared edit channel publishes.
     ///
     /// The server this reaches is chosen by construction, so the local SpaceTerm Server and a
     /// scripted one follow the same path through this window.
-    pub(crate) fn present_shared_workspaces(
+    pub(crate) fn present_workspaces(
         &mut self,
-        edits: super::shared_workspaces::SharedEditSource,
-        sessions: super::shared_workspaces::SharedPaneSessions,
+        edits: super::workspaces::WorkspaceEditSource,
+        sessions: super::workspaces::WorkspacePaneSessions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2639,39 +2637,39 @@ impl WorkspaceManager {
     pub(crate) fn present_server_workspaces(
         &mut self,
         origin: ServerOrigin,
-        edits: super::shared_workspaces::SharedEditSource,
-        sessions: super::shared_workspaces::SharedPaneSessions,
+        edits: super::workspaces::WorkspaceEditSource,
+        sessions: super::workspaces::WorkspacePaneSessions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ServerKey {
-        use super::shared_workspaces::SharedWorkspaces;
+        use super::workspaces::Workspaces;
 
-        let first = self.shared.is_empty();
+        let first = self.binding.is_empty();
         let (key, inserted) = self
-            .shared
-            .insert(origin, SharedWorkspaces::new(edits, sessions));
+            .binding
+            .insert(origin, Workspaces::new(edits, sessions));
         if !inserted {
             return key;
         }
         if first {
-            self.follow_shared_pull_requests(cx);
+            self.follow_pull_requests(cx);
             if let Some(handle) = window.window_handle().downcast::<Self>() {
-                cx.set_global(super::shared_workspaces::SharedWorkspaceHost(handle));
+                cx.set_global(super::workspaces::WorkspaceHost(handle));
             }
         }
         // Reads the server's inventory and this window's edits after each change either one
         // hints, starting at once. Nothing reads on a timer: every change the window shows is
         // hinted after it is visible, so a reading never misses one.
         let reads = self
-            .shared
+            .binding
             .get(key)
-            .map(super::shared_workspaces::SharedWorkspaces::subscribe)
+            .map(super::workspaces::Workspaces::subscribe)
             .map(|changes| {
                 cx.spawn_in(window, async move |manager, cx| {
                     while changes.recv().await.is_ok() {
                         if manager
                             .update_in(cx, |manager, window, cx| {
-                                manager.sync_shared_workspaces(key, window, cx);
+                                manager.sync_workspaces(key, window, cx);
                             })
                             .is_err()
                         {
@@ -2681,7 +2679,7 @@ impl WorkspaceManager {
                 })
             });
         if let Some(reads) = reads {
-            self.shared.follow(key, reads);
+            self.binding.follow(key, reads);
         }
         cx.notify();
         key
@@ -2699,12 +2697,12 @@ impl WorkspaceManager {
         if key == ServerKey::LOCAL {
             return;
         }
-        self.save_shared_arrangements(cx);
+        self.save_arrangements(cx);
         let presented: Vec<WorkspaceId> = self
             .workspaces
             .iter()
             .map(|entry| entry.id())
-            .filter(|&workspace_id| self.shared.owner(workspace_id) == Some(key))
+            .filter(|&workspace_id| self.binding.owner(workspace_id) == Some(key))
             .collect();
         for workspace_id in presented {
             self.remove_workspace_presentation(workspace_id, window, cx);
@@ -2712,7 +2710,7 @@ impl WorkspaceManager {
         let parked: Vec<_> = self
             .workspaces
             .parked_ids()
-            .filter(|&id| self.shared.owner(id) == Some(key))
+            .filter(|&id| self.binding.owner(id) == Some(key))
             .collect();
         for id in parked {
             if let Ok(manager) = self.workspaces.discard_parked_workspace(id) {
@@ -2720,7 +2718,7 @@ impl WorkspaceManager {
             }
             self.pending_final_tab_closes.remove(&id);
         }
-        if let Some(mut withdrawn) = self.shared.remove(key) {
+        if let Some(mut withdrawn) = self.binding.remove(key) {
             withdrawn.flush_client_views();
         }
         // A Workspace still waiting for this server says it couldn't open rather than vanishing.
@@ -2731,21 +2729,16 @@ impl WorkspaceManager {
         {
             self.continue_server_directory(window, cx);
         }
-        self.present_shared_repositories(cx);
+        self.present_repositories(cx);
         cx.notify();
     }
 
     /// Reads one server's answer and its inventory, then presents both.
-    fn sync_shared_workspaces(
-        &mut self,
-        key: ServerKey,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn sync_workspaces(&mut self, key: ServerKey, window: &mut Window, cx: &mut Context<Self>) {
         let ready = self
-            .shared
+            .binding
             .get_mut(key)
-            .map(|shared| shared.prepare_client_views());
+            .map(|binding| binding.prepare_client_views());
         if !matches!(ready, Some(Ok(true))) {
             self.report_client_view_error(window, cx);
             self.reread_after_modal(window, cx);
@@ -2755,13 +2748,13 @@ impl WorkspaceManager {
         // keyboard ownership first, so that replacement cannot erase the initiating close intent.
         let keyboard_before_reconciliation = window.focused(cx);
         let Some(poll) = self
-            .shared
+            .binding
             .get_mut(key)
-            .map(super::shared_workspaces::SharedWorkspaces::poll)
+            .map(super::workspaces::Workspaces::poll)
         else {
             return;
         };
-        self.reconcile_parked_shared_workspaces(key, window, cx);
+        self.reconcile_parked_workspaces(key, window, cx);
         // Approved closes already moved presentation. Published membership never replaces newer focus.
         let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
             matches!(
@@ -2769,12 +2762,12 @@ impl WorkspaceManager {
                 spaceterm_server::hierarchy::Mutation::Close { .. }
             )
         }) {
-            super::shared_workspaces::SharedRemoval::OwnClose
+            super::workspaces::WorkspaceRemoval::OwnClose
         } else {
-            super::shared_workspaces::SharedRemoval::Published
+            super::workspaces::WorkspaceRemoval::Published
         };
         if let Some(inventory) = poll.inventory {
-            self.apply_shared_inventory(key, &inventory, removal, window, cx);
+            self.apply_inventory(key, &inventory, removal, window, cx);
             self.settle_remembered_view(key, window, cx);
         }
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
@@ -2783,68 +2776,68 @@ impl WorkspaceManager {
         if let Some(workspace_id) = poll
             .initial
             .filter(|_| !self.restores_remembered_view())
-            .and_then(|server| self.shared.get(key)?.local(server))
+            .and_then(|server| self.binding.get(key)?.local(server))
             && self.activate_workspace(workspace_id, window, cx)
         {
             self.focus(window, cx);
         }
         // The client that asked for a creation opens it, once, after the server published it.
         if let Some(accepted) = poll.accepted {
-            self.open_accepted_shared(key, &accepted, window, cx);
+            self.open_accepted(key, &accepted, window, cx);
         }
         self.present_reveal(window, cx);
         // Each answer below stays with this reading until its alert is admitted, and counts as
         // presented once the person answers that alert.
         if !spaceterm_ui::window_modal_is_open(window, cx)
             && let Some((conflict, notice)) = self
-                .shared
+                .binding
                 .get(key)
-                .and_then(super::shared_workspaces::SharedWorkspaces::next_conflict)
-            && self.present_shared_conflict(conflict, &notice, window, cx)
-            && let Some(shared) = self.shared.get_mut(key)
+                .and_then(super::workspaces::Workspaces::next_conflict)
+            && self.present_conflict(conflict, &notice, window, cx)
+            && let Some(binding) = self.binding.get_mut(key)
         {
-            let _ = shared.take_conflict();
+            let _ = binding.take_conflict();
         }
         while let Some((refusal, notice)) = self
-            .shared
+            .binding
             .get(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::next_refusal)
-            && self.present_shared_refusal(refusal, Some(&notice), window, cx)
-            && let Some(shared) = self.shared.get_mut(key)
+            .and_then(super::workspaces::Workspaces::next_refusal)
+            && self.present_refusal(refusal, Some(&notice), window, cx)
+            && let Some(binding) = self.binding.get_mut(key)
         {
-            let _ = shared.take_refusal();
+            let _ = binding.take_refusal();
         }
         if let Some(notice) = self
-            .shared
+            .binding
             .get(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::next_forgotten)
+            .and_then(super::workspaces::Workspaces::next_forgotten)
             && self.present_forgotten_outcomes(&notice, window, cx)
-            && let Some(shared) = self.shared.get_mut(key)
+            && let Some(binding) = self.binding.get_mut(key)
         {
-            let _ = shared.take_forgotten();
+            let _ = binding.take_forgotten();
         }
         while let Some((server_target, local, notice)) = self
-            .shared
+            .binding
             .get(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::next_stale_close)
-            && self.present_stale_shared_close(server_target, local, Some(&notice), window, cx)
-            && let Some(shared) = self.shared.get_mut(key)
+            .and_then(super::workspaces::Workspaces::next_stale_close)
+            && self.present_stale_close(server_target, local, Some(&notice), window, cx)
+            && let Some(binding) = self.binding.get_mut(key)
         {
-            let _ = shared.take_stale_close();
+            let _ = binding.take_stale_close();
         }
-        self.revalidate_shared_close(key, window, cx);
+        self.revalidate_close(key, window, cx);
         if !spaceterm_ui::window_modal_is_open(window, cx)
             && self.close_confirmation.pending().is_none()
-            && let Some(intent) = self.shared.get(key).and_then(|shared| shared.take_close_intent())
+            && let Some(intent) = self.binding.get(key).and_then(|binding| binding.take_close_intent())
             // The local presentation must still name the exact creation this intent followed.
-            && self.shared_close_target(intent.local, cx) == Some(intent.server)
+            && self.close_target(intent.local, cx) == Some(intent.server)
         {
             let held_keyboard = intent.keyboard.is_some()
                 && intent.keyboard == keyboard_before_reconciliation
                 && self.close_target_is_active(intent.local, cx);
-            self.shared_close_keyboard.reviewed = Some(held_keyboard);
-            self.request_shared_close(intent.local, window, cx);
-            self.shared_close_keyboard.reviewed = None;
+            self.close_keyboard.reviewed = Some(held_keyboard);
+            self.request_server_close(intent.local, window, cx);
+            self.close_keyboard.reviewed = None;
         }
         // Each server's reading may present the Worktree it created or change the one under
         // review; both look up their own Workspace's server.
@@ -2857,9 +2850,9 @@ impl WorkspaceManager {
         // A form presents its own Create's answer, so a failure reaches here only when no
         // surface that asked for it presents it.
         while let Some((failure, notice)) = self
-            .shared
+            .binding
             .get(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::next_worktree_failure)
+            .and_then(super::workspaces::Workspaces::next_worktree_failure)
             && self.server_worktree_operation_failure(
                 &failure.operation,
                 failure.error,
@@ -2867,28 +2860,28 @@ impl WorkspaceManager {
                 window,
                 cx,
             )
-            && let Some(shared) = self.shared.get_mut(key)
+            && let Some(binding) = self.binding.get_mut(key)
         {
-            let _ = shared.take_worktree_failure();
+            let _ = binding.take_worktree_failure();
         }
-        self.save_shared_arrangements(cx);
+        self.save_arrangements(cx);
         self.report_client_view_error(window, cx);
         self.read_refusal_offer(cx);
         // Membership, connection, and Git facts all decide what each view presents, including
         // Workspaces nobody is looking at.
         if poll.changed {
-            self.present_shared_repositories(cx);
+            self.present_repositories(cx);
             // Metadata alone can change without a membership revision.
-            if let Some(inventory) = self.shared.get(key).and_then(|s| s.latest_inventory()) {
-                self.present_shared_metadata(key, inventory, cx);
+            if let Some(inventory) = self.binding.get(key).and_then(|s| s.latest_inventory()) {
+                self.present_metadata(key, inventory, cx);
             }
         }
-        if std::mem::take(&mut self.close_empty_after_shared_removal)
+        if std::mem::take(&mut self.close_empty_after_removal)
             && self.workspaces.active_workspace_id().is_none()
             && self.workspaces.parked_ids().next().is_none()
         {
-            for (_, shared) in self.shared.iter() {
-                shared.edits().retain_until_settled(cx);
+            for (_, binding) in self.binding.iter() {
+                binding.edits().retain_until_settled(cx);
             }
             if cx.windows().len() == 1 {
                 crate::status_menu::show_in_dock(cx, false);
@@ -2902,7 +2895,7 @@ impl WorkspaceManager {
     /// Presents the Terminal Metadata `inventory` publishes for every Pane of its server's
     /// Workspaces this window shows, active or not, painted or not. The inventory names each
     /// Pane's Session run, so metadata from a run that ended never replaces the current one's.
-    fn present_shared_metadata(
+    fn present_metadata(
         &self,
         key: ServerKey,
         inventory: &spaceterm_server::hierarchy::Inventory,
@@ -2938,25 +2931,25 @@ impl WorkspaceManager {
             .collect::<std::collections::BTreeMap<_, _>>();
         let lookup = |pane| published.get(&pane).copied();
         for entry in self.workspaces.iter() {
-            if self.shared.owner(entry.id()) != Some(key) {
+            if self.binding.owner(entry.id()) != Some(key) {
                 continue;
             }
             entry.payload().clone().update(cx, |manager, cx| {
-                manager.present_shared_metadata(&lookup, cx);
+                manager.present_metadata(&lookup, cx);
             });
         }
     }
 
-    fn save_shared_arrangements(&mut self, cx: &App) {
-        for key in self.shared.keys() {
+    fn save_arrangements(&mut self, cx: &App) {
+        for key in self.binding.keys() {
             let workspaces = self
                 .workspaces
                 .iter()
-                .filter(|entry| self.shared.owner(entry.id()) == Some(key))
-                .filter_map(|entry| entry.payload().read(cx).shared_arrangement(cx))
+                .filter(|entry| self.binding.owner(entry.id()) == Some(key))
+                .filter_map(|entry| entry.payload().read(cx).arrangement(cx))
                 .collect();
-            if let Some(shared) = self.shared.get_mut(key) {
-                shared.save_arrangements(spaceterm_server::client_view::ClientView { workspaces });
+            if let Some(binding) = self.binding.get_mut(key) {
+                binding.save_arrangements(spaceterm_server::client_view::ClientView { workspaces });
             }
         }
     }
@@ -2970,17 +2963,17 @@ impl WorkspaceManager {
         self.modal_reread =
             spaceterm_ui::when_window_modal_closes(window, cx, |manager, window, cx| {
                 manager.modal_reread = None;
-                for key in manager.shared.keys() {
-                    manager.sync_shared_workspaces(key, window, cx);
+                for key in manager.binding.keys() {
+                    manager.sync_workspaces(key, window, cx);
                 }
             });
     }
 
     fn report_client_view_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let notice = self
-            .shared
+            .binding
             .iter_mut()
-            .find_map(|shared| shared.take_view_error());
+            .find_map(|binding| binding.take_view_error());
         // The retained Workspace order says it couldn't be read or saved the same way.
         let notice = notice.or_else(|| self.take_display_order_error());
         if let Some(notice) = notice
@@ -2994,22 +2987,22 @@ impl WorkspaceManager {
 
     /// Applies one published inventory. Every membership change the server made reaches this
     /// window here, including the answer to this client's own accepted edit.
-    fn apply_shared_inventory(
+    fn apply_inventory(
         &mut self,
         key: ServerKey,
         inventory: &spaceterm_server::hierarchy::Inventory,
-        removal: super::shared_workspaces::SharedRemoval,
+        removal: super::workspaces::WorkspaceRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use super::shared_workspaces::SharedWorkspacePlan;
+        use super::workspaces::WorkspacePlan;
 
-        let Some(plan) = self.shared.get(key).map(|shared| shared.plan(inventory)) else {
+        let Some(plan) = self.binding.get(key).map(|binding| binding.plan(inventory)) else {
             return;
         };
         for step in plan {
             match step {
-                SharedWorkspacePlan::Create { facts } => {
+                WorkspacePlan::Create { facts } => {
                     let Some(workspace) = inventory
                         .workspaces
                         .iter()
@@ -3017,9 +3010,9 @@ impl WorkspaceManager {
                     else {
                         continue;
                     };
-                    self.present_shared_workspace(key, &facts, workspace, window, cx);
+                    self.present_workspace(key, &facts, workspace, window, cx);
                 }
-                SharedWorkspacePlan::Update { local, facts } => {
+                WorkspacePlan::Update { local, facts } => {
                     let Some(workspace) = inventory
                         .workspaces
                         .iter()
@@ -3036,10 +3029,10 @@ impl WorkspaceManager {
                         && let Err(error) =
                             self.workspaces.rename_workspace(local, facts.name.clone())
                     {
-                        Self::report_workspace_error("rename the shared", error);
+                        Self::report_workspace_error("rename the Workspace", error);
                     }
-                    if let Some(shared) = self.shared.get_mut(key) {
-                        shared.register(local, facts);
+                    if let Some(binding) = self.binding.get_mut(key) {
+                        binding.register(local, facts);
                     }
                     if let Some(manager) = self
                         .workspaces
@@ -3047,15 +3040,15 @@ impl WorkspaceManager {
                         .map(|entry| entry.payload().clone())
                     {
                         manager.update(cx, |manager, cx| {
-                            manager.reconcile_shared(workspace, removal, window, cx);
+                            manager.reconcile(workspace, removal, window, cx);
                         });
                     }
                 }
                 // The server no longer has the Workspace, so neither does this window. Leaving
                 // it behind would turn server data into desktop-owned work, and an inactive
                 // Pane's connection may never report its own end.
-                SharedWorkspacePlan::Removed { local } => {
-                    self.remove_shared_workspace(local, removal, window, cx);
+                WorkspacePlan::Removed { local } => {
+                    self.remove_workspace(local, removal, window, cx);
                 }
             }
         }
@@ -3063,28 +3056,28 @@ impl WorkspaceManager {
         self.reconcile_display_order(key);
         // Views this inventory just created, including a reattached Workspace's, present its
         // metadata now. A later poll may carry the same inventory and report no change.
-        self.present_shared_metadata(key, inventory, cx);
+        self.present_metadata(key, inventory, cx);
         self.synchronize_tab_manager_layouts(window, cx);
         cx.notify();
     }
 
     /// Presents one server Workspace this window has not seen before. It joins the sidebar and
     /// never becomes the Active Workspace, because another client's creation is membership here.
-    fn present_shared_workspace(
+    fn present_workspace(
         &mut self,
         key: ServerKey,
-        facts: &super::shared_workspaces::SharedWorkspaceFacts,
+        facts: &super::workspaces::WorkspaceFacts,
         workspace: &spaceterm_server::hierarchy::Workspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use super::shared_workspaces::SharedTabs;
+        use super::workspaces::WorkspaceTabs;
 
-        let Some(shared) = self.shared.get(key) else {
+        let Some(binding) = self.binding.get(key) else {
             return;
         };
-        let sessions = shared.sessions().clone();
-        let edits = shared.edits();
+        let sessions = binding.sessions().clone();
+        let edits = binding.edits();
         let Some(root_tab) = workspace
             .tabs
             .iter()
@@ -3104,7 +3097,7 @@ impl WorkspaceManager {
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let sidebar_width = self.sidebar.read(cx).layout().width;
-        let root = crate::ui::tab_manager::SharedRoot {
+        let root = crate::ui::tab_manager::WorkspaceRoot {
             tab: root_tab.id,
             pane: root_tab.root_pane,
             state: root_state,
@@ -3113,7 +3106,7 @@ impl WorkspaceManager {
             .workspaces
             .create_workspace(facts.name.clone(), |workspace_id| {
                 Self::create_tab_manager(
-                    SharedTabs::new(edits, sessions, facts.server),
+                    WorkspaceTabs::new(edits, sessions, facts.server),
                     root,
                     session_factory,
                     TabManagerCreation {
@@ -3129,7 +3122,7 @@ impl WorkspaceManager {
         let workspace_id = match created {
             Ok(workspace_id) => workspace_id,
             Err(error) => {
-                Self::report_workspace_error("present the shared", error);
+                Self::report_workspace_error("present the Workspace", error);
                 return;
             }
         };
@@ -3159,8 +3152,8 @@ impl WorkspaceManager {
         if empty_held_keyboard {
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         }
-        if let Some(shared) = self.shared.get_mut(key) {
-            shared.register(workspace_id, facts.clone());
+        if let Some(binding) = self.binding.get_mut(key) {
+            binding.register(workspace_id, facts.clone());
         }
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         if let Some(manager) = self
@@ -3169,9 +3162,9 @@ impl WorkspaceManager {
             .map(|entry| entry.payload().clone())
         {
             manager.update(cx, |manager, cx| {
-                manager.reconcile_shared(
+                manager.reconcile(
                     workspace,
-                    super::shared_workspaces::SharedRemoval::Published,
+                    super::workspaces::WorkspaceRemoval::Published,
                     window,
                     cx,
                 );
@@ -3179,13 +3172,13 @@ impl WorkspaceManager {
         }
         cx.notify();
         if let Some(saved) = self
-            .shared
+            .binding
             .get(key)
-            .and_then(|shared| shared.saved_arrangement(workspace.id))
+            .and_then(|binding| binding.saved_arrangement(workspace.id))
             .cloned()
         {
             manager.update(cx, |manager, cx| {
-                manager.restore_shared_arrangement(&saved, workspace, cx)
+                manager.restore_arrangement(&saved, workspace, cx)
             });
         }
         self.restore_remembered_workspace(key, workspace_id, workspace.id, window, cx);
@@ -3193,41 +3186,41 @@ impl WorkspaceManager {
 
     /// Asks the server for a Workspace it owns and every connected client presents.
     /// Returns whether the request reached the server. A refusal is presented here.
-    fn create_shared_workspace(
+    fn create_workspace(
         &mut self,
         name: String,
         directory: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
+        use super::workspaces::{WorkspaceRefusalReason, WorkspaceSubmission};
 
-        let Some(shared) = self.shared.local_mut() else {
+        let Some(binding) = self.binding.local_mut() else {
             // The launch screen already says why the server is not ready, and offers its step.
             if self.workspaces.active_workspace_id().is_none() {
                 self.focus(window, cx);
             } else {
-                Self::show_shared_refusal(
+                Self::show_refusal(
                     "create a Workspace",
-                    SharedRefusalReason::Offline,
+                    WorkspaceRefusalReason::Offline,
                     window,
                     cx,
                 );
             }
             return false;
         };
-        let submission = shared.create_workspace(name, directory);
-        if let SharedSubmission::Refused(reason) = submission {
-            Self::show_shared_refusal("create a Workspace", reason, window, cx);
+        let submission = binding.create_workspace(name, directory);
+        if let WorkspaceSubmission::Refused(reason) = submission {
+            Self::show_refusal("create a Workspace", reason, window, cx);
         } else {
-            self.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            self.sync_workspaces(ServerKey::LOCAL, window, cx);
         }
         cx.notify();
-        submission == SharedSubmission::Submitted
+        submission == WorkspaceSubmission::Submitted
     }
 
-    /// Asks the server to rename a shared Workspace, and reports whether the Workspace was one.
-    fn rename_shared_workspace(
+    /// Asks the server to rename a Workspace, and reports whether the Workspace was one.
+    fn rename_workspace(
         &mut self,
         workspace_id: WorkspaceId,
         name: &str,
@@ -3235,28 +3228,28 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        use super::shared_workspaces::SharedSubmission;
+        use super::workspaces::WorkspaceSubmission;
 
-        let Some(shared) = self.shared.owning_mut(workspace_id) else {
+        let Some(binding) = self.binding.owning_mut(workspace_id) else {
             return false;
         };
-        let submission = shared.rename(workspace_id, name.to_owned(), observed_version);
-        if let SharedSubmission::Refused(reason) = submission {
-            Self::show_shared_refusal("rename the Workspace", reason, window, cx);
-        } else if let Some(key) = self.shared.owner(workspace_id) {
-            self.sync_shared_workspaces(key, window, cx);
+        let submission = binding.rename(workspace_id, name.to_owned(), observed_version);
+        if let WorkspaceSubmission::Refused(reason) = submission {
+            Self::show_refusal("rename the Workspace", reason, window, cx);
+        } else if let Some(key) = self.binding.owner(workspace_id) {
+            self.sync_workspaces(key, window, cx);
         }
         cx.notify();
         true
     }
 
-    /// Asks the server to pin or unpin a shared Workspace's directory. It reports `None` when the
+    /// Asks the server to pin or unpin a Workspace's directory. It reports `None` when the
     /// Workspace is this window's own, so the local pin applies instead.
     ///
     /// The chosen directory is a local choice a person made with local authority, and it reaches
     /// the server as the value it should hold. The server's own answer is never read back as local
     /// authority.
-    fn pin_shared_workspace(
+    fn pin_workspace(
         &mut self,
         workspace_id: WorkspaceId,
         pin: Option<&ValidatedLocalDirectory>,
@@ -3264,15 +3257,15 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<bool> {
-        use super::shared_workspaces::SharedSubmission;
+        use super::workspaces::WorkspaceSubmission;
 
-        let owner = self.shared.owner(workspace_id)?;
+        let owner = self.binding.owner(workspace_id)?;
         let directory = match pin {
             // A local directory names a directory on this machine, which only the account-local
             // server shares. Another server's Workspace never receives one.
             Some(_) if owner != ServerKey::LOCAL => {
                 self.transient.end_pin();
-                Self::show_shared_unavailable(REMOTE_LOCAL_PIN_REFUSED, window, cx);
+                Self::show_unavailable(REMOTE_LOCAL_PIN_REFUSED, window, cx);
                 return Some(false);
             }
             Some(directory) => Some(directory.path().to_owned()),
@@ -3282,15 +3275,15 @@ impl WorkspaceManager {
         self.transient.end_pin();
         // `observed_version` is the pin version the chooser opened on. An immediate Unpin has no
         // chooser, so it carries none and is fenced to the version its row showed.
-        let shared = self.shared.get_mut(owner)?;
-        let submission = shared.pin(workspace_id, directory, observed_version);
-        if let SharedSubmission::Refused(reason) = submission {
-            Self::show_shared_refusal("change the pinned directory", reason, window, cx);
+        let binding = self.binding.get_mut(owner)?;
+        let submission = binding.pin(workspace_id, directory, observed_version);
+        if let WorkspaceSubmission::Refused(reason) = submission {
+            Self::show_refusal("change the pinned directory", reason, window, cx);
         } else {
-            self.sync_shared_workspaces(owner, window, cx);
+            self.sync_workspaces(owner, window, cx);
         }
         cx.notify();
-        Some(submission == SharedSubmission::Submitted)
+        Some(submission == WorkspaceSubmission::Submitted)
     }
 
     /// Asks another computer's server to pin its Workspace to `directory`, a path that server
@@ -3302,11 +3295,11 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        use super::shared_workspaces::SharedSubmission;
+        use super::workspaces::WorkspaceSubmission;
 
         let observed_version = self.transient.pin_version(workspace_id);
         let Some(owner) = self
-            .shared
+            .binding
             .owner(workspace_id)
             .filter(|owner| *owner != ServerKey::LOCAL)
         else {
@@ -3314,28 +3307,28 @@ impl WorkspaceManager {
         };
         self.pin_operation = self.pin_operation.wrapping_add(1);
         self.transient.end_pin();
-        let Some(shared) = self.shared.get_mut(owner) else {
+        let Some(binding) = self.binding.get_mut(owner) else {
             return false;
         };
-        let submission = shared.pin(workspace_id, Some(directory), observed_version);
-        if let SharedSubmission::Refused(reason) = submission {
-            Self::show_shared_refusal("change the pinned directory", reason, window, cx);
+        let submission = binding.pin(workspace_id, Some(directory), observed_version);
+        if let WorkspaceSubmission::Refused(reason) = submission {
+            Self::show_refusal("change the pinned directory", reason, window, cx);
         } else {
-            self.sync_shared_workspaces(owner, window, cx);
+            self.sync_workspaces(owner, window, cx);
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
-        submission == SharedSubmission::Submitted
+        submission == WorkspaceSubmission::Submitted
     }
 
-    /// The edit writer of the server that owns a shared Workspace. It reaches that server, and
+    /// The edit writer of the server that owns a Workspace. It reaches that server, and
     /// only it, over the route this client admitted for it.
     pub(super) fn owning_client(
         &self,
         workspace_id: WorkspaceId,
         cx: &mut App,
     ) -> Option<crate::ui::server_worktrees::Client> {
-        self.server_client(self.shared.owner(workspace_id)?, cx)
+        self.server_client(self.binding.owner(workspace_id)?, cx)
     }
 
     /// The edit writer of the server presented at `key`.
@@ -3346,7 +3339,7 @@ impl WorkspaceManager {
     ) -> Option<crate::ui::server_worktrees::Client> {
         use crate::ui::server_worktrees::Client;
 
-        match self.shared.origin(key)? {
+        match self.binding.origin(key)? {
             ServerOrigin::Local => Client::get(cx),
             ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx),
         }
@@ -3359,7 +3352,7 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         cx: &mut App,
     ) -> Option<ServerDirectorySource> {
-        self.server_directory_source(self.shared.owner(workspace_id)?, cx)
+        self.server_directory_source(self.binding.owner(workspace_id)?, cx)
     }
 
     /// Browses the directories of the server on another computer presented at `key`, or `None`
@@ -3370,7 +3363,7 @@ impl WorkspaceManager {
         cx: &mut App,
     ) -> Option<ServerDirectorySource> {
         let machine = self
-            .shared
+            .binding
             .origin(key)
             .and_then(ServerOrigin::remote_name)?;
         let client = self.server_client(key, cx)?;
@@ -3386,29 +3379,29 @@ impl WorkspaceManager {
         ))
     }
 
-    /// Asks to close a Pane, Tab, or Workspace a SpaceTerm Server owns, returning whether the
-    /// target is shared.
+    /// Asks the owning server to close a Pane, Tab, or Workspace, returning whether this client
+    /// has a server binding for the target.
     ///
     /// Captures the exact server targets before applying contextual confirmation. Idle own work
     /// closes directly; other clients' work and Workspace removal always require review.
-    fn request_shared_close(
+    fn request_server_close(
         &mut self,
         target: CloseTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        use super::shared_workspaces::{
-            SharedCloseIntent, SharedCloseReview, SharedCloseUnavailable,
+        use super::workspaces::{
+            WorkspaceCloseIntent, WorkspaceCloseReview, WorkspaceCloseUnavailable,
         };
 
         let workspace_id = close_target_workspace(target);
-        if !self.is_shared_workspace(workspace_id) {
+        if !self.has_workspace(workspace_id) {
             return false;
         }
         if self.close_confirmation.pending().is_some() {
             return true;
         }
-        let Some(server_target) = self.shared_close_target(target, cx) else {
+        let Some(server_target) = self.close_target(target, cx) else {
             // A target this window can no longer name closes nothing.
             return true;
         };
@@ -3417,19 +3410,15 @@ impl WorkspaceManager {
         }
         // A Review hands over what the person's first request held; any other request reads it
         // now, before a confirmation takes the keyboard.
-        let held_keyboard = self
-            .shared_close_keyboard
-            .reviewed
-            .take()
-            .unwrap_or_else(|| {
-                self.workspaces
-                    .workspace(workspace_id)
-                    .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx))
-            });
-        let Some(shared) = self.shared.owning(workspace_id) else {
+        let held_keyboard = self.close_keyboard.reviewed.take().unwrap_or_else(|| {
+            self.workspaces
+                .workspace(workspace_id)
+                .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx))
+        });
+        let Some(binding) = self.binding.owning(workspace_id) else {
             return true;
         };
-        match shared.defer_close(SharedCloseIntent {
+        match binding.defer_close(WorkspaceCloseIntent {
             server: server_target,
             local: target,
             keyboard: held_keyboard.then(|| window.focused(cx)).flatten(),
@@ -3437,27 +3426,27 @@ impl WorkspaceManager {
             Ok(true) => return true,
             Ok(false) => {}
             Err(reason) => {
-                Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
+                Self::show_refusal(Self::close_operation(target), reason, window, cx);
                 return true;
             }
         }
-        let approval = match shared.close_approval(server_target) {
+        let approval = match binding.close_approval(server_target) {
             Ok(approval) => approval,
-            Err(SharedCloseUnavailable::Edits(reason)) => {
-                Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
+            Err(WorkspaceCloseUnavailable::Edits(reason)) => {
+                Self::show_refusal(Self::close_operation(target), reason, window, cx);
                 return true;
             }
-            Err(SharedCloseUnavailable::Missing) => {
-                self.present_shared_refusal(
-                    super::shared_workspaces::SharedRefusal::Missing,
+            Err(WorkspaceCloseUnavailable::Missing) => {
+                self.present_refusal(
+                    super::workspaces::WorkspaceRefusal::Missing,
                     None,
                     window,
                     cx,
                 );
                 return true;
             }
-            Err(SharedCloseUnavailable::Unreported) => {
-                Self::show_shared_unavailable_with_title(
+            Err(WorkspaceCloseUnavailable::Unreported) => {
+                Self::show_unavailable_with_title(
                     "Couldn\u{2019}t Close Yet",
                     "Wait for SpaceTerm to check the affected Terminal Sessions, then try again.",
                     window,
@@ -3473,29 +3462,29 @@ impl WorkspaceManager {
                     entry
                         .payload()
                         .read(cx)
-                        .shared_pane_closes_directly(pane, live_session, cx)
+                        .pane_closes_directly(pane, live_session, cx)
                 })
         });
         if let Some(approval) = direct {
-            use super::shared_workspaces::SharedSubmission;
+            use super::workspaces::WorkspaceSubmission;
 
-            let key = self.shared.owner(workspace_id);
+            let key = self.binding.owner(workspace_id);
             let submission = self
-                .shared
+                .binding
                 .owning_mut(workspace_id)
-                .map(|shared| shared.close(approval, target));
-            if let Some(SharedSubmission::Refused(reason)) = submission {
-                Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
+                .map(|binding| binding.close(approval, target));
+            if let Some(WorkspaceSubmission::Refused(reason)) = submission {
+                Self::show_refusal(Self::close_operation(target), reason, window, cx);
             }
-            if submission == Some(SharedSubmission::Submitted) {
-                self.prepare_shared_close_keyboard(target, held_keyboard, cx);
+            if submission == Some(WorkspaceSubmission::Submitted) {
+                self.prepare_close_keyboard(target, held_keyboard, cx);
             }
             if let Some(key) = key {
-                self.sync_shared_workspaces(key, window, cx);
+                self.sync_workspaces(key, window, cx);
             }
             // A reviewed close that needs no confirmation now still moves the keyboard the
             // person's first request held.
-            if held_keyboard && submission == Some(SharedSubmission::Submitted) {
+            if held_keyboard && submission == Some(WorkspaceSubmission::Submitted) {
                 self.focus(window, cx);
             }
             return true;
@@ -3506,9 +3495,9 @@ impl WorkspaceManager {
         let Some(generation) = self.close_confirmation.begin(target) else {
             return true;
         };
-        self.shared_close_keyboard.pending = Some((generation, held_keyboard));
+        self.close_keyboard.pending = Some((generation, held_keyboard));
         let mut alert = Alert::new(
-            ModalId::new("shared-close-confirmation"),
+            ModalId::new("close-confirmation"),
             approval.title(),
             approval.title(),
             approval.message(),
@@ -3517,7 +3506,7 @@ impl WorkspaceManager {
                     CloseConfirmationAction::Confirm,
                     approval.confirm_label(),
                     ModalActionRole::Affirmative,
-                    SHARED_CLOSE_CONFIRM_SELECTOR,
+                    CLOSE_CONFIRM_SELECTOR,
                 )
                 .with_intent(ModalActionIntent::Destructive)
                 .with_emphasis(ModalActionEmphasis::Prominent),
@@ -3525,7 +3514,7 @@ impl WorkspaceManager {
                     CloseConfirmationAction::Cancel,
                     "Cancel",
                     ModalActionRole::Cancel,
-                    SHARED_CLOSE_CANCEL_SELECTOR,
+                    CLOSE_CANCEL_SELECTOR,
                 ),
             ],
         )
@@ -3545,7 +3534,7 @@ impl WorkspaceManager {
                     }
                 );
                 let _ = window_handle.update(cx, |manager, window, cx| {
-                    manager.settle_shared_close(generation, target, confirmed, window, cx);
+                    manager.settle_close(generation, target, confirmed, window, cx);
                 });
             },
             |_, _| {},
@@ -3554,8 +3543,8 @@ impl WorkspaceManager {
         );
         match presented {
             Ok(presentation) => {
-                if let Some(shared) = self.shared.owning_mut(workspace_id) {
-                    shared.begin_review(SharedCloseReview {
+                if let Some(binding) = self.binding.owning_mut(workspace_id) {
+                    binding.begin_review(WorkspaceCloseReview {
                         generation,
                         target,
                         approval,
@@ -3565,22 +3554,17 @@ impl WorkspaceManager {
             }
             Err(error) => {
                 self.close_confirmation.presentation_failed(generation);
-                self.shared_close_keyboard.take(generation);
-                eprintln!("failed to present the shared close confirmation: {error}");
+                self.close_keyboard.take(generation);
+                eprintln!("failed to present the close confirmation: {error}");
             }
         }
         true
     }
 
-    fn prepare_shared_close_keyboard(
-        &self,
-        target: CloseTarget,
-        held_keyboard: bool,
-        cx: &mut App,
-    ) {
+    fn prepare_close_keyboard(&self, target: CloseTarget, held_keyboard: bool, cx: &mut App) {
         if let Some(entry) = self.workspaces.workspace(close_target_workspace(target)) {
             entry.payload().update(cx, |manager, cx| {
-                manager.prepare_shared_close_keyboard(held_keyboard, cx);
+                manager.prepare_close_keyboard(held_keyboard, cx);
             });
         }
     }
@@ -3605,7 +3589,7 @@ impl WorkspaceManager {
     }
 
     /// What a refused shared close says it did not do.
-    const fn shared_close_operation(target: CloseTarget) -> &'static str {
+    const fn close_operation(target: CloseTarget) -> &'static str {
         match target {
             CloseTarget::Pane { .. } => "close the Pane",
             CloseTarget::Tab { .. } => "close the Tab",
@@ -3615,7 +3599,7 @@ impl WorkspaceManager {
     }
 
     /// The server identities a local close target names, read from this window's own map.
-    fn shared_close_target(
+    fn close_target(
         &self,
         target: CloseTarget,
         cx: &App,
@@ -3623,7 +3607,7 @@ impl WorkspaceManager {
         use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
 
         let workspace_id = close_target_workspace(target);
-        let shared = self.shared.owning(workspace_id)?;
+        let binding = self.binding.owning(workspace_id)?;
         let tab_manager = |workspace_id| {
             self.workspaces
                 .workspace(workspace_id)
@@ -3631,14 +3615,14 @@ impl WorkspaceManager {
         };
         match target {
             CloseTarget::KillWorkspace(workspace_id) => Some(ServerCloseTarget::KillWorkspace {
-                workspace: shared.facts(workspace_id)?.server,
+                workspace: binding.facts(workspace_id)?.server,
             }),
             CloseTarget::Tab {
                 workspace_id,
                 tab_id,
             } => Some(ServerCloseTarget::Tab {
-                workspace: shared.facts(workspace_id)?.server,
-                tab: tab_manager(workspace_id)?.shared_server_tab(tab_id)?,
+                workspace: binding.facts(workspace_id)?.server,
+                tab: tab_manager(workspace_id)?.server_tab(tab_id)?,
             }),
             CloseTarget::Pane {
                 workspace_id,
@@ -3647,17 +3631,17 @@ impl WorkspaceManager {
             } => {
                 let manager = tab_manager(workspace_id)?;
                 Some(ServerCloseTarget::Pane {
-                    workspace: shared.facts(workspace_id)?.server,
-                    tab: manager.shared_server_tab(tab_id)?,
-                    pane: manager.shared_server_pane(tab_id, pane_id, cx)?,
+                    workspace: binding.facts(workspace_id)?.server,
+                    tab: manager.server_tab(tab_id)?,
+                    pane: manager.server_pane(tab_id, pane_id, cx)?,
                 })
             }
             CloseTarget::Worktree {
                 workspace_id,
                 worktree_id,
             } => {
-                let workspace = shared.server_workspace(workspace_id)?;
-                let path = self.shared_worktree_root(workspace_id, worktree_id)?;
+                let workspace = binding.server_workspace(workspace_id)?;
+                let path = self.worktree_root(workspace_id, worktree_id)?;
                 let anchor = workspace
                     .tabs
                     .iter()
@@ -3678,7 +3662,7 @@ impl WorkspaceManager {
     /// no confirmation does. The confirmation would otherwise return it to a Pane that is gone.
     /// A sidebar rename held beneath the confirmation gets the keyboard back unless the close
     /// removed its Workspace, which ends the rename and moves the keyboard to what remains.
-    fn settle_shared_close(
+    fn settle_close(
         &mut self,
         generation: u64,
         target: CloseTarget,
@@ -3686,13 +3670,13 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use super::shared_workspaces::{SharedCloseState, SharedSubmission};
+        use super::workspaces::{WorkspaceCloseState, WorkspaceSubmission};
 
-        let held_keyboard = self.shared_close_keyboard.take(generation);
+        let held_keyboard = self.close_keyboard.take(generation);
 
         // The review lives with the server that owns what it would close.
-        let review = self.shared.keys().into_iter().find_map(|key| {
-            let review = self.shared.get_mut(key)?.end_review(generation)?;
+        let review = self.binding.keys().into_iter().find_map(|key| {
+            let review = self.binding.get_mut(key)?.end_review(generation)?;
             Some((key, review))
         });
         if !self
@@ -3704,32 +3688,28 @@ impl WorkspaceManager {
         let Some((key, review)) = review else {
             return;
         };
-        let Some(shared) = self.shared.get_mut(key) else {
+        let Some(binding) = self.binding.get_mut(key) else {
             return;
         };
-        match shared.close_state(&review.approval) {
-            SharedCloseState::Current => {
+        match binding.close_state(&review.approval) {
+            WorkspaceCloseState::Current => {
                 let renaming = self.sidebar.read(cx).is_renaming();
-                let submission = shared.close(review.approval, review.target);
-                if let SharedSubmission::Refused(reason) = submission {
-                    Self::show_shared_refusal(
-                        Self::shared_close_operation(target),
-                        reason,
-                        window,
-                        cx,
-                    );
+                let submission = binding.close(review.approval, review.target);
+                if let WorkspaceSubmission::Refused(reason) = submission {
+                    Self::show_refusal(Self::close_operation(target), reason, window, cx);
                 }
-                if submission == SharedSubmission::Submitted {
-                    self.prepare_shared_close_keyboard(target, held_keyboard, cx);
+                if submission == WorkspaceSubmission::Submitted {
+                    self.prepare_close_keyboard(target, held_keyboard, cx);
                 }
-                self.sync_shared_workspaces(key, window, cx);
+                self.sync_workspaces(key, window, cx);
                 let rename_removed = renaming && !self.sidebar.read(cx).is_renaming();
-                if (held_keyboard || rename_removed) && submission == SharedSubmission::Submitted {
+                if (held_keyboard || rename_removed) && submission == WorkspaceSubmission::Submitted
+                {
                     self.focus(window, cx);
                 }
             }
-            SharedCloseState::Changed => {
-                self.present_shared_close_changed(
+            WorkspaceCloseState::Changed => {
+                self.present_close_changed(
                     review.approval.changed_title(),
                     Some(target),
                     held_keyboard,
@@ -3738,8 +3718,8 @@ impl WorkspaceManager {
                     cx,
                 );
             }
-            SharedCloseState::Missing => {
-                self.present_shared_close_missing(&review.approval, window, cx);
+            WorkspaceCloseState::Missing => {
+                self.present_close_missing(&review.approval, window, cx);
             }
         }
         cx.notify();
@@ -3747,39 +3727,34 @@ impl WorkspaceManager {
 
     /// Withdraws a shared close confirmation that another client's change made stale, and says
     /// why. The person never approves Sessions or Panes they were not shown.
-    fn revalidate_shared_close(
-        &mut self,
-        key: ServerKey,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use super::shared_workspaces::SharedCloseState;
+    fn revalidate_close(&mut self, key: ServerKey, window: &mut Window, cx: &mut Context<Self>) {
+        use super::workspaces::WorkspaceCloseState;
 
-        let Some(shared) = self.shared.get_mut(key) else {
+        let Some(binding) = self.binding.get_mut(key) else {
             return;
         };
-        let Some((generation, state)) = shared
+        let Some((generation, state)) = binding
             .review()
-            .map(|review| (review.generation, shared.close_state(&review.approval)))
-            .filter(|(_, state)| *state != SharedCloseState::Current)
+            .map(|review| (review.generation, binding.close_state(&review.approval)))
+            .filter(|(_, state)| *state != WorkspaceCloseState::Current)
         else {
             return;
         };
-        let Some(review) = shared.end_review(generation) else {
+        let Some(review) = binding.end_review(generation) else {
             return;
         };
         // The pending confirmation ends here, so its own deferred answer settles nothing.
         self.close_confirmation.presentation_failed(generation);
-        let held_keyboard = self.shared_close_keyboard.take(generation);
+        let held_keyboard = self.close_keyboard.take(generation);
         if let Some(presentation) = review.presentation.as_ref() {
             let _ = presentation.dismiss(window, cx);
         }
         match state {
-            SharedCloseState::Missing => {
-                self.present_shared_close_missing(&review.approval, window, cx);
+            WorkspaceCloseState::Missing => {
+                self.present_close_missing(&review.approval, window, cx);
             }
             _ => {
-                self.present_shared_close_changed(
+                self.present_close_changed(
                     review.approval.changed_title(),
                     Some(review.target),
                     held_keyboard,
@@ -3797,12 +3772,12 @@ impl WorkspaceManager {
     /// keyboard when the person asked, so the approved fresh close moves it as the first would.
     /// Returns whether the alert was admitted. `notice` records the presentation of an unseen
     /// outcome.
-    fn present_shared_close_changed(
+    fn present_close_changed(
         &mut self,
         title: &'static str,
         target: Option<CloseTarget>,
         held_keyboard: bool,
-        notice: Option<&super::shared_workspaces::OutcomeNotice>,
+        notice: Option<&super::workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3818,7 +3793,7 @@ impl WorkspaceManager {
                     true,
                     "Review",
                     ModalActionRole::Affirmative,
-                    SHARED_CLOSE_REVIEW_SELECTOR,
+                    CLOSE_REVIEW_SELECTOR,
                 )
                 .with_emphasis(ModalActionEmphasis::Prominent),
             );
@@ -3827,13 +3802,13 @@ impl WorkspaceManager {
             false,
             if target.is_some() { "Cancel" } else { "OK" },
             ModalActionRole::Cancel,
-            SHARED_CLOSE_DISMISS_SELECTOR,
+            CLOSE_DISMISS_SELECTOR,
         ));
         let manager = cx.weak_entity();
         let window_handle = window.window_handle();
         let lifecycle = notice.map(|notice| notice.lifecycle());
         let alert = Alert::new(
-            ModalId::new("shared-close-changed"),
+            ModalId::new("close-changed"),
             title,
             title,
             message,
@@ -3855,9 +3830,9 @@ impl WorkspaceManager {
                 };
                 let _ = window_handle.update(cx, |_, window, cx| {
                     let _ = manager.update(cx, |manager, cx| {
-                        manager.shared_close_keyboard.reviewed = Some(held_keyboard);
+                        manager.close_keyboard.reviewed = Some(held_keyboard);
                         manager.request_close(target, window, cx);
-                        manager.shared_close_keyboard.reviewed = None;
+                        manager.close_keyboard.reviewed = None;
                     });
                 });
             },
@@ -3870,7 +3845,7 @@ impl WorkspaceManager {
             cx,
         );
         if let Err(error) = &result {
-            eprintln!("failed to present the changed shared close: {error}");
+            eprintln!("failed to present the changed close: {error}");
         }
         result.is_ok()
     }
@@ -3920,22 +3895,21 @@ impl WorkspaceManager {
     /// Presents a close the server refused because what it would end changed first. Review is
     /// offered only to the process that asked, and only while its target is still here.
     /// Returns whether the alert was admitted.
-    fn present_stale_shared_close(
+    fn present_stale_close(
         &mut self,
         server_target: spaceterm_server::hierarchy::CloseTarget,
         local: Option<CloseTarget>,
-        notice: Option<&super::shared_workspaces::OutcomeNotice>,
+        notice: Option<&super::workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let local =
-            local.filter(|local| self.shared_close_target(*local, cx) == Some(server_target));
+        let local = local.filter(|local| self.close_target(*local, cx) == Some(server_target));
         // The refused close already moved the keyboard, so a Review keeps what holds it now.
         let held_keyboard = local
             .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
             .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
-        self.present_shared_close_changed(
-            super::shared_workspaces::shared_close_changed_title(server_target),
+        self.present_close_changed(
+            super::workspaces::close_changed_title(server_target),
             local,
             held_keyboard,
             notice,
@@ -3945,14 +3919,14 @@ impl WorkspaceManager {
     }
 
     /// Explains that another client already removed what a close confirmation named.
-    fn present_shared_close_missing(
+    fn present_close_missing(
         &mut self,
-        approval: &super::shared_workspaces::SharedCloseApproval,
+        approval: &super::workspaces::WorkspaceCloseApproval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let alert = Alert::new(
-            ModalId::new("shared-close-missing"),
+            ModalId::new("close-missing"),
             approval.missing_title(),
             approval.missing_title(),
             "Another client already closed it.",
@@ -3960,7 +3934,7 @@ impl WorkspaceManager {
                 (),
                 "OK",
                 ModalActionRole::Cancel,
-                SHARED_CLOSE_DISMISS_SELECTOR,
+                CLOSE_DISMISS_SELECTOR,
             )],
         )
         .intent(AlertIntent::Informational);
@@ -3969,10 +3943,10 @@ impl WorkspaceManager {
 
     /// Presents a refused same-field edit: the server's value, the draft it rejected, and the
     /// choice to ask again with that draft. Nothing retries on its own.
-    fn present_shared_conflict(
+    fn present_conflict(
         &mut self,
-        conflict: super::shared_workspaces::SharedWorkspaceConflict,
-        notice: &super::shared_workspaces::OutcomeNotice,
+        conflict: super::workspaces::WorkspaceConflict,
+        notice: &super::workspaces::OutcomeNotice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3989,7 +3963,7 @@ impl WorkspaceManager {
         let owner = cx.weak_entity();
         let window_handle = window.window_handle();
         let alert = Alert::new(
-            ModalId::new("shared-workspace-conflict"),
+            ModalId::new("workspace-conflict"),
             "Change not applied",
             conflict.field.title(),
             detail,
@@ -3998,14 +3972,14 @@ impl WorkspaceManager {
                     true,
                     conflict.field.retry_label(),
                     ModalActionRole::Affirmative,
-                    SHARED_CONFLICT_RETRY_SELECTOR,
+                    CONFLICT_RETRY_SELECTOR,
                 )
                 .with_emphasis(ModalActionEmphasis::Prominent),
                 ModalAction::new(
                     false,
                     "Keep Current Value",
                     ModalActionRole::Cancel,
-                    SHARED_CONFLICT_KEEP_SELECTOR,
+                    CONFLICT_KEEP_SELECTOR,
                 ),
             ],
         )
@@ -4024,7 +3998,7 @@ impl WorkspaceManager {
                 }
                 let _ = window_handle.update(cx, |_, window, cx| {
                     let _ = owner.update(cx, |manager, cx| {
-                        manager.retry_shared_edit(&conflict, window, cx);
+                        manager.retry_edit(&conflict, window, cx);
                     });
                 });
             },
@@ -4033,41 +4007,41 @@ impl WorkspaceManager {
             cx,
         );
         if let Err(error) = result {
-            eprintln!("failed to present the shared change conflict: {error}");
+            eprintln!("failed to present the change conflict: {error}");
             return false;
         }
         true
     }
 
     /// Asks the server again with the preserved draft and the version shown in the conflict.
-    fn retry_shared_edit(
+    fn retry_edit(
         &mut self,
-        conflict: &super::shared_workspaces::SharedWorkspaceConflict,
+        conflict: &super::workspaces::WorkspaceConflict,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use super::shared_workspaces::SharedSubmission;
+        use super::workspaces::WorkspaceSubmission;
 
-        let Some(shared) = self.shared.owning_mut(conflict.workspace) else {
+        let Some(binding) = self.binding.owning_mut(conflict.workspace) else {
             return;
         };
-        if let SharedSubmission::Refused(reason) = shared.ask_again(conflict) {
-            Self::show_shared_refusal("apply the change", reason, window, cx);
+        if let WorkspaceSubmission::Refused(reason) = binding.ask_again(conflict) {
+            Self::show_refusal("apply the change", reason, window, cx);
         }
         cx.notify();
     }
 
     /// Presents a shared edit the server refused for a reason no retry repairs.
     /// Returns whether the alert was admitted.
-    fn present_shared_refusal(
+    fn present_refusal(
         &mut self,
-        refusal: super::shared_workspaces::SharedRefusal,
-        notice: Option<&super::shared_workspaces::OutcomeNotice>,
+        refusal: super::workspaces::WorkspaceRefusal,
+        notice: Option<&super::workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let alert = Alert::new(
-            ModalId::new("shared-workspace-refused"),
+            ModalId::new("workspace-refused"),
             "Change not applied",
             refusal.title(),
             refusal.detail(),
@@ -4075,7 +4049,7 @@ impl WorkspaceManager {
                 (),
                 "OK",
                 ModalActionRole::Cancel,
-                "shared-workspace-refused-ok",
+                "workspace-refused-ok",
             )],
         )
         .intent(AlertIntent::Warning);
@@ -4098,12 +4072,12 @@ impl WorkspaceManager {
     /// keeps. Returns whether the alert was admitted.
     fn present_forgotten_outcomes(
         &mut self,
-        notice: &super::shared_workspaces::OutcomeNotice,
+        notice: &super::workspaces::OutcomeNotice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let alert = Alert::new(
-            ModalId::new("shared-outcomes-forgotten"),
+            ModalId::new("workspace-outcomes-forgotten"),
             "Some Results Weren\u{2019}t Shown",
             "Some Results Weren\u{2019}t Shown",
             format!(
@@ -4116,7 +4090,7 @@ impl WorkspaceManager {
                 (),
                 "OK",
                 ModalActionRole::Cancel,
-                "shared-outcomes-forgotten-ok",
+                "workspace-outcomes-forgotten-ok",
             )],
         )
         .intent(AlertIntent::Warning);
@@ -4125,30 +4099,30 @@ impl WorkspaceManager {
     }
 
     /// Explains a shared edit this client could not submit. Nothing was sent, and nothing waits.
-    fn show_shared_refusal(
+    fn show_refusal(
         _operation: &str,
-        reason: super::shared_workspaces::SharedRefusalReason,
+        reason: super::workspaces::WorkspaceRefusalReason,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let detail = match reason {
-            super::shared_workspaces::SharedRefusalReason::Offline => "Reconnect, then try again.",
-            super::shared_workspaces::SharedRefusalReason::Pending => {
+            super::workspaces::WorkspaceRefusalReason::Offline => "Reconnect, then try again.",
+            super::workspaces::WorkspaceRefusalReason::Pending => {
                 "Wait for the current changes to finish, then try again."
             }
-            super::shared_workspaces::SharedRefusalReason::Value => {
+            super::workspaces::WorkspaceRefusalReason::Value => {
                 "Enter a shorter name or directory, then try again."
             }
         };
-        Self::show_shared_unavailable_with_title("Couldn\u{2019}t Make Change", detail, window, cx);
+        Self::show_unavailable_with_title("Couldn\u{2019}t Make Change", detail, window, cx);
     }
 
     /// Returns whether the alert was presented over the active Settings Window.
-    fn show_shared_unavailable(detail: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        Self::show_shared_unavailable_with_title("Shared Change Unavailable", detail, window, cx)
+    fn show_unavailable(detail: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        Self::show_unavailable_with_title("Shared Change Unavailable", detail, window, cx)
     }
 
-    fn show_shared_unavailable_with_title(
+    fn show_unavailable_with_title(
         title: &'static str,
         detail: &str,
         window: &mut Window,
@@ -4157,7 +4131,7 @@ impl WorkspaceManager {
         let detail = detail.to_owned();
         let alert = move || {
             Alert::new(
-                ModalId::new("shared-workspace-unavailable"),
+                ModalId::new("workspace-unavailable"),
                 "Shared change unavailable",
                 title,
                 detail.clone(),
@@ -4165,7 +4139,7 @@ impl WorkspaceManager {
                     (),
                     "OK",
                     ModalActionRole::Cancel,
-                    "shared-workspace-unavailable-ok",
+                    "workspace-unavailable-ok",
                 )],
             )
             .intent(AlertIntent::Warning)
@@ -4181,26 +4155,25 @@ impl WorkspaceManager {
         answered
     }
 
-    /// Whether a SpaceTerm Server owns the Workspace, which changes what this window may read
-    /// and do with it.
-    pub(super) fn is_shared_workspace(&self, workspace_id: WorkspaceId) -> bool {
-        self.shared.owner(workspace_id).is_some()
+    /// Whether this client has a server binding for the Workspace.
+    pub(super) fn has_workspace(&self, workspace_id: WorkspaceId) -> bool {
+        self.binding.owner(workspace_id).is_some()
     }
 
     /// Whether the account-local server owns the Workspace. Only that server shares this
     /// computer's filesystem, so only its Workspaces take local directories and Worktree writes.
     pub(super) fn is_local_server_workspace(&self, workspace_id: WorkspaceId) -> bool {
-        self.shared.owner(workspace_id) == Some(ServerKey::LOCAL)
+        self.binding.owner(workspace_id) == Some(ServerKey::LOCAL)
     }
 
     /// Opens what one accepted edit of this client's own created, once the server published it.
     ///
     /// Only the client that asked for the creation does this. A Workspace, Tab, or Pane another
     /// client created joins the presentation without moving anything here.
-    fn open_accepted_shared(
+    fn open_accepted(
         &mut self,
         key: ServerKey,
-        accepted: &super::shared_workspaces::SharedAcceptance,
+        accepted: &super::workspaces::WorkspaceAcceptance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4213,9 +4186,9 @@ impl WorkspaceManager {
         match &accepted.mutation {
             Mutation::CreateWorkspace { .. } => {
                 let Some(workspace_id) = self
-                    .shared
+                    .binding
                     .get(key)
-                    .and_then(|shared| shared.local(accepted.target))
+                    .and_then(|binding| binding.local(accepted.target))
                 else {
                     return;
                 };
@@ -4233,9 +4206,9 @@ impl WorkspaceManager {
                 ..
             }) => {
                 let Some(manager) = self
-                    .shared
+                    .binding
                     .get(key)
-                    .and_then(|shared| shared.local(*workspace))
+                    .and_then(|binding| binding.local(*workspace))
                     .and_then(|workspace_id| self.workspaces.workspace(workspace_id))
                     .map(|entry| entry.payload().clone())
                 else {
@@ -4243,7 +4216,7 @@ impl WorkspaceManager {
                 };
                 let target = accepted.target;
                 manager.update(cx, |manager, cx| {
-                    manager.open_accepted_shared(target, window, cx);
+                    manager.open_accepted(target, window, cx);
                 });
             }
             // A rename or a pin changes no membership, so there is nothing to open.
@@ -4278,7 +4251,7 @@ impl WorkspaceManager {
             return;
         }
         let navigation = manager.navigation(cx);
-        let Some(key) = self.shared.owner(workspace_id) else {
+        let Some(key) = self.binding.owner(workspace_id) else {
             return;
         };
         self.pending_reveal = Some(PendingReveal {
@@ -4307,9 +4280,9 @@ impl WorkspaceManager {
             return;
         }
         let Some(workspace_id) = self
-            .shared
+            .binding
             .get(reveal.key)
-            .and_then(|shared| shared.local(reveal.target.workspace))
+            .and_then(|binding| binding.local(reveal.target.workspace))
         else {
             return;
         };
@@ -4320,10 +4293,7 @@ impl WorkspaceManager {
         else {
             return;
         };
-        if !manager
-            .read(cx)
-            .presents_shared_pane(reveal.target.pane, cx)
-        {
+        if !manager.read(cx).presents_pane(reveal.target.pane, cx) {
             return;
         }
         self.pending_reveal = None;
@@ -4335,7 +4305,7 @@ impl WorkspaceManager {
             self.scroll_active_workspace_into_view(cx);
         }
         manager.update(cx, |manager, cx| {
-            manager.open_accepted_shared(reveal.target.pane, window, cx);
+            manager.open_accepted(reveal.target.pane, window, cx);
         });
     }
 
@@ -4344,17 +4314,17 @@ impl WorkspaceManager {
     /// The server already removed it, so this needs no confirmation here. It ends nothing on the
     /// server. An optimistic removal parks its presentation and keeps the edit owner alive until
     /// the Original Operation settles, so a refused close can restore the same views.
-    fn remove_shared_workspace(
+    fn remove_workspace(
         &mut self,
         workspace_id: WorkspaceId,
-        removal: super::shared_workspaces::SharedRemoval,
+        removal: super::workspaces::WorkspaceRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self
-            .shared
+            .binding
             .owning(workspace_id)
-            .is_some_and(|shared| shared.optimistically_closing(workspace_id))
+            .is_some_and(|binding| binding.optimistically_closing(workspace_id))
         {
             if self.workspaces.parked_ids().any(|id| id == workspace_id) {
                 return;
@@ -4391,15 +4361,15 @@ impl WorkspaceManager {
             return;
         }
         let confirmed = self
-            .shared
+            .binding
             .owning(workspace_id)
-            .and_then(|shared| shared.facts(workspace_id))
+            .and_then(|binding| binding.facts(workspace_id))
             .is_some_and(|facts| facts.confirmed);
-        if let Some(shared) = self.shared.owning_mut(workspace_id) {
-            shared.forget(workspace_id);
+        if let Some(binding) = self.binding.owning_mut(workspace_id) {
+            binding.forget(workspace_id);
         }
         self.pending_final_tab_closes.remove(&workspace_id);
-        let own = removal == super::shared_workspaces::SharedRemoval::OwnClose;
+        let own = removal == super::workspaces::WorkspaceRemoval::OwnClose;
         let held_keyboard = self
             .workspaces
             .workspace(workspace_id)
@@ -4408,7 +4378,7 @@ impl WorkspaceManager {
         // client's publication is nobody's request for a Pane; this client's own Kill Workspace
         // is, as a local close is.
         self.close_workspace_activating(workspace_id, own, window, cx);
-        self.close_empty_after_shared_removal |= confirmed;
+        self.close_empty_after_removal |= confirmed;
         // The keyboard that was in the removed Workspace rests in the Workspace that takes its
         // place, without asking the server for a Pane there. Typing anywhere else, such as in
         // the sidebar, stays where it is.
@@ -4417,7 +4387,7 @@ impl WorkspaceManager {
         }
     }
 
-    fn reconcile_parked_shared_workspaces(
+    fn reconcile_parked_workspaces(
         &mut self,
         key: ServerKey,
         window: &mut Window,
@@ -4426,19 +4396,19 @@ impl WorkspaceManager {
         let parked: Vec<_> = self
             .workspaces
             .parked_ids()
-            .filter(|id| self.shared.owner(*id) == Some(key))
+            .filter(|id| self.binding.owner(*id) == Some(key))
             .collect();
         for id in parked {
-            let Some(shared) = self.shared.get(key) else {
+            let Some(binding) = self.binding.get(key) else {
                 continue;
             };
-            let Some(inventory) = shared.latest_inventory() else {
+            let Some(inventory) = binding.latest_inventory() else {
                 continue;
             };
-            let exists = shared
+            let exists = binding
                 .facts(id)
                 .is_some_and(|facts| inventory.workspaces.iter().any(|w| w.id == facts.server));
-            if exists && shared.optimistically_closing(id) {
+            if exists && binding.optimistically_closing(id) {
                 continue;
             }
             if exists {
@@ -4456,55 +4426,55 @@ impl WorkspaceManager {
                 if let Ok(manager) = self.workspaces.discard_parked_workspace(id) {
                     manager.update(cx, |manager, cx| manager.close_all(cx));
                 }
-                if let Some(shared) = self.shared.get_mut(key) {
-                    shared.forget(id);
+                if let Some(binding) = self.binding.get_mut(key) {
+                    binding.forget(id);
                 }
                 self.pending_final_tab_closes.remove(&id);
-                self.close_empty_after_shared_removal = true;
+                self.close_empty_after_removal = true;
             }
         }
     }
 
-    /// The pin version a shared Workspace shows now, which its chooser keeps while it is open.
-    fn shared_pin_version(&self, workspace_id: WorkspaceId) -> Option<u64> {
-        self.shared.owning(workspace_id)?.pin_version(workspace_id)
+    /// The pin version a Workspace shows now, which its chooser keeps while it is open.
+    fn workspace_pin_version(&self, workspace_id: WorkspaceId) -> Option<u64> {
+        self.binding.owning(workspace_id)?.pin_version(workspace_id)
     }
 
-    fn shared_row_facts(&self, workspace_id: WorkspaceId) -> Option<SharedRowFacts> {
-        let key = self.shared.owner(workspace_id)?;
-        let shared = self.shared.get(key)?;
-        let facts = shared.facts(workspace_id)?;
-        let editability = shared.editability();
+    fn workspace_row_facts(&self, workspace_id: WorkspaceId) -> Option<WorkspaceRowFacts> {
+        let key = self.binding.owner(workspace_id)?;
+        let binding = self.binding.get(key)?;
+        let facts = binding.facts(workspace_id)?;
+        let editability = binding.editability();
         // A Pane's confirmed directory changes without a membership revision, so the row reads
         // the latest inventory.
-        let directory = shared
+        let directory = binding
             .server_workspace(workspace_id)
-            .and_then(super::shared_workspaces::workspace_directory)
+            .and_then(super::workspaces::workspace_directory)
             .unwrap_or_else(|| facts.displayed_directory());
-        Some(SharedRowFacts {
-            row: super::workspace_sidebar::SharedWorkspaceRow {
+        Some(WorkspaceRowFacts {
+            row: super::workspace_sidebar::WorkspaceRow {
                 name_version: facts.name_version,
                 edits: editability.available(),
                 edits_reason: editability.explanation(),
-                status: shared.row_status(
+                status: binding.row_status(
                     facts.server,
-                    self.shared_inventory(workspace_id)
+                    self.workspace_inventory(workspace_id)
                         .map(|inventory| inventory.main_root.as_path()),
                 ),
-                detaches: shared.attachments_changeable(),
+                detaches: binding.attachments_changeable(),
             },
             directory: directory.to_owned(),
             pinned: facts.pinned(),
-            machine: self.shared.origin(key).and_then(ServerOrigin::remote_name),
+            machine: self.binding.origin(key).and_then(ServerOrigin::remote_name),
         })
     }
 
     /// Whether the account-local server, which creates this window's new Workspaces, is
     /// reachable.
-    fn shared_reachable(&self) -> bool {
-        self.shared.local().is_none_or(|shared| {
-            super::shared_workspaces::SharedRefusalReason::from(shared.editability())
-                != super::shared_workspaces::SharedRefusalReason::Offline
+    fn local_server_reachable(&self) -> bool {
+        self.binding.local().is_none_or(|binding| {
+            super::workspaces::WorkspaceRefusalReason::from(binding.editability())
+                != super::workspaces::WorkspaceRefusalReason::Offline
         })
     }
 
@@ -4513,9 +4483,9 @@ impl WorkspaceManager {
     /// Only a connected server's detached Workspaces are offered, and each one attaches when
     /// chosen. None takes an activation Shortcut, because those follow the sidebar's order.
     fn detached_switcher_items(&self) -> Vec<ComboBoxItem<SwitcherChoice>> {
-        self.shared
+        self.binding
             .iter()
-            .flat_map(|(key, shared)| self.detached_server_items(key, shared))
+            .flat_map(|(key, binding)| self.detached_server_items(key, binding))
             .collect()
     }
 
@@ -4524,11 +4494,11 @@ impl WorkspaceManager {
     fn detached_server_items(
         &self,
         key: ServerKey,
-        shared: &super::shared_workspaces::SharedWorkspaces,
+        binding: &super::workspaces::Workspaces,
     ) -> Vec<ComboBoxItem<SwitcherChoice>> {
-        let changeable = shared.attachments_changeable();
-        let destination = self.shared.origin(key).and_then(ServerOrigin::remote_name);
-        shared
+        let changeable = binding.attachments_changeable();
+        let destination = self.binding.origin(key).and_then(ServerOrigin::remote_name);
+        binding
             .available_workspaces()
             .into_iter()
             .filter(|available| available.local.is_none())
@@ -4574,32 +4544,35 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.get_mut(key) else {
+        let Some(binding) = self.binding.get_mut(key) else {
             return;
         };
-        if let Err(failure) = shared.attach(server) {
+        if let Err(failure) = binding.attach(server) {
             Self::present_attachment_failure(AttachmentChange::Attach, failure, window, cx);
             return;
         }
         // The inventory revision did not change, so this window presents the attachment now
         // rather than waiting for the server's next publication.
         if let Some(inventory) = self
-            .shared
+            .binding
             .get(key)
-            .and_then(|shared| shared.latest_inventory())
+            .and_then(|binding| binding.latest_inventory())
             .cloned()
         {
-            self.apply_shared_inventory(
+            self.apply_inventory(
                 key,
                 &inventory,
-                super::shared_workspaces::SharedRemoval::Published,
+                super::workspaces::WorkspaceRemoval::Published,
                 window,
                 cx,
             );
             // The Repository Status the server already read reaches the attached Workspace too.
-            self.present_shared_repositories(cx);
+            self.present_repositories(cx);
         }
-        let Some(workspace_id) = self.shared.get(key).and_then(|shared| shared.local(server))
+        let Some(workspace_id) = self
+            .binding
+            .get(key)
+            .and_then(|binding| binding.local(server))
         else {
             return;
         };
@@ -4608,34 +4581,34 @@ impl WorkspaceManager {
         }
     }
 
-    /// Stops presenting a shared Workspace in this window.
+    /// Stops presenting a Workspace in this window.
     ///
     /// Detach Workspace removes only this client's Workspace Attachment. The Workspace and its
     /// Terminal Sessions keep running on the server for every client, and this client gives up
     /// control of its Panes. It needs no server, so it works offline, and it confirms nothing
     /// because nothing ends. Detaching the final Workspace leaves the empty view: nothing
     /// replaces it here, and nothing is created on the server.
-    fn detach_shared_workspace(
+    fn detach_workspace(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use super::shared_workspaces::SharedAttachmentFailure;
+        use super::workspaces::WorkspaceAttachmentFailure;
 
-        if !self.is_shared_workspace(workspace_id) {
+        if !self.has_workspace(workspace_id) {
             return;
         }
         // The person's arrangement is saved first, so attaching the Workspace again restores it.
-        self.save_shared_arrangements(cx);
-        let Some(shared) = self.shared.owning_mut(workspace_id) else {
+        self.save_arrangements(cx);
+        let Some(binding) = self.binding.owning_mut(workspace_id) else {
             return;
         };
-        let outcome = shared.detach(workspace_id);
-        if outcome == Err(SharedAttachmentFailure::Unchanged) {
+        let outcome = binding.detach(workspace_id);
+        if outcome == Err(WorkspaceAttachmentFailure::Unchanged) {
             Self::present_attachment_failure(
                 AttachmentChange::Detach,
-                SharedAttachmentFailure::Unchanged,
+                WorkspaceAttachmentFailure::Unchanged,
                 window,
                 cx,
             );
@@ -4649,7 +4622,7 @@ impl WorkspaceManager {
         }
     }
 
-    /// Removes one Workspace's presentation without replacing it. Closing a shared Workspace's
+    /// Removes one Workspace's presentation without replacing it. Closing a Workspace's
     /// local Panes drops their subscriptions and ends nothing on the server.
     fn remove_workspace_presentation(
         &mut self,
@@ -4657,11 +4630,11 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(shared) = self.shared.owning_mut(workspace_id) {
-            shared.forget(workspace_id);
+        if let Some(binding) = self.binding.owning_mut(workspace_id) {
+            binding.forget(workspace_id);
         }
         self.pending_final_tab_closes.remove(&workspace_id);
-        // Ends a pin chooser open for the Workspace; a shared Workspace has no remote runtime.
+        // Ends a pin chooser open for the Workspace; a Workspace has no remote runtime.
         self.end_pin_for_closing(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
         let held_keyboard = self
@@ -4712,13 +4685,13 @@ impl WorkspaceManager {
     /// running on its server whatever this client saved.
     fn present_attachment_failure(
         change: AttachmentChange,
-        failure: super::shared_workspaces::SharedAttachmentFailure,
+        failure: super::workspaces::WorkspaceAttachmentFailure,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (label, title, detail) = change.failure(failure);
         let _ = Alert::new(
-            ModalId::new("shared-attachment-failed"),
+            ModalId::new("workspace-attachment-failed"),
             label,
             title,
             detail.to_owned(),
@@ -4726,7 +4699,7 @@ impl WorkspaceManager {
                 (),
                 "OK",
                 ModalActionRole::Cancel,
-                "shared-attachment-failed-ok",
+                "workspace-attachment-failed-ok",
             )],
         )
         .intent(AlertIntent::Warning)
@@ -4759,9 +4732,9 @@ impl AttachmentChange {
     /// The accessibility label, title, and detail of a failed or unconfirmed change.
     const fn failure(
         self,
-        failure: super::shared_workspaces::SharedAttachmentFailure,
+        failure: super::workspaces::WorkspaceAttachmentFailure,
     ) -> (&'static str, &'static str, &'static str) {
-        use super::shared_workspaces::SharedAttachmentFailure::{Uncertain, Unchanged};
+        use super::workspaces::WorkspaceAttachmentFailure::{Uncertain, Unchanged};
 
         match (self, failure) {
             (Self::Attach, Unchanged) => (
@@ -4788,12 +4761,12 @@ impl AttachmentChange {
     }
 }
 
-const SHARED_CLOSE_CONFIRM_SELECTOR: &str = "shared-close-confirm";
-const SHARED_CLOSE_CANCEL_SELECTOR: &str = "shared-close-cancel";
-const SHARED_CLOSE_REVIEW_SELECTOR: &str = "shared-close-review";
-const SHARED_CLOSE_DISMISS_SELECTOR: &str = "shared-close-dismiss";
-const SHARED_CONFLICT_RETRY_SELECTOR: &str = "shared-workspace-conflict-retry";
-const SHARED_CONFLICT_KEEP_SELECTOR: &str = "shared-workspace-conflict-keep";
+const CLOSE_CONFIRM_SELECTOR: &str = "close-confirm";
+const CLOSE_CANCEL_SELECTOR: &str = "close-cancel";
+const CLOSE_REVIEW_SELECTOR: &str = "close-review";
+const CLOSE_DISMISS_SELECTOR: &str = "close-dismiss";
+const CONFLICT_RETRY_SELECTOR: &str = "workspace-conflict-retry";
+const CONFLICT_KEEP_SELECTOR: &str = "workspace-conflict-keep";
 
 /// Why a directory on this computer never becomes another computer's server Workspace pin.
 const REMOTE_LOCAL_PIN_REFUSED: &str =
@@ -5154,14 +5127,14 @@ impl WorkspaceManager {
 
 /// Whether a shared close's Workspace held the keyboard when the person asked for the close.
 #[derive(Default)]
-struct SharedCloseKeyboard {
+struct WorkspaceCloseKeyboard {
     /// The open confirmation's generation and its answer.
     pending: Option<(u64, bool)>,
     /// The answer a Review hands to the fresh request it makes.
     reviewed: Option<bool>,
 }
 
-impl SharedCloseKeyboard {
+impl WorkspaceCloseKeyboard {
     /// Takes the answer for confirmation `generation`. Another generation's answer is false.
     fn take(&mut self, generation: u64) -> bool {
         match self.pending {
@@ -5241,7 +5214,7 @@ pub(crate) use desktop_requests::serve as serve_desktop_requests;
 mod direct_servers;
 mod display_order;
 mod remembered;
-mod shared_repositories;
+mod workspace_repositories;
 mod worktrees;
 
 #[cfg(test)]

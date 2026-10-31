@@ -662,7 +662,7 @@ fn every_native_suite_mount_requires_test_target_and_feature_gates() {
     }
 }
 
-fn shared_presentation_violation(source: &str) -> Option<&'static str> {
+fn workspace_presentation_violation(source: &str) -> Option<&'static str> {
     let source = source
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
@@ -693,7 +693,7 @@ fn shared_presentation_violation(source: &str) -> Option<&'static str> {
 }
 
 #[test]
-fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
+fn workspace_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect_rust_sources(&root.join("ui"), &mut files);
@@ -714,7 +714,7 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
         } else {
             production.to_owned()
         };
-        if let Some(forbidden) = shared_presentation_violation(&production) {
+        if let Some(forbidden) = workspace_presentation_violation(&production) {
             panic!("{} contains host presentation {forbidden}", path.display());
         }
     }
@@ -732,7 +732,7 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
         &production[..profile_start],
         &production[portable_start..]
     );
-    if let Some(forbidden) = shared_presentation_violation(&portable) {
+    if let Some(forbidden) = workspace_presentation_violation(&portable) {
         panic!("reusable Command Palette contains host presentation {forbidden}");
     }
 }

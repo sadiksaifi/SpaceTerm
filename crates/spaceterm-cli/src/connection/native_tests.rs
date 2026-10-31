@@ -39,7 +39,7 @@ fn native_owner() {
         spaceterm_server::run_owned_development(
             spaceterm_server::panes(|sync| {
                 Ok(spaceterm::runtime::Served::new(
-                    spaceterm::runtime::SharedWorkspaceHost::local(sync)?,
+                    spaceterm::runtime::WorkspaceHost::local(sync)?,
                 ))
             }),
             owner,

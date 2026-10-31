@@ -37,7 +37,7 @@ impl ClientEffects {
     /// the server still holds.
     pub(super) fn complete(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         lease: Lease,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
@@ -67,7 +67,7 @@ impl ClientEffects {
     /// needs only whether input is hidden, and each event can displace a queued screen.
     pub(super) fn line(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         events: &async_channel::Sender<TerminalSessionEvent>,
         line: pane::LineState,
     ) -> Result<(), ServerError> {
@@ -88,7 +88,7 @@ impl ClientEffects {
     /// still permits it.
     pub(super) fn request(
         &mut self,
-        state: &DevelopmentPaneState,
+        state: &ServerPaneState,
         acknowledged: Option<u64>,
         events: &async_channel::Sender<TerminalSessionEvent>,
         request: pane::effects::Request,

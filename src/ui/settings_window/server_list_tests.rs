@@ -782,7 +782,7 @@ fn searching_for_the_worktree_location_reveals_the_selected_servers_setting(
 
 #[gpui::test]
 fn a_server_settings_change_reaches_only_the_selected_server(cx: &mut TestAppContext) {
-    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use crate::ui::workspaces::testing::ScriptedEdits;
     use spaceterm_server::hierarchy::Mutation;
     use spaceterm_server::worktree::Operation;
 
@@ -869,11 +869,11 @@ fn present_both<'a>(
     cx: &'a mut TestAppContext,
 ) -> (
     Servers<'a>,
-    Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-    Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+    Rc<crate::ui::workspaces::testing::ScriptedEdits>,
 ) {
     use crate::ui::server_worktrees::testing::{ScriptedReads, present_direct};
-    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use crate::ui::workspaces::testing::ScriptedEdits;
 
     let paired = connected_paired(&["alpha", "bravo"], cx);
     let servers = open_with(false, paired, cx);
@@ -1004,17 +1004,17 @@ fn running_sessions(boot: u8, live: u8) -> spaceterm_server::hierarchy::Inventor
 /// This computer's server's scripted writer, starting with `inventory`.
 fn local_writer(
     inventory: spaceterm_server::hierarchy::Inventory,
-) -> Rc<crate::ui::shared_workspaces::testing::ScriptedEdits> {
-    Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-        Some(inventory),
-    ))
+) -> Rc<crate::ui::workspaces::testing::ScriptedEdits> {
+    Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(Some(
+        inventory,
+    )))
 }
 
 /// Settings with this computer's server, selected and presented through `local`, and one saved
 /// paired server, `bravo`. The writer is registered before Settings opens, so its first reading
 /// is the scripted one and no real server is asked.
 fn present_local_sessions(
-    local: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    local: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
     cx: &mut TestAppContext,
 ) -> Servers<'_> {
     use crate::ui::server_worktrees::testing::{ScriptedReads, present_local};

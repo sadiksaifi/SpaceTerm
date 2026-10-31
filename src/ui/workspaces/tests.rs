@@ -1,4 +1,4 @@
-//! Shared server Workspaces driven through the main Workspace interface.
+//! Server Workspaces driven through the main Workspace interface.
 //!
 //! Every test here goes through the public surfaces a person uses: the Tab strip, the Pane
 //! Caption, the Pane itself, and the server inventory the window reads. None of them reaches into
@@ -15,13 +15,13 @@ use spaceterm_server::hierarchy::{
     Axis, CloseInventory, ConfirmedPane, Id, Inventory, Mutation, Outcome, Pane, Tab, Workspace,
 };
 
-use super::development::testing::{ScriptedEdits, ScriptedPanes};
-use super::development::{
-    SharedEditSource, SharedEditability, SharedPaneOpener, SharedPaneSessions, SharedRefusal,
-    SharedRefusalReason, SharedSubmission, SharedTabs, SharedWorkspaceDraft, SharedWorkspaceEdits,
-    SharedWorkspaceFacts, SharedWorkspaceField, SharedWorkspacePlan, SharedWorkspaces,
+use super::server::testing::{ScriptedEdits, ScriptedPanes};
+use super::server::{
+    WorkspaceDraft, WorkspaceEditSource, WorkspaceEditability, WorkspaceEdits, WorkspaceFacts,
+    WorkspaceField, WorkspacePaneOpener, WorkspacePaneSessions, WorkspacePlan, WorkspaceRefusal,
+    WorkspaceRefusalReason, WorkspaceSubmission, WorkspaceTabs, Workspaces,
 };
-use crate::terminal::server_session::DevelopmentPaneStatus;
+use crate::terminal::server_session::ServerPaneStatus;
 use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::tab_manager::TabManager;
@@ -109,14 +109,14 @@ fn root_only() -> Inventory {
     )
 }
 
-struct SharedHarness {
+struct WorkspaceHarness {
     manager: Entity<TabManager>,
     edits: Rc<ScriptedEdits>,
     panes: Rc<ScriptedPanes>,
 }
 
 /// A Tab strip presenting one server Workspace's Root Tab, as the Workspace Window binds it.
-fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTestContext) {
+fn tab_manager(cx: &mut TestAppContext) -> (WorkspaceHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
@@ -127,19 +127,19 @@ fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTes
     );
     let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
     let panes = ScriptedPanes::new(session_factory.clone());
-    let sessions = SharedPaneSessions::with_opener(
-        Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
+    let sessions = WorkspacePaneSessions::with_opener(
+        Rc::clone(&panes) as Rc<dyn WorkspacePaneOpener>,
         &PaneConstruction::testing(),
     );
     let edits = Rc::new(ScriptedEdits::new(Some(root_only())));
-    let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+    let source = WorkspaceEditSource::new(Rc::clone(&edits) as Rc<dyn WorkspaceEdits>);
     let (_, state) = panes
         .open(ROOT_PANE)
         .expect("the Root Pane subscription must open");
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        TabManager::shared(
-            SharedTabs::new(source, sessions, WORKSPACE),
-            crate::ui::tab_manager::SharedRoot {
+        TabManager::new(
+            WorkspaceTabs::new(source, sessions, WORKSPACE),
+            crate::ui::tab_manager::WorkspaceRoot {
                 tab: ROOT_TAB,
                 pane: ROOT_PANE,
                 state,
@@ -158,7 +158,7 @@ fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTes
     });
     cx.run_until_parked();
     (
-        SharedHarness {
+        WorkspaceHarness {
             manager,
             edits,
             panes,
@@ -167,14 +167,14 @@ fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTes
     )
 }
 
-fn publish(harness: &SharedHarness, inventory: Inventory, cx: &mut VisualTestContext) {
+fn publish(harness: &WorkspaceHarness, inventory: Inventory, cx: &mut VisualTestContext) {
     let workspace = inventory.workspaces[0].clone();
     harness.edits.set_inventory(inventory);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.reconcile_shared(
+            manager.reconcile(
                 &workspace,
-                super::development::SharedRemoval::Published,
+                super::server::WorkspaceRemoval::Published,
                 window,
                 cx,
             );
@@ -183,20 +183,20 @@ fn publish(harness: &SharedHarness, inventory: Inventory, cx: &mut VisualTestCon
     cx.run_until_parked();
 }
 
-fn tab_count(harness: &SharedHarness, cx: &mut VisualTestContext) -> usize {
+fn tab_count(harness: &WorkspaceHarness, cx: &mut VisualTestContext) -> usize {
     harness
         .manager
         .read_with(cx, |manager, _| manager.tab_ids().len())
 }
 
-fn pane_count(harness: &SharedHarness, cx: &mut VisualTestContext) -> usize {
+fn pane_count(harness: &WorkspaceHarness, cx: &mut VisualTestContext) -> usize {
     harness.manager.read_with(cx, |manager, cx| {
         manager.active_tab_view().read(cx).pane_count()
     })
 }
 
 /// Lets every Pane read its connection and paints the frame that follows.
-fn settle(_: &SharedHarness, cx: &mut VisualTestContext) {
+fn settle(_: &WorkspaceHarness, cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -226,7 +226,7 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 
 #[gpui::test]
 fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     assert_eq!(tab_count(&harness, cx), 1);
     let root = harness
         .manager
@@ -256,7 +256,7 @@ fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut T
 
 #[gpui::test]
 fn command_t_should_ask_the_server_for_a_tab_beside_the_active_one(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
 
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
@@ -274,7 +274,7 @@ fn command_t_should_ask_the_server_for_a_tab_beside_the_active_one(cx: &mut Test
 
 #[gpui::test]
 fn a_published_tab_should_join_the_strip_without_taking_the_active_tab(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     let active = harness
         .manager
         .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0);
@@ -308,7 +308,7 @@ fn a_published_tab_should_join_the_strip_without_taking_the_active_tab(cx: &mut 
 
 #[gpui::test]
 fn a_published_split_should_join_the_layout_without_taking_focus(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     let focused = harness
         .manager
         .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).1);
@@ -348,8 +348,8 @@ fn a_published_split_should_join_the_layout_without_taking_focus(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn a_split_in_a_shared_workspace_should_ask_the_server_for_the_pane(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+fn a_split_in_a_workspace_should_ask_the_server_for_the_pane(cx: &mut TestAppContext) {
+    let (harness, cx) = tab_manager(cx);
 
     click("pane-split-down-1", cx);
 
@@ -372,8 +372,8 @@ fn a_split_in_a_shared_workspace_should_ask_the_server_for_the_pane(cx: &mut Tes
 }
 
 #[gpui::test]
-fn shared_edits_should_be_unavailable_offline_rather_than_queued(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+fn edits_should_be_unavailable_offline_rather_than_queued(cx: &mut TestAppContext) {
+    let (harness, cx) = tab_manager(cx);
     harness.edits.set_connected(false);
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -390,8 +390,8 @@ fn shared_edits_should_be_unavailable_offline_rather_than_queued(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn a_shared_pane_should_refuse_its_own_local_close(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+fn a_pane_should_refuse_its_own_local_close(cx: &mut TestAppContext) {
+    let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
         inventory(
@@ -413,13 +413,13 @@ fn a_shared_pane_should_refuse_its_own_local_close(cx: &mut TestAppContext) {
     assert_eq!(
         pane_count(&harness, cx),
         2,
-        "closing a shared Pane needs every client's confirmation, so it closes none locally"
+        "closing a Pane needs every client's confirmation, so it closes none locally"
     );
 }
 
 #[gpui::test]
 fn removed_membership_should_leave_no_desktop_owned_remains(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
         inventory(
@@ -452,7 +452,7 @@ fn removed_membership_should_leave_no_desktop_owned_remains(cx: &mut TestAppCont
 
 #[gpui::test]
 fn a_publication_that_replaces_every_known_pane_should_keep_the_tab(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     assert_eq!(pane_count(&harness, cx), 1);
 
     // Between two readings the server split the Root Pane twice and the Root Pane's shell exited.
@@ -482,20 +482,17 @@ fn a_publication_that_replaces_every_known_pane_should_keep_the_tab(cx: &mut Tes
 }
 
 #[gpui::test]
-fn a_shared_pane_whose_shell_exits_should_keep_its_place_until_the_server_publishes(
+fn a_pane_whose_shell_exits_should_keep_its_place_until_the_server_publishes(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
 
     // The Terminal Session ends before the next reading of the inventory. The server may have
     // created a Pane this client has not seen, so membership waits for what the server publishes.
-    harness
-        .panes
-        .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::Ended);
+    harness.panes.pane(ROOT_PANE).set(ServerPaneStatus::Ended);
     cx.update(|_, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.exit_shared_pane_for_test(cx);
+            manager.exit_pane_for_test(cx);
         });
     });
     cx.run_until_parked();
@@ -528,8 +525,8 @@ fn a_shared_pane_whose_shell_exits_should_keep_its_place_until_the_server_publis
 }
 
 #[gpui::test]
-fn focus_a_shared_pane_regains_should_not_ask_the_server_for_it(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+fn focus_a_pane_regains_should_not_ask_the_server_for_it(cx: &mut TestAppContext) {
+    let (harness, cx) = tab_manager(cx);
     let selections = harness.panes.pane(ROOT_PANE).selections();
 
     // Window restoration refocuses the Pane's terminal, which notifies the Tab the same way a
@@ -549,8 +546,8 @@ fn focus_a_shared_pane_regains_should_not_ask_the_server_for_it(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn opening_a_shared_workspace_should_ask_the_server_for_its_focused_pane(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+fn opening_a_workspace_should_ask_the_server_for_its_focused_pane(cx: &mut TestAppContext) {
+    let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
         inventory(
@@ -592,7 +589,7 @@ fn opening_a_shared_workspace_should_ask_the_server_for_its_focused_pane(cx: &mu
 
 #[gpui::test]
 fn an_explicit_pane_press_should_ask_the_server_for_that_pane(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
         inventory(
@@ -625,7 +622,7 @@ fn an_explicit_pane_press_should_ask_the_server_for_that_pane(cx: &mut TestAppCo
 
 #[gpui::test]
 fn an_offline_client_should_ask_the_server_for_no_pane(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
         inventory(
@@ -653,19 +650,19 @@ fn an_offline_client_should_ask_the_server_for_no_pane(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn a_takeover_screen_should_replace_the_pane_and_offer_take_over(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     harness
         .panes
         .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::Takeover);
+        .set(ServerPaneStatus::Takeover);
     settle(&harness, cx);
 
     assert!(
-        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        cx.debug_bounds("pane-takeover-1").is_some(),
         "another client's control should replace the Pane with its screen"
     );
 
-    click("shared-pane-take-over-1", cx);
+    click("pane-take-over-1", cx);
 
     assert_eq!(
         harness.panes.pane(ROOT_PANE).take_overs(),
@@ -678,20 +675,20 @@ fn a_takeover_screen_should_replace_the_pane_and_offer_take_over(cx: &mut TestAp
 /// change that follows the Tab's previous reading.
 #[gpui::test]
 fn each_pane_change_should_show_without_a_timer(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     let pane = harness.panes.pane(ROOT_PANE);
 
-    pane.set(DevelopmentPaneStatus::Takeover);
+    pane.set(ServerPaneStatus::Takeover);
     settle(&harness, cx);
     assert!(
-        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        cx.debug_bounds("pane-takeover-1").is_some(),
         "the first change shows"
     );
 
     pane.reconnect();
     settle(&harness, cx);
     assert!(
-        cx.debug_bounds("shared-pane-takeover-1").is_none(),
+        cx.debug_bounds("pane-takeover-1").is_none(),
         "a change after the Tab's reading shows too"
     );
 }
@@ -703,7 +700,7 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     use spaceterm_server::pane::control::Controller;
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     let pane = harness.panes.pane(ROOT_PANE);
     let client = |name: &str| Controller::Client {
         name: name.into(),
@@ -756,7 +753,7 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     // An interrupted connection cannot say who controls the Pane now, so it names nobody.
     pane.offer_take_over(client("Build Server"));
     settle(&harness, cx);
-    pane.set(DevelopmentPaneStatus::TakeoverReconnecting);
+    pane.set(ServerPaneStatus::TakeoverReconnecting);
     settle(&harness, cx);
     let tree = A11yTree::read(cx);
     assert!(tree.find("Controlled by Build Server").is_none());
@@ -772,7 +769,7 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
     use spaceterm_server::pane::{SessionEnd, control::Controller};
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     let pane = harness.panes.pane(ROOT_PANE);
     pane.offer_take_over(Controller::Client {
         name: "Build Server".into(),
@@ -789,13 +786,13 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
             .is_some(),
         "the screen says why the shell ended"
     );
-    assert!(cx.debug_bounds("shared-pane-takeover-1").is_none());
-    assert!(cx.debug_bounds("shared-pane-start-session-1").is_some());
-    assert!(cx.debug_bounds("shared-pane-close-pane-1").is_some());
+    assert!(cx.debug_bounds("pane-takeover-1").is_none());
+    assert!(cx.debug_bounds("pane-start-session-1").is_some());
+    assert!(cx.debug_bounds("pane-close-pane-1").is_some());
     assert_eq!(pane.restored_starts(), 0, "presenting it starts nothing");
     assert_eq!(pane.take_overs(), 0, "presenting it takes nothing over");
 
-    pane.set(DevelopmentPaneStatus::TakeoverReconnecting);
+    pane.set(ServerPaneStatus::TakeoverReconnecting);
     settle(&harness, cx);
     assert_eq!(
         A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
@@ -809,7 +806,7 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
 fn start_session_on_another_clients_ended_pane_should_take_it_over(cx: &mut TestAppContext) {
     use spaceterm_server::pane::{SessionEnd, control::Controller};
 
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     let pane = harness.panes.pane(ROOT_PANE);
     pane.offer_take_over(Controller::Client {
         name: "Build Server".into(),
@@ -818,29 +815,29 @@ fn start_session_on_another_clients_ended_pane_should_take_it_over(cx: &mut Test
     pane.set_session_end(Some(SessionEnd::EndAllSessions));
     settle(&harness, cx);
 
-    click("shared-pane-start-session-1", cx);
+    click("pane-start-session-1", cx);
     assert_eq!(pane.take_overs(), 1);
     assert_eq!(pane.restored_starts(), 0, "Take Over carries the start");
     pane.reconnect();
     settle(&harness, cx);
-    assert!(cx.debug_bounds("shared-pane-session-ended-1").is_none());
+    assert!(cx.debug_bounds("pane-session-ended-1").is_none());
 }
 
 #[gpui::test]
-fn an_interrupted_shared_pane_should_offer_retry_until_its_screen_returns(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+fn an_interrupted_pane_should_offer_retry_until_its_screen_returns(cx: &mut TestAppContext) {
+    let (harness, cx) = tab_manager(cx);
     harness
         .panes
         .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::Reconnecting);
+        .set(ServerPaneStatus::Reconnecting);
     settle(&harness, cx);
 
     assert!(
-        cx.debug_bounds("shared-pane-notice-1").is_some(),
+        cx.debug_bounds("pane-notice-1").is_some(),
         "an interruption should say so over the Pane's frozen screen"
     );
 
-    click("shared-pane-retry-1", cx);
+    click("pane-retry-1", cx);
 
     assert_eq!(
         harness.panes.pane(ROOT_PANE).retries(),
@@ -852,22 +849,22 @@ fn an_interrupted_shared_pane_should_offer_retry_until_its_screen_returns(cx: &m
     settle(&harness, cx);
 
     assert!(
-        cx.debug_bounds("shared-pane-notice-1").is_none(),
+        cx.debug_bounds("pane-notice-1").is_none(),
         "the notice should leave once the server publishes this client's screens again"
     );
 }
 
 #[gpui::test]
 fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     harness
         .panes
         .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::Restored);
+        .set(ServerPaneStatus::Restored);
     settle(&harness, cx);
 
     assert!(
-        cx.debug_bounds("shared-pane-restored-1").is_some(),
+        cx.debug_bounds("pane-restored-1").is_some(),
         "a Pane retained across a server restart should show its own screen"
     );
     assert_eq!(
@@ -876,7 +873,7 @@ fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut Te
         "rendering the screen must not start a shell"
     );
 
-    click("shared-pane-start-shell-1", cx);
+    click("pane-start-shell-1", cx);
 
     assert_eq!(
         harness.panes.pane(ROOT_PANE).restored_starts(),
@@ -887,28 +884,28 @@ fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut Te
 
 #[gpui::test]
 fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_tab_manager(cx);
+    let (harness, cx) = tab_manager(cx);
     harness
         .panes
         .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::SessionEnded(
+        .set(ServerPaneStatus::SessionEnded(
             spaceterm_server::pane::SessionEnd::EndAllSessions,
         ));
     settle(&harness, cx);
 
     assert!(
-        cx.debug_bounds("shared-pane-session-ended-1").is_some(),
+        cx.debug_bounds("pane-session-ended-1").is_some(),
         "a Pane whose Session End All Sessions ended should say so"
     );
     assert!(
-        cx.debug_bounds("shared-pane-restored-1").is_none(),
+        cx.debug_bounds("pane-restored-1").is_none(),
         "an ended Session is not a server restart"
     );
     // Repaints, reconnection, and focus restoration never start an ended Session.
     harness
         .panes
         .pane(ROOT_PANE)
-        .reconnect_to(DevelopmentPaneStatus::SessionEnded(
+        .reconnect_to(ServerPaneStatus::SessionEnded(
             spaceterm_server::pane::SessionEnd::EndAllSessions,
         ));
     settle(&harness, cx);
@@ -918,14 +915,14 @@ fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAp
         "presenting the ended Session must not start a shell"
     );
 
-    click("shared-pane-start-session-1", cx);
+    click("pane-start-session-1", cx);
 
     assert_eq!(
         harness.panes.pane(ROOT_PANE).restored_starts(),
         1,
         "Start Session should ask the server once"
     );
-    click("shared-pane-start-session-1", cx);
+    click("pane-start-session-1", cx);
     assert_eq!(
         harness.panes.pane(ROOT_PANE).restored_starts(),
         1,
@@ -934,27 +931,21 @@ fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn an_unavailable_shared_pane_offers_explicit_retry_and_keeps_terminal_content_hidden(
+fn an_unavailable_pane_offers_explicit_retry_and_keeps_terminal_content_hidden(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = shared_tab_manager(cx);
-    harness
-        .panes
-        .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::Failed(
-            crate::server_connection::ServerError::DirectoryUnavailable,
-        ));
+    let (harness, cx) = tab_manager(cx);
+    harness.panes.pane(ROOT_PANE).set(ServerPaneStatus::Failed(
+        crate::server_connection::ServerError::DirectoryUnavailable,
+    ));
     settle(&harness, cx);
-    assert!(
-        cx.debug_bounds("shared-pane-directory-unavailable-1")
-            .is_some()
-    );
-    assert!(cx.debug_bounds("shared-pane-directory-retry-1").is_some());
-    assert!(cx.debug_bounds("shared-pane-choose-directory-1").is_some());
+    assert!(cx.debug_bounds("pane-directory-unavailable-1").is_some());
+    assert!(cx.debug_bounds("pane-directory-retry-1").is_some());
+    assert!(cx.debug_bounds("pane-choose-directory-1").is_some());
     assert_eq!(harness.panes.pane(ROOT_PANE).restored_starts(), 0);
-    click("shared-pane-directory-retry-1", cx);
+    click("pane-directory-retry-1", cx);
     assert_eq!(harness.panes.pane(ROOT_PANE).restored_starts(), 1);
-    click("shared-pane-directory-retry-1", cx);
+    click("pane-directory-retry-1", cx);
     assert_eq!(harness.panes.pane(ROOT_PANE).restored_starts(), 1);
 }
 
@@ -991,7 +982,9 @@ mod independent_views {
             if let Some(after) = rest.strip_prefix("pane:") {
                 let end = after.find([',', ')']).unwrap_or(after.len());
                 let pane = PaneId::new(after[..end].parse().expect("a Pane number"));
-                described.push_str(label(server(pane).expect("every Pane here is shared")));
+                described.push_str(label(
+                    server(pane).expect("every Pane has a server identity"),
+                ));
                 rest = &after[end..];
             } else if let Some(after) = rest.strip_prefix("split:") {
                 let end = after.find('(').expect("a Split lists its children");
@@ -1012,46 +1005,48 @@ mod independent_views {
     }
 
     /// One client's own arrangement: its Tab display order, and its Active Tab's Pane Layout.
-    fn arrangement(harness: &SharedHarness, cx: &mut VisualTestContext) -> (Vec<Id>, String) {
+    fn arrangement(harness: &WorkspaceHarness, cx: &mut VisualTestContext) -> (Vec<Id>, String) {
         harness.manager.read_with(cx, |manager, cx| {
             let order = manager
                 .tab_ids()
                 .into_iter()
-                .map(|tab| manager.shared_server_tab(tab).expect("every Tab is shared"))
+                .map(|tab| {
+                    manager
+                        .server_tab(tab)
+                        .expect("every Tab has a server identity")
+                })
                 .collect();
             let (active_tab, _) = manager.active_terminal_identity(cx);
             let layout = describe(
                 &manager.active_tab_view().read(cx).layout_signature(),
-                |pane| manager.shared_server_pane(active_tab, pane, cx),
+                |pane| manager.server_pane(active_tab, pane, cx),
             );
             (order, layout)
         })
     }
 
     /// The Active Tab and its Focused Pane, as the server names them.
-    fn view(harness: &SharedHarness, cx: &mut VisualTestContext) -> (Id, Id) {
+    fn view(harness: &WorkspaceHarness, cx: &mut VisualTestContext) -> (Id, Id) {
         harness.manager.read_with(cx, |manager, cx| {
             let (tab, pane) = manager.active_terminal_identity(cx);
             (
-                manager.shared_server_tab(tab).expect("a shared Tab"),
-                manager
-                    .shared_server_pane(tab, pane, cx)
-                    .expect("a shared Pane"),
+                manager.server_tab(tab).expect("a server Tab"),
+                manager.server_pane(tab, pane, cx).expect("a server Pane"),
             )
         })
     }
 
-    fn zoomed(harness: &SharedHarness, cx: &mut VisualTestContext) -> Option<Id> {
+    fn zoomed(harness: &WorkspaceHarness, cx: &mut VisualTestContext) -> Option<Id> {
         harness.manager.read_with(cx, |manager, cx| {
             let (tab, _) = manager.active_terminal_identity(cx);
             match manager.active_tab_view().read(cx).zoom_state() {
-                ZoomState::Zoomed(pane) => manager.shared_server_pane(tab, pane, cx),
+                ZoomState::Zoomed(pane) => manager.server_pane(tab, pane, cx),
                 ZoomState::Restored => None,
             }
         })
     }
 
-    fn keyboard_in_focused_pane(harness: &SharedHarness, cx: &mut VisualTestContext) -> bool {
+    fn keyboard_in_focused_pane(harness: &WorkspaceHarness, cx: &mut VisualTestContext) -> bool {
         cx.update(|window, cx| {
             harness
                 .manager
@@ -1062,7 +1057,7 @@ mod independent_views {
 
     /// Both clients read the same publication.
     fn publish_to_both(
-        clients: [(&SharedHarness, &mut VisualTestContext); 2],
+        clients: [(&WorkspaceHarness, &mut VisualTestContext); 2],
         inventory: &Inventory,
     ) {
         for (harness, cx) in clients {
@@ -1112,12 +1107,12 @@ mod independent_views {
     /// placement, Split axes, and ratios for what survives, and the new work joins where the ADR
     /// says without moving either Mac's Active Tab or Focused Pane.
     #[gpui::test]
-    fn two_clients_should_keep_their_own_arrangements_through_shared_creation_and_deletion(
+    fn two_clients_should_keep_their_own_arrangements_through_creation_and_deletion(
         mac_1: &mut TestAppContext,
         mac_2: &mut TestAppContext,
     ) {
-        let (first, mac_1) = shared_tab_manager(mac_1);
-        let (second, mac_2) = shared_tab_manager(mac_2);
+        let (first, mac_1) = tab_manager(mac_1);
+        let (second, mac_2) = tab_manager(mac_2);
         publish_to_both(
             [(&first, &mut *mac_1), (&second, &mut *mac_2)],
             &inventory(
@@ -1273,8 +1268,8 @@ mod independent_views {
         mac_1: &mut TestAppContext,
         mac_2: &mut TestAppContext,
     ) {
-        let (first, mac_1) = shared_tab_manager(mac_1);
-        let (second, mac_2) = shared_tab_manager(mac_2);
+        let (first, mac_1) = tab_manager(mac_1);
+        let (second, mac_2) = tab_manager(mac_2);
         let split = vec![
             pane(ROOT_PANE, None, Axis::Right),
             pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
@@ -1377,20 +1372,20 @@ mod edits {
     use crate::domain::WorkspaceId;
     use crate::ui::pane_lifecycle::PaneConstruction;
 
-    fn shared(inventory: Option<Inventory>) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
+    fn binding(inventory: Option<Inventory>) -> (Workspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(inventory));
         (reader(&edits), edits)
     }
 
     /// A reading of `edits` in a new process.
-    fn reader(edits: &Rc<ScriptedEdits>) -> SharedWorkspaces {
-        window(SharedEditSource::new(
-            Rc::clone(edits) as Rc<dyn SharedWorkspaceEdits>
+    fn reader(edits: &Rc<ScriptedEdits>) -> Workspaces {
+        window(WorkspaceEditSource::new(
+            Rc::clone(edits) as Rc<dyn WorkspaceEdits>
         ))
     }
 
     /// A Workspace Window's reading of `source`, which every window of one process shares.
-    fn window(source: SharedEditSource) -> SharedWorkspaces {
+    fn window(source: WorkspaceEditSource) -> Workspaces {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
@@ -1398,11 +1393,11 @@ mod edits {
             .with_reading_available(true),
         );
         let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
-        let sessions = SharedPaneSessions::with_opener(
-            ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
+        let sessions = WorkspacePaneSessions::with_opener(
+            ScriptedPanes::new(session_factory) as Rc<dyn WorkspacePaneOpener>,
             &PaneConstruction::testing(),
         );
-        SharedWorkspaces::new(source, sessions)
+        Workspaces::new(source, sessions)
     }
 
     fn renamed(name: &str, version: u64) -> Inventory {
@@ -1418,63 +1413,60 @@ mod edits {
         first_workspace_id()
     }
 
-    fn bind(shared: &mut SharedWorkspaces, inventory: &Inventory) {
-        shared.register(
+    fn bind(binding: &mut Workspaces, inventory: &Inventory) {
+        binding.register(
             local(),
-            SharedWorkspaceFacts::from_server(&inventory.workspaces[0]),
+            WorkspaceFacts::from_server(&inventory.workspaces[0]),
         );
     }
 
     #[test]
-    fn an_offline_client_should_refuse_a_shared_edit_without_submitting_it() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
+    fn an_offline_client_should_refuse_an_edit_without_submitting_it() {
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
         edits.set_connected(false);
 
-        assert_eq!(shared.editability(), SharedEditability::Offline);
+        assert_eq!(binding.editability(), WorkspaceEditability::Offline);
         assert_eq!(
-            shared.rename(local(), "Logs".to_owned(), Some(0)),
-            SharedSubmission::Refused(SharedRefusalReason::Offline)
+            binding.rename(local(), "Logs".to_owned(), Some(0)),
+            WorkspaceSubmission::Refused(WorkspaceRefusalReason::Offline)
         );
         assert!(edits.submitted().is_empty());
     }
 
     #[test]
     fn a_connected_client_should_keep_distinct_edits_ordered_while_an_answer_waits() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
 
         assert_eq!(
-            shared.rename(local(), "Logs".to_owned(), Some(0)),
-            SharedSubmission::Submitted
+            binding.rename(local(), "Logs".to_owned(), Some(0)),
+            WorkspaceSubmission::Submitted
         );
-        assert_eq!(shared.editability(), SharedEditability::Available);
+        assert_eq!(binding.editability(), WorkspaceEditability::Available);
         assert_eq!(
-            shared.rename(local(), "Notes".to_owned(), Some(0)),
-            SharedSubmission::Submitted
+            binding.rename(local(), "Notes".to_owned(), Some(0)),
+            WorkspaceSubmission::Submitted
         );
         assert_eq!(edits.submitted().len(), 1, "only the first edit is sent");
     }
 
     #[test]
     fn a_conflicting_rename_should_keep_the_draft_and_name_the_value_from_the_same_snapshot() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
-        shared.rename(local(), "Mine".to_owned(), Some(0));
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
+        binding.rename(local(), "Mine".to_owned(), Some(0));
 
         // Another client's rename reached the server first, so this answer and the inventory that
         // carries its value arrive together.
         edits.set_inventory(renamed("Theirs", 1));
         edits.answer(Outcome::Conflict);
-        let poll = shared.poll();
+        let poll = binding.poll();
 
-        let conflict = shared.take_conflict().expect("the draft should be kept");
+        let conflict = binding.take_conflict().expect("the draft should be kept");
         assert_eq!(conflict.workspace, local());
-        assert_eq!(conflict.field, SharedWorkspaceField::Name);
-        assert_eq!(
-            conflict.draft,
-            SharedWorkspaceDraft::Name("Mine".to_owned())
-        );
+        assert_eq!(conflict.field, WorkspaceField::Name);
+        assert_eq!(conflict.draft, WorkspaceDraft::Name("Mine".to_owned()));
         assert_eq!(
             conflict.authoritative.to_string(),
             "Theirs",
@@ -1485,50 +1477,50 @@ mod edits {
 
     #[test]
     fn an_answer_must_reach_the_ui_before_another_edit_can_replace_it() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
-        shared.rename(local(), "Mine".to_owned(), Some(0));
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
+        binding.rename(local(), "Mine".to_owned(), Some(0));
         edits.set_inventory(renamed("Theirs", 1));
         edits.answer(Outcome::Conflict);
 
         assert_eq!(
-            shared.create_workspace("Logs".to_owned(), None),
-            SharedSubmission::Submitted,
+            binding.create_workspace("Logs".to_owned(), None),
+            WorkspaceSubmission::Submitted,
             "a later connected interaction must retain the earlier conflict beside its snapshot"
         );
-        shared.poll();
+        binding.poll();
         assert_eq!(
-            shared.take_conflict().expect("unread conflict").draft,
-            SharedWorkspaceDraft::Name("Mine".to_owned())
+            binding.take_conflict().expect("unread conflict").draft,
+            WorkspaceDraft::Name("Mine".to_owned())
         );
         assert_eq!(
-            shared.create_workspace("Logs".to_owned(), None),
-            SharedSubmission::Submitted
+            binding.create_workspace("Logs".to_owned(), None),
+            WorkspaceSubmission::Submitted
         );
     }
 
     #[test]
     fn asking_again_after_reviewing_a_conflict_should_use_the_version_it_reviewed() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
-        shared.rename(local(), "Mine".to_owned(), Some(0));
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
+        binding.rename(local(), "Mine".to_owned(), Some(0));
         edits.set_inventory(renamed("Theirs", 1));
         edits.answer(Outcome::Conflict);
-        let poll = shared.poll();
-        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
-        let conflict = shared.take_conflict().expect("conflict");
+        let poll = binding.poll();
+        bind(&mut binding, poll.inventory.as_ref().expect("inventory"));
+        let conflict = binding.take_conflict().expect("conflict");
 
         // The dialog still shows "Theirs" while another accepted edit arrives.
         let mut newer = renamed("Latest", 2);
         newer.revision = 3;
         edits.set_inventory(newer);
-        let poll = shared.poll();
+        let poll = binding.poll();
         bind(
-            &mut shared,
+            &mut binding,
             poll.inventory.as_ref().expect("newer inventory"),
         );
 
-        assert_eq!(shared.ask_again(&conflict), SharedSubmission::Submitted);
+        assert_eq!(binding.ask_again(&conflict), WorkspaceSubmission::Submitted);
 
         assert_eq!(
             edits.submitted().last(),
@@ -1545,7 +1537,7 @@ mod edits {
     fn a_conflict_recovered_before_any_binding_should_keep_its_draft_until_the_projection() {
         // A relaunch finds a retained answer this process never submitted, and no local Workspace
         // exists yet.
-        let (mut shared, edits) = shared(Some(root_only()));
+        let (mut binding, edits) = binding(Some(root_only()));
         edits.submit_for_recovery(Mutation::RenameWorkspace {
             workspace: WORKSPACE,
             version: 0,
@@ -1554,20 +1546,17 @@ mod edits {
         edits.set_inventory(renamed("Theirs", 1));
         edits.answer(Outcome::Conflict);
 
-        let poll = shared.poll();
+        let poll = binding.poll();
         assert!(
-            shared.take_conflict().is_none(),
+            binding.take_conflict().is_none(),
             "the draft waits rather than resolving to an unknown Workspace"
         );
-        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+        bind(&mut binding, poll.inventory.as_ref().expect("inventory"));
 
-        let conflict = shared
+        let conflict = binding
             .take_conflict()
             .expect("the recovered draft should survive the projection");
-        assert_eq!(
-            conflict.draft,
-            SharedWorkspaceDraft::Name("Recovered".to_owned())
-        );
+        assert_eq!(conflict.draft, WorkspaceDraft::Name("Recovered".to_owned()));
         assert_eq!(conflict.authoritative.to_string(), "Theirs");
     }
 
@@ -1586,7 +1575,7 @@ mod edits {
     /// neither reaches the person again after that.
     #[test]
     fn a_relaunch_should_present_each_unseen_answer_once_whatever_finished_after_it() {
-        let (mut first, edits) = shared(Some(root_only()));
+        let (mut first, edits) = binding(Some(root_only()));
         edits.submit_for_recovery(Mutation::RenameWorkspace {
             workspace: WORKSPACE,
             version: 0,
@@ -1624,7 +1613,7 @@ mod edits {
         let poll = third.poll();
         bind(&mut third, poll.inventory.as_ref().expect("inventory"));
 
-        let mine = Some(SharedWorkspaceDraft::Name("Mine".to_owned()));
+        let mine = Some(WorkspaceDraft::Name("Mine".to_owned()));
         assert_eq!(waiting, mine, "draft review waits behind the dialog");
         assert_eq!(reviewed, mine);
         assert_eq!(alerted, Some(refused_removal()));
@@ -1637,7 +1626,7 @@ mod edits {
     /// next window, which presents it once.
     #[test]
     fn a_review_that_never_opened_should_reach_the_next_window() {
-        let (mut first, edits) = shared(Some(root_only()));
+        let (mut first, edits) = binding(Some(root_only()));
         edits.submit_for_recovery(Mutation::RenameWorkspace {
             workspace: WORKSPACE,
             version: 0,
@@ -1664,7 +1653,7 @@ mod edits {
         let poll = later.poll();
         bind(&mut later, poll.inventory.as_ref().expect("inventory"));
 
-        let mine = Some(SharedWorkspaceDraft::Name("Mine".to_owned()));
+        let mine = Some(WorkspaceDraft::Name("Mine".to_owned()));
         assert_eq!(queued, mine);
         assert_eq!(reviewed, mine);
         assert!(later.next_conflict().is_none());
@@ -1675,7 +1664,7 @@ mod edits {
     /// again.
     #[test]
     fn a_presentation_while_disconnected_should_reach_the_reconnected_route() {
-        let (mut first, edits) = shared(Some(root_only()));
+        let (mut first, edits) = binding(Some(root_only()));
         edits.submit_for_recovery(Mutation::RenameWorkspace {
             workspace: WORKSPACE,
             version: 0,
@@ -1690,7 +1679,7 @@ mod edits {
         let source = first.edits();
         source.replace_transport(Rc::new(super::super::UnavailableEdits::default()));
         notice.acknowledge();
-        source.replace_transport(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        source.replace_transport(Rc::clone(&edits) as Rc<dyn WorkspaceEdits>);
         drop(first);
 
         let mut reopened = window(source);
@@ -1780,8 +1769,8 @@ mod edits {
     fn disconnected(
         journal: &std::sync::Arc<JournalAt>,
         retries: &super::super::PresentationRetries,
-    ) -> SharedEditSource {
-        SharedEditSource::new(Rc::new(super::super::UnavailableEdits::recording(
+    ) -> WorkspaceEditSource {
+        WorkspaceEditSource::new(Rc::new(super::super::UnavailableEdits::recording(
             ROUTE,
             std::sync::Arc::clone(journal) as std::sync::Arc<dyn super::super::PresentationRecord>,
             retries.clone(),
@@ -1841,7 +1830,7 @@ mod edits {
     /// Workspace. The person learns that the change could not be applied, once.
     #[test]
     fn a_recovered_conflict_for_a_removed_workspace_should_present_its_refusal() {
-        let (mut shared, edits) = shared(Some(root_only()));
+        let (mut binding, edits) = binding(Some(root_only()));
         edits.submit_for_recovery(Mutation::RenameWorkspace {
             workspace: WORKSPACE,
             version: 0,
@@ -1853,19 +1842,19 @@ mod edits {
         edits.set_inventory(removed);
         edits.answer(Outcome::Conflict);
 
-        shared.poll();
+        binding.poll();
         let unseen_before = edits.unseen().len();
-        let refusal = shared.next_refusal().map(|(refusal, notice)| {
+        let refusal = binding.next_refusal().map(|(refusal, notice)| {
             notice.acknowledge();
             refusal
         });
-        let _ = shared.take_refusal();
+        let _ = binding.take_refusal();
 
         assert_eq!(
             unseen_before, 1,
             "nothing is presented until the refusal is"
         );
-        assert_eq!(refusal, Some(SharedRefusal::Missing));
+        assert_eq!(refusal, Some(WorkspaceRefusal::Missing));
         assert!(edits.unseen().is_empty());
     }
 
@@ -1873,7 +1862,7 @@ mod edits {
     /// notice records only the outcomes it stands for.
     #[test]
     fn refusals_for_different_reasons_should_each_be_presented() {
-        let (mut shared, edits) = shared(Some(root_only()));
+        let (mut binding, edits) = binding(Some(root_only()));
         let missing_tab = Mutation::CreateTab {
             workspace: [9; 32],
             source: None,
@@ -1884,31 +1873,31 @@ mod edits {
         edits.submit_for_recovery(missing_tab);
         edits.answer(Outcome::Limit);
 
-        shared.poll();
-        let first = shared.next_refusal().map(|(refusal, notice)| {
+        binding.poll();
+        let first = binding.next_refusal().map(|(refusal, notice)| {
             notice.acknowledge();
             refusal
         });
-        let _ = shared.take_refusal();
+        let _ = binding.take_refusal();
         let unseen_between = edits.unseen().len();
-        let second = shared.next_refusal().map(|(refusal, notice)| {
+        let second = binding.next_refusal().map(|(refusal, notice)| {
             notice.acknowledge();
             refusal
         });
-        let _ = shared.take_refusal();
+        let _ = binding.take_refusal();
 
-        assert_eq!(first, Some(SharedRefusal::Missing));
+        assert_eq!(first, Some(WorkspaceRefusal::Missing));
         assert_eq!(unseen_between, 1, "the Limit refusal is still unseen");
-        assert_eq!(second, Some(SharedRefusal::Limit));
+        assert_eq!(second, Some(WorkspaceRefusal::Limit));
         assert!(edits.unseen().is_empty());
-        assert!(shared.next_refusal().is_none());
+        assert!(binding.next_refusal().is_none());
     }
 
     /// The journal forgot unseen outcomes beyond its bound. One notice says so, and once a
     /// window has shown it, no later window shows it again.
     #[test]
     fn forgotten_outcomes_should_be_noticed_once() {
-        let (mut first, edits) = shared(Some(root_only()));
+        let (mut first, edits) = binding(Some(root_only()));
         edits.forget(2);
         first.poll();
         let noticed = first.next_forgotten().map(|notice| notice.acknowledge());
@@ -1927,8 +1916,8 @@ mod edits {
 
     #[test]
     fn an_answer_recovered_from_an_earlier_run_should_open_nothing() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
         edits.submit_for_recovery(Mutation::CreateTab {
             workspace: WORKSPACE,
             source: None,
@@ -1936,7 +1925,7 @@ mod edits {
         });
         edits.answer(Outcome::Accepted { target: SECOND_TAB });
 
-        let poll = shared.poll();
+        let poll = binding.poll();
 
         assert!(
             poll.accepted.is_none(),
@@ -1947,7 +1936,7 @@ mod edits {
     #[test]
     fn a_recovered_worktree_removal_keeps_its_target_and_offline_status() {
         use spaceterm_server::worktree::Operation;
-        let (mut shared, edits) = shared(Some(root_only()));
+        let (mut binding, edits) = binding(Some(root_only()));
         let path = std::path::PathBuf::from("/fixture/linked");
         edits.submit_for_recovery(Mutation::Worktree(Operation::Remove {
             root: "/fixture".into(),
@@ -1955,59 +1944,59 @@ mod edits {
             boot: BOOT,
             confirmation: [9; 32],
         }));
-        shared.poll();
+        binding.poll();
         assert_eq!(
-            shared.worktree_status(WORKSPACE, Some(std::path::Path::new("/fixture"))),
+            binding.worktree_status(WORKSPACE, Some(std::path::Path::new("/fixture"))),
             Some("Removing Worktree…")
         );
         assert_eq!(
-            shared.row_status([10; 32], Some(std::path::Path::new("/other-repository"))),
+            binding.row_status([10; 32], Some(std::path::Path::new("/other-repository"))),
             None,
             "an unrelated Workspace's row says nothing about another row's edit"
         );
-        assert!(shared.removing_worktree(&path));
+        assert!(binding.removing_worktree(&path));
         edits.set_connected(false);
         edits.set_error(spaceterm_server::ServerError::NotRunning);
-        shared.poll();
+        binding.poll();
         assert_eq!(
-            shared
+            binding
                 .row_status(WORKSPACE, Some(std::path::Path::new("/fixture")))
                 .map(|status| (status.text, status.warning)),
             Some(("Not connected", true)),
             "the Workspace row must show its offline status"
         );
         assert!(
-            shared.removing_worktree(&path),
+            binding.removing_worktree(&path),
             "the Worktree row still names its unresolved original"
         );
     }
 
     #[test]
     fn an_accepted_creation_this_client_asked_for_should_open_once() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
-        shared.create_workspace("Logs".to_owned(), None);
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
+        binding.create_workspace("Logs".to_owned(), None);
         edits.answer(Outcome::Accepted { target: WORKSPACE });
 
-        let accepted = shared.poll().accepted.expect("the creator opens its own");
+        let accepted = binding.poll().accepted.expect("the creator opens its own");
         assert_eq!(accepted.target, WORKSPACE);
         assert!(
             matches!(accepted.mutation, Mutation::CreateWorkspace { .. }),
             "the acceptance should name the edit it answers"
         );
         assert!(
-            shared.poll().accepted.is_none(),
+            binding.poll().accepted.is_none(),
             "one answer opens its creation once"
         );
     }
 
     #[test]
     fn an_accepted_workspace_creation_retains_its_authoritative_attachment() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        shared.poll();
-        bind(&mut shared, &root_only());
-        shared.create_workspace("Logs".to_owned(), None);
-        shared.poll();
+        let (mut binding, edits) = binding(Some(root_only()));
+        binding.poll();
+        bind(&mut binding, &root_only());
+        binding.create_workspace("Logs".to_owned(), None);
+        binding.poll();
         let mut published = root_only();
         let mut created = published.workspaces[0].clone();
         let target = [21; 32];
@@ -2020,13 +2009,13 @@ mod edits {
         published.workspaces.push(created);
         edits.set_inventory(published);
         edits.answer(Outcome::Accepted { target });
-        let poll = shared.poll();
+        let poll = binding.poll();
         assert!(
-            shared
+            binding
                 .plan(poll.inventory.as_ref().expect("accepted inventory"))
                 .iter()
                 .any(|step| {
-                    matches!(step, SharedWorkspacePlan::Create { facts } if facts.server == target)
+                    matches!(step, WorkspacePlan::Create { facts } if facts.server == target)
                 }),
             "the accepted Workspace remains attached after provisional binding"
         );
@@ -2034,18 +2023,18 @@ mod edits {
 
     #[test]
     fn a_draft_started_before_a_publication_should_submit_the_version_it_began_with() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
         // A person starts editing the name while the Workspace sits at name version 0.
-        let draft = shared.facts(local()).expect("facts").name_version;
+        let draft = binding.facts(local()).expect("facts").name_version;
 
         // Another client's rename reaches the server while that draft is still open, and this
         // client reads it.
         edits.set_inventory(renamed("Theirs", 1));
-        let poll = shared.poll();
-        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+        let poll = binding.poll();
+        bind(&mut binding, poll.inventory.as_ref().expect("inventory"));
 
-        shared.rename(local(), "Mine".to_owned(), Some(draft));
+        binding.rename(local(), "Mine".to_owned(), Some(draft));
 
         assert_eq!(
             edits.submitted().last(),
@@ -2061,20 +2050,20 @@ mod edits {
 
     #[test]
     fn a_pin_chooser_opened_before_a_publication_should_submit_the_version_it_opened_at() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
         // A person opens the chooser while the Workspace sits at pin version 0.
-        let draft = shared.pin_version(local()).expect("pin version");
+        let draft = binding.pin_version(local()).expect("pin version");
 
         let mut published = root_only();
         published.revision = 2;
         published.workspaces[0].pinned_directory = Some(PathBuf::from("/server/theirs"));
         published.workspaces[0].pin_version = 1;
         edits.set_inventory(published);
-        let poll = shared.poll();
-        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+        let poll = binding.poll();
+        bind(&mut binding, poll.inventory.as_ref().expect("inventory"));
 
-        shared.pin(local(), Some(PathBuf::from("/server/mine")), Some(draft));
+        binding.pin(local(), Some(PathBuf::from("/server/mine")), Some(draft));
 
         assert_eq!(
             edits.submitted().last(),
@@ -2089,15 +2078,15 @@ mod edits {
 
     #[test]
     fn a_draft_started_after_a_publication_should_submit_the_version_it_can_see() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        bind(&mut shared, &root_only());
+        let (mut binding, edits) = binding(Some(root_only()));
+        bind(&mut binding, &root_only());
         edits.set_inventory(renamed("Theirs", 1));
-        let poll = shared.poll();
-        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+        let poll = binding.poll();
+        bind(&mut binding, poll.inventory.as_ref().expect("inventory"));
 
         // The person starts editing after reading the published name.
-        let draft = shared.facts(local()).expect("facts").name_version;
-        shared.rename(local(), "Mine".to_owned(), Some(draft));
+        let draft = binding.facts(local()).expect("facts").name_version;
+        binding.rename(local(), "Mine".to_owned(), Some(draft));
 
         assert_eq!(
             edits.submitted().last(),
@@ -2115,9 +2104,9 @@ mod edits {
         use spaceterm_server::client_view::{
             ClientView, Layout, LayoutNode, TabView, WorkspaceView,
         };
-        let (mut shared, _) = shared(Some(root_only()));
-        shared.poll();
-        bind(&mut shared, &root_only());
+        let (mut binding, _) = binding(Some(root_only()));
+        binding.poll();
+        bind(&mut binding, &root_only());
         let personal = WorkspaceView {
             workspace: WORKSPACE,
             tabs: vec![TabView {
@@ -2127,46 +2116,46 @@ mod edits {
                 },
             }],
         };
-        shared.save_arrangements(ClientView {
+        binding.save_arrangements(ClientView {
             workspaces: vec![personal.clone()],
         });
-        shared.detach(local()).unwrap();
-        shared.forget(local());
-        shared.save_arrangements(ClientView::default());
-        shared.attach(WORKSPACE).unwrap();
-        assert_eq!(shared.saved_arrangement(WORKSPACE), Some(&personal));
+        binding.detach(local()).unwrap();
+        binding.forget(local());
+        binding.save_arrangements(ClientView::default());
+        binding.attach(WORKSPACE).unwrap();
+        assert_eq!(binding.saved_arrangement(WORKSPACE), Some(&personal));
     }
 
     #[test]
-    fn offline_detach_survives_publication_and_reattach_never_submits_shared_creation() {
-        let (mut shared, edits) = shared(Some(root_only()));
-        shared.poll();
-        bind(&mut shared, &root_only());
+    fn offline_detach_survives_publication_and_reattach_never_submits_creation() {
+        let (mut binding, edits) = binding(Some(root_only()));
+        binding.poll();
+        bind(&mut binding, &root_only());
         edits.set_connected(false);
-        shared.poll();
-        shared.detach(local()).unwrap();
-        shared.forget(local());
-        assert!(shared.plan(&root_only()).is_empty());
+        binding.poll();
+        binding.detach(local()).unwrap();
+        binding.forget(local());
+        assert!(binding.plan(&root_only()).is_empty());
         assert!(
-            shared.available_workspaces().is_empty(),
+            binding.available_workspaces().is_empty(),
             "detached work needs a connected server to be offered"
         );
-        assert!(shared.attach(WORKSPACE).is_err());
+        assert!(binding.attach(WORKSPACE).is_err());
         edits.set_connected(true);
-        shared.poll();
-        assert_eq!(shared.available_workspaces().len(), 1);
-        shared.attach(WORKSPACE).unwrap();
+        binding.poll();
+        assert_eq!(binding.available_workspaces().len(), 1);
+        binding.attach(WORKSPACE).unwrap();
         assert!(matches!(
-            shared.plan(&root_only()).as_slice(),
-            [SharedWorkspacePlan::Create { .. }]
+            binding.plan(&root_only()).as_slice(),
+            [WorkspacePlan::Create { .. }]
         ));
         let mut gone = root_only();
         gone.revision += 1;
         gone.workspaces.clear();
         edits.set_inventory(gone);
-        shared.poll();
+        binding.poll();
         assert!(
-            shared.attach(WORKSPACE).is_err(),
+            binding.attach(WORKSPACE).is_err(),
             "killed work is never recreated by a saved attachment"
         );
         assert!(edits.submitted().is_empty());
@@ -2174,19 +2163,16 @@ mod edits {
 
     #[test]
     fn a_plan_should_create_update_and_remove_against_the_published_inventory() {
-        let (mut shared, _) = shared(Some(root_only()));
-        shared.poll();
-        let plan = shared.plan(&root_only());
-        assert!(matches!(
-            plan.as_slice(),
-            [SharedWorkspacePlan::Create { .. }]
-        ));
+        let (mut binding, _) = binding(Some(root_only()));
+        binding.poll();
+        let plan = binding.plan(&root_only());
+        assert!(matches!(plan.as_slice(), [WorkspacePlan::Create { .. }]));
 
-        bind(&mut shared, &root_only());
-        let plan = shared.plan(&renamed("Theirs", 1));
+        bind(&mut binding, &root_only());
+        let plan = binding.plan(&renamed("Theirs", 1));
         match plan.as_slice() {
             [
-                SharedWorkspacePlan::Update {
+                WorkspacePlan::Update {
                     local: bound,
                     facts,
                 },
@@ -2204,14 +2190,14 @@ mod edits {
             close: None,
         };
         assert!(matches!(
-            shared.plan(&gone).as_slice(),
-            [SharedWorkspacePlan::Removed { local: bound }] if *bound == local()
+            binding.plan(&gone).as_slice(),
+            [WorkspacePlan::Removed { local: bound }] if *bound == local()
         ));
     }
 
     #[test]
     fn a_waiting_draft_for_a_removed_workspace_should_report_the_removal() {
-        let (mut shared, edits) = shared(Some(root_only()));
+        let (mut binding, edits) = binding(Some(root_only()));
         edits.submit_for_recovery(Mutation::RenameWorkspace {
             workspace: WORKSPACE,
             version: 0,
@@ -2219,7 +2205,7 @@ mod edits {
         });
         edits.set_inventory(renamed("Theirs", 1));
         edits.answer(Outcome::Conflict);
-        shared.poll();
+        binding.poll();
 
         edits.set_inventory(Inventory {
             repositories: None,
@@ -2227,11 +2213,11 @@ mod edits {
             workspaces: Vec::new(),
             close: None,
         });
-        shared.poll();
+        binding.poll();
 
-        assert!(shared.take_conflict().is_none());
+        assert!(binding.take_conflict().is_none());
         assert!(
-            shared.take_refusal().is_some(),
+            binding.take_refusal().is_some(),
             "a draft whose Workspace is gone reports the removal instead of waiting"
         );
     }
@@ -2243,25 +2229,25 @@ mod close {
     use crate::close_confirmation::CloseTarget as LocalCloseTarget;
     use crate::domain::TabId;
     use crate::ui::pane_lifecycle::PaneConstruction;
-    use crate::ui::shared_workspaces::{SharedCloseState, SharedCloseUnavailable};
+    use crate::ui::workspaces::{WorkspaceCloseState, WorkspaceCloseUnavailable};
     use spaceterm_server::hierarchy::{CloseConfirmation, CloseTarget};
 
-    fn shared(inventory: Inventory) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
+    fn binding(inventory: Inventory) -> (Workspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
-        let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        let source = WorkspaceEditSource::new(Rc::clone(&edits) as Rc<dyn WorkspaceEdits>);
         let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
             crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
             )
             .with_reading_available(true),
         ));
-        let sessions = SharedPaneSessions::with_opener(
-            ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
+        let sessions = WorkspacePaneSessions::with_opener(
+            ScriptedPanes::new(session_factory) as Rc<dyn WorkspacePaneOpener>,
             &PaneConstruction::testing(),
         );
-        let mut shared = SharedWorkspaces::new(source, sessions);
-        shared.poll();
-        (shared, edits)
+        let mut binding = Workspaces::new(source, sessions);
+        binding.poll();
+        (binding, edits)
     }
 
     /// A Root Tab split in two, beside a second Tab.
@@ -2306,15 +2292,15 @@ mod close {
     #[test]
     fn a_confirmed_close_should_ask_the_server_to_end_exactly_what_it_showed() {
         let published = with_session(split_beside_second_tab(), SPLIT_PANE, [40; 32]);
-        let (mut shared, edits) = shared(published.clone());
+        let (mut binding, edits) = binding(published.clone());
 
-        let approval = shared
+        let approval = binding
             .close_approval(ROOT_TAB_TARGET)
             .expect("the published Tab can be reviewed");
-        assert_eq!(shared.close_state(&approval), SharedCloseState::Current);
+        assert_eq!(binding.close_state(&approval), WorkspaceCloseState::Current);
         assert_eq!(
-            shared.close(approval, local_tab()),
-            SharedSubmission::Submitted
+            binding.close(approval, local_tab()),
+            WorkspaceSubmission::Submitted
         );
 
         assert_eq!(
@@ -2345,16 +2331,16 @@ mod close {
 
     #[test]
     fn a_session_that_starts_after_the_review_should_make_it_stale_without_a_new_revision() {
-        let (mut shared, edits) = shared(split_beside_second_tab());
-        let approval = shared
+        let (mut binding, edits) = binding(split_beside_second_tab());
+        let approval = binding
             .close_approval(ROOT_TAB_TARGET)
             .expect("the published Tab can be reviewed");
 
         // Another client starts the restored shell. Membership and its revision stay the same.
         edits.set_inventory(with_session(split_beside_second_tab(), ROOT_PANE, [41; 32]));
-        shared.poll();
+        binding.poll();
 
-        assert_eq!(shared.close_state(&approval), SharedCloseState::Changed);
+        assert_eq!(binding.close_state(&approval), WorkspaceCloseState::Changed);
         assert!(edits.submitted().is_empty());
     }
 
@@ -2367,8 +2353,8 @@ mod close {
             tab: ROOT_TAB,
             pane: ROOT_PANE,
         };
-        let (mut shared, edits) = shared(split_beside_second_tab());
-        let approval = shared
+        let (mut binding, edits) = binding(split_beside_second_tab());
+        let approval = binding
             .close_approval(ROOT_PANE_TARGET)
             .expect("the published Pane can be reviewed");
         assert_eq!(
@@ -2380,10 +2366,10 @@ mod close {
             tab_id: TabId::new(1),
             pane_id: crate::domain::PaneId::new(1),
         };
-        let (mut initial, initial_edits) = self::shared(split_beside_second_tab());
+        let (mut initial, initial_edits) = self::binding(split_beside_second_tab());
         assert_eq!(
             initial.close(approval.clone(), local_pane),
-            SharedSubmission::Submitted
+            WorkspaceSubmission::Submitted
         );
         assert!(matches!(
             initial_edits.submitted().as_slice(),
@@ -2403,14 +2389,14 @@ mod close {
                 tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
             ],
         ));
-        shared.poll();
+        binding.poll();
 
         assert_eq!(
-            shared.close_state(&approval),
-            SharedCloseState::Changed,
+            binding.close_state(&approval),
+            WorkspaceCloseState::Changed,
             "the reviewed close no longer says its Tab closes too"
         );
-        let fresh = shared
+        let fresh = binding
             .close_approval(ROOT_PANE_TARGET)
             .expect("the Pane can be reviewed again");
         assert_eq!(
@@ -2420,7 +2406,10 @@ mod close {
         );
         assert_eq!(fresh.detail(), None, "the Workspace keeps its second Tab");
         assert!(edits.submitted().is_empty());
-        assert_eq!(shared.close(fresh, local_pane), SharedSubmission::Submitted);
+        assert_eq!(
+            binding.close(fresh, local_pane),
+            WorkspaceSubmission::Submitted
+        );
         assert!(matches!(
             edits.submitted().as_slice(),
             [Mutation::Close {
@@ -2436,8 +2425,8 @@ mod close {
 
     #[test]
     fn a_target_another_client_removed_should_be_missing_rather_than_changed() {
-        let (mut shared, edits) = shared(split_beside_second_tab());
-        let approval = shared
+        let (mut binding, edits) = binding(split_beside_second_tab());
+        let approval = binding
             .close_approval(ROOT_TAB_TARGET)
             .expect("the published Tab can be reviewed");
 
@@ -2448,12 +2437,12 @@ mod close {
                 vec![pane(SECOND_TAB_PANE, None, Axis::Right)],
             )],
         ));
-        shared.poll();
+        binding.poll();
 
-        assert_eq!(shared.close_state(&approval), SharedCloseState::Missing);
+        assert_eq!(binding.close_state(&approval), WorkspaceCloseState::Missing);
         assert_eq!(
-            shared.close_approval(ROOT_TAB_TARGET),
-            Err(SharedCloseUnavailable::Missing)
+            binding.close_approval(ROOT_TAB_TARGET),
+            Err(WorkspaceCloseUnavailable::Missing)
         );
     }
 
@@ -2461,29 +2450,31 @@ mod close {
     fn a_close_without_reported_sessions_should_not_be_offered_for_review() {
         let mut unreported = split_beside_second_tab();
         unreported.close = None;
-        let (shared, _) = shared(unreported);
+        let (binding, _) = binding(unreported);
 
         assert_eq!(
-            shared.close_approval(ROOT_TAB_TARGET),
-            Err(SharedCloseUnavailable::Unreported),
+            binding.close_approval(ROOT_TAB_TARGET),
+            Err(WorkspaceCloseUnavailable::Unreported),
             "a person cannot approve Sessions the server has not reported"
         );
     }
 
     #[test]
     fn an_offline_client_should_offer_no_close_review() {
-        let (shared, edits) = shared(split_beside_second_tab());
+        let (binding, edits) = binding(split_beside_second_tab());
         edits.set_connected(false);
 
         assert_eq!(
-            shared.close_approval(ROOT_TAB_TARGET),
-            Err(SharedCloseUnavailable::Edits(SharedRefusalReason::Offline))
+            binding.close_approval(ROOT_TAB_TARGET),
+            Err(WorkspaceCloseUnavailable::Edits(
+                WorkspaceRefusalReason::Offline
+            ))
         );
     }
 
     #[test]
     fn a_stale_answer_should_name_the_local_target_only_for_the_client_that_asked() {
-        let (mut asked, edits) = shared(split_beside_second_tab());
+        let (mut asked, edits) = binding(split_beside_second_tab());
         let approval = asked
             .close_approval(ROOT_TAB_TARGET)
             .expect("the published Tab can be reviewed");
@@ -2503,7 +2494,7 @@ mod close {
         );
 
         // An answer recovered after a relaunch belongs to no review this process opened.
-        let (mut recovered, edits) = shared(split_beside_second_tab());
+        let (mut recovered, edits) = binding(split_beside_second_tab());
         edits.submit_for_recovery(Mutation::Close {
             target: ROOT_TAB_TARGET,
             confirmation: CloseConfirmation {
@@ -2527,8 +2518,8 @@ mod close {
             SPLIT_PANE,
             [41; 32],
         );
-        let (shared, _) = shared(published);
-        let tab = shared
+        let (binding, _) = binding(published);
+        let tab = binding
             .close_approval(ROOT_TAB_TARGET)
             .expect("the published Tab can be reviewed");
         assert_eq!(
@@ -2537,7 +2528,7 @@ mod close {
         );
         assert_eq!(tab.detail(), None, "the Workspace keeps its second Tab");
 
-        let unstarted = shared
+        let unstarted = binding
             .close_approval(CloseTarget::Pane {
                 workspace: WORKSPACE,
                 tab: SECOND_TAB,
@@ -2551,7 +2542,7 @@ mod close {
             "a retained Pane without a shell ends no Session"
         );
 
-        let running = shared
+        let running = binding
             .close_approval(CloseTarget::Pane {
                 workspace: WORKSPACE,
                 tab: ROOT_TAB,
@@ -2563,7 +2554,7 @@ mod close {
             "This ends 1 Terminal Session and stops its running commands for every client."
         );
 
-        let kill = shared
+        let kill = binding
             .close_approval(CloseTarget::KillWorkspace {
                 workspace: WORKSPACE,
             })
@@ -2592,8 +2583,8 @@ mod close {
             panes: Vec::new(),
             ..tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)])
         };
-        let (shared, _) = shared(inventory(1, vec![worktree_tab, empty_tab]));
-        let close = shared
+        let (binding, _) = binding(inventory(1, vec![worktree_tab, empty_tab]));
+        let close = binding
             .close_approval(CloseTarget::Worktree {
                 workspace: WORKSPACE,
                 tab: ROOT_TAB,
@@ -2615,8 +2606,8 @@ mod close {
 
     #[test]
     fn closing_a_workspaces_only_pane_should_say_the_workspace_is_removed() {
-        let (shared, _) = shared(with_session(root_only(), ROOT_PANE, [42; 32]));
-        let only = shared
+        let (binding, _) = binding(with_session(root_only(), ROOT_PANE, [42; 32]));
+        let only = binding
             .close_approval(CloseTarget::Pane {
                 workspace: WORKSPACE,
                 tab: ROOT_TAB,
@@ -2647,10 +2638,10 @@ mod draft {
 
     use super::*;
     use crate::ui::workspace_sidebar::{
-        SharedWorkspaceRow, SidebarEvent, WorkspaceRowViewModel, WorkspaceSidebar,
+        SidebarEvent, WorkspaceRow, WorkspaceRowViewModel, WorkspaceSidebar,
     };
 
-    /// One shared Workspace row at `name_version`, as the Workspace Window publishes it.
+    /// One Workspace row at `name_version`, as the Workspace Window publishes it.
     fn row(name: &str, name_version: u64) -> WorkspaceRowViewModel {
         WorkspaceRowViewModel {
             workspace_id: first_workspace_id(),
@@ -2664,7 +2655,7 @@ mod draft {
             worktrees: None,
             creates_worktrees: false,
             active: true,
-            shared: Some(SharedWorkspaceRow {
+            binding: Some(WorkspaceRow {
                 detaches: true,
                 name_version,
                 edits: true,

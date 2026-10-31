@@ -1,6 +1,6 @@
 //! Terminal input through the protocol, on a real headless PTY.
 use super::dispatch::Served;
-use super::tests::{create_shared, host, shared_inventory, size};
+use super::tests::{create_workspace, host, size, workspace_inventory};
 use super::*;
 use spaceterm_server::attachments::Attachment;
 use spaceterm_server::connection::outbox::Outbox;
@@ -18,7 +18,7 @@ const PEER: Peer = Peer {
 };
 const CHANNEL: Channel = Channel(1);
 
-fn reply(served: &mut Served<SharedWorkspaceHost>, operation: Operation) -> ReplyBody {
+fn reply(served: &mut Served<WorkspaceHost>, operation: Operation) -> ReplyBody {
     match served.request(&PEER, RequestId(1), operation) {
         Dispatch::Reply(result) => (*result).expect("the operation succeeds"),
         _ => panic!("the operation replies at once"),
@@ -32,7 +32,7 @@ fn text(text: &str) -> InputEvent {
     InputEvent::Key(key)
 }
 
-fn send(served: &mut Served<SharedWorkspaceHost>, serial: u32, events: Vec<InputEvent>) {
+fn send(served: &mut Served<WorkspaceHost>, serial: u32, events: Vec<InputEvent>) {
     served.input(
         &PEER,
         protocol::Input {
@@ -92,7 +92,7 @@ impl Received {
 /// Publishes until a row of the received screen ends with `line`. Output can follow a prompt on
 /// its row when input arrives before the shell prints that prompt, as dash does.
 fn await_line(
-    served: &mut Served<SharedWorkspaceHost>,
+    served: &mut Served<WorkspaceHost>,
     outbox: &Outbox,
     received: &mut Received,
     line: &str,
@@ -124,9 +124,9 @@ fn await_line(
 /// with a control character no key produces is refused while the Terminal Session keeps running.
 #[test]
 fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused() {
-    let mut shared = SharedWorkspaceHost::new(host());
-    let workspace = create_shared(&mut shared, 1);
-    let inventory = shared_inventory(&mut shared);
+    let mut binding = WorkspaceHost::new(host());
+    let workspace = create_workspace(&mut binding, 1);
+    let inventory = workspace_inventory(&mut binding);
     let pane = inventory
         .workspaces
         .iter()
@@ -135,7 +135,7 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         .and_then(|tab| tab.panes.first())
         .unwrap()
         .id;
-    let mut served = Served::new(shared);
+    let mut served = Served::new(binding);
     // Terminal Sessions ask the connection to publish.
     served.ticker(Arc::new(|| {}));
     let outbox = Outbox::new(Arc::new(|| {}));

@@ -11,8 +11,8 @@ use super::{
     SidebarState, WorkspaceManager, named_route, server_inventory, workspace_adapters,
 };
 use crate::domain::PresentedWorkspace as _;
-use crate::ui::shared_workspaces::testing::{FixedOwner, ScriptedEdits, ScriptedPanes};
-use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
+use crate::ui::workspaces::testing::{FixedOwner, ScriptedEdits, ScriptedPanes};
+use crate::ui::workspaces::{DirectServer, WorkspaceEditSource, WorkspacePaneSessions};
 
 /// The Workspace `number` of [`server_inventory`] with a second Tab, whose id and Pane follow
 /// from `number`.
@@ -101,21 +101,21 @@ fn present_with(
         manager.update(cx, |manager, cx| {
             let key = manager.present_server_workspaces(
                 origin,
-                SharedEditSource::new(Rc::clone(edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
+                WorkspaceEditSource::new(Rc::clone(edits) as Rc<_>),
+                WorkspacePaneSessions::with_opener(
                     Rc::clone(panes) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
                 cx,
             );
-            if let Some(shared) = manager.shared.get_mut(key) {
-                shared.identify(Rc::new(FixedOwner(owner)));
+            if let Some(binding) = manager.binding.get_mut(key) {
+                binding.identify(Rc::new(FixedOwner(owner)));
                 if let Some(attached) = &attached {
-                    shared.attach_for_test(attached);
+                    binding.attach_for_test(attached);
                 }
             }
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.sync_workspaces(key, window, cx);
             key
         })
     });
@@ -148,9 +148,7 @@ fn present_penguin(
 
 fn sync(manager: &Entity<WorkspaceManager>, key: ServerKey, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(key, window, cx)
-        });
+        manager.update(cx, |manager, cx| manager.sync_workspaces(key, window, cx));
     });
     cx.run_until_parked();
 }
@@ -219,7 +217,7 @@ fn open_tab(manager: &Entity<WorkspaceManager>, tab: Id, cx: &mut VisualTestCont
             .read(cx)
             .active_tab_manager()
             .expect("a Workspace is active");
-        active.update(cx, |tabs, cx| tabs.open_accepted_shared(tab, window, cx));
+        active.update(cx, |tabs, cx| tabs.open_accepted(tab, window, cx));
     });
     cx.run_until_parked();
 }
@@ -493,12 +491,12 @@ fn present_retained_penguin(
                     cx,
                 )
                 .expect("the route is presented");
-            if let Some(shared) = manager.shared.get_mut(key) {
-                shared.identify(Rc::new(FixedOwner(route)));
-                shared.retain_copy_for_test(copy);
+            if let Some(binding) = manager.binding.get_mut(key) {
+                binding.identify(Rc::new(FixedOwner(route)));
+                binding.retain_copy_for_test(copy);
             }
             manager.present_retained_copy(&route);
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.sync_workspaces(key, window, cx);
             key
         })
     });
@@ -520,7 +518,7 @@ fn connect_penguin(
             let key = manager
                 .server_key(&crate::ui::ServerTarget::Direct(route))
                 .expect("the route stays presented");
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.sync_workspaces(key, window, cx);
         });
     });
     cx.run_until_parked();
@@ -860,8 +858,8 @@ fn taking_over_the_focused_pane_with_the_keyboard_keeps_it_when_the_server_retur
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     local_panes
         .pane(root_pane(1))
-        .set(crate::terminal::server_session::DevelopmentPaneStatus::Takeover);
-    super::settle_shared_panes(&mut window);
+        .set(crate::terminal::server_session::ServerPaneStatus::Takeover);
+    super::settle_panes(&mut window);
     focus_content(&manager, &mut window);
     window.simulate_keystrokes("tab");
     press(&mut window, "enter");

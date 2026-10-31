@@ -863,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_shared_organization_is_incompatible_and_left_unchanged() {
+    fn newer_workspace_organization_is_incompatible_and_left_unchanged() {
         let fixture = Fixture::new();
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();

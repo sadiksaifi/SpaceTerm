@@ -9,7 +9,7 @@ use super::*;
 use crate::args::{Cli, Command, PaneCommand};
 use crate::contract::{Format, Screen as ScreenData, ScreenSize};
 use clap::Parser;
-use spaceterm::runtime::{Served, SharedWorkspaceHost};
+use spaceterm::runtime::{Served, WorkspaceHost};
 use spaceterm_server::connection::io::{Waker, serve, spawn_link};
 use spaceterm_server::connection::loopback::Loopback;
 use spaceterm_server::connection::outbox::Outbox;
@@ -54,7 +54,7 @@ impl Server {
     fn start() -> Self {
         environment();
         let (sync, _) = SyncWorker::spawn().unwrap();
-        let host = SharedWorkspaceHost::local(sync.clone()).unwrap();
+        let host = WorkspaceHost::local(sync.clone()).unwrap();
         let service: SharedPaneService = Arc::new(Mutex::new(
             Box::new(Served::new(host)) as Box<dyn PaneService>
         ));

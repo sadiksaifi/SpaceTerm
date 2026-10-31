@@ -281,10 +281,10 @@ impl WorkspaceManager {
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let reachable = self.shared_reachable();
+        let reachable = self.local_server_reachable();
         let place = presentation.wording().this_computer_phrase;
-        let local = self.shared.local();
-        let stopped = local.and_then(|shared| shared.connection_error())
+        let local = self.binding.local();
+        let stopped = local.and_then(|binding| binding.connection_error())
             == Some(spaceterm_server::ServerError::Stopped);
         let (title, detail): (&'static str, SharedString) = if reachable {
             // A reachable server ends any reconnect the person asked for.
@@ -387,22 +387,22 @@ impl WorkspaceManager {
     /// Asks this computer's server connection to reconnect now, and remembers the failed
     /// attempts so far, so the view can say whether this attempt failed.
     fn reconnect_local(&mut self, cx: &mut Context<Self>) {
-        let Some(shared) = self.shared.local() else {
+        let Some(binding) = self.binding.local() else {
             return;
         };
         self.launch
             .reconnect_from
-            .set(Some(shared.failed_attempts()));
-        shared.retry_connection();
+            .set(Some(binding.failed_attempts()));
+        binding.retry_connection();
         cx.notify();
     }
 
     /// Where the reconnect the person asked for stands, if they asked for one.
     fn reconnect_status(&self, _: &Context<Self>) -> Option<Reconnect> {
         let from = self.launch.reconnect_from.get()?;
-        let shared = self.shared.local()?;
-        Some(if shared.failed_attempts() > from {
-            Reconnect::Failed(shared.connection_error())
+        let binding = self.binding.local()?;
+        Some(if binding.failed_attempts() > from {
+            Reconnect::Failed(binding.connection_error())
         } else {
             Reconnect::Trying
         })

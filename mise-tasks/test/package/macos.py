@@ -217,11 +217,11 @@ int main(int argc, char **argv) {{
         artifact = bundled.parent.parent / "Resources/server-artifact"
         self.assertEqual(
             (artifact / "artifact.tar.gz").read_bytes(),
-            Path(self.env["SPACETERM_SERVER_ARCHIVE"]).read_bytes(),
+            Path(self.env["SPACETERM_CLI_ARCHIVE"]).read_bytes(),
         )
         self.assertEqual(
             (artifact / "artifact.sig").read_bytes(),
-            Path(self.env["SPACETERM_SERVER_SIGNATURE"]).read_bytes(),
+            Path(self.env["SPACETERM_CLI_SIGNATURE"]).read_bytes(),
         )
         catalog = artifact.with_name("server-artifacts") / "aarch64-apple-darwin"
         self.assertEqual(

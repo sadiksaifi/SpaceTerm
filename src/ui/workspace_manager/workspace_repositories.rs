@@ -1,4 +1,4 @@
-//! Repository Status and Worktrees of the shared server Workspaces this window presents.
+//! Repository Status and Worktrees of the server Workspaces this window presents.
 //!
 //! The owning server reads git for every directory its Workspaces show and publishes the facts
 //! with its live inventory, so a Workspace nobody looks at stays as current as the Active one. This
@@ -6,12 +6,12 @@
 //! branch or Pull Request, the collapsed title-bar chip, each Pane's Repository Status, and the
 //! Worktree rows, with each Tab in the Worktree the server says it belongs to.
 //!
-//! This window reads no git for a shared Workspace. A server path is displayed and copied as
+//! This window reads no git for a Workspace. A server path is displayed and copied as
 //! text; it grants no local file action. Explicit Worktree writes use the owning server.
 
-pub(super) use development::SharedWorkspaceRepositories;
+pub(super) use server::WorkspaceRepositories;
 
-mod development {
+mod server {
     use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
 
@@ -31,24 +31,24 @@ mod development {
     use crate::ui::repository_status_store::{
         InstalledRepositoryStatus, ServerPullRequestsChanged,
     };
-    use crate::ui::shared_workspaces::{
-        LocalPresentation, SharedRepositories, pane_directory, workspace_directory,
-    };
     use crate::ui::workspace_sidebar::{
         WorktreeGroup, WorktreeRemoval, WorktreeRowViewModel, WorktreeSection,
+    };
+    use crate::ui::workspaces::{
+        LocalPresentation, ServerRepositories, pane_directory, workspace_directory,
     };
     use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
     /// What this window keeps beside the server's facts: a stable handle for each shared
     /// Worktree, and whether a person collapsed its Workspace row.
     #[derive(Default)]
-    pub(in crate::ui::workspace_manager) struct SharedWorkspaceRepositories {
-        worktrees: BTreeMap<WorkspaceId, SharedWorktrees>,
+    pub(in crate::ui::workspace_manager) struct WorkspaceRepositories {
+        worktrees: BTreeMap<WorkspaceId, PresentedWorktrees>,
         _pull_requests: Option<Subscription>,
     }
 
     #[derive(Default)]
-    struct SharedWorktrees {
+    struct PresentedWorktrees {
         registry: WorktreeRegistry,
         /// The last listed record of each Worktree with a handle. A Worktree git no longer
         /// lists keeps its label while the server keeps Tabs in it.
@@ -60,31 +60,31 @@ mod development {
     impl WorkspaceManager {
         /// Follows the Pull Requests this client's GitHub CLI finds for server branches, and
         /// presents the server's facts again whenever one changes.
-        pub(in crate::ui::workspace_manager) fn follow_shared_pull_requests(
+        pub(in crate::ui::workspace_manager) fn follow_pull_requests(
             &mut self,
             cx: &mut Context<Self>,
         ) {
             let Some(store) = InstalledRepositoryStatus::store(cx) else {
                 return;
             };
-            self.shared_repositories._pull_requests = Some(cx.subscribe(
+            self.workspace_repositories._pull_requests = Some(cx.subscribe(
                 &store,
                 |manager, _, _: &ServerPullRequestsChanged, cx| {
-                    manager.present_shared_repositories(cx);
+                    manager.present_repositories(cx);
                 },
             ));
         }
 
-        /// Presents the server's latest Git facts in every shared Workspace, active or not: each
+        /// Presents the server's latest Git facts in every Workspace, active or not: each
         /// Tab's Worktree, each Pane's Repository Status, and the sidebar.
-        pub(in crate::ui::workspace_manager) fn present_shared_repositories(
+        pub(in crate::ui::workspace_manager) fn present_repositories(
             &mut self,
             cx: &mut Context<Self>,
         ) {
             let keys = self
-                .shared
+                .binding
                 .iter()
-                .flat_map(|(_, shared)| shared.repositories().pull_request_keys())
+                .flat_map(|(_, binding)| binding.repositories().pull_request_keys())
                 .collect::<Vec<_>>();
             if let Some(store) = InstalledRepositoryStatus::store(cx) {
                 store.update(cx, |store, cx| store.follow_server_pull_requests(keys, cx));
@@ -93,15 +93,15 @@ mod development {
                 .workspaces
                 .iter()
                 .map(|workspace| workspace.id())
-                .filter(|&workspace_id| self.is_shared_workspace(workspace_id))
+                .filter(|&workspace_id| self.has_workspace(workspace_id))
                 .collect();
-            self.shared_repositories
+            self.workspace_repositories
                 .worktrees
                 .retain(|workspace_id, _| workspace_ids.contains(workspace_id));
             for &workspace_id in &workspace_ids {
-                self.reconcile_shared_worktrees(workspace_id, cx);
+                self.reconcile_worktrees(workspace_id, cx);
             }
-            let views = self.shared_pane_views(&workspace_ids, cx);
+            let views = self.pane_views(&workspace_ids, cx);
             for workspace_id in workspace_ids {
                 let Some(manager) = self
                     .workspaces
@@ -111,7 +111,7 @@ mod development {
                     continue;
                 };
                 manager.update(cx, |manager, cx| {
-                    manager.present_shared_repositories(
+                    manager.present_repositories(
                         &|pane| views.get(&pane).cloned().unwrap_or_default(),
                         cx,
                     );
@@ -121,7 +121,7 @@ mod development {
         }
 
         /// What one server directory presents, with this client's Settings and Pull Requests.
-        fn shared_repository_view(
+        fn repository_view(
             &self,
             workspace_id: WorkspaceId,
             directory: &Path,
@@ -131,24 +131,24 @@ mod development {
             if let Some(view) = crate::ui::developer_workbench::repository_view_fixture(cx) {
                 return view;
             }
-            let Some(shared) = self.shared.owning(workspace_id) else {
+            let Some(binding) = self.binding.owning(workspace_id) else {
                 return RepositoryView::Hidden;
             };
             let store = InstalledRepositoryStatus::store(cx);
             let store = store.as_ref().map(|store| store.read(cx));
             let lookup = |key: &_| store.and_then(|store| store.server_pull_request(key));
-            shared.repositories().view(
+            binding.repositories().view(
                 directory,
                 &LocalPresentation {
                     preferences: store.map(|store| store.preferences()).unwrap_or_default(),
-                    connected: shared.connected(),
+                    connected: binding.connected(),
                     pull_request: &lookup,
                 },
             )
         }
 
         /// Each shared Pane's view, by its server identity.
-        fn shared_pane_views(
+        fn pane_views(
             &self,
             workspace_ids: &[WorkspaceId],
             cx: &App,
@@ -157,7 +157,7 @@ mod development {
                 .iter()
                 .filter_map(|&workspace_id| {
                     let workspace = self
-                        .shared
+                        .binding
                         .owning(workspace_id)?
                         .server_workspace(workspace_id)?;
                     Some((workspace_id, workspace))
@@ -172,68 +172,64 @@ mod development {
                 .map(|(workspace_id, pane)| {
                     (
                         pane.id,
-                        self.shared_repository_view(workspace_id, pane_directory(pane), cx),
+                        self.repository_view(workspace_id, pane_directory(pane), cx),
                     )
                 })
                 .collect()
         }
 
         /// The server Workspace one local Workspace presents, and the directory its row reads.
-        fn shared_row_source(
+        fn workspace_row_source(
             &self,
             workspace_id: WorkspaceId,
         ) -> Option<(&ServerWorkspace, &Path)> {
             let workspace = self
-                .shared
+                .binding
                 .owning(workspace_id)?
                 .server_workspace(workspace_id)?;
             Some((workspace, workspace_directory(workspace)?))
         }
 
-        /// What a shared Workspace row's second line shows after its directory.
-        pub(in crate::ui::workspace_manager) fn shared_sidebar_badge(
+        /// What a Workspace row's second line shows after its directory.
+        pub(in crate::ui::workspace_manager) fn sidebar_badge(
             &self,
             workspace_id: WorkspaceId,
             cx: &App,
         ) -> Option<SidebarBadge> {
-            let (_, directory) = self.shared_row_source(workspace_id)?;
-            SidebarBadge::from_view(&self.shared_repository_view(workspace_id, directory, cx))
+            let (_, directory) = self.workspace_row_source(workspace_id)?;
+            SidebarBadge::from_view(&self.repository_view(workspace_id, directory, cx))
         }
 
-        /// The collapsed title-bar chip's tooltip line for a shared Workspace.
-        pub(in crate::ui::workspace_manager) fn shared_chip_line(
+        /// The collapsed title-bar chip's tooltip line for a Workspace.
+        pub(in crate::ui::workspace_manager) fn chip_line(
             &self,
             workspace_id: WorkspaceId,
             cx: &App,
         ) -> Option<String> {
-            let (_, directory) = self.shared_row_source(workspace_id)?;
-            chip_tooltip_line(&self.shared_repository_view(workspace_id, directory, cx))
+            let (_, directory) = self.workspace_row_source(workspace_id)?;
+            chip_tooltip_line(&self.repository_view(workspace_id, directory, cx))
         }
 
-        /// The Worktrees of the repository a shared Workspace's row reads, as git on the server
+        /// The Worktrees of the repository a Workspace's row reads, as git on the server
         /// lists them.
-        pub(in crate::ui::workspace_manager) fn shared_inventory(
+        pub(in crate::ui::workspace_manager) fn workspace_inventory(
             &self,
             workspace_id: WorkspaceId,
         ) -> Option<&WorktreeInventory> {
-            let shared = self.shared.owning(workspace_id)?;
-            shared
+            let binding = self.binding.owning(workspace_id)?;
+            binding
                 .repositories()
-                .workspace_worktrees(shared.server_workspace(workspace_id)?)
+                .workspace_worktrees(binding.server_workspace(workspace_id)?)
         }
 
         /// Names every Worktree the server lists or keeps Tabs in, and tags each Tab with the
         /// Worktree the server says it belongs to. Nothing here moves a Tab on its own: the
         /// server reconciles membership, including a Root Tab that follows its Root Pane.
-        fn reconcile_shared_worktrees(
-            &mut self,
-            workspace_id: WorkspaceId,
-            cx: &mut Context<Self>,
-        ) {
-            let Some(shared) = self.shared.owning(workspace_id) else {
+        fn reconcile_worktrees(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
+            let Some(binding) = self.binding.owning(workspace_id) else {
                 return;
             };
-            let Some(server) = shared.server_workspace(workspace_id) else {
+            let Some(server) = binding.server_workspace(workspace_id) else {
                 return;
             };
             let Some(manager) = self
@@ -243,10 +239,10 @@ mod development {
             else {
                 return;
             };
-            let repositories = shared.repositories();
+            let repositories = binding.repositories();
             let inventory = repositories.workspace_worktrees(server);
             let state = self
-                .shared_repositories
+                .workspace_repositories
                 .worktrees
                 .entry(workspace_id)
                 .or_default();
@@ -284,7 +280,7 @@ mod development {
                 scopes.insert(tab.id, (id, root.clone()));
             }
             manager.update(cx, |manager, cx| {
-                manager.apply_shared_worktrees(
+                manager.apply_worktrees(
                     &|tab| {
                         server
                             .tabs
@@ -296,7 +292,7 @@ mod development {
                 );
             });
             let counts = manager.read(cx).worktree_tab_counts();
-            let Some(state) = self.shared_repositories.worktrees.get_mut(&workspace_id) else {
+            let Some(state) = self.workspace_repositories.worktrees.get_mut(&workspace_id) else {
                 return;
             };
             let unused: Vec<WorktreeId> = state
@@ -311,21 +307,21 @@ mod development {
             }
         }
 
-        /// The Worktrees a shared Workspace row discloses, or `None` outside a repository.
-        pub(in crate::ui::workspace_manager) fn shared_worktree_section(
+        /// The Worktrees a Workspace row discloses, or `None` outside a repository.
+        pub(in crate::ui::workspace_manager) fn server_worktree_section(
             &self,
             workspace_id: WorkspaceId,
             cx: &App,
         ) -> Option<WorktreeSection> {
-            let (server, _) = self.shared_row_source(workspace_id)?;
-            let state = self.shared_repositories.worktrees.get(&workspace_id)?;
+            let (server, _) = self.workspace_row_source(workspace_id)?;
+            let state = self.workspace_repositories.worktrees.get(&workspace_id)?;
             let manager = self.workspaces.workspace(workspace_id)?.payload().read(cx);
             let counts = manager.worktree_tab_counts();
             let active = manager.active_worktree();
-            let inventory = self.shared_inventory(workspace_id);
+            let inventory = self.workspace_inventory(workspace_id);
             // The owning server runs Git for its Workspace, on its own computer.
             let worktree_writes = self.owner_writes_worktrees(workspace_id, cx);
-            let repositories = self.shared.owning(workspace_id)?.repositories();
+            let repositories = self.binding.owning(workspace_id)?.repositories();
             let current =
                 inventory.map(|inventory| RepositoryIdentity::new(inventory.main_root.clone()));
             // `listed` says whether the repository the Workspace reads lists the Worktree now.
@@ -340,7 +336,7 @@ mod development {
                 // that left keeps its Tab here, but its directory and Repository Status are its
                 // own, so the row describes the root and names the Pane's directory apart.
                 let pane = manager
-                    .shared_worktree_pane(id, cx)
+                    .worktree_pane(id, cx)
                     .and_then(|pane| {
                         server
                             .tabs
@@ -355,17 +351,14 @@ mod development {
                     .filter(|_| outside_pane.is_none())
                     .unwrap_or(record.root.as_path());
                 // The listing names the branch until the server reads the Worktree's status.
-                let repository = SidebarBadge::from_view(&self.shared_repository_view(
-                    workspace_id,
-                    directory,
-                    cx,
-                ))
-                .or_else(|| {
-                    (!label.is_empty()).then(|| SidebarBadge::Branch {
-                        glyph: HeadGlyph::from_detached(detached),
-                        text: label.clone(),
-                    })
-                });
+                let repository =
+                    SidebarBadge::from_view(&self.repository_view(workspace_id, directory, cx))
+                        .or_else(|| {
+                            (!label.is_empty()).then(|| SidebarBadge::Branch {
+                                glyph: HeadGlyph::from_detached(detached),
+                                text: label.clone(),
+                            })
+                        });
                 let main = state
                     .registry
                     .key(id)
@@ -373,8 +366,8 @@ mod development {
                 // Only the owning server resolves a pin's physical location. Its list of
                 // pinned Worktrees confirms a pin once a check is Ready, while a pin lexically
                 // inside the root is confirmed without one.
-                let owning = self.shared.owning(workspace_id);
-                let pin_check = owning.map(|shared| shared.repositories().pin_check_state());
+                let owning = self.binding.owning(workspace_id);
+                let pin_check = owning.map(|binding| binding.repositories().pin_check_state());
                 let removal = if !listed {
                     WorktreeRemoval::Unlisted
                 } else if main {
@@ -382,8 +375,8 @@ mod development {
                 } else if record.locked {
                     WorktreeRemoval::Locked
                 } else if (matches!(pin_check, Some(PinCheckState::Ready))
-                    && owning.is_some_and(|shared| {
-                        shared.repositories().holds_pinned_directory(&record.root)
+                    && owning.is_some_and(|binding| {
+                        binding.repositories().holds_pinned_directory(&record.root)
                     }))
                     || owning.and_then(|s| s.latest_inventory()).is_some_and(|i| {
                         i.workspaces
@@ -410,7 +403,7 @@ mod development {
                     detached,
                     path: record.root.display().to_string().into(),
                     directory: if self
-                        .shared
+                        .binding
                         .owning(workspace_id)
                         .is_some_and(|s| s.removing_worktree(&record.root))
                     {
@@ -427,7 +420,7 @@ mod development {
                     has_tabs: counts.contains_key(&id),
                     opens_first_tab: worktree_writes
                         && self
-                            .shared
+                            .binding
                             .owning(workspace_id)
                             .is_some_and(|s| s.editability().available()),
                     active: active == Some(id),
@@ -435,9 +428,9 @@ mod development {
                     missing: missing || record.missing,
                     removal,
                     closes_tabs: self
-                        .shared
+                        .binding
                         .owning(workspace_id)
-                        .is_some_and(|shared| shared.editability().available())
+                        .is_some_and(|binding| binding.editability().available())
                         && counts.contains_key(&id)
                         && (manager.has_tabs_besides(&manager.worktree_tab_ids(id))
                             || (worktree_writes
@@ -519,36 +512,36 @@ mod development {
             })
         }
 
-        /// The person's choice for a shared Workspace's Worktree group, or `None` for the default.
-        pub(in crate::ui::workspace_manager) fn shared_worktrees_expanded(
+        /// The person's choice for a Workspace's Worktree group, or `None` for the default.
+        pub(in crate::ui::workspace_manager) fn worktrees_expanded(
             &self,
             workspace_id: WorkspaceId,
         ) -> Option<bool> {
-            self.shared_repositories
+            self.workspace_repositories
                 .worktrees
                 .get(&workspace_id)
                 .and_then(|worktrees| worktrees.expanded)
         }
 
         /// Restores a choice another window left, before the server's Git facts arrive.
-        pub(in crate::ui::workspace_manager) fn restore_shared_worktrees_expanded(
+        pub(in crate::ui::workspace_manager) fn restore_worktrees_expanded(
             &mut self,
             workspace_id: WorkspaceId,
             expanded: bool,
         ) {
-            self.shared_repositories
+            self.workspace_repositories
                 .worktrees
                 .entry(workspace_id)
                 .or_default()
                 .expanded = Some(expanded);
         }
 
-        pub(in crate::ui::workspace_manager) fn set_shared_worktrees_expanded(
+        pub(in crate::ui::workspace_manager) fn set_server_worktrees_expanded(
             &mut self,
             workspace_id: WorkspaceId,
             expanded: bool,
         ) {
-            if let Some(worktrees) = self.shared_repositories.worktrees.get_mut(&workspace_id) {
+            if let Some(worktrees) = self.workspace_repositories.worktrees.get_mut(&workspace_id) {
                 worktrees.expanded = Some(expanded);
             }
         }
@@ -556,7 +549,7 @@ mod development {
         /// Shows a shared Worktree's Tabs. It reports `None` for a Workspace this window owns.
         ///
         /// An existing Worktree without Tabs requests its first Tab from the owning server.
-        pub(in crate::ui::workspace_manager) fn open_shared_worktree(
+        pub(in crate::ui::workspace_manager) fn open_server_worktree(
             &mut self,
             workspace_id: WorkspaceId,
             worktree_id: WorktreeId,
@@ -564,7 +557,7 @@ mod development {
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> Option<bool> {
-            if !self.is_shared_workspace(workspace_id) {
+            if !self.has_workspace(workspace_id) {
                 return None;
             }
             let manager = self
@@ -572,18 +565,18 @@ mod development {
                 .workspace(workspace_id)
                 .map(|workspace| workspace.payload().clone())?;
             let shown = manager.update(cx, |manager, cx| {
-                manager.show_shared_worktree(worktree_id, focus, window, cx)
+                manager.show_worktree(worktree_id, focus, window, cx)
             });
             Some(shown || self.open_server_worktree_tab(workspace_id, worktree_id, window, cx))
         }
 
         /// A shared Worktree's root, as the server reported it.
-        pub(in crate::ui::workspace_manager) fn shared_worktree_root(
+        pub(in crate::ui::workspace_manager) fn worktree_root(
             &self,
             workspace_id: WorkspaceId,
             worktree_id: WorktreeId,
         ) -> Option<PathBuf> {
-            self.shared_repositories
+            self.workspace_repositories
                 .worktrees
                 .get(&workspace_id)?
                 .registry
@@ -602,8 +595,8 @@ mod development {
         root: &Path,
         saved: Option<&Path>,
         inventory: Option<&WorktreeInventory>,
-        state: &SharedWorktrees,
-        repositories: &SharedRepositories,
+        state: &PresentedWorktrees,
+        repositories: &ServerRepositories,
     ) -> WorktreeKey {
         let key = |main_root: &Path| {
             WorktreeKey::new(
@@ -638,7 +631,7 @@ mod development {
     /// read keeps that Worktree, as it keeps the directory's last Repository Status. Only a
     /// directory the server never placed in a Worktree is compared by path, unless a successful
     /// read found it outside every repository.
-    fn within_worktree(directory: &Path, root: &Path, repositories: &SharedRepositories) -> bool {
+    fn within_worktree(directory: &Path, root: &Path, repositories: &ServerRepositories) -> bool {
         let Some(facts) = repositories.facts(directory) else {
             return directory.starts_with(root);
         };
@@ -666,7 +659,7 @@ mod development {
     fn membership_listing<'a>(
         root: &Path,
         saved: Option<&Path>,
-        repositories: &'a SharedRepositories,
+        repositories: &'a ServerRepositories,
     ) -> Option<&'a WorktreeInventory> {
         repositories
             .worktrees(root)
@@ -678,7 +671,7 @@ mod development {
     fn unlisted_record(
         root: &Path,
         saved: Option<&Path>,
-        repositories: &SharedRepositories,
+        repositories: &ServerRepositories,
     ) -> WorktreeRecord {
         membership_listing(root, saved, repositories)
             .and_then(|inventory| {

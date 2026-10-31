@@ -68,7 +68,7 @@ impl WriterGuard {
         if let Some(lock) = self.lock.take() {
             self.journal = Some(
                 connection
-                    .shared_journal_locked(lock)
+                    .operation_journal_locked(lock)
                     .map_err(from_server_error)?,
             );
         }

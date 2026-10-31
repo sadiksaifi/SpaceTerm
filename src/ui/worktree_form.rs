@@ -154,7 +154,7 @@ pub(crate) struct WorktreeForm {
     failure: u64,
     /// The shown failure once a render has drawn its error. Only then can the person's response
     /// answer it.
-    displayed: crate::ui::shared_workspaces::DrawnAnswer,
+    displayed: crate::ui::workspaces::DrawnAnswer,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
     _status: Task<()>,
@@ -211,7 +211,7 @@ impl WorktreeForm {
             pending_path: None,
             unanswered: false,
             failure: 0,
-            displayed: crate::ui::shared_workspaces::DrawnAnswer::default(),
+            displayed: crate::ui::workspaces::DrawnAnswer::default(),
             pending_cancel: None,
             _branches: Task::ready(()),
             _status: Task::ready(()),

@@ -133,9 +133,9 @@ jobs:
           MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-          SPACETERM_SERVER_ARTIFACTS: ${{ github.workspace }}/target/release-server-artifacts
-          SPACETERM_SERVER_ARCHIVE: ${{ github.workspace }}/target/release-server-artifacts/aarch64-apple-darwin/artifact.tar.gz
-          SPACETERM_SERVER_SIGNATURE: ${{ github.workspace }}/target/release-server-artifacts/aarch64-apple-darwin/artifact.sig
+          SPACETERM_CLI_ARTIFACTS: ${{ github.workspace }}/target/release-server-artifacts
+          SPACETERM_CLI_ARCHIVE: ${{ github.workspace }}/target/release-server-artifacts/aarch64-apple-darwin/artifact.tar.gz
+          SPACETERM_CLI_SIGNATURE: ${{ github.workspace }}/target/release-server-artifacts/aarch64-apple-darwin/artifact.sig
         run: mise run release:package:macos "$RELEASE_TAG"
       - name: Sign and verify update assets
         timeout-minutes: 10
@@ -214,9 +214,9 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-          SPACETERM_SERVER_ARTIFACTS: ${{ github.workspace }}/target/release-server-artifacts
-          SPACETERM_SERVER_ARCHIVE: ${{ github.workspace }}/target/release-server-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz
-          SPACETERM_SERVER_SIGNATURE: ${{ github.workspace }}/target/release-server-artifacts/x86_64-unknown-linux-gnu/artifact.sig
+          SPACETERM_CLI_ARTIFACTS: ${{ github.workspace }}/target/release-server-artifacts
+          SPACETERM_CLI_ARCHIVE: ${{ github.workspace }}/target/release-server-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz
+          SPACETERM_CLI_SIGNATURE: ${{ github.workspace }}/target/release-server-artifacts/x86_64-unknown-linux-gnu/artifact.sig
         run: mise run release:package:linux "$RELEASE_TAG"
       - name: Sign and verify Linux update assets
         timeout-minutes: 10

@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_ids_round_trip_their_laneorm_and_reject_others() {
+    fn operation_ids_round_trip_their_hex_form_and_reject_others() {
         let id = OperationId([0xab; 16]);
         assert_eq!(id.to_string(), "ab".repeat(16));
         assert_eq!(OperationId::parse(&id.to_string()), Some(id));

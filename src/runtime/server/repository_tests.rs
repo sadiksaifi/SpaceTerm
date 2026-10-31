@@ -1,4 +1,4 @@
-use super::tests::{await_text, command, create_shared, host, shared_inventory, size};
+use super::tests::{await_text, command, create_workspace, host, size, workspace_inventory};
 use super::*;
 use std::time::Instant;
 pub(super) struct GitFixture(pub(super) std::path::PathBuf);
@@ -42,13 +42,13 @@ impl Drop for GitFixture {
     }
 }
 pub(super) fn git_facts(
-    host: &mut SharedWorkspaceHost,
+    host: &mut WorkspaceHost,
     directory: &std::path::Path,
     predicate: impl Fn(&spaceterm_server::repository::DirectoryFacts) -> bool,
 ) -> spaceterm_server::hierarchy::Inventory {
     let until = Instant::now() + Duration::from_secs(12);
     loop {
-        let inventory = shared_inventory(host);
+        let inventory = workspace_inventory(host);
         if inventory.repositories.as_ref().is_some_and(|snapshot| {
             snapshot
                 .directories
@@ -77,9 +77,9 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
         "origin",
         "https://github.com/owner/example.git",
     ]);
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
-    let before = shared_inventory(&mut host);
+    let before = workspace_inventory(&mut host);
     let pane = before.workspaces[0].tabs[0].root_pane;
     let Reply::Attached { lease } = host.request(
         [1; 32],
@@ -181,7 +181,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
     );
     await_text(&mut host, lease, "OWNED-DIRECTORY");
     assert_eq!(
-        shared_inventory(&mut host).workspaces[0].tabs[0].panes[0]
+        workspace_inventory(&mut host).workspaces[0].tabs[0].panes[0]
             .confirmed_directory
             .as_ref(),
         Some(&tree)
@@ -207,7 +207,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
             ),
         );
         await_text(&mut host, lease, marker);
-        let current = shared_inventory(&mut host);
+        let current = workspace_inventory(&mut host);
         let workspace = &current.workspaces[0];
         assert_eq!(
             workspace.tabs[0].panes[0].presented_directory(),
@@ -283,8 +283,8 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     git.git(&["config", "branch.main.merge", "refs/heads/main"]);
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    create_workspace(&mut host, 1);
     git_facts(&mut host, &git.0, |facts| {
         facts
             .repository
@@ -356,7 +356,7 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     assert!(!git.0.join(".git/filter-finished").exists());
 }
 #[test]
-fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_membership() {
+fn git_reads_publish_external_changes_to_two_clients_and_retain_worktree_membership() {
     use spaceterm_server::hierarchy::Mutation;
     use spaceterm_server::repository::{ChangeTotal, RepositoryHead};
     let git = GitFixture::new();
@@ -364,8 +364,8 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
     let mut prototype = host();
     prototype.directory = tree.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
     let first = git_facts(&mut host, &tree, |facts| {
         facts.repository.as_ref().is_some_and(|repo| {
             repo.head == RepositoryHead::Branch("feature".into()) && repo.counting.is_none()
@@ -385,7 +385,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     ) else {
         panic!("Root Pane did not start")
     };
-    let focus = |host: &mut SharedWorkspaceHost| {
+    let focus = |host: &mut WorkspaceHost| {
         host.request(
             [1; 32],
             [1; 32],
@@ -421,7 +421,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
             .find(|facts| facts.directory == tree)
     );
     // Creating another Workspace does not move or stop the first Workspace's Git reads.
-    let other = create_shared(&mut host, 2);
+    let other = create_workspace(&mut host, 2);
     assert!(matches!(
         host.request(
             [1; 32],
@@ -496,8 +496,8 @@ fn a_deleted_sole_worktree_rediscovers_its_repository_after_restart() {
     git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
     let mut prototype = host();
     prototype.directory = tree.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    create_workspace(&mut host, 1);
     let inventory = git_facts(&mut host, &tree, |facts| facts.worktrees.is_some());
     let saved_tab = inventory.workspaces[0].tabs[0].clone();
     let mut state = State::empty();
@@ -587,11 +587,11 @@ fn abandoned_server_git_reads_cancel_on_disconnect_and_stop_without_losing_tabs(
         std::fs::write(git.0.join("tracked.txt"), "after!\n").unwrap();
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
         let until = Instant::now() + Duration::from_secs(8);
         while !git.0.join(".git/started").exists() {
-            shared_inventory(&mut host);
+            workspace_inventory(&mut host);
             assert!(Instant::now() < until, "filter never started");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -605,7 +605,7 @@ fn abandoned_server_git_reads_cancel_on_disconnect_and_stop_without_losing_tabs(
             started.elapsed() < Duration::from_secs(2),
             "abandoned read reached its deadline instead of cancelling"
         );
-        let current = shared_inventory(&mut host);
+        let current = workspace_inventory(&mut host);
         assert_eq!(current.workspaces[0].id, workspace);
         assert_eq!(current.workspaces[0].tabs.len(), 1);
         assert!(!git.0.join(".git/finished").exists());
@@ -622,7 +622,7 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
     destination.git(&["checkout", "-b", "destination"]);
     let mut prototype = host();
     prototype.directory = original.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
+    let mut host = WorkspaceHost::new(prototype);
     host.prepare_initial_organization().unwrap();
     let first = git_facts(&mut host, &original.0, |facts| facts.worktrees.is_some());
     let workspace = first.workspaces[0].id;
@@ -644,7 +644,7 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
     let Outcome::Accepted { target: other_id } = created.outcome else {
         panic!("second Tab creation refused")
     };
-    let initial = shared_inventory(&mut host);
+    let initial = workspace_inventory(&mut host);
     assert!(initial.workspaces[0].pinned_directory.is_none());
     assert_ne!(root_id, other_id);
     assert_eq!(initial.workspaces[0].tabs.len(), 2);
@@ -738,7 +738,7 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
         ),
         Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })
     ));
-    let closed = shared_inventory(&mut host);
+    let closed = workspace_inventory(&mut host);
     assert_eq!(closed.workspaces[0].tabs.len(), 1);
     assert_eq!(closed.workspaces[0].tabs[0].id, root_id);
     assert_eq!(
@@ -760,8 +760,8 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
     std::fs::remove_dir_all(outside.0.join(".git")).unwrap();
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
     git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     assert!(matches!(
         host.request(
@@ -778,7 +778,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
         ),
         Reply::Outcome(_)
     ));
-    let initial = shared_inventory(&mut host);
+    let initial = workspace_inventory(&mut host);
     let root = &initial.workspaces[0].tabs[0];
     let root_id = root.id;
     let other_id = initial.workspaces[0].tabs[1].id;
@@ -851,7 +851,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
         ),
     );
     await_text(&mut host, lease, "ENTERED-REPOSITORY");
-    let entered = shared_inventory(&mut host);
+    let entered = workspace_inventory(&mut host);
     assert!(
         entered.workspaces[0]
             .tabs
@@ -870,8 +870,8 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     std::fs::remove_dir_all(outside.0.join(".git")).unwrap();
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
     let first = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     let root_id = first.workspaces[0].root_tab;
     let Outcome::Accepted { target: opened } = finish_write(
@@ -887,7 +887,7 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     ) else {
         panic!("open a Tab in the Worktree")
     };
-    let before = shared_inventory(&mut host);
+    let before = workspace_inventory(&mut host);
     let tab = before.workspaces[0]
         .tabs
         .iter()
@@ -914,7 +914,7 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
         ),
         Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })
     ));
-    let promoted = shared_inventory(&mut host);
+    let promoted = workspace_inventory(&mut host);
     assert!(promoted.workspaces[0].pinned_directory.is_none());
     assert_eq!(promoted.workspaces[0].root_tab, opened);
     let tab = &promoted.workspaces[0].tabs[0];
@@ -948,7 +948,7 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     // The former repository's facts leave once no Tab retains membership in it.
     let until = Instant::now() + Duration::from_secs(12);
     let left = loop {
-        let inventory = shared_inventory(&mut host);
+        let inventory = workspace_inventory(&mut host);
         if inventory
             .repositories
             .as_ref()
@@ -1021,8 +1021,8 @@ fn a_repaired_tab_promoted_to_root_tab_keeps_its_missing_worktree() {
     git.git(&["worktree", "add", "-b", "repair", tree.to_str().unwrap()]);
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
     let first = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     let root_id = first.workspaces[0].root_tab;
     let Outcome::Accepted { target: opened } = finish_write(
@@ -1038,7 +1038,7 @@ fn a_repaired_tab_promoted_to_root_tab_keeps_its_missing_worktree() {
     ) else {
         panic!("open a Tab in the linked Worktree")
     };
-    let pane = shared_inventory(&mut host).workspaces[0]
+    let pane = workspace_inventory(&mut host).workspaces[0]
         .tabs
         .iter()
         .find(|tab| tab.id == opened)
@@ -1087,7 +1087,7 @@ fn a_repaired_tab_promoted_to_root_tab_keeps_its_missing_worktree() {
         ),
         Reply::Attached { .. }
     ));
-    let before = shared_inventory(&mut host);
+    let before = workspace_inventory(&mut host);
     let target = CloseTarget::Tab {
         workspace,
         tab: root_id,
@@ -1132,8 +1132,8 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     git.git(&["worktree", "add", "-b", "repair", tree.to_str().unwrap()]);
     let mut prototype = host();
     prototype.directory = tree.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    create_workspace(&mut host, 1);
     let before = git_facts(&mut host, &tree, |facts| facts.worktrees.is_some());
     let original = before.workspaces[0].clone();
     let id = original.tabs[0].root_pane;
@@ -1226,8 +1226,8 @@ fn worktree_write_retries_resolve_the_original_and_never_recreate_removed_state(
     let git = GitFixture::new();
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
     let tree = git.0.join("created");
     let mutation = Mutation::Worktree(Operation::Create {
         control: spaceterm_server::hierarchy::CreateControl::Creator,
@@ -1269,7 +1269,7 @@ fn worktree_write_retries_resolve_the_original_and_never_recreate_removed_state(
 }
 
 pub(super) fn finish_write(
-    host: &mut SharedWorkspaceHost,
+    host: &mut WorkspaceHost,
     sequence: u64,
     operation: spaceterm_server::worktree::Operation,
 ) -> spaceterm_server::hierarchy::Outcome {
@@ -1292,7 +1292,7 @@ pub(super) fn finish_write(
     }
 }
 pub(super) fn review_removal(
-    host: &mut SharedWorkspaceHost,
+    host: &mut WorkspaceHost,
     root: &std::path::Path,
     path: &std::path::Path,
 ) -> spaceterm_server::worktree::Removal {
@@ -1309,7 +1309,7 @@ pub(super) fn review_removal(
 }
 /// Runs a Worktree read for the client `[1; 32]` and waits for its reply.
 pub(super) fn read_worktree(
-    host: &mut SharedWorkspaceHost,
+    host: &mut WorkspaceHost,
     read: spaceterm_server::worktree::Read,
 ) -> Result<spaceterm_server::worktree::ReadReply, spaceterm_server::worktree::Error> {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -1330,9 +1330,9 @@ fn removal_revalidates_other_workspace_sessions_and_closes_unattached_work_befor
     git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
     let mut prototype = host();
     prototype.directory = tree.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    create_shared(&mut host, 1);
-    create_shared(&mut host, 2);
+    let mut host = WorkspaceHost::new(prototype);
+    create_workspace(&mut host, 1);
+    create_workspace(&mut host, 2);
     git_facts(&mut host, &tree, |facts| facts.worktrees.is_some());
     let review = review_removal(&mut host, &git.0, &tree);
     assert_eq!(review.tabs.len(), 2);
@@ -1401,14 +1401,14 @@ fn removal_revalidates_other_workspace_sessions_and_closes_unattached_work_befor
     ));
     assert!(!tree.exists());
     assert!(
-        shared_inventory(&mut host)
+        workspace_inventory(&mut host)
             .close
             .unwrap()
             .sessions
             .iter()
             .all(|p| p.session.is_none())
     );
-    let inventory = shared_inventory(&mut host);
+    let inventory = workspace_inventory(&mut host);
     assert_eq!(inventory.workspaces.len(), 2);
     assert!(
         inventory
@@ -1429,8 +1429,8 @@ fn replaced_worktree_and_main_worktree_are_preserved_after_confirmation() {
     git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    create_workspace(&mut host, 1);
     assert!(matches!(
         read_worktree(
             &mut host,
@@ -1477,7 +1477,7 @@ fn worktree_location_refuses_an_unwritable_folder_without_changing_settings() {
     let alias = fixture.0.join("alias");
     symlink(&folder, &alias).unwrap();
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     let result = finish_write(
         &mut host,
         1,
@@ -1511,7 +1511,7 @@ fn worktree_location_refuses_a_file_in_the_folder_prefix() {
     let fixture = GitFixture::new();
     let file = fixture.0.join("file");
     std::fs::write(&file, b"keep").unwrap();
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     let result = finish_write(
         &mut host,
         1,
@@ -1537,7 +1537,7 @@ fn worktree_location_draft_validation_returns_typed_errors_without_saving_or_cre
         Error, Read, ReadReply, Settings, path_template::WorktreePathTemplateError::*,
     };
     let fixture = GitFixture::new();
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     for (template, expected) in [
         ("", Empty),
         ("~/worktrees/{unknown}", UnknownPlaceholder),
@@ -1579,7 +1579,7 @@ fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_c
         worktree::{Error, Operation, Read, ReadReply},
     };
     let fixture = GitFixture::new();
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     let Ok(ReadReply::Settings(original)) = read_worktree(&mut host, Read::Settings) else {
         panic!("initial settings unavailable")
     };
@@ -1622,8 +1622,8 @@ fn server_facts_read_the_owning_hosts_metadata_without_a_workspace_or_git_contex
     use spaceterm_server::worktree::{Read, ReadReply};
     let expected_machine =
         crate::platform::launch_host::terminal_machine(std::path::Path::new("/"));
-    let mut host = SharedWorkspaceHost::new(host());
-    assert!(shared_inventory(&mut host).workspaces.is_empty());
+    let mut host = WorkspaceHost::new(host());
+    assert!(workspace_inventory(&mut host).workspaces.is_empty());
     let reply = read_worktree(&mut host, Read::ServerFacts);
     let Ok(ReadReply::ServerFacts(facts)) = reply else {
         panic!("owning-server facts unavailable without a Workspace: {reply:?}")
@@ -1634,7 +1634,7 @@ fn server_facts_read_the_owning_hosts_metadata_without_a_workspace_or_git_contex
     #[cfg(target_os = "linux")]
     assert_eq!(facts.operating_system, "Linux");
     assert_eq!(facts.version, env!("SPACETERM_VERSION"));
-    assert!(shared_inventory(&mut host).workspaces.is_empty());
+    assert!(workspace_inventory(&mut host).workspaces.is_empty());
     host.shutdown().unwrap();
 }
 
@@ -1644,14 +1644,14 @@ fn git_settings_read_the_owning_servers_tools_without_a_workspace() {
         repository::GitToolStatus,
         worktree::{Read, ReadReply},
     };
-    let mut host = SharedWorkspaceHost::new(host());
-    assert!(shared_inventory(&mut host).workspaces.is_empty());
+    let mut host = WorkspaceHost::new(host());
+    assert!(workspace_inventory(&mut host).workspaces.is_empty());
     let reply = read_worktree(&mut host, Read::Git);
     assert!(
         matches!(reply, Ok(ReadReply::Git(GitToolStatus::Ready(_)))),
         "the fixture host's Git must be readable without a repository: {reply:?}"
     );
-    assert!(shared_inventory(&mut host).workspaces.is_empty());
+    assert!(workspace_inventory(&mut host).workspaces.is_empty());
     host.shutdown().unwrap();
 }
 
@@ -1661,7 +1661,7 @@ fn worktree_location_uses_server_defaults_and_validates_explicit_edits() {
         hierarchy::Outcome,
         worktree::{Error, Operation, Read, ReadReply},
     };
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut host = WorkspaceHost::new(host());
     assert!(matches!(
         read_worktree(&mut host, Read::Settings),
         Ok(ReadReply::Settings(settings))
@@ -1719,9 +1719,9 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
     git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
-    let other = create_shared(&mut host, 2);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
+    let other = create_workspace(&mut host, 2);
     let alias = git.0.join("pin-alias");
     std::os::unix::fs::symlink(&tree, &alias).unwrap();
     host.request(
@@ -1746,7 +1746,7 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
             "the owning server must finish physical pin discovery"
         );
         std::thread::sleep(Duration::from_millis(5));
-        inventory = shared_inventory(&mut host);
+        inventory = workspace_inventory(&mut host);
     }
     assert!(
         inventory
@@ -1779,7 +1779,7 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
         },
     );
     assert!(
-        !shared_inventory(&mut host)
+        !workspace_inventory(&mut host)
             .repositories
             .unwrap()
             .pinned_worktrees
@@ -1842,7 +1842,7 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
     );
 
     assert!(
-        shared_inventory(&mut host)
+        workspace_inventory(&mut host)
             .workspaces
             .iter()
             .any(|w| w.id == workspace)
@@ -1863,8 +1863,8 @@ fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
     std::os::unix::fs::symlink(&actual, &alias).unwrap();
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
     let result = finish_write(
         &mut host,
         2,
@@ -1882,7 +1882,7 @@ fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
     let Outcome::Accepted { target } = result else {
         panic!("creation through alias: {result:?}")
     };
-    let inventory = shared_inventory(&mut host);
+    let inventory = workspace_inventory(&mut host);
     let tab = inventory
         .workspaces
         .iter()
@@ -1902,8 +1902,8 @@ fn creations_git_refuses_should_answer_why_without_creating_anything() {
     let git = GitFixture::new();
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
-    let workspace = create_shared(&mut host, 1);
+    let mut host = WorkspaceHost::new(prototype);
+    let workspace = create_workspace(&mut host, 1);
     let refusals = [
         (
             Branch::New {
@@ -1994,7 +1994,7 @@ fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_send
     let git = GitFixture::new();
     let mut prototype = host();
     prototype.directory = git.0.clone();
-    let mut host = SharedWorkspaceHost::new(prototype);
+    let mut host = WorkspaceHost::new(prototype);
     // The host's wake, and the bell its Terminal Sessions ring when they have news.
     let wakes = Arc::new(AtomicUsize::new(0));
     let rings = Arc::new(AtomicUsize::new(0));
@@ -2009,7 +2009,7 @@ fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_send
     host.prepare_initial_organization().unwrap();
     let outbox = Outbox::new(Arc::new(|| {}));
     HostCommands::connected(&mut host, [1; 32], [1; 32], &outbox);
-    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let Reply::Attached { lease } = host.request(
         [1; 32],
         [1; 32],

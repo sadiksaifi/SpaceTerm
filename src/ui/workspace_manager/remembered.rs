@@ -44,7 +44,7 @@ impl WorkspaceManager {
             .filter_map(|entry| {
                 let reference = self.workspace_reference(entry.id())?;
                 let mut remembered = entry.payload().read(cx).remember(cx)?;
-                remembered.worktrees_expanded = self.shared_worktrees_expanded(entry.id());
+                remembered.worktrees_expanded = self.worktrees_expanded(entry.id());
                 Some((reference, remembered))
             })
             .collect();
@@ -68,8 +68,8 @@ impl WorkspaceManager {
 
     /// Names a server Workspace across windows.
     fn workspace_reference(&self, workspace_id: WorkspaceId) -> Option<WorkspaceReference> {
-        self.shared
-            .get(self.shared.owner(workspace_id)?)?
+        self.binding
+            .get(self.binding.owner(workspace_id)?)?
             .workspace_reference(workspace_id)
     }
 
@@ -159,13 +159,13 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.get(key) else {
+        let Some(binding) = self.binding.get(key) else {
             return;
         };
-        let Some(owner) = shared.owner() else {
+        let Some(owner) = binding.owner() else {
             return;
         };
-        let retained_copy = shared.presents_retained_copy();
+        let retained_copy = binding.presents_retained_copy();
         let reference = WorkspaceReference {
             owner,
             workspace: server,
@@ -180,7 +180,7 @@ impl WorkspaceManager {
         let keyboard = self.content_holds_keyboard(window, cx);
         if let Some(remembered) = self.restoration.take_workspace(&reference) {
             if let Some(expanded) = remembered.worktrees_expanded {
-                self.restore_shared_worktrees_expanded(workspace_id, expanded);
+                self.restore_worktrees_expanded(workspace_id, expanded);
             }
             manager.update(cx, |manager, cx| {
                 manager.restore_remembered(&remembered, window, cx);
@@ -216,24 +216,24 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(shared) = self.shared.get(key) else {
+        let Some(binding) = self.binding.get(key) else {
             return;
         };
         // A retained copy stands in for an offline server and says nothing about its Workspaces.
-        if shared.presents_retained_copy() {
+        if binding.presents_retained_copy() {
             return;
         }
-        let Some(owner) = shared.owner() else {
+        let Some(owner) = binding.owner() else {
             return;
         };
         self.restoration
-            .published(owner, |target| shared.local(target.workspace).is_some());
+            .published(owner, |target| binding.local(target.workspace).is_some());
         let held: Vec<_> = self
             .restoration
             .take_held(owner)
             .into_iter()
             .filter_map(|(reference, remembered)| {
-                let local = shared.local(reference.workspace)?;
+                let local = binding.local(reference.workspace)?;
                 let manager = self.workspaces.workspace(local)?.payload().clone();
                 Some((local, manager, remembered))
             })

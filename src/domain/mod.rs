@@ -1,4 +1,4 @@
-pub(crate) mod remote_workspace;
+pub(crate) mod server_connection;
 pub(crate) mod tab;
 pub(crate) mod tab_collection;
 pub(crate) mod workspace_collection;
@@ -20,4 +20,4 @@ pub(crate) use workspace_collection::{
 };
 pub(crate) use worktree::{RepositoryIdentity, WorktreeId, WorktreeKey, WorktreeRegistry};
 
-pub(crate) use remote_workspace::RemoteConnectionPhase;
+pub(crate) use server_connection::ServerConnectionPhase;

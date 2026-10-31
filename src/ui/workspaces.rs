@@ -1,4 +1,4 @@
-//! Shared server Workspaces inside the main Workspace Window.
+//! Server Workspaces inside the main Workspace Window.
 //!
 //! A SpaceTerm Server owns these Workspaces, their Tabs, their Panes, and the Terminal Sessions
 //! the Panes present. Normal launch presents the account server's Workspaces this client has
@@ -16,41 +16,41 @@
 //!
 //! The server reads Repository Status and Worktree inventory for every directory its Workspaces
 //! show, so inactive Workspaces stay current too. This client adds its own Git Settings and Pull
-//! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
+//! Requests from its own GitHub CLI, and never reads git for a Workspace itself.
 //!
-pub(crate) use development::ArrangementUnavailable;
-pub(crate) use development::{
-    DirectServer, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, SharedAcceptance,
-    SharedAttachmentFailure, SharedCloseApproval, SharedCloseIntent, SharedCloseReview,
-    SharedCloseState, SharedCloseUnavailable, SharedEditSource, SharedPaneOpener,
-    SharedPaneSessions, SharedPaneSubscription, SharedPanes, SharedRefusal, SharedRefusalReason,
-    SharedRemoval, SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
-    SharedWorkspaceEdits, SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan,
-    SharedWorkspaces, presenting_window, shared_close_changed_title,
+pub(crate) use server::ArrangementUnavailable;
+pub(crate) use server::{
+    DirectServer, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, WorkspaceAcceptance,
+    WorkspaceAttachmentFailure, WorkspaceCloseApproval, WorkspaceCloseIntent, WorkspaceCloseReview,
+    WorkspaceCloseState, WorkspaceCloseUnavailable, WorkspaceConflict, WorkspaceEditSource,
+    WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener, WorkspacePaneSessions,
+    WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan, WorkspaceRefusal,
+    WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus, WorkspaceSubmission,
+    WorkspaceTabs, Workspaces, close_changed_title, presenting_window,
 };
 #[cfg(test)]
-pub(crate) use development::{WorkspaceOwner, testing};
+pub(crate) use server::{WorkspaceOwner, testing};
 
-#[path = "shared_workspaces/repositories.rs"]
+#[path = "workspaces/repositories.rs"]
 mod repositories;
 pub(crate) use repositories::{
-    LocalPresentation, SharedRepositories, pane_directory, workspace_directory,
+    LocalPresentation, ServerRepositories, pane_directory, workspace_directory,
 };
 
 #[cfg(test)]
-#[path = "shared_workspaces/tests.rs"]
+#[path = "workspaces/tests.rs"]
 pub(crate) mod tests;
 
-#[path = "shared_workspaces/pending.rs"]
+#[path = "workspaces/pending.rs"]
 mod pending;
 
-#[path = "shared_workspaces/direct_route.rs"]
+#[path = "workspaces/direct_route.rs"]
 mod direct_route;
 pub(crate) use direct_route::{
     DirectRoutePanes, PresentationRecord, PresentationRetries, UnavailableEdits,
 };
 
-mod development {
+mod server {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
@@ -70,33 +70,31 @@ mod development {
     use crate::domain::{PaneId, TabId, WorkspaceId};
     use crate::server_connection::ServerConnection;
     use crate::terminal::WorkspaceTerminalSessionFactory;
-    use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
-    use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
+    use crate::terminal::server_session::{PaneControls, ServerSessionFactory};
+    use crate::terminal::workspace_client::{WorkspaceClient, WorkspaceSnapshot};
     use crate::ui::pane_lifecycle::PaneConstruction;
     use crate::ui::server_pane::{ServerPaneConnection, ServerPaneView};
 
-    /// The one Workspace Window presenting this device's shared Workspaces.
+    /// The one Workspace Window presenting this device's Workspaces.
     ///
     /// One device holds one durable edit journal and one claim on each Pane, so a second window
     /// cannot present the same server: it would stay offline behind the journal lock and fence
     /// every Pane the first window holds. Another window activates this one instead.
-    pub(crate) struct SharedWorkspaceHost(
-        pub(crate) gpui::WindowHandle<crate::ui::WorkspaceManager>,
-    );
+    pub(crate) struct WorkspaceHost(pub(crate) gpui::WindowHandle<crate::ui::WorkspaceManager>);
 
-    impl gpui::Global for SharedWorkspaceHost {}
+    impl gpui::Global for WorkspaceHost {}
 
-    /// The live window presenting shared Workspaces. Membership decides this, not a view read:
+    /// The live window presenting Workspaces. Membership decides this, not a view read:
     /// the root view is leased while an action dispatches inside the window.
     fn host(cx: &App) -> Option<gpui::WindowHandle<crate::ui::WorkspaceManager>> {
-        let handle = cx.try_global::<SharedWorkspaceHost>()?.0;
+        let handle = cx.try_global::<WorkspaceHost>()?.0;
         cx.windows()
             .iter()
             .any(|window| window.window_id() == handle.window_id())
             .then_some(handle)
     }
 
-    /// The other live Workspace Window already presenting this device's shared Workspaces.
+    /// The other live Workspace Window already presenting this device's Workspaces.
     pub(crate) fn presenting_window(
         cx: &App,
     ) -> Option<gpui::WindowHandle<crate::ui::WorkspaceManager>> {
@@ -106,17 +104,17 @@ mod development {
     /// The server-side edits one desktop client submits, and the last answer it received.
     ///
     /// The implementation owns durable operation identity, reconciliation after a lost reply, and
-    /// bounded acknowledgement. This transport accepts one operation at a time; SharedEditSource
+    /// bounded acknowledgement. This transport accepts one operation at a time; WorkspaceEditSource
     /// orders the bounded connected interactions waiting for it.
-    pub(crate) trait SharedWorkspaceEdits {
-        fn snapshot(&self) -> SharedWorkspaceSnapshot;
+    pub(crate) trait WorkspaceEdits {
+        fn snapshot(&self) -> WorkspaceSnapshot;
 
         /// Whether this client is connected, and whether an edit already waits for an answer.
         /// Rendering reads this for every control, so it copies no hierarchy.
         fn availability(&self) -> (bool, bool);
 
         /// Dispatches one Original Operation, or refuses while offline or resolving another one.
-        /// SharedEditSource owns the connected interactions waiting to dispatch.
+        /// WorkspaceEditSource owns the connected interactions waiting to dispatch.
         fn submit(&self, mutation: Mutation) -> bool;
 
         /// A data-free hint now and after each change the snapshot publishes. The snapshot
@@ -134,8 +132,8 @@ mod development {
         fn forgotten_presented(&self, _total: u64) {}
     }
 
-    impl SharedWorkspaceEdits for SharedWorkspaceClient {
-        fn snapshot(&self) -> SharedWorkspaceSnapshot {
+    impl WorkspaceEdits for WorkspaceClient {
+        fn snapshot(&self) -> WorkspaceSnapshot {
             Self::snapshot(self)
         }
 
@@ -201,8 +199,8 @@ mod development {
     /// A paired route's transport changes as its connections come and go. Every clone follows
     /// the replacement, and the interactions already queued keep their order.
     #[derive(Clone)]
-    pub(crate) struct SharedEditSource {
-        edits: Rc<std::cell::RefCell<Rc<dyn SharedWorkspaceEdits>>>,
+    pub(crate) struct WorkspaceEditSource {
+        edits: Rc<std::cell::RefCell<Rc<dyn WorkspaceEdits>>>,
         /// Counts transport replacements, so a subscription knows to follow the new one.
         generation: Rc<std::cell::Cell<u64>>,
         /// The inventory a paired route last confirmed, presented while its transport has none.
@@ -224,11 +222,11 @@ mod development {
     /// its Create's. Until it presents that answer or drops this, no other surface presents it;
     /// dropping it unpresented leaves the answer to the Workspace Window.
     pub(crate) struct OutcomeOwner {
-        source: SharedEditSource,
+        source: WorkspaceEditSource,
         answer: Rc<std::cell::Cell<Option<u64>>>,
     }
 
-    /// Where [`SharedEditSource::submit_owned`] tells an [`OutcomeOwner`] its answer.
+    /// Where [`WorkspaceEditSource::submit_owned`] tells an [`OutcomeOwner`] its answer.
     pub(crate) struct OutcomeTicket(std::rc::Weak<std::cell::Cell<Option<u64>>>);
 
     impl OutcomeOwner {
@@ -295,7 +293,7 @@ mod development {
     /// seen; an alert closed any other way leaves them for the next presentation.
     #[derive(Clone)]
     pub(crate) struct OutcomeNotice {
-        source: SharedEditSource,
+        source: WorkspaceEditSource,
         sequences: Rc<[u64]>,
         /// The forgotten total, for the notice that says how many outcomes went unseen.
         forgotten: Option<u64>,
@@ -336,13 +334,13 @@ mod development {
         }
     }
 
-    pub(crate) struct SharedEditNotifications {
-        source: SharedEditSource,
+    pub(crate) struct WorkspaceEditNotifications {
+        source: WorkspaceEditSource,
         local: async_channel::Receiver<()>,
         remote: std::cell::RefCell<(u64, async_channel::Receiver<()>)>,
     }
 
-    impl SharedEditNotifications {
+    impl WorkspaceEditNotifications {
         pub(crate) async fn recv(&self) -> Result<(), async_channel::RecvError> {
             loop {
                 let (generation, remote) = {
@@ -362,8 +360,8 @@ mod development {
         }
     }
 
-    impl SharedEditSource {
-        pub(crate) fn new(edits: Rc<dyn SharedWorkspaceEdits>) -> Self {
+    impl WorkspaceEditSource {
+        pub(crate) fn new(edits: Rc<dyn WorkspaceEdits>) -> Self {
             Self {
                 edits: Rc::new(std::cell::RefCell::new(edits)),
                 generation: Rc::default(),
@@ -430,14 +428,14 @@ mod development {
         }
 
         /// The transport this source submits to now.
-        pub(crate) fn transport(&self) -> Rc<dyn SharedWorkspaceEdits> {
+        pub(crate) fn transport(&self) -> Rc<dyn WorkspaceEdits> {
             Rc::clone(&self.edits.borrow())
         }
 
         /// Submits through `edits` from now on, as when a paired route connects or disconnects.
         /// An operation already dispatched resolves through the journal the new transport
         /// reads, and every follower hears of the change.
-        pub(crate) fn replace_transport(&self, edits: Rc<dyn SharedWorkspaceEdits>) {
+        pub(crate) fn replace_transport(&self, edits: Rc<dyn WorkspaceEdits>) {
             self.generation.set(self.generation.get().wrapping_add(1));
             for sequence in self.acknowledged.borrow().iter() {
                 edits.presented(*sequence);
@@ -466,36 +464,36 @@ mod development {
             });
         }
 
-        fn editability(&self) -> SharedEditability {
+        fn editability(&self) -> WorkspaceEditability {
             if !self.transport().availability().0 || self.standing_in.get() {
-                SharedEditability::Offline
+                WorkspaceEditability::Offline
             } else if self.pending.borrow().full() {
-                SharedEditability::Pending
+                WorkspaceEditability::Pending
             } else {
-                SharedEditability::Available
+                WorkspaceEditability::Available
             }
         }
 
-        pub(crate) fn submit(&self, mutation: Mutation) -> SharedSubmission {
+        pub(crate) fn submit(&self, mutation: Mutation) -> WorkspaceSubmission {
             match self.enqueue(mutation, None, None) {
-                Ok(()) => SharedSubmission::Submitted,
-                Err(reason) => SharedSubmission::Refused(reason),
+                Ok(()) => WorkspaceSubmission::Submitted,
+                Err(reason) => WorkspaceSubmission::Refused(reason),
             }
         }
 
         fn enqueue(
             &self,
             mutation: Mutation,
-            reply: Option<async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>>,
+            reply: Option<async_channel::Sender<Result<RetainedOutcome, WorkspaceRefusalReason>>>,
             owner: Option<std::rc::Weak<std::cell::Cell<Option<u64>>>>,
-        ) -> Result<(), SharedRefusalReason> {
+        ) -> Result<(), WorkspaceRefusalReason> {
             self.snapshot();
             let editability = self.editability();
             if !editability.available() {
                 return Err(editability.into());
             }
             if !mutation.is_bounded() {
-                return Err(SharedRefusalReason::Value);
+                return Err(WorkspaceRefusalReason::Value);
             }
             self.pending.borrow_mut().push(mutation, reply, owner)?;
             self.dispatch();
@@ -513,8 +511,8 @@ mod development {
             &self,
             mutation: Mutation,
         ) -> Result<
-            async_channel::Receiver<Result<RetainedOutcome, SharedRefusalReason>>,
-            SharedRefusalReason,
+            async_channel::Receiver<Result<RetainedOutcome, WorkspaceRefusalReason>>,
+            WorkspaceRefusalReason,
         > {
             let (reply, receiver) = async_channel::bounded(1);
             self.enqueue(mutation, Some(reply), None)?;
@@ -528,8 +526,8 @@ mod development {
             mutation: Mutation,
             owner: OutcomeTicket,
         ) -> Result<
-            async_channel::Receiver<Result<RetainedOutcome, SharedRefusalReason>>,
-            SharedRefusalReason,
+            async_channel::Receiver<Result<RetainedOutcome, WorkspaceRefusalReason>>,
+            WorkspaceRefusalReason,
         > {
             let (reply, receiver) = async_channel::bounded(1);
             self.enqueue(mutation, Some(reply), Some(owner.0))?;
@@ -551,13 +549,13 @@ mod development {
             }
         }
 
-        pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
+        pub(crate) fn snapshot(&self) -> WorkspaceSnapshot {
             self.read().0
         }
 
         /// The transport's snapshot, and whether its inventory is the stand-in because the
         /// transport has published none.
-        fn read(&self) -> (SharedWorkspaceSnapshot, bool) {
+        fn read(&self) -> (WorkspaceSnapshot, bool) {
             let mut snapshot = self.transport().snapshot();
             let standing_in = snapshot.inventory.is_none() && self.stand_in.borrow().is_some();
             if standing_in {
@@ -613,14 +611,14 @@ mod development {
         pub(crate) fn closing(&self, pane: Id) -> bool {
             self.pending.borrow().closing(pane)
         }
-        pub(crate) fn take_presentation(&self) -> Option<SharedAcceptance> {
+        pub(crate) fn take_presentation(&self) -> Option<WorkspaceAcceptance> {
             self.pending.borrow_mut().take_presentation()
         }
     }
 
     /// Whether a shared edit can be asked for now.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedEditability {
+    pub(crate) enum WorkspaceEditability {
         Available,
         /// The client has no connection to the server, so shared edits are unavailable rather
         /// than queued.
@@ -629,7 +627,7 @@ mod development {
         Pending,
     }
 
-    impl SharedEditability {
+    impl WorkspaceEditability {
         pub(crate) const fn available(self) -> bool {
             matches!(self, Self::Available)
         }
@@ -644,15 +642,15 @@ mod development {
         }
     }
 
-    /// What one shared Workspace's sidebar row says in place of its directory.
+    /// What one Workspace's sidebar row says in place of its directory.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) struct SharedRowStatus {
+    pub(crate) struct WorkspaceRowStatus {
         pub(crate) text: &'static str,
         /// Whether the status reports a problem, rather than work in progress.
         pub(crate) warning: bool,
     }
 
-    impl SharedRowStatus {
+    impl WorkspaceRowStatus {
         const fn progress(text: &'static str) -> Self {
             Self {
                 text,
@@ -663,14 +661,14 @@ mod development {
 
     /// What asking for a shared edit did. A refusal submitted nothing and retains nothing.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedSubmission {
+    pub(crate) enum WorkspaceSubmission {
         Submitted,
-        Refused(SharedRefusalReason),
+        Refused(WorkspaceRefusalReason),
     }
 
     /// Why this client submitted nothing.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedRefusalReason {
+    pub(crate) enum WorkspaceRefusalReason {
         Offline,
         Pending,
         /// The value itself is outside what the SpaceTerm Protocol carries, such as a name or a
@@ -678,23 +676,23 @@ mod development {
         Value,
     }
 
-    impl SharedRefusalReason {
+    impl WorkspaceRefusalReason {
         pub(crate) const fn explanation(self) -> &'static str {
             match self {
-                Self::Offline => SharedEditability::Offline.explanation(),
-                Self::Pending => SharedEditability::Pending.explanation(),
+                Self::Offline => WorkspaceEditability::Offline.explanation(),
+                Self::Pending => WorkspaceEditability::Pending.explanation(),
                 Self::Value => "Enter a shorter name or directory.",
             }
         }
     }
 
-    impl From<SharedEditability> for SharedRefusalReason {
-        fn from(editability: SharedEditability) -> Self {
+    impl From<WorkspaceEditability> for WorkspaceRefusalReason {
+        fn from(editability: WorkspaceEditability) -> Self {
             match editability {
                 // A submission refused while every control reads available names the value.
-                SharedEditability::Available => Self::Value,
-                SharedEditability::Offline => Self::Offline,
-                SharedEditability::Pending => Self::Pending,
+                WorkspaceEditability::Available => Self::Value,
+                WorkspaceEditability::Offline => Self::Offline,
+                WorkspaceEditability::Pending => Self::Pending,
             }
         }
     }
@@ -703,24 +701,24 @@ mod development {
     /// rejected draft stays here, so a person reads it beside the server's value and decides
     /// whether to ask again. Nothing retries on its own.
     #[derive(Clone, Debug, Eq, PartialEq)]
-    pub(crate) struct SharedWorkspaceConflict {
+    pub(crate) struct WorkspaceConflict {
         pub(crate) workspace: WorkspaceId,
-        pub(crate) field: SharedWorkspaceField,
+        pub(crate) field: WorkspaceField,
         reviewed_version: u64,
         /// The exact value this client asked for, kept so asking again sends the same draft.
-        pub(crate) draft: SharedWorkspaceDraft,
+        pub(crate) draft: WorkspaceDraft,
         /// The value the server holds now, which another client's accepted edit wrote.
         pub(crate) authoritative: SharedString,
     }
 
     /// A rejected shared edit's own value, kept exactly as a person supplied it.
     #[derive(Clone, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedWorkspaceDraft {
+    pub(crate) enum WorkspaceDraft {
         Name(String),
         Pin(Option<PathBuf>),
     }
 
-    impl SharedWorkspaceDraft {
+    impl WorkspaceDraft {
         /// The draft as a person reads it.
         pub(crate) fn display(&self) -> SharedString {
             match self {
@@ -739,12 +737,12 @@ mod development {
 
     /// Which Workspace field a shared edit changed.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedWorkspaceField {
+    pub(crate) enum WorkspaceField {
         Name,
         PinnedDirectory,
     }
 
-    impl SharedWorkspaceField {
+    impl WorkspaceField {
         pub(crate) const fn title(self) -> &'static str {
             match self {
                 Self::Name => "Workspace Renamed Elsewhere",
@@ -769,7 +767,7 @@ mod development {
 
     /// A shared edit the server refused for a reason no retry repairs.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedRefusal {
+    pub(crate) enum WorkspaceRefusal {
         /// The target no longer exists on the server.
         Missing,
         /// The server rejected the value.
@@ -779,7 +777,7 @@ mod development {
         Disconnected,
     }
 
-    impl SharedRefusal {
+    impl WorkspaceRefusal {
         pub(crate) const fn title(self) -> &'static str {
             match self {
                 Self::Missing => "Item Already Removed",
@@ -801,15 +799,15 @@ mod development {
         }
     }
 
-    /// Why this client cannot read or keep its own arrangement of shared Workspaces: their Tab
+    /// Why this client cannot read or keep its own arrangement of Workspaces: their Tab
     /// display order and Pane Layouts. A failed read leaves the saved arrangement in place. A
     /// failed save may already have replaced it, so no case claims which arrangement is saved.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(crate) enum ArrangementUnavailable {
-        /// The saved arrangement could not be read, so shared Workspaces stay closed rather than
+        /// The saved arrangement could not be read, so Workspaces stay closed rather than
         /// opening in a default arrangement that a later save would write over it.
         Read,
-        /// The saved arrangement or its storage could not be validated, so shared Workspaces stay
+        /// The saved arrangement or its storage could not be validated, so Workspaces stay
         /// closed and the saved data is kept.
         UnsafeStorage,
         /// SpaceTerm cannot confirm which arrangement was saved. The window keeps working, and
@@ -858,12 +856,12 @@ mod development {
         pub(crate) fn present<T: 'static>(self, window: &gpui::Window, cx: &mut gpui::Context<T>) {
             let (id, ok) = match self {
                 Self::Read | Self::UnsafeStorage => (
-                    "shared-arrangement-unavailable",
-                    "shared-arrangement-unavailable-ok",
+                    "workspace-arrangement-unavailable",
+                    "workspace-arrangement-unavailable-ok",
                 ),
                 Self::Write => (
-                    "shared-arrangement-not-saved",
-                    "shared-arrangement-not-saved-ok",
+                    "workspace-arrangement-not-saved",
+                    "workspace-arrangement-not-saved-ok",
                 ),
             };
             let _ = spaceterm_ui::Alert::new(
@@ -886,7 +884,7 @@ mod development {
     /// One Workspace's presented server metadata and its local creation binding.
     /// Directory values grant no local filesystem authority.
     #[derive(Clone, Debug, Eq, PartialEq)]
-    pub(crate) struct SharedWorkspaceFacts {
+    pub(crate) struct WorkspaceFacts {
         pub(crate) server: Id,
         /// The server has published this identity. A refused provisional creation removes its
         /// row without dismissing the empty window that must explain the refusal.
@@ -899,7 +897,7 @@ mod development {
         pub(crate) directory: PathBuf,
     }
 
-    impl SharedWorkspaceFacts {
+    impl WorkspaceFacts {
         pub(crate) fn from_server(workspace: &ServerWorkspace) -> Self {
             let directory = workspace
                 .tabs
@@ -931,7 +929,7 @@ mod development {
 
     /// One Pane's passive subscription to the server: how it presents the Pane and the connection
     /// whose status the Pane reads.
-    pub(crate) type SharedPaneSubscription = (
+    pub(crate) type WorkspacePaneSubscription = (
         WorkspaceTerminalSessionFactory,
         Arc<dyn ServerPaneConnection>,
     );
@@ -940,8 +938,8 @@ mod development {
     ///
     /// Opening a subscription presents a Pane; it starts no shell and acquires no unclaimed grant,
     /// because only an explicit selection of that Pane asks the server for one.
-    pub(crate) trait SharedPaneOpener {
-        fn open(&self, pane: Id) -> Option<SharedPaneSubscription>;
+    pub(crate) trait WorkspacePaneOpener {
+        fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription>;
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory;
 
         /// Only an account-local route can interpret server directory text on this client.
@@ -997,7 +995,7 @@ mod development {
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
     }
 
-    impl SharedPaneOpener for LocalServerPanes {
+    impl WorkspacePaneOpener for LocalServerPanes {
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
             WorkspaceTerminalSessionFactory::pending()
         }
@@ -1008,8 +1006,8 @@ mod development {
             Some(&self.local_files)
         }
 
-        fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
-            let (factory, state) = DevelopmentServerSessionFactory::for_pane(
+        fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription> {
+            let (factory, state) = ServerSessionFactory::for_pane(
                 self.server.clone(),
                 &self.controls,
                 self.local_files.clone(),
@@ -1031,7 +1029,7 @@ mod development {
         direct: DirectServer,
     }
 
-    impl SharedPaneOpener for RemoteServerPanes {
+    impl WorkspacePaneOpener for RemoteServerPanes {
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
             WorkspaceTerminalSessionFactory::pending()
         }
@@ -1040,8 +1038,8 @@ mod development {
             Some(&self.direct)
         }
 
-        fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
-            let (factory, state) = DevelopmentServerSessionFactory::for_remote_pane(
+        fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription> {
+            let (factory, state) = ServerSessionFactory::for_remote_pane(
                 self.server.clone(),
                 &self.controls,
                 self.direct.display(),
@@ -1060,13 +1058,13 @@ mod development {
     /// Shared Panes reuse native client effects and obtain accessible shell text from the server.
     /// Same-machine file authority applies only to Panes on this machine's server.
     #[derive(Clone)]
-    pub(crate) struct SharedPaneSessions {
-        opener: Rc<dyn SharedPaneOpener>,
+    pub(crate) struct WorkspacePaneSessions {
+        opener: Rc<dyn WorkspacePaneOpener>,
         panes: PaneConstruction,
-        edits: Option<SharedEditSource>,
+        edits: Option<WorkspaceEditSource>,
     }
 
-    impl SharedPaneSessions {
+    impl WorkspacePaneSessions {
         pub(crate) fn new(
             server: ServerConnection,
             controls: Arc<PaneControls>,
@@ -1089,7 +1087,7 @@ mod development {
             server: ServerConnection,
             controls: Arc<PaneControls>,
             direct: DirectServer,
-        ) -> Rc<dyn SharedPaneOpener> {
+        ) -> Rc<dyn WorkspacePaneOpener> {
             Rc::new(RemoteServerPanes {
                 server,
                 controls,
@@ -1098,7 +1096,7 @@ mod development {
         }
 
         pub(crate) fn with_opener(
-            opener: Rc<dyn SharedPaneOpener>,
+            opener: Rc<dyn WorkspacePaneOpener>,
             panes: &PaneConstruction,
         ) -> Self {
             Self {
@@ -1136,7 +1134,7 @@ mod development {
         }
 
         /// Subscribes to one server Pane.
-        pub(crate) fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
+        pub(crate) fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription> {
             if self
                 .edits
                 .as_ref()
@@ -1147,7 +1145,7 @@ mod development {
             self.opener.open(pane)
         }
 
-        fn with_edits(mut self, edits: SharedEditSource) -> Self {
+        fn with_edits(mut self, edits: WorkspaceEditSource) -> Self {
             self.edits = Some(edits);
             self
         }
@@ -1177,8 +1175,8 @@ mod development {
 
     struct PendingPane;
     impl ServerPaneConnection for PendingPane {
-        fn status(&self) -> crate::terminal::server_session::DevelopmentPaneStatus {
-            crate::terminal::server_session::DevelopmentPaneStatus::Connecting
+        fn status(&self) -> crate::terminal::server_session::ServerPaneStatus {
+            crate::terminal::server_session::ServerPaneStatus::Connecting
         }
         fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
             None
@@ -1198,9 +1196,9 @@ mod development {
 
     /// One shared Tab's Panes: their server identities, each one's view of its connection, and
     /// the focus the screen replacing a Pane rests on.
-    pub(crate) struct SharedPanes {
-        edits: SharedEditSource,
-        sessions: SharedPaneSessions,
+    pub(crate) struct WorkspacePanes {
+        edits: WorkspaceEditSource,
+        sessions: WorkspacePaneSessions,
         workspace: Id,
         tab: Id,
         panes: BTreeMap<PaneId, Id>,
@@ -1213,7 +1211,7 @@ mod development {
         changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
     }
 
-    impl Drop for SharedPanes {
+    impl Drop for WorkspacePanes {
         fn drop(&mut self) {
             for id in self.panes.values() {
                 self.edits.retire_alias(*id);
@@ -1221,10 +1219,10 @@ mod development {
         }
     }
 
-    impl SharedPanes {
+    impl WorkspacePanes {
         pub(crate) fn new(
-            edits: SharedEditSource,
-            sessions: SharedPaneSessions,
+            edits: WorkspaceEditSource,
+            sessions: WorkspacePaneSessions,
             workspace: Id,
             tab: Id,
         ) -> Self {
@@ -1242,7 +1240,7 @@ mod development {
             }
         }
 
-        pub(crate) const fn sessions(&self) -> &SharedPaneSessions {
+        pub(crate) const fn sessions(&self) -> &WorkspacePaneSessions {
             &self.sessions
         }
 
@@ -1328,7 +1326,7 @@ mod development {
             self.panes.get(&pane_id).is_some_and(|id| *id != server) || self.reopened(pane_id)
         }
 
-        pub(crate) fn edits(&self) -> SharedEditSource {
+        pub(crate) fn edits(&self) -> WorkspaceEditSource {
             self.edits.clone()
         }
 
@@ -1407,24 +1405,24 @@ mod development {
             self.panes.keys().copied().collect()
         }
 
-        pub(crate) fn editability(&self) -> SharedEditability {
+        pub(crate) fn editability(&self) -> WorkspaceEditability {
             self.edits.editability()
         }
 
         /// Whether the server is reachable, which an explicit Pane selection needs: offline
         /// navigation must never ask the server to start a retained shell.
         pub(crate) fn reachable(&self) -> bool {
-            self.edits.editability() != SharedEditability::Offline
+            self.edits.editability() != WorkspaceEditability::Offline
         }
 
         /// Requests a shared split. Its provisional Pane is presentation only until the server
         /// supplies its authoritative identity and membership.
-        pub(crate) fn split(&self, source: PaneId, axis: Axis) -> SharedSubmission {
+        pub(crate) fn split(&self, source: PaneId, axis: Axis) -> WorkspaceSubmission {
             let Some(source) = self.server_pane(source) else {
-                return SharedSubmission::Refused(SharedRefusalReason::Value);
+                return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
             let Some(inventory) = self.edits.presentation_inventory() else {
-                return SharedSubmission::Refused(SharedRefusalReason::Value);
+                return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
             match spaceterm_server::organize::split(
                 &inventory,
@@ -1434,23 +1432,23 @@ mod development {
                 spaceterm_server::hierarchy::CreateControl::Creator,
             ) {
                 Ok(mutation) => self.edits.submit(mutation),
-                Err(_) => SharedSubmission::Refused(SharedRefusalReason::Value),
+                Err(_) => WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value),
             }
         }
     }
 
-    /// One shared Workspace's Tabs and the identities its Panes split within.
-    pub(crate) struct SharedTabs {
-        edits: SharedEditSource,
-        sessions: SharedPaneSessions,
+    /// One Workspace's Tabs and the identities its Panes split within.
+    pub(crate) struct WorkspaceTabs {
+        edits: WorkspaceEditSource,
+        sessions: WorkspacePaneSessions,
         workspace: Id,
         tabs: BTreeMap<TabId, Id>,
     }
 
-    impl SharedTabs {
+    impl WorkspaceTabs {
         pub(crate) fn new(
-            edits: SharedEditSource,
-            sessions: SharedPaneSessions,
+            edits: WorkspaceEditSource,
+            sessions: WorkspacePaneSessions,
             workspace: Id,
         ) -> Self {
             Self {
@@ -1503,11 +1501,11 @@ mod development {
             }
         }
 
-        pub(crate) const fn sessions(&self) -> &SharedPaneSessions {
+        pub(crate) const fn sessions(&self) -> &WorkspacePaneSessions {
             &self.sessions
         }
 
-        pub(crate) fn edits(&self) -> SharedEditSource {
+        pub(crate) fn edits(&self) -> WorkspaceEditSource {
             self.edits.clone()
         }
 
@@ -1529,14 +1527,14 @@ mod development {
                 .find_map(|(&tab_id, &id)| (self.edits.canonical(id) == server).then_some(tab_id))
         }
 
-        pub(crate) fn editability(&self) -> SharedEditability {
+        pub(crate) fn editability(&self) -> WorkspaceEditability {
             self.edits.editability()
         }
 
         /// Asks the server for another Tab in this Workspace.
-        pub(crate) fn create_tab(&self, source: Id) -> SharedSubmission {
+        pub(crate) fn create_tab(&self, source: Id) -> WorkspaceSubmission {
             let Some(inventory) = self.edits.presentation_inventory() else {
-                return SharedSubmission::Refused(SharedRefusalReason::Value);
+                return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
             let plan = spaceterm_server::organize::new_tab(
                 &inventory,
@@ -1550,7 +1548,7 @@ mod development {
                 Ok(spaceterm_server::organize::NewTab::Worktree(operation)) => {
                     Mutation::Worktree(operation)
                 }
-                Err(_) => return SharedSubmission::Refused(SharedRefusalReason::Value),
+                Err(_) => return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value),
             };
             self.edits.submit(mutation)
         }
@@ -1558,13 +1556,13 @@ mod development {
 
     /// One available server Workspace and its optional presentation in this client.
     #[derive(Clone, Debug)]
-    pub(crate) struct SharedAvailableWorkspace {
+    pub(crate) struct AvailableWorkspace {
         pub(crate) server: Id,
         pub(crate) name: String,
         pub(crate) local: Option<WorkspaceId>,
     }
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedAttachmentFailure {
+    pub(crate) enum WorkspaceAttachmentFailure {
         Unchanged,
         Uncertain,
     }
@@ -1582,13 +1580,13 @@ mod development {
     }
 
     /// The Workspace Window's authoritative inventory, attachments and pending presentation.
-    pub(crate) struct SharedWorkspaces {
-        edits: SharedEditSource,
+    pub(crate) struct Workspaces {
+        edits: WorkspaceEditSource,
         /// The presentation this binding is, which names its Workspaces in this client's order.
         owner: Option<Rc<dyn WorkspaceOwner>>,
-        sessions: SharedPaneSessions,
+        sessions: WorkspacePaneSessions,
         /// Each server Workspace and the local Workspace presenting it.
-        workspaces: BTreeMap<WorkspaceId, SharedWorkspaceFacts>,
+        workspaces: BTreeMap<WorkspaceId, WorkspaceFacts>,
         /// The inventory revision this client has applied.
         revision: Option<u64>,
         presentation: Option<Inventory>,
@@ -1601,7 +1599,7 @@ mod development {
         conflicts: VecDeque<PendingConflict>,
         /// Refusals still to present, each with the unseen outcomes it stands for. Outcomes
         /// refused for the same reason share one notice.
-        refusals: VecDeque<(SharedRefusal, Vec<u64>)>,
+        refusals: VecDeque<(WorkspaceRefusal, Vec<u64>)>,
         /// The forgotten total the notice that some outcomes went unseen would record.
         forgotten: Option<u64>,
         /// Failed Worktree operations no surface has presented yet.
@@ -1612,9 +1610,9 @@ mod development {
         /// confirmation reads. Those facts can change without a new membership revision.
         latest: Option<Inventory>,
         /// The Git facts the server read with its latest inventory.
-        repositories: super::SharedRepositories,
+        repositories: super::ServerRepositories,
         /// The close confirmation a person is reviewing now.
-        review: Option<SharedCloseReview>,
+        review: Option<WorkspaceCloseReview>,
         /// The close this process submitted, and the local target a fresh review would reopen.
         submitted_close: Option<(ServerCloseTarget, CloseTarget)>,
         /// Closes the server refused because what they would end changed after the
@@ -1643,9 +1641,9 @@ mod development {
         /// The sequence of the refusal, which draft review presents.
         sequence: u64,
         workspace: Id,
-        field: SharedWorkspaceField,
+        field: WorkspaceField,
         reviewed_version: u64,
-        draft: SharedWorkspaceDraft,
+        draft: WorkspaceDraft,
         /// Captured from the snapshot that carried the refusal, so it never names a value a later
         /// accepted edit replaced.
         authoritative: SharedString,
@@ -1660,7 +1658,7 @@ mod development {
         pub(crate) error: spaceterm_server::worktree::Error,
     }
 
-    impl Drop for SharedWorkspaces {
+    impl Drop for Workspaces {
         fn drop(&mut self) {
             self.edits
                 .pending
@@ -1691,8 +1689,8 @@ mod development {
         }
     }
 
-    impl SharedWorkspaces {
-        pub(crate) fn new(edits: SharedEditSource, sessions: SharedPaneSessions) -> Self {
+    impl Workspaces {
+        pub(crate) fn new(edits: WorkspaceEditSource, sessions: WorkspacePaneSessions) -> Self {
             Self {
                 sessions: sessions.with_edits(edits.clone()),
                 edits,
@@ -1711,7 +1709,7 @@ mod development {
                 worktree_failures: VecDeque::new(),
                 handed: Rc::default(),
                 latest: None,
-                repositories: super::SharedRepositories::default(),
+                repositories: super::ServerRepositories::default(),
                 review: None,
                 submitted_close: None,
                 stale_closes: VecDeque::new(),
@@ -1760,7 +1758,7 @@ mod development {
         /// Follows a paired route's new transport. The presented Workspaces, Tabs and this
         /// client's views of them stay; the next inventory reconciles them, and until the
         /// transport publishes one the retained copy stands in.
-        pub(crate) fn replace_transport(&mut self, edits: Rc<dyn SharedWorkspaceEdits>) {
+        pub(crate) fn replace_transport(&mut self, edits: Rc<dyn WorkspaceEdits>) {
             self.edits
                 .stand_in(self.confirmed.as_ref().map(RetainedInventory::inventory));
             // The next inventory is read afresh: it initializes attachments and rebinds Panes.
@@ -1866,13 +1864,13 @@ mod development {
             self.standing_in
         }
 
-        pub(crate) fn available_workspaces(&self) -> Vec<SharedAvailableWorkspace> {
+        pub(crate) fn available_workspaces(&self) -> Vec<AvailableWorkspace> {
             self.latest
                 .iter()
                 .flat_map(|inventory| &inventory.workspaces)
                 .filter_map(|workspace| {
                     let local = self.local(workspace.id);
-                    (self.connected || local.is_some()).then(|| SharedAvailableWorkspace {
+                    (self.connected || local.is_some()).then(|| AvailableWorkspace {
                         server: workspace.id,
                         name: workspace.name.clone(),
                         local,
@@ -1945,7 +1943,7 @@ mod development {
         }
 
         /// The Git facts the server read for the directories its Workspaces show.
-        pub(crate) const fn repositories(&self) -> &super::SharedRepositories {
+        pub(crate) const fn repositories(&self) -> &super::ServerRepositories {
             &self.repositories
         }
 
@@ -1969,33 +1967,36 @@ mod development {
             self.attachments.changeable()
                 && (self.retained_views.is_none() || self.saved_views.is_some())
         }
-        pub(crate) fn attach(&mut self, server: Id) -> Result<(), SharedAttachmentFailure> {
+        pub(crate) fn attach(&mut self, server: Id) -> Result<(), WorkspaceAttachmentFailure> {
             if !self.connected || !self.attachments_changeable() {
-                return Err(SharedAttachmentFailure::Unchanged);
+                return Err(WorkspaceAttachmentFailure::Unchanged);
             }
             match self.attachments.attach(server) {
                 Ok(true) => Ok(()),
-                Ok(false) => Err(SharedAttachmentFailure::Unchanged),
+                Ok(false) => Err(WorkspaceAttachmentFailure::Unchanged),
                 Err(_) => Err(if self.attachments.changeable() {
-                    SharedAttachmentFailure::Unchanged
+                    WorkspaceAttachmentFailure::Unchanged
                 } else {
-                    SharedAttachmentFailure::Uncertain
+                    WorkspaceAttachmentFailure::Uncertain
                 }),
             }
         }
-        pub(crate) fn detach(&mut self, local: WorkspaceId) -> Result<(), SharedAttachmentFailure> {
+        pub(crate) fn detach(
+            &mut self,
+            local: WorkspaceId,
+        ) -> Result<(), WorkspaceAttachmentFailure> {
             if !self.attachments_changeable() {
-                return Err(SharedAttachmentFailure::Unchanged);
+                return Err(WorkspaceAttachmentFailure::Unchanged);
             }
             let server = self
                 .facts(local)
-                .ok_or(SharedAttachmentFailure::Unchanged)?
+                .ok_or(WorkspaceAttachmentFailure::Unchanged)?
                 .server;
             self.attachments.detach(server).map_err(|_| {
                 if self.attachments.changeable() {
-                    SharedAttachmentFailure::Unchanged
+                    WorkspaceAttachmentFailure::Unchanged
                 } else {
-                    SharedAttachmentFailure::Uncertain
+                    WorkspaceAttachmentFailure::Uncertain
                 }
             })
         }
@@ -2152,15 +2153,15 @@ mod development {
             &self,
             workspace: Id,
             repository: Option<&Path>,
-        ) -> Option<SharedRowStatus> {
+        ) -> Option<WorkspaceRowStatus> {
             if let Some(text) = self.worktree_status(workspace, repository) {
-                return Some(SharedRowStatus::progress(text));
+                return Some(WorkspaceRowStatus::progress(text));
             }
             match self.edits.editability() {
-                SharedEditability::Offline
+                WorkspaceEditability::Offline
                     if self.connection_error.is_some() || self.standing_in =>
                 {
-                    Some(SharedRowStatus {
+                    Some(WorkspaceRowStatus {
                         text: "Not connected",
                         warning: true,
                     })
@@ -2172,15 +2173,15 @@ mod development {
             self.pending
                 && matches!(self.pending_operation.as_ref(),Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {path:target,..})) if target==path)
         }
-        pub(crate) const fn sessions(&self) -> &SharedPaneSessions {
+        pub(crate) const fn sessions(&self) -> &WorkspacePaneSessions {
             &self.sessions
         }
 
-        pub(crate) fn edits(&self) -> SharedEditSource {
+        pub(crate) fn edits(&self) -> WorkspaceEditSource {
             self.edits.clone()
         }
 
-        pub(crate) fn editability(&self) -> SharedEditability {
+        pub(crate) fn editability(&self) -> WorkspaceEditability {
             self.edits.editability()
         }
 
@@ -2196,15 +2197,15 @@ mod development {
         /// Waits for exact creation identities before capturing any destructive approval.
         pub(crate) fn defer_close(
             &self,
-            intent: SharedCloseIntent,
-        ) -> Result<bool, SharedRefusalReason> {
+            intent: WorkspaceCloseIntent,
+        ) -> Result<bool, WorkspaceRefusalReason> {
             if !self.edits.transport().availability().0 {
-                return Err(SharedRefusalReason::Offline);
+                return Err(WorkspaceRefusalReason::Offline);
             }
             self.edits.pending.borrow_mut().defer_close(intent)
         }
 
-        pub(crate) fn take_close_intent(&self) -> Option<SharedCloseIntent> {
+        pub(crate) fn take_close_intent(&self) -> Option<WorkspaceCloseIntent> {
             self.edits.pending.borrow_mut().take_close_intent()
         }
 
@@ -2213,31 +2214,31 @@ mod development {
         pub(crate) fn close_approval(
             &self,
             target: ServerCloseTarget,
-        ) -> Result<SharedCloseApproval, SharedCloseUnavailable> {
+        ) -> Result<WorkspaceCloseApproval, WorkspaceCloseUnavailable> {
             let editability = self.editability();
             if !editability.available() {
-                return Err(SharedCloseUnavailable::Edits(editability.into()));
+                return Err(WorkspaceCloseUnavailable::Edits(editability.into()));
             }
             let inventory = self
                 .latest
                 .as_ref()
-                .ok_or(SharedCloseUnavailable::Unreported)?;
+                .ok_or(WorkspaceCloseUnavailable::Unreported)?;
             let workspace = target_workspace(inventory, target)
                 .filter(|_| target_exists(inventory, target))
-                .ok_or(SharedCloseUnavailable::Missing)?;
+                .ok_or(WorkspaceCloseUnavailable::Missing)?;
             // Membership exists, so a missing confirmation means the server has not reported the
             // live Sessions a person would be approving.
             let confirmation = inventory
                 .close_confirmation(target)
-                .ok_or(SharedCloseUnavailable::Unreported)?;
+                .ok_or(WorkspaceCloseUnavailable::Unreported)?;
             let scope = match target {
-                _ if confirmation.removes_workspace => SharedCloseScope::Workspace,
-                ServerCloseTarget::Pane { .. } => SharedCloseScope::Pane,
-                ServerCloseTarget::Tab { .. } => SharedCloseScope::Tab,
-                ServerCloseTarget::KillWorkspace { .. } => SharedCloseScope::Workspace,
-                ServerCloseTarget::Worktree { .. } => SharedCloseScope::Worktree,
+                _ if confirmation.removes_workspace => WorkspaceCloseScope::Workspace,
+                ServerCloseTarget::Pane { .. } => WorkspaceCloseScope::Pane,
+                ServerCloseTarget::Tab { .. } => WorkspaceCloseScope::Tab,
+                ServerCloseTarget::KillWorkspace { .. } => WorkspaceCloseScope::Workspace,
+                ServerCloseTarget::Worktree { .. } => WorkspaceCloseScope::Worktree,
             };
-            Ok(SharedCloseApproval {
+            Ok(WorkspaceCloseApproval {
                 target,
                 scope,
                 workspace: workspace.name.clone(),
@@ -2260,16 +2261,16 @@ mod development {
 
         /// Whether what an approval would end and remove is still exactly what the server
         /// reports now.
-        pub(crate) fn close_state(&self, approval: &SharedCloseApproval) -> SharedCloseState {
+        pub(crate) fn close_state(&self, approval: &WorkspaceCloseApproval) -> WorkspaceCloseState {
             let Some(inventory) = self.latest.as_ref() else {
-                return SharedCloseState::Changed;
+                return WorkspaceCloseState::Changed;
             };
             if !target_exists(inventory, approval.target) {
-                return SharedCloseState::Missing;
+                return WorkspaceCloseState::Missing;
             }
             match inventory.close_confirmation(approval.target) {
-                Some(current) if current == approval.confirmation => SharedCloseState::Current,
-                _ => SharedCloseState::Changed,
+                Some(current) if current == approval.confirmation => WorkspaceCloseState::Current,
+                _ => WorkspaceCloseState::Changed,
             }
         }
 
@@ -2277,15 +2278,15 @@ mod development {
         /// review reopens if the server finds the approval stale.
         pub(crate) fn close(
             &mut self,
-            approval: SharedCloseApproval,
+            approval: WorkspaceCloseApproval,
             local: CloseTarget,
-        ) -> SharedSubmission {
+        ) -> WorkspaceSubmission {
             let target = approval.target;
             let submission = self.ask(Mutation::Close {
                 target,
                 confirmation: approval.confirmation,
             });
-            if submission == SharedSubmission::Submitted {
+            if submission == WorkspaceSubmission::Submitted {
                 self.submitted_close = Some((target, local));
             }
             submission
@@ -2347,25 +2348,25 @@ mod development {
             Some((target, local))
         }
 
-        pub(crate) const fn review(&self) -> Option<&SharedCloseReview> {
+        pub(crate) const fn review(&self) -> Option<&WorkspaceCloseReview> {
             self.review.as_ref()
         }
 
-        pub(crate) fn begin_review(&mut self, review: SharedCloseReview) {
+        pub(crate) fn begin_review(&mut self, review: WorkspaceCloseReview) {
             self.review = Some(review);
         }
 
         /// Ends the review with `generation`, returning it once.
-        pub(crate) fn end_review(&mut self, generation: u64) -> Option<SharedCloseReview> {
+        pub(crate) fn end_review(&mut self, generation: u64) -> Option<WorkspaceCloseReview> {
             self.review
                 .take_if(|review| review.generation == generation)
         }
 
-        pub(crate) fn facts(&self, workspace: WorkspaceId) -> Option<&SharedWorkspaceFacts> {
+        pub(crate) fn facts(&self, workspace: WorkspaceId) -> Option<&WorkspaceFacts> {
             self.workspaces.get(&workspace)
         }
 
-        pub(crate) fn is_shared(&self, workspace: WorkspaceId) -> bool {
+        pub(crate) fn contains_workspace(&self, workspace: WorkspaceId) -> bool {
             self.workspaces.contains_key(&workspace)
         }
 
@@ -2375,7 +2376,7 @@ mod development {
             })
         }
 
-        pub(crate) fn register(&mut self, workspace: WorkspaceId, facts: SharedWorkspaceFacts) {
+        pub(crate) fn register(&mut self, workspace: WorkspaceId, facts: WorkspaceFacts) {
             self.workspaces.insert(workspace, facts);
         }
 
@@ -2395,10 +2396,10 @@ mod development {
 
         /// Leaves ownership and admission capacity here until the notice is admitted. Draft
         /// review's presentation records it.
-        pub(crate) fn next_conflict(&self) -> Option<(SharedWorkspaceConflict, OutcomeNotice)> {
+        pub(crate) fn next_conflict(&self) -> Option<(WorkspaceConflict, OutcomeNotice)> {
             let pending = &self.conflicts[self.presentable_conflict_index()?];
             Some((
-                SharedWorkspaceConflict {
+                WorkspaceConflict {
                     workspace: self.local(pending.workspace)?,
                     field: pending.field,
                     reviewed_version: pending.reviewed_version,
@@ -2409,13 +2410,13 @@ mod development {
             ))
         }
 
-        pub(crate) fn take_conflict(&mut self) -> Option<SharedWorkspaceConflict> {
+        pub(crate) fn take_conflict(&mut self) -> Option<WorkspaceConflict> {
             let index = self.presentable_conflict_index()?;
             let pending = self.conflicts.remove(index)?;
             self.hand(pending.sequence);
             let workspace = self.local(pending.workspace)?;
             self.edits.pending.borrow_mut().release_conflicts(1);
-            Some(SharedWorkspaceConflict {
+            Some(WorkspaceConflict {
                 workspace,
                 field: pending.field,
                 reviewed_version: pending.reviewed_version,
@@ -2426,11 +2427,11 @@ mod development {
 
         /// The oldest refusal to present, and its alert's presentation of exactly the outcomes
         /// it stands for. It stays until [`Self::take_refusal`].
-        pub(crate) fn next_refusal(&self) -> Option<(SharedRefusal, OutcomeNotice)> {
+        pub(crate) fn next_refusal(&self) -> Option<(WorkspaceRefusal, OutcomeNotice)> {
             let (refusal, refused) = self.refusals.front()?;
             Some((*refusal, self.notice(refused.as_slice())))
         }
-        pub(crate) fn take_refusal(&mut self) -> Option<SharedRefusal> {
+        pub(crate) fn take_refusal(&mut self) -> Option<WorkspaceRefusal> {
             let (refusal, refused) = self.refusals.pop_front()?;
             for sequence in refused {
                 self.hand(sequence);
@@ -2468,10 +2469,10 @@ mod development {
 
         /// Wakes now, after each change the server connection publishes, and after each edit
         /// this window queues.
-        pub(crate) fn subscribe(&self) -> SharedEditNotifications {
+        pub(crate) fn subscribe(&self) -> WorkspaceEditNotifications {
             let (sender, local) = async_channel::bounded(1);
             self.edits.subscribers.borrow_mut().push(sender);
-            SharedEditNotifications {
+            WorkspaceEditNotifications {
                 source: self.edits.clone(),
                 local,
                 remote: std::cell::RefCell::new((
@@ -2488,9 +2489,9 @@ mod development {
         /// it rejected, because that draft is a person's work; only an answer this process asked
         /// for reports an acceptance the window may act on, so a publication from another client
         /// never moves the Active Workspace, Tab, or Pane.
-        pub(crate) fn poll(&mut self) -> SharedPoll {
+        pub(crate) fn poll(&mut self) -> WorkspacePoll {
             let (snapshot, standing_in) = self.edits.read();
-            let mut poll = SharedPoll::default();
+            let mut poll = WorkspacePoll::default();
             if self.standing_in != standing_in {
                 // The server's first inventory after the retained copy initializes attachments
                 // and opens Panes even when its revision is the copy's.
@@ -2559,10 +2560,10 @@ mod development {
                 if !self
                     .refusals
                     .iter()
-                    .any(|(refusal, _)| *refusal == SharedRefusal::Disconnected)
+                    .any(|(refusal, _)| *refusal == WorkspaceRefusal::Disconnected)
                 {
                     self.refusals
-                        .push_back((SharedRefusal::Disconnected, Vec::new()));
+                        .push_back((WorkspaceRefusal::Disconnected, Vec::new()));
                 }
                 poll.changed = true;
             }
@@ -2652,7 +2653,7 @@ mod development {
                         .release_conflicts(removed.len());
                     // The Missing refusal presents what happened to each draft.
                     for sequence in removed {
-                        self.refuse(SharedRefusal::Missing, sequence);
+                        self.refuse(WorkspaceRefusal::Missing, sequence);
                     }
                     poll.changed = true;
                 }
@@ -2691,7 +2692,7 @@ mod development {
             outcome: &RetainedOutcome,
             inventory: Option<&Inventory>,
             own: bool,
-            poll: &mut SharedPoll,
+            poll: &mut WorkspacePoll,
         ) {
             let sequence = outcome.sequence;
             match outcome.outcome {
@@ -2711,7 +2712,7 @@ mod development {
                 // client that asked for a creation also opens it, once.
                 Outcome::Accepted { target } => {
                     if own {
-                        poll.accepted = Some(SharedAcceptance {
+                        poll.accepted = Some(WorkspaceAcceptance {
                             mutation: outcome.mutation.clone(),
                             target,
                         });
@@ -2727,12 +2728,12 @@ mod development {
                     } else {
                         // Another client removed the Workspace before this client could name
                         // it, as a relaunch can find. The draft has nowhere to go.
-                        self.refuse(SharedRefusal::Missing, sequence);
+                        self.refuse(WorkspaceRefusal::Missing, sequence);
                     }
                 }
-                Outcome::Missing => self.refuse(SharedRefusal::Missing, sequence),
-                Outcome::Invalid => self.refuse(SharedRefusal::Invalid, sequence),
-                Outcome::Limit => self.refuse(SharedRefusal::Limit, sequence),
+                Outcome::Missing => self.refuse(WorkspaceRefusal::Missing, sequence),
+                Outcome::Invalid => self.refuse(WorkspaceRefusal::Invalid, sequence),
+                Outcome::Limit => self.refuse(WorkspaceRefusal::Limit, sequence),
                 // What the close would end changed after a person approved it. Ending the new
                 // Sessions needs a fresh review, so nothing asks again on its own.
                 Outcome::StaleConfirmation => match &outcome.mutation {
@@ -2745,7 +2746,7 @@ mod development {
         }
 
         /// Queues `refusal` for `sequence`, beside earlier outcomes refused for the same reason.
-        fn refuse(&mut self, refusal: SharedRefusal, sequence: u64) {
+        fn refuse(&mut self, refusal: WorkspaceRefusal, sequence: u64) {
             match self
                 .refusals
                 .iter_mut()
@@ -2775,9 +2776,9 @@ mod development {
                 } => Some(PendingConflict {
                     sequence,
                     workspace: *workspace,
-                    field: SharedWorkspaceField::Name,
+                    field: WorkspaceField::Name,
                     reviewed_version: authority(*workspace)?.name_version,
-                    draft: SharedWorkspaceDraft::Name(name.clone()),
+                    draft: WorkspaceDraft::Name(name.clone()),
                     authoritative: SharedString::from(authority(*workspace)?.name.clone()),
                 }),
                 Mutation::PinWorkspace {
@@ -2787,9 +2788,9 @@ mod development {
                 } => Some(PendingConflict {
                     sequence,
                     workspace: *workspace,
-                    field: SharedWorkspaceField::PinnedDirectory,
+                    field: WorkspaceField::PinnedDirectory,
                     reviewed_version: authority(*workspace)?.pin_version,
-                    draft: SharedWorkspaceDraft::Pin(directory.clone()),
+                    draft: WorkspaceDraft::Pin(directory.clone()),
                     authoritative: display_pin(authority(*workspace)?.pinned_directory.as_deref()),
                 }),
                 // Independent creations never conflict with each other, so the server answers
@@ -2806,7 +2807,7 @@ mod development {
 
         /// Applies one server inventory to this client's own map, reporting what changed. The
         /// caller owns the local collections, so it performs the creations this plan names.
-        pub(crate) fn plan(&self, inventory: &Inventory) -> Vec<SharedWorkspacePlan> {
+        pub(crate) fn plan(&self, inventory: &Inventory) -> Vec<WorkspacePlan> {
             let mut plan = Vec::new();
             for workspace in &inventory.workspaces {
                 if !self.attachments.is_attached(workspace.id)
@@ -2814,11 +2815,11 @@ mod development {
                 {
                     continue;
                 }
-                let mut facts = SharedWorkspaceFacts::from_server(workspace);
+                let mut facts = WorkspaceFacts::from_server(workspace);
                 facts.confirmed = !self.edits.provisional(workspace.id);
                 match self.local(workspace.id) {
-                    Some(local) => plan.push(SharedWorkspacePlan::Update { local, facts }),
-                    None => plan.push(SharedWorkspacePlan::Create { facts }),
+                    Some(local) => plan.push(WorkspacePlan::Update { local, facts }),
+                    None => plan.push(WorkspacePlan::Create { facts }),
                 }
             }
             for (&local, facts) in &self.workspaces {
@@ -2827,7 +2828,7 @@ mod development {
                         && (self.attachments.is_attached(workspace.id)
                             || self.edits.provisional(workspace.id))
                 }) {
-                    plan.push(SharedWorkspacePlan::Removed { local });
+                    plan.push(WorkspacePlan::Removed { local });
                 }
             }
             plan
@@ -2838,7 +2839,7 @@ mod development {
             &mut self,
             name: String,
             directory: Option<PathBuf>,
-        ) -> SharedSubmission {
+        ) -> WorkspaceSubmission {
             self.ask(Mutation::CreateWorkspace {
                 name,
                 directory,
@@ -2846,7 +2847,7 @@ mod development {
             })
         }
 
-        /// Asks the server to rename a shared Workspace.
+        /// Asks the server to rename a Workspace.
         ///
         /// `observed` is the name version the draft began at, which fences the edit to the value
         /// the person was editing: a publication that arrives while the editor is open then
@@ -2857,9 +2858,9 @@ mod development {
             workspace: WorkspaceId,
             name: String,
             observed: Option<u64>,
-        ) -> SharedSubmission {
+        ) -> WorkspaceSubmission {
             let Some(facts) = self.facts(workspace) else {
-                return SharedSubmission::Refused(SharedRefusalReason::Value);
+                return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
             let version = observed.unwrap_or(facts.name_version);
             self.ask(Mutation::RenameWorkspace {
@@ -2869,7 +2870,7 @@ mod development {
             })
         }
 
-        /// Asks the server to pin or unpin a shared Workspace's directory.
+        /// Asks the server to pin or unpin a Workspace's directory.
         ///
         /// `observed` is the pin version the chooser opened at, for the same reason a rename keeps
         /// the version its editor began with.
@@ -2878,9 +2879,9 @@ mod development {
             workspace: WorkspaceId,
             directory: Option<PathBuf>,
             observed: Option<u64>,
-        ) -> SharedSubmission {
+        ) -> WorkspaceSubmission {
             let Some(facts) = self.facts(workspace) else {
-                return SharedSubmission::Refused(SharedRefusalReason::Value);
+                return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
             let version = observed.unwrap_or(facts.pin_version);
             self.ask(Mutation::PinWorkspace {
@@ -2890,21 +2891,21 @@ mod development {
             })
         }
 
-        /// The pin version a shared Workspace shows now, which its chooser keeps while it is open.
+        /// The pin version a Workspace shows now, which its chooser keeps while it is open.
         pub(crate) fn pin_version(&self, workspace: WorkspaceId) -> Option<u64> {
             Some(self.facts(workspace)?.pin_version)
         }
 
         /// Asks again with the preserved draft, fenced to the version the conflict displayed.
         /// Only a person's explicit request calls this.
-        pub(crate) fn ask_again(&mut self, conflict: &SharedWorkspaceConflict) -> SharedSubmission {
+        pub(crate) fn ask_again(&mut self, conflict: &WorkspaceConflict) -> WorkspaceSubmission {
             // The person read the server's value beside their draft, so asking again is fenced
             // to the version they reviewed rather than the one the draft began at.
             match conflict.draft.clone() {
-                SharedWorkspaceDraft::Name(name) => {
+                WorkspaceDraft::Name(name) => {
                     self.rename(conflict.workspace, name, Some(conflict.reviewed_version))
                 }
-                SharedWorkspaceDraft::Pin(directory) => self.pin(
+                WorkspaceDraft::Pin(directory) => self.pin(
                     conflict.workspace,
                     directory,
                     Some(conflict.reviewed_version),
@@ -2912,9 +2913,9 @@ mod development {
             }
         }
 
-        fn ask(&mut self, mutation: Mutation) -> SharedSubmission {
+        fn ask(&mut self, mutation: Mutation) -> WorkspaceSubmission {
             let submission = self.edits.submit(mutation);
-            if submission == SharedSubmission::Submitted {
+            if submission == WorkspaceSubmission::Submitted {
                 self.pending = true;
                 // A new answer replaces these notices; what they would present stays unseen.
                 let sequences: Vec<u64> = self
@@ -2974,11 +2975,11 @@ mod development {
     /// Tab and Workspace the close removes are still exactly what it holds, whichever client
     /// controls them.
     #[derive(Clone, Debug, Eq, PartialEq)]
-    pub(crate) struct SharedCloseApproval {
+    pub(crate) struct WorkspaceCloseApproval {
         target: ServerCloseTarget,
         confirmation: ServerCloseConfirmation,
         controls: Option<Vec<ConfirmedControl>>,
-        scope: SharedCloseScope,
+        scope: WorkspaceCloseScope,
         /// The Tabs that hold the reviewed Panes.
         tabs: usize,
         /// The Workspace's name as the server published it.
@@ -2987,21 +2988,21 @@ mod development {
 
     /// Which close a person asked for.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedCloseScope {
+    pub(crate) enum WorkspaceCloseScope {
         Pane,
         Tab,
         Workspace,
         Worktree,
     }
 
-    impl SharedCloseApproval {
+    impl WorkspaceCloseApproval {
         /// A direct close binds every reviewed Pane to its exact control grant. A Pane without a
         /// reported grant requires explicit confirmation.
         pub(crate) fn direct_close(
             &self,
             directly_closable: impl Fn(Id, bool) -> bool,
         ) -> Option<Self> {
-            if self.scope == SharedCloseScope::Workspace {
+            if self.scope == WorkspaceCloseScope::Workspace {
                 return None;
             }
             let controls = self.controls.as_ref()?;
@@ -3036,10 +3037,10 @@ mod development {
 
         pub(crate) fn title(&self) -> String {
             match self.scope {
-                SharedCloseScope::Pane => "Close Pane?".to_owned(),
-                SharedCloseScope::Tab => "Close Tab?".to_owned(),
-                SharedCloseScope::Worktree => "Close Tabs?".to_owned(),
-                SharedCloseScope::Workspace => {
+                WorkspaceCloseScope::Pane => "Close Pane?".to_owned(),
+                WorkspaceCloseScope::Tab => "Close Tab?".to_owned(),
+                WorkspaceCloseScope::Worktree => "Close Tabs?".to_owned(),
+                WorkspaceCloseScope::Workspace => {
                     format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
                 }
             }
@@ -3047,10 +3048,10 @@ mod development {
 
         pub(crate) const fn confirm_label(&self) -> &'static str {
             match self.scope {
-                SharedCloseScope::Pane => "Close Pane",
-                SharedCloseScope::Tab => "Close Tab",
-                SharedCloseScope::Worktree => "Close Tabs",
-                SharedCloseScope::Workspace => "Kill Workspace",
+                WorkspaceCloseScope::Pane => "Close Pane",
+                WorkspaceCloseScope::Tab => "Close Tab",
+                WorkspaceCloseScope::Worktree => "Close Tabs",
+                WorkspaceCloseScope::Workspace => "Kill Workspace",
             }
         }
 
@@ -3155,24 +3156,24 @@ mod development {
 
         /// The title of the notice that replaces a confirmation another client made stale.
         pub(crate) const fn changed_title(&self) -> &'static str {
-            shared_close_changed_title(self.target)
+            close_changed_title(self.target)
         }
 
         /// The title of the notice that replaces a confirmation whose target another client
         /// already removed.
         pub(crate) const fn missing_title(&self) -> &'static str {
             match self.scope {
-                SharedCloseScope::Pane => "Pane Already Closed",
-                SharedCloseScope::Tab => "Tab Already Closed",
-                SharedCloseScope::Worktree => "Tabs Already Closed",
-                SharedCloseScope::Workspace => "Workspace Already Removed",
+                WorkspaceCloseScope::Pane => "Pane Already Closed",
+                WorkspaceCloseScope::Tab => "Tab Already Closed",
+                WorkspaceCloseScope::Worktree => "Tabs Already Closed",
+                WorkspaceCloseScope::Workspace => "Workspace Already Removed",
             }
         }
     }
 
     /// The title of the notice that says a close ended nothing because what it would end changed
     /// after the confirmation opened.
-    pub(crate) const fn shared_close_changed_title(target: ServerCloseTarget) -> &'static str {
+    pub(crate) const fn close_changed_title(target: ServerCloseTarget) -> &'static str {
         match target {
             ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
             ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
@@ -3183,8 +3184,8 @@ mod development {
 
     /// Why a shared close cannot be reviewed now. Nothing was sent.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedCloseUnavailable {
-        Edits(SharedRefusalReason),
+    pub(crate) enum WorkspaceCloseUnavailable {
+        Edits(WorkspaceRefusalReason),
         /// The server no longer has the target.
         Missing,
         /// The server has not reported the live Sessions the close would end, so a person cannot
@@ -3194,7 +3195,7 @@ mod development {
 
     /// Whether an approval still names exactly what the server holds.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedCloseState {
+    pub(crate) enum WorkspaceCloseState {
         Current,
         /// A Pane joined or left, or a Session started or ended, after the confirmation opened.
         Changed,
@@ -3203,7 +3204,7 @@ mod development {
     }
 
     /// An unapproved close waiting for the exact provisional creation it names.
-    pub(crate) struct SharedCloseIntent {
+    pub(crate) struct WorkspaceCloseIntent {
         pub(crate) server: ServerCloseTarget,
         pub(crate) local: CloseTarget,
         /// The initiating keyboard owner, before any confirmation or later navigation.
@@ -3212,10 +3213,10 @@ mod development {
 
     /// One shared close confirmation on screen: its Close Confirmation generation, the local
     /// target it closes, what it approves, and the presentation another client's change replaces.
-    pub(crate) struct SharedCloseReview {
+    pub(crate) struct WorkspaceCloseReview {
         pub(crate) generation: u64,
         pub(crate) target: CloseTarget,
-        pub(crate) approval: SharedCloseApproval,
+        pub(crate) approval: WorkspaceCloseApproval,
         pub(crate) presentation: Option<spaceterm_ui::ModalPresentationHandle>,
     }
 
@@ -3223,40 +3224,40 @@ mod development {
     /// close moves the keyboard to what remains, as a local close does; another client's change
     /// never does.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum SharedRemoval {
+    pub(crate) enum WorkspaceRemoval {
         Published,
         OwnClose,
     }
 
     /// What one authoritative reading and its pending presentation changed.
     #[derive(Default)]
-    pub(crate) struct SharedPoll {
+    pub(crate) struct WorkspacePoll {
         /// The presentation changed, so the window repaints.
         pub(crate) changed: bool,
         /// The server published membership this client has not applied yet.
         pub(crate) inventory: Option<Inventory>,
         /// The initiating interaction presents a provisional creation, or a nonoptimistic edit
         /// completed. An older creation's acknowledgement never opens its target again.
-        pub(crate) accepted: Option<SharedAcceptance>,
+        pub(crate) accepted: Option<WorkspaceAcceptance>,
         /// The Workspace this client chose as its first-ever view just now. Opening it is the
         /// person's first use, so the window opens its Active Tab for them.
         pub(crate) initial: Option<Id>,
     }
 
     /// An initiating presentation target or a completed edit this process submitted.
-    pub(crate) struct SharedAcceptance {
+    pub(crate) struct WorkspaceAcceptance {
         pub(crate) mutation: Mutation,
         pub(crate) target: Id,
     }
 
     /// One step of applying a server inventory to this client's own Workspaces.
-    pub(crate) enum SharedWorkspacePlan {
+    pub(crate) enum WorkspacePlan {
         Create {
-            facts: SharedWorkspaceFacts,
+            facts: WorkspaceFacts,
         },
         Update {
             local: WorkspaceId,
-            facts: SharedWorkspaceFacts,
+            facts: WorkspaceFacts,
         },
         /// The server no longer has the Workspace, so this client stops presenting it as shared.
         Removed {
@@ -3282,12 +3283,12 @@ mod development {
 
         use spaceterm_server::hierarchy::{Inventory, Mutation, Outcome, RetainedOutcome};
 
-        use super::SharedWorkspaceEdits;
-        use crate::terminal::shared_workspace::SharedWorkspaceSnapshot;
+        use super::WorkspaceEdits;
+        use crate::terminal::workspace_client::WorkspaceSnapshot;
 
         /// A scripted Pane whose status a test sets and whose explicit requests it counts.
         pub(crate) struct ScriptedPane {
-            status: Mutex<crate::terminal::server_session::DevelopmentPaneStatus>,
+            status: Mutex<crate::terminal::server_session::ServerPaneStatus>,
             startup_pending: std::sync::atomic::AtomicBool,
             controller: Mutex<Option<spaceterm_server::pane::control::Controller>>,
             session_end: Mutex<Option<spaceterm_server::pane::SessionEnd>>,
@@ -3307,7 +3308,7 @@ mod development {
             pub(crate) fn new() -> std::sync::Arc<Self> {
                 std::sync::Arc::new(Self {
                     status: Mutex::new(
-                        crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
+                        crate::terminal::server_session::ServerPaneStatus::Connecting,
                     ),
                     startup_pending: std::sync::atomic::AtomicBool::new(true),
                     controller: Mutex::default(),
@@ -3323,16 +3324,13 @@ mod development {
                 })
             }
 
-            pub(crate) fn set(
-                &self,
-                status: crate::terminal::server_session::DevelopmentPaneStatus,
-            ) {
+            pub(crate) fn set(&self, status: crate::terminal::server_session::ServerPaneStatus) {
                 self.startup_pending.store(
                     matches!(
                         status,
-                        crate::terminal::server_session::DevelopmentPaneStatus::Connecting
-                            | crate::terminal::server_session::DevelopmentPaneStatus::TakingOver
-                            | crate::terminal::server_session::DevelopmentPaneStatus::Reconnecting
+                        crate::terminal::server_session::ServerPaneStatus::Connecting
+                            | crate::terminal::server_session::ServerPaneStatus::TakingOver
+                            | crate::terminal::server_session::ServerPaneStatus::Reconnecting
                     ),
                     std::sync::atomic::Ordering::SeqCst,
                 );
@@ -3353,14 +3351,14 @@ mod development {
                 controller: spaceterm_server::pane::control::Controller,
             ) {
                 *self.controller.lock().expect("controller") = Some(controller);
-                self.set(crate::terminal::server_session::DevelopmentPaneStatus::Takeover);
+                self.set(crate::terminal::server_session::ServerPaneStatus::Takeover);
             }
 
             /// A new connection reaches the Terminal Session and supplies its screen.
             pub(crate) fn reconnect(&self) {
                 self.generation
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                self.set(crate::terminal::server_session::DevelopmentPaneStatus::Connected);
+                self.set(crate::terminal::server_session::ServerPaneStatus::Connected);
             }
 
             /// The server says why the Pane's Session ended, if it did.
@@ -3372,7 +3370,7 @@ mod development {
             /// A new connection reaches the server, which answers with `status`.
             pub(crate) fn reconnect_to(
                 &self,
-                status: crate::terminal::server_session::DevelopmentPaneStatus,
+                status: crate::terminal::server_session::ServerPaneStatus,
             ) {
                 self.generation
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3405,7 +3403,7 @@ mod development {
         }
 
         impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
-            fn status(&self) -> crate::terminal::server_session::DevelopmentPaneStatus {
+            fn status(&self) -> crate::terminal::server_session::ServerPaneStatus {
                 *self.status.lock().expect("status")
             }
 
@@ -3455,8 +3453,8 @@ mod development {
                 self.take_overs
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut status = self.status.lock().expect("status");
-                if *status == crate::terminal::server_session::DevelopmentPaneStatus::Takeover {
-                    *status = crate::terminal::server_session::DevelopmentPaneStatus::TakingOver;
+                if *status == crate::terminal::server_session::ServerPaneStatus::Takeover {
+                    *status = crate::terminal::server_session::ServerPaneStatus::TakingOver;
                 }
                 drop(status);
                 self.changes.publish();
@@ -3542,7 +3540,7 @@ mod development {
             }
         }
 
-        impl super::SharedPaneOpener for ScriptedPanes {
+        impl super::WorkspacePaneOpener for ScriptedPanes {
             fn placeholder(&self) -> super::WorkspaceTerminalSessionFactory {
                 super::WorkspaceTerminalSessionFactory::pending()
             }
@@ -3553,7 +3551,7 @@ mod development {
                 Some(&self.local_files)
             }
 
-            fn open(&self, pane: super::Id) -> Option<super::SharedPaneSubscription> {
+            fn open(&self, pane: super::Id) -> Option<super::WorkspacePaneSubscription> {
                 let connection = ScriptedPane::new();
                 connection
                     .connect_when_observed
@@ -3569,7 +3567,7 @@ mod development {
 
         /// A scripted server whose inventory, connection, and answers the test sets.
         pub(crate) struct ScriptedEdits {
-            snapshot: Mutex<SharedWorkspaceSnapshot>,
+            snapshot: Mutex<WorkspaceSnapshot>,
             submitted: Mutex<Vec<Mutation>>,
             /// The next sequence a settled answer carries.
             sequence: Mutex<u64>,
@@ -3780,7 +3778,7 @@ mod development {
 
             pub(crate) fn new(inventory: Option<Inventory>) -> Self {
                 Self {
-                    snapshot: Mutex::new(SharedWorkspaceSnapshot {
+                    snapshot: Mutex::new(WorkspaceSnapshot {
                         inventory,
                         connected: true,
                         pending: false,
@@ -3816,7 +3814,7 @@ mod development {
             }
 
             /// Changes the snapshot, then hints its readers.
-            fn publish(&self, update: impl FnOnce(&mut SharedWorkspaceSnapshot)) {
+            fn publish(&self, update: impl FnOnce(&mut WorkspaceSnapshot)) {
                 update(&mut self.snapshot.lock().expect("snapshot"));
                 self.changes.publish();
             }
@@ -3917,8 +3915,8 @@ mod development {
             }
         }
 
-        impl SharedWorkspaceEdits for ScriptedEdits {
-            fn snapshot(&self) -> SharedWorkspaceSnapshot {
+        impl WorkspaceEdits for ScriptedEdits {
+            fn snapshot(&self) -> WorkspaceSnapshot {
                 self.settle();
                 self.snapshot.lock().expect("snapshot").clone()
             }

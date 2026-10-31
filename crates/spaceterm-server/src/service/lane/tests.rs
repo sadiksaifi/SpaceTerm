@@ -1311,7 +1311,7 @@ mod flow {
     }
 
     #[test]
-    fn a_helperailure_settles_without_waiting_for_a_disconnect() {
+    fn a_helper_failure_settles_without_waiting_for_a_disconnect() {
         with_lane(|lane| {
             let switch = Arc::new(Switch::default());
             switch.up(lane.lane.clone());

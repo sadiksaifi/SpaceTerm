@@ -52,7 +52,7 @@ mod exercise {
     }
 
     fn mutate(server: &ServerConnection, link: &ServerLink, mutation: Mutation) -> Result<Id> {
-        let mut journal = server.shared_journal()?;
+        let mut journal = server.operation_journal()?;
         if journal.pending().is_some() {
             return Err("resolve the original fixture operation before continuing".into());
         }

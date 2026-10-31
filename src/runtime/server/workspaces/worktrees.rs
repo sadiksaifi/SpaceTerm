@@ -208,7 +208,7 @@ pub(in crate::runtime::server) fn pinned_in_worktree<'a>(
     }
     Ok(false)
 }
-impl SharedWorkspaceHost {
+impl WorkspaceHost {
     fn worktree_lock(
         &self,
     ) -> Result<Option<spaceterm_server::organization::WorktreeLock>, Refusal> {
@@ -553,7 +553,7 @@ mod tests {
     use super::*;
     use crate::runtime::server::{
         repository_tests::{GitFixture, finish_write, git_facts, review_removal},
-        tests::{create_shared, host, screen, shared_inventory, size},
+        tests::{create_workspace, host, screen, size, workspace_inventory},
     };
 
     mod close_fallback {
@@ -571,9 +571,9 @@ mod tests {
             let git = GitFixture::new();
             let mut prototype = host();
             prototype.directory = git.0.clone();
-            let mut host = SharedWorkspaceHost::new(prototype);
-            let workspace = create_shared(&mut host, 1);
-            let initial = shared_inventory(&mut host);
+            let mut host = WorkspaceHost::new(prototype);
+            let workspace = create_workspace(&mut host, 1);
+            let initial = workspace_inventory(&mut host);
             let origin = initial.workspaces[0].tabs[0].root_pane;
             let Reply::Attached { lease } = host.request(
                 [1; 32],
@@ -618,7 +618,7 @@ mod tests {
             let Outcome::Accepted { target } = record.outcome else {
                 panic!("Worktree creation succeeds")
             };
-            let updated = shared_inventory(&mut host);
+            let updated = workspace_inventory(&mut host);
             let tabs = &updated.workspaces[0].tabs;
             assert_eq!(tabs.len(), initial.workspaces[0].tabs.len() + 1);
             let tab = tabs.iter().find(|t| t.id == target).unwrap();
@@ -661,8 +661,8 @@ mod tests {
     fn revoke_during(git: &GitFixture, operation: impl FnOnce(Id) -> Operation) {
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
         assert!(matches!(
             host.request(
                 [1; 32],
@@ -725,8 +725,8 @@ mod tests {
         git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
         assert!(
             matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 2, mutation: Mutation::PinWorkspace { workspace, version: 0, directory: Some(git.0.clone()) } }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. }))
         );
@@ -838,8 +838,8 @@ mod tests {
         std::fs::write(tree.join("kept"), b"kept").unwrap();
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
         let outside = host.state.inventory.workspaces[0].root_tab;
         let Outcome::Accepted { target: tab } = finish_write(
             &mut host,
@@ -884,7 +884,7 @@ mod tests {
         );
         await_text(&mut host, lease, &format!("SOURCE-CWD:{}", tree.display()));
         let target = CloseTarget::Worktree { workspace, tab };
-        let confirmation = shared_inventory(&mut host)
+        let confirmation = workspace_inventory(&mut host)
             .close_confirmation(target)
             .unwrap();
         assert!(confirmation.panes.iter().any(|pane| pane.session.is_some()));
@@ -922,8 +922,8 @@ mod tests {
         std::fs::create_dir(&pin).unwrap();
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
         let source = host.state.inventory.workspaces[0].tabs[0].root_pane;
         host.state.confirm_directory(source, cwd.clone());
         for (index, (pinned, expected)) in [
@@ -1034,8 +1034,8 @@ mod tests {
         std::fs::write(gate.0.join("release"), "").unwrap();
         let mut prototype = host();
         prototype.directory = tree.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        create_workspace(&mut host, 1);
         let review = review_removal(&mut host, &git.0, &tree);
         assert!(!review.changes);
         std::fs::write(tree.join("payload"), "changed!\n").unwrap();
@@ -1140,8 +1140,8 @@ mod tests {
         let (git, tree, gate) = blocked_removal_fixture();
         let mut prototype = host();
         prototype.directory = git.0.parent().unwrap().to_owned();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        create_workspace(&mut host, 1);
         let pane = host.state.inventory.workspaces[0].tabs[0].root_pane;
         let Reply::Attached { lease } = host.request(
             [1; 32],
@@ -1210,8 +1210,8 @@ mod tests {
         git.git(&["worktree", "add", "-b", "nested", nested.to_str().unwrap()]);
         let mut prototype = host();
         prototype.directory = nested.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut host, 1);
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
         let initial = git_facts(&mut host, &nested, |facts| facts.worktrees.is_some());
         let root_tab = initial.workspaces[0].root_tab;
         assert!(matches!(
@@ -1245,8 +1245,8 @@ mod tests {
         let git = GitFixture::new();
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut original = SharedWorkspaceHost::new(prototype);
-        let workspace = create_shared(&mut original, 1);
+        let mut original = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut original, 1);
         let operation = Operation::Create {
             control: spaceterm_server::hierarchy::CreateControl::Creator,
             workspace,
@@ -1273,7 +1273,7 @@ mod tests {
 
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut restored = SharedWorkspaceHost::new(prototype);
+        let mut restored = WorkspaceHost::new(prototype);
         restored.state =
             *serde_json::from_slice::<spaceterm_server::organization::Organization>(&bytes)
                 .unwrap()
@@ -1288,7 +1288,7 @@ mod tests {
             sequence: 2, mutation: Mutation::Worktree(operation),
         }), Reply::Outcome(record) if record.outcome == Outcome::WorktreeFailed(Error::Interrupted))
         );
-        assert_eq!(shared_inventory(&mut restored).workspaces.len(), 1);
+        assert_eq!(workspace_inventory(&mut restored).workspaces.len(), 1);
         restored.shutdown().unwrap();
         assert!(!git.0.exists());
     }
@@ -1302,9 +1302,9 @@ mod tests {
         std::fs::create_dir(&unrelated).unwrap();
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        create_shared(&mut host, 1);
-        let workspace = create_shared(&mut host, 2);
+        let mut host = WorkspaceHost::new(prototype);
+        create_workspace(&mut host, 1);
+        let workspace = create_workspace(&mut host, 2);
         assert!(matches!(
             host.request(
                 [1; 32],
@@ -1349,9 +1349,9 @@ mod tests {
         std::os::unix::fs::symlink(&tree, &alias).unwrap();
         let mut prototype = host();
         prototype.directory = git.0.clone();
-        let mut host = SharedWorkspaceHost::new(prototype);
-        create_shared(&mut host, 1);
-        create_shared(&mut host, 2);
+        let mut host = WorkspaceHost::new(prototype);
+        create_workspace(&mut host, 1);
+        create_workspace(&mut host, 2);
         let pane = host.state.inventory.workspaces[1].tabs[0].root_pane;
         // Shell integration retains logical $PWD while the Tab keeps its original membership.
         host.state.inventory.workspaces[1].tabs[0].worktree = Some(git.0.clone());
@@ -1411,7 +1411,7 @@ mod tests {
         ));
         assert!(!tree.exists());
         assert!(
-            shared_inventory(&mut host)
+            workspace_inventory(&mut host)
                 .close
                 .unwrap()
                 .sessions

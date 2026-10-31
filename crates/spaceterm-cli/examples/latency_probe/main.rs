@@ -269,7 +269,7 @@ impl OwnerLink {
 
     /// Enables Network Access at `bind`. Here it returns what to restore; an owner command restores
     /// Network Access itself when its input ends.
-    fn expose(&mut self, bind: std::net::SocketAddr) -> Result<Option<protocol::Exposure>> {
+    fn expose(&mut self, bind: std::net::SocketAddr) -> Result<Option<protocol::NetworkAccess>> {
         if let Self::Here(owner) = self {
             return owner.expose(bind).map(Some);
         }
@@ -322,7 +322,7 @@ fn combine(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
 
 fn measure_paired(options: &Options) -> Result<()> {
     let mut owner = OwnerLink::open(options)?;
-    let exposure = match options.expose {
+    let network_access = match options.expose {
         Some(bind) => owner.expose(bind)?,
         None => None,
     };
@@ -346,8 +346,8 @@ fn measure_paired(options: &Options) -> Result<()> {
     if let Ok(count) = revoked {
         eprintln!("latency_probe: revoked {count} probe pairing");
     }
-    let restored = match (&owner, exposure) {
-        (OwnerLink::Here(here), Some(exposure)) => here.restore(exposure),
+    let restored = match (&owner, network_access) {
+        (OwnerLink::Here(here), Some(network_access)) => here.restore(network_access),
         _ => Ok(()),
     };
     combine([result, abandoned, revoked.map(drop), restored])
@@ -358,10 +358,10 @@ fn measure_paired(options: &Options) -> Result<()> {
 fn serve_owner(identity: &str) -> Result<()> {
     let owner = Owner::open(identity)?;
     let mut approved = Vec::new();
-    let mut exposure = None;
-    let served = serve_requests(&owner, &mut approved, &mut exposure);
+    let mut network_access = None;
+    let served = serve_requests(&owner, &mut approved, &mut network_access);
     let revoked = approved.iter().map(|device| owner.revoke(device).map(drop));
-    let restored = exposure.map_or(Ok(()), |exposure| owner.restore(exposure));
+    let restored = network_access.map_or(Ok(()), |network_access| owner.restore(network_access));
     combine(
         [served, owner.abandon()]
             .into_iter()
@@ -373,7 +373,7 @@ fn serve_owner(identity: &str) -> Result<()> {
 fn serve_requests(
     owner: &Owner,
     approved: &mut Vec<String>,
-    exposure: &mut Option<protocol::Exposure>,
+    network_access: &mut Option<protocol::NetworkAccess>,
 ) -> Result<()> {
     let mut output = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
@@ -398,11 +398,11 @@ fn serve_requests(
                 .map(|count| json!({ "revoked": count }))
         } else if let Some(bind) = request["expose"].as_str() {
             match bind.parse() {
-                Ok(bind) if exposure.is_none() => owner.expose(bind).map(|previous| {
-                    *exposure = Some(previous);
+                Ok(bind) if network_access.is_none() => owner.expose(bind).map(|previous| {
+                    *network_access = Some(previous);
                     json!({ "exposed": true })
                 }),
-                _ => fail("owner exposure"),
+                _ => fail("owner Network Access"),
             }
         } else if request["abandon"] == true {
             owner.abandon().map(|()| json!({ "abandoned": true }))

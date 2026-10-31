@@ -45,19 +45,19 @@ fn a_returning_desktop_restores_its_arrangement_without_changing_a_new_desktops_
         ],
     };
     let retained = {
-        let (first, cx) = shared_tab_manager(app);
+        let (first, cx) = tab_manager(app);
         publish(&first, published.clone(), cx);
         let active = first
             .manager
             .read_with(cx, |manager, cx| manager.active_terminal_identity(cx));
         cx.update(|_, cx| {
             first.manager.update(cx, |manager, cx| {
-                manager.restore_shared_arrangement(&personal, &published.workspaces[0], cx)
+                manager.restore_arrangement(&personal, &published.workspaces[0], cx)
             })
         });
         let saved = first
             .manager
-            .read_with(cx, |manager, cx| manager.shared_arrangement(cx).unwrap());
+            .read_with(cx, |manager, cx| manager.arrangement(cx).unwrap());
         assert_eq!(saved, personal);
         assert_eq!(
             first
@@ -71,11 +71,11 @@ fn a_returning_desktop_restores_its_arrangement_without_changing_a_new_desktops_
         );
         serde_json::to_vec(&saved).unwrap()
     };
-    let (second, cx) = shared_tab_manager(app);
+    let (second, cx) = tab_manager(app);
     publish(&second, published.clone(), cx);
     let default = second
         .manager
-        .read_with(cx, |manager, cx| manager.shared_arrangement(cx).unwrap());
+        .read_with(cx, |manager, cx| manager.arrangement(cx).unwrap());
     assert_eq!(
         default.tabs.iter().map(|tab| tab.tab).collect::<Vec<_>>(),
         vec![ROOT_TAB, SECOND_TAB]
@@ -108,12 +108,12 @@ fn a_returning_desktop_restores_its_arrangement_without_changing_a_new_desktops_
     publish(&second, current.clone(), cx);
     cx.update(|_, cx| {
         second.manager.update(cx, |manager, cx| {
-            manager.restore_shared_arrangement(&saved, &current.workspaces[0], cx)
+            manager.restore_arrangement(&saved, &current.workspaces[0], cx)
         })
     });
     let restored = second
         .manager
-        .read_with(cx, |manager, cx| manager.shared_arrangement(cx).unwrap());
+        .read_with(cx, |manager, cx| manager.arrangement(cx).unwrap());
     assert_eq!(
         restored.tabs.iter().map(|tab| tab.tab).collect::<Vec<_>>(),
         vec![SECOND_TAB, ROOT_TAB]

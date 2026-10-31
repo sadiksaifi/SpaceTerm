@@ -266,7 +266,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_creation_preserves_server_directory_policy_for_pinned_and_unpinned_workspaces() {
+    fn tab_and_split_creation_preserve_server_directory_policy_for_pinned_and_unpinned_workspaces()
+    {
         for (pin, expected) in [(None, "/repo/source"), (Some("/pinned"), "/pinned")] {
             let mut state = state(pin);
             let workspace = state.inventory.workspaces[0].id;

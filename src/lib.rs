@@ -19,7 +19,7 @@ pub fn run_desktop() {
                     "version": env!("SPACETERM_VERSION"),
                     "commit": env!("SPACETERM_COMMIT"),
                     "target": env!("SPACETERM_TARGET"),
-                    "server_candidate_sha256": env!("SPACETERM_SERVER_SHA256"),
+                    "server_candidate_sha256": env!("SPACETERM_CLI_SHA256"),
                 })
             );
             return;

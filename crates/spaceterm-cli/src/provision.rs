@@ -9,7 +9,7 @@ use spaceterm_server::{
 };
 use std::io::{Read, Write};
 
-const IDENTITY: &str = env!("SPACETERM_SERVER_IDENTITY");
+const IDENTITY: &str = env!("SPACETERM_CLI_IDENTITY");
 
 pub enum Error {
     Failure(Failure),
@@ -82,9 +82,9 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
         ProvisionCommand::SshDiscover => {
             let discovery = spaceterm_server::provisioning::discover(IDENTITY)?;
             let mut value = serde_json::to_value(discovery).map_err(|_| ServerError::Protocol)?;
-            value["target"] = env!("SPACETERM_SERVER_TARGET").into();
-            value["version"] = env!("SPACETERM_SERVER_VERSION").into();
-            value["commit"] = env!("SPACETERM_SERVER_COMMIT").into();
+            value["target"] = env!("SPACETERM_CLI_TARGET").into();
+            value["version"] = env!("SPACETERM_CLI_VERSION").into();
+            value["commit"] = env!("SPACETERM_CLI_COMMIT").into();
             write_setup(&value)?;
         }
         ProvisionCommand::SshDirectStatus => {

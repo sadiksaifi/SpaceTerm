@@ -692,7 +692,7 @@ fn searching_by_shortcut_captures_a_chord_that_closes_the_window(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn a_chord_no_command_uses_finds_nothing(cx: &mut TestAppContext) {
+fn searching_by_a_terminal_reserved_shortcut_names_its_owner(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
 
     click("settings-keybindings-search-by-shortcut", cx);

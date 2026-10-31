@@ -148,7 +148,7 @@ pub(crate) mod server_graphics;
 #[cfg(feature = "desktop")]
 pub(crate) mod server_session;
 #[cfg(feature = "desktop")]
-pub(crate) mod shared_workspace;
+pub(crate) mod workspace_client;
 
 #[cfg(feature = "desktop")]
 pub(crate) use emulator::ScrollbackMovement;

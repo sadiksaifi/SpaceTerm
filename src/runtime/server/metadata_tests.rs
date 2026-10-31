@@ -52,7 +52,7 @@ fn encoder_sanitizes_bounds_and_client_rejects_malformed_presentation() {
 #[test]
 fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control() {
     fn inventory(
-        host: &mut SharedWorkspaceHost,
+        host: &mut WorkspaceHost,
         connection: u8,
     ) -> spaceterm_server::hierarchy::Inventory {
         let reply = host.request([2; 32], [connection; 32], Request::Inventory);
@@ -62,7 +62,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         inventory
     }
     fn wait(
-        host: &mut SharedWorkspaceHost,
+        host: &mut WorkspaceHost,
         connection: u8,
         title: &str,
     ) -> spaceterm_server::hierarchy::Inventory {
@@ -101,7 +101,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         local_filesystem(),
         LocalMachine::new(Some("alice"), Some("build.test"), Some("/home/alice")),
     );
-    let mut host = SharedWorkspaceHost::new(prototype);
+    let mut host = WorkspaceHost::new(prototype);
     host.prepare_initial_organization().unwrap();
     let dormant = inventory(&mut host, 20);
     let pane = dormant.workspaces[0].tabs[0].root_pane;

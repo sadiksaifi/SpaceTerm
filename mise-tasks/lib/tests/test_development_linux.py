@@ -25,7 +25,7 @@ ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 FAKE_CARGO = """import json, os, pathlib, sys
 arguments = sys.argv[1:]
 assert not any(name in os.environ for name in (
-    "SPACETERM_PACKAGED", "SPACETERM_RELEASE_TAG", "SPACETERM_SERVER_ARCHIVE", "SPACETERM_SERVER_SIGNATURE"
+    "SPACETERM_PACKAGED", "SPACETERM_RELEASE_TAG", "SPACETERM_CLI_ARCHIVE", "SPACETERM_CLI_SIGNATURE"
 ))
 assert arguments[0] == "build" and "--locked" in arguments and "--features" not in arguments
 binary = arguments[arguments.index("--bin") + 1]
@@ -61,7 +61,7 @@ shutil.copyfile(archive, entry / "artifact.tar.gz")
 shutil.copyfile(signature, entry / "artifact.sig")
 import hashlib
 (entry / "artifact.sha256").write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + "\\n")
-os.environ["SPACETERM_SERVER_ARTIFACTS"] = str(catalog)
+os.environ["SPACETERM_CLI_ARTIFACTS"] = str(catalog)
 sys.argv = sys.argv[2:]
 def package(identity, *, target):
     assert identity == "spaceterm-development"
@@ -234,8 +234,8 @@ int main(int argc, char **argv) {{
             overrides={
                 "SPACETERM_PACKAGED": "1",
                 "SPACETERM_RELEASE_TAG": "v1.0.0",
-                "SPACETERM_SERVER_ARCHIVE": "/absent/archive",
-                "SPACETERM_SERVER_SIGNATURE": "/absent/signature",
+                "SPACETERM_CLI_ARCHIVE": "/absent/archive",
+                "SPACETERM_CLI_SIGNATURE": "/absent/signature",
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)

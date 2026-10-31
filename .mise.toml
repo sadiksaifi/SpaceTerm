@@ -423,7 +423,7 @@ description = "Test CLI identities, creation control and journals, then exercise
 run = [
     "cargo test -p spaceterm-cli --lib --locked -- state:: journal::",
     "cargo test -p spaceterm-server --features client --lib --locked -- admission:: control:: hierarchy:: a_cli_agent revocation_closes",
-    "cargo test -p spaceterm --lib --all-features --locked -- create_control_tests shared_repositories::reveal shell_launch::",
+    "cargo test -p spaceterm --lib --all-features --locked -- create_control_tests workspace_repositories::reveal shell_launch::",
     "cargo test -p spaceterm --lib --features native-tests --locked -- each_shell_puts_the_session_cli_first",
     "cargo run -p spaceterm-cli --example cli_identity --locked",
 ]
@@ -544,16 +544,16 @@ run = [
   "cargo run --package spaceterm-cli --example restored_workspace --locked",
 ]
 
-[tasks."server:shared:smoke"]
+[tasks."server:workspaces:smoke"]
 description = "Exercise shared edits, independent Pane control, lost outcomes and restart"
 run = [
   "cargo build --package spaceterm-cli --examples --bins --locked",
-  "cargo run --package spaceterm-cli --example shared_workspaces --locked",
+  "cargo run --package spaceterm-cli --example workspaces --locked",
 ]
 
-[tasks."server:shared:desktop:test"]
-description = "Test shared Workspace integration and server Pane presentation in the main app"
-run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
+[tasks."server:workspaces:desktop:test"]
+description = "Test Workspace integration and server Pane presentation in the main app"
+run = "cargo test --package spaceterm --lib --all-features --locked -- workspaces workspace_manager server_pane"
 
 [tasks."server:setup:test"]
 description = "Test temporary SSH provisioning and paired QUIC setup admission"
@@ -584,7 +584,7 @@ description = "Test server-backed repository, Worktree and Settings presentation
 usage = '''
 arg "[filter]" help="Run one regression instead of the affected repository and Settings suites"
 '''
-run = "cargo test --package spaceterm --lib --all-features --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}runtime::server::repositories runtime::server::repository_tests shared_workspaces::repositories workspace_manager::tests::shared_repositories settings_window{% endif %}"
+run = "cargo test --package spaceterm --lib --all-features --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}runtime::server::repositories runtime::server::repository_tests workspaces::repositories workspace_manager::tests::workspace_repositories settings_window{% endif %}"
 
 [tasks."server:test:host"]
 description = "Test the headless executable's build isolation"
@@ -674,7 +674,7 @@ description = "Measure a paired QUIC request's round trip on loopback, in a rele
 run = "cargo test --release --package spaceterm-server --lib --all-features --locked -- direct::tests::quic_connections::quic_request_round_trip_on_loopback --ignored --exact --nocapture"
 
 [tasks."server:direct:test"]
-description = "Test direct-network proof, exposure, enrollment and revocation boundaries"
+description = "Test direct-network proof, Network Access, enrollment and revocation boundaries"
 run = "cargo test --package spaceterm-server --features client --locked -- direct"
 
 [tasks."server:direct:desktop:test"]
@@ -691,7 +691,7 @@ usage = '''
 arg "<bind>" help="Concrete owner IP address and UDP port"
 arg "<server>" help="Exact idle Development server identity in hexadecimal"
 flag "--confirm-idle-development" help="Authorize only test-created pairings and Workspaces on the idle Development server"
-flag "--restart-idle-service" help="Also verify exposure policy through an explicit idle service restart"
+flag "--restart-idle-service" help="Also verify Network Access policy through an explicit idle service restart"
 '''
 run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/direct_devices\" --bind {{usage.bind | quote}} --expect-server {{usage.server | quote}} {% if usage.confirm_idle_development %}--confirm-idle-development{% endif %} {% if usage.restart_idle_service %}--restart-idle-service{% endif %}"
 
