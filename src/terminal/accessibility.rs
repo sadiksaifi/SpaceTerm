@@ -297,6 +297,9 @@ struct AccessibilityRowBlock {
     screen_generation: usize,
     node_serial: u64,
     rows: Arc<[Arc<AccessibilityRow>]>,
+    /// Local row indices ordered by page row, then by position, so an identity resolves to its
+    /// first row in document order without visiting the block.
+    by_page_row: Box<[usize]>,
     utf16_prefix: Arc<[usize]>,
     len_utf16: usize,
 }
@@ -321,13 +324,27 @@ impl AccessibilityRowBlock {
             .first()
             .map(|row| (row.id.screen_generation, row.id.node_serial))
             .unwrap_or_default();
+        let mut by_page_row = (0..rows.len()).collect::<Vec<_>>();
+        by_page_row.sort_unstable_by_key(|local| (rows[*local].id.page_row, *local));
         Arc::new(Self {
             screen_generation,
             node_serial,
             rows: Arc::from(rows),
+            by_page_row: by_page_row.into_boxed_slice(),
             utf16_prefix: Arc::from(utf16_prefix),
             len_utf16,
         })
+    }
+
+    fn local_row(&self, id: AccessibilityRowId) -> Option<usize> {
+        let first = self
+            .by_page_row
+            .partition_point(|local| self.rows[*local].id.page_row < id.page_row);
+        self.by_page_row[first..]
+            .iter()
+            .copied()
+            .take_while(|local| self.rows[*local].id.page_row == id.page_row)
+            .find(|local| self.rows[*local].id == id)
     }
 
     fn shares_rows(&self, rows: &[Arc<AccessibilityRow>], is_document_tail: bool) -> bool {
@@ -414,6 +431,9 @@ struct AccessibilityDocument {
     topology: Arc<[AccessibilityRowId]>,
     row_index: Option<Arc<AccessibilityRowIndex>>,
     blocks: Arc<[Arc<AccessibilityRowBlock>]>,
+    /// Block indices ordered by their `(screen_generation, node_serial)` key, then by position.
+    /// With each block's page row order it forms the identity-to-line index.
+    blocks_by_key: Box<[usize]>,
     block_row_prefix: Arc<[usize]>,
     block_utf16_prefix: Arc<[usize]>,
     rows: usize,
@@ -427,6 +447,7 @@ impl AccessibilityDocument {
             topology: Arc::from([]),
             row_index: None,
             blocks: Arc::from([]),
+            blocks_by_key: Box::new([]),
             block_row_prefix: Arc::from([0]),
             block_utf16_prefix: Arc::from([0]),
             rows: 0,
@@ -487,20 +508,26 @@ impl AccessibilityDocument {
     }
 
     fn row_for_id(&self, id: AccessibilityRowId) -> Option<(usize, &AccessibilityRow)> {
-        for (block_index, block) in self.blocks.iter().enumerate() {
-            if block.screen_generation != id.screen_generation
-                || block.node_serial != id.node_serial
-            {
-                continue;
-            }
-            if let Some(local) = block.rows.iter().position(|row| row.id == id) {
-                return Some((
-                    self.block_row_prefix[block_index] + local,
-                    &block.rows[local],
-                ));
-            }
-        }
-        None
+        count_lookup();
+        let key = (id.screen_generation, id.node_serial);
+        let block_key = |block_index: &usize| {
+            let block = &self.blocks[*block_index];
+            (block.screen_generation, block.node_serial)
+        };
+        let first = self
+            .blocks_by_key
+            .partition_point(|block_index| block_key(block_index) < key);
+        self.blocks_by_key[first..]
+            .iter()
+            .take_while(|block_index| block_key(block_index) == key)
+            .find_map(|block_index| {
+                let block = &self.blocks[*block_index];
+                let local = block.local_row(id)?;
+                Some((
+                    self.block_row_prefix[*block_index] + local,
+                    &*block.rows[local],
+                ))
+            })
     }
 
     fn is_text_boundary(&self, index: usize) -> bool {
@@ -587,6 +614,71 @@ struct TerminalAccessibilityData {
     cursor_cell: Option<(usize, u16)>,
     cursor_ref: Option<AccessibilityCellRef>,
     selection_refs: Option<AccessibilitySelectionRefs>,
+}
+
+impl TerminalAccessibilityData {
+    /// Resolves the cursor and Selection references through the document's identity index, so
+    /// binding a retained document costs the same at any Scrollback size.
+    fn retained(request: RetainedAccessibilityRequest) -> Self {
+        let RetainedAccessibilityRequest {
+            generation,
+            content_revision,
+            screen,
+            screen_generation,
+            document,
+            visible_lines,
+            cursor,
+            selection,
+        } = request;
+        let visible_lines =
+            visible_lines.start.min(document.rows)..visible_lines.end.min(document.rows);
+        let visible_range = visible_range(&document, visible_lines.clone());
+        let resolved_cursor = cursor.and_then(|reference| {
+            let (line, row) = resolve_ref(&document, reference)?;
+            let column = row
+                .cells
+                .iter()
+                .find(|cell| cell.columns.contains(&reference.column))
+                .map_or(reference.column, |cell| cell.columns.start);
+            let offset = offset_for_column(&document, line, row, reference.column, false);
+            Some(((line, column), offset))
+        });
+        let cursor_cell = resolved_cursor.map(|(cell, _)| cell);
+        let cursor_ref = cursor.filter(|_| cursor_cell.is_some());
+        let cursor = resolved_cursor
+            .and_then(|(_, offset)| offset)
+            .unwrap_or(visible_range.start);
+        // AppKit exposes one contiguous UTF-16 range. A terminal rectangle therefore uses the
+        // smallest contiguous range containing its ordered endpoints; the refs keep the shape.
+        let selection_range = selection.and_then(|selection| {
+            range_for_refs(&document, selection.start, selection.end)
+                .map(|range| (selection, range))
+        });
+        Self {
+            generation,
+            content_revision,
+            screen,
+            screen_generation,
+            document,
+            visible_lines,
+            visible_range,
+            selection: selection_range.as_ref().map(|(_, range)| range.clone()),
+            cursor: cursor..cursor,
+            cursor_cell,
+            cursor_ref,
+            selection_refs: selection_range.map(|(selection, _)| selection),
+        }
+    }
+
+    /// Whether `other` presents the same screen, visible lines, cursor and Selection for the
+    /// same generation, so publishing it would tell assistive technology nothing new.
+    fn presents_same(&self, other: &Self) -> bool {
+        self.screen == other.screen
+            && self.generation == other.generation
+            && self.visible_lines == other.visible_lines
+            && self.cursor == other.cursor
+            && self.selection == other.selection
+    }
 }
 
 struct RetainedAccessibilityRequest {
@@ -760,7 +852,7 @@ impl TerminalAccessibilityModel {
         generation: PresentationGeneration,
     ) -> Self {
         let mut selected = Vec::new();
-        let mut rows = BTreeMap::new();
+        let mut rows = RetainedRows::default();
         let mut topology = Vec::with_capacity(lines.len());
         for (line_index, line) in lines.into_iter().enumerate() {
             let id = AccessibilityRowId {
@@ -782,15 +874,12 @@ impl TerminalAccessibilityModel {
                     cell
                 })
                 .collect();
-            rows.insert(
+            rows.insert(AccessibilityRow::from_update(AccessibilityRowUpdate {
                 id,
-                AccessibilityRow::from_update(AccessibilityRowUpdate {
-                    id,
-                    revision: 1,
-                    soft_wrapped: line.soft_wrapped,
-                    cells,
-                }),
-            );
+                revision: 1,
+                soft_wrapped: line.soft_wrapped,
+                cells,
+            }));
             topology.push(id);
         }
         let document = build_document(&topology, &rows, None);
@@ -843,59 +932,6 @@ impl TerminalAccessibilityModel {
                 content_revision: 1,
                 screen: AccessibilityScreen::Primary,
                 screen_generation: 0,
-                document,
-                visible_lines,
-                visible_range,
-                selection,
-                cursor: cursor..cursor,
-                cursor_cell,
-                cursor_ref,
-                selection_refs,
-            }),
-        }
-    }
-
-    fn from_retained(request: RetainedAccessibilityRequest) -> Self {
-        let RetainedAccessibilityRequest {
-            generation,
-            content_revision,
-            screen,
-            screen_generation,
-            document,
-            visible_lines,
-            cursor,
-            selection,
-        } = request;
-        let visible_lines =
-            visible_lines.start.min(document.rows)..visible_lines.end.min(document.rows);
-        let visible_range = visible_range(&document, visible_lines.clone());
-        let cursor_cell = cursor.and_then(|reference| {
-            let (line, row) = document.row_for_id(reference.row)?;
-            (row.revision == reference.row_revision).then_some(())?;
-            let column = row
-                .cells
-                .iter()
-                .find(|cell| cell.columns.contains(&reference.column))
-                .map_or(reference.column, |cell| cell.columns.start);
-            Some((line, column))
-        });
-        let cursor_ref = cursor.filter(|_| cursor_cell.is_some());
-        let cursor = cursor
-            .and_then(|reference| offset_for_ref(&document, reference, false))
-            .unwrap_or(visible_range.start);
-        // AppKit exposes one contiguous UTF-16 range. A terminal rectangle therefore uses the
-        // smallest contiguous range containing its ordered endpoints; the refs keep the shape.
-        let selection_refs = selection.filter(|selection| {
-            range_for_refs(&document, selection.start, selection.end).is_some()
-        });
-        let selection = selection_refs
-            .and_then(|selection| range_for_refs(&document, selection.start, selection.end));
-        Self {
-            data: Arc::new(TerminalAccessibilityData {
-                generation,
-                content_revision,
-                screen,
-                screen_generation,
                 document,
                 visible_lines,
                 visible_range,
@@ -1167,14 +1203,74 @@ impl TerminalAccessibilityModel {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Retained-row and row-identity lookups this thread has made, so a test can prove that a
+/// re-bind visits no retained rows.
+#[cfg(test)]
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(dead_code, reason = "the re-bind cost test drives the desktop client")
+)]
+pub(crate) fn lookups() -> usize {
+    LOOKUPS.with(std::cell::Cell::get)
+}
+
+fn count_lookup() {
+    #[cfg(test)]
+    LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+}
+
+/// The retained rows of one screen, keyed by identity.
+#[derive(Debug, Default)]
+struct RetainedRows(BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>);
+
+impl RetainedRows {
+    fn get(&self, id: &AccessibilityRowId) -> Option<&Arc<AccessibilityRow>> {
+        count_lookup();
+        self.0.get(id)
+    }
+
+    #[cfg(feature = "desktop")]
+    fn contains_key(&self, id: &AccessibilityRowId) -> bool {
+        count_lookup();
+        self.0.contains_key(id)
+    }
+
+    fn insert(&mut self, row: Arc<AccessibilityRow>) {
+        self.0.insert(row.id, row);
+    }
+
+    fn retain_live(&mut self, live: &BTreeSet<AccessibilityRowId>) {
+        self.0.retain(|id, _| live.contains(id));
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 #[derive(Debug)]
 struct AccessibilityScreenState {
     topology: Arc<[AccessibilityRowId]>,
     live_rows: BTreeSet<AccessibilityRowId>,
-    rows: BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>,
+    /// Holds only identities in `live_rows`: a topology drops the rest, and a changed row enters
+    /// only when the topology names it.
+    rows: RetainedRows,
     document: Arc<AccessibilityDocument>,
     document_dirty: bool,
     content_revision: u64,
+}
+
+impl AccessibilityScreenState {
+    /// Whether every identity the topology names is retained. Because `rows` holds only live
+    /// identities, equal counts mean equal sets, so no re-bind visits the retained rows.
+    fn is_complete(&self) -> bool {
+        self.rows.len() == self.live_rows.len()
+    }
 }
 
 impl Default for AccessibilityScreenState {
@@ -1182,7 +1278,7 @@ impl Default for AccessibilityScreenState {
         Self {
             topology: Arc::from([]),
             live_rows: BTreeSet::new(),
-            rows: BTreeMap::new(),
+            rows: RetainedRows::default(),
             document: AccessibilityDocument::empty(),
             document_dirty: false,
             content_revision: 0,
@@ -1233,7 +1329,7 @@ impl TerminalAccessibilityState {
                 return None;
             }
             let live = topology.iter().copied().collect::<BTreeSet<_>>();
-            state.rows.retain(|id, _| live.contains(id));
+            state.rows.retain_live(&live);
             state.document_dirty |= state.topology.as_ref() != topology.as_slice();
             state.topology = Arc::from(topology.clone());
             state.live_rows = live;
@@ -1246,27 +1342,18 @@ impl TerminalAccessibilityState {
                 continue;
             }
             let replacement = AccessibilityRow::from_update(changed);
-            let existing = state.rows.get(&replacement.id);
-            state.document_dirty |= existing.is_none_or(|existing| {
-                existing.revision != replacement.revision
-                    || existing.soft_wrapped != replacement.soft_wrapped
-                    || existing.text != replacement.text
-                    || existing.cells != replacement.cells
+            let unchanged = state.rows.get(&replacement.id).is_some_and(|existing| {
+                existing.revision == replacement.revision
+                    && existing.soft_wrapped == replacement.soft_wrapped
+                    && existing.text == replacement.text
+                    && existing.cells == replacement.cells
             });
-            let replacement = state
-                .rows
-                .get(&replacement.id)
-                .filter(|existing| {
-                    existing.revision == replacement.revision
-                        && existing.soft_wrapped == replacement.soft_wrapped
-                        && existing.text == replacement.text
-                        && existing.cells == replacement.cells
-                })
-                .cloned()
-                .unwrap_or(replacement);
-            state.rows.insert(replacement.id, replacement);
+            if !unchanged {
+                state.document_dirty = true;
+                state.rows.insert(replacement);
+            }
         }
-        if !update.complete || state.topology.iter().any(|id| !state.rows.contains_key(id)) {
+        if !update.complete || !state.is_complete() {
             return None;
         }
 
@@ -1283,28 +1370,7 @@ impl TerminalAccessibilityState {
             state.document = Arc::clone(&document);
         }
         self.pending_semantic_target = false;
-        if !document_changed
-            && self.latest.as_ref().is_some_and(|latest| {
-                latest.data.screen == update.screen
-                    && latest.data.generation == generation
-                    && latest.data.visible_lines == update.visible_lines
-                    && latest.data.cursor
-                        == update
-                            .cursor
-                            .and_then(|reference| offset_for_ref(&document, reference, false))
-                            .map_or_else(
-                                || latest.data.visible_range.start..latest.data.visible_range.start,
-                                |offset| offset..offset,
-                            )
-                    && latest.data.selection
-                        == update.selection.and_then(|selection| {
-                            range_for_refs(&document, selection.start, selection.end)
-                        })
-            })
-        {
-            return None;
-        }
-        let model = TerminalAccessibilityModel::from_retained(RetainedAccessibilityRequest {
+        let data = TerminalAccessibilityData::retained(RetainedAccessibilityRequest {
             generation,
             content_revision: state.content_revision,
             screen: update.screen,
@@ -1314,6 +1380,17 @@ impl TerminalAccessibilityState {
             cursor: update.cursor,
             selection: update.selection,
         });
+        if !document_changed
+            && self
+                .latest
+                .as_ref()
+                .is_some_and(|latest| latest.data.presents_same(&data))
+        {
+            return None;
+        }
+        let model = TerminalAccessibilityModel {
+            data: Arc::new(data),
+        };
         self.latest = Some(model.clone());
         Some(Arc::new(model))
     }
@@ -1357,7 +1434,7 @@ impl TerminalAccessibilityState {
 
 fn build_document(
     topology: &[AccessibilityRowId],
-    rows: &BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>,
+    rows: &RetainedRows,
     previous: Option<&Arc<AccessibilityDocument>>,
 ) -> Arc<AccessibilityDocument> {
     if topology.is_empty() {
@@ -1434,6 +1511,11 @@ fn build_document(
         row_start += block.rows.len();
         blocks.push(block);
     }
+    let mut blocks_by_key = (0..blocks.len()).collect::<Vec<_>>();
+    blocks_by_key.sort_unstable_by_key(|block_index| {
+        let block = &blocks[*block_index];
+        (block.screen_generation, block.node_serial, *block_index)
+    });
     let mut block_row_prefix = Vec::with_capacity(blocks.len() + 1);
     let mut block_utf16_prefix = Vec::with_capacity(blocks.len() + 1);
     block_row_prefix.push(0);
@@ -1450,6 +1532,7 @@ fn build_document(
         topology,
         row_index,
         blocks: Arc::from(blocks),
+        blocks_by_key: blocks_by_key.into_boxed_slice(),
         block_row_prefix: Arc::from(block_row_prefix),
         block_utf16_prefix: Arc::from(block_utf16_prefix),
         rows: total_rows,
@@ -1495,14 +1578,13 @@ fn offset_for_column(
         })
 }
 
-fn offset_for_ref(
+/// The line and row a reference names, only while the document retains its row revision.
+fn resolve_ref(
     document: &AccessibilityDocument,
     reference: AccessibilityCellRef,
-    inclusive_end: bool,
-) -> Option<usize> {
+) -> Option<(usize, &AccessibilityRow)> {
     let (line, row) = document.row_for_id(reference.row)?;
-    (row.revision == reference.row_revision).then_some(())?;
-    offset_for_column(document, line, row, reference.column, inclusive_end)
+    (row.revision == reference.row_revision).then_some((line, row))
 }
 
 fn range_for_refs(
@@ -1510,10 +1592,15 @@ fn range_for_refs(
     start: AccessibilityCellRef,
     end: AccessibilityCellRef,
 ) -> Option<Range<usize>> {
-    let start_begin = offset_for_ref(document, start, false)?;
-    let start_end = offset_for_ref(document, start, true)?;
-    let end_begin = offset_for_ref(document, end, false)?;
-    let end_end = offset_for_ref(document, end, true)?;
+    let bounds = |reference: AccessibilityCellRef| {
+        let (line, row) = resolve_ref(document, reference)?;
+        Some((
+            offset_for_column(document, line, row, reference.column, false)?,
+            offset_for_column(document, line, row, reference.column, true)?,
+        ))
+    };
+    let (start_begin, start_end) = bounds(start)?;
+    let (end_begin, end_end) = bounds(end)?;
     Some(start_begin.min(end_begin)..start_end.max(end_end))
 }
 
@@ -2180,6 +2267,79 @@ mod tests {
             .unwrap();
         assert_eq!(pruned.data.document.rows, 10_000);
         assert!(Arc::ptr_eq(&unaffected, &state.primary.document.blocks[1]));
+    }
+
+    #[test]
+    fn cursor_and_selection_resolve_rows_across_unordered_and_repeated_pages() {
+        let id = |serial, page_row| row_id(AccessibilityScreen::Primary, 1, serial, page_row);
+        // Page 10 lists its rows out of order and appears again after page 11.
+        let topology = vec![
+            id(10, 3),
+            id(10, 1),
+            id(10, 2),
+            id(11, 1),
+            id(11, 0),
+            id(10, 5),
+        ];
+        let update = |cursor, selection| AccessibilityUpdate {
+            revision: 1,
+            screen: AccessibilityScreen::Primary,
+            screen_generation: 1,
+            complete: true,
+            more: false,
+            topology: Some(topology.clone()),
+            visible_lines: 0..6,
+            cursor,
+            selection,
+            changed_rows: topology
+                .iter()
+                .zip(["a", "b", "c", "d", "e", "f"])
+                .map(|(id, text)| update_row(*id, 1, text, false))
+                .collect(),
+        };
+        let cell = |row, row_revision| AccessibilityCellRef {
+            row,
+            row_revision,
+            column: 0,
+        };
+        let mut state = TerminalAccessibilityState::default();
+        let model = state
+            .apply(
+                update(
+                    Some(cell(id(11, 0), 1)),
+                    Some(AccessibilitySelectionRefs {
+                        start: cell(id(10, 2), 1),
+                        end: cell(id(10, 5), 1),
+                        rectangle: false,
+                    }),
+                ),
+                PresentationGeneration::test(1),
+            )
+            .unwrap();
+        assert_eq!(model.text(), "a\nb\nc\nd\ne\nf");
+        assert_eq!(model.cursor_cell(), Some((4, 0)));
+        assert_eq!(model.cursor_range(), 8..8);
+        assert_eq!(model.selection_range(), Some(4..11));
+
+        // A missing identity or a stale row revision resolves nothing.
+        let mut state = TerminalAccessibilityState::default();
+        let model = state
+            .apply(
+                update(
+                    Some(cell(id(10, 4), 1)),
+                    Some(AccessibilitySelectionRefs {
+                        start: cell(id(10, 2), 2),
+                        end: cell(id(10, 5), 1),
+                        rectangle: false,
+                    }),
+                ),
+                PresentationGeneration::test(1),
+            )
+            .unwrap();
+        assert_eq!(model.cursor_cell(), None);
+        assert_eq!(model.cursor_range(), 0..0);
+        assert_eq!(model.selection_range(), None);
+        assert!(model.selection_refs().is_none());
     }
 
     #[test]

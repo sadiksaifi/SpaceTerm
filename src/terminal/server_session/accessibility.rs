@@ -872,6 +872,85 @@ mod tests {
         );
     }
 
+    /// Binds a document of `retained` rows, spread over pages of 100, to one newer Screen and
+    /// returns the allocations and retained-row lookups that re-bind made.
+    fn rebind_cost(retained: usize) -> (crate::terminal::testing::Allocations, usize) {
+        let state = demanded();
+        let fetcher = Fetcher::new(lease());
+        let id = |line: usize| wire::RowId {
+            screen: wire::Screen::Primary,
+            screen_generation: 1,
+            node_serial: 1 + (line / 100) as u64,
+            page_row: (line % 100) as u16,
+        };
+        let cell = |line: usize| wire::CellRef {
+            row: id(line),
+            row_revision: 1,
+            column: 0,
+        };
+        let document = wire::Snapshot {
+            revision: 1,
+            screen: wire::Screen::Primary,
+            screen_generation: 1,
+            topology: (0..retained).map(id).collect(),
+            rows: (0..retained)
+                .map(|line| wire::Row {
+                    id: id(line),
+                    revision: 1,
+                    soft_wrapped: false,
+                    cells: vec![wire::Cell {
+                        text: "x".into(),
+                        column: 0,
+                        width_cells: 1,
+                    }],
+                })
+                .collect(),
+            visible_lines: retained - 24..retained,
+            cursor: Some(cell(retained - 1)),
+            selection: Some(wire::SelectionRefs {
+                start: cell(retained - 2),
+                end: cell(retained - 1),
+                rectangle: false,
+            }),
+        };
+        let first = state
+            .accessibility
+            .lock()
+            .unwrap()
+            .apply(document, PresentationGeneration::default())
+            .unwrap()
+            .unwrap();
+        let next = PresentationGeneration::default().next();
+
+        let before = crate::terminal::accessibility::lookups();
+        let (rebound, allocations) =
+            crate::terminal::testing::count_allocations(|| fetcher.rebind(&state, next));
+        let lookups = crate::terminal::accessibility::lookups() - before;
+
+        let rebound = rebound.expect("a newer Screen republishes the retained document");
+        assert!(rebound.shares_document(&first));
+        assert_eq!(rebound.generation(), next);
+        assert_eq!(rebound.cursor_cell(), Some((retained - 1, 0)));
+        assert_eq!(rebound.selection_range(), first.selection_range());
+        assert!(rebound.selection_range().is_some());
+        (allocations, lookups)
+    }
+
+    #[test]
+    fn a_rebind_costs_the_same_at_any_retained_row_count() {
+        let small = rebind_cost(100);
+        let large = rebind_cost(10_000);
+
+        assert!(
+            small.1 > 0,
+            "the cursor and Selection resolve through lookups"
+        );
+        assert_eq!(
+            small, large,
+            "a re-bind with no changed rows visits no retained rows"
+        );
+    }
+
     #[test]
     fn a_large_document_arrives_one_chunk_per_turn_without_awaiting_output_checks() {
         let state = demanded();
