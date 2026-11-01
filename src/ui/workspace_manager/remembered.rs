@@ -11,6 +11,7 @@
 //! any element handles the input, for presses, scrolling and keys coming up. A key coming up still
 //! arrives after an input method consumed it going down. Keys going down reach a keystroke
 //! interceptor first, because a Shortcut's action runs before any element's own key listener.
+//! Input handlers report composition start through the same capture scope, before key release.
 //! Both listen only while a remembered choice is held. A command chosen from the menu bar reaches the window as an action with
 //! no input event, so the menu adapter reports it through [`crate::app::menu_command_chosen`].
 //! The window's own changes are not input, so they never settle anything.
@@ -361,6 +362,11 @@ impl gpui::Element for PersonInputScope {
             // passes here first.
             let key_up = tell(manager);
             window.on_key_event(move |_: &KeyUpEvent, phase, _, cx| key_up(phase, cx));
+            let composed = tell(manager);
+            window.on_action(
+                std::any::TypeId::of::<spaceterm_ui::InputMethodCompositionStarted>(),
+                move |_, phase, _, cx| composed(phase, cx),
+            );
             let pressed = tell(manager);
             window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| pressed(phase, cx));
             let scrolled = tell(manager);

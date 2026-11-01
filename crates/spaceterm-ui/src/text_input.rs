@@ -74,6 +74,8 @@ actions!(
         FocusNext,
         FocusPrevious,
         ShowCharacterPalette,
+        /// An input method began composing text in the focused input surface.
+        CompositionStarted,
     ]
 );
 
@@ -2056,6 +2058,8 @@ impl EntityInputHandler for TextInput {
             replacement
         };
         if self.composition.is_none() {
+            self.focus_handle
+                .dispatch_action(&CompositionStarted, window, cx);
             self.composition = Some(CompositionState {
                 original: self.buffer.snapshot(),
                 marked_range: marked_range.clone(),
