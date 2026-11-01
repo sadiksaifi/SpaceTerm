@@ -615,13 +615,12 @@ impl RowHasher {
             self.word(u64::from(*byte) | 1 << 56);
             return;
         }
-        let mut chunks = bytes.chunks_exact(7);
-        for chunk in &mut chunks {
+        let (chunks, rest) = bytes.as_chunks::<7>();
+        for chunk in chunks {
             let mut word = [0xff; 8];
             word[..7].copy_from_slice(chunk);
             self.word(u64::from_le_bytes(word));
         }
-        let rest = chunks.remainder();
         let mut word = [0; 8];
         word[..rest.len()].copy_from_slice(rest);
         word[7] = rest.len() as u8;
@@ -766,10 +765,6 @@ fn blank(cell: &CellSnapshot) -> bool {
         && !cell.spacer_tail
         && cell.hyperlink.is_none()
         && StyleFields::of(cell) == StyleFields::DEFAULT
-}
-
-fn style(cell: &CellSnapshot) -> Style {
-    StyleFields::of(cell).style()
 }
 
 /// The cell fields its sent [`Style`] is made of, cheaper to compare than the style.
