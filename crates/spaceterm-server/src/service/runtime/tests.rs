@@ -96,14 +96,19 @@ fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claim
                 Ok(())
             })
             .unwrap();
-            files::create_file(&directory, Path::new("artifact.tar.gz"), &bytes, 0o644).unwrap();
-            files::create_file(
-                &directory,
-                Path::new("artifact.sig"),
-                &std::fs::read(&signature).unwrap(),
-                0o644,
-            )
-            .unwrap();
+            let mut buffer = vec![0; CHUNK];
+            for (name, bytes) in [
+                ("artifact.tar.gz", bytes),
+                ("artifact.sig", std::fs::read(&signature).unwrap()),
+            ] {
+                files::create_file(
+                    &directory,
+                    Path::new(name),
+                    &mut Member::new(&mut bytes.as_slice(), bytes.len() as u64, &mut buffer),
+                    0o644,
+                )
+                .unwrap();
+            }
             assert_eq!(
                 verify(&installation, identity),
                 Err(ServerError::RuntimeUnavailable)
@@ -988,5 +993,161 @@ fn native_update_inspection_accepts_a_signed_new_major_without_weakening_pins() 
             );
         },
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Counts the heap bytes a measured thread holds, so a test can read the peak a call adds.
+struct Measured;
+thread_local! {
+    static MEASURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LIVE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static PEAK: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+fn record(change: isize) {
+    let _ = MEASURING.try_with(|measuring| {
+        if measuring.get() {
+            let live = LIVE.get() + change;
+            LIVE.set(live);
+            PEAK.set(PEAK.get().max(live));
+        }
+    });
+}
+// SAFETY: every call forwards to the system allocator unchanged and only counts sizes.
+unsafe impl std::alloc::GlobalAlloc for Measured {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let pointer = unsafe { std::alloc::System.alloc(layout) };
+        if !pointer.is_null() {
+            record(layout.size() as isize);
+        }
+        pointer
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let pointer = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            record(layout.size() as isize);
+        }
+        pointer
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) };
+        record(-(layout.size() as isize));
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        let moved = unsafe { std::alloc::System.realloc(pointer, layout, size) };
+        if !moved.is_null() {
+            record(size as isize - layout.size() as isize);
+        }
+        moved
+    }
+}
+#[global_allocator]
+static MEASURED: Measured = Measured;
+
+/// The most heap `run` holds at once on this thread beyond what it started with.
+fn peak_transient<T>(run: impl FnOnce() -> T) -> (T, usize) {
+    LIVE.set(0);
+    PEAK.set(0);
+    MEASURING.set(true);
+    let result = run();
+    MEASURING.set(false);
+    (result, PEAK.get().max(0) as usize)
+}
+
+/// Bytes that deflate can't shrink, so the archive grows with the executable.
+fn incompressible(size: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    (0..size)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+/// Retains a signed fixture whose native executable holds `executable` bytes.
+fn installation_with_executable(root: &Path, executable: Vec<u8>) -> PathBuf {
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            let main = format!(
+                "server/{}",
+                Layout::host("spaceterm-development")
+                    .unwrap()
+                    .executable()
+                    .display()
+            );
+            rewrite(archive, signature, |entries| {
+                entries
+                    .iter_mut()
+                    .find(|(name, _, _)| *name == main)
+                    .unwrap()
+                    .1 = executable.clone();
+            });
+            provision(
+                &root.join("installations"),
+                "spaceterm-development",
+                archive,
+                signature,
+                target(),
+                COMMIT,
+                VERSION,
+            )
+            .unwrap()
+            .directory
+        },
+    )
+}
+
+#[test]
+fn verification_holds_the_same_transient_memory_for_any_package_size() {
+    const SMALL: usize = 1024 * 1024;
+    const LARGE: usize = 8 * SMALL;
+    let mut peaks = Vec::new();
+    for size in [SMALL, LARGE] {
+        let root = temporary();
+        let installation = installation_with_executable(&root, incompressible(size));
+        let (result, peak) = test_support::with_fixture_trust(|| {
+            peak_transient(|| verify(&installation, "spaceterm-development"))
+        });
+        assert_eq!(result, Ok(()));
+        eprintln!("verification of a {size}-byte executable held at most {peak} heap bytes");
+        peaks.push(peak);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    let (small, large) = (peaks[0], peaks[1]);
+    assert!(
+        small < SMALL,
+        "verification held {small} bytes, as much as a whole {SMALL}-byte file"
+    );
+    assert!(
+        large <= small + 4096,
+        "verification held {large} bytes for an {LARGE}-byte executable and {small} for {SMALL}"
+    );
+}
+
+#[test]
+fn verification_compares_installed_files_to_their_last_byte() {
+    let root = temporary();
+    let signed = incompressible(1024 * 1024 + 1);
+    let installation = installation_with_executable(&root, signed.clone());
+    let executable = installation.join(Layout::host("spaceterm-development").unwrap().executable());
+    let check =
+        || test_support::with_fixture_trust(|| verify(&installation, "spaceterm-development"));
+    assert_eq!(check(), Ok(()));
+    let mut changed = signed.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    std::fs::write(&executable, &changed).unwrap();
+    assert_eq!(check(), Err(ServerError::RuntimeUnavailable));
+    let mut longer = signed.clone();
+    longer.push(0);
+    std::fs::write(&executable, &longer).unwrap();
+    assert_eq!(check(), Err(ServerError::RuntimeUnavailable));
+    std::fs::write(&executable, &signed[..signed.len() - 1]).unwrap();
+    assert_eq!(check(), Err(ServerError::RuntimeUnavailable));
+    std::fs::write(&executable, &signed).unwrap();
+    assert_eq!(check(), Ok(()));
     std::fs::remove_dir_all(root).unwrap();
 }

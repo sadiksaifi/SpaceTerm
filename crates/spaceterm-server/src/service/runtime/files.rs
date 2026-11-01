@@ -1,4 +1,4 @@
-//! Descriptor-relative creation, publication and cleanup beneath the installation lock.
+//! Descriptor-relative creation, mapping, publication and cleanup of retained installations.
 use super::*;
 use std::{ffi::CStr, os::unix::fs::PermissionsExt};
 
@@ -54,7 +54,7 @@ pub(super) fn store(path: &Path) -> Result<File, ServerError> {
 pub(super) fn create_file(
     directory: &File,
     path: &Path,
-    bytes: &[u8],
+    data: &mut Member<'_>,
     mode: u32,
 ) -> Result<(), ServerError> {
     let parent = create_directories(directory, path.parent().ok_or(ServerError::UnsafeStorage)?)?;
@@ -73,8 +73,10 @@ pub(super) fn create_file(
     }
     // SAFETY: openat returned a fresh owned descriptor.
     let mut file = unsafe { File::from_raw_fd(fd) };
-    file.write_all(bytes)
-        .map_err(|_| ServerError::StorageUnavailable)?;
+    while let Some(piece) = data.next()? {
+        file.write_all(piece)
+            .map_err(|_| ServerError::StorageUnavailable)?;
+    }
     file.set_permissions(std::fs::Permissions::from_mode(mode))
         .map_err(|_| ServerError::StorageUnavailable)?;
     file.sync_all()
@@ -319,4 +321,68 @@ fn remove_tree(parent: &File, name: &CStr, directory: &File) -> Result<(), Serve
     parent
         .sync_all()
         .map_err(|_| ServerError::StorageUnavailable)
+}
+
+/// A read-only private mapping of one retained file. Its pages are file-backed, so reading a
+/// large artifact through it never holds a heap copy of the whole file.
+pub(super) struct Mapped {
+    address: std::ptr::NonNull<libc::c_void>,
+    length: usize,
+}
+impl Mapped {
+    /// Map the single-link regular file at `path` beneath `directory`, opened without following
+    /// links, when it holds between one and `maximum` bytes.
+    ///
+    /// # Errors
+    /// Returns RuntimeUnavailable for another file type, a linked file or an out-of-bounds length;
+    /// StorageUnavailable when the file can't be read or mapped.
+    pub fn open(directory: &File, path: &Path, maximum: u64) -> Result<Self, ServerError> {
+        let file = open_relative(directory, path, false)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.len() == 0
+            || metadata.len() > maximum
+        {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        let length =
+            usize::try_from(metadata.len()).map_err(|_| ServerError::RuntimeUnavailable)?;
+        // SAFETY: a fresh read-only private mapping of a live descriptor at a kernel-chosen address.
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if address == libc::MAP_FAILED {
+            return Err(ServerError::StorageUnavailable);
+        }
+        let address = std::ptr::NonNull::new(address).ok_or(ServerError::StorageUnavailable)?;
+        Ok(Self { address, length })
+    }
+}
+impl std::ops::Deref for Mapped {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // SAFETY: the mapping stays readable for `length` bytes until drop. Retained installation
+        // files are created exclusively and never rewritten or truncated in place; truncation by
+        // another process of this account would end this one with SIGBUS, not expose stale bytes.
+        unsafe { std::slice::from_raw_parts(self.address.as_ptr().cast(), self.length) }
+    }
+}
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        // SAFETY: unmaps exactly the region this value mapped, after its last borrow.
+        unsafe {
+            libc::munmap(self.address.as_ptr(), self.length);
+        }
+    }
 }

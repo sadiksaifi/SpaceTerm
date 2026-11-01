@@ -19,6 +19,8 @@ pub use layout::{Layout, bundle_identifier, bundle_name};
 
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 512 * 1024 * 1024;
+/// Signed entries reach visitors in pieces of at most this many bytes.
+const CHUNK: usize = 64 * 1024;
 #[cfg(target_os = "macos")]
 const TARGET: &str = "aarch64-apple-darwin";
 #[cfg(target_os = "linux")]
@@ -542,7 +544,7 @@ pub(super) fn authenticate(
 /// across majors.
 pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
-    let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
+    let bytes = files::Mapped::open(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
     let signature = read_file(&directory, Path::new("artifact.sig"), 64)?;
     if path.file_name().and_then(|v| v.to_str()) != Some(&digest(&bytes)) {
         return Err(ServerError::RuntimeUnavailable);
@@ -709,11 +711,58 @@ impl Build {
     }
 }
 
+/// One signed archive entry, read in pieces through the parser's fixed buffer.
+pub(super) struct Member<'a> {
+    reader: &'a mut dyn Read,
+    size: u64,
+    remaining: u64,
+    buffer: &'a mut [u8],
+}
+impl<'a> Member<'a> {
+    pub(super) fn new(reader: &'a mut dyn Read, size: u64, buffer: &'a mut [u8]) -> Self {
+        Self {
+            reader,
+            size,
+            remaining: size,
+            buffer,
+        }
+    }
+
+    /// The entry's signed length.
+    pub(super) fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The next piece of the entry, or `None` after its last byte.
+    ///
+    /// # Errors
+    /// Returns RuntimeUnavailable when the archive can't be read or ends before the entry does.
+    pub(super) fn next(&mut self) -> Result<Option<&[u8]>, ServerError> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let wanted = usize::try_from(self.remaining)
+            .unwrap_or(usize::MAX)
+            .min(self.buffer.len());
+        let read = loop {
+            match self.reader.read(&mut self.buffer[..wanted]) {
+                Ok(0) => return Err(ServerError::RuntimeUnavailable),
+                Ok(read) => break read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(ServerError::RuntimeUnavailable),
+            }
+        };
+        self.remaining -= read as u64;
+        Ok(Some(&self.buffer[..read]))
+    }
+}
+
 /// One parser owns the signed layout for both extraction and retained-content verification.
+/// Visitors receive each entry as a [`Member`]; the parser reads whatever a visitor leaves.
 fn contents(
     bytes: &[u8],
     identity: &str,
-    visit: impl FnMut(&Path, bool, u32, &[u8]) -> Result<(), ServerError>,
+    visit: impl FnMut(&Path, bool, u32, &mut Member<'_>) -> Result<(), ServerError>,
 ) -> Result<Build, ServerError> {
     contents_for_target(bytes, identity, TARGET, visit)
 }
@@ -721,8 +770,9 @@ fn contents_for_target(
     bytes: &[u8],
     identity: &str,
     target: &str,
-    mut visit: impl FnMut(&Path, bool, u32, &[u8]) -> Result<(), ServerError>,
+    mut visit: impl FnMut(&Path, bool, u32, &mut Member<'_>) -> Result<(), ServerError>,
 ) -> Result<Build, ServerError> {
+    let mut buffer = vec![0; CHUNK];
     let layout = Layout::for_target(target, identity).ok_or(ServerError::RuntimeUnavailable)?;
     let main = layout.executable();
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
@@ -736,7 +786,7 @@ fn contents_for_target(
         .entries()
         .map_err(|_| ServerError::RuntimeUnavailable)?
     {
-        let item = item.map_err(|_| ServerError::RuntimeUnavailable)?;
+        let mut item = item.map_err(|_| ServerError::RuntimeUnavailable)?;
         let raw = item.path_bytes();
         let path = item
             .path()
@@ -785,20 +835,30 @@ fn contents_for_target(
         if expanded > MAX_EXPANDED || (directory && size != 0) {
             return Err(ServerError::RuntimeUnavailable);
         }
-        let mut signed = Vec::new();
-        item.take(size + 1)
-            .read_to_end(&mut signed)
-            .map_err(|_| ServerError::RuntimeUnavailable)?;
-        if signed.len() as u64 != size {
-            return Err(ServerError::RuntimeUnavailable);
-        }
-        if path == Path::new("build.json") {
-            manifest = Some(Build::parse_for_target(&signed, identity, target)?);
-        }
         if path == main && !directory {
             executable = true;
         }
-        visit(path, directory, mode, &signed)?;
+        if path == Path::new("build.json") {
+            if size > 4096 {
+                return Err(ServerError::RuntimeUnavailable);
+            }
+            let mut signed = Vec::new();
+            let mut member = Member::new(&mut item, size, &mut buffer);
+            while let Some(piece) = member.next()? {
+                signed.extend_from_slice(piece);
+            }
+            manifest = Some(Build::parse_for_target(&signed, identity, target)?);
+            visit(
+                path,
+                directory,
+                mode,
+                &mut Member::new(&mut signed.as_slice(), size, &mut buffer),
+            )?;
+        } else {
+            let mut member = Member::new(&mut item, size, &mut buffer);
+            visit(path, directory, mode, &mut member)?;
+            while member.next()?.is_some() {}
+        }
     }
     let mut required: BTreeSet<PathBuf> = serde_json::from_str::<Vec<PathBuf>>(include_str!(
         "../../../../packaging/server-resources.json"
@@ -835,6 +895,7 @@ fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<Bui
         PathBuf::from("artifact.tar.gz"),
         PathBuf::from("artifact.sig"),
     ]);
+    let mut installed = vec![0; CHUNK];
     let info = contents(bytes, identity, |path, is_directory, mode, signed| {
         if !path.as_os_str().is_empty() {
             let file = open_relative(directory, path, is_directory)?;
@@ -844,8 +905,11 @@ fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<Bui
             if metadata.is_dir() != is_directory || metadata.mode() & 0o7777 != mode {
                 return Err(ServerError::RuntimeUnavailable);
             }
-            if !is_directory && read_file(directory, path, signed.len() as u64)? != signed {
-                return Err(ServerError::RuntimeUnavailable);
+            if !is_directory {
+                if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() != signed.size() {
+                    return Err(ServerError::RuntimeUnavailable);
+                }
+                compare(file, signed, &mut installed)?;
             }
             expected.insert(path.to_owned());
             expected.extend(
@@ -885,6 +949,34 @@ fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<Bui
         return Err(ServerError::RuntimeUnavailable);
     }
     Ok(info)
+}
+/// Compare an installed file with its signed entry piece by piece, through `buffer`.
+fn compare(mut file: File, signed: &mut Member<'_>, buffer: &mut [u8]) -> Result<(), ServerError> {
+    let unread = |error: std::io::Error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            ServerError::RuntimeUnavailable
+        } else {
+            ServerError::StorageUnavailable
+        }
+    };
+    while let Some(piece) = signed.next()? {
+        let installed = &mut buffer[..piece.len()];
+        file.read_exact(installed).map_err(unread)?;
+        if installed != piece {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+    }
+    let after = loop {
+        match file.read(&mut buffer[..1]) {
+            Ok(read) => break read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(ServerError::StorageUnavailable),
+        }
+    };
+    if after != 0 {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    Ok(())
 }
 fn read_file(directory: &File, path: &Path, maximum: u64) -> Result<Vec<u8>, ServerError> {
     bounded(open_relative(directory, path, false)?, maximum)
@@ -1046,6 +1138,7 @@ fn retain(
         }
     } else {
         let prepared = files::Preparation::new(&directory)?;
+        let mut buffer = vec![0; CHUNK];
         contents(bytes, identity, |path, is_directory, mode, data| {
             if is_directory {
                 files::create_directories(&prepared.directory, path)?;
@@ -1054,18 +1147,14 @@ fn retain(
             }
             Ok(())
         })?;
-        files::create_file(
-            &prepared.directory,
-            Path::new("artifact.tar.gz"),
-            bytes,
-            0o644,
-        )?;
-        files::create_file(
-            &prepared.directory,
-            Path::new("artifact.sig"),
-            signature,
-            0o644,
-        )?;
+        for (name, data) in [("artifact.tar.gz", bytes), ("artifact.sig", signature)] {
+            files::create_file(
+                &prepared.directory,
+                Path::new(name),
+                &mut Member::new(&mut &*data, data.len() as u64, &mut buffer),
+                0o644,
+            )?;
+        }
         verify_contents(&prepared.directory, bytes, identity)?;
         let prepared_path = prepared.path(parent);
         verify_directory_path(&prepared.directory, &prepared_path)?;
