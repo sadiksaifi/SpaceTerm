@@ -29,6 +29,7 @@ use effects::ClientEffects;
 use link::encode_key;
 use link::{encode_modifiers, expect_unchanged, submit_input};
 use screen::{ScreenReceiver, clear_presentation, encode_style};
+use spaceterm_server::direct::DirectError;
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
     Arc, Mutex,
@@ -394,6 +395,7 @@ impl ServerPaneState {
                 | ServerError::Controlled
                 | ServerError::ActivationUnresolved
                 | ServerError::ServiceBusy
+                | ServerError::Direct(DirectError::Transport)
         );
         let error = if retryable
             && (error != ServerError::DirectoryUnavailable || self.start_unconfirmed())
@@ -442,6 +444,27 @@ impl ServerPaneState {
         }
         self.changed();
         retryable
+    }
+
+    /// A confirmed inventory proves the shared route is reachable again. Renew only a direct
+    /// transport outage; an identity refusal or exhausted protocol recovery still needs action.
+    fn server_reachable(&self) {
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(
+            *status,
+            ServerPaneStatus::Reconnecting
+                | ServerPaneStatus::TakeoverReconnecting
+                | ServerPaneStatus::Failed(ServerError::Direct(DirectError::Transport))
+                | ServerPaneStatus::TakeoverFailed(ServerError::Direct(DirectError::Transport))
+        ) && self
+            .connection_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .direct_reachable()
+        {
+            self.retry.store(true, Ordering::Release);
+            self.wake.notify();
+        }
     }
     fn set(&self, status: ServerPaneStatus) {
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());

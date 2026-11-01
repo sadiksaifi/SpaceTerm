@@ -101,6 +101,7 @@ impl LinkSink for ControlWatch {
     fn deliver(&self, event: LinkEvent) {
         let changed = match event {
             LinkEvent::Inventory(revision) => {
+                self.state.server_reachable();
                 let facts = ControlFacts::of(&revision.inventory, self.pane);
                 let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
                 (*seen != facts) && {
@@ -479,6 +480,214 @@ mod tests {
             directory_unavailable: false,
             session_ended: None,
         }
+    }
+
+    fn reachable(watch: &ControlWatch) {
+        use spaceterm_server::{hierarchy::Inventory, protocol::InventoryRevision};
+        watch.deliver(LinkEvent::Inventory(Arc::new(InventoryRevision {
+            inventory: Inventory {
+                revision: 1,
+                workspaces: Vec::new(),
+                close: None,
+                repositories: None,
+            },
+            next_sequence: 1,
+        })));
+    }
+
+    /// The exchange double changes reachability without opening a network connection. A long
+    /// outage exhausts the Pane's retries, then the route's confirmed inventory wakes it again.
+    #[test]
+    fn a_paired_pane_reconnects_when_its_server_becomes_reachable() {
+        let state = Arc::new(ServerPaneState::new());
+        let watch = ControlWatch::new(Arc::clone(&state), [2; 32]);
+        // An inventory may confirm reachability without changing this Pane's control facts.
+        reachable(&watch);
+        for attempt in 0..4 {
+            let failure = run_claim(&state, |_| {
+                Err(ServerError::Direct(
+                    spaceterm_server::direct::DirectError::Transport,
+                ))
+            })
+            .err()
+            .unwrap();
+            assert_eq!(state.connection_failed(failure, false), attempt < 3);
+        }
+        assert!(!state.retry.load(Ordering::Acquire));
+        reachable(&watch);
+        assert!(state.retry.swap(false, Ordering::AcqRel));
+        let grant = run_claim(&state, |request| {
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            Ok(Reply::Attached {
+                lease: Lease {
+                    server: [1; 32],
+                    session: [3; 32],
+                    control: [4; 32],
+                    connection: [5; 32],
+                },
+            })
+        })
+        .unwrap()
+        .expect("the existing Terminal Session reconnects without Try Again");
+        assert_eq!(grant.lease.session, [3; 32]);
+    }
+
+    #[test]
+    fn a_paired_pane_recovers_a_restarted_server_without_starting_a_shell() {
+        let state = Arc::new(ServerPaneState::new());
+        let watch = ControlWatch::new(Arc::clone(&state), [2; 32]);
+        let failure = run_claim(&state, |_| {
+            Err(ServerError::Direct(
+                spaceterm_server::direct::DirectError::Transport,
+            ))
+        })
+        .err()
+        .unwrap();
+        assert!(state.connection_failed(failure, false));
+        reachable(&watch);
+        assert!(state.retry.swap(false, Ordering::AcqRel));
+
+        use crate::ui::server_pane::{DormantCopy, ServerPaneScreen, ServerPaneView};
+        let alive = AtomicBool::new(true);
+        let mut view = ServerPaneView::new(state.clone());
+        let mut starts = 0;
+        let mut passive_after_decision = 0;
+        // The inventory wake lets the claim pass its no-start decision and observe once more.
+        state.wake.notify();
+        let grant = ClaimWorker {
+            state: &state,
+            pane_id: [2; 32],
+            alive: &alive,
+            attachment: &None,
+            size: &Mutex::new(PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 16,
+            }),
+            appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
+            attached_session: &mut true,
+            takeover: &mut false,
+            paste_unconfirmed: &mut false,
+        }
+        .run(
+            |request| {
+                match request {
+                    Request::SelectPane {
+                        explicit: false,
+                        style,
+                        ..
+                    } => {
+                        if style.is_none() {
+                            passive_after_decision += 1;
+                            view.sync();
+                            assert_eq!(
+                                view.screen(),
+                                Some(ServerPaneScreen::Restored {
+                                    starting: false,
+                                    unconfirmed: false,
+                                    offered: true,
+                                    ended: None,
+                                })
+                            );
+                            let Some(ServerPaneScreen::Restored { ended, .. }) = view.screen()
+                            else {
+                                unreachable!()
+                            };
+                            let copy = DormantCopy::of(ended);
+                            assert_eq!(
+                                (copy.title, copy.label),
+                                ("Server Restarted", "Start Session")
+                            );
+                            // Teardown only after the live claim chose observation over Start.
+                            alive.store(false, Ordering::Release);
+                        }
+                    }
+                    Request::StartRestored { .. } | Request::SelectPane { explicit: true, .. } => {
+                        starts += 1;
+                        alive.store(false, Ordering::Release);
+                    }
+                    _ => panic!("reconnection must only observe the Pane"),
+                }
+                exchange(&state, [2; 32], request, |_| Ok(restored(9)))
+            },
+            || {},
+        )
+        .unwrap();
+        assert!(grant.is_none());
+        assert_eq!(starts, 0, "reachability authorized a replacement shell");
+        assert_eq!(passive_after_decision, 1);
+        assert_eq!(state.status(), ServerPaneStatus::Restored);
+    }
+
+    #[test]
+    fn a_paired_transport_loss_keeps_a_start_unconfirmed_until_passive_recovery() {
+        let state = Arc::new(ServerPaneState::new());
+        let size = PaneSize {
+            columns: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        exchange(
+            &state,
+            [2; 32],
+            &Request::SelectPane {
+                pane: [2; 32],
+                explicit: false,
+                size,
+                style: None,
+            },
+            |_| Ok(restored(1)),
+        )
+        .unwrap();
+        let lost = ServerError::Direct(DirectError::Transport);
+        let result = exchange(
+            &state,
+            [2; 32],
+            &Request::StartRestored {
+                server: [1; 32],
+                pane: [2; 32],
+                size,
+                style: None,
+            },
+            |_| Err(lost),
+        );
+        assert_eq!(result.err(), Some(lost));
+        assert!(
+            state.start_unconfirmed(),
+            "a transport loss forgot the submitted shell start"
+        );
+        assert!(state.connection_failed(lost, false));
+        reachable(&ControlWatch::new(Arc::clone(&state), [2; 32]));
+        assert!(state.retry.swap(false, Ordering::AcqRel));
+        let grant = run_claim(&state, |request| {
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            Ok(Reply::Attached {
+                lease: Lease {
+                    server: [1; 32],
+                    session: [3; 32],
+                    control: [4; 32],
+                    connection: [5; 32],
+                },
+            })
+        })
+        .unwrap()
+        .expect("passive observation resolves the original successful start");
+        assert_eq!(grant.lease.session, [3; 32]);
+        assert!(!state.start_unconfirmed());
     }
 
     #[test]

@@ -6,15 +6,23 @@ use spaceterm_server::connection::carrier::{
     Carrier, CarrierError, Flush, Offer, Priority, Readiness,
 };
 use spaceterm_server::connection::io;
-use spaceterm_server::connection::link::{LinkEvent, LinkSink};
+use spaceterm_server::connection::link::LinkSink;
 use spaceterm_server::connection::loopback::Loopback;
 use spaceterm_server::connection::outbox::Outbox;
 use spaceterm_server::connection::server::AdmittedConnection;
 use spaceterm_server::connection::service::{Peer, SharedPaneService};
 use spaceterm_server::connection::sync::SyncWorker;
-use spaceterm_server::protocol::RawFrame;
+use spaceterm_server::protocol::{self, RawFrame};
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
+
+#[derive(Default)]
+struct StartReplyLoss {
+    armed: AtomicBool,
+    starts: AtomicUsize,
+    accepted: Mutex<Option<[u8; 32]>>,
+    observed: Mutex<Vec<[u8; 32]>>,
+}
 
 /// Frames and bytes on one connection, in each direction.
 #[derive(Default)]
@@ -44,11 +52,42 @@ impl Traffic {
 struct Counting {
     inner: Loopback,
     traffic: Arc<Traffic>,
+    start_loss: Arc<StartReplyLoss>,
+    requests: protocol::frame::Assembler,
+    starting: Option<protocol::RequestId>,
 }
 
 impl Carrier for Counting {
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
+        // Claim replies fit one frame. Lose the accepted start's reply at the carrier,
+        // after the real host created its Session and before the worker can confirm it.
+        let raw = RawFrame::parse(frame)?;
+        let attached = if raw.kind == protocol::frame::Kind::Reply as u8 {
+            match protocol::frame::Assembler::default().server(raw)? {
+                Some(protocol::ServerMessage::Reply(reply)) => match reply.result {
+                    Ok(protocol::ReplyBody::Claim(protocol::ClaimReply::Attached { lease })) => {
+                        if self.starting == Some(reply.id)
+                            && self.start_loss.armed.swap(false, Ordering::AcqRel)
+                        {
+                            *self.start_loss.accepted.lock().unwrap() = Some(lease.session);
+                            self.inner.close();
+                            return Err(CarrierError::Closed);
+                        }
+                        Some(lease.session)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
         let offer = self.inner.offer(frame, priority)?;
+        if offer == Offer::Accepted
+            && let Some(session) = attached
+        {
+            self.start_loss.observed.lock().unwrap().push(session);
+        }
         if offer == Offer::Accepted {
             self.traffic.server_frames.fetch_add(1, Ordering::SeqCst);
             self.traffic
@@ -63,6 +102,15 @@ impl Carrier for Counting {
     fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
         let frame = self.inner.receive()?;
         if let Some(frame) = &frame {
+            if let Some(protocol::ClientMessage::Request(request)) =
+                self.requests.client(frame.clone())?
+                && matches!(&request.operation, protocol::Operation::Claim(claim)
+                    if matches!(claim.claim, pane::AttachmentClaim::Start { .. }
+                        | pane::AttachmentClaim::Select { explicit: true }))
+            {
+                self.start_loss.starts.fetch_add(1, Ordering::SeqCst);
+                self.starting = Some(request.id);
+            }
             self.traffic.client_frames.fetch_add(1, Ordering::SeqCst);
             // The length prefix and the kind byte, then the body.
             self.traffic
@@ -79,12 +127,8 @@ impl Carrier for Counting {
     }
 }
 
-struct Ignore;
-impl LinkSink for Ignore {
-    fn deliver(&self, _: LinkEvent) {}
-}
-
 type Bell = Arc<(Mutex<bool>, std::sync::Condvar)>;
+type Stops = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
 fn ring(bell: &Bell) {
     *bell.0.lock().unwrap() = true;
@@ -127,11 +171,17 @@ fn ticking(
 pub(crate) struct ConnectedPane {
     pub(crate) factory: ServerSessionFactory,
     traffic: Arc<Traffic>,
+    start_loss: Arc<StartReplyLoss>,
     stop: Option<Box<dyn FnOnce()>>,
+    reconnect: Box<dyn Fn() -> spaceterm_server::connection::link::ServerLink>,
 }
 
 impl ConnectedPane {
     pub(crate) fn new() -> Self {
+        Self::with_connection(ServerConnection::for_identity("spaceterm-development").unwrap())
+    }
+
+    fn with_connection(connection: ServerConnection) -> Self {
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
         let Reply::Inventory { inventory, .. } = host.request([1; 32], [1; 32], Request::Inventory)
@@ -140,7 +190,21 @@ impl ConnectedPane {
         };
         let workspace = inventory.workspaces[0].id;
         let pane_id = inventory.workspaces[0].tabs[0].root_pane;
+        let attachments = spaceterm_server::attachments::Attachments::memory();
+        attachments.initialize(&inventory, Some(workspace)).unwrap();
+        let permit = attachments.permit(pane_id).unwrap();
+        let controls = PaneControls::default();
+        let (factory, state) = ServerSessionFactory::for_pane(
+            connection.clone(),
+            &controls,
+            crate::platform::runtime_local_filesystem(),
+            pane_id,
+        );
+        state.start_created();
+        let watch = claim::ControlWatch::new(Arc::clone(&state), pane_id);
+        let factory = factory.with_attachment(permit);
         let traffic = Arc::new(Traffic::default());
+        let start_loss = Arc::new(StartReplyLoss::default());
         let service: SharedPaneService = Arc::new(Mutex::new(Box::new(Served::new(host))));
         let running = Arc::new(AtomicBool::new(true));
         let bell = Bell::default();
@@ -149,65 +213,236 @@ impl ConnectedPane {
             Arc::clone(&running),
             Arc::clone(&bell),
         );
-
-        let (client, server) = Loopback::pair(1 << 20).unwrap();
-        let server = Counting {
-            inner: server,
-            traffic: Arc::clone(&traffic),
-        };
-        let (waker, wake) = io::Waker::new().unwrap();
-        let outbox = Outbox::new(Arc::clone(&wake));
-        let peer = Peer {
-            client: [1; 32],
-            connection: [1; 32],
-            pairing: None,
-        };
-        service
-            .lock()
-            .unwrap()
-            .admitted(&peer, "Test".into(), outbox.clone());
-        let (sync, _sync_thread) = SyncWorker::spawn().unwrap();
-        let stopping = Arc::new(AtomicBool::new(false));
-        let serving = {
-            let (service, stopping) = (Arc::clone(&service), Arc::clone(&stopping));
-            std::thread::spawn(move || {
-                let connection = AdmittedConnection::new(peer, outbox, sync, None, Instant::now());
-                io::serve(Box::new(server), connection, &waker, &service, &stopping);
-            })
-        };
-        let link = io::spawn_link(Box::new(client), Arc::new(Ignore)).unwrap();
-        let connection = ServerConnection::for_identity("spaceterm-development").unwrap();
-        connection.adopt(link.clone());
-
-        let attachments = spaceterm_server::attachments::Attachments::memory();
-        attachments.initialize(&inventory, Some(workspace)).unwrap();
-        let permit = attachments
-            .permit(pane_id)
-            .expect("an attached Pane has a permit");
-        let controls = PaneControls::default();
-        let (factory, state) = ServerSessionFactory::for_pane(
-            connection,
-            &controls,
-            crate::platform::runtime_local_filesystem(),
-            pane_id,
-        );
-        state.start_created();
-        let factory = factory.with_attachment(permit);
+        let stops = Stops::default();
+        let reconnect = Box::new({
+            let (service, traffic, stops) = (
+                Arc::clone(&service),
+                Arc::clone(&traffic),
+                Arc::clone(&stops),
+            );
+            let start_loss = Arc::clone(&start_loss);
+            let count = AtomicUsize::new(0);
+            move || {
+                let (client, server) = Loopback::pair(1 << 20).unwrap();
+                let server = Counting {
+                    inner: server,
+                    traffic: Arc::clone(&traffic),
+                    start_loss: Arc::clone(&start_loss),
+                    requests: protocol::frame::Assembler::default(),
+                    starting: None,
+                };
+                let (waker, wake) = io::Waker::new().unwrap();
+                let outbox = Outbox::new(Arc::clone(&wake));
+                let mut id = [1; 32];
+                id[..8]
+                    .copy_from_slice(&(count.fetch_add(1, Ordering::SeqCst) as u64).to_le_bytes());
+                let peer = Peer {
+                    client: [1; 32],
+                    connection: id,
+                    pairing: None,
+                };
+                service
+                    .lock()
+                    .unwrap()
+                    .admitted(&peer, "Test".into(), outbox.clone());
+                let (sync, _sync_thread) = SyncWorker::spawn().unwrap();
+                let stopping = Arc::new(AtomicBool::new(false));
+                // Adopt before serving, so an inventory wake can only find this admitted link.
+                let events = Arc::downgrade(&watch);
+                let link = io::spawn_link(
+                    Box::new(client),
+                    Arc::new(move |event| {
+                        if let Some(watch) = events.upgrade() {
+                            watch.deliver(event);
+                        }
+                    }),
+                )
+                .unwrap();
+                connection.adopt(link.clone());
+                let serving = {
+                    let (service, stopping) = (Arc::clone(&service), Arc::clone(&stopping));
+                    std::thread::spawn(move || {
+                        let admitted =
+                            AdmittedConnection::new(peer, outbox, sync, None, Instant::now());
+                        io::serve(Box::new(server), admitted, &waker, &service, &stopping);
+                    })
+                };
+                let closed = link.clone();
+                stops.lock().unwrap().push(Box::new(move || {
+                    stopping.store(true, Ordering::Release);
+                    wake.wake();
+                    closed.close();
+                    serving.join().unwrap();
+                }));
+                link
+            }
+        });
+        reconnect();
         Self {
             factory,
             traffic,
+            start_loss,
+            reconnect,
             stop: Some(Box::new(move || {
                 running.store(false, Ordering::Release);
                 ring(&bell);
-                stopping.store(true, Ordering::Release);
-                wake.wake();
-                link.close();
-                let _ = serving.join();
-                let _ = ticks.join();
+                for stop in std::mem::take(&mut *stops.lock().unwrap()) {
+                    stop();
+                }
+                ticks.join().unwrap();
                 service.lock().unwrap().shutdown().unwrap();
             })),
         }
     }
+}
+
+pub(crate) fn paired_connection(
+    connector: Arc<dyn spaceterm_server::direct::DirectConnector>,
+) -> ServerConnection {
+    use spaceterm_server::direct::{PairedDevice, ServerPin};
+    ServerConnection::direct(
+        "spaceterm-development",
+        [4; 32],
+        PairedDevice {
+            pin: ServerPin {
+                build: "spaceterm-development".into(),
+                server: [9; 32],
+                public_key: [2; 32],
+                certificate: [3; 32],
+            },
+            pairing: [5; 32],
+            client: [1; 32],
+        },
+        connector,
+    )
+    .unwrap()
+}
+
+fn await_status(state: &ServerPaneState, expected: ServerPaneStatus) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.status() != expected {
+        assert!(
+            Instant::now() < until,
+            "expected {expected:?}, got {:?}",
+            state.status()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_live_paired_pane_recovers_after_transport_loss() {
+    use spaceterm_server::connection::link::LinkError;
+    use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
+    struct Away;
+    impl DirectConnector for Away {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            Err(DirectError::Transport)
+        }
+    }
+    for lost in [
+        LinkError::Closed,
+        LinkError::Unresponsive,
+        LinkError::Stalled,
+    ] {
+        let server = ConnectedPane::with_connection(paired_connection(Arc::new(Away)));
+        let state = Arc::clone(&server.factory.state);
+        let started = server
+            .factory
+            .start(
+                *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+                TerminalAppearanceUpdate::builtin().unwrap(),
+            )
+            .unwrap();
+        await_status(&state, ServerPaneStatus::Connected);
+        let generation = state.connection_generation();
+        let link = server.factory.server.link().unwrap();
+        link.fail(lost);
+        let expected = ServerPaneStatus::Failed(ServerError::Direct(DirectError::Transport));
+        let until = Instant::now() + Duration::from_secs(8);
+        while !matches!(state.status(), ServerPaneStatus::Failed(_)) {
+            assert!(
+                Instant::now() < until,
+                "the outage never exhausted recovery"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(state.status(), expected, "live loss {lost:?}");
+        (server.reconnect)();
+        await_status(&state, ServerPaneStatus::Connected);
+        assert!(state.connection_generation() > generation);
+        drop(started);
+    }
+}
+
+/// Exercise classification before the worker records a submitted start's outcome. Losing the
+/// real host's accepted reply must not become a protocol-recovery episode or a second start.
+#[test]
+fn a_paired_worker_recovers_the_original_session_after_losing_its_start_reply() {
+    use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
+    struct Away;
+    impl DirectConnector for Away {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            Err(DirectError::Transport)
+        }
+    }
+    let server = ConnectedPane::with_connection(paired_connection(Arc::new(Away)));
+    server.start_loss.armed.store(true, Ordering::Release);
+    let state = Arc::clone(&server.factory.state);
+    let started = server
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !matches!(state.status(), ServerPaneStatus::Failed(_)) {
+        assert!(
+            Instant::now() < until,
+            "the lost start did not exhaust recovery"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let original = server
+        .start_loss
+        .accepted
+        .lock()
+        .unwrap()
+        .expect("the host accepted a start before its reply was lost");
+    assert_eq!(server.start_loss.starts.load(Ordering::SeqCst), 1);
+    assert!(
+        state.start_unconfirmed(),
+        "the lost reply must leave the original start unconfirmed"
+    );
+    assert_eq!(
+        state.status(),
+        ServerPaneStatus::Failed(ServerError::Direct(DirectError::Transport)),
+        "transport classification must happen before claim bookkeeping"
+    );
+    assert!(
+        server.start_loss.observed.lock().unwrap().is_empty(),
+        "no successful claim reply reached the old link"
+    );
+
+    (server.reconnect)();
+    await_status(&state, ServerPaneStatus::Connected);
+    assert!(!state.start_unconfirmed());
+    assert_eq!(
+        server.start_loss.starts.load(Ordering::SeqCst),
+        1,
+        "recovery must not submit a second shell start"
+    );
+    let observed = server.start_loss.observed.lock().unwrap();
+    assert!(
+        !observed.is_empty(),
+        "recovery must observe a running Session"
+    );
+    assert!(
+        observed.iter().all(|session| *session == original),
+        "recovery must find the original Session"
+    );
+    drop(started);
 }
 
 impl Drop for ConnectedPane {

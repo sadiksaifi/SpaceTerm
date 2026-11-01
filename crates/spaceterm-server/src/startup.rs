@@ -58,8 +58,10 @@ impl LocalStartup {
                 return Ok(StartupOutcome::Stopped);
             }
             let deadline = Instant::now() + Duration::from_secs(5);
+            // Launch has admitted the service operation. Observe its result even if the
+            // initiating presentation has since closed; cancellation cannot undo that Start.
             let status = loop {
-                match self.server.refresh_cancellable(&cancelled) {
+                match self.server.refresh() {
                     Err(ServerError::NotRunning) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(20));
                     }

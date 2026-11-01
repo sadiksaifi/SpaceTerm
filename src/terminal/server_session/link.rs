@@ -1287,6 +1287,30 @@ pub(super) fn expect_unchanged(reply: Reply) -> Result<(), ServerError> {
     }
 }
 
+/// Keep paired transport losses distinct from protocol violations before recovery records an
+/// operation's outcome. Local IPC retains its existing error classification.
+fn connection_failure(
+    server: &ServerConnection,
+    link: Option<&ServerLink>,
+    error: ServerError,
+) -> ServerError {
+    if error == ServerError::Protocol
+        && !server.is_account_local()
+        && link.is_some_and(|link| {
+            matches!(
+                link.health(),
+                spaceterm_server::connection::link::Health::Closed(
+                    LinkError::Closed | LinkError::Unresponsive | LinkError::Stalled
+                )
+            )
+        })
+    {
+        ServerError::Direct(DirectError::Transport)
+    } else {
+        error
+    }
+}
+
 pub(super) fn present(
     factory: ServerSessionFactory,
     (reservation, alive): (control::Reservation, Arc<AtomicBool>),
@@ -1320,8 +1344,18 @@ pub(super) fn present(
             return;
         }
         state.retry.store(false, Ordering::Release);
+        let mut connected_link = None;
         let connected = (|| {
-            let link = server.link_cancellable(&|| !alive.load(Ordering::Acquire))?;
+            let link = if server.is_account_local() {
+                server.link_cancellable(&|| !alive.load(Ordering::Acquire))?
+            } else {
+                // The saved route owns paired dials and their backoff. A Pane neither dials
+                // nor queues behind the owner, and can close while its probe is in flight.
+                server
+                    .live_link()
+                    .ok_or(ServerError::Direct(DirectError::Transport))?
+            };
+            connected_link = Some(link.clone());
             let mut connection = PaneLink::new(link, attachment.clone(), {
                 let state = Arc::clone(&state);
                 Arc::new(move || state.wake.notify())
@@ -1350,7 +1384,9 @@ pub(super) fn present(
                         // Complete recovery bookkeeping before another presentation can send.
                         // No Recovery lock is held while exchanging with the server.
                         claim::exchange(&state, pane_id, request, |request| {
-                            connection.exchange(request)
+                            connection.exchange(request).map_err(|error| {
+                                connection_failure(&server, connected_link.as_ref(), error)
+                            })
                         })
                     })
                 },
@@ -1733,6 +1769,7 @@ pub(super) fn present(
             // A successor owns this Pane's state now; leave it untouched.
             Err(_) if !alive.load(Ordering::Acquire) || !presenter.current() => return,
             Err(error) => {
+                let error = connection_failure(&server, connected_link.as_ref(), error);
                 // A missing old Session does not mean its retained Pane was removed. Reconcile
                 // by Pane identity before deciding, even after several End All operations.
                 let error = if error == ServerError::SessionUnavailable
