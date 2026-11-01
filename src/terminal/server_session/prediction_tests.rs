@@ -42,7 +42,7 @@ const CONTROL: u16 = 1 << 2;
 
 fn blank() -> CellSnapshot {
     CellSnapshot {
-        text: " ".to_owned(),
+        text: " ".into(),
         foreground_source: TerminalColor::Default,
         background_source: TerminalColor::Default,
         inverse: false,
@@ -71,7 +71,7 @@ fn screen(lines: &[&str]) -> Arc<ScreenSnapshot> {
             let mut cells: Vec<_> = line
                 .chars()
                 .map(|character| CellSnapshot {
-                    text: character.to_string(),
+                    text: character.to_string().into(),
                     ..blank()
                 })
                 .collect();

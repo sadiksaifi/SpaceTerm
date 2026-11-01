@@ -167,7 +167,7 @@ impl TerminalEmulator {
             let cell = reference.cell()?;
             let style = reference.style()?;
             let spacer_tail = cell.wide()? == CellWide::SpacerTail;
-            let mut text = String::new();
+            let mut text = CellText::default();
             if !spacer_tail && cell.has_text()? {
                 let count = match reference.graphemes(&mut graphemes) {
                     Ok(count) => count,
@@ -177,10 +177,10 @@ impl TerminalEmulator {
                     }
                     Err(error) => return Err(error),
                 };
-                text.extend(&graphemes[..count]);
+                text = graphemes[..count].iter().copied().collect();
             }
             if text.is_empty() {
-                text.push(' ');
+                text = CellText::new_inline(" ");
             }
             let background_source = match cell.content_tag()? {
                 CellContentTag::BgColorPalette => {
