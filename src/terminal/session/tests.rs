@@ -3918,16 +3918,25 @@ fn synchronized_output_publishes_a_line_mode_change_within_100_ms() {
     assert!(worker.publish_screen());
     count_screens(&receiver);
     assert!(worker.feed_test_output(vec![b"\x1b[?2026h".to_vec()]));
-    let changed = start + Duration::from_millis(300);
+    let mut last_read = None;
+    let mut changed = None;
     let mut published = None;
-    for tick in 1..=20 {
-        let now = start + Duration::from_millis(tick * 50);
-        if now == changed {
+    for tick in 1..=200 {
+        let now = start + Duration::from_millis(tick * 10);
+        // Change the mode one tick after a paced read, so the next paced read must publish it.
+        if changed.is_none()
+            && last_read.is_some_and(|read| read >= start + Duration::from_millis(300))
+        {
             records.update(|state| state.line_mode = PASSWORD);
+            changed = Some(now);
         }
         worker.schedules.fix_clock(now);
+        let reads = records.snapshot().line_reads;
         assert!(worker.feed_test_output(vec![b"Password: ".to_vec()]));
         run_due_commands(&mut worker, now);
+        if records.snapshot().line_reads > reads {
+            last_read = Some(now);
+        }
         if published.is_none() && worker.events.line().mode == PASSWORD {
             published = Some(now);
         }
@@ -3937,14 +3946,15 @@ fn synchronized_output_publishes_a_line_mode_change_within_100_ms() {
         0,
         "synchronized output holds frames"
     );
+    let changed = changed.expect("a paced read must happen while frames are held");
     let published = published.expect("the mode change must be published while frames are held");
     assert!(
         published - changed <= Duration::from_millis(100),
         "published {:?} after the change",
         published - changed
     );
-    // Held frames read at most once per 100 ms.
-    assert!(records.snapshot().line_reads - 1 <= 10);
+    // Held frames read at most once per 100 ms over 2 s.
+    assert!(records.snapshot().line_reads - 1 <= 20);
     worker.finish();
 }
 
