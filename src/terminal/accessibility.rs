@@ -294,8 +294,8 @@ impl AccessibilityRow {
 
 #[derive(Debug)]
 struct AccessibilityRowBlock {
-    screen_generation: usize,
-    node_serial: u64,
+    /// The Screen generation and node serial its rows share, read through `key`.
+    page: (usize, u64),
     rows: Arc<[Arc<AccessibilityRow>]>,
     /// Local row indices ordered by page row, then by position, so an identity resolves to its
     /// first row in document order without visiting the block.
@@ -320,15 +320,14 @@ impl AccessibilityRowBlock {
             }
             utf16_prefix.push(len_utf16);
         }
-        let (screen_generation, node_serial) = rows
+        let page = rows
             .first()
             .map(|row| (row.id.screen_generation, row.id.node_serial))
             .unwrap_or_default();
         let mut by_page_row = (0..rows.len()).collect::<Vec<_>>();
         by_page_row.sort_unstable_by_key(|local| (rows[*local].id.page_row, *local));
         Arc::new(Self {
-            screen_generation,
-            node_serial,
+            page,
             rows: Arc::from(rows),
             by_page_row: by_page_row.into_boxed_slice(),
             utf16_prefix: Arc::from(utf16_prefix),
@@ -336,14 +335,24 @@ impl AccessibilityRowBlock {
         })
     }
 
+    /// The page this block's rows belong to. Every read counts as one identity-search probe.
+    fn key(&self) -> (usize, u64) {
+        count_probe();
+        self.page
+    }
+
     fn local_row(&self, id: AccessibilityRowId) -> Option<usize> {
+        let page_row = |local: usize| {
+            count_probe();
+            self.rows[local].id.page_row
+        };
         let first = self
             .by_page_row
-            .partition_point(|local| self.rows[*local].id.page_row < id.page_row);
+            .partition_point(|local| page_row(*local) < id.page_row);
         self.by_page_row[first..]
             .iter()
             .copied()
-            .take_while(|local| self.rows[*local].id.page_row == id.page_row)
+            .take_while(|local| page_row(*local) == id.page_row)
             .find(|local| self.rows[*local].id == id)
     }
 
@@ -508,12 +517,8 @@ impl AccessibilityDocument {
     }
 
     fn row_for_id(&self, id: AccessibilityRowId) -> Option<(usize, &AccessibilityRow)> {
-        count_lookup();
         let key = (id.screen_generation, id.node_serial);
-        let block_key = |block_index: &usize| {
-            let block = &self.blocks[*block_index];
-            (block.screen_generation, block.node_serial)
-        };
+        let block_key = |block_index: &usize| self.blocks[*block_index].key();
         let first = self
             .blocks_by_key
             .partition_point(|block_index| block_key(block_index) < key);
@@ -1205,23 +1210,23 @@ impl TerminalAccessibilityModel {
 
 #[cfg(test)]
 thread_local! {
-    static LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Retained-row and row-identity lookups this thread has made, so a test can prove that a
-/// re-bind visits no retained rows.
+/// Retained-row map lookups plus row blocks and rows that row-identity searches visited on this
+/// thread, so a test can prove that a re-bind's cost does not follow the retained row count.
 #[cfg(test)]
 #[cfg_attr(
     not(feature = "desktop"),
     allow(dead_code, reason = "the re-bind cost test drives the desktop client")
 )]
-pub(crate) fn lookups() -> usize {
-    LOOKUPS.with(std::cell::Cell::get)
+pub(crate) fn probes() -> usize {
+    PROBES.with(std::cell::Cell::get)
 }
 
-fn count_lookup() {
+fn count_probe() {
     #[cfg(test)]
-    LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+    PROBES.with(|probes| probes.set(probes.get() + 1));
 }
 
 /// The retained rows of one screen, keyed by identity.
@@ -1230,13 +1235,13 @@ struct RetainedRows(BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>);
 
 impl RetainedRows {
     fn get(&self, id: &AccessibilityRowId) -> Option<&Arc<AccessibilityRow>> {
-        count_lookup();
+        count_probe();
         self.0.get(id)
     }
 
     #[cfg(feature = "desktop")]
     fn contains_key(&self, id: &AccessibilityRowId) -> bool {
-        count_lookup();
+        count_probe();
         self.0.contains_key(id)
     }
 
@@ -1490,12 +1495,7 @@ fn build_document(
     let previous_blocks = previous
         .into_iter()
         .flat_map(|document| document.blocks.iter())
-        .map(|block| {
-            (
-                (block.screen_generation, block.node_serial),
-                Arc::clone(block),
-            )
-        })
+        .map(|block| (block.key(), Arc::clone(block)))
         .collect::<BTreeMap<_, _>>();
     let last_row = topology.len() - 1;
     let mut row_start = 0_usize;
@@ -1513,8 +1513,8 @@ fn build_document(
     }
     let mut blocks_by_key = (0..blocks.len()).collect::<Vec<_>>();
     blocks_by_key.sort_unstable_by_key(|block_index| {
-        let block = &blocks[*block_index];
-        (block.screen_generation, block.node_serial, *block_index)
+        let (screen_generation, node_serial) = blocks[*block_index].key();
+        (screen_generation, node_serial, *block_index)
     });
     let mut block_row_prefix = Vec::with_capacity(blocks.len() + 1);
     let mut block_utf16_prefix = Vec::with_capacity(blocks.len() + 1);

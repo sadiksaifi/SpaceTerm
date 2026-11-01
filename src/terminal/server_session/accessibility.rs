@@ -873,7 +873,7 @@ mod tests {
     }
 
     /// Binds a document of `retained` rows, spread over pages of 100, to one newer Screen and
-    /// returns the allocations and retained-row lookups that re-bind made.
+    /// returns the allocations and identity-search probes that re-bind made.
     fn rebind_cost(retained: usize) -> (crate::terminal::testing::Allocations, usize) {
         let state = demanded();
         let fetcher = Fetcher::new(lease());
@@ -922,10 +922,10 @@ mod tests {
             .unwrap();
         let next = PresentationGeneration::default().next();
 
-        let before = crate::terminal::accessibility::lookups();
+        let before = crate::terminal::accessibility::probes();
         let (rebound, allocations) =
             crate::terminal::testing::count_allocations(|| fetcher.rebind(&state, next));
-        let lookups = crate::terminal::accessibility::lookups() - before;
+        let probes = crate::terminal::accessibility::probes() - before;
 
         let rebound = rebound.expect("a newer Screen republishes the retained document");
         assert!(rebound.shares_document(&first));
@@ -933,21 +933,33 @@ mod tests {
         assert_eq!(rebound.cursor_cell(), Some((retained - 1, 0)));
         assert_eq!(rebound.selection_range(), first.selection_range());
         assert!(rebound.selection_range().is_some());
-        (allocations, lookups)
+        (allocations, probes)
     }
 
     #[test]
     fn a_rebind_costs_the_same_at_any_retained_row_count() {
-        let small = rebind_cost(100);
-        let large = rebind_cost(10_000);
+        let (small_allocations, small_probes) = rebind_cost(100);
+        let (large_allocations, large_probes) = rebind_cost(10_000);
 
-        assert!(
-            small.1 > 0,
-            "the cursor and Selection resolve through lookups"
-        );
         assert_eq!(
-            small, large,
-            "a re-bind with no changed rows visits no retained rows"
+            small_allocations, large_allocations,
+            "a re-bind with no changed rows allocates nothing per retained row"
+        );
+        assert!(
+            small_probes > 0,
+            "the cursor and Selection resolve through identity searches"
+        );
+        // The large document holds 100 pages where the small one holds 1, and every page holds
+        // 100 rows. The cursor and the two Selection endpoints each search the pages once. A
+        // binary search over 100 pages probes at most 7 of them, so this allows twice that per
+        // search. A linear search over pages, or any pass over retained rows, adds at least 99
+        // probes per search.
+        let pages = 100_u32;
+        let per_search = 2 * (u32::BITS - (pages - 1).leading_zeros()) as usize;
+        assert!(
+            large_probes <= small_probes + 3 * per_search,
+            "a re-bind's identity searches grow logarithmically with the retained row count: \
+             {small_probes} probes at 100 rows, {large_probes} at 10,000"
         );
     }
 
