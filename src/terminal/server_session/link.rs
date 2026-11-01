@@ -1287,6 +1287,30 @@ pub(super) fn expect_unchanged(reply: Reply) -> Result<(), ServerError> {
     }
 }
 
+/// Keep paired transport losses distinct from protocol violations before recovery records an
+/// operation's outcome. Local IPC retains its existing error classification.
+fn connection_failure(
+    server: &ServerConnection,
+    link: Option<&ServerLink>,
+    error: ServerError,
+) -> ServerError {
+    if error == ServerError::Protocol
+        && !server.is_account_local()
+        && link.is_some_and(|link| {
+            matches!(
+                link.health(),
+                spaceterm_server::connection::link::Health::Closed(
+                    LinkError::Closed | LinkError::Unresponsive | LinkError::Stalled
+                )
+            )
+        })
+    {
+        ServerError::Direct(DirectError::Transport)
+    } else {
+        error
+    }
+}
+
 pub(super) fn present(
     factory: ServerSessionFactory,
     (reservation, alive): (control::Reservation, Arc<AtomicBool>),
@@ -1360,7 +1384,9 @@ pub(super) fn present(
                         // Complete recovery bookkeeping before another presentation can send.
                         // No Recovery lock is held while exchanging with the server.
                         claim::exchange(&state, pane_id, request, |request| {
-                            connection.exchange(request)
+                            connection.exchange(request).map_err(|error| {
+                                connection_failure(&server, connected_link.as_ref(), error)
+                            })
                         })
                     })
                 },
@@ -1743,23 +1769,7 @@ pub(super) fn present(
             // A successor owns this Pane's state now; leave it untouched.
             Err(_) if !alive.load(Ordering::Acquire) || !presenter.current() => return,
             Err(error) => {
-                // A live paired link retains its typed transport loss even though command
-                // adapters use Protocol for exchanges that could not complete. A protocol
-                // violation or authenticated refusal keeps its own classification.
-                let error = if error == ServerError::Protocol
-                    && !server.is_account_local()
-                    && connected_link.as_ref().is_some_and(|link| {
-                        matches!(
-                            link.health(),
-                            spaceterm_server::connection::link::Health::Closed(
-                                LinkError::Closed | LinkError::Unresponsive | LinkError::Stalled
-                            )
-                        )
-                    }) {
-                    ServerError::Direct(DirectError::Transport)
-                } else {
-                    error
-                };
+                let error = connection_failure(&server, connected_link.as_ref(), error);
                 // A missing old Session does not mean its retained Pane was removed. Reconcile
                 // by Pane identity before deciding, even after several End All operations.
                 let error = if error == ServerError::SessionUnavailable

@@ -102,7 +102,14 @@ impl Recovery {
             Ok(Reply::Attached { .. } | Reply::Restored { .. } | Reply::Takeover { .. }) => {
                 self.start = None;
             }
-            Err(error) if !matches!(error, ServerError::Protocol | ServerError::NotRunning) => {
+            Err(error)
+                if !matches!(
+                    error,
+                    ServerError::Protocol
+                        | ServerError::NotRunning
+                        | ServerError::Direct(DirectError::Transport)
+                ) =>
+            {
                 self.start = None;
             }
             _ => {

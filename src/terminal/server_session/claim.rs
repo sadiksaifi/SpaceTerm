@@ -627,6 +627,70 @@ mod tests {
     }
 
     #[test]
+    fn a_paired_transport_loss_keeps_a_start_unconfirmed_until_passive_recovery() {
+        let state = Arc::new(ServerPaneState::new());
+        let size = PaneSize {
+            columns: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        exchange(
+            &state,
+            [2; 32],
+            &Request::SelectPane {
+                pane: [2; 32],
+                explicit: false,
+                size,
+                style: None,
+            },
+            |_| Ok(restored(1)),
+        )
+        .unwrap();
+        let lost = ServerError::Direct(DirectError::Transport);
+        let result = exchange(
+            &state,
+            [2; 32],
+            &Request::StartRestored {
+                server: [1; 32],
+                pane: [2; 32],
+                size,
+                style: None,
+            },
+            |_| Err(lost),
+        );
+        assert_eq!(result.err(), Some(lost));
+        assert!(
+            state.start_unconfirmed(),
+            "a transport loss forgot the submitted shell start"
+        );
+        assert!(state.connection_failed(lost, false));
+        reachable(&ControlWatch::new(Arc::clone(&state), [2; 32]));
+        assert!(state.retry.swap(false, Ordering::AcqRel));
+        let grant = run_claim(&state, |request| {
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            Ok(Reply::Attached {
+                lease: Lease {
+                    server: [1; 32],
+                    session: [3; 32],
+                    control: [4; 32],
+                    connection: [5; 32],
+                },
+            })
+        })
+        .unwrap()
+        .expect("passive observation resolves the original successful start");
+        assert_eq!(grant.lease.session, [3; 32]);
+        assert!(!state.start_unconfirmed());
+    }
+
+    #[test]
     fn fifteen_hidden_creation_grants_release_startup_without_a_screen() {
         use crate::runtime::HostCommands as _;
         use spaceterm_server::hierarchy::Mutation;
