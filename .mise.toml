@@ -200,8 +200,14 @@ run = [
 ]
 
 [tasks."lint:rust"]
-description = "Lint every target and feature for the current platform"
-run = "cargo clippy --all-targets --all-features --locked --no-deps -- -D warnings"
+description = "Lint workspace targets with desktop, headless and desktop-test features"
+# The vendored safe wrapper retains upstream pedantic lint debt. Its owned patches run through
+# engine:test and engine:test:no-graphics. The sys crate and its build script remain in this check.
+run = [
+  "cargo clippy --workspace --exclude libghostty-vt --all-targets --all-features --locked --no-deps -- -D warnings",
+  "cargo clippy --workspace --exclude libghostty-vt --all-targets --no-default-features --locked --no-deps -- -D warnings",
+  "cargo clippy --workspace --exclude libghostty-vt --all-targets --no-default-features --features desktop-tests --locked --no-deps -- -D warnings",
+]
 
 [tasks."lint:rust:portable"]
 description = "Lint shared targets without native features"
