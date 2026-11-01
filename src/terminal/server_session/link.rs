@@ -1322,7 +1322,15 @@ pub(super) fn present(
         state.retry.store(false, Ordering::Release);
         let mut connected_link = None;
         let connected = (|| {
-            let link = server.link_cancellable(&|| !alive.load(Ordering::Acquire))?;
+            let link = if server.is_account_local() {
+                server.link_cancellable(&|| !alive.load(Ordering::Acquire))?
+            } else {
+                // The saved route owns paired dials and their backoff. A Pane neither dials
+                // nor queues behind the owner, and can close while its probe is in flight.
+                server
+                    .live_link()
+                    .ok_or(ServerError::Direct(DirectError::Transport))?
+            };
             connected_link = Some(link.clone());
             let mut connection = PaneLink::new(link, attachment.clone(), {
                 let state = Arc::clone(&state);

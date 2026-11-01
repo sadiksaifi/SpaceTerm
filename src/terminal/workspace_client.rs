@@ -25,8 +25,8 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// [`ServerConnection`].
 trait EditServer: Send + 'static {
     type Journal: EditJournal;
-    /// The shared link, connecting when none is live. `cancelled` ends a wait for a server
-    /// operation early.
+    /// The shared link. Paired followers read only their owner's admitted connection;
+    /// account-local followers may connect. `cancelled` ends a server-operation wait early.
     fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<ServerLink, ServerError>;
     fn attachments(&self) -> Result<Attachments, ServerError>;
     /// This client's durable journal of Original Operations.
@@ -53,7 +53,15 @@ trait EditJournal {
 impl EditServer for ServerConnection {
     type Journal = ClientJournal;
     fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<ServerLink, ServerError> {
-        ServerConnection::link_cancellable(self, cancelled)
+        if self.is_account_local() {
+            ServerConnection::link_cancellable(self, cancelled)
+        } else if cancelled() {
+            Err(ServerError::ServiceBusy)
+        } else {
+            self.live_link().ok_or(ServerError::Direct(
+                spaceterm_server::direct::DirectError::Transport,
+            ))
+        }
     }
     fn attachments(&self) -> Result<Attachments, ServerError> {
         ServerConnection::attachments(self)
@@ -585,6 +593,31 @@ fn reject(state: &PublishedSnapshot, mutation: Mutation) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paired_inventory_follower_leaves_reachability_probes_to_its_route_owner() {
+        use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
+        use std::sync::atomic::AtomicUsize;
+        struct Route(AtomicUsize);
+        impl DirectConnector for Route {
+            fn connect(&self) -> Result<DirectConnection, DirectError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(DirectError::Transport)
+            }
+        }
+        let route = Arc::new(Route(AtomicUsize::new(0)));
+        let server = crate::terminal::server_session::push_tests::paired_connection(route.clone());
+        assert_eq!(
+            EditServer::link(&server, &|| false).err(),
+            Some(ServerError::Direct(DirectError::Transport))
+        );
+        assert_eq!(
+            route.0.load(Ordering::SeqCst),
+            0,
+            "an inventory follower dialed outside the owner's backoff"
+        );
+    }
+
     #[test]
     fn each_subscriber_wakes_after_a_coalesced_publication_without_holding_state() {
         let (commands, _receiver) = mpsc::channel();

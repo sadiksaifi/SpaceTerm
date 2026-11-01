@@ -577,6 +577,19 @@ impl ServerConnection {
     pub fn link(&self) -> Result<ServerLink, ServerError> {
         self.link_with(None)
     }
+    /// Reads the shared live connection without opening one or waiting for a pending dial.
+    /// Paired presentation follows its route owner's connection and backoff through this read.
+    pub fn live_link(&self) -> Option<ServerLink> {
+        let saved = match self.shared.link.try_lock() {
+            Ok(saved) => saved,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        saved
+            .as_ref()
+            .filter(|link| link.health() == crate::connection::link::Health::Live)
+            .cloned()
+    }
     /// Closes the shared connection, including links retained by this handle's clones.
     /// The route owner must disable its connector before disconnecting to prevent reconnects.
     pub fn disconnect(&self) {

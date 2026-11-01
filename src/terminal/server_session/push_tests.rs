@@ -241,7 +241,7 @@ impl ConnectedPane {
     }
 }
 
-fn paired_connection(
+pub(crate) fn paired_connection(
     connector: Arc<dyn spaceterm_server::direct::DirectConnector>,
 ) -> ServerConnection {
     use spaceterm_server::direct::{PairedDevice, ServerPin};

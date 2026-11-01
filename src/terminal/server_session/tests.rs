@@ -1,60 +1,202 @@
 use super::link::{ActiveInput, present};
 use super::*;
 
-#[test]
-fn an_unreachable_paired_pane_bounds_and_spaces_its_connection_attempts() {
-    use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
-    use std::time::Instant;
-
-    struct Unreachable(mpsc::Sender<Instant>);
-    impl DirectConnector for Unreachable {
-        fn connect(&self) -> Result<DirectConnection, DirectError> {
-            self.0.send(Instant::now()).unwrap();
-            Err(DirectError::Transport)
-        }
+#[derive(Default)]
+struct ProbeGate {
+    released: Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+impl ProbeGate {
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.changed.notify_all();
     }
-    let (attempts, observed) = mpsc::channel();
-    let server = ServerConnection::direct(
-        "spaceterm-development",
-        [4; 32],
-        spaceterm_server::direct::PairedDevice {
-            pin: spaceterm_server::direct::ServerPin {
-                build: "spaceterm-development".into(),
-                server: [9; 32],
-                public_key: [2; 32],
-                certificate: [3; 32],
-            },
-            pairing: [5; 32],
-            client: [6; 32],
-        },
-        Arc::new(Unreachable(attempts)),
-    )
-    .unwrap();
+    fn wait(&self) {
+        let (released, _) = self
+            .changed
+            .wait_timeout_while(
+                self.released.lock().unwrap(),
+                Duration::from_secs(10),
+                |released| !*released,
+            )
+            .unwrap();
+        assert!(*released, "the test did not release its connection probe");
+    }
+}
+struct ReleaseProbe(Arc<ProbeGate>);
+impl Drop for ReleaseProbe {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+struct PairedProbe {
+    calls: Mutex<Vec<std::time::Instant>>,
+    entered: mpsc::Sender<usize>,
+    hold: usize,
+    gate: Arc<ProbeGate>,
+}
+impl spaceterm_server::direct::DirectConnector for PairedProbe {
+    fn connect(&self) -> Result<spaceterm_server::direct::DirectConnection, DirectError> {
+        let count = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(std::time::Instant::now());
+            calls.len()
+        };
+        self.entered.send(count).unwrap();
+        if count == self.hold {
+            self.gate.wait();
+        }
+        Err(DirectError::Transport)
+    }
+}
+impl PairedProbe {
+    fn new(hold: usize) -> (Arc<Self>, mpsc::Receiver<usize>) {
+        let (entered, attempts) = mpsc::channel();
+        (
+            Arc::new(Self {
+                calls: Mutex::default(),
+                entered,
+                hold,
+                gate: Arc::default(),
+            }),
+            attempts,
+        )
+    }
+}
+
+fn paired_pane(
+    server: ServerConnection,
+    controls: &PaneControls,
+    id: u8,
+) -> (StartedTerminalSession, Arc<ServerPaneState>) {
     let (factory, state) = ServerSessionFactory::for_pane(
         server,
-        &PaneControls::default(),
+        controls,
         crate::platform::runtime_local_filesystem(),
-        [8; 32],
+        [id; 32],
     );
+    // A real retry intent marks when the worker consumes its initial connection request.
+    state.retry();
     let started = factory
         .start(
             *Adapter::new().handle.geometry.lock().unwrap(),
             TerminalAppearanceUpdate::builtin().unwrap(),
         )
         .unwrap();
-    let attempts: Vec<_> = (0..4)
-        .map(|_| observed.recv_timeout(Duration::from_secs(5)).unwrap())
+    (started, state)
+}
+
+#[test]
+fn eight_paired_panes_share_the_route_owners_reachability_probes() {
+    let (probe, _entered) = PairedProbe::new(usize::MAX);
+    let server = super::push_tests::paired_connection(probe.clone());
+    // The owner probes once per backoff step. Panes may only follow the resulting link.
+    assert_eq!(
+        server.refresh(),
+        Err(ServerError::Direct(DirectError::Transport))
+    );
+    let controls = PaneControls::default();
+    let panes: Vec<_> = (1..=8)
+        .map(|id| paired_pane(server.clone(), &controls, id))
         .collect();
-    for pair in attempts.windows(2) {
-        assert!(pair[1].duration_since(pair[0]) >= Duration::from_secs(1));
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(
+            server.refresh(),
+            Err(ServerError::Direct(DirectError::Transport))
+        );
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while state.status() != ServerPaneStatus::Failed(ServerError::Direct(DirectError::Transport)) {
-        assert!(Instant::now() < deadline, "the Pane did not stop retrying");
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while panes
+        .iter()
+        .any(|(_, state)| !matches!(state.status(), ServerPaneStatus::Failed(_)))
+    {
+        assert!(
+            std::time::Instant::now() < until,
+            "the Pane recovery episode did not end"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(observed.try_recv().is_err());
-    drop(started);
+    drop(panes);
+    let calls = probe.calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        4,
+        "eight Panes multiplied the owner's four probes"
+    );
+    assert!(
+        calls
+            .windows(2)
+            .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_secs(1))
+    );
+}
+
+#[test]
+fn closing_panes_cancels_recovery_while_the_route_owner_is_probing() {
+    let (probe, entered) = PairedProbe::new(3);
+    let release = ReleaseProbe(Arc::clone(&probe.gate));
+    let server = super::push_tests::paired_connection(probe.clone());
+    for _ in 0..2 {
+        assert_eq!(
+            server.refresh(),
+            Err(ServerError::Direct(DirectError::Transport))
+        );
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    let owner = std::thread::spawn({
+        let server = server.clone();
+        move || server.refresh()
+    });
+    assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    // A slow owner holds the shared-link mutex. Pane recovery must neither wait behind it
+    // nor leave another dial queued after the presentations are dropped.
+    let controls = PaneControls::default();
+    let panes: Vec<_> = (1..=2)
+        .map(|id| paired_pane(server.clone(), &controls, id))
+        .collect();
+    let states: Vec<_> = panes
+        .iter()
+        .map(|(_, state)| Arc::downgrade(state))
+        .collect();
+    let started_by = std::time::Instant::now() + Duration::from_secs(5);
+    while panes
+        .iter()
+        .any(|(_, state)| state.retry.load(Ordering::Acquire))
+    {
+        assert!(
+            std::time::Instant::now() < started_by,
+            "Pane workers did not consume their retry requests"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(panes);
+    let released_by = std::time::Instant::now() + Duration::from_secs(2);
+    while states.iter().any(|state| state.strong_count() > 0)
+        && std::time::Instant::now() < released_by
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let released_before_owner = states.iter().all(|state| state.strong_count() == 0);
+    drop(release);
+    assert_eq!(
+        owner.join().unwrap(),
+        Err(ServerError::Direct(DirectError::Transport))
+    );
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while states.iter().any(|state| state.strong_count() > 0) {
+        assert!(
+            std::time::Instant::now() < until,
+            "closed Pane workers did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let count = probe.calls.lock().unwrap().len();
+    assert!(
+        released_before_owner,
+        "closed Panes waited for the owner and made {count} probes"
+    );
+    assert_eq!(count, 3, "closed Panes started another connection");
 }
 
 #[test]
