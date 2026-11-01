@@ -1,0 +1,83 @@
+{
+  "environment": {
+    "checkout_clean": true,
+    "commit": "91bdb8f6a7793cbd7d49a8e3f95105cd822ce00b",
+    "cpus": 11,
+    "hardware": "Apple M3 Pro",
+    "host": "macbook-pro-personal",
+    "input_sha256": "f2617e0006744196634338c48ddc52eebc19d6cb025a2b90d4d53f05ec2c8679",
+    "jailed": false,
+    "memory_bytes": 19327352832,
+    "system": "macOS 26.6.2",
+    "time": "2026-11-01T22:15:09+0530"
+  },
+  "settings": {
+    "columns": 120,
+    "max_hz": 60,
+    "rows": 40,
+    "runs": 3,
+    "seconds": 20
+  },
+  "summary": {
+    "cat/accessibility": {
+      "after_footprint_bytes": 117523032,
+      "bytes_sent": 28294941,
+      "cpu_s": 3.353487874999985,
+      "peak_footprint_bytes": 145588896
+    },
+    "cat/plain": {
+      "after_footprint_bytes": 16220640,
+      "bytes_sent": 8808,
+      "cpu_s": 2.1753552916666763,
+      "peak_footprint_bytes": 16695776
+    },
+    "partial/accessibility": {
+      "after_footprint_bytes": 26837664,
+      "bytes_sent": 1992040,
+      "cpu_s": 0.6754616666666777,
+      "peak_footprint_bytes": 67666592
+    },
+    "partial/plain": {
+      "after_footprint_bytes": 6259168,
+      "bytes_sent": 165001,
+      "cpu_s": 0.4684235000000001,
+      "peak_footprint_bytes": 6259168
+    },
+    "scroll/accessibility": {
+      "after_footprint_bytes": 109265568,
+      "bytes_sent": 115735340,
+      "cpu_s": 4.448289375000002,
+      "peak_footprint_bytes": 109675168
+    },
+    "scroll/plain": {
+      "after_footprint_bytes": 16089568,
+      "bytes_sent": 1137633,
+      "cpu_s": 2.1109554583333363,
+      "peak_footprint_bytes": 16499168
+    },
+    "vim/accessibility": {
+      "after_footprint_bytes": 27345568,
+      "bytes_sent": 13604489,
+      "cpu_s": 2.761145499999998,
+      "peak_footprint_bytes": 27378336
+    },
+    "vim/plain": {
+      "after_footprint_bytes": 6586848,
+      "bytes_sent": 1596800,
+      "cpu_s": 2.21860241666667,
+      "peak_footprint_bytes": 6586848
+    },
+    "yes/accessibility": {
+      "after_footprint_bytes": 32358952,
+      "bytes_sent": 5128216,
+      "cpu_s": 19.29487916666666,
+      "peak_footprint_bytes": 37339688
+    },
+    "yes/plain": {
+      "after_footprint_bytes": 16089568,
+      "bytes_sent": 28641,
+      "cpu_s": 25.150683708333332,
+      "peak_footprint_bytes": 16531936
+    }
+  }
+}
