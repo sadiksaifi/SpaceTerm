@@ -1,8 +1,10 @@
 //! Encodes screen snapshots as row style runs against the frame the client holds.
 //!
 //! The emulator keeps an unchanged row's `Arc` across snapshots, so pointer equality with the
-//! baseline is the per-row damage that decides which rows are encoded again. Each encoded row is
-//! hashed, and a scroll is found by matching those hashes against the baseline's.
+//! baseline is the per-row damage. A row that moved is a new `Arc` with the old cells, so each
+//! snapshot row is hashed and a scroll is found by matching those hashes against the baseline's
+//! before any row is encoded. A row is encoded only when its cells differ from the baseline row
+//! the client shows at its position after the scroll.
 use super::*;
 use spaceterm_server::pane::effects::Hyperlink;
 use spaceterm_server::protocol::limits;
@@ -10,6 +12,7 @@ use spaceterm_server::protocol::screen::{
     self as wire, Cells, Colors, Cursor, CursorPosition, Geometry, History, LinkDefinition, Modes,
     Page, Run, ScreenUpdate, ScrollShift, Style, StyleDefinition, StyleRef, flags,
 };
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -28,6 +31,9 @@ pub struct ScreenCapture {
 pub(crate) struct ScreenEncoder {
     tables: Tables,
     baseline: Option<Baseline>,
+    /// Rows the last `encode` call encoded.
+    #[cfg(test)]
+    encoded_rows: usize,
 }
 
 struct Baseline {
@@ -43,17 +49,31 @@ struct Baseline {
     accessibility_revision: u64,
 }
 
-/// One row as encoded, with the snapshot row it came from.
-#[derive(Clone)]
+/// One row as encoded, with the snapshot row it came from and that row's [`Fingerprint`] hash.
 struct Encoded {
     source: RowSnapshot,
+    hash: u64,
     line: Arc<Line>,
+}
+
+/// One snapshot row before encoding.
+struct Pending<'a> {
+    source: &'a RowSnapshot,
+    wrapped: bool,
+    fingerprint: OnceCell<Fingerprint>,
+}
+
+/// A hash of a row's cell text and styles, and whether every cell is blank. Links and cell
+/// metadata are left out of the hash, so equal hashes only suggest equal rows.
+#[derive(Clone, Copy)]
+struct Fingerprint {
+    hash: u64,
+    blank: bool,
 }
 
 /// One row's content without its index. Style and link ids refer to the encoder's tables.
 #[derive(Debug, PartialEq, Eq)]
 struct Line {
-    hash: u64,
     wrapped: bool,
     runs: Vec<Run>,
 }
@@ -69,6 +89,11 @@ enum Mode {
 }
 
 impl ScreenEncoder {
+    #[cfg(test)]
+    pub(crate) fn encoded_rows(&self) -> usize {
+        self.encoded_rows
+    }
+
     /// Encodes `capture` as frame `frame` against the client's frame `base`, or as a keyframe when
     /// `base` is `None`. Returns `None` when the capture equals the baseline; the baseline then
     /// stays as it was. A base other than the last emitted frame receives every row.
@@ -78,6 +103,10 @@ impl ScreenEncoder {
         frame: u64,
         base: Option<u64>,
     ) -> Option<ScreenUpdate> {
+        #[cfg(test)]
+        {
+            self.encoded_rows = 0;
+        }
         let previous = self.baseline.take();
         let mode = match (&previous, base) {
             (_, None) => Mode::Keyframe,
@@ -91,8 +120,8 @@ impl ScreenEncoder {
             None => None,
         };
         match encoded {
-            Some((update, rows)) => {
-                self.baseline = Some(Baseline::new(capture, frame, rows, &update));
+            Some((update, built)) => {
+                self.baseline = Some(Baseline::new(capture, frame, built, &update));
                 Some(update)
             }
             None => {
@@ -108,7 +137,7 @@ impl ScreenEncoder {
         capture: &ScreenCapture,
         previous: Option<&Baseline>,
         mode: Mode,
-    ) -> Option<(ScreenUpdate, Vec<Encoded>)> {
+    ) -> Option<(ScreenUpdate, Built)> {
         if mode != Mode::Delta {
             self.tables = Tables::default();
         }
@@ -118,55 +147,54 @@ impl ScreenEncoder {
         let resized = previous.is_some_and(|previous| {
             (previous.geometry.columns, previous.geometry.rows) != (geometry.columns, geometry.rows)
         });
-        let rows = screen
+        let pending = screen
             .rows
             .iter()
             .enumerate()
-            .map(|(index, row)| {
-                let wrapped = screen.row_soft_wrapped.get(index).copied().unwrap_or(false);
-                let reused = previous
-                    .filter(|_| !resized)
-                    .and_then(|previous| previous.rows.get(index))
-                    .filter(|old| old.line.wrapped == wrapped && Arc::ptr_eq(&old.source, row));
-                Encoded {
-                    source: Arc::clone(row),
-                    line: match reused {
-                        Some(old) => Arc::clone(&old.line),
-                        None => Arc::new(Line::encode(row, wrapped, &mut self.tables)),
-                    },
-                }
+            .map(|(index, source)| Pending {
+                source,
+                wrapped: screen.row_soft_wrapped.get(index).copied().unwrap_or(false),
+                fingerprint: OnceCell::new(),
             })
             .collect::<Vec<_>>();
+        // The baseline row the client shows at each position once `shift` applies. `None` is a
+        // blank row: a keyframe starts from blank rows, a resize sends every row that is not
+        // blank, and a scroll moves blank rows in.
+        let (shift, shown) = match previous.filter(|_| !resized) {
+            Some(previous) => match find_shift(&previous.rows, &pending) {
+                Some((shift, shown)) => (Some(shift), shown),
+                None => (None, previous.rows.iter().map(Some).collect()),
+            },
+            None => (None, Vec::new()),
+        };
+        let blank = Arc::new(Line::blank());
+        let mut changed = Vec::with_capacity(pending.len());
+        let mut rows = Vec::with_capacity(pending.len());
+        for (index, new) in pending.iter().enumerate() {
+            let shown = shown.get(index).copied().flatten();
+            let shown_line = shown.map_or(&blank, |old| &old.line);
+            let (line, hash) = match shown {
+                Some(old) if new.shown_by(Some(old)) => (Arc::clone(&old.line), old.hash),
+                None if new.shown_by(None) => (Arc::clone(&blank), new.fingerprint().hash),
+                _ => {
+                    #[cfg(test)]
+                    {
+                        self.encoded_rows += 1;
+                    }
+                    let line = Line::encode(new.source, new.wrapped, &mut self.tables);
+                    (Arc::new(line), new.fingerprint().hash)
+                }
+            };
+            changed.push(mode == Mode::Replace || line != *shown_line);
+            rows.push(Encoded {
+                source: Arc::clone(new.source),
+                hash,
+                line,
+            });
+        }
         if mode == Mode::Delta && self.tables.overflowed {
             return None;
         }
-        let blank = Arc::new(Line::blank());
-        let mut shift = None;
-        let changed = match previous {
-            Some(previous) => {
-                let mut old = if resized {
-                    vec![Arc::clone(&blank); rows.len()]
-                } else {
-                    previous
-                        .rows
-                        .iter()
-                        .map(|row| Arc::clone(&row.line))
-                        .collect()
-                };
-                if !resized && let Some((found, shifted)) = find_shift(&old, &rows, &blank) {
-                    shift = Some(found);
-                    old = shifted;
-                }
-                rows.iter()
-                    .zip(&old)
-                    .map(|(new, old)| new.line != *old)
-                    .collect::<Vec<_>>()
-            }
-            None => rows
-                .iter()
-                .map(|row| mode == Mode::Replace || *row.line != *blank)
-                .collect(),
-        };
         let changed_rows = rows
             .iter()
             .zip(changed)
@@ -181,6 +209,7 @@ impl ScreenEncoder {
         let (styles, links) = self.tables.take_definitions();
         let modes = modes(screen);
         let colors = colors(screen);
+        let colors_changed = previous.is_none_or(|previous| previous.colors != colors);
         let update = ScreenUpdate {
             cursor: cursor(screen),
             history: History {
@@ -194,9 +223,7 @@ impl ScreenEncoder {
             modes: previous
                 .is_none_or(|previous| previous.modes != modes)
                 .then_some(modes),
-            colors: previous
-                .is_none_or(|previous| previous.colors != colors)
-                .then_some(colors),
+            colors: colors_changed.then(|| colors.clone()),
             shift,
             styles,
             links,
@@ -223,21 +250,27 @@ impl ScreenEncoder {
         {
             return None;
         }
-        Some((update, rows))
+        Some((update, Built { rows, colors }))
     }
 }
 
+/// What a built frame leaves for its [`Baseline`].
+struct Built {
+    rows: Vec<Encoded>,
+    colors: Colors,
+}
+
 impl Baseline {
-    fn new(capture: &ScreenCapture, frame: u64, rows: Vec<Encoded>, update: &ScreenUpdate) -> Self {
+    fn new(capture: &ScreenCapture, frame: u64, built: Built, update: &ScreenUpdate) -> Self {
         let screen = capture.screen.as_ref();
         Self {
             frame,
-            rows,
+            rows: built.rows,
             cursor: update.cursor,
             history: update.history,
             geometry: geometry(screen),
             modes: modes(screen),
-            colors: colors(screen),
+            colors: built.colors,
             graphics: screen.graphics.clone(),
             generation: update.generation,
             accessibility_revision: update.accessibility_revision,
@@ -275,32 +308,32 @@ pub(crate) fn encode_page<'a>(
     }
 }
 
-/// Finds the scroll that leaves the fewest rows to send. It returns the shift and the baseline
-/// rows after it, or `None` when no shift saves a row.
-fn find_shift(
-    old: &[Arc<Line>],
-    new: &[Encoded],
-    blank: &Arc<Line>,
-) -> Option<(ScrollShift, Vec<Arc<Line>>)> {
+/// Finds the scroll that leaves the fewest rows to encode, comparing row hashes. It returns the
+/// shift and the baseline rows the client shows after it, `None` for a row that moved in blank.
+/// It returns `None` when no shift saves a row.
+fn find_shift<'a>(
+    old: &'a [Encoded],
+    new: &[Pending],
+) -> Option<(ScrollShift, Vec<Option<&'a Encoded>>)> {
     let changed = new
         .iter()
         .zip(old)
-        .filter(|(new, old)| new.line != **old)
+        .filter(|(new, old)| !new.resembles(Some(old)))
         .count();
     if changed < 2 {
         return None;
     }
     let mut positions = HashMap::<u64, usize>::with_capacity(old.len());
     for (index, line) in old.iter().enumerate().rev() {
-        if !line.runs.is_empty() {
+        if !line.line.runs.is_empty() {
             positions.insert(line.hash, index);
         }
     }
     let mut votes = HashMap::<isize, usize>::new();
     for (index, (row, old)) in new.iter().zip(old).enumerate() {
-        if *row.line != **old
-            && !row.line.runs.is_empty()
-            && let Some(source) = positions.get(&row.line.hash)
+        if !row.resembles(Some(old))
+            && !row.fingerprint().blank
+            && let Some(source) = positions.get(&row.fingerprint().hash)
         {
             *votes.entry(*source as isize - index as isize).or_default() += 1;
         }
@@ -310,19 +343,19 @@ fn find_shift(
         b.1.cmp(&a.1)
             .then(a.0.unsigned_abs().cmp(&b.0.unsigned_abs()))
     });
-    let mut best: Option<(usize, ScrollShift, Vec<Arc<Line>>)> = None;
+    let mut best: Option<(usize, ScrollShift, Vec<Option<&Encoded>>)> = None;
     for (lines, _) in candidates.into_iter().take(3) {
         let Some(shift) = shift_region(old, new, lines) else {
             continue;
         };
-        let mut shifted = old.to_vec();
-        if shift.apply(&mut shifted, || Arc::clone(blank)).is_none() {
+        let mut shifted = old.iter().map(Some).collect::<Vec<_>>();
+        if shift.apply(&mut shifted, || None).is_none() {
             continue;
         }
         let remaining = new
             .iter()
             .zip(&shifted)
-            .filter(|(new, old)| new.line != **old)
+            .filter(|(new, old)| !new.resembles(**old))
             .count();
         if best
             .as_ref()
@@ -335,8 +368,8 @@ fn find_shift(
         .map(|(_, shift, shifted)| (shift, shifted))
 }
 
-/// The region of the longest stretch of rows where `new[i]` equals `old[i + lines]`.
-fn shift_region(old: &[Arc<Line>], new: &[Encoded], lines: isize) -> Option<ScrollShift> {
+/// The region of the longest stretch of rows where `new[i]` resembles `old[i + lines]`.
+fn shift_region(old: &[Encoded], new: &[Pending], lines: isize) -> Option<ScrollShift> {
     let mut longest = 0..0;
     let mut start = None;
     for index in 0..=new.len() {
@@ -344,7 +377,7 @@ fn shift_region(old: &[Arc<Line>], new: &[Encoded], lines: isize) -> Option<Scro
             && index
                 .checked_add_signed(lines)
                 .and_then(|source| old.get(source))
-                .is_some_and(|old| *new[index].line == **old);
+                .is_some_and(|old| new[index].resembles(Some(old)));
         match (matched, start) {
             (true, None) => start = Some(index),
             (false, Some(first)) => {
@@ -371,19 +404,60 @@ fn shift_region(old: &[Arc<Line>], new: &[Encoded], lines: isize) -> Option<Scro
     })
 }
 
-impl Line {
-    fn blank() -> Self {
-        Self::hashed(false, Vec::new())
+impl Pending<'_> {
+    fn fingerprint(&self) -> Fingerprint {
+        *self
+            .fingerprint
+            .get_or_init(|| Fingerprint::of(self.source))
     }
 
-    fn hashed(wrapped: bool, runs: Vec<Run>) -> Self {
+    /// Whether this row probably equals `old`, a blank row when `None`. Scroll detection uses
+    /// this, so it hashes each row once and compares no cells.
+    fn resembles(&self, old: Option<&Encoded>) -> bool {
+        match old {
+            Some(old) => {
+                old.line.wrapped == self.wrapped
+                    && (Arc::ptr_eq(&old.source, self.source)
+                        || old.hash == self.fingerprint().hash)
+            }
+            None => !self.wrapped && self.fingerprint().blank,
+        }
+    }
+
+    /// Whether the client already shows this row where it shows `old`, a blank row when `None`.
+    fn shown_by(&self, old: Option<&Encoded>) -> bool {
+        match old {
+            Some(old) => {
+                old.line.wrapped == self.wrapped
+                    && (Arc::ptr_eq(&old.source, self.source)
+                        || (old.hash == self.fingerprint().hash && old.source == *self.source))
+            }
+            None => self.resembles(None),
+        }
+    }
+}
+
+impl Fingerprint {
+    fn of(cells: &[CellSnapshot]) -> Self {
         let mut hasher = DefaultHasher::new();
-        wrapped.hash(&mut hasher);
-        runs.hash(&mut hasher);
+        let mut blank = true;
+        for cell in cells {
+            text(cell).hash(&mut hasher);
+            style(cell).hash(&mut hasher);
+            blank &= self::blank(cell);
+        }
         Self {
             hash: hasher.finish(),
-            wrapped,
-            runs,
+            blank,
+        }
+    }
+}
+
+impl Line {
+    fn blank() -> Self {
+        Self {
+            wrapped: false,
+            runs: Vec::new(),
         }
     }
 
@@ -437,7 +511,7 @@ impl Line {
             }
         }
         finish(runs.last_mut(), &mut lengths, narrow);
-        Self::hashed(wrapped, runs)
+        Self { wrapped, runs }
     }
 }
 

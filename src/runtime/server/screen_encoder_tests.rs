@@ -148,6 +148,51 @@ fn a_three_line_log_scroll_costs_about_half_a_kilobyte() {
     assert!(bytes <= 550, "a 3-line scroll took {bytes} B");
 }
 
+/// A log line with styles and wide characters. Every tenth line adds a link, an emoji and a
+/// combining mark, which the emulator's debug build is slow to store.
+fn rich_line(number: usize) -> String {
+    let rare = if number % 10 == 0 {
+        "\x1b]8;;https://example.com/\x1b\\link\x1b]8;;\x1b\\ 👨‍👩‍👧 e\u{301}"
+    } else {
+        "text"
+    };
+    format!(
+        "\x1b[1;3{}m{number:05}\x1b[0m {rare} 界面 {}\r\n",
+        number % 8,
+        "output ".repeat(number % 20 + 1),
+    )
+}
+
+#[test]
+fn a_scroll_encodes_only_the_rows_that_moved_in() {
+    let mut channel = Channel1::new(240, 100);
+    for number in 0..150 {
+        channel.emulator.feed(rich_line(number).as_bytes());
+    }
+    channel.present().unwrap();
+    assert_eq!(channel.encoder.encoded_rows(), 99);
+    for number in 150..157 {
+        channel.emulator.feed(rich_line(number).as_bytes());
+    }
+    let (update, _) = channel.present().unwrap();
+    assert_eq!(
+        update.shift.map(|shift| (shift.top, shift.lines)),
+        Some((0, 7))
+    );
+    assert_eq!(
+        update.rows.iter().map(|row| row.index).collect::<Vec<_>>(),
+        (92..99).collect::<Vec<_>>()
+    );
+    // The 92 rows that only moved are taken from the baseline without being encoded.
+    assert_eq!(channel.encoder.encoded_rows(), 7);
+    // Blank rows that scroll in at the top need no encoding either.
+    channel.emulator.feed(b"\x1b[3T");
+    let (update, _) = channel.present().unwrap();
+    assert_eq!(update.shift.map(|shift| shift.lines), Some(-3));
+    assert!(update.rows.is_empty());
+    assert_eq!(channel.encoder.encoded_rows(), 0);
+}
+
 #[test]
 fn a_scroll_region_keeps_its_status_line_and_scrolls_down_too() {
     let mut channel = Channel1::new(40, 10);
