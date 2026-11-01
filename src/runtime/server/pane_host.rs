@@ -291,7 +291,7 @@ impl OwnedPane {
         self.presentable = false;
         self.apply_presentable();
         self.graphics_transfer = None;
-        self.accessibility.disconnect();
+        self.accessibility.end();
         self.runtime.end_server_accessibility_demand();
         self.runtime.client_effect_focus(None);
         self.effects.clear();

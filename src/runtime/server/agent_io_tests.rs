@@ -902,8 +902,13 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
         Operation::Close {
             channel: Channel(5),
         },
-        Operation::EndAccessibility {
+        Operation::AccessibilityDemand {
             channel: Channel(5),
+            demand: pane::accessibility::Demand::Start { generation: 1 },
+        },
+        Operation::AccessibilityDemand {
+            channel: Channel(5),
+            demand: pane::accessibility::Demand::End,
         },
     ] {
         assert!(matches!(
@@ -911,6 +916,11 @@ fn observing_a_controlled_pane_changes_nothing_about_it() {
             Err(Refusal::Unsupported)
         ));
     }
+    assert_eq!(
+        agent.outbox.acknowledge_semantics(Channel(5), 1, 1),
+        Err(spaceterm_server::connection::outbox::OutboxError::Violation),
+        "an observer never starts demand, so its acknowledgements are violations"
+    );
     served.input(
         &OBSERVER,
         protocol::Input {

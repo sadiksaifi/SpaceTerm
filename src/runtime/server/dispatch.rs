@@ -55,8 +55,7 @@ impl ServerPaneHost {
         }
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
-            Request::Accessibility { lease, .. }
-            | Request::EndAccessibilityDemand { lease }
+            Request::AccessibilityDemand { lease, .. }
             | Request::AccessibilitySelection { lease, .. }
             | Request::GraphicsChunk { lease, .. } => lease,
             Request::CompleteClipboard { lease, .. }
@@ -79,25 +78,24 @@ impl ServerPaneHost {
         }
         pane.drain();
         match request {
-            Request::EndAccessibilityDemand { .. } => {
-                pane.runtime.end_server_accessibility_demand();
-                Ok(Reply::Unchanged)
-            }
-            Request::Accessibility {
-                revision,
-                offset,
-                base,
+            Request::AccessibilityDemand {
+                demand: pane::accessibility::Demand::Start { .. },
                 ..
             } => {
                 if pane.ended || pane.failed {
                     return Err(Refusal::Missing);
                 }
-                if let Some(demand) = pane.runtime.accessibility_demand_sender() {
-                    demand.request();
-                }
-                Ok(Reply::Accessibility(
-                    pane.accessibility.chunk(revision, offset, base),
-                ))
+                pane.accessibility.start();
+                pane.request_semantics();
+                Ok(Reply::Unchanged)
+            }
+            Request::AccessibilityDemand {
+                demand: pane::accessibility::Demand::End,
+                ..
+            } => {
+                pane.accessibility.end();
+                pane.runtime.end_server_accessibility_demand();
+                Ok(Reply::Unchanged)
             }
             Request::AccessibilitySelection {
                 focus_generation,
@@ -1255,7 +1253,8 @@ fn body(reply: Reply) -> Result<ReplyBody, Refusal> {
         }))),
         Reply::Outcome(outcome) => ReplyBody::Outcome(outcome),
         Reply::GraphicsChunk(chunk) => ReplyBody::Graphics(chunk),
-        Reply::Accessibility(chunk) => ReplyBody::Accessibility(chunk),
+        // Semantics are pushed; no command replies with a chunk of them.
+        Reply::Accessibility(_) => return Err(Refusal::Unsupported),
         Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
         Reply::Paste(_) => return Err(Refusal::Failed),
     })
@@ -1497,17 +1496,9 @@ impl<H: HostCommands> Served<H> {
                 image,
                 offset: offset as usize,
             }),
-            Operation::Accessibility {
-                channel,
-                revision,
-                offset,
-                base,
-            } => self.on_channel(peer, channel, |lease| Request::Accessibility {
-                lease,
-                revision,
-                offset: offset as usize,
-                base,
-            }),
+            Operation::AccessibilityDemand { channel, demand } => {
+                return self.demand_semantics(peer, channel, demand);
+            }
             Operation::AccessibilitySelection {
                 channel,
                 focus_generation,
@@ -1517,11 +1508,10 @@ impl<H: HostCommands> Served<H> {
                 focus_generation,
                 selection,
             }),
-            Operation::EndAccessibility { channel } => self.on_channel(peer, channel, |lease| {
-                Request::EndAccessibilityDemand { lease }
-            }),
-            // This server pushes no semantic updates yet.
-            Operation::AccessibilityDemand { .. } => Err(Refusal::Unsupported),
+            // Semantics are pushed while demanded, never read.
+            Operation::Accessibility { .. } | Operation::EndAccessibility { .. } => {
+                Err(Refusal::Unsupported)
+            }
             Operation::DirectoryRead(operation) => {
                 return self.read(peer, id, HostRead::Directory(operation));
             }
@@ -1583,6 +1573,41 @@ impl<H: HostCommands> Served<H> {
         })
     }
 
+    /// Starts or ends semantic demand on a bound channel. A start names a generation above the
+    /// channel's last, or the connection ends with a protocol violation; the channel's outbox
+    /// then sends the Pane's latest model as the generation's complete document.
+    fn demand_semantics(
+        &mut self,
+        peer: &Peer,
+        channel: Channel,
+        demand: pane::accessibility::Demand,
+    ) -> Dispatch {
+        let result = self.on_channel(peer, channel, |lease| Request::AccessibilityDemand {
+            lease,
+            demand,
+        });
+        let Some(outbox) = self
+            .connections
+            .get(&peer.connection)
+            .map(|connection| connection.outbox.clone())
+        else {
+            return Dispatch::reply(Err(Refusal::Stale));
+        };
+        match demand {
+            pane::accessibility::Demand::End => outbox.end_semantics(channel),
+            pane::accessibility::Demand::Start { generation } if result.is_ok() => {
+                if let Err(error) = outbox.start_semantics(channel, generation) {
+                    // The goodbye ends the connection, so no reply is written.
+                    let _ = outbox.goodbye(protocol::Fatal::from(error));
+                    return Dispatch::Deferred;
+                }
+                self.publish_channel(peer.connection, channel);
+            }
+            pane::accessibility::Demand::Start { .. } => {}
+        }
+        Dispatch::reply(result)
+    }
+
     /// Reads a Scrollback page for the channel's controlling client. The reply comes from the
     /// Pane's terminal worker once it read the rows, so no lock is held while it reads.
     fn scrollback_page(
@@ -1635,6 +1660,7 @@ fn channel_of(operation: &Operation) -> Option<Channel> {
         | Operation::Style { channel, .. }
         | Operation::Graphics { channel, .. }
         | Operation::Accessibility { channel, .. }
+        | Operation::AccessibilityDemand { channel, .. }
         | Operation::AccessibilitySelection { channel, .. }
         | Operation::EndAccessibility { channel }
         | Operation::Run { channel, .. } => Some(*channel),
