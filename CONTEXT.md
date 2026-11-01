@@ -277,7 +277,7 @@ _Avoid_: local echo, speculative echo
 
 **Terminal Failure**: A terminal fault with an explicit recovery class.
 
-**Terminal Diagnostics**: Terminal fault metadata exported by the Export Terminal Diagnostics command.
+**Terminal Diagnostics**: Terminal fault metadata and typed counts of terminal pipeline stages. The Export Terminal Diagnostics command exports the client's; `server status` reports a running server's counts.
 
 **Close Confirmation**: Authorization for an exact user-requested close that may discard running work.
 

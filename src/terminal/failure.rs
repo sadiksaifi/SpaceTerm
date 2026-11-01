@@ -3,6 +3,8 @@ use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 
+use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+
 use super::emulator::PresentationGeneration;
 use super::key::KeyAction;
 use super::session::{TerminalSessionExit, TerminalSessionFailure, TerminalSessionStartupStage};
@@ -326,7 +328,7 @@ impl DiagnosticBundle {
     fn header(&self, skipped: usize) -> String {
         let omitted = self.next_sequence - 1 - self.records.len() as u64 + skipped as u64;
         format!(
-            "SpaceTerm diagnostics\nschema=2\nbuild_version={}\nos={}\narch={}\nnetwork_telemetry=false\nterminal_content=false\nrecords_omitted={omitted}\n",
+            "SpaceTerm diagnostics\nschema=3\nbuild_version={}\nos={}\narch={}\nnetwork_telemetry=false\nterminal_content=false\nrecords_omitted={omitted}\n",
             env!("SPACETERM_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,
@@ -391,8 +393,22 @@ impl DiagnosticBundle {
         }
     }
 
+    /// Writes every record and this client process's Terminal Diagnostics counters.
     pub(crate) fn export(&self, path: &Path) -> std::io::Result<()> {
-        std::fs::write(path, self.encode_from(0))
+        std::fs::write(
+            path,
+            self.export_text(&TerminalCounters::process().snapshot()),
+        )
+    }
+
+    fn export_text(&self, counters: &TerminalCounterSnapshot) -> String {
+        let mut text = self.encode_from(0);
+        for line in counters.lines().lines() {
+            text.push_str("client_counter.");
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
     }
 }
 
@@ -527,7 +543,7 @@ mod tests {
         assert!(!path.exists());
         bundle.export(&path).unwrap();
         let exported = fs::read_to_string(&path).unwrap();
-        assert!(exported.contains("schema=2\n"));
+        assert!(exported.contains("schema=3\n"));
         assert!(exported.contains(&format!("build_version={}\n", env!("SPACETERM_VERSION"))));
         assert!(exported.contains(&format!(
             "os={}\narch={}\n",
@@ -559,7 +575,12 @@ mod tests {
         assert!(bytes.encoded_len() <= 65_536);
         bytes.export(&path).unwrap();
         let exported = fs::read_to_string(&path).unwrap();
-        assert_eq!(exported.len(), bytes.encoded_len());
+        let records_only: usize = exported
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with("client_counter."))
+            .map(str::len)
+            .sum();
+        assert_eq!(records_only, bytes.encoded_len());
         let records = diagnostic_records(&exported);
         assert_eq!(records.len(), bytes.record_count());
         assert_eq!(records.last().unwrap().0, 128);
@@ -569,6 +590,33 @@ mod tests {
                 .all(|(_, _, event)| event.ends_with(long_operation))
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn export_states_each_client_counter_after_the_records() {
+        let mut bundle = DiagnosticBundle::default();
+        bundle.record(&TerminalFailure::platform("native-event"));
+        let counters = TerminalCounterSnapshot {
+            accessibility_rebinds: 3,
+            frames_decoded: 7,
+            frames_painted: 5,
+            ..TerminalCounterSnapshot::default()
+        };
+
+        let text = bundle.export_text(&counters);
+
+        let (records, counter_lines) = text.split_at(bundle.encode_from(0).len());
+        assert_eq!(records, bundle.encode_from(0));
+        assert_eq!(counter_lines.lines().count(), 15);
+        assert!(
+            counter_lines
+                .lines()
+                .all(|line| line.starts_with("client_counter."))
+        );
+        assert!(counter_lines.contains("client_counter.accessibility_rebinds=3\n"));
+        assert!(counter_lines.contains(
+            "client_counter.frames_published=0\nclient_counter.frames_decoded=7\nclient_counter.frames_painted=5\n"
+        ));
     }
 
     #[test]
