@@ -473,19 +473,72 @@ fn presented_server(origin: &ServerOrigin, cx: &App) -> Option<Id> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desktop_channel::{ChannelStream, DesktopChannelEndpoint, TRANSFER_WINDOW};
+    use crate::desktop_channel::{
+        ChannelIo, ChannelStream, DesktopChannelEndpoint, TRANSFER_WINDOW,
+    };
     use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
-    use std::os::unix::net::UnixStream;
+    use std::io::{PipeReader, PipeWriter, Read, Write};
     use std::sync::Mutex;
+    use std::time::Duration;
 
     const IDENTITY: &str = "spaceterm-development";
 
+    /// One end of an in-memory connection. Reads and writes block, so the limits wait for
+    /// nothing.
+    struct End {
+        read: PipeReader,
+        write: Option<PipeWriter>,
+    }
+    impl Read for End {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.read.read(buffer)
+        }
+    }
+    impl Write for End {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.write
+                .as_mut()
+                .ok_or(std::io::ErrorKind::BrokenPipe)?
+                .write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl ChannelIo for End {
+        fn close_write(&mut self) -> std::io::Result<()> {
+            self.write = None;
+            Ok(())
+        }
+        fn limit_read(&mut self, _: Duration) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn limit_write(&mut self, _: Duration) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn connection() -> (End, End) {
+        let (client_read, desktop_write) = std::io::pipe().unwrap();
+        let (desktop_read, client_write) = std::io::pipe().unwrap();
+        (
+            End {
+                read: client_read,
+                write: Some(client_write),
+            },
+            End {
+                read: desktop_read,
+                write: Some(desktop_write),
+            },
+        )
+    }
+
     /// Hands the desktop one connection, then fails, which ends its channel thread.
-    struct OneConnection(Mutex<Option<UnixStream>>);
+    struct OneConnection(Mutex<Option<End>>);
     impl DesktopChannelEndpoint for OneConnection {
         fn accept(&self) -> std::io::Result<Option<Box<dyn ChannelStream>>> {
             match self.0.lock().unwrap().take() {
-                Some(stream) => Ok(Some(Box::new(stream))),
+                Some(end) => Ok(Some(Box::new(end))),
                 None => Err(std::io::ErrorKind::Other.into()),
             }
         }
@@ -497,7 +550,7 @@ mod tests {
         counters.record_frame_decoded();
         counters.record_frame_painted();
         counters.record_frame_painted();
-        let (client, desktop) = UnixStream::pair().unwrap();
+        let (client, desktop) = connection();
         cx.update(|cx| {
             serve(
                 Arc::new(OneConnection(Mutex::new(Some(desktop)))),
