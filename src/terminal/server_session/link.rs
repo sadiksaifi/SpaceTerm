@@ -923,7 +923,7 @@ impl PaneLink {
         request: super::scrollback::PageRequest,
         then: impl FnOnce(Option<protocol::Page>) + Send + 'static,
     ) -> Result<bool, ServerError> {
-        let channel = self.bound(lease)?.channel();
+        let channel = self.bound(lease)?.channel()?;
         let sent = self.link.request_then(
             Operation::ScrollbackPage {
                 channel,
@@ -980,7 +980,7 @@ impl PaneLink {
             return self.claim(claim);
         }
         let channel =
-            |lease: Lease| -> Result<Channel, ServerError> { Ok(self.bound(lease)?.channel()) };
+            |lease: Lease| -> Result<Channel, ServerError> { Ok(self.bound(lease)?.channel()?) };
         match request.clone() {
             Request::View {
                 lease,

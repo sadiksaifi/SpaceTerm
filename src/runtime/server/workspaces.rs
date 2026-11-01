@@ -2269,3 +2269,7 @@ mod tests {
         restored.shutdown().unwrap();
     }
 }
+
+#[cfg(all(test, feature = "desktop"))]
+#[path = "workspaces/background_restart_tests.rs"]
+mod background_restart_tests;

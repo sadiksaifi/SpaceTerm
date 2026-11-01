@@ -173,6 +173,8 @@ struct State {
     next_id: u32,
     requests: HashMap<RequestId, Waiter>,
     next_channel: u32,
+    /// Handles reserved locally but not yet introduced on the wire.
+    unbound: usize,
     channels: HashMap<Channel, ChannelState>,
     /// Channels whose handle dropped while their `Release` waits for request capacity.
     releases: VecDeque<Channel>,
@@ -195,7 +197,6 @@ struct Queued {
 struct ChannelState {
     sink: Arc<dyn ChannelSink>,
     serial: u32,
-    claimed: bool,
     /// The server sent the channel's last event, so dropping the handle sends no `Release`.
     ended: bool,
 }
@@ -208,6 +209,7 @@ impl ServerLink {
                     next_id: 0,
                     requests: HashMap::new(),
                     next_channel: 0,
+                    unbound: 0,
                     channels: HashMap::new(),
                     releases: VecDeque::new(),
                     l0: VecDeque::new(),
@@ -303,28 +305,20 @@ impl ServerLink {
         Ok(id)
     }
 
-    /// Opens a channel whose frames and Pane events go to `sink`. Claim it next with
-    /// [`ChannelHandle::claim`]. Dropping the handle sends `Release` unless the channel ended.
+    /// Reserves a handle whose frames and Pane events go to `sink`. Its wire channel is assigned
+    /// when [`ChannelHandle::claim`] or [`ChannelHandle::observe`] submits its introduction.
+    /// Dropping an introduced handle sends `Release` unless the channel ended.
     pub fn open_channel(&self, sink: Arc<dyn ChannelSink>) -> Result<ChannelHandle, LinkError> {
         let mut state = self.lock();
         state.usable()?;
-        if state.channels.len() + state.releases.len() >= limits::MAX_CHANNELS {
+        if state.channels.len() + state.unbound + state.releases.len() >= limits::MAX_CHANNELS {
             return Err(LinkError::Busy);
         }
-        state.next_channel = state.next_channel.checked_add(1).ok_or(LinkError::Busy)?;
-        let channel = Channel(state.next_channel);
-        state.channels.insert(
-            channel,
-            ChannelState {
-                sink,
-                serial: 0,
-                claimed: false,
-                ended: false,
-            },
-        );
+        state.unbound += 1;
         Ok(ChannelHandle {
             link: self.clone(),
-            channel,
+            channel: std::sync::OnceLock::new(),
+            sink,
         })
     }
 
@@ -530,7 +524,7 @@ impl ServerLink {
         let Some(dropped) = state.channels.remove(&channel) else {
             return;
         };
-        if !dropped.claimed || dropped.ended || state.closed.is_some() {
+        if dropped.ended || state.closed.is_some() {
             return;
         }
         state.releases.push_back(channel);
@@ -704,12 +698,14 @@ impl PendingReply {
 /// One claimable Pane on one link.
 pub struct ChannelHandle {
     link: ServerLink,
-    channel: Channel,
+    channel: std::sync::OnceLock<Channel>,
+    sink: Arc<dyn ChannelSink>,
 }
 
 impl ChannelHandle {
-    pub fn channel(&self) -> Channel {
-        self.channel
+    /// The wire channel assigned when its claim or observation was submitted.
+    pub fn channel(&self) -> Result<Channel, LinkError> {
+        self.channel.get().copied().ok_or(LinkError::Unclaimed)
     }
 
     /// Claims a Pane for this channel, once. Frames may arrive before the reply. A reply other
@@ -723,14 +719,17 @@ impl ChannelHandle {
         size: impl Into<Option<PaneSize>>,
         style: Option<PresentationStyle>,
     ) -> Result<PendingReply, LinkError> {
-        self.bind(Operation::Claim(Claim {
-            channel: self.channel,
-            attachment,
-            pane,
-            claim,
-            size: size.into(),
-            style,
-        }))
+        let size = size.into();
+        self.bind(|channel| {
+            Operation::Claim(Claim {
+                channel,
+                attachment,
+                pane,
+                claim,
+                size,
+                style,
+            })
+        })
     }
 
     /// Observes a Pane on this channel, once, without control. `session` fences the observed
@@ -741,30 +740,39 @@ impl ChannelHandle {
         pane: crate::hierarchy::Id,
         session: Option<crate::hierarchy::Id>,
     ) -> Result<PendingReply, LinkError> {
-        self.bind(Operation::Observe {
-            channel: self.channel,
+        self.bind(|channel| Operation::Observe {
+            channel,
             pane,
             session,
         })
     }
 
-    /// Sends the operation that binds this channel, once.
-    fn bind(&self, operation: Operation) -> Result<PendingReply, LinkError> {
+    /// Assigns a wire channel and queues its introduction in the same turn. Handle creation
+    /// order need not match claim order when several Pane workers share the link.
+    fn bind(
+        &self,
+        operation: impl FnOnce(Channel) -> Operation,
+    ) -> Result<PendingReply, LinkError> {
         let slot = Arc::new(ReplySlot::default());
         let mut state = self.link.lock();
         state.usable()?;
-        let channel = state
-            .channels
-            .get_mut(&self.channel)
-            .ok_or(LinkError::Unclaimed)?;
-        if channel.claimed {
+        if self.channel.get().is_some() {
             return Err(LinkError::Unclaimed);
         }
+        let channel = Channel(state.next_channel.checked_add(1).ok_or(LinkError::Busy)?);
         state.send_releases();
-        let id = state.send_request(operation, Waiter::Slot(Arc::clone(&slot)))?;
-        if let Some(channel) = state.channels.get_mut(&self.channel) {
-            channel.claimed = true;
-        }
+        let id = state.send_request(operation(channel), Waiter::Slot(Arc::clone(&slot)))?;
+        state.next_channel = channel.0;
+        state.unbound -= 1;
+        state.channels.insert(
+            channel,
+            ChannelState {
+                sink: Arc::clone(&self.sink),
+                serial: 0,
+                ended: false,
+            },
+        );
+        let _ = self.channel.set(channel);
         drop(state);
         self.link.wake();
         Ok(PendingReply {
@@ -784,14 +792,14 @@ impl ChannelHandle {
         state.usable()?;
         let channel = state
             .channels
-            .get(&self.channel)
+            .get(&self.channel()?)
             .ok_or(LinkError::Unclaimed)?;
-        if !channel.claimed || channel.ended {
+        if channel.ended {
             return Err(LinkError::Unclaimed);
         }
         let (messages, serial) = build(channel.serial)?;
         state.queue_all(&messages, urgent)?;
-        if let Some(channel) = state.channels.get_mut(&self.channel) {
+        if let Some(channel) = state.channels.get_mut(&self.channel()?) {
             channel.serial = serial;
         }
         drop(state);
@@ -803,7 +811,7 @@ impl ChannelHandle {
     /// report the serials they reflect, and `PaneEvent::Input` reports a discard. Use
     /// [`ChannelHandle::paste`] for paste text.
     pub fn input(&self, generation: u64, events: Vec<InputEvent>) -> Result<u32, LinkError> {
-        let channel = self.channel;
+        let channel = self.channel()?;
         self.send_channel(true, move |last| {
             let serial = last.checked_add(1).ok_or(LinkError::OutOfBounds)?;
             let message = ClientMessage::Input(Input {
@@ -823,7 +831,7 @@ impl ChannelHandle {
             return Err(LinkError::OutOfBounds);
         }
         let chunks = chunks(text, limits::MAX_PASTE_CHUNK_BYTES);
-        let channel = self.channel;
+        let channel = self.channel()?;
         self.send_channel(true, move |mut serial| {
             let count = chunks.len();
             let mut messages = Vec::with_capacity(count);
@@ -851,7 +859,7 @@ impl ChannelHandle {
     pub fn acknowledge(&self, frame: u64) -> Result<(), LinkError> {
         self.send_simple(
             ClientMessage::FrameAck(FrameAck {
-                channel: self.channel,
+                channel: self.channel()?,
                 frame,
             }),
             true,
@@ -861,7 +869,7 @@ impl ChannelHandle {
     pub fn view(&self, visible: bool, max_hz: u8) -> Result<(), LinkError> {
         self.send_simple(
             ClientMessage::View(View {
-                channel: self.channel,
+                channel: self.channel()?,
                 visible,
                 max_hz,
             }),
@@ -877,7 +885,7 @@ impl ChannelHandle {
     ) -> Result<(), LinkError> {
         self.send_simple(
             ClientMessage::EffectDone(EffectDone {
-                channel: self.channel,
+                channel: self.channel()?,
                 generation,
                 effect,
                 completion,
@@ -898,14 +906,19 @@ impl ChannelHandle {
     /// acknowledged by the link.
     pub fn detach(self) {
         // Dropping finds no channel to release.
-        self.link.lock().channels.remove(&self.channel);
+        if let Ok(channel) = self.channel() {
+            self.link.lock().channels.remove(&channel);
+        }
     }
 }
 
 impl Drop for ChannelHandle {
     /// Sends `Release` for a claimed channel that has not ended, so the server frees its slot.
     fn drop(&mut self) {
-        self.link.release(self.channel);
+        match self.channel() {
+            Ok(channel) => self.link.release(channel),
+            Err(_) => self.link.lock().unbound -= 1,
+        }
     }
 }
 

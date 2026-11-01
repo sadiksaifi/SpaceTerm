@@ -534,7 +534,7 @@ impl EchoPane {
     /// Reads one Scrollback page of `rows` rows, `back` rows above the newest history row.
     pub fn fetch(&mut self, back: u64, rows: u16) -> Result<()> {
         let history = self.history;
-        let channel = self.channel()?.channel();
+        let channel = at("channel", self.channel()?.channel())?;
         let start = history.total.saturating_sub(back).max(history.oldest);
         let operation = Operation::ScrollbackPage {
             channel,

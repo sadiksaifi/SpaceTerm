@@ -230,7 +230,7 @@ impl Channel {
     }
 
     pub(crate) fn number(&self) -> spaceterm_server::protocol::Channel {
-        self.handle().channel()
+        self.handle().channel().expect("the channel was claimed")
     }
 
     pub(crate) fn observe(

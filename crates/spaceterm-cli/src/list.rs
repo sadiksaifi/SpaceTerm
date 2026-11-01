@@ -23,7 +23,7 @@ pub fn collect(
     link: &spaceterm_server::connection::link::ServerLink,
     deadline: std::time::Instant,
 ) -> Result<Vec<PaneFacts>, Failure> {
-    use spaceterm_server::protocol::{ObserveReply, Operation, ReplyBody, SessionState};
+    use spaceterm_server::protocol::{ObserveReply, ReplyBody, SessionState};
     use std::sync::Arc;
     let close = snapshot
         .inventory
@@ -58,11 +58,7 @@ pub fn collect(
                     .open_channel(Arc::new(|_| {}))
                     .map_err(|e| from_server_error(e.into()))?;
                 let request = channel
-                    .request(Operation::Observe {
-                        channel: channel.channel(),
-                        pane: pane.id,
-                        session: expected,
-                    })
+                    .observe(pane.id, expected)
                     .map_err(|e| from_server_error(e.into()))?;
                 let reply = match request
                     .wait_for(deadline.saturating_duration_since(std::time::Instant::now()))

@@ -173,7 +173,13 @@ pub(crate) struct ConnectedPane {
     traffic: Arc<Traffic>,
     start_loss: Arc<StartReplyLoss>,
     stop: Option<Box<dyn FnOnce()>>,
-    reconnect: Box<dyn Fn() -> spaceterm_server::connection::link::ServerLink>,
+    pub(crate) reconnect: Box<dyn Fn() -> spaceterm_server::connection::link::ServerLink>,
+    service: SharedPaneService,
+    watches: Arc<Mutex<Vec<Arc<claim::ControlWatch>>>>,
+    controls: PaneControls,
+    attachments: spaceterm_server::attachments::Attachments,
+    stops: Stops,
+    bell: Bell,
 }
 
 impl ConnectedPane {
@@ -184,6 +190,13 @@ impl ConnectedPane {
     fn with_connection(connection: ServerConnection) -> Self {
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
+        Self::with_host(connection, host)
+    }
+
+    pub(crate) fn with_host(
+        connection: ServerConnection,
+        mut host: crate::runtime::WorkspaceHost,
+    ) -> Self {
         let Reply::Inventory { inventory, .. } = host.request([1; 32], [1; 32], Request::Inventory)
         else {
             panic!("fixture inventory unavailable");
@@ -201,7 +214,10 @@ impl ConnectedPane {
             pane_id,
         );
         state.start_created();
-        let watch = claim::ControlWatch::new(Arc::clone(&state), pane_id);
+        let watches = Arc::new(Mutex::new(vec![claim::ControlWatch::new(
+            Arc::clone(&state),
+            pane_id,
+        )]));
         let factory = factory.with_attachment(permit);
         let traffic = Arc::new(Traffic::default());
         let start_loss = Arc::new(StartReplyLoss::default());
@@ -221,6 +237,7 @@ impl ConnectedPane {
                 Arc::clone(&stops),
             );
             let start_loss = Arc::clone(&start_loss);
+            let watches = Arc::clone(&watches);
             let count = AtomicUsize::new(0);
             move || {
                 let (client, server) = Loopback::pair(1 << 20).unwrap();
@@ -248,12 +265,21 @@ impl ConnectedPane {
                 let (sync, _sync_thread) = SyncWorker::spawn().unwrap();
                 let stopping = Arc::new(AtomicBool::new(false));
                 // Adopt before serving, so an inventory wake can only find this admitted link.
-                let events = Arc::downgrade(&watch);
+                let events = Arc::clone(&watches);
                 let link = io::spawn_link(
                     Box::new(client),
                     Arc::new(move |event| {
-                        if let Some(watch) = events.upgrade() {
-                            watch.deliver(event);
+                        for watch in events.lock().unwrap().iter() {
+                            watch.deliver(match &event {
+                                spaceterm_server::connection::link::LinkEvent::Inventory(
+                                    revision,
+                                ) => spaceterm_server::connection::link::LinkEvent::Inventory(
+                                    Arc::clone(revision),
+                                ),
+                                spaceterm_server::connection::link::LinkEvent::Health(health) => {
+                                    spaceterm_server::connection::link::LinkEvent::Health(*health)
+                                }
+                            });
                         }
                     }),
                 )
@@ -271,8 +297,8 @@ impl ConnectedPane {
                 stops.lock().unwrap().push(Box::new(move || {
                     stopping.store(true, Ordering::Release);
                     wake.wake();
-                    closed.close();
                     serving.join().unwrap();
+                    closed.close();
                 }));
                 link
             }
@@ -283,6 +309,12 @@ impl ConnectedPane {
             traffic,
             start_loss,
             reconnect,
+            service: Arc::clone(&service),
+            watches,
+            controls,
+            attachments,
+            stops: Arc::clone(&stops),
+            bell: Arc::clone(&bell),
             stop: Some(Box::new(move || {
                 running.store(false, Ordering::Release);
                 ring(&bell);
@@ -293,6 +325,50 @@ impl ConnectedPane {
                 service.lock().unwrap().shutdown().unwrap();
             })),
         }
+    }
+
+    pub(crate) fn connection(&self) -> ServerConnection {
+        self.factory.server.clone()
+    }
+
+    pub(crate) fn pane(&self, pane: [u8; 32]) -> (ServerSessionFactory, Arc<ServerPaneState>) {
+        let (factory, state) = ServerSessionFactory::for_pane(
+            self.connection(),
+            &self.controls,
+            crate::platform::runtime_local_filesystem(),
+            pane,
+        );
+        self.watches
+            .lock()
+            .unwrap()
+            .push(claim::ControlWatch::new(Arc::clone(&state), pane));
+        (
+            factory.with_attachment(self.attachments.permit(pane).unwrap()),
+            state,
+        )
+    }
+
+    pub(crate) fn stop_server(&self) {
+        for stop in std::mem::take(&mut *self.stops.lock().unwrap()) {
+            stop();
+        }
+        self.service.lock().unwrap().shutdown().unwrap();
+    }
+
+    pub(crate) fn restore_server(&self, host: crate::runtime::WorkspaceHost) {
+        let mut service = self.service.lock().unwrap();
+        *service = Box::new(Served::new(host));
+        let bell = Arc::clone(&self.bell);
+        service.ticker(Arc::new(move || ring(&bell)));
+        ring(&self.bell);
+    }
+
+    pub(crate) fn starts(&self) -> usize {
+        self.start_loss.starts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn sessions(&self) -> Vec<[u8; 32]> {
+        self.service.lock().unwrap().sessions()
     }
 }
 
@@ -318,7 +394,7 @@ pub(crate) fn paired_connection(
     .unwrap()
 }
 
-fn await_status(state: &ServerPaneState, expected: ServerPaneStatus) {
+pub(crate) fn await_status(state: &ServerPaneState, expected: ServerPaneStatus) {
     let until = Instant::now() + Duration::from_secs(10);
     while state.status() != expected {
         assert!(
