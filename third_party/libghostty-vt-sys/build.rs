@@ -497,7 +497,7 @@ fn apply_spaceterm_patch(src_dir: &Path) {
 fn apply_patch(src_dir: &Path, patch: &Path) {
     let already_applied = Command::new("git")
         .args(["apply", "--reverse", "--check"])
-        .arg(&patch)
+        .arg(patch)
         .current_dir(src_dir)
         .output()
         .unwrap_or_else(|error| panic!("failed to verify SpaceTerm Ghostty patch: {error}"));
@@ -507,13 +507,13 @@ fn apply_patch(src_dir: &Path, patch: &Path) {
 
     let applies_cleanly = Command::new("git")
         .args(["apply", "--check"])
-        .arg(&patch)
+        .arg(patch)
         .current_dir(src_dir)
         .output()
         .unwrap_or_else(|error| panic!("failed to check SpaceTerm Ghostty patch: {error}"));
     if applies_cleanly.status.success() {
         let mut apply = Command::new("git");
-        apply.arg("apply").arg(&patch).current_dir(src_dir);
+        apply.arg("apply").arg(patch).current_dir(src_dir);
         run(apply, "apply SpaceTerm Ghostty patch");
         return;
     }

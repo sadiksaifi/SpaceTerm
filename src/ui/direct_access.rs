@@ -98,6 +98,8 @@ impl OpenInvitation {
 pub(crate) enum AccessFailure {
     /// The server isn't running, or this client isn't connected to it.
     Unreachable,
+    /// This client and the server require different SpaceTerm Protocol majors.
+    IncompatibleProtocol,
     /// The address isn't one the server can listen at.
     InvalidAddress,
     /// The server couldn't listen at the address and port, so nothing changed.
@@ -254,13 +256,12 @@ fn device(device: DeviceInfo) -> Device {
 /// errors convert to their direct network classification first.
 fn classify(error: impl Into<DirectError>) -> AccessFailure {
     match error.into() {
-        // A route whose own key or credential storage is unavailable can't reach the server,
-        // and neither can a client that doesn't speak the server's protocol major.
+        // A route whose own key or credential storage is unavailable can't reach the server.
         DirectError::Transport
         | DirectError::InteractionRequired
         | DirectError::CredentialUnavailable
-        | DirectError::Revoked
-        | DirectError::IncompatibleProtocol => AccessFailure::Unreachable,
+        | DirectError::Revoked => AccessFailure::Unreachable,
+        DirectError::IncompatibleProtocol => AccessFailure::IncompatibleProtocol,
         DirectError::InvalidAddress => AccessFailure::InvalidAddress,
         DirectError::AddressUnavailable => AccessFailure::AddressUnavailable,
         DirectError::Disabled => AccessFailure::Disabled,
@@ -305,6 +306,9 @@ impl AccessFailure {
             Self::Unreachable => {
                 format!("SpaceTerm can\u{2019}t reach \u{201C}{server}\u{201D}. Try again.")
             }
+            Self::IncompatibleProtocol => format!(
+                "This SpaceTerm Client and the SpaceTerm Server on \"{server}\" use incompatible SpaceTerm Protocol versions."
+            ),
             Self::InvalidAddress => {
                 format!(
                     "Enter an IP address of \u{201C}{server}\u{201D}, optionally followed by a port."
