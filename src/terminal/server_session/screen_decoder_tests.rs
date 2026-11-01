@@ -855,3 +855,29 @@ fn consecutive_screens_share_the_projected_palette_until_its_inputs_change() {
         crate::appearance::Color::rgb(0x28323c)
     );
 }
+
+#[test]
+fn a_program_that_changes_one_palette_entry_again_shows_its_new_color() {
+    let mut session = Session::new(8, 2);
+    let mut palette_entry = |osc: &[u8]| {
+        session.emulator.feed(osc);
+        let base = session.decoder.frame();
+        let (_, frame, update) = session.next_against(base).unwrap();
+        let decoded = session.decoder.apply(frame, base, update, None).unwrap();
+        let rendered = session.presenter.snapshot(
+            decoded,
+            PresentationGeneration::test(frame),
+            &session.appearance,
+        );
+        assert!(rendered.colors.palette_overrides[2]);
+        rendered.colors.palette[2]
+    };
+    assert_eq!(
+        palette_entry(b"\x1b]4;2;rgb:01/02/03\x1b\\"),
+        crate::appearance::Color::rgb(0x010203)
+    );
+    assert_eq!(
+        palette_entry(b"\x1b]4;2;rgb:04/05/06\x1b\\"),
+        crate::appearance::Color::rgb(0x040506)
+    );
+}
