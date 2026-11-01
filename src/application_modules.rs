@@ -104,10 +104,6 @@ pub mod desktop_channel;
 #[cfg(feature = "desktop")]
 mod architecture_tests;
 
-#[cfg(test)]
-#[cfg(feature = "desktop")]
-mod allocation_count;
-
 #[cfg(feature = "desktop")]
 use spaceterm_connections as direct_connections;
 #[cfg(feature = "desktop")]

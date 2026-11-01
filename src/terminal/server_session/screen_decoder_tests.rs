@@ -1,10 +1,10 @@
 //! Round trips from a real emulator through the server encoder, the wire and this decoder.
 use super::screen_decoder::{DecodedScreen, Presenter, ScreenDecoder, UpdateError, decode_page};
 use super::*;
-use crate::allocation_count;
 use crate::runtime::screen_encoder::{ScreenCapture, ScreenEncoder, encode_page};
 use crate::terminal::emulator::TerminalEmulator;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
+use crate::terminal::testing::count_allocations;
 use spaceterm_server::protocol::frame::{Assembler, encode_server};
 use spaceterm_server::protocol::screen::{Cells, Row, Run, ScreenUpdate, ScrollShift, StyleRef};
 use spaceterm_server::protocol::{Channel, Frame, RawFrame, ServerMessage, limits};
@@ -735,14 +735,14 @@ fn a_frame_that_changes_only_metadata_allocates_nothing() {
     let base = session.decoder.frame();
     let (_, frame, update) = session.next_against(base).unwrap();
     assert!(update.rows.is_empty() && update.shift.is_none() && update.colors.is_none());
-    let (applied, allocations) = allocation_count::count(|| {
+    let (applied, allocations) = count_allocations(|| {
         session
             .decoder
             .apply(frame, base, update, None)
             .map(|decoded| decoded.cursor.position)
     });
     assert!(applied.unwrap().is_some());
-    assert_eq!(allocations, 0);
+    assert_eq!(allocations.count, 0);
 }
 
 #[test]
@@ -756,7 +756,7 @@ fn a_changed_row_allocates_nothing_per_cell() {
     let base = session.decoder.frame();
     let (_, frame, update) = session.next_against(base).unwrap();
     assert_eq!(update.rows.len(), 1);
-    let (applied, allocations) = allocation_count::count(|| {
+    let (applied, allocations) = count_allocations(|| {
         session
             .decoder
             .apply(frame, base, update, None)
@@ -764,7 +764,7 @@ fn a_changed_row_allocates_nothing_per_cell() {
     });
     assert_eq!(applied, Ok(200));
     // The row itself, and the copy of the row list the renderer holds.
-    assert!(allocations <= 2, "{allocations} allocations");
+    assert!(allocations.count <= 2, "{allocations:?}");
 }
 
 #[test]
@@ -810,8 +810,8 @@ fn consecutive_screens_share_the_projected_palette_until_its_inputs_change() {
     let first = presenter.snapshot(decoded, generation(1), &appearance);
     let decoded = decoder.apply(2, Some(1), moved(1), None).unwrap();
     let (second, allocations) =
-        allocation_count::count(|| presenter.snapshot(decoded, generation(2), &appearance));
-    assert_eq!(allocations, 0);
+        count_allocations(|| presenter.snapshot(decoded, generation(2), &appearance));
+    assert_eq!(allocations.count, 0);
     assert!(Arc::ptr_eq(&first.colors.palette, &second.colors.palette));
     assert_eq!(
         second.cursor.position.map(|position| position.column),
