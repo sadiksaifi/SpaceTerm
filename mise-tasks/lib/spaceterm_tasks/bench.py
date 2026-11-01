@@ -631,6 +631,49 @@ def evaluate(summary, budgets, *, reference=None, hardware=None, scenarios=None,
     return verdicts
 
 
+# The build the desktop ratio budgets compare with.
+DESKTOP_REFERENCE_VERSION = "0.6.8"
+# Settings that define the work a bench:desktop:macos run measures.
+DESKTOP_SETTINGS = ("seconds", "idle_seconds", "window", "large_window", "workloads")
+# Environment facts a desktop reference is valid for: the same Mac and macOS version.
+DESKTOP_ENVIRONMENT = ("host", "hardware", "cpus", "memory_bytes", "system")
+
+
+def compare_desktop_reference(reference, results, budgets, scenarios, states):
+    """Why the bench:desktop:macos `reference` cannot serve `results`' ratio budgets.
+
+    A reference is a run of v0.6.8 through the reference adapter, on the same Mac and macOS
+    version, with the same settings and, when `results` measures S6, the same `cat` input. It
+    must hold every measurement a ratio budget in `scenarios` compares with, in every state of
+    `states`. Returns the reasons; none means comparable.
+    """
+    reasons = []
+    environment = reference.get("environment", {})
+    if environment.get("adapter") != "reference":
+        reasons.append("not measured by --app reference")
+    if environment.get("app_version") != DESKTOP_REFERENCE_VERSION:
+        reasons.append(f"app version is not {DESKTOP_REFERENCE_VERSION}")
+    for key in DESKTOP_ENVIRONMENT:
+        if environment.get(key) != results["environment"].get(key):
+            reasons.append(f"environment {key} differs")
+    digest = results["environment"].get("input_sha256")
+    if digest is not None and environment.get("input_sha256") != digest:
+        reasons.append("environment input_sha256 differs")
+    for key in DESKTOP_SETTINGS:
+        if reference.get("settings", {}).get(key) != results["settings"].get(key):
+            reasons.append(f"setting {key} differs")
+    summary = reference.get("summary", {})
+    for budget in budgets["desktop"]["budget"]:
+        measurement = budget["measurement"]
+        if "ratio" not in budget or measurement.split("/")[0] not in scenarios:
+            continue
+        for accessibility in states:
+            name = f"{measurement}/{accessibility}"
+            if lookup(summary, name, budget["role"], budget["metric"]) is None:
+                reasons.append(f"reference lacks {name} {budget['role']} {budget['metric']}")
+    return reasons
+
+
 def regressions(baseline, current, server_budgets):
     """Server medians in `current` that exceed `baseline` by more than the allowed fraction.
 

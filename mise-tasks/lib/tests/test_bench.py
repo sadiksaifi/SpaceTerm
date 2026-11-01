@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -302,6 +303,61 @@ class BudgetTests(unittest.TestCase):
         slower = run({"yes/plain": values | {"cpu_s": 12.0}})
         self.assertEqual(bench.compare_server(baseline, slower, server)["status"], "regressed")
 
+    def test_a_desktop_reference_must_measure_the_same_work_on_the_same_mac(self):
+        scroll = {"name": "scroll", "measurement": "S7/scroll", "role": "product"}
+        cold = {"name": "cold", "measurement": "S1/cold-start", "role": "product"}
+        budgets = self.budgets(
+            scroll | {"metric": "cpu_s", "ratio": 1.35}, cold | {"metric": "cpu_s", "max": 1.1}
+        )
+        environment = dict.fromkeys(bench.DESKTOP_ENVIRONMENT, "same") | {"input_sha256": "a"}
+        settings = dict.fromkeys(bench.DESKTOP_SETTINGS, "same")
+        current = {
+            "environment": environment | {"app_version": "0.7.0", "adapter": "current"},
+            "settings": settings | {"runs": 3, "scenarios": ["S1", "S7"]},
+        }
+        both = [measurement("S7", "scroll", state, 10.0) for state in ("off", "on")]
+
+        def reference(summary=both, **changes):
+            return {
+                "environment": environment
+                | {"app_version": "0.6.8", "adapter": "reference"}
+                | changes.get("environment", {}),
+                # Runs and scenarios may differ: only the work each measurement did must match.
+                "settings": settings
+                | {"runs": 1, "scenarios": ["S7"]}
+                | changes.get("settings", {}),
+                "summary": bench.summarize(summary),
+            }
+
+        def reasons(candidate, scenarios=("S1", "S7"), results=current):
+            return bench.compare_desktop_reference(
+                candidate, results, budgets, scenarios, ("off", "on")
+            )
+
+        self.assertEqual(reasons(reference()), [])
+        for key in bench.DESKTOP_SETTINGS:
+            with self.subTest(setting=key):
+                changed = reference(settings={key: "other"})
+                self.assertEqual(reasons(changed), [f"setting {key} differs"])
+        for key in (*bench.DESKTOP_ENVIRONMENT, "input_sha256"):
+            with self.subTest(environment=key):
+                changed = reference(environment={key: "other"})
+                self.assertEqual(reasons(changed), [f"environment {key} differs"])
+        # A run without S6 has no input to compare.
+        no_input = current | {"environment": current["environment"] | {"input_sha256": None}}
+        self.assertEqual(
+            reasons(reference(environment={"input_sha256": "b"}), results=no_input), []
+        )
+        self.assertEqual(
+            reasons(reference(environment={"app_version": "0.7.0", "adapter": "current"})),
+            ["not measured by --app reference", "app version is not 0.6.8"],
+        )
+        self.assertEqual(
+            reasons(reference(both[:1])), ["reference lacks S7/scroll/on product cpu_s"]
+        )
+        # Only ratio budgets of requested scenarios need the reference.
+        self.assertEqual(reasons(reference([]), scenarios=("S1",)), [])
+
     def test_server_regressions_respect_the_fraction_and_noise_floor(self):
         server = {"regression": 0.1, "floor": {"cpu_s": 0.05}}
         baseline = {"yes/plain": {"cpu_s": 10.0, "bytes_sent": 100}, "cat/plain": {"cpu_s": 0.1}}
@@ -326,7 +382,15 @@ class JobTests(unittest.TestCase):
         try:
             number, command = jobs.prepare("receipt")
             self.assertTrue(command.startswith(" sh "))
-            shell = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, text=True)
+            # A Pane's shell leads its terminal's session; the current app also names the Pane.
+            shell = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                env=dict(os.environ, SPACETERM_PANE="7"),
+            )
             jobs.wait(number, ".ready", 30)
             self.assertFalse(jobs.path(number, ".done.json").exists())
             jobs.start(number)
@@ -334,6 +398,7 @@ class JobTests(unittest.TestCase):
             output, _ = shell.communicate(timeout=30)
             self.assertEqual(receipt["kind"], "receipt")
             self.assertEqual(receipt["returncode"], 0)
+            self.assertEqual((receipt["pane"], receipt["session"]), ("7", shell.pid))
             self.assertIn(f"{bench.MARKER} {number}", output)
             self.assertNotIn(bench.MARKER, command)
         finally:
@@ -480,22 +545,31 @@ class FakeApp:
     """The installed app as the desktop task sees it through keys, windows and Accessibility.
 
     Workspaces hold Tabs and Tabs hold Panes. A Pane holds Accessibility demand from a read
-    while it is visible until it is hidden, as the app's per-Pane demand does.
+    while it is visible until it is hidden, as the app's per-Pane demand does. A `legacy` app
+    is v0.6.8: one process without a server, whose Panes end with it and whose quit ends it.
     """
 
-    def __init__(self):
+    def __init__(self, legacy=False):
+        self.legacy = legacy
         self.next_pane = 0
+        self.reset()
+        self.client = None
+        self.window = "closed"
+        self.front = False
+        self.server = not legacy
+        self.demand = set()
+        self.reads = []
+        self.lag = False
+
+    def reset(self):
         self.workspaces = [[[self.new_pane()]]]
         self.workspace = 0
         self.tabs = [0]
         self.focus = self.workspaces[0][0][0]
-        self.client = None
-        self.window = "closed"
-        self.front = False
-        self.server = True
-        self.demand = set()
-        self.reads = []
-        self.lag = False
+
+    def running(self):
+        """Whether the Panes' shells run: in the server, or in a legacy app's own process."""
+        return self.client is not None if self.legacy else self.server
 
     def new_pane(self):
         self.next_pane += 1
@@ -524,6 +598,8 @@ class FakeApp:
     def terminate(self):
         self.client = None
         self.window = "closed"
+        if self.legacy:
+            self.reset()
         self.changed()
 
     def key(self, key, *modifiers):
@@ -550,6 +626,8 @@ class FakeApp:
             self.close()
         elif command and key == "m":
             self.window = "minimized"
+        elif command and key == "q" and self.legacy:
+            self.terminate()
         elif command and key == "q":
             self.window = "closed"
         self.changed()
@@ -621,7 +699,10 @@ class FakeJobs:
 
     def receipt(self, number, timeout):
         job = self.jobs[number]
-        receipt = {"kind": job["kind"], "returncode": 0, "wall_s": 1.0, "pane": job["pane"]}
+        receipt = {"kind": job["kind"], "returncode": 0, "wall_s": 1.0, "rows": 40}
+        # v0.6.8 puts no Pane in the Pane's environment; every shell leads its own session.
+        receipt |= {"pane": None if self.app.legacy else job["pane"]}
+        receipt |= {"session": int(job["pane"], 16)}
         if job["kind"] == "yes":
             receipt["producer_returncode"] = -13
         if job["kind"] == "fill":
@@ -629,10 +710,15 @@ class FakeJobs:
         return receipt
 
 
-def fake_desktop(task, app, accessibility, clock):
-    class Desktop(task.Desktop):
-        """The real Desktop with the app's processes, windows and CLI replaced by `app`."""
+def fake_desktop(task, app, accessibility, clock, reference=False):
+    """The task's adapter for `app`, with the app's processes and windows replaced by `app`.
 
+    The current app's CLI is replaced too. v0.6.8 has none, so the reference adapter keeps its
+    own operations and any call to a server or CLI fails.
+    """
+    adapter = task.ReferenceDesktop if reference else task.CurrentDesktop
+
+    class Gui(adapter):
         def members(self):
             return []
 
@@ -641,22 +727,16 @@ def fake_desktop(task, app, accessibility, clock):
                 return [app.client] if app.client else []
             if role == "server":
                 return [1] if app.server else []
-            return list(range(len(app.panes()))) if app.server else []
+            return list(range(len(app.panes()))) if app.running() else []
 
         def client(self):
             return app.client
 
         def shells(self):
-            return len(app.panes()) if app.server else 0
+            return len(app.panes()) if app.running() else 0
 
         def wait_shells(self, count, timeout=30):
             assert self.shells() == count, (self.shells(), count)
-
-        def has_server(self):
-            return True
-
-        def service(self, action):
-            app.server = action == "start"
 
         def launch(self):
             app.launch()
@@ -684,18 +764,32 @@ def fake_desktop(task, app, accessibility, clock):
         def resize(self, width, height):
             pass
 
-        def close_pane(self, pane):
-            app.close(pane)
+    class Cli(Gui):
+        def has_server(self):
+            return True
+
+        def service(self, action):
+            app.server = action == "start"
+
+        def close_panes(self, panes):
+            for pane in panes:
+                app.close(pane)
             app.changed()
 
-        def retained_rows(self, pane):
-            app.rows_asked = pane
+        def retained_rows(self, receipt):
+            app.rows_asked = receipt["pane"]
             return 10_040
 
         def counters(self):
             return {"server": None, "client": None}
 
-    return Desktop(task.APPS["preflight"], FakeInput(app), FakeJobs(app), accessibility, clock)
+    return (Gui if reference else Cli)(
+        task.RELEASE if reference else task.PREFLIGHT,
+        FakeInput(app),
+        FakeJobs(app),
+        accessibility,
+        clock,
+    )
 
 
 class DesktopScenarioTests(unittest.TestCase):
@@ -709,7 +803,7 @@ class DesktopScenarioTests(unittest.TestCase):
     def run_scenarios(self, accessibility, scenarios=None, app=None):
         app = app or FakeApp()
         clock = FakeClock()
-        desktop = fake_desktop(self.task, app, accessibility, clock)
+        desktop = fake_desktop(self.task, app, accessibility, clock, reference=app.legacy)
         args = SimpleNamespace(idle_seconds=60, seconds=60, input="/input")
         results = {"measurements": []}
         output = Path(self.directory.name) / "results.json"
@@ -759,6 +853,75 @@ class DesktopScenarioTests(unittest.TestCase):
         # The visible Tab is the last one filled, so its Pane is the one asked about.
         fills = [pane for kind, pane, _ in desktop.jobs.started if kind == "fill"]
         self.assertEqual(app.rows_asked, fills[-1])
+
+    def test_the_reference_runs_every_scenario_without_a_server_or_pane_environment(self):
+        compared = {
+            tuple(budget["measurement"].split("/"))
+            for budget in bench.load_budgets()["desktop"]["budget"]
+            if "ratio" in budget
+        }
+        for accessibility in (False, True):
+            with self.subTest(accessibility=accessibility):
+                app, desktop, results, observations = self.run_scenarios(
+                    accessibility, app=FakeApp(legacy=True)
+                )
+                recorded = {(m["scenario"], m["phase"]) for m in results["measurements"]}
+                self.assertLessEqual(compared, recorded)
+                # v0.6.8's quit ends it, which leaves S4 nothing to observe.
+                self.assertNotIn("S4", {scenario for scenario, _ in recorded})
+                s5 = [visible for scenario, _, visible, _ in observations if scenario == "S5"]
+                self.assertEqual([len(visible) for visible in s5], [3])
+                # v0.6.8 keeps 10,000 Scrollback rows; the fill receipt reports 40 screen rows.
+                [filled] = [m for m in results["measurements"] if m["phase"] == "filled"]
+                self.assertEqual(filled["values"]["rows"], 10_040)
+                if not accessibility:
+                    self.assertEqual(app.reads, [])
+                    continue
+                for scenario, phase, visible, demand in observations:
+                    with self.subTest(observation=f"{scenario}/{phase}"):
+                        self.assertLessEqual(visible, demand)
+                workloads = [started for started in desktop.jobs.started if started[0] != "receipt"]
+                self.assertTrue(all(demanded for _, _, demanded in workloads), workloads)
+
+    def test_a_reference_with_another_duration_reaches_no_ratio_verdict(self):
+        budgets = bench.load_budgets()
+        scenarios, states = ["S7"], ["off"]
+        environment = {
+            "host": "mac",
+            "hardware": "Chip",
+            "cpus": 12,
+            "memory_bytes": 1 << 34,
+            "system": "macOS 26.6",
+            "input_sha256": None,
+        }
+
+        def results(seconds, version, adapter):
+            args = SimpleNamespace(runs=3, seconds=seconds, idle_seconds=60)
+            return {
+                "environment": environment | {"app_version": version, "adapter": adapter},
+                "settings": self.task.settings(args, scenarios, states),
+            }
+
+        def summary(cpu):
+            phases = ("scroll", "partial", "vim")
+            return bench.summarize([measurement("S7", phase, "off", cpu) for phase in phases])
+
+        path = Path(self.directory.name) / "reference.json"
+        path.write_text(json.dumps(results(20, "0.6.8", "reference") | {"summary": summary(10.0)}))
+        # 8 CPU s in 10 s against 10 in 20 s is 60% more CPU per second; its ratio, 0.8, passes.
+        with self.assertRaisesRegex(TaskError, "setting seconds differs"):
+            self.task.load_reference(
+                path, results(10, "0.7.0", "current"), budgets, scenarios, states
+            )
+        reference = self.task.load_reference(
+            path, results(20, "0.7.0", "current"), budgets, scenarios, states
+        )
+        verdicts = bench.evaluate(
+            summary(8.0), budgets, reference=reference, scenarios=scenarios, states=states
+        )
+        ratios = {v["measurement"]: v for v in verdicts if v["bound"] == "ratio"}
+        self.assertEqual(ratios["S7/scroll/off"]["value"], 0.8)
+        self.assertTrue(ratios["S7/scroll/off"]["pass"])
 
     def test_checked_in_budgets_name_measurements_the_desktop_task_records(self):
         _, _, off, _ = self.run_scenarios(False)

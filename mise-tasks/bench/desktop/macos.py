@@ -1,15 +1,15 @@
 #!/usr/bin/env python
 # MISE description="Measure an installed SpaceTerm app's CPU, memory and wakeups in ten scenarios with Accessibility off and on"
-# USAGE flag "--app <app>" help="Installed app to measure" default="preflight" {
-# USAGE   choices "preflight" "release"
+# USAGE flag "--app <app>" help="Installed app to measure; reference is v0.6.8, installed as SpaceTerm" default="preflight" {
+# USAGE   choices "preflight" "release" "reference"
 # USAGE }
 # USAGE flag "--scenarios <list>" help="Comma-separated scenarios S1 to S10" default="S1,S2,S3,S4,S5,S6,S7,S8,S9,S10"
 # USAGE flag "--runs <count>" help="Runs of each scenario" default="3"
 # USAGE flag "--accessibility <list>" help="Comma-separated Accessibility states: off, on" default="off,on"
 # USAGE flag "--seconds <seconds>" help="Duration of the S7 workloads" default="60"
 # USAGE flag "--idle-seconds <seconds>" help="Duration of the S2 to S5 idle observations" default="60"
-# USAGE flag "--reference <file>" help="results.json of a v0.6.8 run, for the ratio budgets"
-# USAGE flag "--no-budgets" help="Skip the budget check, as for the v0.6.8 reference run"
+# USAGE flag "--reference <file>" help="results.json of an --app reference run on this Mac with the same settings, for the ratio budgets"
+# USAGE flag "--no-budgets" help="Skip the budget check"
 # USAGE flag "--input-python <path>" help="Python that holds the Accessibility permission and posts input" default="python3"
 # USAGE flag "--output <directory>" help="Directory for results.json; defaults to target/bench/desktop/TIME"
 """Measure an installed SpaceTerm app in the ten scenarios of #773.
@@ -31,6 +31,13 @@ moved. Results go to `--output` after each observation, then the task checks the
 mise-tasks/bench/budgets.json and fails when a budget is missed or a requested budget has no
 measurement.
 
+`--app reference` measures v0.6.8, the build the ratio budgets compare with, and checks no
+budgets. v0.6.8 is one process without a server, a CLI or a Pane identity in the Pane's
+environment, so this run identifies a Pane by its shell's session and records nothing in S4,
+whose quit ends v0.6.8. `--reference` takes its results.json and refuses one that measured other
+work: other durations, workloads, window sizes or `cat` input, another Mac or macOS version, or
+another app version, or one that lacks a measurement a requested ratio budget compares with.
+
 The app needs a shell prompt in its focused Pane. The Python given by `--input-python` must hold
 the Accessibility permission in System Settings > Privacy & Security. Leave the keyboard, mouse
 and screen alone while the task runs. Measure one product at a time: stop the other product's
@@ -51,6 +58,7 @@ from pathlib import Path
 from spaceterm_tasks import ROOT, TaskError, main
 from spaceterm_tasks.bench import (
     CLOCK,
+    DESKTOP_REFERENCE_VERSION,
     MIB,
     Jobs,
     Sampler,
@@ -58,6 +66,7 @@ from spaceterm_tasks.bench import (
     check_seconds,
     classify,
     cli_json,
+    compare_desktop_reference,
     counter_difference,
     delta,
     environment,
@@ -83,6 +92,24 @@ ORIGIN = (80, 80)
 COLD_SETTLE_SECONDS = 10
 FILLED_PANES = 10
 FILL_LINES = 100_000
+YES_LINES = 20_000_000
+TYPED_KEYS = 450
+TYPING_RATE = 15
+RESIZE_SECONDS = 20
+RESIZE_INTERVAL_SECONDS = 0.5
+# The work each scenario does beyond its durations; a reference must have done the same.
+WORKLOADS = {
+    "cold_settle_s": COLD_SETTLE_SECONDS,
+    "filled_panes": FILLED_PANES,
+    "fill_lines": FILL_LINES,
+    "yes_lines": YES_LINES,
+    "typed_keys": TYPED_KEYS,
+    "typing_rate": TYPING_RATE,
+    "resize_s": RESIZE_SECONDS,
+    "resize_interval_s": RESIZE_INTERVAL_SECONDS,
+}
+# v0.6.8 keeps at most this many Scrollback rows per Pane (src/terminal/emulator.rs).
+REFERENCE_SCROLLBACK_ROWS = 10_000
 # The longest a workload's presentation work may continue after it ends.
 SETTLE_LIMIT_SECONDS = 120
 # The desktop's counters through the CLI, once it has such a command (#773). Until then the
@@ -111,10 +138,8 @@ class App:
         return command.startswith(str(self.installations) + "/") and command.endswith("/spaceterm")
 
 
-APPS = {
-    "preflight": App("SpaceTerm Preflight", "spaceterm-preflight"),
-    "release": App("SpaceTerm", "spaceterm"),
-}
+PREFLIGHT = App("SpaceTerm Preflight", "spaceterm-preflight")
+RELEASE = App("SpaceTerm", "spaceterm")
 
 
 class Input:
@@ -168,7 +193,11 @@ def wait_until(condition, timeout, failure, interval=0.05):
 
 
 class Desktop:
-    """One installed app: its processes, window and focused Pane."""
+    """One installed app: its processes, window and focused Pane.
+
+    The app's architecture decides how the task finds its processes and Panes, starts its shells
+    and cleans up, so `CurrentDesktop` and `ReferenceDesktop` provide those operations.
+    """
 
     def __init__(self, app, keyboard, jobs, accessibility, clock=CLOCK):
         self.app = app
@@ -180,17 +209,44 @@ class Desktop:
         # The Pane each read text area belongs to, per client process.
         self.elements = {}
 
+    # Operations each architecture provides
+
+    def roots(self, rows):
+        """The app's own processes in a process listing, by pid, with their roles."""
+        raise NotImplementedError
+
+    def pane(self, receipt):
+        """The Pane whose shell wrote `receipt`, or a TaskError when the receipt cannot tell."""
+        raise NotImplementedError
+
+    def stop_server(self):
+        raise NotImplementedError
+
+    def start_server(self):
+        raise NotImplementedError
+
+    def start_shell(self):
+        """Waits until the focused Pane runs a shell. Returns whether that took Start Session."""
+        raise NotImplementedError
+
+    def close_panes(self, panes):
+        """Closes `panes`, which this task created, and leaves the Panes it found."""
+        raise NotImplementedError
+
+    def retained_rows(self, receipt):
+        """Rows, Scrollback and screen, that the Pane retains after the fill that wrote
+        `receipt`."""
+        raise NotImplementedError
+
+    def counters(self):
+        """Terminal Diagnostics counters, `{"server": ..., "client": ...}`, None where absent."""
+        raise NotImplementedError
+
     # Processes
 
     def members(self):
         rows = processes()
-        roots = {}
-        for row in rows:
-            if row["command"] == self.app.executable:
-                roots[row["pid"]] = "client"
-            elif self.app.is_server(row["command"]):
-                roots[row["pid"]] = "server"
-        return classify(rows, roots)
+        return classify(rows, self.roots(rows))
 
     def pids(self, role):
         return [member["pid"] for member in self.members() if member["role"] == role]
@@ -215,45 +271,6 @@ class Desktop:
         for pid in self.pids("client"):
             os.kill(pid, signal.SIGTERM)
         wait_until(lambda: not self.pids("client"), 20, "the client did not exit")
-
-    def cli(self):
-        launcher = Path.home() / ".local" / "bin" / self.app.identity
-        if launcher.exists():
-            return str(launcher)
-        installed = sorted(self.app.installations.glob("*/*.app/Contents/MacOS/spaceterm"))
-        if not installed:
-            raise TaskError(f"no installed {self.app.name} server")
-        return str(installed[-1])
-
-    def has_server(self):
-        return self.app.installations.exists()
-
-    def confirmed(self, *arguments):
-        """Runs a `spaceterm` command, confirming the preview it may return. Returns the exit
-        status and the error code of the final attempt."""
-        command = [self.cli(), "--json", "--no-input", *arguments]
-        result = subprocess.run(command, capture_output=True, text=True)
-        envelope = json.loads(result.stdout) if result.stdout.strip() else {}
-        if result.returncode == 3:
-            token = envelope["data"]["confirmation"]["token"]
-            result = subprocess.run(command + ["--confirm", token], capture_output=True, text=True)
-            envelope = json.loads(result.stdout) if result.stdout.strip() else {}
-        return result.returncode, (envelope.get("error") or {}).get("code")
-
-    def service(self, action):
-        """Runs `spaceterm server ACTION`."""
-        status, code = self.confirmed("server", action)
-        if status and not (action == "stop" and code == "stopped"):
-            raise TaskError(f"server {action} failed ({code or status})")
-        if action == "stop":
-            wait_until(lambda: not self.pids("server"), 30, "the server did not stop")
-
-    def close_pane(self, pane):
-        """Closes Pane `pane` through the CLI, and its Workspace when it is the last Pane there,
-        which the desktop would only do after a confirmation dialog."""
-        status, code = self.confirmed("--server", "local", "pane", "close", "--pane", f"id:{pane}")
-        if status:
-            raise TaskError(f"spaceterm pane close failed ({code or status})")
 
     # Window and focus
 
@@ -357,28 +374,144 @@ class Desktop:
         return check_receipt(self.jobs.receipt(number, timeout), kind, **parameters)
 
     def receipt(self):
-        """Proves the focused Pane runs typed commands: its shell writes a receipt file, which
-        names the Pane."""
+        """Proves the focused Pane runs typed commands: its shell writes a receipt file. Returns
+        the Pane that wrote it."""
         number, _ = self.run_job("receipt")
         self.jobs.start(number)
-        receipt = self.finish_job(number, "receipt", 30)
-        if not receipt.get("pane"):
-            raise TaskError("the focused Pane's shell does not know its Pane")
-        return receipt
+        return self.pane(self.finish_job(number, "receipt", 30))
 
     def focused(self, step):
         """Proves the focused Pane runs typed commands and, with Accessibility on, demands its
         accessibility work. Call after every change of the focused or visible Panes, with
-        `step` naming the change. Returns the Pane id."""
-        pane = self.receipt()["pane"]
+        `step` naming the change. Returns the Pane."""
+        pane = self.receipt()
         if self.accessibility:
             self.read_text(step, pane)
         return pane
 
-    def retained_rows(self, pane):
-        """Rows Pane `pane` retains, Scrollback and screen, as the CLI reports them."""
+    def read_text(self, step, pane):
+        """Demands Pane `pane`'s accessibility work: reads the focused Pane's text through the
+        Accessibility API, and fails unless the read reached a text area of that Pane alone."""
+        client = self.client()
+        result = self.input.call("read_text", pid=client)
+        self.reads.append(dict(result, step=step, pane=pane))
+        if not result.get("read"):
+            raise TaskError(f"the Accessibility read failed ({result.get('reason')})")
+        owner = self.elements.setdefault((client, result["element"]), pane)
+        if owner != pane:
+            raise TaskError("the Accessibility read reached another Pane than the focused one")
+
+    def ready(self):
+        """One visible, frontmost window of WINDOW size whose focused Pane runs typed commands."""
+        if not self.pids("server"):
+            self.start_server()
+        if self.client() is None or self.window() is None:
+            self.launch()
+            if wait_until(self.window, 10, None) is None:
+                # A minimized or closed window may not return on reopen; a new client shows one.
+                if self.client() is not None:
+                    self.terminate()
+                self.launch()
+        self.activate()
+        self.place(*WINDOW)
+        self.start_shell()
+        self.focused("ready")
+
+    def restart(self):
+        if self.client() is not None:
+            self.terminate()
+        self.ready()
+
+
+class CurrentDesktop(Desktop):
+    """A client and a local server, which the task reaches through the server's CLI.
+
+    The server keeps the Panes when the client ends, and a Pane's shell knows its Pane from
+    `SPACETERM_PANE`.
+    """
+
+    def roots(self, rows):
+        roots = {}
+        for row in rows:
+            if row["command"] == self.app.executable:
+                roots[row["pid"]] = "client"
+            elif self.app.is_server(row["command"]):
+                roots[row["pid"]] = "server"
+        return roots
+
+    def pane(self, receipt):
+        if not receipt.get("pane"):
+            raise TaskError("the focused Pane's shell does not know its Pane")
+        return receipt["pane"]
+
+    def cli(self):
+        launcher = Path.home() / ".local" / "bin" / self.app.identity
+        if launcher.exists():
+            return str(launcher)
+        installed = sorted(self.app.installations.glob("*/*.app/Contents/MacOS/spaceterm"))
+        if not installed:
+            raise TaskError(f"no installed {self.app.name} server")
+        return str(installed[-1])
+
+    def has_server(self):
+        return self.app.installations.exists()
+
+    def confirmed(self, *arguments):
+        """Runs a `spaceterm` command, confirming the preview it may return. Returns the exit
+        status and the error code of the final attempt."""
+        command = [self.cli(), "--json", "--no-input", *arguments]
+        result = subprocess.run(command, capture_output=True, text=True)
+        envelope = json.loads(result.stdout) if result.stdout.strip() else {}
+        if result.returncode == 3:
+            token = envelope["data"]["confirmation"]["token"]
+            result = subprocess.run(command + ["--confirm", token], capture_output=True, text=True)
+            envelope = json.loads(result.stdout) if result.stdout.strip() else {}
+        return result.returncode, (envelope.get("error") or {}).get("code")
+
+    def service(self, action):
+        """Runs `spaceterm server ACTION`."""
+        status, code = self.confirmed("server", action)
+        if status and not (action == "stop" and code == "stopped"):
+            raise TaskError(f"server {action} failed ({code or status})")
+        if action == "stop":
+            wait_until(lambda: not self.pids("server"), 30, "the server did not stop")
+
+    def stop_server(self):
+        if self.has_server():
+            self.service("stop")
+
+    def start_server(self):
+        if self.has_server():
+            self.service("start")
+
+    def start_session(self):
+        """A restored Pane offers Start Session after the server restarts; Tab focuses it."""
+        self.input.key("tab")
+        time.sleep(0.2)
+        self.input.key("return")
+
+    def start_shell(self):
+        if wait_until(self.shells, 3, None):
+            return False
+        wait_until(lambda: self.frontmost() == self.client(), 5, "the client is not frontmost")
+        self.start_session()
+        wait_until(self.shells, 15, "the focused Pane started no shell")
+        return True
+
+    def close_panes(self, panes):
+        """Closes each Pane through the CLI, and its Workspace with its last Pane, which the
+        desktop would only do after a confirmation dialog."""
+        for pane in panes:
+            status, code = self.confirmed(
+                "--server", "local", "pane", "close", "--pane", f"id:{pane}"
+            )
+            if status:
+                raise TaskError(f"spaceterm pane close failed ({code or status})")
+
+    def retained_rows(self, receipt):
+        """The rows the CLI reports for the receipt's Pane."""
         command = [self.cli(), "--server", "local", "--json", "--quiet", "pane", "read"]
-        command += ["--pane", f"id:{pane}", "--rows", "1", "--max-bytes", "4096"]
+        command += ["--pane", f"id:{self.pane(receipt)}", "--rows", "1", "--max-bytes", "4096"]
         envelope = cli_json(command)
         if envelope is None:
             raise TaskError("spaceterm pane read did not report the Pane's history")
@@ -397,46 +530,53 @@ class Desktop:
     def counters(self):
         return {"server": self.server_counters(), "client": self.client_counters()}
 
-    def start_session(self):
-        """A restored Pane offers Start Session after the server restarts; Tab focuses it."""
-        self.input.key("tab")
-        time.sleep(0.2)
-        self.input.key("return")
 
-    def read_text(self, step, pane):
-        """Demands Pane `pane`'s accessibility work: reads the focused Pane's text through the
-        Accessibility API, and fails unless the read reached a text area of that Pane alone."""
-        client = self.client()
-        result = self.input.call("read_text", pid=client)
-        self.reads.append(dict(result, step=step, pane=pane))
-        if not result.get("read"):
-            raise TaskError(f"the Accessibility read failed ({result.get('reason')})")
-        owner = self.elements.setdefault((client, result["element"]), pane)
-        if owner != pane:
-            raise TaskError("the Accessibility read reached another Pane than the focused one")
+class ReferenceDesktop(Desktop):
+    """SpaceTerm v0.6.8, the build the ratio budgets compare with.
 
-    def ready(self):
-        """One visible, frontmost window of WINDOW size whose focused Pane runs typed commands."""
-        if self.has_server() and not self.pids("server"):
-            self.service("start")
-        if self.client() is None or self.window() is None:
-            self.launch()
-            if wait_until(self.window, 10, None) is None:
-                # A minimized or closed window may not return on reopen; a new client shows one.
-                if self.client() is not None:
-                    self.terminate()
-                self.launch()
-        self.activate()
-        self.place(*WINDOW)
-        if not wait_until(self.shells, 3, None):
-            self.start_session()
-            wait_until(self.shells, 15, "the focused Pane started no shell")
-        self.focused("ready")
+    v0.6.8 is one process that runs its Panes' shells itself. It has no server and no CLI, and
+    its Panes' environment names no Pane. Its Panes end with the process and a launch shows one
+    new Pane, which starts its shell at once.
+    """
 
-    def restart(self):
-        if self.client() is not None:
-            self.terminate()
-        self.ready()
+    def roots(self, rows):
+        return {row["pid"]: "client" for row in rows if row["command"] == self.app.executable}
+
+    def pane(self, receipt):
+        """A Pane's shell leads the session of the Pane's terminal, so the session id names the
+        Pane while it lives."""
+        if not receipt.get("session"):
+            raise TaskError("the focused Pane's shell reported no session")
+        return f"session {receipt['session']}"
+
+    def stop_server(self):
+        pass
+
+    def start_server(self):
+        pass
+
+    def start_shell(self):
+        wait_until(self.shells, 15, "the focused Pane started no shell")
+        return False
+
+    def close_panes(self, panes):
+        """A new process shows one new Pane, which avoids v0.6.8's close confirmations."""
+        self.restart()
+
+    def retained_rows(self, receipt):
+        """v0.6.8 cannot report its rows; it keeps the fill's lines up to its Scrollback limit,
+        and the screen's rows."""
+        return min(receipt["lines"], REFERENCE_SCROLLBACK_ROWS) + receipt["rows"]
+
+    def counters(self):
+        return {"server": None, "client": None}
+
+
+APPS = {
+    "preflight": (PREFLIGHT, CurrentDesktop),
+    "release": (RELEASE, CurrentDesktop),
+    "reference": (RELEASE, ReferenceDesktop),
+}
 
 
 class Bench:
@@ -525,28 +665,18 @@ class Bench:
         clock = self.clock
         if desktop.client() is not None:
             desktop.terminate()
-        server = desktop.has_server()
-        if server:
-            desktop.service("stop")
+        desktop.stop_server()
         started = clock.monotonic()
         before = {"monotonic": time.monotonic(), "processes": []}
-        if server:
-            desktop.service("start")
+        desktop.start_server()
         desktop.launch()
         wait_until(desktop.window, 30, "the cold client showed no window")
         window_s = clock.monotonic() - started
-        started_session = False
-        if not wait_until(desktop.shells, 3, None):
-            wait_until(
-                lambda: desktop.frontmost() == desktop.client(), 5, "the client is not frontmost"
-            )
-            desktop.start_session()
-            started_session = True
-            wait_until(desktop.shells, 15, "the focused Pane started no shell")
+        started_session = desktop.start_shell()
         wait_until(
             lambda: desktop.frontmost() == desktop.client(), 5, "the client is not frontmost"
         )
-        pane = desktop.receipt()["pane"]
+        pane = desktop.receipt()
         usable_s = clock.monotonic() - started
         if desktop.accessibility:
             desktop.read_text("S1 cold start", pane)
@@ -577,9 +707,10 @@ class Bench:
         self.observe("S3", "minimized", self.args.idle_seconds)
 
     def s4(self):
+        """Quit closes every window while the status menu keeps the client running, then the
+        client ends and leaves the server. v0.6.8 has neither: its quit ends it."""
         desktop = self.desktop
         desktop.ready()
-        # Quit closes every window while the status menu keeps the client running.
         desktop.input.key("q", "command")
         wait_until(lambda: desktop.window() is None, 10, "the windows did not close")
         self.clock.sleep(2)
@@ -615,14 +746,13 @@ class Bench:
             created.append(desktop.focused(f"S5 Workspace {workspace + 1} split 2"))
         self.clock.sleep(10)
         self.observe("S5", "idle-panes", self.args.idle_seconds)
-        for pane in reversed(created):
-            desktop.close_pane(pane)
+        desktop.close_panes(list(reversed(created)))
         desktop.wait_shells(base)
 
     def s6(self):
         self.desktop.ready()
         self.job("S6", "cat", "cat", file=str(self.args.input))
-        self.job("S6", "yes", "yes", lines=20_000_000)
+        self.job("S6", "yes", "yes", lines=YES_LINES)
 
     def s7(self):
         self.desktop.ready()
@@ -642,7 +772,7 @@ class Bench:
         base = desktop.shells()
         desktop.input.key("k", "command")
         self.observe("S8", "empty", 10)
-        pane = None
+        filled = None
         for tab in range(FILLED_PANES):
             if tab:
                 desktop.input.key("t", "command")
@@ -651,8 +781,8 @@ class Bench:
                 desktop.focused(f"S8 Tab {tab + 1}")
             number, _ = desktop.run_job("fill", lines=FILL_LINES)
             desktop.jobs.start(number)
-            pane = desktop.finish_job(number, "fill", 120, lines=FILL_LINES)["pane"]
-        rows = desktop.retained_rows(pane)
+            filled = desktop.finish_job(number, "fill", 120, lines=FILL_LINES)
+        rows = desktop.retained_rows(filled)
         settle(desktop.members(), limit_s=SETTLE_LIMIT_SECONDS, clock=self.clock)
         self.observe("S8", "filled", 10, values={"rows": rows, "panes": FILLED_PANES})
         # A fresh Tab stays while the first Tab, filled, closes ten times over.
@@ -671,7 +801,9 @@ class Bench:
         desktop.ready()
         desktop.input.key("u", "control")
         self.observe(
-            "S9", "typing", action=lambda: desktop.input.call("paced", key="a", count=450, rate=15)
+            "S9",
+            "typing",
+            action=lambda: desktop.input.call("paced", key="a", count=TYPED_KEYS, rate=TYPING_RATE),
         )
         desktop.input.key("u", "control")
 
@@ -685,11 +817,11 @@ class Bench:
         def resize():
             started = clock.monotonic()
             count = 0
-            while clock.monotonic() - started < 20:
+            while clock.monotonic() - started < RESIZE_SECONDS:
                 desktop.resize(*(LARGE_WINDOW if count % 2 == 0 else WINDOW))
                 desktop.input.key("b", "command")
                 count += 1
-                clock.sleep(max(0, started + count * 0.5 - clock.monotonic()))
+                clock.sleep(max(0, started + count * RESIZE_INTERVAL_SECONDS - clock.monotonic()))
             # An even count leaves the window and sidebar as they were.
             if count % 2:
                 desktop.resize(*WINDOW)
@@ -715,7 +847,7 @@ def choices(text, allowed, option):
 
 def check_isolation(app):
     """The other product must not run, so its processes cannot share the machine."""
-    other = APPS["release" if app is APPS["preflight"] else "preflight"]
+    other = RELEASE if app == PREFLIGHT else PREFLIGHT
     rows = processes()
     running = [
         row for row in rows if row["command"] == other.executable or other.is_server(row["command"])
@@ -735,6 +867,31 @@ def app_version(app):
     return result.stdout.strip()
 
 
+def settings(args, scenarios, states):
+    """What a run measures. A reference must share everything but its scenarios, states and
+    runs."""
+    return {
+        "scenarios": scenarios,
+        "runs": args.runs,
+        "accessibility": states,
+        "seconds": args.seconds,
+        "idle_seconds": args.idle_seconds,
+        "window": list(WINDOW),
+        "large_window": list(LARGE_WINDOW),
+        "workloads": dict(WORKLOADS),
+    }
+
+
+def load_reference(path, results, budgets, scenarios, states):
+    """The summary of the reference run in `path`, after checking that it measured the work
+    `results` describes and every ratio budget's measurement in `scenarios` and `states`."""
+    reference = json.loads(Path(path).read_text())
+    reasons = compare_desktop_reference(reference, results, budgets, scenarios, states)
+    if reasons:
+        raise TaskError(f"{path} is no comparable reference: {'; '.join(reasons)}")
+    return reference["summary"]
+
+
 def report(verdicts):
     for verdict in verdicts:
         status = "pass" if verdict["pass"] else "MISS"
@@ -748,9 +905,18 @@ def report(verdicts):
 def run(args):
     if sys.platform != "darwin":
         raise TaskError("bench:desktop:macos needs macOS")
-    app = APPS[args.app]
+    app, adapter = APPS[args.app]
     if not app.bundle.exists():
         raise TaskError(f"{app.name} is not installed in /Applications")
+    version = app_version(app)
+    measures_reference = adapter is ReferenceDesktop
+    if measures_reference != (version == DESKTOP_REFERENCE_VERSION):
+        raise TaskError(
+            f"{app.name} is version {version}; --app reference measures "
+            f"v{DESKTOP_REFERENCE_VERSION} and the other apps measure later versions"
+        )
+    if measures_reference and args.reference:
+        raise TaskError("--reference compares a later version with a reference run")
     scenarios = choices(args.scenarios, SCENARIOS, "--scenarios")
     states = choices(args.accessibility, ("off", "on"), "--accessibility")
     if args.runs < 1:
@@ -764,34 +930,40 @@ def run(args):
         else ROOT / "target" / "bench" / "desktop" / time.strftime("%Y%m%d-%H%M%S")
     )
     path = output / "results.json"
-    reference = json.loads(Path(args.reference).read_text())["summary"] if args.reference else None
+    reads = {}
     args.input, digest = fixed_input() if "S6" in scenarios else (None, None)
     results = {
         "environment": dict(
-            environment(), app=app.name, app_version=app_version(app), input_sha256=digest
+            environment(),
+            app=app.name,
+            app_version=version,
+            adapter="reference" if measures_reference else "current",
+            input_sha256=digest,
         ),
-        "settings": {
-            "scenarios": scenarios,
-            "runs": args.runs,
-            "accessibility": states,
-            "seconds": args.seconds,
-            "idle_seconds": args.idle_seconds,
-            "window": WINDOW,
-        },
+        "settings": settings(args, scenarios, states),
         "measurements": [],
+        # Saved with every observation, so a failed run keeps the reads made so far.
+        "accessibility_reads": reads,
     }
+    budgets = load_budgets()
+    check = args.budgets and not measures_reference
+    reference = None
+    if check and args.reference:
+        # Checked before measuring, so an incomparable reference costs no run.
+        reference = load_reference(args.reference, results, budgets, scenarios, states)
+        results["reference"] = str(Path(args.reference).resolve())
     keyboard = Input(args.input_python)
     jobs = Jobs()
     try:
         print(
-            f"bench:desktop:macos: measuring {app.name}; leave the keyboard, mouse and screen alone",
+            f"bench:desktop:macos: measuring {app.name} {version}; leave the keyboard, mouse and "
+            "screen alone",
             file=sys.stderr,
         )
         with screen_lock():
             for state in states:
-                desktop = Desktop(app, keyboard, jobs, state == "on")
-                # Saved with every observation, so a failed run keeps the reads made so far.
-                results.setdefault("accessibility_reads", {})[state] = desktop.reads
+                desktop = adapter(app, keyboard, jobs, state == "on")
+                reads[state] = desktop.reads
                 bench = Bench(desktop, args, path, results)
                 # A fresh client starts each state, so Accessibility from an earlier read is off.
                 desktop.restart()
@@ -804,9 +976,8 @@ def run(args):
         keyboard.close()
         jobs.remove()
     results["summary"] = summarize(results["measurements"])
-    budgets = load_budgets()
     verdicts = []
-    if args.budgets:
+    if check:
         verdicts = evaluate(
             results["summary"],
             budgets,
@@ -818,7 +989,7 @@ def run(args):
         results["budgets"] = verdicts
     write_json(path, results)
     print(f"bench:desktop:macos: results in {path}")
-    if not args.budgets:
+    if not check:
         return 0
     report(verdicts)
     for budget in budgets["desktop"]["unmeasured"]:

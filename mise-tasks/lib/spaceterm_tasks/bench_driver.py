@@ -48,6 +48,13 @@ def write_all(data):
         view = view[os.write(1, view) :]
 
 
+def pane():
+    """The Pane this runs in: the Pane the current app names in `SPACETERM_PANE`, which
+    bench:desktop:macos asks the CLI about, and the session its shell leads, which also
+    identifies a v0.6.8 Pane."""
+    return {"pane": os.environ.get("SPACETERM_PANE"), "session": os.getsid(0)}
+
+
 def run(job, directory):
     kind = job["kind"]
     result = {"kind": kind}
@@ -82,11 +89,10 @@ def run(job, directory):
         for _ in range(job.get("lines", 100_000) // 1000):
             write_all(FILL_LINE * 1000)
         result["lines"] = job.get("lines", 100_000)
-        result["pane"] = os.environ.get("SPACETERM_PANE")
+        result.update(pane())
     elif kind == "receipt":
         result["returncode"] = 0
-        # The Pane that runs this receipt, which bench:desktop:macos asks the CLI about.
-        result["pane"] = os.environ.get("SPACETERM_PANE")
+        result.update(pane())
     else:
         raise SystemExit(f"unknown workload {kind}")
     return result
