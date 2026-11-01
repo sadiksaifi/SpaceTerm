@@ -1,10 +1,11 @@
 //! The bounded queue that carries PTY output from the reader thread to the terminal worker.
 //!
-//! The queue holds at most a fixed number of reads. Its sender can also wait until the worker has
-//! received every queued read, which the reader does after a short read: see
-//! [`TRICKLE_READ_BYTES`].
+//! The queue holds at most a fixed number of reads. When the shell trickles output a few bytes per
+//! write, the reader waits after each read until the worker has received every queued read: see
+//! [`NextRead`].
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::platform::native_pty::NativePtyOutput;
 
@@ -14,7 +15,22 @@ use crate::platform::native_pty::NativePtyOutput;
 /// read never counts as short. A shell that writes a few bytes at a time, such as `yes | head`
 /// writing one line per write, otherwise gets one read per write while the worker is busy. Those
 /// reads only split output the worker cannot take yet into more, smaller reads.
-pub(super) const TRICKLE_READ_BYTES: usize = 1024;
+const TRICKLE_READ_BYTES: usize = 1024;
+
+/// A pause this long before a read means the shell was quiet, so the read starts a new burst.
+///
+/// Inside a burst the reader goes straight from one read to the next, which takes microseconds.
+const QUIET_BEFORE_BURST: Duration = Duration::from_millis(1);
+
+/// What the reader does after it queues a read and announces it to the worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NextRead {
+    /// Read again at once.
+    Now,
+    /// The shell trickles. Read again once the worker has received every queued read, so the
+    /// shell's output collects in the PTY instead of arriving a few bytes per read.
+    AfterReceipt,
+}
 
 /// Creates a queue that holds at most `capacity` reads.
 pub(super) fn reader_output(capacity: usize) -> (ReaderOutputSender, ReaderOutputReceiver) {
@@ -26,6 +42,8 @@ pub(super) fn reader_output(capacity: usize) -> (ReaderOutputSender, ReaderOutpu
             receiver_open: true,
             sender_waiting: false,
             receiver_waiting: false,
+            burst_short_reads: 0,
+            reader_resumed: Instant::now(),
         }),
         sender_wakeup: Condvar::new(),
         receiver_wakeup: Condvar::new(),
@@ -55,6 +73,10 @@ struct State {
     receiver_open: bool,
     sender_waiting: bool,
     receiver_waiting: bool,
+    /// Short reads since the shell was last quiet.
+    burst_short_reads: usize,
+    /// When the reader last went back to reading.
+    reader_resumed: Instant,
 }
 
 impl Shared {
@@ -85,27 +107,49 @@ pub(super) struct ReaderOutputSender {
 }
 
 impl ReaderOutputSender {
-    /// Queues one read, waiting while the queue is full.
-    pub(super) fn send(&self, output: NativePtyOutput) -> bool {
+    /// Queues one read, waiting while the queue is full, and returns None once the worker's end is
+    /// gone.
+    ///
+    /// A burst of short reads after the shell was quiet, such as a prompt or an echo, keeps a
+    /// queue's worth of read-ahead. The queue's capacity is also the worker's batch limit, so the
+    /// worker's first batch after a busy period holds the whole burst, as it would without a wait.
+    /// Short reads beyond that are a sustained trickle and wait for receipt.
+    pub(super) fn send(&self, output: NativePtyOutput) -> Option<NextRead> {
+        let now = Instant::now();
+        let short =
+            matches!(&output, NativePtyOutput::Bytes(bytes) if bytes.len() < TRICKLE_READ_BYTES);
         let capacity = self.shared.capacity;
-        let Some(mut state) = self
+        let mut state = self
             .shared
-            .wait_for_sender(|state| state.queue.len() < capacity)
-        else {
-            return false;
-        };
+            .wait_for_sender(|state| state.queue.len() < capacity)?;
         state.queue.push_back(output);
         if state.receiver_waiting {
             self.shared.receiver_wakeup.notify_one();
         }
-        true
+        if !short {
+            state.reader_resumed = now;
+            return Some(NextRead::Now);
+        }
+        if now.saturating_duration_since(state.reader_resumed) >= QUIET_BEFORE_BURST {
+            state.burst_short_reads = 0;
+        }
+        state.burst_short_reads = state.burst_short_reads.saturating_add(1);
+        state.reader_resumed = now;
+        Some(if state.burst_short_reads > capacity {
+            NextRead::AfterReceipt
+        } else {
+            NextRead::Now
+        })
     }
 
-    /// Waits until the worker has received every queued read.
+    /// Waits until the worker has received every queued read, and returns false once the worker's
+    /// end is gone.
     pub(super) fn wait_until_received(&self) -> bool {
-        self.shared
-            .wait_for_sender(|state| state.queue.is_empty())
-            .is_some()
+        let Some(mut state) = self.shared.wait_for_sender(|state| state.queue.is_empty()) else {
+            return false;
+        };
+        state.reader_resumed = Instant::now();
+        true
     }
 }
 
@@ -186,8 +230,8 @@ mod tests {
     #[test]
     fn reads_arrive_in_order_and_close_after_the_reader_ends() {
         let (sender, receiver) = reader_output(2);
-        assert!(sender.send(bytes(1)));
-        assert!(sender.send(bytes(2)));
+        assert!(sender.send(bytes(1)).is_some());
+        assert!(sender.send(bytes(2)).is_some());
         drop(sender);
 
         assert_eq!(received_byte(&receiver), 1);
@@ -201,7 +245,7 @@ mod tests {
         let (sent, sends) = mpsc::channel();
         let reader = thread::spawn(move || {
             for value in 0..2 {
-                sent.send(sender.send(bytes(value))).unwrap();
+                sent.send(sender.send(bytes(value)).is_some()).unwrap();
             }
         });
         assert!(sends.recv().unwrap());
@@ -216,8 +260,8 @@ mod tests {
     #[test]
     fn waiting_for_receipt_ends_when_the_worker_receives_every_read() {
         let (sender, receiver) = reader_output(4);
-        assert!(sender.send(bytes(0)));
-        assert!(sender.send(bytes(1)));
+        assert!(sender.send(bytes(0)).is_some());
+        assert!(sender.send(bytes(1)).is_some());
         let (waited, waits) = mpsc::channel();
         let reader = thread::spawn(move || waited.send(sender.wait_until_received()).unwrap());
 
@@ -232,10 +276,10 @@ mod tests {
     fn dropping_the_workers_end_releases_a_waiting_reader() {
         for full in [true, false] {
             let (sender, receiver) = reader_output(1);
-            assert!(sender.send(bytes(0)));
+            assert!(sender.send(bytes(0)).is_some());
             let reader = thread::spawn(move || {
                 if full {
-                    sender.send(bytes(1))
+                    sender.send(bytes(1)).is_some()
                 } else {
                     sender.wait_until_received()
                 }

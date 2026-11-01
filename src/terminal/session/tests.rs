@@ -1317,11 +1317,17 @@ fn a_trickling_shell_gets_one_read_per_worker_receive() {
     });
 
     let mut received = 0;
-    for _ in 0..BUSY_PERIODS {
+    for period in 0..BUSY_PERIODS {
         thread::sleep(Duration::from_millis(20));
         let in_flight = reads.load(Ordering::SeqCst) - received;
+        // The first short reads are a burst that keeps the queue's read-ahead.
+        let allowed = if period == 0 {
+            PTY_OUTPUT_QUEUE_CAPACITY + 1
+        } else {
+            1
+        };
         assert!(
-            in_flight <= 1,
+            in_flight <= allowed,
             "the reader made {in_flight} reads the worker had not received"
         );
         // The worker's next batch: everything announced so far, and at least one read.
@@ -1339,6 +1345,80 @@ fn a_trickling_shell_gets_one_read_per_worker_receive() {
 
     drop(reader_event_rx);
     producer.join().unwrap();
+}
+
+#[test]
+fn a_short_burst_after_idle_reaches_the_first_frame_after_a_busy_worker() {
+    // A prompt or echo arrives as a few short reads after the shell was quiet. While the worker is
+    // busy, the reader must read the whole burst ahead so the worker's next frame shows all of it,
+    // even after a sustained trickle used the reader's read-ahead.
+    const TRICKLE_READS: usize = 2 * PTY_OUTPUT_QUEUE_CAPACITY;
+    let (command_tx, commands) = mpsc::channel();
+    let (reader_events, reader_event_rx) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
+    let output = TerminalSessionNativePtyOutputSink {
+        clipboard_authority: Arc::default(),
+        commands: command_tx.clone(),
+        events: reader_events,
+    };
+    let producer = thread::spawn(move || {
+        for _ in 0..TRICKLE_READS {
+            assert!(output.publish(NativePtyOutput::Bytes(b"y\r\n".to_vec())));
+        }
+        // The shell is quiet, then writes its prompt in two writes; the reader is descheduled or
+        // spends 1 ms between the two reads.
+        thread::sleep(Duration::from_millis(20));
+        let _ = output.publish(NativePtyOutput::Bytes(b"first".to_vec()));
+        thread::sleep(Duration::from_millis(1));
+        let _ = output.publish(NativePtyOutput::Bytes(b" second".to_vec()));
+    });
+    for _ in 0..TRICKLE_READS {
+        assert!(matches!(commands.recv().unwrap(), Command::ReaderReady(_)));
+        assert!(matches!(
+            reader_event_rx.recv(),
+            Ok(NativePtyOutput::Bytes(_))
+        ));
+    }
+    // The worker is busy while the prompt becomes available in the PTY.
+    thread::sleep(Duration::from_millis(100));
+    assert!(matches!(commands.recv().unwrap(), Command::ReaderReady(_)));
+
+    let records = ScriptedPtyRecords::default();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let mut worker = TerminalWorker {
+        metadata_state: TerminalSessionMetadataState::default(),
+        native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        commands,
+        reader_events: reader_event_rx,
+        events: events.into(),
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+        permission_requests: PermissionRequestFilter::default(),
+        clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
+    };
+
+    // Output after idle publishes at once, and the batch holds every read the reader announced.
+    assert!(worker.process_reader_events(None));
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+        panic!("the prompt must publish a terminal screen")
+    };
+    let first_frame = screen_text(&screen);
+    worker.finish();
+    drop(command_tx);
+    producer.join().unwrap();
+    assert!(
+        first_frame.contains("first second"),
+        "the first frame after the busy worker split the prompt: {:?}",
+        first_frame.trim_end()
+    );
 }
 
 #[test]
@@ -1712,7 +1792,11 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
     let (reader_events, reader_event_rx) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
     // Two reads queued before the worker's batch, each announced by its own ReaderReady.
     for bytes in [b"first".as_slice(), b" second"] {
-        assert!(reader_events.send(NativePtyOutput::Bytes(bytes.to_vec())));
+        assert!(
+            reader_events
+                .send(NativePtyOutput::Bytes(bytes.to_vec()))
+                .is_some()
+        );
         command_tx.send(Command::ReaderReady(None)).unwrap();
     }
     assert!(matches!(commands.recv().unwrap(), Command::ReaderReady(_)));
@@ -3852,10 +3936,14 @@ fn clipboard_request_survives_reader_exit_until_output_is_resumed() {
     worker.events = events.into();
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     worker.accessibility = accessibility;
-    assert!(reader_tx.send(NativePtyOutput::Bytes(
-        b"before\x1b]52;c;?\x07after\x1b[5n".to_vec(),
-    )));
-    assert!(reader_tx.send(NativePtyOutput::Stopped(None)));
+    assert!(
+        reader_tx
+            .send(NativePtyOutput::Bytes(
+                b"before\x1b]52;c;?\x07after\x1b[5n".to_vec(),
+            ))
+            .is_some()
+    );
+    assert!(reader_tx.send(NativePtyOutput::Stopped(None)).is_some());
     commands.send(Command::ReaderReady(Some(3))).unwrap();
     assert!(worker.process_reader_events(Some(3)));
     assert!(worker.clipboard.pending());
@@ -3969,7 +4057,11 @@ fn deferred_reader_output_never_acquires_a_later_clipboard_focus_grant() {
     let (mut worker, records, requests, reader_tx, _commands) = clipboard_worker();
     assert!(worker.feed_test_output(vec![b"\x1b]52;c;?\x07".to_vec()]));
     let first = requests.try_recv().unwrap();
-    assert!(reader_tx.send(NativePtyOutput::Bytes(b"\x1b]52;p;?\x07".to_vec())));
+    assert!(
+        reader_tx
+            .send(NativePtyOutput::Bytes(b"\x1b]52;p;?\x07".to_vec()))
+            .is_some()
+    );
     assert!(worker.process_command(Command::ReaderReady(Some(3))));
     worker.clipboard.authority.focus(false);
     worker.clipboard.authority.focus(true);

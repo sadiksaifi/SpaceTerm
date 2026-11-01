@@ -24,7 +24,7 @@ mod reader_output;
 use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 pub use launch::{LocalTerminalLaunchPlan, NativeTerminalSessionFactory};
-use reader_output::{ReaderOutputReceiver, ReaderOutputSender, TRICKLE_READ_BYTES};
+use reader_output::{NextRead, ReaderOutputReceiver, ReaderOutputSender};
 use std::fmt;
 #[cfg(test)]
 use std::io::Write;
@@ -982,15 +982,14 @@ struct TerminalSessionNativePtyOutputSink {
 
 impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
-        let trickle =
-            matches!(&output, NativePtyOutput::Bytes(bytes) if bytes.len() < TRICKLE_READ_BYTES);
         // ReaderReady orders bounded PTY output against the reliable control command lane.
         let epoch = self.clipboard_authority.output_epoch();
-        // After a short read, the next read waits for the worker so the shell's output collects
-        // in the PTY instead of arriving a few bytes per read.
-        self.events.send(output)
-            && self.commands.send(Command::ReaderReady(epoch)).is_ok()
-            && (!trickle || self.events.wait_until_received())
+        let Some(next_read) = self.events.send(output) else {
+            return false;
+        };
+        // The wait comes after ReaderReady, so the worker learns of every read it must receive.
+        self.commands.send(Command::ReaderReady(epoch)).is_ok()
+            && (next_read == NextRead::Now || self.events.wait_until_received())
     }
 }
 
