@@ -215,9 +215,9 @@ fn exercise(base: &ServerConnection, data: &std::path::Path) -> Result<()> {
     std::thread::spawn(|| {
         spaceterm_server::run_local_with_panes(
             IDENTITY,
-            spaceterm_server::panes(|sync| {
+            spaceterm_server::panes(std::sync::Arc::default(), |sync| {
                 Ok(spaceterm::runtime::Served::new(
-                    spaceterm::runtime::WorkspaceHost::local(sync)?,
+                    spaceterm::runtime::WorkspaceHost::local(sync, std::sync::Arc::default())?,
                 ))
             }),
         )

@@ -1,0 +1,15 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "diagnostics",
+  "status": "error",
+  "server": null,
+  "data": {},
+  "error": {
+    "code": "desktop_unavailable",
+    "class": "unavailable",
+    "message": "No SpaceTerm desktop is running for this account on this machine.",
+    "retryable": true,
+    "details": {}
+  },
+  "warnings": []
+}

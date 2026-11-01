@@ -4,6 +4,7 @@
 //! renderer finds them by pointer and prepares only the rows that changed.
 use super::*;
 use crate::runtime::HyperlinkTarget;
+use spaceterm_server::diagnostics::TerminalCounters;
 use spaceterm_server::pane::graphics;
 use spaceterm_server::protocol::screen::{
     Colors, Cursor, Geometry, History, Modes, Page, Row, ScreenUpdate, Style, StyleRef, flags,
@@ -22,12 +23,13 @@ pub(super) enum UpdateError {
 
 /// One channel's decoder. It holds the last applied frame and the channel's style and link
 /// tables.
-#[derive(Default)]
 pub(super) struct ScreenDecoder {
     frame: Option<u64>,
     styles: HashMap<u16, CellSnapshot>,
     links: HashMap<u16, Option<Arc<HyperlinkTarget>>>,
     screen: Option<DecodedScreen>,
+    /// Counts each decoded frame.
+    counters: Arc<TerminalCounters>,
 }
 
 /// The server's screen as of the decoder's last frame.
@@ -55,8 +57,18 @@ impl ScreenDecoder {
         self.frame
     }
 
+    pub(super) fn new(counters: Arc<TerminalCounters>) -> Self {
+        Self {
+            frame: None,
+            styles: HashMap::new(),
+            links: HashMap::new(),
+            screen: None,
+            counters,
+        }
+    }
+
     pub(super) fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self::new(Arc::clone(&self.counters));
     }
 
     /// Applies frame `frame`, which the server encoded against `base`. A file link becomes a
@@ -72,7 +84,10 @@ impl ScreenDecoder {
         local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
     ) -> Result<&DecodedScreen, UpdateError> {
         match self.decode(frame, base, update, local_files) {
-            Ok(()) => self.screen.as_ref().ok_or(UpdateError::Malformed),
+            Ok(()) => {
+                self.counters.record_frame_decoded();
+                self.screen.as_ref().ok_or(UpdateError::Malformed)
+            }
             Err(error) => {
                 self.reset();
                 Err(error)
@@ -332,7 +347,7 @@ fn rgb(color: [u8; 3]) -> crate::appearance::Color {
 /// The text of each row of a keyframe, with a wide character's spacer as a space.
 #[cfg(test)]
 pub(super) fn keyframe_lines(update: &ScreenUpdate) -> Vec<String> {
-    ScreenDecoder::default()
+    ScreenDecoder::new(Arc::default())
         .apply(1, None, update.clone(), None)
         .map(DecodedScreen::lines)
         .unwrap_or_default()

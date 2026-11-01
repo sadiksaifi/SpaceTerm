@@ -110,7 +110,15 @@ impl Rows {
 
 /// A bound channel the client shows.
 fn bound(outbox: &Outbox) -> Publication {
-    let mut publication = Publication::bind(outbox, CHANNEL).unwrap();
+    bound_counting(outbox, Arc::default())
+}
+
+/// A bound channel the client shows, whose encoded frames count in `counters`.
+fn bound_counting(
+    outbox: &Outbox,
+    counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+) -> Publication {
+    let mut publication = Publication::bind(outbox, CHANNEL, counters).unwrap();
     outbox.view(CHANNEL, true);
     publication.view(true);
     publication
@@ -153,6 +161,28 @@ fn later_screens_apply_to_the_acknowledged_frame() {
     assert_eq!(frame.base, Some(1));
     rows.apply(frame);
     assert!(rows.shows("one") && rows.shows("two"));
+}
+
+#[test]
+fn each_encoded_screen_frame_counts_once_as_published() {
+    use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+    let counters = Arc::new(TerminalCounters::default());
+    let outbox = outbox();
+    let mut publication = bound_counting(&outbox, Arc::clone(&counters));
+    let mut sent = 0;
+    for generation in 1..=20 {
+        publication.publish(live(Some(capture(generation, &generation.to_string(), 0))));
+        sent += frames(&drain(&outbox)).len();
+    }
+
+    assert_eq!(sent, 20);
+    assert_eq!(
+        counters.snapshot(),
+        TerminalCounterSnapshot {
+            frames_published: 20,
+            ..Default::default()
+        }
+    );
 }
 
 #[test]
@@ -970,7 +1000,7 @@ mod wakes {
 #[test]
 fn input_progress_newer_than_a_screen_is_delivered_with_it() {
     let outbox = outbox();
-    let mut publication = Publication::bind(&outbox, CHANNEL).unwrap();
+    let mut publication = Publication::bind(&outbox, CHANNEL, Arc::default()).unwrap();
     outbox.view(CHANNEL, true);
     publication.view(true);
     let observation = || Observation {

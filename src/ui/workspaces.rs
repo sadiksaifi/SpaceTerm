@@ -993,6 +993,7 @@ mod server {
         server: ServerConnection,
         controls: Arc<PaneControls>,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     }
 
     impl WorkspacePaneOpener for LocalServerPanes {
@@ -1012,6 +1013,7 @@ mod server {
                 &self.controls,
                 self.local_files.clone(),
                 pane,
+                Arc::clone(&self.counters),
             );
             let permit = self.server.attachments().ok()?.permit(pane)?;
             let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
@@ -1027,6 +1029,7 @@ mod server {
         server: ServerConnection,
         controls: Arc<PaneControls>,
         direct: DirectServer,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     }
 
     impl WorkspacePaneOpener for RemoteServerPanes {
@@ -1044,6 +1047,7 @@ mod server {
                 &self.controls,
                 self.direct.display(),
                 pane,
+                Arc::clone(&self.counters),
             );
             let permit = self.server.attachments().ok()?.permit(pane)?;
             let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
@@ -1076,6 +1080,7 @@ mod server {
                     server,
                     controls,
                     local_files,
+                    counters: Arc::clone(panes.counters()),
                 }),
                 panes,
             )
@@ -1087,11 +1092,13 @@ mod server {
             server: ServerConnection,
             controls: Arc<PaneControls>,
             direct: DirectServer,
+            counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
         ) -> Rc<dyn WorkspacePaneOpener> {
             Rc::new(RemoteServerPanes {
                 server,
                 controls,
                 direct,
+                counters,
             })
         }
 

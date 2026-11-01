@@ -92,7 +92,7 @@ fn integrated_host(shell: &std::path::Path, home: &Home) -> ServerPaneHost {
     let directory = filesystem.validate_directory(&home.0).unwrap();
     let factory = NativeTerminalSessionFactory::new(
         Arc::new(EmptyHome {
-            pty: native_pty_factory(),
+            pty: native_pty_factory(Arc::default()),
             home: home.0.to_str().unwrap().into(),
         }),
         ShellLaunchPlanner::new(
@@ -109,6 +109,7 @@ fn integrated_host(shell: &std::path::Path, home: &Home) -> ServerPaneHost {
         ),
         filesystem,
         LocalMachine::default(),
+        Arc::default(),
     );
     ServerPaneHost::new(factory, directory).unwrap()
 }

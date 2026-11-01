@@ -79,7 +79,7 @@ pub fn validate_command(command: &Command, selector: &str) -> Result<(), Failure
             | ServerCommand::Provision(_),
         ) => Err(Code::LocalOnly.into()),
         // The desktop on this machine presents only this machine's server to these commands.
-        Command::Open(_) | Command::Show(_) => Err(Code::LocalOnly.into()),
+        Command::Open(_) | Command::Show(_) | Command::Diagnostics => Err(Code::LocalOnly.into()),
         _ => Ok(()),
     }
 }

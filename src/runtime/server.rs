@@ -365,13 +365,16 @@ impl ServerPaneHost {
             session_context: None,
         })
     }
-    /// Native composition for the explicitly launched local server.
-    pub fn local() -> Result<Self, ServerError> {
-        Self::local_with_pty_factory(native_pty_factory())
+    /// Native composition for the explicitly launched local server, recording into `counters`.
+    pub fn local(
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    ) -> Result<Self, ServerError> {
+        Self::local_with_pty_factory(native_pty_factory(Arc::clone(&counters)), counters)
     }
 
     fn local_with_pty_factory(
         pty_factory: Arc<dyn NativePtyAdapterFactory>,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     ) -> Result<Self, ServerError> {
         let filesystem = local_filesystem();
         let directory = crate::platform::app_directories::AppDirectoryEnvironment::capture()
@@ -383,6 +386,7 @@ impl ServerPaneHost {
             crate::platform::launch_host::shell_launch_planner(),
             filesystem,
             crate::platform::launch_host::terminal_machine(&directory),
+            counters,
         );
         Ok(Self {
             boot: nonce()?,

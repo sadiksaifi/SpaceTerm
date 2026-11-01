@@ -1759,7 +1759,11 @@ mod tests {
                 let paths = self.paths.clone();
                 *self.host.lock().unwrap() = Some(std::thread::spawn(move || {
                     std::thread::sleep(delay);
-                    crate::host::serve_runtime(&paths, Some(crate::panes(|_| Ok(TestPanes))), true)
+                    crate::host::serve_runtime(
+                        &paths,
+                        Some(crate::panes(std::sync::Arc::default(), |_| Ok(TestPanes))),
+                        true,
+                    )
                 }));
             }
             fn close_host(&self) -> Result<(), ServerError> {

@@ -212,6 +212,7 @@ impl ConnectedPane {
             &controls,
             crate::platform::runtime_local_filesystem(),
             pane_id,
+            Arc::default(),
         );
         state.start_created();
         let watches = Arc::new(Mutex::new(vec![claim::ControlWatch::new(
@@ -337,6 +338,7 @@ impl ConnectedPane {
             &self.controls,
             crate::platform::runtime_local_filesystem(),
             pane,
+            Arc::default(),
         );
         self.watches
             .lock()

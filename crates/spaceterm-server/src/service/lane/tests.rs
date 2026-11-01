@@ -48,6 +48,7 @@ struct Host {
     releasing: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Told each time a fence is set.
     fencing: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    counters: crate::diagnostics::TerminalCounters,
 }
 impl LaneHost for Host {
     fn fence(
@@ -74,6 +75,9 @@ impl LaneHost for Host {
     }
     fn sessions(&self) -> Vec<Id> {
         self.sessions.lock().unwrap().clone()
+    }
+    fn terminal_counters(&self) -> crate::diagnostics::TerminalCounterSnapshot {
+        self.counters.snapshot()
     }
     fn devices(&self) -> Result<Vec<LaneDevice>, ServerError> {
         Ok(Vec::new())
@@ -600,6 +604,9 @@ fn permission_messages_keep_their_json_shape() {
 fn status_reports_the_approved_runtime_and_live_sessions() {
     with_lane(|lane| {
         lane.host.sessions.lock().unwrap().push([3; 32]);
+        lane.host.counters.record_frame_decoded();
+        lane.host.counters.record_line_mode_read();
+        lane.host.counters.record_line_mode_read();
         let LaneReply::Status(status) = lane.lane.answer(LaneRequest::Status, &ACTOR) else {
             panic!("expected a status");
         };
@@ -610,6 +617,14 @@ fn status_reports_the_approved_runtime_and_live_sessions() {
         assert_eq!(status.activation, LaneActivation::Settled);
         assert_eq!(status.lane_major, LANE_MAJOR);
         assert!(status.staged.is_empty());
+        assert_eq!(
+            status.terminal_counters,
+            Some(crate::diagnostics::TerminalCounterSnapshot {
+                frames_decoded: 1,
+                line_mode_reads: 2,
+                ..Default::default()
+            })
+        );
     });
 }
 

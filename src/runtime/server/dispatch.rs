@@ -286,6 +286,9 @@ pub trait HostCommands: Send {
     fn sessions(&self) -> Vec<[u8; 32]> {
         Vec::new()
     }
+    /// The Terminal Diagnostics counters this host's Terminal Sessions and publications record
+    /// into.
+    fn terminal_counters(&self) -> Arc<spaceterm_server::diagnostics::TerminalCounters>;
     /// Records the Client Name an admitted client supplied, before any of its requests.
     fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
     /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
@@ -488,6 +491,8 @@ pub struct Served<H> {
     routes: Arc<Routes>,
     /// Reads whose replies wait for the host to settle them.
     reads: Vec<PendingRead>,
+    /// The host's counters, which each channel's publication records into.
+    counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
 }
 
 /// Which connections present each Terminal Session. [`Served`] rebuilds it under the
@@ -608,6 +613,7 @@ impl<H: HostCommands> Served<H> {
     pub fn new(host: H) -> Self {
         let bell = Arc::<Bell>::default();
         Self {
+            counters: host.terminal_counters(),
             host,
             connections: BTreeMap::new(),
             reads: Vec::new(),
@@ -698,7 +704,8 @@ impl<H: HostCommands> Served<H> {
             }
         };
         let publication =
-            Publication::bind(&connection.outbox, channel).map_err(|_| Refusal::Capacity)?;
+            Publication::bind(&connection.outbox, channel, Arc::clone(&self.counters))
+                .map_err(|_| Refusal::Capacity)?;
         connection.observers.insert(
             channel,
             Watch {
@@ -990,7 +997,8 @@ impl<H: HostCommands> Served<H> {
             connection.outbox.close(old);
         }
         let publication =
-            Publication::bind(&connection.outbox, channel).map_err(|_| Refusal::Capacity)?;
+            Publication::bind(&connection.outbox, channel, Arc::clone(&self.counters))
+                .map_err(|_| Refusal::Capacity)?;
         connection.channels.insert(
             channel,
             Bound {

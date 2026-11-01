@@ -28,6 +28,9 @@ impl LaneHost for Direct {
     fn sessions(&self) -> Vec<[u8; 32]> {
         Vec::new()
     }
+    fn terminal_counters(&self) -> crate::diagnostics::TerminalCounterSnapshot {
+        crate::diagnostics::TerminalCounterSnapshot::default()
+    }
     fn devices(&self) -> Result<Vec<LaneDevice>, ServerError> {
         Ok(Vec::new())
     }
@@ -786,6 +789,9 @@ impl LaneHost for Stalling {
     fn release_fence(&self) {}
     fn sessions(&self) -> Vec<[u8; 32]> {
         Vec::new()
+    }
+    fn terminal_counters(&self) -> crate::diagnostics::TerminalCounterSnapshot {
+        crate::diagnostics::TerminalCounterSnapshot::default()
     }
     fn devices(&self) -> Result<Vec<LaneDevice>, ServerError> {
         Ok(Vec::new())

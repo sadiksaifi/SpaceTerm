@@ -229,6 +229,7 @@ fn compose(
         visibility: Rc::new(super::linux_window_visibility::LinuxWindowVisibilityFactory),
         wheel: Rc::new(super::linux_scroll::LinuxWheelPhaseEnrichment),
         permission_setup: None,
+        counters: Arc::default(),
     };
     let paths = crate::local_path::LocalPathSemantics::Posix;
     let local_filesystem = super::local_filesystem::LocalFilesystemAuthority::new(

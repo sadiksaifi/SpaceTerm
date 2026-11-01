@@ -4058,6 +4058,48 @@ fn block_cursor_hides_overhang_from_a_neighboring_row_on_both_cursor_paths() {
 }
 
 #[gpui::test]
+fn each_painted_grid_counts_once_as_a_painted_frame(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    let counters = pane.read_with(cx, |pane, _| {
+        Arc::clone(&pane.lifecycle_dependencies.counters)
+    });
+    let mut screen = text_screen(10, &["first row", "second row"]);
+    cx.simulate_resize(gpui::size(px(324.0), px(162.0)));
+    pane.update(cx, |pane, cx| {
+        pane.cell_width = px(8.0);
+        pane.line_height = 16.0;
+        pane.last_geometry = Some(TerminalGeometry::from_grid(
+            CellGridSize::new(40, 10),
+            LogicalCellSize::new(8.0, 16.0),
+            BackingScale::ONE,
+        ));
+        pane.handle_event(TerminalSessionEvent::Screen(screen.clone()), cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let before = counters.snapshot();
+
+    for generation in 1..=10 {
+        let changed = Arc::make_mut(&mut screen);
+        changed.generation = crate::terminal::PresentationGeneration::test(10 + generation);
+        Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].text = generation.to_string();
+        pane.update(cx, |pane, cx| {
+            pane.handle_event(TerminalSessionEvent::Screen(screen.clone()), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    assert_eq!(
+        counters.snapshot(),
+        spaceterm_server::diagnostics::TerminalCounterSnapshot {
+            frames_painted: before.frames_painted + 10,
+            ..before
+        }
+    );
+}
+
+#[gpui::test]
 fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     cx: &mut TestAppContext,
 ) {

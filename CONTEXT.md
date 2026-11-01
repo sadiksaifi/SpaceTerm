@@ -96,7 +96,7 @@ _Avoid_: shim, alias, CLI install
 
 **Account-local Connection**: A connection authorized by the operating system as belonging to the SpaceTerm Server's owning account.
 
-**Desktop Channel**: The account-local connection on which `spaceterm` asks the desktop on its machine to open a local file or show work in that desktop's own view.
+**Desktop Channel**: The account-local connection on which `spaceterm` asks the desktop on its machine to open a local file, show work in that desktop's own view, or report its Terminal Diagnostics counters.
 
 **Paired Device**: A client device deliberately enrolled for direct-network access to a SpaceTerm Server.
 
@@ -277,7 +277,7 @@ _Avoid_: local echo, speculative echo
 
 **Terminal Failure**: A terminal fault with an explicit recovery class.
 
-**Terminal Diagnostics**: Terminal fault metadata exported by the Export Terminal Diagnostics command.
+**Terminal Diagnostics**: Terminal fault metadata and typed counts of terminal pipeline stages, kept separately by each server and each desktop.
 
 **Close Confirmation**: Authorization for an exact user-requested close that may discard running work.
 
