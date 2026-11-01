@@ -1,4 +1,5 @@
-//! Answers `spaceterm open` and `spaceterm show` from this account's Terminal Sessions.
+//! Answers `spaceterm open` and `spaceterm show` from this account's Terminal Sessions, and
+//! `spaceterm diagnostics` from the desktop's Terminal Diagnostics counters.
 //!
 //! A request names exact server, Workspace, Tab, Pane and Terminal Session IDs. They select only
 //! what this window presents and grant nothing. Only a Local Pane's own filesystem authority
@@ -82,7 +83,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Option<Reply>> {
-        if Instant::now() >= act_by {
+        // The channel thread answers a Diagnostics request itself, without the window.
+        if Instant::now() >= act_by || request == Request::Diagnostics {
             return Task::ready(None);
         }
         // The person asked this desktop to show work, as their own input in the window would.
@@ -103,6 +105,7 @@ impl WorkspaceManager {
                 path,
                 preview,
             } => self.open_local_file(session, path, preview, act_by, context, window, cx),
+            Request::Diagnostics => Task::ready(None),
         }
     }
 
@@ -361,9 +364,13 @@ fn validate(
 /// Answers each request the endpoint accepts on the GPUI main thread, in the window presenting
 /// this desktop's Workspaces. The endpoint's thread serves one connection at a time, and
 /// every connection ends by its own deadlines.
+/// Serves `endpoint` until it fails. A Diagnostics request reads `counters` on the channel
+/// thread, so it needs no Workspace Window and moves nothing. Every other request goes to the
+/// presenting window on the main thread.
 pub(crate) fn serve(
     endpoint: Arc<dyn crate::desktop_channel::DesktopChannelEndpoint>,
     identity: &'static str,
+    counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     cx: &mut App,
 ) {
     struct Exchange {
@@ -395,6 +402,9 @@ pub(crate) fn serve(
                     identity,
                     request_by,
                     |request, act_by| {
+                        if request == Request::Diagnostics {
+                            return Some(Reply::Diagnostics(counters.snapshot()));
+                        }
                         let (reply, answer) = std::sync::mpsc::sync_channel(1);
                         requests
                             .send_blocking(Exchange {
@@ -457,5 +467,59 @@ fn presented_server(origin: &ServerOrigin, cx: &App) -> Option<Id> {
         ServerOrigin::Direct(direct) => crate::ui::direct_servers::installed(cx)?
             .route(&direct.route)
             .map(|route| route.paired.pin.server),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop_channel::{ChannelStream, DesktopChannelEndpoint, TRANSFER_WINDOW};
+    use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+
+    const IDENTITY: &str = "spaceterm-development";
+
+    /// Hands the desktop one connection, then fails, which ends its channel thread.
+    struct OneConnection(Mutex<Option<UnixStream>>);
+    impl DesktopChannelEndpoint for OneConnection {
+        fn accept(&self) -> std::io::Result<Option<Box<dyn ChannelStream>>> {
+            match self.0.lock().unwrap().take() {
+                Some(stream) => Ok(Some(Box::new(stream))),
+                None => Err(std::io::ErrorKind::Other.into()),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn diagnostics_are_answered_with_no_workspace_window(cx: &mut gpui::TestAppContext) {
+        let counters = Arc::new(TerminalCounters::default());
+        counters.record_frame_decoded();
+        counters.record_frame_painted();
+        counters.record_frame_painted();
+        let (client, desktop) = UnixStream::pair().unwrap();
+        cx.update(|cx| {
+            serve(
+                Arc::new(OneConnection(Mutex::new(Some(desktop)))),
+                IDENTITY,
+                Arc::clone(&counters),
+                cx,
+            );
+        });
+
+        // The main thread never runs while the client waits, so the channel thread answers on
+        // its own.
+        let deadline = Instant::now() + TRANSFER_WINDOW;
+        let reply =
+            crate::desktop_channel::exchange(client, IDENTITY, &Request::Diagnostics, &|| deadline);
+
+        assert_eq!(
+            reply,
+            Ok(Reply::Diagnostics(TerminalCounterSnapshot {
+                frames_decoded: 1,
+                frames_painted: 2,
+                ..Default::default()
+            }))
+        );
     }
 }

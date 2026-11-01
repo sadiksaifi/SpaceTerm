@@ -1,6 +1,8 @@
-//! `open` and `show`: requests to the desktop on this machine over its account-local channel.
-//! `open` needs no server connection; the desktop checks the Session context against what it
-//! presents. `show` resolves its target in [the work executor](crate::work::execute).
+//! `open`, `show` and `diagnostics`: requests to the desktop on this machine over its
+//! account-local channel. `open` needs no server connection; the desktop checks the Session
+//! context against what it presents. `show` resolves its target in
+//! [the work executor](crate::work::execute). `diagnostics` reads the desktop's Terminal
+//! Diagnostics counters and changes nothing.
 use crate::args::{Cli, Command, OpenArgs};
 use crate::contract::*;
 use crate::work::output::{Output, value};
@@ -28,17 +30,17 @@ impl Desktop for LocalDesktop<'_> {
     }
 }
 
-/// How long `open` waits without `--timeout`.
-pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `open` and `diagnostics` wait without `--timeout`.
+pub const DESKTOP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A desktop that commands other than `open` and `show` never ask.
+/// A desktop that commands other than `open`, `show` and `diagnostics` never ask.
 #[cfg(test)]
 pub(crate) struct NoDesktop;
 
 #[cfg(test)]
 impl Desktop for NoDesktop {
     fn request(&self, _: &Request) -> Result<Reply, ChannelError> {
-        panic!("only open and show ask the desktop")
+        panic!("only open, show and diagnostics ask the desktop")
     }
 }
 
@@ -58,6 +60,8 @@ pub fn ask(desktop: &dyn Desktop, request: &Request) -> Result<(), Failure> {
 fn classify(result: Result<Reply, ChannelError>, interrupted: bool) -> Option<Code> {
     Some(match result {
         Ok(Reply::Done) => return None,
+        // Only a Diagnostics request is answered with counters.
+        Ok(Reply::Diagnostics(_)) => Code::DesktopIncompatible,
         Ok(Reply::Refused(refusal)) => match refusal {
             Refusal::NotShown => Code::NotShown,
             Refusal::RemoteSession => Code::RemoteSession,
@@ -117,11 +121,20 @@ fn hex(id: &[u8; 32]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Process entry for `open`.
+/// Process entry for `open` and `diagnostics`.
 pub fn start(cli: &Cli) -> Option<Output> {
-    let Command::Open(args) = &cli.command else {
-        return None;
+    let desktop = LocalDesktop {
+        identity: env!("SPACETERM_CLI_IDENTITY"),
+        deadline: Instant::now() + cli.global.timeout.unwrap_or(DESKTOP_TIMEOUT),
     };
+    match &cli.command {
+        Command::Open(args) => Some(start_open(args, &desktop)),
+        Command::Diagnostics => Some(diagnostics(&desktop)),
+        _ => None,
+    }
+}
+
+fn start_open(args: &OpenArgs, desktop: &LocalDesktop<'_>) -> Output {
     let identity = std::env::var("SPACETERM_IDENTITY").ok();
     let server = std::env::var("SPACETERM_SERVER_ID").ok();
     let pane = std::env::var("SPACETERM_PANE").ok();
@@ -132,15 +145,39 @@ pub fn start(cli: &Cli) -> Option<Output> {
         pane: pane.as_deref(),
         session: session.as_deref(),
     };
-    let identity = env!("SPACETERM_CLI_IDENTITY");
-    let desktop = LocalDesktop {
-        identity,
-        deadline: Instant::now() + cli.global.timeout.unwrap_or(OPEN_TIMEOUT),
-    };
-    Some(match std::env::current_dir() {
-        Ok(cwd) => open(args, identity, &session, &cwd, &desktop),
+    match std::env::current_dir() {
+        Ok(cwd) => open(args, desktop.identity, &session, &cwd, desktop),
         Err(_) => failed(Failure::new(Code::DirectoryUnavailable)),
-    })
+    }
+}
+
+/// Reads the desktop's Terminal Diagnostics counters. The request has no effect, so it marks no
+/// dispatch, and an interrupt ends it as any read does.
+pub fn diagnostics(desktop: &dyn Desktop) -> Output {
+    let counters = match desktop.request(&Request::Diagnostics) {
+        Ok(Reply::Diagnostics(counters)) => counters,
+        result => {
+            let code = classify(result, false).unwrap_or(Code::DesktopIncompatible);
+            return Output::failed(
+                "diagnostics",
+                None,
+                Failure::new(code),
+                serde_json::json!({}),
+                String::new(),
+            );
+        }
+    };
+    Output {
+        envelope: Envelope::ok(
+            "diagnostics",
+            None,
+            value(DesktopDiagnostics {
+                terminal_counters: counters,
+            }),
+        ),
+        text: counters.lines(),
+        diagnostics: String::new(),
+    }
 }
 
 /// Opens `args.path`, or its File Preview, in the desktop showing the current Session.
@@ -408,6 +445,48 @@ mod tests {
             Some(Code::Timeout)
         );
         assert_eq!(classify(Ok(Reply::Done), true), None);
+    }
+
+    #[test]
+    fn diagnostics_reports_the_desktops_counters() {
+        let counters = spaceterm_server::diagnostics::TerminalCounterSnapshot {
+            pty_read_attempts: 9,
+            pty_data_reads: 4,
+            pty_read_bytes: 12_000,
+            frames_decoded: 7,
+            frames_painted: 5,
+            ..Default::default()
+        };
+        let desktop = Recorded::answering(Ok(Reply::Diagnostics(counters)));
+
+        let output = diagnostics(&desktop);
+
+        assert_eq!(desktop.requests.into_inner(), vec![Request::Diagnostics]);
+        assert_eq!(output.envelope.exit(), 0);
+        assert_eq!(output.text, counters.lines());
+        assert_golden("diagnostics", &output.envelope);
+    }
+
+    #[test]
+    fn diagnostics_without_counters_has_a_fixed_code() {
+        for (answer, expected, exit) in [
+            (Err(ChannelError::Unavailable), "desktop_unavailable", 5),
+            (Err(ChannelError::Timeout), "timeout", 6),
+            (Ok(Reply::Done), "desktop_incompatible", 5),
+            (
+                Ok(Reply::Refused(Refusal::Incompatible)),
+                "desktop_incompatible",
+                5,
+            ),
+        ] {
+            let output = diagnostics(&Recorded::answering(answer));
+            assert_eq!(code(&output), Some(expected));
+            assert_eq!(output.envelope.exit(), exit, "{expected}");
+        }
+        assert_golden(
+            "diagnostics_desktop_unavailable",
+            &diagnostics(&Recorded::answering(Err(ChannelError::Unavailable))).envelope,
+        );
     }
 
     #[test]

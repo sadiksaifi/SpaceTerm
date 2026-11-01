@@ -1994,6 +1994,13 @@ pub struct Opened {
     pub session: String,
 }
 
+/// `diagnostics`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DesktopDiagnostics {
+    /// The desktop's Terminal Diagnostics counters, totals since it started.
+    pub terminal_counters: spaceterm_server::diagnostics::TerminalCounterSnapshot,
+}
+
 /// `show`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Shown {

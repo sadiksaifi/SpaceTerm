@@ -3,7 +3,8 @@
 //! One connection carries one request. The client half-closes after its request; the desktop
 //! answers once and closes. Both ends require the peer to run as their own account. Requests
 //! carry exact server, Workspace, Tab, Pane and Terminal Session IDs as fences, never authority:
-//! the desktop decides what it presents, and only a Local Pane may open a local file.
+//! the desktop decides what it presents, and only a Local Pane may open a local file. A
+//! Diagnostics request only reads the desktop's Terminal Diagnostics counters.
 //!
 //! Every connect, read and write ends by an absolute deadline, recomputed before each operation.
 //! The client's request carries the instant it stops waiting, on the host's monotonic clock that
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// The format of every request and reply. A different schema is refused as incompatible.
-pub const SCHEMA: &str = "spaceterm.desktop.v1";
+pub const SCHEMA: &str = "spaceterm.desktop.v2";
 /// The largest request or reply, which bounds a local path of 4 KiB with its envelope.
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 /// How long the desktop gives a connected client to deliver its whole request, and itself to
@@ -82,6 +83,9 @@ pub enum Request {
         tab: Option<Id>,
         pane: Option<Id>,
     },
+    /// Reads the desktop's Terminal Diagnostics counters. It changes nothing and needs no
+    /// presented Workspace, Pane or server connection.
+    Diagnostics,
 }
 
 impl std::fmt::Debug for Request {
@@ -90,6 +94,7 @@ impl std::fmt::Debug for Request {
             Self::Open { preview: false, .. } => "Request::Open { .. }",
             Self::Open { preview: true, .. } => "Request::Preview { .. }",
             Self::Show { .. } => "Request::Show { .. }",
+            Self::Diagnostics => "Request::Diagnostics",
         })
     }
 }
@@ -100,6 +105,8 @@ impl std::fmt::Debug for Request {
 pub enum Reply {
     Done,
     Refused(Refusal),
+    /// The desktop's Terminal Diagnostics counters, totals since it started.
+    Diagnostics(spaceterm_server::diagnostics::TerminalCounterSnapshot),
 }
 
 /// Why the desktop refused a request. Each names a fixed classification only.
