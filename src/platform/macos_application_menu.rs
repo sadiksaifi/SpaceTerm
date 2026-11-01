@@ -456,10 +456,12 @@ fn native_menu_shortcuts(menus: &[Menu], keymap: &Keymap) -> Vec<NativeMenuShort
     keys
 }
 
+#[cfg(any(not(test), feature = "native-tests"))]
 pub(crate) type MenuActionCallback<C> = std::rc::Rc<dyn Fn(&mut C)>;
 
 /// Registers origin capture and delivery at AppKit's action boundaries. The host supplies its
 /// notification registry and active-window lookup, so both callbacks share the same captured origin.
+#[cfg(any(not(test), feature = "native-tests"))]
 pub(crate) fn observe_menu_commands<C: 'static, W: 'static, T>(
     mut observe: impl FnMut(&'static str, MenuActionCallback<C>) -> T,
     active_window: impl Fn(&mut C) -> Option<W> + 'static,
