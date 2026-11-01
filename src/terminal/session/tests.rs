@@ -1235,6 +1235,53 @@ fn scripted_output_should_reach_the_terminal_screen() {
     );
 }
 
+// Other tests in this process record into the same counters, so this checks lower bounds
+// large enough that concurrent recording cannot supply them.
+#[test]
+fn pane_worker_wakes_are_counted_by_what_woke_the_worker() {
+    let (result, reader_steps, _records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = result.unwrap();
+    let before = TerminalCounters::process().snapshot();
+
+    for round in 0..3 {
+        for key in 0..50 {
+            session.key(text_key(if key % 2 == 0 {
+                KeyAction::Press
+            } else {
+                KeyAction::Release
+            }));
+            worker_round_trip(&session);
+        }
+        for focus in 0..50 {
+            session.focus(focus % 2 == 1);
+            worker_round_trip(&session);
+        }
+        let marker = format!("wake round {round}");
+        reader_steps
+            .send(ReaderStep::Bytes(marker.clone().into_bytes()))
+            .unwrap();
+        receive_event(
+            &events,
+            "the round's output",
+            move |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains(&marker)),
+        );
+        // The Line Mode settle read and scrollback compression follow output after a delay.
+        thread::sleep(Duration::from_millis(400));
+    }
+
+    let after = TerminalCounters::process().snapshot().pane_worker_wakes;
+    let before = before.pane_worker_wakes;
+    // A command taken without waiting, such as one held behind a presentation barrier, is no
+    // wake, so most rather than all of the 150 keys, 300 round trips and 150 focus changes
+    // count.
+    assert!(after.input - before.input >= 100);
+    assert!(after.accessibility - before.accessibility >= 200);
+    assert!(after.client - before.client >= 100);
+    assert!(after.output - before.output >= 3);
+    assert!(after.deadline - before.deadline >= 3);
+    session.shutdown_and_join();
+}
+
 #[test]
 fn bounded_output_should_preserve_the_control_lane_and_unblock_the_producer() {
     const CHUNK_SIZE: usize = 16 * 1024;

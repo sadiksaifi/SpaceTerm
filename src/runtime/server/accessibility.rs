@@ -2,6 +2,7 @@
 use super::*;
 use pane::accessibility as wire;
 use serde::{Serialize, Serializer, ser::SerializeSeq};
+use spaceterm_server::diagnostics::TerminalCounters;
 use std::{collections::BTreeMap, io::Write, sync::mpsc};
 
 type Encoded = Result<Vec<u8>, wire::Error>;
@@ -309,5 +310,6 @@ fn encode(
     };
     let mut output = BoundedBytes(Vec::new());
     serde_json::to_writer(&mut output, &snapshot).map_err(|_| wire::Error::TooLarge)?;
+    TerminalCounters::process().record_accessibility_revision(output.0.len());
     Ok(output.0)
 }

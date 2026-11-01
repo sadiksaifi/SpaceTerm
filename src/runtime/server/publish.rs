@@ -12,6 +12,7 @@ use super::*;
 use spaceterm_server::connection::outbox::{
     FrameTicket, Outbox, OutboxError, Presentation, Presented,
 };
+use spaceterm_server::diagnostics::TerminalCounters;
 use spaceterm_server::protocol::{self, Channel, Fatal, PaneEvent};
 use std::sync::Mutex;
 
@@ -52,6 +53,7 @@ impl Presentation for ScreenPresentation {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .encode(&self.capture, ticket.frame, ticket.base)?;
+        TerminalCounters::process().record_frame_published();
         Some(Presented {
             input: self.capture.screen.input_serial,
             update,

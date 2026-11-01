@@ -4,6 +4,7 @@
 //! renderer finds them by pointer and prepares only the rows that changed.
 use super::*;
 use crate::runtime::HyperlinkTarget;
+use spaceterm_server::diagnostics::TerminalCounters;
 use spaceterm_server::pane::graphics;
 use spaceterm_server::protocol::screen::{
     Colors, Cursor, Geometry, History, Modes, Page, Row, ScreenUpdate, Style, StyleRef, flags,
@@ -72,7 +73,10 @@ impl ScreenDecoder {
         local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
     ) -> Result<&DecodedScreen, UpdateError> {
         match self.decode(frame, base, update, local_files) {
-            Ok(()) => self.screen.as_ref().ok_or(UpdateError::Malformed),
+            Ok(()) => {
+                TerminalCounters::process().record_frame_decoded();
+                self.screen.as_ref().ok_or(UpdateError::Malformed)
+            }
             Err(error) => {
                 self.reset();
                 Err(error)

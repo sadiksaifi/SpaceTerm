@@ -155,6 +155,25 @@ fn later_screens_apply_to_the_acknowledged_frame() {
     assert!(rows.shows("one") && rows.shows("two"));
 }
 
+// Other tests in this process record into the same counters, so this checks a lower bound
+// large enough that concurrent recording cannot supply it.
+#[test]
+fn each_encoded_screen_frame_counts_as_published() {
+    use spaceterm_server::diagnostics::TerminalCounters;
+    let outbox = outbox();
+    let mut publication = bound(&outbox);
+    let before = TerminalCounters::process().snapshot();
+    let mut sent = 0;
+    for generation in 1..=200 {
+        publication.publish(live(Some(capture(generation, &generation.to_string(), 0))));
+        sent += frames(&drain(&outbox)).len();
+    }
+
+    assert_eq!(sent, 200);
+    let after = TerminalCounters::process().snapshot();
+    assert!(after.frames_published - before.frames_published >= 200);
+}
+
 #[test]
 fn a_hidden_channel_receives_nothing_and_revealing_presents_the_current_screen() {
     let outbox = outbox();

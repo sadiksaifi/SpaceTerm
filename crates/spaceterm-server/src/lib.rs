@@ -6,6 +6,7 @@ pub mod client_view;
 #[cfg(feature = "client")]
 mod computer_name;
 pub mod connection;
+pub mod diagnostics;
 pub mod direct;
 pub mod hierarchy;
 mod host;

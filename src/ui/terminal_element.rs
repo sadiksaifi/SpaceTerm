@@ -10,6 +10,7 @@ use gpui::{
     IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
     UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
+use spaceterm_server::diagnostics::TerminalCounters;
 use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::appearance::{Color, ResolvedTerminalAppearance, TerminalColors};
@@ -2180,6 +2181,7 @@ impl Element for TerminalGridElement {
                 .submit(prepaint.candidate.grid_bounds, true, window, cx)
             {
                 Ok(()) => {
+                    TerminalCounters::process().record_frame_painted();
                     presented_input = Some(self.input_geometry(prepaint.candidate.grid_bounds));
                     if let Some(layer) = &self.cursor_layer {
                         layer.set(prepaint.cursor.clone());

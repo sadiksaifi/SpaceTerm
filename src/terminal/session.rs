@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use spaceterm_server::diagnostics::{PaneWorkerWake, TerminalCounters};
 use thiserror::Error;
 
 use crate::appearance::{AppearanceGeneration, ResolvedTerminalAppearance};
@@ -1067,6 +1068,49 @@ impl Command {
                 | Self::PublishAccessibility
         )
     }
+
+    /// The Terminal Diagnostics wake reason of a command that woke the worker.
+    const fn wake(&self) -> PaneWorkerWake {
+        match self {
+            Self::ReaderReady(_) | Self::ResumeOutput(_) => PaneWorkerWake::Output,
+            Self::Run(..)
+            | Self::Key(..)
+            | Self::ApplicationPointer(..)
+            | Self::CancelApplicationPointer
+            | Self::ApplicationWheel(..)
+            | Self::RequestPaste(..)
+            | Self::ResolvePaste(..)
+            | Self::FocusPasteConfirmation(..)
+            | Self::InputSerial(..)
+            | Self::RestartInputSerials
+            | Self::CopyOrForward(..)
+            | Self::FlushInput => PaneWorkerWake::Input,
+            Self::ServerAccessibilitySelection(..)
+            | Self::EndAccessibilityDemand(..)
+            | Self::AccessibilityDemand
+            | Self::AccessibilityContinue
+            | Self::PublishAccessibility => PaneWorkerWake::Accessibility,
+            Self::Subscribe { .. }
+            | Self::Focus(..)
+            | Self::Resize
+            | Self::SetPresentable(..)
+            | Self::SetFrameRate(..)
+            | Self::AppearanceChanged
+            | Self::ClearScreenAndScrollback
+            | Self::ReadScrollback(..) => PaneWorkerWake::Client,
+            Self::PasteConfirmationExpired
+            | Self::PublishMetadata
+            | Self::PublishPendingScreen
+            | Self::MetadataStatusTick
+            | Self::GraphicsAnimationTick
+            | Self::GraphicsBudgetAvailable
+            | Self::CompressScrollback
+            | Self::Shutdown
+            | Self::ReadLineMode
+            | Self::CompleteClipboard(..)
+            | Self::ClipboardExpired => PaneWorkerWake::Other,
+        }
+    }
 }
 
 impl fmt::Debug for Command {
@@ -1451,12 +1495,17 @@ impl TerminalWorker {
             .min();
             let Some(deadline) = deadline else {
                 let command = self.commands.recv().ok()?;
+                TerminalCounters::process().record_pane_worker_wake(command.wake());
                 return Some(self.note_normal_command(command));
             };
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.commands.recv_timeout(timeout) {
-                Ok(command) => return Some(self.note_normal_command(command)),
+                Ok(command) => {
+                    TerminalCounters::process().record_pane_worker_wake(command.wake());
+                    return Some(self.note_normal_command(command));
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    TerminalCounters::process().record_pane_worker_wake(PaneWorkerWake::Deadline);
                     if self
                         .input
                         .deadline()

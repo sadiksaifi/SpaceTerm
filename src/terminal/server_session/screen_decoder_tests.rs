@@ -439,6 +439,21 @@ fn random_terminal_output_round_trips_through_every_frame() {
     assert!(selected > 0 && images > 0, "{selected} {images}");
 }
 
+// Other tests in this process record into the same counters, so this checks a lower bound
+// large enough that concurrent recording cannot supply it.
+#[test]
+fn each_decoded_frame_is_counted() {
+    use spaceterm_server::diagnostics::TerminalCounters;
+    let mut session = Session::new(20, 4);
+    let before = TerminalCounters::process().snapshot();
+    for line in 0..300 {
+        session.emulator.feed(format!("line {line}\r\n").as_bytes());
+        session.sync().unwrap();
+    }
+    let after = TerminalCounters::process().snapshot();
+    assert!(after.frames_decoded - before.frames_decoded >= 300);
+}
+
 #[test]
 fn unchanged_rows_keep_their_pointers_and_scrolled_rows_move_with_them() {
     let mut session = Session::new(30, 6);

@@ -9,6 +9,7 @@ use crate::terminal::accessibility::{
     AccessibilityUpdate, TerminalAccessibilityModel, TerminalAccessibilityState,
 };
 use pane::accessibility as wire;
+use spaceterm_server::diagnostics::TerminalCounters;
 use std::ops::Range;
 
 /// The rows this client retains for one connection epoch. A new epoch starts empty, so nothing
@@ -209,6 +210,7 @@ impl Fetcher {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .rebind(generation)
+            .inspect(|_| TerminalCounters::process().record_accessibility_rebind())
     }
 
     /// Advances the current transfer by one chunk, returning a model to publish when one
@@ -870,6 +872,29 @@ mod tests {
             (rebound.generation(), rebound.shares_document(&first)),
             (next, true)
         );
+    }
+
+    // Other tests in this process record into the same counters, so this checks a lower bound
+    // large enough that concurrent recording cannot supply it.
+    #[test]
+    fn each_rebind_to_a_newer_screen_is_counted() {
+        let state = demanded();
+        let mut fetcher = Fetcher::new(lease());
+        let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
+        let mut generation = PresentationGeneration::default();
+        fetcher
+            .poll(&state, generation, &mut server.exchange())
+            .unwrap()
+            .unwrap();
+        let before = TerminalCounters::process().snapshot();
+
+        for _ in 0..500 {
+            generation = generation.next();
+            fetcher.rebind(&state, generation).unwrap();
+        }
+
+        let after = TerminalCounters::process().snapshot();
+        assert!(after.accessibility_rebinds - before.accessibility_rebinds >= 500);
     }
 
     #[test]

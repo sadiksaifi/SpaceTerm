@@ -423,3 +423,53 @@ fn takeover_semantics_ignore_models_published_before_the_reading_reset() {
         assert!(Instant::now() < deadline);
     }
 }
+
+// Other tests in this process record into the same counters, so this checks lower bounds
+// large enough that concurrent recording cannot supply them.
+#[test]
+fn each_serialized_accessibility_revision_counts_once_with_its_bytes() {
+    use crate::terminal::emulator::TerminalEmulator;
+    use spaceterm_server::diagnostics::TerminalCounters;
+    let mut emulator = TerminalEmulator::new(geometry(size())).unwrap();
+    let mut state = accessibility::Accessibility::default();
+    let before = TerminalCounters::process().snapshot();
+    let mut transferred = 0;
+    for revision in 1..=40 {
+        emulator.feed(format!("revision {revision}\r\n").as_bytes());
+        let mut first = true;
+        let model = loop {
+            let (model, more) = emulator.accessibility_snapshot(first).unwrap();
+            first = false;
+            if !more {
+                break model.unwrap();
+            }
+        };
+        state.update(model);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut offset = 0;
+        let mut current = None;
+        loop {
+            match state.chunk(current, offset, None) {
+                Ok(chunk) => {
+                    current = Some(chunk.revision);
+                    offset += chunk.bytes.len();
+                    if offset == chunk.total {
+                        transferred += chunk.total;
+                        break;
+                    }
+                }
+                Err(Error::Pending) => std::thread::yield_now(),
+                other => panic!("{other:?}"),
+            }
+            assert!(Instant::now() < deadline);
+        }
+        assert_eq!(current, Some(revision));
+    }
+
+    let after = TerminalCounters::process().snapshot();
+    assert!(after.accessibility_revisions - before.accessibility_revisions >= 40);
+    assert!(
+        after.accessibility_revision_bytes - before.accessibility_revision_bytes
+            >= transferred as u64
+    );
+}
