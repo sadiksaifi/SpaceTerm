@@ -20,9 +20,11 @@ use subscriptions::{TerminalEventPublisher, WorkerEventLifetime};
 mod schedules;
 use schedules::{ScheduleInput, WorkerSchedules};
 mod launch;
+mod reader_output;
 use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 pub use launch::{LocalTerminalLaunchPlan, NativeTerminalSessionFactory};
+use reader_output::{ReaderOutputReceiver, ReaderOutputSender, TRICKLE_READ_BYTES};
 use std::fmt;
 #[cfg(test)]
 use std::io::Write;
@@ -951,12 +953,12 @@ impl Drop for TerminalRuntime {
 
 struct ReaderTransport {
     output: Arc<TerminalSessionNativePtyOutputSink>,
-    event_rx: mpsc::Receiver<NativePtyOutput>,
+    event_rx: ReaderOutputReceiver,
 }
 
 impl ReaderTransport {
     fn new(commands: CommandSender<Command>, clipboard_authority: Arc<ClipboardAuthority>) -> Self {
-        let (events, event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (events, event_rx) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
         Self {
             output: Arc::new(TerminalSessionNativePtyOutputSink {
                 commands,
@@ -975,14 +977,20 @@ impl ReaderTransport {
 struct TerminalSessionNativePtyOutputSink {
     clipboard_authority: Arc<ClipboardAuthority>,
     commands: CommandSender<Command>,
-    events: mpsc::SyncSender<NativePtyOutput>,
+    events: ReaderOutputSender,
 }
 
 impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
+        let trickle =
+            matches!(&output, NativePtyOutput::Bytes(bytes) if bytes.len() < TRICKLE_READ_BYTES);
         // ReaderReady orders bounded PTY output against the reliable control command lane.
         let epoch = self.clipboard_authority.output_epoch();
-        self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady(epoch)).is_ok()
+        // After a short read, the next read waits for the worker so the shell's output collects
+        // in the PTY instead of arriving a few bytes per read.
+        self.events.send(output)
+            && self.commands.send(Command::ReaderReady(epoch)).is_ok()
+            && (!trickle || self.events.wait_until_received())
     }
 }
 
@@ -1121,7 +1129,7 @@ struct TerminalWorker {
     input: PtyInput,
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
-    reader_events: mpsc::Receiver<NativePtyOutput>,
+    reader_events: ReaderOutputReceiver,
     events: TerminalEventPublisher,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     pending_command: Option<Command>,
