@@ -136,12 +136,14 @@ mod tests {
     fn each_blocking_wait_counts_once_by_what_ended_it() {
         let (sender, commands, counters) = queue();
 
-        let input = send_later(&sender, Command::FlushInput);
-        assert!(matches!(
-            commands.wait(None),
-            Waited::Command(Command::FlushInput)
-        ));
-        input.join().unwrap();
+        for _ in 0..2 {
+            let input = send_later(&sender, Command::FlushInput);
+            assert!(matches!(
+                commands.wait(None),
+                Waited::Command(Command::FlushInput)
+            ));
+            input.join().unwrap();
+        }
         let client = send_later(&sender, Command::Resize);
         assert!(matches!(
             commands.wait(Some(Duration::from_secs(30))),
@@ -163,7 +165,7 @@ mod tests {
             counters.snapshot(),
             TerminalCounterSnapshot {
                 pane_worker_waits: PaneWorkerWaits {
-                    input: 1,
+                    input: 2,
                     client: 1,
                     deadline: 1,
                     disconnected: 1,
