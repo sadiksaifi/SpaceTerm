@@ -26,6 +26,9 @@ struct Session {
     frame: u64,
     /// Frames that carried a scroll.
     shifts: usize,
+    /// The last frame's scroll and the indexes of the rows it sent.
+    last_shift: Option<ScrollShift>,
+    last_rows: Vec<u16>,
 }
 
 impl Session {
@@ -38,6 +41,8 @@ impl Session {
             generation: 0,
             frame: 0,
             shifts: 0,
+            last_shift: None,
+            last_rows: Vec::new(),
         }
     }
 
@@ -62,6 +67,8 @@ impl Session {
         let update = self.encoder.encode(&capture, frame, base)?;
         self.frame = frame;
         self.shifts += usize::from(update.shift.is_some());
+        self.last_shift = update.shift;
+        self.last_rows = update.rows.iter().map(|row| row.index).collect();
         let update = through_wire(frame, base, update);
         let decoded = self.decoder.apply(frame, base, update, None).unwrap();
         assert_same(decoded, &capture);
@@ -554,9 +561,10 @@ fn scroll_heavy_output_round_trips_through_every_frame() {
     assert!(shifts > 200, "{shifts} frames scrolled");
 }
 
-/// A row whose text and style match a row that scrolled, but whose link differs, is sent.
+/// A row rewritten after a scroll with the text and style of a row that moved, and another
+/// link, is sent with its own link.
 #[test]
-fn a_scrolled_row_is_reused_only_when_its_cells_are_equal() {
+fn a_row_rewritten_with_another_link_after_a_scroll_keeps_its_link() {
     let mut session = Session::new(20, 5);
     session.emulator.feed(
         b"zero\r\n\x1b]8;;https://example.com/a\x1b\\same\x1b]8;;\x1b\\\r\ntwo\r\nthree\r\nfour",
@@ -567,6 +575,31 @@ fn a_scrolled_row_is_reused_only_when_its_cells_are_equal() {
         .feed(b"\r\nfive\x1b[1;1H\x1b]8;;https://example.com/b\x1b\\same\x1b]8;;\x1b\\");
     session.sync().unwrap();
     assert_eq!(session.shifts, 1);
+}
+
+/// Rows with equal text and distinct links still scroll, so only the row that moved in is
+/// encoded and sent.
+#[test]
+fn rows_that_differ_only_in_their_links_scroll() {
+    let mut session = Session::new(20, 5);
+    let line = |row: usize| format!("\x1b]8;;https://example.com/{row}\x1b\\same\x1b]8;;\x1b\\");
+    for row in 0..5 {
+        let at = format!("\x1b[{};1H", row + 1);
+        session.emulator.feed((at + &line(row)).as_bytes());
+    }
+    session.sync().unwrap();
+    session.emulator.feed(format!("\r\n{}", line(5)).as_bytes());
+    session.sync().unwrap();
+    assert_eq!(
+        session.last_shift,
+        Some(ScrollShift {
+            top: 0,
+            bottom: 5,
+            lines: 1
+        })
+    );
+    assert_eq!(session.last_rows, [4]);
+    assert_eq!(session.encoder.encoded_rows(), 1);
 }
 
 #[test]
