@@ -768,6 +768,19 @@ def retained_rows(envelope):
     return history["total"] - history["oldest"] + rows["screen"]["size"]["rows"]
 
 
+def layout(envelope):
+    """Each Workspace's Tabs, inside and outside its Worktrees, as their Pane counts, from a
+    `spaceterm --json list` envelope."""
+    return [
+        [
+            len(tab["panes"])
+            for tabs in [workspace["tabs"], *(tree["tabs"] for tree in workspace["worktrees"])]
+            for tab in tabs
+        ]
+        for workspace in envelope["data"]["workspaces"]
+    ]
+
+
 def cli_json(command, env=None):
     """The envelope of a `spaceterm --json` command, or None when it fails or is unknown."""
     try:

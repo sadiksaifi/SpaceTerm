@@ -508,6 +508,20 @@ class CliFactTests(unittest.TestCase):
         rows["screen"]["size"]["rows"] = 40
         self.assertEqual(bench.retained_rows(envelope), 10_040)
 
+    def test_layout_counts_the_panes_of_every_tab_inside_and_outside_worktrees(self):
+        def tab(panes):
+            return {"ref": {}, "panes": [{"ref": {}}] * panes}
+
+        envelope = {
+            "data": {
+                "workspaces": [
+                    {"tabs": [tab(1)], "worktrees": []},
+                    {"tabs": [tab(2)], "worktrees": [{"worktree": {}, "tabs": [tab(1), tab(3)]}]},
+                ]
+            }
+        }
+        self.assertEqual(bench.layout(envelope), [[1], [2, 1, 3]])
+
     def test_counter_differences_include_nested_counters(self):
         before = {"pty_read_attempts": 3, "pane_worker_waits": {"output": 1, "input": 2}}
         after = {"pty_read_attempts": 10, "pane_worker_waits": {"output": 5, "input": 2}}
@@ -653,6 +667,8 @@ class FakeApp:
         self.demand = set()
         self.reads = []
         self.lag = False
+        # Every key the task pressed, in order.
+        self.keys = []
         # Each read of the server's or client's counters, in order, and the task's snapshots.
         self.counter_reads = []
 
@@ -698,6 +714,7 @@ class FakeApp:
         self.changed()
 
     def key(self, key, *modifiers):
+        self.keys.append(key)
         command = "command" in modifiers
         if command and key == "d":
             tab = self.tab()
@@ -871,6 +888,9 @@ def fake_desktop(task, app, accessibility, clock, reference=False):
                 app.close(pane)
             app.changed()
 
+        def layout(self):
+            return [[len(tab) for tab in workspace] for workspace in app.workspaces]
+
         def retained_rows(self, receipt):
             app.rows_asked = receipt["pane"]
             return 10_040
@@ -994,6 +1014,27 @@ class DesktopScenarioTests(unittest.TestCase):
         # The visible Tab is the last one filled, so its Pane is the one asked about.
         fills = [pane for kind, pane, _ in desktop.jobs.started if kind == "fill"]
         self.assertEqual(app.rows_asked, fills[-1])
+
+    def test_another_starting_layout_is_refused_before_any_input(self):
+        def two_tabs(app):
+            app.workspaces[0].append([app.new_pane()])
+
+        def two_panes(app):
+            app.workspaces[0][0].append(app.new_pane())
+
+        def two_workspaces(app):
+            app.workspaces.append([[app.new_pane()]])
+            app.tabs.append(0)
+
+        for change in (two_tabs, two_panes, two_workspaces):
+            with self.subTest(layout=change.__name__):
+                app = FakeApp()
+                change(app)
+                before = [[list(tab) for tab in workspace] for workspace in app.workspaces]
+                with self.assertRaisesRegex(TaskError, "one Workspace holding one Tab"):
+                    self.run_scenarios(False, ["S8"], app)
+                self.assertEqual(app.keys, [])
+                self.assertEqual(app.workspaces, before)
 
     def test_the_reference_runs_every_scenario_without_a_server_or_pane_environment(self):
         compared = {

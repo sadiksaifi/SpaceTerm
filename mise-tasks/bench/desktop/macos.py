@@ -39,7 +39,9 @@ quit ends v0.6.8. `--reference` takes its results.json and refuses one that meas
 other durations, workloads, window sizes or `cat` input, another Mac or macOS version, or another
 app version, or one that lacks a measurement a requested ratio budget compares with.
 
-The app needs a shell prompt in its focused Pane. The Python given by `--input-python` must hold
+The current app must start with one Workspace holding one Tab with one Pane, at a shell prompt.
+The task reads that layout with `spaceterm list` before any input and refuses another, because its
+scenarios close Tabs and Panes by position. v0.6.8 has no CLI; each of its launches shows one Pane. The Python given by `--input-python` must hold
 the Accessibility permission in System Settings > Privacy & Security. Leave the keyboard, mouse
 and screen alone while the task runs. Measure one product at a time: stop the other product's
 client and server first.
@@ -73,6 +75,7 @@ from spaceterm_tasks.bench import (
     environment,
     evaluate,
     fixed_input,
+    layout,
     load_budgets,
     processes,
     retained_rows,
@@ -405,10 +408,14 @@ class Desktop:
         if owner != pane:
             raise TaskError("the Accessibility read reached another Pane than the focused one")
 
+    def check_layout(self):
+        """Refuses a starting layout other than one Workspace, one Tab and one Pane."""
+
     def ready(self):
         """One visible, frontmost window of WINDOW size whose focused Pane runs typed commands."""
         if not self.pids("server"):
             self.start_server()
+        self.check_layout()
         if self.client() is None or self.window() is None:
             self.launch()
             if wait_until(self.window, 10, None) is None:
@@ -511,6 +518,25 @@ class CurrentDesktop(Desktop):
             )
             if status:
                 raise TaskError(f"spaceterm pane close failed ({code or status})")
+
+    def layout(self):
+        """Each Workspace's Tabs as their Pane counts, from the CLI."""
+        envelope = cli_json([self.cli(), "--server", "local", "--json", "--quiet", "list"])
+        if envelope is None:
+            raise TaskError("spaceterm list did not report the Workspaces")
+        return layout(envelope)
+
+    def check_layout(self):
+        """The scenarios close Tabs and Panes by position, so any other layout would lose
+        unrelated Panes or keep measured ones."""
+        workspaces = self.layout()
+        if workspaces != [[1]]:
+            tabs = sum(len(tabs) for tabs in workspaces)
+            panes = sum(map(sum, workspaces))
+            raise TaskError(
+                "the app must start with one Workspace holding one Tab with one Pane; it has "
+                f"{len(workspaces)} Workspaces, {tabs} Tabs and {panes} Panes"
+            )
 
     def retained_rows(self, receipt):
         """The rows the CLI reports for the receipt's Pane."""
