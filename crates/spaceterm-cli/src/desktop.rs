@@ -50,10 +50,12 @@ impl Desktop for NoDesktop {
 /// unconfirmed.
 pub fn ask(desktop: &dyn Desktop, request: &Request) -> Result<(), Failure> {
     crate::interrupt::dispatch()?;
+    // An interrupt during the exchange shortens its wait, so it is read only after the answer.
+    let result = desktop.request(request);
     let asked = Asked::Effect {
         interrupted: crate::interrupt::interrupted(),
     };
-    match classify(desktop.request(request), asked) {
+    match classify(result, asked) {
         None => Ok(()),
         Some(code) => Err(Failure::new(code)),
     }
@@ -323,6 +325,60 @@ mod tests {
             .error
             .as_ref()
             .map(|error| error.code.as_str())
+    }
+
+    /// A desktop whose exchange receives a real `SIGINT` and then times out, as the channel does
+    /// when the interrupt brings its deadline forward.
+    struct InterruptedExchange;
+
+    impl Desktop for InterruptedExchange {
+        fn request(&self, _: &Request) -> Result<Reply, ChannelError> {
+            // SAFETY: signals only this test process, whose handler only records the signal.
+            assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+            assert!(crate::interrupt::interrupted());
+            Err(ChannelError::Timeout)
+        }
+    }
+
+    // The child installs the real signal handler, which is process-wide, so it runs alone.
+    #[test]
+    #[ignore = "child process for an_interrupt_during_the_exchange_leaves_the_outcome_unconfirmed"]
+    fn interrupted_exchange_child() {
+        if std::env::var_os("SPACETERM_TEST_INTERRUPTED_EXCHANGE").is_none() {
+            return;
+        }
+        let mode = Mode {
+            json: true,
+            ..Default::default()
+        };
+        crate::interrupt::install("show", mode).unwrap();
+        let request = Request::Show {
+            server: [1; 32],
+            workspace: [2; 32],
+            tab: None,
+            pane: None,
+        };
+        let code = ask(&InterruptedExchange, &request).unwrap_err().code;
+        println!("code={}", code.as_str());
+    }
+
+    #[test]
+    fn an_interrupt_during_the_exchange_leaves_the_outcome_unconfirmed() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "desktop::tests::interrupted_exchange_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SPACETERM_TEST_INTERRUPTED_EXCHANGE", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("code=outcome_unconfirmed\n"), "{stdout}");
     }
 
     #[test]
